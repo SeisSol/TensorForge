@@ -170,13 +170,14 @@ class ScalarContractionInstruction(ComputeInstruction):
             # undeclared identifier, 36 of them once SeisSol's damage step
             # rolls its run of 362 operations.  Taking the value instead of
             # the name is the def-use edge that settles it, and settles it
-            # for every pass rather than for the one that was caught.
+            # for every pass rather than for `licm` alone.
             bound = view.symbol.pir_scalar(writer)
             if bound is not None:
                 return bound
-            # No binding in this body -- a legacy writer, or a name bound
-            # around it.  Then the name is all there is, and a stand-in's is
-            # pinned so that the fallback cannot do what the value prevents.
+            # No binding in this body -- the text-based `Writer`, or a name
+            # bound around it.  Then the name is all there is, and a
+            # stand-in's is pinned so that the fallback cannot do what the
+            # value prevents.
             return writer.rawexpr(
                 view.symbol.name, type_=ScalarType(self._context.fp_type),
                 hint='s', pure=True,

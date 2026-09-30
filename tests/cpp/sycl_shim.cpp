@@ -4,9 +4,9 @@
 //
 // The SYCL shim is only worth anything if its types have the properties the
 // generated code relies on.  A shim that compiles but models the wrong thing
-// makes `test_syntax.py` green for the wrong reason -- which has happened
-// here before, when GCC dropped a `vector_size` attribute off an alias
-// template and every MFMA call then type-checked against plain `float`.
+// makes `test_syntax.py` green for the wrong reason: GCC drops a
+// `vector_size` attribute off an alias template, so a vector declared that
+// way would have every MFMA call type-check against plain `float`.
 //
 // So the properties are asserted, not assumed.  Everything here is a
 // `static_assert`; a successful compile is the pass.

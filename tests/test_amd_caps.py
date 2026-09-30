@@ -5,15 +5,15 @@
 
 `amd.py` decides which `fmacdpp` width to emit; `hip.h` decides which ones
 exist, behind `#if` guards.  Those are two copies of the same fact in two
-languages, and they had drifted: the generator emitted `fmacdpp4` for gfx900,
-where the specializations are switched off, and `fmacdpp8` at a time when the
-runtime did not declare it for any target at all.  Neither showed up in a test, because
-a call to a template with no definition is a *link* error and nothing here
+languages, and they can drift apart: a generator emitting `fmacdpp4` for
+gfx900, where the specializations are switched off, or `fmacdpp8` for a target
+the runtime does not declare it for, would pass every other test, because a
+call to a template with no definition is a *link* error and nothing here
 links.
 
 So the guards are parsed out of the header and compared against the Python
 predicates.  The duplication stays -- the generator cannot include a C++
-header -- but it stops being silent.
+header -- but a drift between the two fails here.
 """
 
 from __future__ import annotations
@@ -46,9 +46,9 @@ def _family_macros(arch: str) -> set:
 
     It matters: if `__GFX12__` is *not* defined for gfx1250, then hip.h's
     guard is false there, `fmacdpp16` has no specializations, and the
-    generator emits a call to an undeclared template -- exactly the gfx900
-    failure, one family over.  The assumption is written down here rather than
-    buried in a string slice so that it can be settled with one compile.
+    generator emits a call to an undeclared template -- the gfx900 case of
+    `fmacdpp4`, one family over.  The assumption is written down here rather
+    than buried in a string slice so that it can be settled with one compile.
     """
     macros = {f"__{arch}__"}
     n = int(arch[3:], 16)

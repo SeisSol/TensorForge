@@ -38,8 +38,8 @@ class PassContext:
     """Everything a pass may read, plus the analysis cache.
 
     Passes reach for named analyses instead of being handed positional
-    arguments, which is what let ``live_map`` and ``regions`` drift apart
-    from the stream they described.
+    arguments, which would let ``live_map`` and ``regions`` drift apart from
+    the stream they describe.
     """
 
     def __init__(self,
@@ -58,8 +58,8 @@ class PassContext:
         self.scopes = scopes
         # Built before this stage and never routed through it.  Passes must
         # be able to see its definitions or every symbol it defines looks
-        # undefined -- which is precisely why preloaded shared-memory
-        # buffers never entered LivenessAnalysis.
+        # undefined -- a preloaded shared-memory buffer, for one, would never
+        # enter LivenessAnalysis.
         self.global_ir: List[AbstractInstruction] = list(global_ir or [])
         self._analyses: Dict[str, Any] = {}
         self.extra: Dict[str, Any] = dict(extra or {})
@@ -110,8 +110,8 @@ class PassContext:
 class PassScope(Enum):
     """What an instruction stream means to a pass.
 
-    Once an instruction can carry a region, "the instruction list" is ambiguous
-    and the right reading differs per pass:
+    Since an instruction can carry a region, "the instruction list" is
+    ambiguous and the right reading differs per pass:
 
     ``WHOLE_NEST``  the pass gets the top-level stream and walks regions itself.
                     Correct for anything global: liveness needs the back edges,

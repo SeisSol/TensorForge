@@ -1,40 +1,39 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Migration progress, by how much a pass can actually see -- and from where.
+"""How much of the generated code a pass can actually see -- and from where.
 
 Two measurements, because they answer different questions and conflating them
-is how this tool was wrong once already.
+gets both wrong.
 
 *Constructed* is what the generator emits into the builder. That is the number
 attributed to source sites, because a site is what you go and rewrite.
 
 *Lowered* is what survives `pir.optimize` and reaches codegen. That is the
-number that says how far along the migration is, and it is smaller: passes
-delete raw nodes. `flatten_scopes` alone removes every textless `Op.RAWBLOCK`,
-so the 18016 empty scopes `write_loops_inner` used to open counted as 67% of
-everything opaque while lowering to no text at all.
+number that says how much of the code is still opaque, and it is smaller:
+passes delete raw nodes. `flatten_scopes` alone removes every textless `Op.RAWBLOCK`,
+so an empty scope counts as opaque when constructed and lowers to no text at
+all.
 
 Constructing nodes for a pass to delete is still waste, and a region boundary
 still constrains the passes that run before the one that removes it. But it is
 not opacity in the generated code, and reporting it as such overstates the
-work left by a factor of five.
+work left.
 
 `raw*` is too coarse a bucket: `load_expr` produces a RAWEXPR whose text is
 still vendor-specific but whose *result is an SSA value* and whose *memory
 effect is declared* -- a pass can reorder around it and reuse it.  A RAWSTMT
 with Effect.UNKNOWN can do neither.  Counting them together hides the step.
 
-The per-case totals answer "how far along is this".  They do not answer
+The per-case totals answer "how much is still opaque".  They do not answer
 "what do I change next", because a percentage is not a work item.  So the
 second report attributes every raw node to the function that emitted it, by
 walking out of the `pir` and writer frames to the first caller that is
 neither.  That names a file and a function, which is a thing one can go and
 rewrite.
 
-Two contexts are working on this at once.  The corpus number is the shared
-one: if it is quoted anywhere it should come from here rather than from a
-subset, so that both sides are talking about the same denominator.
+The corpus number is the one to quote: two figures taken from different
+subsets do not share a denominator.
 
     python3 tools/ir_opacity.py            # per-case table, then the sites
     python3 tools/ir_opacity.py --sites    # sites only
@@ -71,7 +70,7 @@ text_site: Dict[str, Counter] = {}
 
 
 def _classify(stmt):
-    """`raw*` is too coarse, and so was the two-way split that replaced it.
+    """`raw*` is too coarse, and so is a two-way split of it.
 
     Three questions, not one.  *Can a pass reason about this as code?*  No, for
     anything raw.  *Does it pin everything around it?*  Only if its effect is
@@ -80,13 +79,12 @@ def _classify(stmt):
     `movable=True`: it constrains nothing, reorders freely and lowers to a line
     the compiler discards.
 
-    Counting comments as opaque put `compute/__init__.py:gen_ir` at the head of
-    the work list with 1092 nodes, 23% of everything -- and rewriting that site
-    would have bought exactly nothing, because the nodes it emits are the
-    `sink.Comment(self.__str__())` on line 19.  Corpus-wide that is 686 of 4735
-    raw nodes, 14.5%, all inert.
+    Counting comments as opaque would put `compute/__init__.py:gen_ir` at the
+    head of the work list -- and rewriting that site would buy exactly
+    nothing, because the nodes it emits are `sink.Comment(self.__str__())`,
+    all inert.
 
-    So `inert` is its own bucket and does not count against the migration.  Of
+    So `inert` is its own bucket and does not count as opaque.  Of
     what remains, `blocking` is what a scheduler cannot move across and
     `declared` is what it can.
     """
@@ -107,10 +105,10 @@ _orig_optimize = pir.optimize
 def _counting_optimize(body, *args, **kwargs):
     """Count what reaches codegen, which is what `optimize` returns.
 
-    Forwards whatever `optimize` takes.  Naming its parameters here made the
-    tool report every case as a generation failure the moment one was added --
-    a hundred-odd `TypeError`s that look like the generator broke, from a
-    wrapper that only ever wanted to count the result.
+    Forwards whatever `optimize` takes.  Naming its parameters here would
+    make the tool report every case as a generation failure the moment one
+    is added -- a hundred-odd `TypeError`s that look like the generator
+    broke, from a wrapper that only wants to count the result.
     """
     out = _orig_optimize(body, *args, **kwargs)
     for stmt, _ in walk(out):
@@ -140,9 +138,9 @@ def _site():
     while f is not None:
         name = f.f_code.co_filename
         if '/pir/' not in name and 'writer' not in name:
-            # `__init__.py:gen_ir` names two different files and is the
-            # largest bucket in the report; the parent directory disambiguates
-            # without turning every row into an absolute path.
+            # A bare `__init__.py:gen_ir` would name two different files in
+            # one row; the parent directory disambiguates without turning
+            # every row into an absolute path.
             path = Path(name)
             label = (f'{path.parent.name}/{path.name}'
                      if path.name == '__init__.py' else path.name)

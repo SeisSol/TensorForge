@@ -6,10 +6,11 @@
 The reduction contracts the lead axis, so the fold crosses the lanes and the
 kept axis `j` is walked sequentially -- and the temporary is computed into a
 register image that spreads `j` over the lanes (`materialize_dest`).  A loop
-variable on the image's lead axis addresses a slot, not an element: lane 0
-wrote every `j` into its own slot `j`, past the end of a one-slot image, and
-the image went to the buffer as one wrong value.  Each element is now written
-by number, by the lane that owns it (`ReductionInstruction._image_axis`).
+variable on the image's lead axis addresses a slot, not an element: written
+through one, lane 0 would put every `j` into its own slot `j`, past the end of
+a one-slot image, and the image would go to the buffer as one wrong value.
+Each element is written by number, by the lane that owns it
+(`ReductionInstruction._image_axis`).
 """
 
 import numpy as np

@@ -1,40 +1,38 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Blackwell's work queue, and the four ways the first attempt got it wrong.
+"""Blackwell's work queue, and four ways to get it wrong.
 
 `clusterlaunchcontrol.try_cancel` asks the launcher not to launch a CTA that
 has not started yet and hands the caller its id, so a resident block drains
-the grid without an occupancy query.  The mode has been in `LoopMode` since it
-was written, disabled behind a comment saying it was broken, and nothing here
-tested it -- which is why it stayed broken.  It was four things, each of which
-this module pins:
+the grid without an occupancy query.  The mode rests on four things, each of
+which this module pins:
 
-*The phase was a copy.*  `queryNext(int phase)` took the mbarrier parity by
-value and flipped its own local.  The caller's parity therefore never changed,
-so from the second iteration on the wait was against a phase that had already
-completed, returned at once, and the block read a response another block was
-also acting on.  One character, and the whole mode.  The parity now lives in
-`ClusterLaunchCursor`, where a caller cannot hold it wrong.
+*The phase is not a copy.*  The mbarrier parity lives in
+`ClusterLaunchCursor`, where a caller cannot hold it wrong.  A query that took
+the parity by value and flipped its own local would leave the caller's parity
+unchanged, so from the second iteration on the wait would be against a phase
+that had already completed, return at once, and the block would read a
+response another block is also acting on.  One character, and the whole mode.
 
-*The response type was a host type.*  `std::optional` is not `__device__`; it
+*The response type is a device type.*  `std::optional` is not `__device__`; it
 compiles only under `--expt-relaxed-constexpr`, which this repository happens
 to pass and a consumer need not.
 
-*The bookkeeping was shared.*  A cursor in shared memory is one parity that
-every thread of the block flips, which is a race, not a counter.  It is
-per-thread now, and stays in lockstep because each value it derives is read
+*The bookkeeping is per-thread.*  A cursor in shared memory would be one
+parity that every thread of the block flips, which is a race, not a counter.
+A per-thread cursor stays in lockstep because each value it derives is read
 from a response behind a barrier.
 
-*The loop-carried barrier was under the element guard.*  `Generator` appended
-one `SyncThreads` per iteration for both persistent modes, and under this one
-it landed inside `if (batchId0 < numElements0)` -- a predicate the rows of a
-block decide differently.  That does not reliably deadlock, which is worse
-than if it did: `bar.sync` pairs arrivals by barrier *number*, so the rows
-that skipped rendezvous at the next barrier instead and the loop runs on one
-barrier out of step, reusing the tile an iteration early.  With a flag mask
-making the rows disagree persistently it does hang.  The hand-off carries its
-own barrier, outside the guard, so nothing needs to be appended at all.
+*The loop-carried barrier is outside the element guard.*  The hand-off carries
+its own barrier, outside the guard, so nothing needs to be appended at all.  A
+`SyncThreads` appended per iteration, as the grid-stride loop has it, would
+land inside `if (batchId0 < numElements0)` -- a predicate the rows of a block
+decide differently.  That does not reliably deadlock, which is worse than if
+it did: `bar.sync` pairs arrivals by barrier *number*, so the rows that skip
+it rendezvous at the next barrier instead and the loop runs on one barrier out
+of step, reusing the tile an iteration early.  With a flag mask making the
+rows disagree persistently it does hang.
 
 The numbers that decide the default are in the option's own declaration.
 """
@@ -117,7 +115,7 @@ def test_the_depth_reaches_the_type():
     assert "ClusterLaunchCursor<2>" in src
 
 
-# -- the four defects ------------------------------------------------------ #
+# -- four ways to get it wrong --------------------------------------------- #
 
 def test_the_cursor_is_not_in_shared_memory():
     """Per-thread state; in shared memory the parity is a race, not a counter."""
@@ -148,8 +146,8 @@ def test_no_loop_carried_barrier_is_appended_under_the_guard():
 
     `next` carries a `__syncthreads` of its own, in the header and outside the
     guard, so the traversal has nothing left to append.  Anything block-wide
-    appearing in the generated body would be back inside the guard, which is
-    where the mode was hanging.
+    appearing in the generated body would be inside the guard, which is where
+    a barrier hangs the mode.
     """
     src = _kernel(launch_control=True).get_kernel()
     barriers = [line.strip() for line in src.splitlines()
@@ -161,7 +159,8 @@ def test_no_loop_carried_barrier_is_appended_under_the_guard():
 
 
 def test_the_grid_stride_loop_still_gets_its_loop_carried_barrier():
-    """Dropping the append must not have dropped it for the other mode too.
+    """Leaving the append out of the queue loop must not leave it out of the
+    other mode.
 
     The grid-stride loop has no hand-off to carry one, so its separation
     between this iteration's reads and the next one's writes is exactly this
@@ -218,10 +217,10 @@ def test_a_grid_barrier_is_refused():
     The mechanism *is* that the launcher never starts most of the grid: a
     resident block cancels the CTAs it then runs itself.  So the blocks a grid
     barrier waits for are exactly the ones that will not exist, and the ones
-    that do run disagree on how many iterations they take.  It used to be a
-    bare `assert not coop` in the launcher, which fires with no message and
-    reads as an internal defect rather than as the answer to a question the
-    caller asked.
+    that do run disagree on how many iterations they take.  Refused with a
+    `GenerationError`, because a bare `assert not coop` in the launcher would
+    fire with no message and read as an internal defect rather than as the
+    answer to a question the caller asked.
     """
     dt = Datatype.F32
 
@@ -268,9 +267,9 @@ def _the_loop(op, **options):
     for body in _bodies(**options):
         for stmt, _ in walk(body):
             # The loop over the batch is the one whose induction carries the
-            # macro layer's name -- as a hint now that nothing spells it, so
-            # this reads the value rather than an `extern` attribute that is
-            # no longer set.
+            # macro layer's name -- as a hint, since nothing spells it, so
+            # this reads the value rather than an `extern` attribute, which
+            # the batch loop does not set.
             if stmt.op == op and stmt.induction.hint == "batchId0":
                 return stmt
     raise AssertionError(f"no {op} over the batch in the generated body")
@@ -305,7 +304,7 @@ def test_the_queue_loop_is_a_construct_the_passes_can_walk():
 
 
 def test_the_queue_loop_is_block_uniform_and_its_element_guard_is_not():
-    """The two are different questions and the form now answers both.
+    """The two are different questions and the form answers both.
 
     Every thread reads the same cancel response out of shared memory behind a
     barrier, so all of them leave on the same iteration -- the loop is entered
@@ -345,8 +344,8 @@ def _loop_with_a_block_barrier(queried: bool):
         with builder.while_("start", extern="batchId0", index_type=SIZE,
                             uniform=Uniformity.MULT) as loop:
             # `Participants` says what the barrier covers in hardware;
-            # `uniform` says what the region guarantees.  Two ladders since
-            # `a51b625b`, and this call names the first one.
+            # `uniform` says what the region guarantees.  Two ladders, and
+            # this call names the first one.
             builder.barrier(Participants.BLOCK)
             nxt = builder.call("cursor.next", INDEX, "queue", pure=False,
                                movable=False, uniform=Uniformity.BLOCK,

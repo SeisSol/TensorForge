@@ -56,7 +56,8 @@ def test_a_build_reports_its_mix_and_what_it_moves(arch, backend):
 
 def test_a_dpp_fma_is_arithmetic_and_a_matrix_builtin_is_a_matrix_op():
     """On RDNA the contraction is FMAs with a DPP operand, on CDNA MFMAs:
-    counted as a move between lanes and as nothing, they left `fp` empty."""
+    counted as a move between lanes and as nothing, they would leave `fp`
+    empty."""
     rdna = {c: v[0] for c, v in _built('local_flux', 'gfx1150', 'hip')
             .issue_mix.items()}
     cdna = {c: v[0] for c, v in _built('local_flux', 'gfx942', 'hip')
@@ -136,7 +137,7 @@ def test_dram_is_what_an_element_streams_and_binds_when_scarce():
 def test_intel_is_calibrated_and_its_cross_lane_row_is_zero():
     """81 kernels of the case set, compiled ahead of time and counted.
 
-    Intel had no row at all, so every statement counted one -- a message over
+    Without a row for Intel, every statement would count one -- a message over
     the send unit like a `mad`.  The entry worth naming is `xlane`: 16938
     cross-lane statements emitted and not one instruction compiled, because
     the broadcast is a region on the reading instruction there.

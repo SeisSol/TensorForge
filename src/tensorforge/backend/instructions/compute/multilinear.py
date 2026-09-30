@@ -182,17 +182,19 @@ class MultilinearInstruction(ComputeInstruction):
         register-resident operand that carries it pins the origin modulo T
         exactly like one carrying the lead index does: its element `s` sits in
         lane `s % T` whatever the loop would prefer.  An intermediate written
-        from a slice starting at row 35 was laid out from lane 3 on, and read
-        back as the reduced operand of the next product it was three lanes off
-        -- a remainder no address can apply.  Starting the loop where the data
-        already is costs nothing: every operand's effective offset along the
-        reduction drops by the same amount, and the ones in memory take any.
+        from a slice starting at row 35 is laid out from lane 3 on; read back
+        as the reduced operand of the next product by a loop starting at 0, it
+        would be three lanes off -- a remainder no address can apply.
+        Starting the loop where the data already is costs nothing: every
+        operand's effective offset along the reduction drops by the same
+        amount, and the ones in memory take any.
 
         Register operands that disagree modulo T would need a shuffle; the
-        origin then stays where it was, and so does what that meant before.
-        An explicit-SIMD lowering has the lane in the type and selects any
-        remainder (`Symbol.build_address`), so it keeps its origin as well: a
-        shifted window would only split its vector loads in two.
+        origin then stays unshifted, and they are handled as they would be
+        without the shift.  An explicit-SIMD lowering has the lane in the type
+        and selects any remainder (`Symbol.build_address`), so it keeps its
+        origin as well: a shifted window would only split its vector loads in
+        two.
         """
         threads = self._num_threads
         if not threads or _explicit_simd(self._context):
@@ -263,10 +265,11 @@ class MultilinearInstruction(ComputeInstruction):
         # operands only say which of them they carry.  Deriving the rank from
         # the operands alone drops any index none of them mentions --- which is
         # exactly what a broadcast is: `t4[32x3] = t2[32]` has one operand
-        # targeting `[0]`, and dimension 1 vanished, so the loop nest ran over
-        # `n0` only and wrote one slot per lead block instead of three.  An
-        # operand that lacks an index is read at the same address for every
-        # value of it, which is the broadcast; the index still has to exist.
+        # targeting `[0]`, and dimension 1 would vanish, so the loop nest would
+        # run over `n0` only and write one slot per lead block instead of
+        # three.  An operand that lacks an index is read at the same address
+        # for every value of it, which is the broadcast; the index still has
+        # to exist.
         targetrank = self._dest_obj.bbox.rank()
         for i, op in enumerate(self._ops):
             for j in range(op.bbox.rank()):
@@ -297,9 +300,9 @@ class MultilinearInstruction(ComputeInstruction):
             self._opdim_to_nks += [opdim]
 
         for i in range(len(self._ns)):
-            # honest intersection with the destination's range.  The previous
-            # form clamped a *size* against a range, which only coincides with
-            # this one while dest.bbox.lower() == 0.
+            # intersection with the destination's range -- a range against a
+            # range; clamping a size against a range would agree with it only
+            # while dest.bbox.lower() == 0.
             self._ns[i] = (max(self._ns[i][0], self._dest_obj.bbox.lower()[i]),
                            min(self._ns[i][1], self._dest_obj.bbox.upper()[i]))
 
@@ -339,12 +342,12 @@ class MultilinearInstruction(ComputeInstruction):
                                                   [u for _,u in self._ns])
         self._iregs = 1
         if len(self._ns) > 0:
-            # No longer a third copy of the slot-count formula: it is called,
-            # like the addressing side and the other allocation site, because
-            # three statements of one rule is how the width came to be in one
-            # of them and not the others.  `DataView.lead_lanes` stays a
-            # separate factor -- how many entries one slot takes is a question
-            # about the lowering, not about the distribution.
+            # The slot-count formula is called, not restated, like the
+            # addressing side and the other allocation site: three statements
+            # of one rule would let the width reach one of them and not the
+            # others.  `DataView.lead_lanes` stays a separate factor -- how
+            # many entries one slot takes is a question about the lowering,
+            # not about the distribution.
             self._iregs = slots_for(self._ns[0][0], self._ns[0][1],
                                     self._num_threads, self._lead_width)
             self._iregs *= DataView.lead_lanes(
@@ -364,14 +367,14 @@ class MultilinearInstruction(ComputeInstruction):
             # off.  Two things disqualify a neighbor.  A global or shared
             # symbol describes the whole buffer, not the box this operation
             # writes.  And a register image is only usable if it is an image of
-            # the *same* box: `_deferred_stores` is keyed by symbol name and
-            # lives for the whole kernel, so what a later operation finds there
-            # may have been staged for a read of a much wider region.  In the
-            # poroelastic space-time predictor a one-row-one-column write
-            # picked up the image of the whole 32x13x4 tensor and inherited its
-            # box; the accumulator then claimed elements it never computed, and
-            # the store wrote all of them --- reading past the end of the
-            # register array on the way.
+            # the *same* box: the residency is keyed by symbol name and lives
+            # for the whole kernel, so what a later operation finds there may
+            # have been staged for a read of a much wider region.  In the
+            # poroelastic space-time predictor a one-row-one-column write would
+            # pick up the image of the whole 32x13x4 tensor and inherit its
+            # box; the accumulator would then claim elements it never computes,
+            # and the store would write all of them --- reading past the end of
+            # the register array on the way.
             #
             # A whole image of the destination (`whole_prev`) is adopted even
             # where this term's own box is narrower: the result *is* the
@@ -402,7 +405,7 @@ class MultilinearInstruction(ComputeInstruction):
         # written `-i-1`, which is the encoding the test at the head of the K
         # nest reads -- nothing produces one today, since a contraction axis
         # spread across the lanes is the cross-lane fold that `_leading_dim`
-        # never got.
+        # does not have.
         #
         # The value is [0] for every case in the corpus, because
         # `MultilinearDescr._lead_dim` aligns the thread count to the
@@ -530,12 +533,11 @@ class MultilinearInstruction(ComputeInstruction):
         if not self._has_epilogue:
             self._vdest = self._dest
         elif hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
-            # Same shape `RegisterAlloc` stopped emitting as text, from a
-            # different site.  It matters beyond its own node count: this was
-            # the last raw declaration inside a compute body, and
-            # `flatten_scopes` keeps the `{ }` around any region whose raw
-            # text declares a C++ name -- so one line here held a wall around
-            # every multilinear in the corpus.
+            # The same structured alloc as `RegisterAlloc`'s, from a different
+            # site.  It matters beyond its own node count: `flatten_scopes`
+            # keeps the `{ }` around any region whose raw text declares a C++
+            # name, so a raw declaration here would hold a wall around every
+            # multilinear.
             #
             # The name stays via `extern` for the same reason as there: the
             # accumulation still spells `ir2` out in places this does not
@@ -615,8 +617,8 @@ class MultilinearInstruction(ComputeInstruction):
             # peels the components no whole vector covers and hands them over
             # as plain element indices, so the last body of a ragged
             # dimension is scalar while every earlier one is wide.  Reading
-            # the instruction's field instead made the peeled body build a
-            # vector type over a scalar element -- a splat of the tail and a
+            # the instruction's field instead would make the peeled body build
+            # a vector type over a scalar element -- a splat of the tail and a
             # wide store past the end of it.
             width = lead_width_of(
                 [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)])
@@ -628,7 +630,8 @@ class MultilinearInstruction(ComputeInstruction):
             # anyway, so the arithmetic is the same; what the op adds is a
             # name the target can spell itself -- the paired FMA of sm_100
             # is reached only through `__ffma2_rn`, and nvcc does not form it
-            # from two scalar ones.  The scalar body stays as it was.
+            # from two scalar ones.  The scalar body keeps the multiply and the
+            # add.
             fused = (ftype.length is not None
                      and self._productOperation.irop() == 'mul'
                      and self._sumOperation.irop() == 'add')
@@ -684,8 +687,8 @@ class MultilinearInstruction(ComputeInstruction):
             # `dest + (p0 + p1)`: without reassociation that is a multiply, a
             # fused multiply-add and an add for two products, where
             # `(dest + p0) + p1` contracts into two fused multiply-adds.  It
-            # is also the order `k_width == 1` sums in, so the width no longer
-            # changes the rounding.
+            # is also the order `k_width == 1` sums in, so the width does not
+            # change the rounding.
             total = value
             for term in prods:
                 if isinstance(term, list):
@@ -707,12 +710,11 @@ class MultilinearInstruction(ComputeInstruction):
         """The reduction values this body covers, and which slot they fill.
 
         `(values, slot)`.  At `k_width == 1` that is the single value the loop
-        handed over and the behavior is unchanged.  Wider, the loop steps by
-        `k_width` and this expands the base into the group -- clipped at the
-        extent, so a ragged reduction simply gets a shorter last group.  No
-        guard and no masking: unlike the lead dimension, a reduction has no
-        lanes to leave half-valid, the leftover steps are just fewer terms in
-        the same sum.
+        handed over.  Wider, the loop steps by `k_width` and this expands the
+        base into the group -- clipped at the extent, so a ragged reduction
+        simply gets a shorter last group.  No guard and no masking: unlike the
+        lead dimension, a reduction has no lanes to leave half-valid, the
+        leftover steps are just fewer terms in the same sum.
         """
         if not self._ks:
             return [None], None
@@ -743,9 +745,9 @@ class MultilinearInstruction(ComputeInstruction):
         shift -- those lanes are the next rows, and writing them is wrong.
         So: no lead origin shift, and the image's box equals the window.
 
-        Under ESIMD the guard used to cost a narrower vector
-        (`LeadLoop._narrow`); under SPMD a branch around the whole block, which
-        the scheduler cannot look across.
+        Under ESIMD the guard costs a narrower vector (`LeadLoop._narrow`);
+        under SPMD a branch around the whole block, which the scheduler cannot
+        look across.
         """
         opts = self._context.get_user_options()
         if not getattr(opts, 'full_lane_tails', False):
@@ -812,7 +814,7 @@ class MultilinearInstruction(ComputeInstruction):
                 # one fixed entry at a time (`Symbol._linear_image_load`):
                 # adjacent steps are not adjacent there, and there is no
                 # vector of them to load.  Its steps are read one by one --
-                # `derivative` at k_width 2 did not generate at all.
+                # packed, `derivative` at k_width 2 would not generate at all.
                 continue
             if not self._pack_is_aligned(i, sym, steps, writer):
                 continue
@@ -834,9 +836,10 @@ class MultilinearInstruction(ComputeInstruction):
         Contiguity says the values are adjacent; it does not say the vector
         starts where a vector may start, and a wide access that begins
         mid-vector is a fault rather than a slower access.  SeisSol's damage
-        step reads `epsTotal[125, 6]`: the 125 are adjacent, so the pack was
-        taken -- and every second column begins at element 125, which is odd,
-        so the kernel died on a misaligned address at `k_width` 2 and 4.
+        step reads `epsTotal[125, 6]`: the 125 are adjacent, so contiguity
+        alone would take the pack -- and every second column begins at element
+        125, which is odd, so the kernel would die on a misaligned address at
+        `k_width` 2 and 4.
 
         Four conditions, and they are different facts.  The base has to be
         *provably* aligned to the whole group (`Symbol.linear_align_bytes`,
@@ -848,15 +851,15 @@ class MultilinearInstruction(ComputeInstruction):
         first element has to be one: the reduction need not start at zero and
         the view need not either.
 
-        And the buffer must not be permuted against bank conflicts, which is
-        what actually killed the damage step: `*(VectorT<float,2>*)&s0[21]`,
-        where 21 is the image of 20 under the staging buffer's `xor4`.  The
-        other three conditions were all true there, and could not have caught
-        it -- every one of them is about the tensor's layout, and the
-        permutation is not in the layout.  It is applied to the index inside
-        `PirBuilder`, once, to the first element of the access; the rest of a
-        vector reads past it unpermuted.  See `PirBuilder._check_width`, which
-        refuses such an access outright for the callers that have no choice.
+        And the buffer must not be permuted against bank conflicts.  In the
+        damage step that would give `*(VectorT<float,2>*)&s0[21]`, where 21 is
+        the image of 20 under the staging buffer's `xor4`, with the other three
+        conditions all true -- and they cannot catch it: every one of them is
+        about the tensor's layout, and the permutation is not in the layout.
+        It is applied to the index inside `PirBuilder`, once, to the first
+        element of the access; the rest of a vector reads past it unpermuted.
+        See `PirBuilder._check_width`, which refuses such an access outright
+        for the callers that have no choice.
         """
         from tensorforge.backend.instructions.memory.vectorize import (
             reduction_vector_width)
@@ -916,19 +919,20 @@ class MultilinearInstruction(ComputeInstruction):
         whether `matmul` declines, and whether shared memory is reserved --
         so it is written once.
 
-        It used to carry a second clause, `data_view.shape[0] < 16`, and that
-        clause was the reason a register-resident operand could be *written*
-        under one element-to-lane map and *read* under another.  The flat fill
-        `GlbToRegLoader` emits puts storage element `f` on lane `f % T`, slot
-        `f // T`; ordinary addressing puts element `(i0, i1)` on lane `i0 % T`,
-        slot `i0 // T + i1 * ceil(e0 / T)`.  Those are the same map only when
-        `e0 % T == 0`.  The writer chose between them on where the operand's
-        lane axis sits (`multilinear_builder.py:_make_load_op`), this chose on
-        a size against a constant, and nothing made the two agree -- so a plain
-        `C = A @ B` with `K = 20` over 16 lanes read six output columns out of
-        register slots nobody had written, and got exact zeros.
+        The writer of a register-resident operand
+        (`multilinear_builder.py:_make_load_op`) asks it too, and the two have
+        to agree, or the operand is *written* under one element-to-lane map and
+        *read* under another.  The flat fill `GlbToRegLoader` emits puts
+        storage element `f` on lane `f % T`, slot `f // T`; ordinary addressing
+        puts element `(i0, i1)` on lane `i0 % T`, slot
+        `i0 // T + i1 * ceil(e0 / T)`.  Those are the same map only when
+        `e0 % T == 0`.  A second clause here, such as
+        `data_view.shape[0] < 16`, would decide on a size against a constant
+        the writer does not consult -- and a plain `C = A @ B` with `K = 20`
+        over 16 lanes would read six output columns out of register slots
+        nobody wrote, and get exact zeros.
 
-        Now both sides ask this one question, and `is_dense` is the whole of
+        So both sides ask this one question, and `is_dense` is the whole of
         it: the flat fill is for the operands stored compressed, which are
         exactly the ones whose cells have no dimension-wise addresses to begin
         with.  Keeping the two in step is what the predicate is for; which
@@ -959,9 +963,9 @@ class MultilinearInstruction(ComputeInstruction):
         emission will use -- and emission then finds the order in place, which
         is what the offers' idempotence is for.  The matrix path offers its
         fragment order, the nest its SIMT interleave (`_offer_simt_order`):
-        offered only at emission, the interleave outgrew the preloaded image,
-        which was sized for the dense operand, and the reads ran into the next
-        image.
+        offered only at emission, the interleave would outgrow the preloaded
+        image, which is sized for the dense operand, and the reads would run
+        into the next image.
         """
         if not self._ops or len(self._ns) == 0:
             return
@@ -994,8 +998,8 @@ class MultilinearInstruction(ComputeInstruction):
         that starts on a slot names whole slots of the order, whatever its
         extent, and a ragged last slot is padding, which a full-lane tail
         reads as zeros.  SeisSol reads its operators in boxes -- `volume` rows
-        1 to 54 of 64, the derivative fewer each order -- and none of them was
-        offered before.
+        1 to 54 of 64, the derivative fewer each order -- and a condition on
+        the whole tensor would offer none of them.
 
         Nor only one reader.  The order is the tensor's, not this operation's:
         `Symbol._interleaved_load` addresses every read of it, so another
@@ -1045,11 +1049,11 @@ class MultilinearInstruction(ComputeInstruction):
         slots = -(-rows // threads)
         # As wide as a lane's rows need, and no wider.  A vector past the rows
         # a lane holds is padding every load carries: 64 rows over 32 lanes
-        # are two a lane, and a group of four read half zeros -- the operator
-        # stored at twice its size, and at one row a lane four times.  Of the
-        # widths that take the fewest loads, the narrowest: two rows a lane
-        # in one 8-byte pair, three still in one 16-byte group (a quarter of
-        # it padding, for one load rather than two), and one row in none --
+        # are two a lane, and a group of four would read half zeros -- the
+        # operator stored at twice its size, and at one row a lane four times.
+        # Of the widths that take the fewest loads, the narrowest: two rows a
+        # lane in one 8-byte pair, three still in one 16-byte group (a quarter
+        # of it padding, for one load rather than two), and one row in none --
         # the plain layout already hands the lanes of a column one run.
         group = min((w for w in (1, 2, 4, 8, 16) if w <= widest),
                     key=lambda w: (-(-slots // w), w))
@@ -1385,7 +1389,7 @@ class MultilinearInstruction(ComputeInstruction):
 
             # At lead width `w` a slot is `threads * w` elements, and that is
             # the unit every lead and contraction index below divides by.  At
-            # width one the arithmetic is what it was.  A packed operand whose
+            # width one the span is the thread count.  A packed operand whose
             # lead or contraction does not start on a whole vector (or a lead
             # that does not start on a slot) goes to the nest, which peels.
             width = self._lead_width
@@ -1773,9 +1777,9 @@ class MultilinearInstruction(ComputeInstruction):
         product = f" {self._productOperation} ".join(op.symbol.name for op in self._ops)
         if self._has_epilogue:
             return f'{self._idest.name} = {self._sumOperation}({product})'
-        # Unchanged where there is no epilogue, down to the `None` standing for
-        # the absent previous value: the comment is part of every kernel's
-        # source, and so of its name.
+        # Where there is no epilogue this form stays exactly as it is, down to
+        # the `None` standing for the absent previous value: the comment is
+        # part of every kernel's source, and so of its name.
         return f'{self._dest.name} = {self._sumOperation}({product}) {self._sumOperation} {self._prev}' # TODO: dimensions
 
     def temp_shmem(self):

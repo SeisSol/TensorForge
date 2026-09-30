@@ -17,9 +17,8 @@ whose source lane lies between the active count and the vector width ---
 silently, and only with the optimizer on.  `split_predicated_load` is the
 remedy, and this is what says whether it still works.
 
-One product, or as many rows as lanes, computes correctly either way; both
-variants were measured before this case was written down as the narrowest one
-that fails.
+One product, or as many rows as lanes, computes correctly either way; this is
+the narrowest case that fails.
 """
 
 import numpy as np

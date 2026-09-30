@@ -44,9 +44,8 @@ def _tensor(shape, alias, dtype):
 def _wide_generator(ctx, lead, dtype):
     """`_wide_section` at the width its lead aligns to, asked for outright.
 
-    An elementwise descriptor used to waive the lane ceiling, and that is how
-    this reached a width above the wave; it no longer does (`lanes.deduce`),
-    so the width is requested instead of provoked.
+    An elementwise descriptor does not waive the lane ceiling (`lanes.deduce`),
+    so a width above the wave is requested instead of provoked.
     """
     from tensorforge.generators.lanes import LaneConfig
     return Generator(_wide_section(lead, dtype), ctx,
@@ -111,7 +110,7 @@ def test_the_grouped_traversal_is_driven_by_the_leader():
 
     # 48 lanes over a 32-wide wave: the launch is in units of 16 and the
     # multiplication's index is derived from the unit (`MultLayout`), so the
-    # group is spelled over `tfMult`, the index `threadIdx.y` used to be.
+    # group is spelled over `tfMult` rather than `threadIdx.y`.
     assert re.search(r"dim3 block \(16, 6, 1\)", gen.get_launcher())
     assert "batchIdLane0 = tfMult % 2" in src
     assert "batchIdGroup0 = (tfMult - batchIdLane0)" in src, (

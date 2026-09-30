@@ -20,8 +20,8 @@ guesses in it:
   name it
 
 That last one replaces the assumption `spp_sweep.py` carries.  There the
-traversal count follows the ADER recursion because nothing better was
-available; here it is counted.
+traversal count follows the ADER recursion, because the matrices alone say
+nothing better; here it is counted.
 
     python3 tools/spp_kernels.py descriptors.json
     python3 tools/spp_kernels.py --arch gfx90a --fp 8 descriptors.json

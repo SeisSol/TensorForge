@@ -152,8 +152,8 @@ def _padded_local_flux():
 def test_a_zero_filled_tail_is_written_whole():
     """The rows after the 56 computed ones are zero-filled by the store
     anyway: the tail writes them in its own write, padding lanes zeroed --
-    under ESIMD a merge and a 32-wide write where it was 16 + 8 and a fill
-    nest, under SPMD a select where it was a branch -- and the fill nest has
+    under ESIMD a merge and a 32-wide write where off has 16 + 8 and a fill
+    nest, under SPMD a select where off has a branch -- and the fill nest has
     nothing left to do."""
     off = _kernel(_padded_local_flux(), full_lane_tails=False)
     on = _kernel(_padded_local_flux(), full_lane_tails=True)

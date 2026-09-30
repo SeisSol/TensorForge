@@ -22,8 +22,7 @@ same formulas, so this table cannot drift from the header without saying so.
 
 The fragment layout *is* derived too, and from the vISA specification rather
 than the SYCL header -- `documentation/visa/instructions/DPAS.md` in
-intel-graphics-compiler.  An earlier version of this file said it was not
-documented anywhere; that was wrong, and the answer turns out to be simple::
+intel-graphics-compiler.  The answer is simple::
 
     Dst, Src0 (C) and Src2 (A) are row-major in the GRF's 1-D space.
     Src1 (B) is laid out over a 2-D view: GRF row = k, DW column = n.
@@ -147,11 +146,11 @@ TF32_TERMS = len(split.products(TF32_SPLIT_TERMS))
 #: given shape -- that second question is `supports()`.  Two different facts,
 #: so two names, and only this one is a decision about the generator.
 #:
-#: Parked pending a run on real hardware, and by now for the same reason as
-#: the NVIDIA path rather than a sharper one.
+#: Parked pending a run on real hardware, for the same reason as the NVIDIA
+#: path.
 #:
-#: What used to block it is settled.  The fragment layout is derived from the
-#: vISA pseudo-code and checked by placing a matrix through the offsets,
+#: Everything short of that is settled.  The fragment layout is derived from
+#: the vISA pseudo-code and checked by placing a matrix through the offsets,
 #: running the transcription and comparing against `C + A @ B`; the operand
 #: mapping (Src1 is this generator's A, Src2 its B) is checked the same way;
 #: and 29 of the 31 emitted kernels are well-formed with 11 of them carrying
@@ -374,21 +373,21 @@ def simd(lexic, elem, count) -> str:
 #: only what a front end sees -- an element read and an FMA -- so what it waits
 #: on is the arithmetic, and that is checkable without hardware.
 #:
-#: Two defects had to go first, and naming them is worth more than the flag:
+#: Two things it rests on, and naming them is worth more than the flag:
 #:
-#: * the dispatch passed `Mx` where this path needs `M`.  `unwindI` maps its
-#:   argument with `i % M`, so iterating to the element count asked for the
-#:   same index `threads` times and got the same value back -- and then the
-#:   same product was accumulated into everything.  Not an error anywhere,
-#:   just wrong.
+#: * this path takes `M`, not `Mx`.  `unwindI` maps its argument with
+#:   `i % M`, so iterating to the element count would ask for the same index
+#:   `threads` times and get the same value back -- and then the same product
+#:   would be accumulated into everything.  Not an error anywhere, just
+#:   wrong.
 #: * `float * simd<float, N>` needs the free operator ESIMD defines in
-#:   `detail/operators.hpp`; the test shim only had the member overloads,
-#:   which cover a scalar on the right.
+#:   `detail/operators.hpp`; the member overloads cover only a scalar on the
+#:   right, so a test shim needs the free one too.
 #:
-#: What clears it now: 31 of 31 emitted kernels are well-formed, no
-#: accumulator receives a product twice, and on a 16x16 GEMM each of the 16
-#: accumulators sweeps the full contraction over one distinct B vector.  That
-#: is structure, not numerics -- the numbers still want a run.
+#: What clears it: 31 of 31 emitted kernels are well-formed, no accumulator
+#: receives a product twice, and on a 16x16 GEMM each of the 16 accumulators
+#: sweeps the full contraction over one distinct B vector.  That is
+#: structure, not numerics -- the numbers still want a run.
 BROADCAST_ENABLED = True
 
 
@@ -414,7 +413,7 @@ def _run(writer, frag, start, size, hint):
     """
     # A run is a slot vector the work-item holds whole, whatever it was cut
     # out of.  Left to the join, a run of a lane-distributed operand -- B's
-    # 16-lane load -- inherited that distribution and was declared
+    # 16-lane load -- would inherit that distribution and be declared
     # `simd<float, 16 * size>` around a `size`-wide `select`.
     return writer.rawexpr(f'{{0}}.template select<{size}, 1>({start})', frag,
                           type_=ScalarType(frag.type.base, size), hint=hint,
@@ -454,8 +453,7 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
     size is one slot of sixteen rows, and an operation whose lead is longer --
     54 rows in an order-6 `volume` -- is `M` of them.  They share Src2, the
     same output columns and depths for all of them, so that is split once per
-    block.  Only slot 0 used to be computed: the other rows were neither
-    multiplied nor stored, and nothing on the host could tell from the timing.
+    block.
 
     `parts == 2` where `A` is stored as its two TF32 halves
     (`prepared_order`): Src1 is then read half by half rather than split.
@@ -489,8 +487,8 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
             # Src2 <- this generator's B: one run per repeat row.
             # `B(j, k0 // threads)` is the lane vector holding depths
             # `k0 .. k0 + threads - 1`, so this block's depths start at lane
-            # `k0 % threads` of it.  Taking lane 0 read k = 0..7 again for
-            # every second block of a 16-lane vector.  And only the depths
+            # `k0 % threads` of it.  Taking lane 0 would read k = 0..7 again
+            # for every second block of a 16-lane vector.  And only the depths
             # that exist: past them the load holds the next row, or memory
             # past the operand, and the fragment's zeros have to stay zeros --
             # `0 * inf` is not zero.
@@ -516,7 +514,7 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                 # step, out of slot `i`.  Every read before any conversion: a
                 # call ends a run (`EsimdEmitter._plan_runs`), and the steps of
                 # a slot-major operand are one run -- a fragment in two block
-                # messages where it was eight.
+                # messages rather than eight.
                 # `k0` counts `B`'s steps, from its block's start; `A` counts
                 # from the first step the contraction walks, `kx` later.  A
                 # step before the window has no `A`, and its slot stays the
@@ -650,7 +648,7 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     fragment never runs into the next slot, and the operand is offered as the
     two TF32 halves the three products multiply (`parts`), planar, so that
     each half of a fragment is one run too.  Split once on the host instead
-    of in every multiplication of every element: `castTF32` where it was
+    of in every multiplication of every element: `castTF32` in place of
     `splitFloatTF32`.  Whether the halves are taken is the caller's to say --
     only the matrix path reads them.
 

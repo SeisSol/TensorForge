@@ -5,8 +5,7 @@
 
 Not a GEMM: the descriptor is a bare ``MultilinearDescr`` where the
 destination has rank 1 and we contract one of the two axes of A.
-Adapted from ``example/trace.py`` with shape simplified to a clean
-power of two.
+The shape is a clean power of two.
 """
 
 import numpy as np

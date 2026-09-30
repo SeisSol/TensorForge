@@ -88,9 +88,10 @@ class ComputeInstruction(AbstractInstruction):
     A register array is allocated with a slot count and nothing else; what
     those slots *mean* is decided by whoever writes them, so the array is not
     addressable until an instruction says so.  The multilinear says it inside
-    `_analyze`, from the intersected range it ends up iterating, which is why
-    it was the only operation that could write one -- and therefore the only
-    one that could produce a temporary at all.
+    `_analyze`, from the intersected range it ends up iterating; the
+    elementwise, scalar and reduction instructions say it here.  An operation
+    that did not say so could write no register array, and so could produce
+    no temporary at all.
 
     `bbox` is for an operation whose destination is indexed in a different
     origin than it is declared in.  Everything but the contraction indexes at

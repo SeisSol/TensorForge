@@ -3,20 +3,19 @@
 # SPDX-License-Identifier: MIT
 """The lane count, as a choice rather than a constant.
 
-It was `min(32, num_threads)` at the end of `_deduce_num_threads`, with no
-comment and one condition -- no elementwise descriptor in the list.  Read as a
-hardware fact it is wrong: NVIDIA and Intel report 32 and 16, so the minimum
-does nothing there, and it bites on AMD alone, where the wave is 64.  Read as a
-measurement it is right, and that is what it is: the full wave halves the
-per-lane register footprint and has been slower on some kernels.
+By default the lane count is capped at 32 (`lanes.DEFAULT_LANE_CEILING`).
+Read as a hardware fact the cap is wrong: NVIDIA and Intel report 32 and 16,
+so it does nothing there, and it bites on AMD alone, where the wave is 64.
+Read as a measurement it is right, and that is what it is: the full wave halves
+the per-lane register footprint and has been slower on some kernels.
 
-What it had nowhere to say was which of the two it is, and no way to ask for
-the other answer.  These tests hold both halves: the default is exactly what it
-always produced, and the override actually reaches the generated code.
+`lanes` says which of the two it is, and `ceiling` asks for the other answer.
+These tests hold both halves: the default stays under the ceiling, and the
+override actually reaches the generated code.
 
 The second half is the one that matters going forward.  A search over
 configurations -- lane count, lead width, k-width, pipeline depth -- cannot
-start from a constant, and this is the first of those that stops being one.
+start from a constant.
 """
 
 from __future__ import annotations
@@ -57,7 +56,7 @@ def _register_slots(src: str) -> int:
 
 
 # ----------------------------------------------------------------------
-# the default is what it always was
+# the default and its ceiling
 # ----------------------------------------------------------------------
 
 @pytest.mark.parametrize("backend,arch,wave", [
@@ -74,11 +73,11 @@ def test_the_ceiling_is_a_number_and_the_wave_is_another(backend, arch, wave):
 
     The narrowing is the more interesting half.  The default leaves an Intel
     section at 32 lanes -- wider than a wave -- which is why a barrier inside
-    its batch loop comes out at group scope, and why `verify` refuses 35
-    kernels for a group barrier under a simd-uniform trip count.  Clamping to
-    the wave makes them generate.  That is a lead, not something to change
-    while extracting a decision, so `deduce` reproduces the old answer exactly
-    and this test records the discrepancy rather than closing it.
+    its batch loop comes out at group scope, and why `verify` refuses kernels
+    for a group barrier under a simd-uniform trip count.  Clamping to the wave
+    makes them generate.  That is a lead, not a settled change, so
+    `deduce` keeps the ceiling there as well and this test records the
+    discrepancy rather than closing it.
     """
     ctx = _ctx(arch, backend, Datatype.F64)
     assert ctx.get_vm().get_hw_descr().vec_unit_length == wave
@@ -97,8 +96,8 @@ def test_the_ceiling_is_a_number_and_the_wave_is_another(backend, arch, wave):
 
 def test_an_elementwise_descriptor_alone_takes_the_vector_unit_under_the_ceiling():
     """Nothing else asks, so it does -- and like every other request, the
-    ceiling caps it: it used to waive that, and a contraction beside it then
-    got more lanes than a wave."""
+    ceiling caps it: waiving that would give a contraction beside it more
+    lanes than a wave."""
     ctx = _ctx("gfx90a", "hip")
     a, c = _t([64, 64], 'A'), _t([64, 64], 'C')
     assert lanes.deduce([ew.abs(c, a)], ctx).num_threads == min(
@@ -135,7 +134,7 @@ def test_the_width_is_a_minimum_where_the_lane_count_is_a_maximum():
 
 
 # ----------------------------------------------------------------------
-# and it can now be chosen
+# and it can be chosen
 # ----------------------------------------------------------------------
 
 def test_an_explicit_config_reaches_the_generated_code():
@@ -309,11 +308,8 @@ def test_a_candidate_that_does_not_build_is_not_a_candidate():
     one leaves a barrier inside a batch loop at group scope, which `verify`
     refuses for a trip count that is only simd-uniform.  A search that
     propagated the failure would be unusable on precisely the target where the
-    narrower option is what makes the kernel generate at all.
-
-    Over the corpus on acpp the search now completes for 65 of 67 cases and
-    picks the 16-wide option for 52 of them; the two it does not complete are
-    the ones where neither width builds.
+    narrower option is what makes the kernel generate at all.  The search
+    fails only where neither width builds.
     """
     ctx = _ctx("pvc", "acpp", Datatype.F64)
     pair = [c for c in lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)
@@ -418,8 +414,7 @@ def test_a_tie_keeps_the_configuration_the_descriptors_asked_for():
     """The model seeing no difference is not a reason to change anything.
 
     Changing it anyway is exactly where "the wider one measured slower" would
-    bite: six of the fourteen contested cases on gfx90a are ties, and moving
-    all six for no modeled reason would be six chances to lose and none to
+    bite: a tie moved for no modeled reason is a chance to lose and none to
     win.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
@@ -446,10 +441,9 @@ def test_a_tie_keeps_the_configuration_the_descriptors_asked_for():
 def test_the_exact_bound_outranks_the_model_where_it_speaks():
     """A fact before a guess.
 
-    Over the corpus the two only ever agree -- the exact term differs on one
-    case, the kernel that runs out of registers, and it points the same way.
-    Stated as an ordering anyway, because the reason to prefer it is not that
-    they agree today.
+    Where both speak, the exact term and the model point the same way.  Stated
+    as an ordering anyway, because the reason to prefer the exact term is not
+    that they agree.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
     real = Generator.generate
@@ -530,9 +524,9 @@ def test_an_amd_multiplication_wider_than_the_wave_is_refused(monkeypatch):
     """The register broadcast of the AMD SIMT path ends at the wave.
 
     64 lanes over gfx1150's 32-wide waves put half of the broadcast operand in
-    a wave the exchange cannot reach, and before this was refused the kernel
-    came out wrong with no error and no spill.  On a 64-wide wave the same
-    width is one wave and builds.
+    a wave the exchange cannot reach; built anyway, the kernel would come out
+    wrong with no error and no spill.  On a 64-wide wave the same width is one
+    wave and builds.
     """
     monkeypatch.setenv("TF_LANES", "64")
     with pytest.raises(GenerationError):

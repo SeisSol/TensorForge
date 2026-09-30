@@ -3,16 +3,15 @@
 # SPDX-License-Identifier: MIT
 """Distribution is total, and it is the only statement about lane-varying.
 
-Three properties, each of which was false before and each of which an
-explicitly vectorized emitter depends on:
+Three properties, each of which an explicitly vectorized emitter depends on:
 
-1. ``uniformity`` and ``layout`` cannot disagree.  They did, on 71443 of the
-   93837 values in the corpus that carried a layout, and always in the unsafe
-   direction --- ``GRID`` on a value spread across the lanes.
+1. ``uniformity`` and ``layout`` cannot disagree.  As two separate statements
+   they could drift apart, and the drift that matters is the unsafe direction
+   --- ``GRID`` on a value spread across the lanes.
 
 2. *Replicated* and *unknown* are different answers.  Both spell ``float x``
-   in SPMD, so nothing noticed; in ESIMD one is ``T`` and the other cannot be
-   given a type at all.
+   in SPMD, so SPMD never tells them apart; in ESIMD one is ``T`` and the
+   other cannot be given a type at all.
 
 3. A replicated operand does not destroy the layout of the one it is scaled
    into.  ``alpha * A`` is spread exactly like ``A``, and SeisSol scales
@@ -129,9 +128,9 @@ def test_a_lead_index_gives_its_axis():
 def test_an_offset_lead_index_is_still_that_axis():
     """A slicing shift does not change *which lane holds what*.
 
-    The shift used to be a `VarOffset` wrapped around the index and is now a
-    field on it -- see `LeadIndex._offset`.  Either way the layout is the same
-    axis, which is the property this test is about.
+    The shift is a field on the index -- see `LeadIndex._offset` -- and the
+    layout is the same axis with or without it, which is the property this
+    test is about.
     """
     assert (layout_of([LeadIndex(0, 16, 1, offset=32)])
             == RegisterLayout((LaneAxis(16, 1),)))
@@ -157,18 +156,18 @@ def test_axes_that_do_not_tile_the_wave_stay_unknown():
 # --------------------------------------------------------------------------
 
 def test_a_shared_image_can_carry_a_layout():
-    """It could not, and the omission was silent.
+    """`_record_linear_layout` answers for a shared image too.
 
-    `_record_linear_layout` answered only for registers, because a register
-    image knows its own lane count and a shared one does not -- `num_threads`
-    is None there, a shared buffer not being owned by one multiplication.  The
-    loader that writes the run does know, and is the only party that does.
+    A register image knows its own lane count and a shared one does not --
+    `num_threads` is None there, a shared buffer not being owned by one
+    multiplication.  The loader that writes the run does know, and is the
+    only party that does.
 
     A later read is `load_linear`, whose address has no lane term at all: it
     reports what the fill recorded and can derive nothing.  So an unrecorded
-    claim left every consumer of a staged image failing closed -- invisible
-    under SPMD, where unknown costs only precision, and fatal under an
-    explicit vector, where a declaration needs a distribution.
+    claim would leave every consumer of a staged image failing closed --
+    invisible under SPMD, where unknown costs only precision, and fatal under
+    an explicit vector, where a declaration needs a distribution.
     """
     from tensorforge.backend.symbol import Symbol, SymbolType
     sym = Symbol.__new__(Symbol)
@@ -260,12 +259,12 @@ def test_a_kept_attempt_keeps_it():
 
 
 def test_a_structured_store_records_what_it_distributes():
-    """The third fill path, and the third place the statement was missing.
+    """The third fill path, and the third place the statement has to be made.
 
     A staged image is filled linearly by the loader, in bulk by the transfer,
     or one element at a time by a compute instruction writing out of its
-    registers.  The first two recorded how the image ends up distributed; the
-    third did not, so an image written that way read back as unknown.
+    registers.  Each records how the image ends up distributed; a path that
+    did not would leave an image written that way reading back as unknown.
 
     Derivable here, unlike the linear paths: the index carries a `LeadIndex`,
     which *is* the distribution, so this reports what `layout_of` already
@@ -315,10 +314,10 @@ def _register(threads, width=1, dims=(0,), axes=None):
 @pytest.mark.parametrize('threads', [1, 4, 8, 16, 32, 64])
 @pytest.mark.parametrize('width', [1, 2, 4])
 def test_the_owner_is_the_lane_the_arithmetic_named(threads, width):
-    """The answer is derived from the layout now instead of computed here,
-    and at rank one it has to be the same answer bit for bit -- every image
-    in the tree is rank one, so anything else would be an unreviewed change
-    to all of them.
+    """The answer is derived from the layout rather than computed here, and
+    at rank one it has to be the arithmetic's answer bit for bit -- every
+    image in the tree is rank one, so anything else would be an unreviewed
+    change to all of them.
 
     The width is divided out before the layout is asked, because a packing is
     a property of the register and not of the distribution: a lane holding
@@ -330,7 +329,7 @@ def test_the_owner_is_the_lane_the_arithmetic_named(threads, width):
 
 
 def test_a_rank_two_image_has_an_owner_once_its_producer_says_so():
-    """What `lead_dims` could not say.  Two positions do not distinguish one
+    """What `lead_dims` cannot say.  Two positions do not distinguish one
     pair of axes from another, and the pair is the whole content: `LaneAxis(8,
     4)` beside `LaneAxis(4, 1)` puts the row in the high lane bits and the
     column pair in the low ones, which is where a chained matrix product
@@ -376,16 +375,16 @@ def test_the_declaration_is_not_the_recorded_layout():
 # -- the number a coordinate is divided by --------------------------------- #
 
 def test_the_block_is_the_wave_for_every_image_in_the_tree():
-    """The neutrality claim, stated so it is checked rather than argued.
+    """The single-axis case, stated so it is checked rather than argued.
     Every register image is one axis over the whole wave, so every address
-    divides by the number it always did."""
+    divides by the wave."""
     for threads in (1, 4, 16, 32, 64):
         sym = _register(threads)
         assert sym.lead_block(0) == threads
         # And for a dimension this symbol did not declare, the wave as well:
-        # a lead index arriving there has always meant the wave, and reading
-        # it as unspread would change an address that has been right since
-        # before there were axes to state.
+        # a lead index arriving there means the wave, and reading it as
+        # unspread would change an address that is right without any axes
+        # stated.
         assert sym.lead_block(1) == threads
 
 
@@ -399,9 +398,10 @@ def test_the_block_is_the_axis_where_a_producer_stated_one():
 
 
 def test_slots_are_counted_in_blocks_and_not_in_waves():
-    """What the rename is about.  A sixteen-element dimension is one slot on
-    a wave that holds sixteen and two on an axis whose block is eight, and
-    the formula never knew which number it was given."""
+    """Why the argument is a block and not a wave.  A sixteen-element
+    dimension is one slot on a wave that holds sixteen and two on an axis
+    whose block is eight, and a formula that took a wave could not know which
+    number it was given."""
     from tensorforge.backend.symbol import slots_for
     assert slots_for(0, 16, 16) == 1
     assert slots_for(0, 16, 8) == 2
@@ -410,10 +410,9 @@ def test_slots_are_counted_in_blocks_and_not_in_waves():
 
 
 def test_an_unstated_rank_two_image_still_divides_by_the_wave():
-    """Because that is what it did.  Positions without axes are not a
-    distribution, and changing what they address is not this patch's to
-    make -- `register_layout` refuses them and this falls back to what the
-    addressing has always done."""
+    """Positions without axes are not a distribution, so they give no other
+    number to divide by -- `register_layout` refuses them and this falls back
+    to the wave."""
     sym = _register(32, dims=(0, 1))
     assert sym.register_layout() is None
     assert (sym.lead_block(0), sym.lead_block(1)) == (32, 32)
@@ -436,8 +435,8 @@ def _bbox(*sizes):
 
 
 def test_a_single_axis_image_is_sized_as_it_always_was():
-    """The neutrality claim.  Every caller passes a bare dimension index, and
-    that has to mean the wave, cyclic, with the same register count."""
+    """The single-axis case.  Every caller passes a bare dimension index, and
+    that has to mean the wave, cyclic, with the register count that implies."""
     temps = _temporaries(32)
     sym, alloc = temps.register_array(_bbox(64, 3), 0)
     assert sym.lead_dims == [0] and sym.lead_axes is None
@@ -449,8 +448,8 @@ def test_a_single_axis_image_is_sized_as_it_always_was():
 def test_the_blocks_it_sized_in_are_the_blocks_the_addressing_divides_by(blocks):
     """The property the whole parameter exists for.  An allocation in units
     the addressing does not divide by aliases the next dimension onto this
-    one, and until the blocks could be passed the two agreed only because
-    both defaulted to the wave."""
+    one, and without the blocks passed the two would agree only because both
+    default to the wave."""
     from tensorforge.backend.symbol import slots_for
     temps = _temporaries(32)
     sym, _ = temps.register_array(_bbox(16, 8), list(blocks))
@@ -584,9 +583,8 @@ def test_a_rank_two_image_is_allocated_and_read_at_the_same_place():
 
 
 def test_a_rank_two_image_without_axes_is_refused_at_the_read():
-    """The assertion that stood here refused every rank-two image, including
-    the ones that state their axes.  This refuses only the ones that do not,
-    which would otherwise address both dimensions by the wave and alias them
+    """Refused where the axes are unstated, not for every rank-two image: one
+    without axes would address both dimensions by the wave and alias them
     onto each other."""
     from tensorforge.backend.symbol import DataView
     from tensorforge.common.basic_types import Datatype

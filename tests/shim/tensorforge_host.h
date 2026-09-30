@@ -188,7 +188,7 @@ template <int Row> void fmacdpp16(double &c, double a, double b);
 // The packed pair.  `codegen.py` reaches it only through the `bcst` path,
 // which is switched off today -- so nothing in the corpus calls it, and a
 // shim written from the corpus alone would not have it.  The header is the
-// reference here, not the corpus: the moment `bcst` comes back the missing
+// reference here, not the corpus: the moment `bcst` is switched on the missing
 // overload would be reported as a generator defect.
 template <int Row> void fmacdpp16(float2 &c, float2 a, float2 b);
 
@@ -209,10 +209,9 @@ template <typename T, Operation OpT> struct ReductionOperation {
 template <typename Op, std::size_t Block, std::size_t Subblock, typename T>
 T reduction(const T &value);
 
-// One template, as in the header now: `movdpp16` moves any trivially copyable
+// One template, as in the header: `movdpp16` moves any trivially copyable
 // value, in 64-bit units where the target can -- a float, a `VectorT<float,
-// 2>` pair of broadcast values, a `double`.  It used to be two overloads,
-// because the header defined `float2` alone in inline assembly.
+// 2>` pair of broadcast values, a `double`.
 template <int Row, typename T> T movdpp16(T a);
 // An ordering point on a register: an empty `asm volatile` on the device.
 template <typename T> void pin(T &v);
@@ -223,8 +222,8 @@ template <int Row, typename T> T movdpp16Kept(T a);
 // `tf32` is a typedef for `std::uint32_t` there and has to be: the halves go
 // into `mma.sync` under the `"r"` constraint, which binds a 32-bit register
 // and not a class type.  The name still earns its place -- the generator
-// spells the halves `Datatype.TF32` now rather than "four bytes of something"
-// -- and on the Intel side the same name *is* a distinct class, which is
+// spells the halves `Datatype.TF32` rather than "four bytes of something" --
+// and on the Intel side the same name *is* a distinct class, which is
 // where the mix-up it guards against can actually happen.
 using tf32 = std::uint32_t;
 
@@ -232,7 +231,7 @@ void splitFloatTF32(tf32 &upper, tf32 &lower, float value);
 
 } // namespace tensorforge
 
-// The one property this file has already got wrong once.
+// The one property this file can get wrong without any other check noticing.
 static_assert(sizeof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
               "VectorT lost its vector_size attribute: every check that "
               "passes through it is now meaningless");
@@ -240,7 +239,7 @@ static_assert(sizeof(tensorforge::VectorT<double, 2>) == 2 * sizeof(double),
               "VectorT lost its vector_size attribute");
 // The relaxed twin is the same width and deliberately *not* the same
 // alignment.  If these two ever agree, the twin has stopped being one and
-// every register-side cast is back to claiming an alignment it does not have.
+// every register-side cast claims an alignment it does not have.
 static_assert(sizeof(tensorforge::VectorRelaxedT<float, 4>) ==
                   4 * sizeof(float),
               "VectorRelaxedT lost its vector_size attribute");

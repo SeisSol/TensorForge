@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: MIT
 """AMD code generation for the multilinear kernel.
 
-`multilinear.py` enters through `matmul()` and nothing else.  The modules
-below are layered in dependency order, and the layering carries the lesson of
-the bugs that came out of this file:
+`multilinear.py` enters through what its dispatch asks of every vendor
+module -- `strategies`, `plan`, `scratch`, `convergence`, `prepared_order`
+and `matmul` -- and nothing else.  The modules below are layered in
+dependency order:
 
 * `arch`     -- which family a target is
 * `caps`     -- what its runtime defines
@@ -19,19 +20,13 @@ the bugs that came out of this file:
 * `codegen`  -- the kernel
 * `unused`   -- matrix paths kept for repair, with no call site
 
-The split between `arch` and `caps` is the load-bearing one.  Those were the
-same thing here, and a family predicate standing in for a capability is what
-let gfx900 emit a call to a template that has only a declaration there.
+The split between `arch` and `caps` is the load-bearing one: a family
+predicate standing in for a capability would let gfx900 emit a call to a
+template that has only a declaration there.
 
-Removed when this became a package: the `dppctrl_*` constant helpers, the raw
-`amdgcn_*` intrinsic wrappers, four `shuffle_*` routines, two `reduction`s
-written against CUDA's `__shfl_xor_sync`, the `MatrixCore` class with its
-`matrixcores`/`archmap` tables and the `matmul` it served, and three empty
-stubs -- 350 lines unreachable from `matmul()` through the call graph, not
-merely uncovered by tests.  Two of those names, `reduction` and `matmul`, were
-defined twice at module level, so Python had been discarding the first
-definition since it was written.  `tests/test_amd_reachability.py` keeps the
-property.
+Everything here is reachable through the call graph from the entry points
+`multilinear.py` uses -- not merely covered by some test -- or is listed as
+kept on purpose.  `tests/test_amd_reachability.py` keeps the property.
 """
 
 from dataclasses import replace
@@ -240,9 +235,10 @@ def wave_mults(threads, a_uniform, width=1, dtype=Datatype.F32) -> int:
     to the upper, or back -- and for four, one quarter to all.  So a lead
     operand every multiplication reads alike, at lead width one, over 32 or
     16 lanes: one read of a wave's worth of distinct elements serves two or
-    four contraction steps where each step read the same elements into every
-    multiplication.  One everywhere else, which is the arrangement as it was
-    -- and for F64, whose MFMA spends the field on negation (CDNA3).
+    four contraction steps, where otherwise each step reads the same elements
+    into every multiplication.  One everywhere else, which is the plain
+    arrangement -- and for F64, whose MFMA spends the field on negation
+    (CDNA3).
     """
     if (not B_DUPLICATION or not a_uniform or width != 1 or threads <= 0
             or dtype != Datatype.F32):
@@ -320,11 +316,11 @@ def plan(strategy, shape, n, ctx):
         # A packed lead operand whose tail the DPP chain would decline -- a
         # contraction that ends mid-vector, or no 64-bit move with the fused
         # form off -- goes to the matrix core whole, the last block padded.
-        # A declined tail takes the matrix span down with it: the whole
-        # product went to the nest, `local_flux`'s 9x9 products on gfx942 and
-        # all of it on gfx90a (2100 B of scratch).  Where the chain takes the
-        # tail the width-one boundary stands, which measured one column
-        # cheaper there; at width two that is unmeasured.
+        # A declined tail would take the matrix span down with it and send
+        # the whole product to the nest: `local_flux`'s 9x9 products on
+        # gfx942, and all of it on gfx90a (2100 B of scratch).  Where the
+        # chain takes the tail the width-one boundary stands, which measured
+        # one column cheaper there; at width two that is unmeasured.
         return whole(Strategy.MATRIX, n)
     edge = boundary(fit, n)
     if edge >= n:

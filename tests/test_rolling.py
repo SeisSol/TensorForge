@@ -142,16 +142,14 @@ def nodal_sources(nodes=3):
 def test_a_run_over_temporaries_keeps_which_temporary_it_names():
     """Two sums over nodal sources, rolled: iteration k adds source k.
 
-    A temporary used to be identified by the slot it sits in, on the grounds
-    that the generator names its own scratch and two chunks each holding one
-    hold the same thing.  These are not that: `sourceAlpha0` and
-    `sourceAlpha1` are two values, written elsewhere, and `alphaNodal` and
-    `breakageNodal` are two sums read afterwards.  With position standing in
-    for all four, the six additions came out as one chunk varying in the
-    scalar alone -- so the loop added the first source six times and the
-    breakage sums were never computed.  SeisSol's damage step is this list:
-    35 of its 2271 descriptors came back as another operation, and its
-    breakage scenario grew a drift that ended in a NaN.
+    Identifying a temporary by the slot it sits in rests on the generator
+    naming its own scratch, so that two chunks each holding one hold the same
+    thing.  These are not that: `sourceAlpha0` and `sourceAlpha1` are two
+    values, written elsewhere, and `alphaNodal` and `breakageNodal` are two
+    sums read afterwards.  With position standing in for all four, the six
+    additions would come out as one chunk varying in the scalar alone -- so
+    the loop would add the first source six times and never compute the
+    breakage sums.  SeisSol's damage step is this list.
     """
     original = nodal_sources()
     assert _bound(unroll(roll(original, min_count=3))) == _bound(original)
@@ -169,8 +167,7 @@ def test_scratch_that_crosses_into_the_next_chunk_is_not_scratch():
     `deriv{k}` is written by one chunk and read by the next, so it is a value
     passed on and not scratch, even though nothing outside the run ever looks
     at one.  The anti-unifier makes a hole of it -- identified by its slot it
-    would have been invisible, and every chunk would have read the first
-    step's input.
+    would be invisible, and every chunk would read the first step's input.
     """
     from tensorforge.analysis.families import find_repeats
     run = find_repeats(temporary_chain(), min_count=3)[0]
@@ -464,8 +461,8 @@ def test_a_chain_through_a_published_buffer_generates():
     name a global destination -- so the write goes home first and is read back
     from there.
 
-    Pinned because it is the body the first loop will be built from, and
-    because it is the one chain shape the temporary-based cases do not cover.
+    Pinned because it is the body a loop is built from, and because it is
+    the one chain shape the temporary-based cases do not cover.
     """
     for count in (2, 3, 5):
         assert _generated(_chain(count))
@@ -940,7 +937,8 @@ def _merged(gen):
 
 
 def test_the_option_rewrites_and_emits_in_one_step():
-    """Two separately reachable switches let a list be rolled and expanded."""
+    """Two separately reachable switches would let a list be rolled and then
+    silently expanded again."""
     plain = _with_option(_flux(), merge_variants=False)
     merged = _with_option(_flux(), merge_variants=True)
     assert not _merged(plain)
@@ -978,10 +976,10 @@ def _accumulate_then_read():
 def test_a_merged_accumulation_is_read_back_after_the_loop(arch):
     """`D += W_i Q B_i` three times, merged, then `O = D C`.
 
-    The loop states no definitions of its own and counts as a barrier, and
-    `MoveLoads` let the final product's read of `D` cross it: every row of `O`
-    was computed from a `D` two terms short.  The merged build is checked on
-    its own against numpy, since it names its buffers differently."""
+    The loop states no definitions of its own and counts as a barrier; a
+    `MoveLoads` that let the final product's read of `D` cross it would compute
+    every row of `O` from a `D` two terms short.  The merged build is checked
+    on its own against numpy, since it names its buffers differently."""
     import numpy as np
 
     import kernel_eval
@@ -1069,14 +1067,14 @@ def test_a_factor_the_loop_binds_is_read_inside_it():
 
     The body reads a factor passed by value, and the loop binds that name from
     the table its counter selects.  Read as a bare name the read is a value
-    with no operands, which is what `licm` calls loop-invariant -- so it was
-    hoisted past the header, out of the scope the name is declared in, and the
-    kernel stopped compiling rather than slowing down.
+    with no operands, which is what `licm` calls loop-invariant -- so it could
+    be hoisted past the header, out of the scope the name is declared in, and
+    the kernel would stop compiling rather than slow down.
 
     Stated on the emitted text because that is where it goes wrong: a name
     used before its declaration is a C++ error and nothing earlier in the
-    pipeline has an opinion about it.  SeisSol's damage step had 36 of them
-    once its run of 362 operations rolled; this is the same shape in six.
+    pipeline has an opinion about it.  SeisSol's damage step has this shape in
+    a long run; this is the same shape in six.
     """
     import re
     scalar = Addressing.SCALAR
@@ -1116,14 +1114,14 @@ def test_a_factor_the_loop_binds_is_read_inside_it():
 def test_a_run_reads_its_table_and_its_factor_inside_the_loop():
     """A merged run over ten scalars: nothing it binds is read before the loop.
 
-    Two reads leave the loop, and neither is the one the test beside this
-    covers.  The table a counter selects from is an array once the run is
-    longer than a chain is worth, and the binding that indexes it names the
-    counter in text alone -- so it has no operand that varies and `licm` moved
-    it ahead of the header.  The factor's own read is the same shape one step
-    later: a stand-in read as a bare name is a value with no operands too, and
-    a multilinear that takes it as an epilogue factor had it hoisted out from
-    under the loop that declares it.
+    Two reads could leave the loop, and neither is the one the test beside
+    this covers.  The table a counter selects from is an array once the run is
+    longer than a chain is worth, and a binding that names the counter in text
+    alone has no operand that varies, so `licm` would move it ahead of the
+    header.  The factor's own read is the same shape one step later: a
+    stand-in read as a bare name is a value with no operands too, and a
+    multilinear that takes it as an epilogue factor would have it hoisted out
+    from under the loop that declares it.
 
     Ten iterations because eight is where a select chain gives way to an
     array, and a destination with an axis because a factor beside a rank-0

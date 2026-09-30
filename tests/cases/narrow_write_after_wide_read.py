@@ -3,24 +3,24 @@
 # SPDX-License-Identifier: MIT
 """A narrow write to a tensor that was read wide earlier in the same kernel.
 
-    t          = D[0:16, :]        # reads D over a wide box
+    t          = D[:, :]           # reads D over a wide box
     t         += A @ B
     D[:, 4:5]  = t[:, 4:5]         # writes one column back
     O          = D @ C
 
-``_deferred_stores`` is keyed by symbol name and lives for the whole kernel,
-so the register image staged for the *read* of ``D`` is what the later write
-finds when it asks where its destination lives.  The accumulator then adopted
-that image's data view --- the whole tensor --- although it only ever computes
-one column.  The store believed it held 13 columns, wrote all of them, and
-read past the end of the register array to do it.
+The residency is keyed by symbol name and outlives the operation that staged
+an entry, so the register image staged for the *read* of ``D`` is what the
+later write finds when it asks where its destination lives.  An accumulator
+that adopted that image's data view --- the whole tensor --- although it only
+ever computes one column would hand the store 13 columns, and the store would
+write all of them, reading past the end of the register array to do it.
 
-The space-time predictor does this five times, once per quantity: a
-one-row-one-column write picked up the image of the whole 32x13x4 tensor and
-clobbered it.
+The space-time predictor has this shape five times, once per quantity: a
+one-row-one-column write after a read of the whole 32x13x4 tensor, whose image
+such a write would clobber.
 
-``D`` is read back afterwards, so the damage shows up in the result and not
-only in the generated source.
+``D`` is read back afterwards, so that damage would show up in the result and
+not only in the generated source.
 """
 
 import numpy as np

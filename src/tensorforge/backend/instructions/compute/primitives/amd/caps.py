@@ -21,12 +21,10 @@ def has_fmacdpp4(ctx):
 def has_fmacdpp8(ctx):
     """The `__GFX10__ || ... || __GFX13__` block: DPP8 is gfx10 and later.
 
-    It used to be `False` for every target, because the runtime had no
-    `fmacdpp8` at all and `hfma` had emitted calls to a name that did not
-    exist.  The runtime has one now (float only, like `fmacdpp4`), and at
-    eight lanes it is what carries the broadcast inside each FMA: without it
-    the step narrowed to 4 and a separate move -- `ds_swizzle`, later
-    `v_mov_b32_dpp8` -- redistributed the sub-block first.
+    The runtime's `fmacdpp8` is float only, like `fmacdpp4`, and at eight
+    lanes it is what carries the broadcast inside each FMA: without it the
+    step would narrow to 4 and a separate move -- `ds_swizzle` or
+    `v_mov_b32_dpp8` -- would redistribute the sub-block first.
     """
     return amdarch(ctx) >= 0x1000
 

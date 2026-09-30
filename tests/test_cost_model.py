@@ -276,8 +276,8 @@ def test_a_missing_datatype_is_refused_rather_than_guessed():
 
 
 def test_batch_scales_arithmetic_linearly():
-    """Trivial, and the model got it wrong once by scaling the traffic and not
-    the flops, which moves every arithmetic intensity by the batch."""
+    """Trivial, and a model that scaled the traffic and not the flops would
+    move every arithmetic intensity by the batch."""
     one = _cost_of("square_notrans.py")
     mod = _case("square_notrans.py")
     ten = list_cost(mod.descr_list(), batch=40, datatype=mod.DTYPE)

@@ -12,13 +12,12 @@ The row slice on the accumulations makes ``D`` a destination written in
 several boxes, so each write goes out to memory as it is produced and the
 final descriptor reads ``D`` back from there.  That read is the one thing in
 the kernel that must not move: ``MoveLoads`` hoists transfers to hide their
-latency, and it used to do so without looking at what lay between, so the read
-of ``D`` ended up above the last accumulation's store.  Every term but the
-last reached ``O`` --- no crash, no diagnostic, a result that is wrong by one
-summand.
+latency, and hoisting without looking at what lies between would put the read
+of ``D`` above the last accumulation's store.  Every term but the last would
+reach ``O`` --- no crash, no diagnostic, a result that is wrong by one summand.
 
-This is the shape of an ADER derivative kernel, which is why three of the
-poroelastic kernels showed it and nothing in the suite did.
+This is the shape of an ADER derivative kernel; three of the poroelastic
+kernels have it.
 """
 
 import numpy as np

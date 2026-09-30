@@ -10,9 +10,9 @@ it.  As a destination it has nothing to spread over the lanes, so a
 contraction into it is the scalar branch's (`ScalarContractionInstruction`):
 every lane computes the one value.
 
-The earlier representation carried it with an axis of extent one, and which
-axis that was had to be decided per operation; deciding it as the
-destination's axis 0 made `t[i,j] = rhoInv * S[i,j]` write row 0 of `t`.
+Carried with an axis of extent one instead, it would need that axis decided
+per operation, and taking it as the destination's axis 0 makes
+`t[i,j] = rhoInv * S[i,j]` write row 0 of `t`.
 """
 
 from __future__ import annotations

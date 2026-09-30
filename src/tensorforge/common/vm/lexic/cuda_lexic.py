@@ -16,14 +16,15 @@ from tensorforge.backend.writer import MultiBlock
 #: belongs here; on Intel the same member is a class type and would not.
 #:
 #: Absent, each for its own reason.  `F128` has no overload at any
-#: architecture, which is the defect this set exists to stop.  `BOOL` has
-#: none either, and `const bool*` converts to no other pointer type, so it
-#: would fail the same way the day something loads one.  `F16` and `BF16` are
-#: spelled `half` and `bfloat16`, which nothing in `include/` declares for
-#: CUDA -- so a kernel carrying them fails earlier than this, and claiming an
-#: overload for a type that has no declaration would be a guess.  When that
-#: spelling arrives and resolves to `__half`/`__nv_bfloat16`, `cuda_fp16.hpp`
-#: and `cuda_bf16.hpp` do declare the pair, and this is the line that changes.
+#: architecture, and a hinted access to one is the compile error this set
+#: exists to prevent.  `BOOL` has none either, and `const bool*` converts to
+#: no other pointer type, so it would fail the same way the day something
+#: loads one.  `F16` and `BF16` are spelled `half` and `bfloat16`, which
+#: nothing in `include/` declares for CUDA -- so a kernel carrying them fails
+#: earlier than this, and claiming an overload for a type that has no
+#: declaration would be a guess.  When that spelling arrives and resolves to
+#: `__half`/`__nv_bfloat16`, `cuda_fp16.hpp` and `cuda_bf16.hpp` do declare
+#: the pair, and this is the line that changes.
 _CACHE_HINT_TYPES = frozenset({
     Datatype.F32,
     Datatype.F64,
@@ -242,11 +243,11 @@ class CudaLexic(Lexic):
       return f'{fptype}'
     # Not `float2`/`float4`.  Those are CUDA's own structs: they have no
     # arithmetic operators, so an elementwise op on one does not compile, and
-    # they are unrelated to `VectorRelaxedT`, so the two spellings could not
-    # be assigned to each other -- a staging transfer would load a `float4`
-    # and try to store it through a relaxed pointer of a different type.
-    # `hip.h` and `cuda.h` now declare the same pair, and both are usable as
-    # values and as cast targets.
+    # they are unrelated to `VectorRelaxedT`, so the two spellings cannot be
+    # assigned to each other -- a staging transfer would load a `float4` and
+    # try to store it through a relaxed pointer of a different type.  `hip.h`
+    # and `cuda.h` declare the same pair, and both are usable as values and as
+    # cast targets.
     kind = 'VectorRelaxedT' if relaxed else 'VectorT'
     return f'tensorforge::{kind}<{fptype}, {length}>'
 
@@ -368,14 +369,8 @@ class CudaLexic(Lexic):
     `broadcast` is one: the exchange already exists in `tensorforge_device`,
     both backends define it under the same name, and `multilinear`'s
     lead-dimension fold wants the same thing.  A lexic that emitted the
-    intrinsics directly would be a second copy of it.
-
-    The previous body was unreachable and would not have worked if it had
-    been: it returned `None` (the loop's last statement was a bare f-string),
-    tested `blocks == [2, 4, 8, 16, 32]` for what is a single width, named
-    `__and_sync`, which does not exist, and emitted CUDA intrinsics
-    unconditionally -- and `HipLexic` inherits this method, so HIP would have
-    got `__shfl_xor_sync` too.
+    intrinsics directly would be a second copy of it -- and `HipLexic`
+    inherits this method, so an intrinsic spelled here would reach HIP too.
     """
     if optype not in self.REDUCTION_OPS:
       raise NotImplementedError(f'reduction over {optype}')
@@ -395,14 +390,12 @@ class CudaLexic(Lexic):
     -- at every architecture, since the overload set is a property of the
     header and not of the target.
 
-    `length > 1` is refused twice over.  A wide value is spelled
-    `tensorforge::VectorT<T, N>` here, a GNU vector, and the overloads are
-    declared over `floatN` -- same size, same alignment, no conversion
-    between them, which is the cast `atomic_store` has to write out.  And a
-    value of vector type does not survive nvcc in device code at all, so
-    there is nothing for the hint to be attached to.  Both are spellings the
-    lexic would have to change; neither is answered by naming an intrinsic
-    here.
+    `length > 1` is refused.  A wide value is spelled
+    `tensorforge::VectorT<T, N>` here, a struct of `cuda.h`, and the
+    overloads are declared over `floatN` -- same size, same alignment, no
+    conversion between them, which is the cast `atomic_store` has to write
+    out.  A hint on a wide access needs that cast or another spelling of the
+    value; naming an intrinsic here gives it neither.
     """
     return length == 1 and datatype in _CACHE_HINT_TYPES
 
@@ -441,10 +434,10 @@ class CudaLexic(Lexic):
     A wide update goes through the vector overloads, which exist from sm_90
     for `float2` and `float4` and are global-memory only.  The cast is what
     the spelling costs: the value arrives as `tensorforge::VectorT<float, N>`,
-    a GNU vector, and `atomicAdd` is declared over CUDA's `floatN` -- same
-    size, same alignment, no implicit conversion between them.  Only reached
-    when `has_atomic_store` agreed for this width, so the overload it names
-    exists.
+    a struct of `cuda.h`, and `atomicAdd` is declared over CUDA's `floatN` --
+    same size, same alignment, no implicit conversion between them.  Only
+    reached when `has_atomic_store` agreed for this width, so the overload it
+    names exists.
     """
     if length == 1:
       return f'atomicAdd(&{access}, {variable});'

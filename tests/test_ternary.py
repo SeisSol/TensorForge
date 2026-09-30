@@ -146,14 +146,14 @@ class TestHoisted:
         reads: a shared window, so the branch computes into registers and a
         store carries the value home.
 
-        That store belongs inside the region that computed the value.  It used
-        to be emitted where the *other* half asked the residency to flush it,
-        which is the region under the opposite condition: the value was stored
-        when it did not exist and not stored when it did, and the register it
-        named was scoped to the region that declared it.  The window itself is
-        the mirror image -- declared by whichever half stores first, so it has
-        to be hoisted ahead of both.  Either way round the host compiler
-        rejects the kernel, which is what this asserts.
+        That store belongs inside the region that computed the value.  Emitted
+        where the *other* half asks the residency to flush it, it would sit in
+        the region under the opposite condition: the value would be stored
+        when it does not exist and not stored when it does, and the register
+        it names is scoped to the region that declares it.  The window itself
+        is the mirror image -- declared by whichever half stores first, so it
+        has to be hoisted ahead of both.  Either way round the host compiler
+        would reject the kernel, which is what this asserts.
         """
         cond = {'type': 'elementwise', 'result': ref('c'),
                 'args': [ref('x'), ref('y')], 'condition': [],
@@ -235,8 +235,8 @@ class TestRecorded:
 
     def test_a_factor_is_an_operand_of_the_multilinear_it_scales(self):
         """`2.0 * C^T` as a branch: yateto states the 2.0 in `linear.alpha`
-        and nowhere else, and the reader used to drop it -- the branch
-        computed `C^T`, and so did every scaled contraction."""
+        and nowhere else, so a reader that dropped it would compute `C^T` for
+        the branch, and for every scaled contraction."""
         scale = recorded('ternary_rank0_s')[0]
         assert len(scale.ops) == 2
         assert scale.target[1] == [] and scale.permute[1] == []
@@ -288,9 +288,9 @@ def test_the_guard_waits_for_the_owner_lane_to_store_its_condition(
         backend, arch, fence):
     """`X1 = all(B >= C^T)` is one number: the owner lane stores it, and the
     guard over it is read by every lane.  With nothing in between, sm_120
-    took both branches in one element, and so did gfx1150 -- where the
-    rendezvous of a wave is no instruction at all, and LLVM hoisted the
-    other lanes' load above the owner's store until a fence stood there."""
+    can take both branches in one element, and so can gfx1150 -- where the
+    rendezvous of a wave is no instruction at all, and LLVM hoists the other
+    lanes' load above the owner's store unless a fence stands there."""
     descrs = recorded('ternary_written_t')
     generator = Generator(descrs, Context(arch=arch, backend=backend,
                                           fp_type=Datatype.F32))
@@ -308,8 +308,8 @@ def test_the_guard_waits_for_the_owner_lane_to_store_its_condition(
 def test_a_boolean_staged_in_shared_memory_is_a_window_of_its_own_type(
         backend, arch):
     """The comparison `B >= C^T` is staged in the arena, which is an array of
-    the kernel's float: `bool *s = &arena[0]` did not compile anywhere; the
-    window is a reinterpret of the arena's address."""
+    the kernel's float: `bool *s = &arena[0]` compiles nowhere, so the window
+    is a reinterpret of the arena's address."""
     descrs = recorded('ternary_tensor_t')
     generator = Generator(descrs, Context(arch=arch, backend=backend,
                                           fp_type=Datatype.F32))

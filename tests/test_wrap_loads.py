@@ -4,8 +4,7 @@
 """The wrap-around schedule, checked on the generated text.
 
 The interesting property is not that the pass runs but that the buffer it
-wraps still holds the right element.  Four things have to hold together for
-that, and each of them was a bug at some point while the pass was written:
+wraps still holds the right element.  That takes four things holding together:
 
 * the declaration leaves the loop, or the value written at the tail of
   iteration ``k`` is not there at the head of ``k + 1``;
@@ -135,17 +134,15 @@ def test_peeled_and_wrapped_transfers_use_the_right_element(backend, arch):
     # `batchId1` before the loop is `batchId_start` clamped into range, and it
     # is the clamped one the peel has to name: the peel runs ahead of the size
     # guard, and `batchId_start` is bounded by the launch geometry rather than
-    # by the element count.  This asserted `batchId_start` when it was written,
-    # which is the defect test_peel_bounds.py now pins.  Inside the loop the
-    # same name means `clamp(batchId0 + stride)`, which is what the wrapped
-    # transfer wants -- hence the same token on both lines, meaning two
-    # different things either side of the loop header.
+    # by the element count; test_peel_bounds.py pins why it must not be
+    # `batchId_start`.  Inside the loop the same name means
+    # `clamp(batchId0 + stride)`, which is what the wrapped transfer wants --
+    # hence `batchId1` on both lines, meaning two different things either side
+    # of the loop header.
     assert all('batchId1' in a for a in peeled), peeled
     assert all('batchId1' in a for a in wrapped), wrapped
-    # ...and they are two different tokens now: the peel names the
-    # prologue's binding, which is still text, while the loop's is a value
-    # whose hint the emitter prefixes.  The collision the note above
-    # describes was in the spelling, and it is gone.
+    # ...and they are two different tokens: the peel names the prologue's
+    # binding, the loop's is a value whose hint the emitter prefixes.
     assert all(re.search(r'\bbatchId1\b', a) for a in peeled), peeled
     assert all(re.search(r'\bv\d+_batchId1\b', a) for a in wrapped), wrapped
 
@@ -186,10 +183,9 @@ def test_single_iteration_loop_is_left_alone(monkeypatch):
 
     Forced, because no configuration reaches it today: the generator takes the
     grid-stride loop unless it takes the launch queue (`prefer_persistent =
-    not launch_control`).  This used `square_notrans` as it came and passed
-    only because the slot-based placement gave up on a body with a single
-    compute -- the kernel it looked at was a grid-stride loop all along, and
-    placing by dependence wraps it, as it should.
+    not launch_control`).  Taken as it comes, `square_notrans` is a grid-stride
+    loop, which placing by dependence wraps, as it should -- so a test that did
+    not force the mode would not be looking at `SINGLE` at all.
     """
     from tensorforge.backend.instructions.batch_loop import LoopMode
     monkeypatch.setattr(Generator, "_batch_loop_mode",
@@ -206,11 +202,11 @@ def test_a_loop_over_groups_of_rows_is_not_wrapped(monkeypatch):
     """A group traversed in lockstep emits no peel, so nothing may be wrapped.
 
     `BatchLoop._gen_grouped` emits the region alone.  Wrapped, the transfer
-    went to the tail for the next element and nothing issued it for the first:
-    `local_flux` at 16 lanes on the MMA path read an unfilled window in its
-    first iteration and came out 7 % off.  The same case on the FFMA path has
-    no group and is still wrapped, which is what shows the refusal is the
-    group's and not the case's.
+    would go to the tail for the next element and nothing would issue it for
+    the first: `local_flux` at 16 lanes on the MMA path would read an unfilled
+    window in its first iteration.  The same case on the FFMA path has no
+    group and is still wrapped, which is what shows the refusal is the group's
+    and not the case's.
     """
     from tensorforge.backend.instructions.compute.primitives import nvidia
     monkeypatch.setattr(nvidia, "ENABLED", True)

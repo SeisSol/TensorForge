@@ -4,11 +4,11 @@
 """The residency record, asked directly.
 
 Its whole job is a distinction -- a copy of something memory still holds
-against the only copy of something it does not -- and the distinction used to
-be recomputed at each site from `image is home`, alongside a lookalike test on
-`home.stype` that is not the same question and misreads a writeback into a
-shared-memory temporary.  Stating the kind is what makes that a typo rather
-than a plausible alternative, and these are the properties that says.
+against the only copy of something it does not.  Recomputed at each site from
+`image is home`, it would sit beside a lookalike test on `home.stype` that is
+not the same question and misreads a writeback into a shared-memory
+temporary.  Stating the kind is what makes that a typo rather than a plausible
+alternative, and these are the properties that says.
 
 The geometry half matters for the same reason: an image is indexed in its own
 coordinates and covers only what its producer staged, so `holds` is what stands

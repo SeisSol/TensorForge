@@ -9,11 +9,10 @@ binary only exists because running nothing would be a strange way to report a
 result.
 
 `base.h` needs no device: no intrinsics, no execution-space keywords, not even
-the shim that `test_syntax.py` uses. It also had three wrong neutral elements
-and a mistagged specialization, none of which any test could have caught,
-because the C++ side of this repository had no test at all until the syntax
-check arrived --- and that one only asks whether generated code parses, which
-these headers do regardless of what they compute.
+the shim that `test_syntax.py` uses. A wrong neutral element or a mistagged
+specialization is invisible to the syntax check, which only asks whether
+generated code parses, and these headers parse regardless of what they
+compute.
 
 The rest of `cuda.h` and `hip.h` is not covered here and cannot be by this
 route: a shuffle butterfly needs lanes. `-fsyntax-only` against the shim (see

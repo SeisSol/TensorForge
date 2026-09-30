@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: MIT
 """Symbolic equivalence of two generated kernels' compute bodies.
 
-The AMD conversion changes *how* the arithmetic is written down, not what it
-computes: the same MFMA / DPP / transpose instructions, in the same order, on
-the same operands.  That claim is worth checking rather than asserting,
-because the conversion also let CSE remove more than half the register reads,
-and a wrongly reused read is exactly the failure this would produce.
+Two generated kernels can differ in *how* the arithmetic is written down -- in
+place or in SSA form -- and still compute the same thing: the same
+MFMA / DPP / transpose instructions, in the same order, on the same operands.
+That claim is worth checking rather than asserting, because the SSA form lets
+CSE remove more than half the register reads, and a wrongly reused read is
+exactly the failure this would produce.
 
 The check treats every vendor intrinsic as an *uninterpreted function*: the
 value stored to an output slot becomes a symbolic expression tree over the
@@ -36,8 +37,8 @@ DECL_EMPTY = re.compile(
     r'^\s*(?:const\s+)?(?:float|double|__half|__float128|'
     r'tensorforge::VectorT<[^>]*>)\s+(\w+)\{\}\s*;\s*$')
 ASSIGN = re.compile(r'^\s*([A-Za-z_]\w*)\s*\[([^\]]*)\]\s*=\s*(.+);\s*$')
-# `v15 = mfma(...);` -- the pre-SSA accumulator update.  Matching this is not
-# optional: without it the whole accumulation chain of the old kernel is
+# `v15 = mfma(...);` -- the non-SSA accumulator update.  Matching this is not
+# optional: without it the whole accumulation chain of a non-SSA kernel is
 # invisible and every output slot compares as an untouched zero.
 REASSIGN = re.compile(r'^\s*([A-Za-z_]\w*)\s*=\s*(.+);\s*$')
 VOIDCALL = re.compile(r'^\s*((?:tensorforge::)?\w+(?:<[^>]*>)?)\s*\((.*)\)\s*;\s*$')
@@ -50,8 +51,8 @@ REF = re.compile(r'^\s*auto&\s*(\w+)\s*=\s*(\w+)\s*;\s*$')
 # `transpose4x4b32(w1..w4, v1..v4)` writes the first four and reads the last
 # four.  Emitted in place the two sets are the same names, and the value is
 # still built from what they held *before* the call, so one rule covers both
-# forms -- which is what lets an in-place kernel be compared against the SSA
-# one that replaced it.
+# forms -- which is what lets an in-place kernel be compared against an SSA
+# one.
 #
 # `fmacdpp{n}(c, a, b)` accumulates, so `c` is written *and* read.
 SIGNATURES = {

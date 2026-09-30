@@ -4,13 +4,13 @@
 """What a launch of one generated kernel uses, decided once.
 
 The block, the multiplications a block holds, the shared memory and whether
-the launch is cooperative were decided in the generator and then existed only
-as literals in the launcher text -- which the launcher, the kernel's launch
-bounds, the occupancy estimate, the tuning and half a dozen host tools each
-re-derived or read back with a regex.  This is the one place they are stated,
-and what the header publishes to host code (`LaunchInfo`, and the
-`launch_config_<kernel>` function that adds the grid, which depends on the
-device and the element count and so is decided at run time).
+the launch is cooperative are decided in the generator and stated here, in one
+place: the launcher, the kernel's launch bounds, the occupancy estimate and
+the tuning read them from this record rather than each re-deriving them or
+reading them back out of the launcher text.  It is also what the header
+publishes to host code (`LaunchInfo`, and the `launch_config_<kernel>`
+function that adds the grid, which depends on the device and the element count
+and so is decided at run time).
 """
 
 from dataclasses import asdict, dataclass

@@ -11,7 +11,7 @@ decomposes into bits at all decomposes into the ones that reproduce its own
 
 The first is a check on the translation and not on the tables -- both read the
 same rows, so a wrong row stays wrong.  That is what `Provenance.MEASURED` and
-the LLVM cross-check are for; this says the new reading is the old one.
+the LLVM cross-check are for; this says the two readings agree.
 """
 
 from __future__ import annotations
@@ -148,9 +148,8 @@ def _emitted(index, ctx, tid):
 
     The check has to be against what is generated and not against a second
     copy of the formula here, because a copy shares whatever mistake the
-    original has -- which is the failure the `LaneAxis` docstring already
-    caused once, when the annotations were derived from prose instead of from
-    the hardware.
+    original has -- the way annotations derived from a docstring's prose
+    rather than from the hardware inherit the docstring's mistakes.
     """
     expression = index.write(ctx)
     return eval(expression.replace('threadIdx.x', str(tid)).replace('/', '//'))
@@ -160,8 +159,8 @@ def _emitted(index, ctx, tid):
 @pytest.mark.parametrize('block,stride', [(16, 1), (8, 2), (4, 1), (1, 1)])
 def test_the_packed_reading_is_the_map_the_emitter_writes(width, block, stride):
     """Both halves of what a value holds, checked against the address the
-    generator emits for it: which lane, which slot, and -- the part no layout
-    could state before -- which element inside the register."""
+    generator emits for it: which lane, which slot, and -- the part a lane
+    and slot layout cannot state -- which element inside the register."""
     threads, slots = 64, 2
     extent = width * block * slots
     bits = bitlayout.from_lane_axis(block, stride, extent, width)
@@ -178,9 +177,9 @@ def test_the_packed_reading_is_the_map_the_emitter_writes(width, block, stride):
 
 
 def test_at_width_one_it_is_the_reading_it_replaces():
-    """The default is the old answer and not a new one that agrees on the
-    corpus: `lead_width` is 1 everywhere today, so anything else would be an
-    unreviewed change to every layout in play."""
+    """The default is the width-one reading exactly, not a different one that
+    agrees on the corpus: every unpacked layout is read through it, so
+    anything else would be an unreviewed change to all of them."""
     for block, stride, extent in ((16, 1, 64), (8, 2, 32), (1, 1, 8)):
         assert (bitlayout.from_lane_axis(block, stride, extent, 1)
                 == bitlayout.from_lane_axis(block, stride, extent))
@@ -274,11 +273,11 @@ def _lane_batched():
 
 @pytest.mark.parametrize('name', sorted(op.builtin for op in _lane_batched()))
 def test_the_transpose_output_is_the_a_fragment(name):
-    """What `matmul32` rests on, and what nothing could state before.
+    """What `matmul32` rests on, and what only one vocabulary can state.
 
     `_check_mfma_operand` compares the operand it was handed against what the
     transpose produces -- it never asks whether that is what the instruction
-    wants, because the two were written in languages that do not compare.  In
+    wants, because the two are written in languages that do not compare.  In
     one vocabulary they do, and they agree: the transpose puts one dimension
     on the low lane bits and the other above it, which is where the fragment
     puts `m` and the block.
@@ -359,12 +358,11 @@ def _accumulator_cases():
 
 @pytest.mark.parametrize('name', sorted(set(_accumulator_cases())))
 def test_the_solver_finds_the_swaps_the_plan_states(name):
-    """`accumulator_gathers` computes the epilogue by hand: for each region it
-    checks that one XOR carries every lane and turns it into a `swap`
-    sequence.  Written against two layouts that is one question -- where does
-    each element sit, where does it have to sit -- and the answer has to be
-    the same, or the vocabulary describes something other than what is
-    emitted.
+    """`accumulator_gathers` plans the epilogue: for each region one XOR that
+    carries every lane, turned into a `swap` sequence.  Written against two
+    layouts that is one question -- where does each element sit, where does
+    it have to sit -- and asked from the nest's side the answer has to be the
+    same, or the vocabulary describes something other than what is emitted.
 
     Every region of every column of every entry whose accumulator has a plan.
     """
@@ -485,12 +483,12 @@ def test_index_spaces_that_do_not_line_up_have_no_displacement():
         BitLayout(((Bit(Place.LANE, 1),),))) is None
 
 
-# -- what the emitter now asks --------------------------------------------- #
+# -- what the emitter asks ------------------------------------------------- #
 
 @pytest.mark.parametrize('threads', [32, 64])
 @pytest.mark.parametrize('ext', [4, 16])
 def test_the_nest_needs_one_transpose_to_reach_the_fragment(ext, threads):
-    """What `matmul32` does, now as an answer rather than an assumption."""
+    """What `matmul32` does, as an answer rather than an assumption."""
     from tensorforge.backend.instructions.compute.primitives.amd import relayout
     assert relayout.transposes_between(
         relayout.nest_shared(ext, threads),
@@ -499,8 +497,8 @@ def test_the_nest_needs_one_transpose_to_reach_the_fragment(ext, threads):
 
 def test_an_operand_that_already_arrives_right_needs_none():
     """The answer worth having: transposing unconditionally is correct for
-    the arrangement the nest hands over and wrong for any other, and nothing
-    could tell the two apart."""
+    the arrangement the nest hands over and wrong for any other, and only a
+    comparison of layouts tells the two apart."""
     from tensorforge.backend.instructions.compute.primitives.amd import relayout
     ready = relayout.transposed(4, 64)
     assert relayout.transposes_between(ready, ready, 4) == 0
@@ -521,11 +519,9 @@ def test_a_packed_operand_is_not_reached_by_a_transpose():
 
 
 def test_the_gathers_are_the_solver_s_answer():
-    """`accumulator_gathers` reads the solver now instead of walking lanes.
+    """`accumulator_gathers` reads the solver rather than walking lanes.
 
-    The plan it returns is the same for every entry and every column -- 756
-    answers, 692 of them plans -- which is what makes reading it from two
-    layouts a refactor rather than a second opinion.
+    Every entry and every column: 756 answers, 692 of them plans.
     """
     from tensorforge.backend.instructions.compute.primitives.amd import reorder
     planned = sum(1 for op in MATRIX_OPS for column in range(op.m)
@@ -548,8 +544,8 @@ def test_a_base_on_each_side():
     assert {m.xor for m in backward} == {8}
 
 def test_the_b_fragment_plan_is_the_solver_s_answer():
-    """`fragment_moves` reads the solver now.  351 plans across every entry,
-    slot and group, identical to what walking the lanes produced."""
+    """`fragment_moves` reads the solver.  351 plans across every entry, slot
+    and group."""
     from tensorforge.backend.instructions.compute.primitives.amd import reorder
     planned = 0
     for op in MATRIX_OPS:

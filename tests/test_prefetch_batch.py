@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: MIT
 """The pointer hint: which operands get one, and what it costs when they do.
 
-`PrefetchBatch` is the first thing that builds an `Op.PREFETCH`, so what it
-has to answer for is narrower than the op's own tests: not what a hint means,
-but which address is worth one and which loops can name it.
+`PrefetchBatch` builds `Op.PREFETCH` statements, so what it has to answer for
+is narrower than the op's own tests: not what a hint means, but which address
+is worth one and which loops can name it.
 
 The address is the pointer array under `Addressing.PTR_BASED`, because that is
 the one place a batched kernel pays a dependent load -- `m[batchId0]` has to
@@ -14,9 +14,9 @@ such load, and a hint for it would need the element-offset formula written a
 second time, which is why the pass leaves it alone rather than covering it
 approximately.
 
-The other half is that turning the switch off leaves the output exactly as it
-was. A pass that is off has to be invisible, and this one inserts into the
-head of a region several other passes also rewrite.
+The other half is that turning the switch off leaves no trace in the output.
+A pass that is off has to be invisible, and this one inserts into the head of
+a region several other passes also rewrite.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_the_switch_is_off_by_default():
 
 
 def test_off_leaves_the_kernel_byte_identical():
-    """The property that lets this be reviewed as an addition and nothing else.
+    """The property that makes the switch purely additive.
 
     It inserts at the head of a region that `MoveLoads`, `WrapLoads` and
     `Pipeline` also rewrite, so "does nothing when disabled" is a claim about
@@ -195,13 +195,12 @@ def test_esimd_spells_it_through_the_helper():
 def test_the_hint_sits_at_the_head_of_the_body():
     """Ahead of the first binding, so the whole iteration is cover.
 
-    And outside the flag guard, ahead of it.  It used to sit inside, which was
-    pinned here as a limitation to be lifted by decision -- a masked element
-    issued no hint.  The decision came with `enable_wrap_loads`: the wrapped
-    transfer's pointer is an unguarded prefix of the body, a hint inside the
-    guard ahead of it made the prefix non-contiguous, and the combination did
-    not generate.  Outside is safe: the address is a clamped index into the
-    pointer array, and nothing dereferences what it asks for.
+    And outside the flag guard, ahead of it.  Inside, a masked element would
+    issue no hint, and under `enable_wrap_loads` -- whose wrapped transfer's
+    pointer is an unguarded prefix of the body -- a hint inside the guard
+    ahead of it would make the prefix non-contiguous, and the combination
+    would not generate.  Outside is safe: the address is a clamped index into
+    the pointer array, and nothing dereferences what it asks for.
     """
     src = _kernel(Addressing.PTR_BASED, enable_prefetch=True).splitlines()
     first_hint = next(n for n, ln in enumerate(src)

@@ -22,10 +22,9 @@ Three destinations, not two.  A bit can land on a lane, on a register slot, or
 on an element of a vector-typed register -- and the third is what `LaneAxis`
 excludes on purpose ("a lane holding four consecutive elements is a vector
 *type* over the slot dimension, which is a different thing and does not belong
-on this axis").  Naming it here is what would let a packed operand be a
-starting layout rather than an exclusion: `strategy.is_contraction` refuses
-`lead_width > 1` for every matrix arrangement today, and in this language that
-is a question about whether a path exists, not a rule.
+on this axis").  Naming it here is what lets a packed operand be a starting
+layout rather than an exclusion: in this language, whether an arrangement can
+take `lead_width > 1` is a question about whether a path exists, not a rule.
 
 This module is the vocabulary and the translation into it.  It does not solve
 for paths between two layouts; `relayout.find_relayout` searches a table for
@@ -200,11 +199,10 @@ def from_register_layout(layout, extents: Sequence[int],
     and not how far it reaches, and the number of bits an index needs is the
     second of those.  The widths come from outside for the same reason and a
     sharper one -- the packing is on the value's type, not on its layout, and
-    reading the two apart is what left a packed operand describable only as a
-    number nobody downstream could act on.
+    read apart, the two leave a packed operand describable only as a number
+    nobody downstream can act on.
 
-    Omitted means unpacked throughout, which is what every layout said before
-    a width could be stated and what the corpus still says everywhere.
+    Omitted means unpacked throughout.
     """
     if layout is None or len(layout.axes) != len(extents):
         return None
@@ -245,9 +243,9 @@ def from_value(layout, type_, extents: Sequence[int], axis: int = 0
     carry the same `RegisterLayout`, deliberately, because a pass asking "is
     moving between these a shuffle?" must keep getting "no".  For a matrix
     fragment, which wants the leading dimension across the lanes, the same two
-    values are not interchangeable at all, and until they were readable
-    together the difference could only be spelled as `lead_width` -- a number
-    whose only available use was to switch the arrangement off.
+    values are not interchangeable at all, and unless the two are read
+    together the difference can only be spelled as `lead_width` -- a number
+    whose only available use is to switch the arrangement off.
 
     `axis` names the dimension the packing is on, and defaults to the first
     because that is the emitter's own reading: `lead_width_of` returns the

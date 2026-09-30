@@ -15,8 +15,8 @@ class GuardedRegion(AbstractInstruction):
   """`if (c0 && !c1 && ...) { ... }` over a stretch of the section.
 
   A region rather than a flag on each instruction: the operations under one
-  guard are built as they always were, and the guard is the thing that
-  contains them. Everything that walks a stream -- the passes, `verify` --
+  guard are built exactly as they are without one, and the guard is the thing
+  that contains them. Everything that walks a stream -- the passes, `verify` --
   already recurses through `regions()`, so a body inside one stays visible
   without any of them learning what a guard is.
 

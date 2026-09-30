@@ -7,7 +7,7 @@ Three properties carry the weight here.
 
 A duplicate name is an error.  In a class body two fields of one name are an
 assignment and the last one wins, silently; a registry that refuses the second
-declaration is what makes the collision as loud as a duplicate argument was.
+declaration is what makes the collision as loud as a duplicate argument is.
 
 "Nothing was asked" is not "the default was asked".  They are the same value
 and a different statement: only the first follows a rule that varies by vendor,

@@ -5,16 +5,11 @@
 
 A reduction producing a temporary that a multilinear then consumes, with the
 temporary carried as a rank-1 broadcast operand.  Two things are being asked at
-once: whether the write is visible to `plan` at all, and whether a rank-1
-temporary is given a symbol of the right shape by whoever ends up creating it.
+once: whether the write is visible to `SectionPlan` at all, and whether a
+rank-1 temporary is given a symbol of the right shape by whoever ends up
+creating it.
 
-Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
-vector unit length regardless of the tensors, so nothing is gained by going
-smaller, and 8x8 keeps a snapshot diff readable.
-
-`abs` is the pointwise operation because it is total and exact -- no input
-domain to shape, no tolerance spent on a transcendental, and every backend has
-it.  ESIMD, for one, has no `tanh` intrinsic at all.
+Shapes are 8x8 throughout, which keeps a snapshot diff readable.
 """
 
 import numpy as np

@@ -3,30 +3,25 @@
 # SPDX-License-Identifier: MIT
 """Ordering invariants the residency has to hold in the generated source.
 
-Seven of the eight cases under ``cases/mixed/`` refuse to generate, and their
-snapshots record the refusal, so nothing further is needed to pin them: when
-the residency stops being private to ``MultilinearBuilder`` those snapshots
-turn from a message into source, and the diff is the evidence.
-
-``mixed_ml_glb_then_ew`` is the exception.  It generates, and it is wrong:
+``mixed_ml_glb_then_ew`` is the shape that needs one.  In the wrong order it
+still generates:
 
     // glb_m3 = abs(glb_m0)      <- reads whatever the caller left in M
-    // glb_m0 = store{r>g}(r2);  <- writes M only now
+    // glb_m0 = store{r>g}(r2);  <- writes M only then
 
-A snapshot of that is green, so the defect needs stating as an invariant
+A snapshot of that would be green, so the order needs stating as an invariant
 instead.  That is this file.
 
-Which targets it used to fail on is worth keeping in mind.  With a global
-destination and register residency enabled the store was deferred to the
-section boundary, so the pointwise read overtook it; where register residency
-is off -- every vendor the placement flags in ``MultilinearBuilder.__init__``
-do not name -- the store was eager and the order was already right.  The same
-code, sorted by a placement decision.
+Which targets could get it wrong is worth keeping in mind.  With a global
+destination and register residency enabled, a store deferred to the section
+boundary lets the pointwise read overtake it; where register residency is off
+the store is eager and the order is right regardless.  The same code, sorted
+by a placement decision.
 
-It holds on all four now, because a descriptor that cannot consult the
-residency has the tensors it touches settled back into memory before it runs.
+It holds on all four because a descriptor that cannot consult the residency
+has the tensors it touches settled back into memory before it runs.
 
-The last test here is about a different lifetime and is green: a section's
+The section-boundary test is about a different lifetime: a section's
 residency has to empty at the section boundary rather than at the end of the
 kernel, since a writeback emitted after the barrier that was meant to publish
 it is wrong in a way no snapshot would flag.
@@ -148,16 +143,17 @@ def test_pointwise_read_follows_the_contraction_store(backend, arch):
                          ids=[b for b, _ in ALL_TARGETS])
 def test_temporary_assembled_from_slices_is_read_after_both_writes(backend,
                                                                    arch):
-    """The one mixed shape that is already correct, pinned as a control.
+    """A mixed shape that is correct without the residency, as a control.
 
-    Two contractions write half a temporary each, so ``_written_in_slices``
-    forces both into shared memory as they are produced and the residency is
-    empty by the time the pointwise read happens.  That makes this the case
-    which separates "the consumer cannot see the residency" from "the consumer
-    cannot address a shared temporary at all": it is only ever the former.
+    Two contractions write half a temporary each, so
+    ``SectionPlan.written_in_slices`` forces both into shared memory as they
+    are produced and the residency is empty by the time the pointwise read
+    happens.  That makes this the case which separates "the consumer cannot
+    see the residency" from "the consumer cannot address a shared temporary at
+    all": it is only ever the former.
 
-    It also has to survive the change that fixes the others, which is the
-    reason it is a test and not only a snapshot.
+    It has to hold whatever the residency does, which is the reason it is a
+    test and not only a snapshot.
     """
     gen, _ = _generate("mixed/ml_slices_then_ew", backend, arch)
     lines = gen.get_kernel().splitlines()
@@ -285,8 +281,8 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     scheduling), so a textual assertion would test the architecture rather than
     the pass.
     """
-    # Asked for explicitly, because the default no longer produces a settle
-    # here: `register_temporaries=all` lets the pointwise read take the
+    # Asked for explicitly, because the default produces no settle here:
+    # `register_temporaries=all` lets the pointwise read take the
     # accumulator's image where it is, and then there is no store to publish
     # and no barrier to find.  What this pins is the pair, for every temporary
     # an image cannot serve -- one whose lane axis a consumer moves, one whose

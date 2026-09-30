@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Everything in `primitives/amd.py` is reachable, or is listed as not.
+"""Everything in `primitives/amd/` is reachable, or is listed as not.
 
-The module had accumulated 350 lines that nothing could call: constant
-helpers, intrinsic wrappers, two routines written against CUDA's
-`__shfl_xor_sync`, a class with its dispatch tables, and -- twice -- a
-second module-level definition of a name that silently replaced the first.
-None of it was caught by the tests, because unreachable code cannot fail.
+Code that nothing can call cannot fail, so no test notices it: a constant
+helper, an intrinsic wrapper, a routine written against CUDA's
+`__shfl_xor_sync`, a class with its dispatch tables, or a second module-level
+definition of a name that silently replaces the first.
 
 So the property is asserted directly rather than left to review.  Reachability
 is computed over the call graph from the entry points `multilinear.py` uses,
@@ -37,25 +36,20 @@ MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
            "reorder", "relayout", "select", "emitters", "codegen",
            "exchange_codegen", "tiling", "unused"]
 
-#: What the dispatch calls into this package.  Two, and both are entry points
-#: in the same sense: one is asked before generation what has to be reserved,
-#: the other emits.  Computing reachability from the emitter alone would count
-#: the first as dead.
+#: What the dispatch calls into this package, every one an entry point in the
+#: same sense: `matmul` emits, and the others are asked before it -- what the
+#: target can emit for a shape, how the arrangement is laid out over the
+#: output, what has to be staged, how far the threads run in step, which order
+#: the A operand is read in.  Computing reachability from the emitter alone
+#: would count them as dead.
 ENTRIES = ["matmul", "scratch", "strategies", "plan", "convergence",
            "prepared_order"]
 
 # Unreachable on purpose.  Each entry needs a reason that says why deleting it
 # would be worse than keeping it.
 #
-# The relayout table's lookup half used to be here too, until `hfma` started
-# reaching it through `find_relayout`: `matmul` -> `hfma` -> `find_relayout`
-# -> `RELAYOUTS` -> every row. Nothing in the table is unreachable now.
-#
-# `vega7nm` used to be here, on the claim that it was the missing `fmacdpp4`
-# guard.  It was not: it excludes gfx900, which is what made it look right,
-# but it also excludes all of RDNA, where the instruction does exist.  Using
-# it would have turned a link error on one target into silently slower code on
-# five.  The capability predicates in `amd.py` replaced it and it was deleted.
+# The relayout table needs no entry: `matmul` -> `hfma` -> `find_relayout` ->
+# `RELAYOUTS` reaches every row.
 KEPT_UNREACHABLE = {
     "mfma_emu_int8":
         "matrix path, to be repaired rather than rewritten",
@@ -133,11 +127,10 @@ def test_entry_points_exist(analysis):
 def test_no_name_is_defined_twice(analysis):
     """A second definition of the same name silently discards the first.
 
-    Both `reduction` and `matmul` had one.  The `matmul` case meant the whole
-    MatrixCore dispatch path had been unreachable since it was written -- not
-    by design, by name collision.  Across a package the failure is quieter
-    still: two modules can each define the name and the `__init__` re-export
-    picks whichever it imports last.
+    A second `matmul` would leave the first, a whole dispatch path,
+    unreachable -- not by design, by name collision.  Across a package the
+    failure is quieter still: two modules can each define the name and the
+    `__init__` re-export picks whichever it imports last.
     """
     defs, _ = analysis
     dupes = reachability.duplicate_definitions(defs)
@@ -162,7 +155,7 @@ def test_allow_list_does_not_outlive_its_entries(analysis):
 
 @pytest.mark.parametrize("mod", MODULES)
 def test_no_cuda_intrinsics_in_the_amd_package(mod):
-    """`__shfl_xor_sync` is CUDA.  Two routines here were written against it."""
+    """`__shfl_xor_sync` is CUDA; nothing in the AMD package may use it."""
     src = reachability.code_only(AMD / f"{mod}.py")
     for token in ("__shfl_xor_sync", "__shfl_sync", "__ballot_sync"):
         assert token not in src, f"{mod}.py: {token} is a CUDA intrinsic"

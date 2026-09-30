@@ -8,7 +8,7 @@ its own idea of the launcher's parameter list, the launcher's parameter list
 changes, and the driver keeps emitting -- it only stops at the compiler, on
 whichever machine has the toolchain, in a message about argument count that
 names neither the generator nor the driver. `driver_emit` and `driver_bench`
-now share `launcher_call_expr` for exactly this reason, and what follows checks
+share `launcher_call_expr` for exactly this reason, and what follows checks
 that the shared answer is the right one across the corpus rather than that the
 two agree with each other.
 
@@ -154,8 +154,8 @@ def test_every_workload_exposes_the_three_entry_points():
 
 
 def test_pointer_based_addressing_builds_an_identity_pointer_table():
-    """It used to be refused, on the grounds that a timing run would be
-    measuring the table as much as the kernel.
+    """Built rather than refused, despite the objection that a timing run
+    would be measuring the table as much as the kernel.
 
     Half of that is true and the half that is true is why the layout is
     pinned rather than left open.  The table is built once in `setup` and
@@ -165,7 +165,7 @@ def test_pointer_based_addressing_builds_an_identity_pointer_table():
     number from it is the upper bound on what pointer indirection can reach,
     not what a mesh-ordered batch will see.
 
-    Refusing left the one case the prefetch hint was written for --
+    Refusing would leave the one case the prefetch hint is for --
     `local_flux`, whose operands are `PTR_BASED` -- outside every measurement
     the corpus can make.  An upper bound that says which bound it is beats no
     number at all.

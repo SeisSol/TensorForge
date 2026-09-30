@@ -10,8 +10,10 @@ Reports, per kernel:
   BIAS REUSED  a register array serving as the bias of two accumulations
   STALE READ   a load overtaken by a store to the tensor it reads
   REG OOB      a register array indexed outside the range it was declared with
+  REG OVER-ALLOCATED
+               a register array declared longer than its highest index needs
 
-Each of these was a real defect at some point; they are cheap enough to run
+Each is a defect a generated kernel can have; they are cheap enough to run
 over every dump.
 """
 import re, sys, itertools

@@ -4,18 +4,18 @@
 """The bank-conflict model, against cases whose answer is known by hand.
 
 A diagnostic that reports a number nobody can check is worse than none, and
-this one got three things wrong before it agreed with arithmetic:
+this one has three places where a plausible shortcut disagrees with
+arithmetic:
 
-* it read the vector width out of `*(float4*)&tile[i]` with a pattern that
-  only matched a single identifier, so every wide access was measured as four
-  bytes;
-* it decided store-versus-load from whether the line begins with the buffer
-  name, which a cast store never does;
-* it folded the element size and the access span into one number, so a
-  `VectorT<float,4>` access was taken to have a lane stride of 64 bytes rather
-  than 16 -- turning a conflict-free store into a reported 4-way.
+* reading the vector width out of `*(float4*)&tile[i]` with a pattern that
+  only matches a single identifier measures every wide access as four bytes;
+* deciding store-versus-load from whether the line begins with the buffer
+  name takes every cast store, which never does, for a load;
+* folding the element size and the access span into one number gives a
+  `VectorT<float,4>` access a lane stride of 64 bytes rather than 16 --
+  turning a conflict-free store into a reported 4-way.
 
-Each of those made the tool *over*-report, which is the direction that gets a
+Each of those makes the tool *over*-report, which is the direction that gets a
 check ignored.  So the model is pinned here against hand-computed answers, and
 the tool reads the same function.
 """
@@ -68,7 +68,7 @@ def test_the_model_agrees_with_arithmetic(expr, base, width, want, why):
 
 
 def test_the_mma_fragment_before_and_after_the_swizzle():
-    """The measurement the swizzle was built from, kept where it can fail."""
+    """The measurement the swizzle rests on, kept where it can fail."""
     plain = "(threadIdx.x % 4) + (threadIdx.x / 4) * 8"
     swizzled = f"({plain}) ^ (((({plain}) >> 3)) & 7)"
     assert bc.ways(plain, 4, 1) == 2
@@ -114,12 +114,12 @@ def test_an_address_that_is_not_static_is_reported_not_guessed():
 
 
 # --------------------------------------------------------------------------- #
-# What the census could not see
+# What the census has to see through
 # --------------------------------------------------------------------------- #
 
 def test_a_loop_variable_is_resolved_at_its_initializer():
     """An unresolved access is one the census does not count, which is a blind
-    spot and not a caveat.  77 of them were loop variables.
+    spot and not a caveat.
 
     Substituting the initializer is sound because these are bounds over tensor
     dimensions: every lane in the wave is on the same iteration, so the value
@@ -137,8 +137,8 @@ def test_a_loop_variable_is_resolved_at_its_initializer():
 
 
 def test_an_identifier_that_is_not_a_generator_name_is_still_substituted():
-    """`_resolve` matched only `v{n}` names, so a definition sitting in the
-    table went unused because the variable was called `i`."""
+    """Matching only `v{n}` names, `_resolve` would leave a definition sitting
+    in the table unused because the variable is called `i`."""
     assert bc._resolve('i * 16', {'i': '0'}) == '(0) * 16'
 
 
@@ -148,7 +148,7 @@ def test_an_identifier_that_is_not_a_generator_name_is_still_substituted():
 ])
 def test_the_warp_uniform_builtins_do_not_stop_the_census(expr):
     """They shift every lane's address equally, so they cannot create or
-    remove a conflict -- and refusing the access left it uncounted."""
+    remove a conflict -- and refusing the access would leave it uncounted."""
     assert bc.ways(expr, 4, 1) == 1
 
 
@@ -159,9 +159,10 @@ def test_a_genuinely_unknown_symbol_is_still_refused():
 
 
 def test_a_member_access_is_not_a_substitutable_name():
-    """`threadIdx.x` ends in an identifier that a word boundary matches, so
-    widening the resolver rewrote the thread index into whatever `x` was.  The
-    result was a self-referential expression 25 levels deep."""
+    """`threadIdx.x` ends in an identifier that a word boundary matches, so a
+    resolver that substituted there would rewrite the thread index into
+    whatever `x` is -- and where `x` is defined through `threadIdx.x`, into a
+    self-referential expression nested as deep as the substitution goes."""
     assert bc._resolve('threadIdx.x + i', {'x': '99', 'i': '0'}) \
         == 'threadIdx.x + (0)'
 
@@ -182,9 +183,8 @@ def test_the_arena_a_window_is_cut_from_is_not_itself_a_window():
     like an access to `localShrMem0`.
 
     It is not one: subscripting the arena is how a window is *made*.  Counting
-    those put the arena pointers in the population beside the tiles, which is
-    a different denominator from the one the IR analysis uses -- 252 of the
-    336 accesses the two disagreed on.
+    those would put the arena pointers in the population beside the tiles,
+    which is a different denominator from the one the IR analysis uses.
     """
     source = ("float* localShrMem0 = &totalShrMem[0];\n"
               "float* tempShrMem = &localShrMem0[352];\n"

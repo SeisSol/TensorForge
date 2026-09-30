@@ -4,29 +4,23 @@
 """``C += sum_k A[i, k] * B[k, j]`` — bare :class:`MultilinearDescr`
 with ``add=True``.
 
-This is the only case in the suite that exercises the accumulator
-branch in :mod:`tensorforge.backend.instructions.builders.multilinear_builder`
-(``self._add`` gates two distinct code paths at lines 216 and 269):
-register-array sizing reads from the *destination's existing*
-``data_view._bbox`` rather than ``dest_obj.bbox``, and the store-back
+The accumulator branch of
+:mod:`tensorforge.backend.instructions.builders.multilinear_builder`
+(``self._add``): register-array sizing reads from the *destination's
+existing* data view rather than ``dest_obj.bbox``, and the store-back
 loads the previous value of C via ``_get_target_symbol(True)``.
 
-Why not :class:`GemmDescr`? Because the ``GemmDescr.__init__`` call to
-``super().__init__`` (descriptions.py:147 / :158) is positional, and the
-parent's signature is ``(dest, ops, target, permute, add=False,
-strict_match=False, ...)`` — so :class:`GemmDescr` accidentally passes
-``strict_match`` into the ``add`` slot. Every ``GemmDescr`` therefore
-has ``add == strict_match`` (in practice ``False``). To actually test
-``add=True`` we have to drop down to a bare :class:`MultilinearDescr`.
+A bare :class:`MultilinearDescr` rather than :class:`GemmDescr` with
+``beta=1``, because that constructor is the one the yateto frontend
+calls.
 
 The destination direction is promoted to ``SOURCESINK`` after
 construction. Without this, ``MultilinearDescr.__init__`` would force
-``DataFlowDirection.SINK`` (descriptions.py:26) and the harness would
-zero-initialize C — at which point ``C += A*B`` and ``C = A*B``
-become numerically indistinguishable and the case wouldn't actually
-exercise the accumulator. ``set_data_flow_direction(SOURCE)`` after
-the descr sets it to ``SINK`` triggers the auto-promotion path in
-``tensor.py:51-55``.
+``DataFlowDirection.SINK`` and the harness would zero-initialize C --
+at which point ``C += A*B`` and ``C = A*B`` become numerically
+indistinguishable and the case wouldn't actually exercise the
+accumulator. ``set_data_flow_direction(SOURCE)`` on a tensor the descr
+has set to ``SINK`` promotes it to ``SOURCESINK``.
 """
 
 import numpy as np

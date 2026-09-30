@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: MIT
 """Can `access_equiv` tell two different addressings apart?
 
-The tool's output is a license to not read a 55000-line diff, which makes it
-exactly the kind of check that is dangerous when it is too permissive. It
-canonicalizes three things away on purpose --- renumbering, parenthesization,
-identity terms --- and each of those is one step from canonicalizing away a
-real difference. A checker that says "identical" for everything reads as
-verification and is worse than not checking.
+The tool's output is a license to not read a diff of tens of thousands of
+lines, which makes it exactly the kind of check that is dangerous when it is
+too permissive. It canonicalizes three things away on purpose ---
+renumbering, parenthesization, identity terms --- and each of those is one
+step from canonicalizing away a real difference. A checker that says
+"identical" for everything reads as verification and is worse than not
+checking.
 
 So: for each thing it is meant to ignore, a pair it must call identical, and
 next to it a pair it must call different.
@@ -38,7 +39,7 @@ def eq(a: str, b: str) -> bool:
 # ---------------------------------------------------------------------- #
 
 def test_renumbering_is_ignored():
-    """The pin removal shifts every later SSA number; nothing moved."""
+    """Removing an instruction shifts every later SSA number; nothing moved."""
     assert eq('float v9_data = r2[v8_a];',
               'float v11_data = r2[v10_a];')
 
@@ -111,7 +112,8 @@ def test_a_loop_variable_is_a_leaf():
 
 
 def test_identity_folding_runs_to_fixpoint():
-    """One pass leaves `0 + x` behind when it was nested."""
+    """A single pass folds nested identity terms because `_Fold` rewrites
+    bottom-up; top-down, it would leave `0 + x` behind."""
     assert eq('float v1_d = r2[0 + (0 + (0 + v5_i1))];',
               'float v1_d = r2[v5_i1];')
 

@@ -4,14 +4,14 @@
 """The sub-group an SPMD SYCL multiplication lives in, and how a broadcast
 reads its lanes.
 
-The kernel required a sub-group of 16 whatever the multiplication, while the
-lane search puts 32 lanes on one (`lanes.DEFAULT_LANE_CEILING`, deliberately
-not the 16-wide vector unit).  A multiplication then spanned two sub-groups,
-and `group_broadcast` -- one index for the whole sub-group -- read lanes that
-were not there: on the OpenCL CPU device local_flux wrote nothing and
-chain_five 1e27.  Now the sub-group follows the multiplication where the
-kernel states it (oneAPI on Intel), and where it cannot -- acpp, a plug-in --
-each multiplication reads its lanes at its own base.
+The lane search puts 32 lanes on one multiplication
+(`lanes.DEFAULT_LANE_CEILING`, deliberately not the 16-wide vector unit).  A
+fixed sub-group of 16 would split such a multiplication across two
+sub-groups, and `group_broadcast` -- one index for the whole sub-group --
+would read lanes that are not there.  So the sub-group follows the
+multiplication where the kernel states it (oneAPI on Intel), and where it
+cannot -- acpp, a plug-in -- each multiplication reads its lanes at its own
+base.
 """
 import re
 

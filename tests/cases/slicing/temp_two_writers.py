@@ -8,12 +8,12 @@
     D            = A  @ tmp      <- reads all 12 rows
 
 With one deferred entry per tensor, keeping this in registers can only retain
-whichever write came last; the other half would be lost. `_written_in_slices`
-has to notice the second writer and force both halves into the shared buffer as
-they are produced.
+whichever write came last; the other half would be lost.
+`SectionPlan.written_in_slices` has to notice the second writer and force both
+halves into the shared buffer as they are produced.
 
-The corpus otherwise contains no tensor with more than one writer, so the
-writer-count branch of that predicate is dead in tests.
+Without a tensor that has more than one writer, the writer-count branch of
+that predicate would be dead in tests.
 """
 
 import numpy as np

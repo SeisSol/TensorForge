@@ -108,7 +108,7 @@ def test_amd_reads_them_at_one_index_for_every_lane(arch):
     """A scalar to every product, not spread over the lanes by the DPP or
     MFMA paths: spread, the index is the lane's, and the struct is copied into
     private memory to be indexed at all.  Which space that reaches is left to
-    the compiler -- cast into the constant space, the private copy faulted on
+    the compiler -- cast into the constant space, the private copy faults on
     gfx1150."""
     generator, (a, _, _) = product(False, 'hip', arch)
     text = code(generator)

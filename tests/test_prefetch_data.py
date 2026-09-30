@@ -44,7 +44,7 @@ def _kernel(backend='esimd', arch='pvc', **opts):
 
 
 def test_the_default_is_off_everywhere():
-    """ESIMD included: on pvc the hints cost more than the latency they hid
+    """ESIMD included: on pvc the hints cost more than the latency they hide
     (see the option's doc).  Asking still turns them on."""
     assert 'pf_' not in _kernel()
     assert 'pf_' in _kernel(prefetch_data=True)
@@ -65,7 +65,7 @@ def test_esimd_asks_for_whole_operands_in_few_messages():
     9 x 9 ones: 504 and 4 x 81 floats.  A gather asks for up to 32 lines with
     a lane each, and different operands are only different addresses: the
     first 31 lines of the matrix are one message, its last line and the four
-    small ones another -- two, where 64-dword blocks were 16."""
+    small ones another -- two, where 64-dword blocks would take 16."""
     statements, asked = _esimd_hints(_kernel(prefetch_data=True))
     assert asked == 4 * (504 + 4 * 81)
     assert statements == 2
@@ -95,9 +95,9 @@ def test_the_transfers_stay_where_they_are():
 
 
 def test_pointer_hints_stand_beside_a_wrapped_transfer():
-    """The pointer hints used to sit inside the flag guard, ahead of the
-    unguarded prefix `WrapLoads` makes -- and the guard, one block, could not
-    be formed: neither option combination generated."""
+    """The pointer hints sit outside the flag guard.  Inside it, ahead of the
+    unguarded prefix `WrapLoads` makes, the guard -- one block -- could not be
+    formed, and neither option combination would generate."""
     for backend, arch in (('esimd', 'pvc'), ('cuda', 'sm_100')):
         src = _kernel(backend, arch, enable_prefetch=True,
                       enable_wrap_loads=True, prefetch_data=True)

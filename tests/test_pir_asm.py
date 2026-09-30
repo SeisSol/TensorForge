@@ -10,10 +10,10 @@ the ones with a read-write or write-only constraint go in as declared register
 accesses, and two `mma.sync` calls on different accumulators then provably do
 not conflict.
 
-Before, the whole block was raw text with the operand names interpolated.
-That had two consequences beyond the opacity count: the values it named had no
-use edge, so whatever produced them was reachable by nothing and removable,
-and the operand *numbering* was maintained by hand in two places at once.
+Raw text with the operand names interpolated would have two consequences
+beyond the opacity count: the values it named would have no use edge, so
+whatever produced them would be reachable by nothing and removable, and the
+operand *numbering* would be maintained by hand in two places at once.
 
 Numbering is the part worth checking mechanically.  Outputs and inputs share
 one sequence, `%0` onward, so folding the accumulator into a single `"+f"`
@@ -135,7 +135,7 @@ def test_it_is_not_a_second_op():
 
 
 # --------------------------------------------------------------------------- #
-# The type the vendor signature forced
+# The type the vendor signature forces
 # --------------------------------------------------------------------------- #
 
 def test_u32_exists_because_a_reference_parameter_demands_it():
@@ -161,12 +161,12 @@ def test_a_u32_value_declares_as_uint32():
 # --------------------------------------------------------------------------- #
 
 def test_assign_writes_a_declared_value():
-    """The one shape `declare` left without a verb.
+    """The write a declared value needs, and no other verb states.
 
     A declared value exists precisely because something writes it through a
     reference or across a guard, so the write cannot be its definition and has
-    to be a statement of its own.  864 of those in the NVIDIA epilogue were raw
-    text, each naming two values the IR already knew.
+    to be a statement of its own.  As raw text, each such write in the NVIDIA
+    epilogue would name two values the IR already knows.
     """
     b = builder()
     target = b.declare(hint='c')
@@ -210,10 +210,10 @@ def test_assign_is_pinned():
 def test_a_two_result_op_is_hash_consed():
     """`splitFloatTF32` is a function: one input, two halves, deterministic.
 
-    Modeling it as a call that writes through references made it
-    side-effecting, and CSE skips those -- so the corpus split the same value
-    twice in 15% of cases, with no store and no reload in between, just a
-    second `kk` block asking for the same fragment.  The reference-out
+    Modeled as a call that writes through references, it would be
+    side-effecting, and CSE skips those -- so the corpus would split the same
+    value twice in 15% of cases, with no store and no reload in between, just
+    a second `kk` block asking for the same fragment.  The reference-out
     spelling is the vendor's signature, not a property of the operation, and
     it belongs in the emitter.
     """

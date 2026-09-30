@@ -71,7 +71,7 @@ def sass_instructions(source: str, arch: str, tmp: Path) -> int:
                     '-o', str(cubin), str(cu)], check=True, capture_output=True)
     sass = subprocess.run(['cuobjdump', '-sass', str(cubin)], check=True,
                           capture_output=True, text=True).stdout
-    # an offset past 0xffff has five digits: `{4}` stopped counting at 4096
+    # an offset past 0xffff has five digits: `{4}` would stop counting at 4096
     return len(re.findall(r'^\s+/\*[0-9a-f]{4,}\*/\s+\S', sass, re.M))
 
 

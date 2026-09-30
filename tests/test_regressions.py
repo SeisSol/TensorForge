@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Host-only regressions for two silent-wrong-value codegen defects.
+"""Host-only regression tests for silent-wrong-value codegen.
 
-Both were found in a generated poroelastic SeisSol kernel dump, both produce
-plausible-looking code and wrong numbers, and neither is visible in any case
-the suite had before.  They need no GPU to pin down: one is a numeric
-statement the host interpreter can make, the other a statement about which
-dimension a register staging spreads across lanes.
+Every property here is one whose violation produces plausible-looking code and
+wrong numbers.  None needs a GPU to pin down: each is either a numeric
+statement the host interpreter can make or a statement about the generated
+code itself -- such as which dimension a register staging spreads across
+lanes.
 """
 
 from __future__ import annotations
@@ -50,8 +50,9 @@ def test_a_packed_register_image_is_read_step_by_step_at_k_width_2(backend):
     """SeisSol's damage `derivative` at k_width 2.  The reduction packs two
     steps of an operand into one vector read (`_k_packs`), and under oneapi
     one operand is a register image filled from packed storage -- whose
-    entries sit where `store_linear` put them, one fixed entry per read.  It
-    raised a GenerationError instead of reading those steps one by one."""
+    entries sit where `store_linear` put them, one fixed entry per read.
+    Those steps are read one by one rather than refused with a
+    GenerationError."""
     import seissol_suite as fx
     from tensorforge.common.context import Options
     from tensorforge.frontend.yateto import DescriptionReader
@@ -96,11 +97,11 @@ def _destination(src, seed, tid, preset=None):
 def test_every_accumulated_term_reaches_the_destination(term):
     """Zeroing any one term's operand must move the result.
 
-    A reference-free sensitivity test, which is what this defect needs: the
-    kernel it produced was internally consistent and only *some* of the terms
-    went missing.  With the stale bias in place the destination held the first
-    write plus the last term, so zeroing an operand of any term in between
-    left the output bit-identical.
+    A reference-free sensitivity test, which is what this failure needs: a
+    kernel that loses terms can be internally consistent and lose only *some*
+    of them.  With a stale bias the destination would hold the first write
+    plus the last term, so zeroing an operand of any term in between would
+    leave the output bit-identical.
     """
     src = _generate("accumulate_chain").get_kernel()
     # operand order in the launcher is dest, then (a, b) per descriptor
@@ -118,10 +119,10 @@ def test_every_accumulated_term_reaches_the_destination(term):
 def test_accumulation_chain_stores_once():
     """The chain stays in registers: one store, no reload of the destination.
 
-    Not a correctness statement on its own --- with the invalidation fix the
-    store/reload form computes the right answer too --- but the round trip per
-    term is the cost the writers-vs-boxes distinction exists to avoid, and it
-    is what made the stale bias reachable in the first place.
+    Not a correctness statement on its own --- with the invalidation in place
+    the store/reload form computes the right answer too --- but the round trip
+    per term is the cost the writers-vs-boxes distinction exists to avoid, and
+    it is what makes a stale bias reachable at all.
     """
     src = _generate("accumulate_chain").get_kernel()
     assert src.count("store{r>g}") == 1, src.count("store{r>g}")
@@ -138,9 +139,9 @@ def test_lead_index_off_dim0_is_lane_resident(backend, arch):
 
     Operand ``A`` of this case is ``[1, 20]`` with the contraction index on
     dimension 0 and the destination's lead index on dimension 1.  Staging it
-    with dimension 0 across lanes put the lane-distributed index into the
-    register axis; ``Symbol.load`` then found a loop constant where it
-    expected the lane axis and emitted a cross-lane broadcast, handing every
+    with dimension 0 across lanes would put the lane-distributed index into
+    the register axis; ``Symbol.load`` would then find a loop constant where
+    it expects the lane axis and emit a cross-lane broadcast, handing every
     lane element ``[0, 0]``.
     """
     gen = _generate("lead_index_off_dim0", backend, arch)
@@ -158,7 +159,7 @@ def test_lead_index_off_dim0_needs_no_cross_lane_read(backend, arch):
     The user-visible form of the same statement.  Checking the operand's own
     register array rather than the whole kernel matters: the *other* operand
     carries no lead index and is broadcast entirely legitimately, so a blanket
-    search for cross-lane primitives would report it.  The defect showed up as
+    search for cross-lane primitives would report it.  The failure looks like
     ``readlane(r0[0], 0)`` on CUDA and ``broadcast<32, 1, 0>(r0[0])`` on HIP,
     i.e. one element standing in for twenty.
     """
@@ -215,17 +216,15 @@ def _dropped_results(src):
 
 _STORE_HEAD = re.compile(r"//\s*(glb_\w+) = store\{r>g\}\((\w+)\);")
 _FOR_BOUNDS = re.compile(r"for \(int32_t \w+ = (-?\d+); \w+ < (-?\d+);")
-# The literal is typed now (`0.0f`, not `0`): the neutral element comes
-# from `writer.const(..., ftype)` rather than the string "0".  And the
-# subscript is an expression now (`glb_m0[(v6_lead + v163_lead)]`), not a
-# named temporary: a global store is an `Op.STORE` since the structured path
-# was extended to global memory, and the emitter inlines an address with one
-# use instead of naming it.
+# The literal is typed (`0.0f`, not `0`): the neutral element comes from
+# `writer.const(..., ftype)`.  And the subscript is an expression
+# (`glb_m0[(v6_lead + v163_lead)]`), not a named temporary: a global store is
+# an `Op.STORE`, and the emitter inlines an address with one use instead of
+# naming it.
 #
 # Both are spellings.  What this test is about is that the columns get
 # *defined*, so the pattern says "some subscript" rather than enumerating the
-# shapes a subscript has taken -- it has now been rewritten twice for reasons
-# that had nothing to do with the property.
+# shapes a subscript can take.
 _ZERO_TO_GLOBAL = re.compile(r"\bglb_\w+\[[^\]]+\] = 0(?:\.0+[fF]?)?;")
 
 
@@ -294,10 +293,10 @@ def test_view_write_touches_nothing_outside_its_slice(backend, arch):
 def test_sliced_accumulation_writes_every_term(backend, arch):
     """Slicing and accumulation together still write every term.
 
-    ``_deferred_stores`` holds one entry per symbol name.  Deferring an atomic
+    ``Residency`` holds one entry per symbol name.  Deferring an atomic
     update therefore makes it collide with the next slice of the same tensor:
-    the second displaced the first, and one term ended up in a register array
-    nothing ever read.
+    the second would displace the first, and one term would end up in a
+    register array nothing ever reads.
     """
     src = _generate("sliced_accumulate", backend, arch).get_kernel()
     dropped = _dropped_results(src)
@@ -389,11 +388,11 @@ def test_case_names_a_single_output(path):
 
     `reference()` returns one array and receives one `dest_in`, so the
     snapshot handed to it and the buffer read back afterwards have to be the
-    same operand.  They used to be chosen independently --- the input
-    preparation took the last sink, the comparison the first --- which agreed
-    only as long as every case had exactly one.  A case with two then had its
-    intermediate compared against a reference for its result, and reported a
-    kernel bug that was not there.
+    same operand.  Chosen independently --- the input preparation taking the
+    last sink, the comparison the first --- they would agree only as long as
+    every case had exactly one.  A case with two would then have its
+    intermediate compared against a reference for its result, and report a
+    kernel bug that is not there.
     """
     from harness import driver_emit
 
@@ -489,10 +488,11 @@ def _out_of_range_reads(src):
 def test_narrow_write_does_not_claim_the_whole_tensor(backend, arch):
     """A write finds the image of an earlier *read* and must not adopt its box.
 
-    ``_deferred_stores`` is keyed by symbol name and lives for the whole
+    ``Residency`` is keyed by symbol name and lives for the whole
     kernel, so the register image staged for reading ``D`` wide is what the
-    later one-column write finds.  Adopting its data view made a one-element
-    accumulator claim thirteen, and the store wrote all thirteen columns.
+    later one-column write finds.  Adopting its data view would make a
+    one-element accumulator claim thirteen, and the store would write all
+    thirteen columns.
     """
     src = _generate("narrow_write_after_wide_read", backend, arch).get_kernel()
     bad = _out_of_range_reads(src)
@@ -524,8 +524,8 @@ _ADDR_DEF = r"int32_t {name} = ([^;]+);"
 def _resolved_address(lines, name, depth=8):
     """The address expression for `name`, with intermediates substituted in.
 
-    Address arithmetic is SSA now, so a shift and the term that follows it
-    land in different statements::
+    Address arithmetic is SSA, so a shift and the term that follows it land
+    in different statements::
 
         int32_t v629_a = v625_off + ((v614_n1 + 8) * 32);
         int32_t v630_a = v629_a + (v615_n2 * 416);
@@ -536,7 +536,7 @@ def _resolved_address(lines, name, depth=8):
     read through carry the offset, anywhere along the way.
     """
     if not re.fullmatch(r"v\d+_\w+", name.strip()):
-        # A single-use address is folded into its subscript now that it is an
+        # A single-use address is folded into its subscript, since it is an
         # operand rather than a name inside a string, so the load may hand us
         # `(v322_lead + 384)` instead of a name to look up.  Substituting into
         # it is the same question; there is just one fewer hop to start from.
@@ -570,9 +570,8 @@ def _resolved_address(lines, name, depth=8):
 # and the loops that follow it are the lanes that use the bias.
 _BIAS = re.compile(r"//\s*(\w+) = \w+(?: \* \w+)* \+ (\w+)\s*$")
 _GUARD_LINE = re.compile(r"if \((.+)\) \{")
-# The read used to be handed the fixed name `oldvalue`; it is an SSA
-# value now, so the name varies.  The pair this test needs is still
-# there -- which symbol is read, and through which address.
+# The read is an SSA value, so its name varies; the pair this test needs is
+# which symbol is read, and through which address.
 # The subscript may be a name or a folded expression: `s0[v298_a]` and
 # `s0[(v322_lead + 384)]` are the same read, and which one appears depends on
 # whether the address has more than one use.
@@ -589,7 +588,7 @@ def _predictor_descrs():
 
     Every write slices the *lead* dimension, which pins the accumulator's
     origin, and `D` is read back in between.  That combination is what the
-    three defects below need, and nothing in `cases/` produces it.
+    three tests below need, and nothing in `cases/` produces it.
     """
     from tensorforge.common.basic_types import Addressing
     from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -655,8 +654,9 @@ def test_bias_is_loaded_by_the_lanes_that_use_it(backend, arch):
     `GlbToRegLoader` consumes a slicing offset while loading, so the image sits
     at origin 0 and element `s` lands in lane `s % T`.  Theta, though, is
     pinned on the destination's offset and shifts the whole lead loop by it.
-    With the two out of step the lanes that did the arithmetic never loaded a
-    bias and the ones that loaded it did nothing: `+=` quietly became `=`.
+    With the two out of step the lanes that do the arithmetic would never load
+    a bias and the ones that load it would do nothing: `+=` would quietly
+    become `=`.
     """
     src = _predictor_source(backend, arch)
     lines = src.splitlines()
@@ -686,7 +686,7 @@ def test_shared_bias_carries_the_destination_offset(backend, arch):
     shared temporary, and the compute then addresses it with its own loop
     indices.  The store adds the descriptor's offset on the way out; the read
     has to as well, or the accumulation takes its bias from the wrong
-    elements --- `t[10:20, 8] += ...` read `t[0:10, 0]`.
+    elements --- `t[10:20, 8] += ...` would read `t[0:10, 0]`.
     """
     src = _predictor_source(backend, arch)
     lines = src.splitlines()
@@ -726,14 +726,13 @@ def test_partial_writes_accumulate_into_the_whole_image(backend, arch):
     whole of `t` --- that is what yateto emits --- but `_analyze` intersects
     the range down to what each operand supports, so the accumulations write
     half of it.  Judged on the declared boxes those look like one writer
-    covering everything, so the value was kept in registers; the image left
-    behind then held only the last writer's rows, and the read that follows
-    wants the union.  It was refused outright, which is where the elastic
-    build stopped -- and then sent through shared memory term by term.
+    covering everything; kept in registers on that basis, the image left
+    behind would hold only the last writer's rows, while the read that follows
+    wants the union.
 
-    Each accumulation writes the whole image now: its own rows from the
-    product, the others from the image the assignment left.  So no term goes
-    out on its own; the numbers are `test_kernels`'s to check.
+    Each accumulation writes the whole image: its own rows from the product,
+    the others from the image the assignment left.  So no term goes out on its
+    own; the numbers are `test_kernels`'s to check.
     """
     src = _generate("partial_writes_read_whole", backend, arch).get_kernel()
     assert src.count("store{r>s}") <= 1, (
@@ -746,9 +745,9 @@ def test_partial_writes_accumulate_into_the_whole_image(backend, arch):
 def test_a_narrowing_accumulation_chain_is_stored_once(backend, arch):
     """`D = Q; D += F0; D += F1; D += F2`, each term over fewer rows.
 
-    The shape of the ADER Taylor expansion into a global output.  It was
-    stored after every term and read back for the next one -- three global
-    round trips per element, 1.1-2x the bytes the operation needs on GH200.
+    The shape of the ADER Taylor expansion into a global output.  Stored after
+    every term and read back for the next one, it would take three global
+    round trips per element.
     """
     src = _generate("accumulate_narrowing_chain", backend, arch).get_kernel()
     stores = re.findall(r"//\s*(\w+) = store\{r>g\}", src)
@@ -767,11 +766,11 @@ def test_accumulator_is_sized_for_every_block_it_spans(backend, arch):
 
     With 32 lanes, `D[20:35, 12] += ...` covers lanes 20..31 of one register
     block and lanes 0..2 of the next, so the accumulator needs two slots per
-    remaining index.  `_analyze` works that out and the store walks both;
-    `_alloc_register_array` sized for one, because it added theta to a box
-    that already carried it --- the bias image is staged in the tensor's own
-    lead coordinates.  Order 4 hid it: every window fell inside one block, and
-    the double count canceled.
+    remaining index.  `_analyze` works that out and the store walks both.
+    Adding theta to a box that already carries it --- the bias image is staged
+    in the tensor's own lead coordinates --- would size the array for one.  At
+    order 4 that would not show: every window falls inside one block, and the
+    double count cancels.
 
     The host interpreter does not enforce array bounds, so the emitted numbers
     do not give this away; the store's indices against the declared length do.
@@ -786,9 +785,9 @@ def test_accumulator_slot_count_follows_the_window(theta, blocks):
     """However the window falls, the array and the inner buffer agree.
 
     The inner buffer is sized from the range `_analyze` computed, the result
-    array from the box; they describe the same thing and disagreeing is the
-    defect.  Sweeping theta pins both the straddling case and the one-block
-    case that used to cancel.
+    array from the box; they describe the same thing and have to agree.
+    Sweeping theta pins both the straddling case and the one-block case, where
+    a double count would cancel.
     """
     module = _load("lead_window_spans_two_blocks")
     descrs = module.descr_list()
@@ -826,11 +825,9 @@ def test_a_scalar_operand_reaches_the_kernel():
 
     Its `data` is read back through `value()`, which indexes by coordinate
     tuple -- `()` for a rank-0 tensor.  A list answers that with a TypeError,
-    and for a while nothing noticed: `value()` asked `realindex in self.data`
-    first, which on a list tests the *elements* and never matches a coordinate,
-    so every lookup fell through to `None`.  Asking the sparsity pattern
-    instead reaches the access, and this case stopped generating on both
-    backends.
+    and a membership test such as `realindex in self.data` in front of it
+    would hide that: on a list it tests the *elements* and never matches a
+    coordinate, so every lookup would fall through to `None`.
     """
     import numpy as np
 
@@ -852,8 +849,8 @@ def test_data_that_is_not_an_array_is_rejected_at_construction(data, why):
     """Checked, not coerced.
 
     An `np.asarray` in the constructor would accept these and leave the caller
-    unfixed -- which is how the requirement came to have two homes.  The error
-    names the tensor, so the caller is findable from the message alone.
+    unfixed, giving the requirement two homes.  The error names the tensor,
+    so the caller is findable from the message alone.
     """
     from tensorforge.common.matrix.tensor import Tensor
     from tensorforge.common.basic_types import Addressing
@@ -954,18 +951,18 @@ def test_broadcast_covers_the_destination(backend, arch):
     """An index no operand carries still has to be iterated.
 
     `t4[32x3] = t2[32]` has one operand targeting `[0]`, so nothing in the
-    operation mentions index 1.  The rank came from the operands alone, so the
-    index vanished: the loop nest ran over `n0` and wrote one slot per lead
-    block where three were needed.  The destination decides how many indices
-    are written; an operand that lacks one is read at the same address for
-    every value of it, which is the broadcast.
+    operation mentions index 1.  Taking the rank from the operands alone would
+    lose the index: the loop nest would run over `n0` and write one slot per
+    lead block where three are needed.  The destination decides how many
+    indices are written; an operand that lacks one is read at the same address
+    for every value of it, which is the broadcast.
     """
     src = _generate("broadcast_then_accumulate", backend, arch).get_kernel()
     ranges = re.findall(r"//\s*(\[\(.*?\)\]) \[", src)
     assert ranges, "no compute ranges in the generated source"
     # exactly one operation here has a rank-1 destination (`t2 = A`); every
-    # other writes the rank-2 `t4` or `O`.  The broadcast used to make a second
-    # one rank-1, which is the index going missing.
+    # other writes the rank-2 `t4` or `O`.  A second rank-1 one would be the
+    # broadcast's index going missing.
     rank1 = [r for r in ranges if "), (" not in r]
     assert len(rank1) == 1, (
         f"{len(rank1)} operations cover one index where only `t2 = A` should: "
@@ -976,9 +973,9 @@ def test_broadcast_covers_the_destination(backend, arch):
 def test_register_arrays_match_what_is_written(backend, arch):
     """...and the arrays are sized for it.
 
-    The accumulation onto the broadcast took its size from the rank-1 image
-    left behind --- what it reads, not what it writes --- and came out with one
-    slot where the store walks three.  One array too short, one too long.
+    Sized from the rank-1 image left behind --- what it reads, not what it
+    writes --- the accumulation onto the broadcast would come out with one slot
+    where the store walks three.  One array too short, one too long.
     """
     src = _generate("broadcast_then_accumulate", backend, arch).get_kernel()
     short, over = _register_bounds(src)
@@ -1032,11 +1029,11 @@ def _run_wave(gen, seed):
 def test_elementwise_reads_a_slice_at_its_offset(backend, arch):
     """`max(IA[:, 17:], I[:, 17:])` reads columns 17 and 18, not 0 and 1.
 
-    `ElementwiseInstruction` indexed its operands by their box alone and
-    dropped the slicing offset, so SeisSol's damage `accumulateIntegrals`
-    took the maximum of two columns the sum before it had just overwritten.
-    The multilinear store back applied the offset, so the wrong values
-    landed in the right columns and nothing else changed.
+    Indexing the operands by their box alone would drop the slicing offset,
+    and SeisSol's damage `accumulateIntegrals` would take the maximum of two
+    columns the sum before it has just overwritten.  The multilinear store
+    back applies the offset, so the wrong values would land in the right
+    columns and nothing else would change.
     """
     case = _load("sliced_max")
     gen = _generate("sliced_max", backend, arch)
@@ -1060,8 +1057,8 @@ def test_elementwise_reads_a_slice_at_its_offset(backend, arch):
 def test_reduction_reads_a_slice_at_its_offset(backend, arch):
     """`D[r] = sum(A[r, 17:19])` sums columns 17 and 18.
 
-    `ReductionInstruction` dropped the offset the same way the elementwise
-    did, and read columns 0 and 1.
+    A `ReductionInstruction` that dropped the offset the same way would read
+    columns 0 and 1.
     """
     from tensorforge.common.basic_types import Addressing
     from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -1102,8 +1099,8 @@ def test_a_term_of_scalars_alone_is_their_product(backend, arch):
     """`O[i] += 3 * 2` adds 6 to every entry, not 0.
 
     Every operand of the term is a scalar, so none is left to accumulate and
-    the accumulator is never written.  The epilogue read it anyway and scaled
-    its zero, which is how SeisSol's damage step turned `1 - B` into `-B`.
+    the accumulator is never written.  An epilogue that read it anyway would
+    scale its zero, which in SeisSol's damage step turns `1 - B` into `-B`.
     """
     case = _load("scalar_broadcast")
     gen = _generate("scalar_broadcast", backend, arch)

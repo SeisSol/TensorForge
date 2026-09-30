@@ -144,7 +144,7 @@ class Opt:
     try:
       return self.rule(hw, explicit_simd)
     except TypeError:
-      # A rule written before the second argument existed.
+      # A rule that takes the hardware alone.
       return self.rule(hw)
 
   def check(self, value: Any) -> None:
@@ -364,8 +364,8 @@ declare('enable_move_loads',
             '`MoveLoads` splits a transfer from its `LoadWait` and walks the '
             'transfer up the stream to hide its latency, stopping where '
             'something between the two would write what the load reads.\n'
-            'On by default and always has been -- this switch exists so the '
-            'default can be *priced*, not because it is in doubt. A pass with '
+            'On by default -- this switch exists so the default can be '
+            '*priced*, not because it is in doubt. A pass with '
             'no way to be turned off is a pass whose contribution nobody has '
             'measured, and the same argument that put `preload_globals` behind '
             'a question applies to it.')
@@ -382,7 +382,7 @@ declare('move_distance',
         default=1,
         doc='How many loads a transfer is moved ahead by.  `MoveLoads` lets a '
             'load travel past this many earlier loads before it stops (1: the '
-            'one before it, as always); `WrapLoads` wraps the transfers whose '
+            'one before it); `WrapLoads` wraps the transfers whose '
             'move runs across the back edge, which are the first this many of '
             'the body.  A dependence stops a transfer whatever the distance.')
 
@@ -419,7 +419,7 @@ declare('cache_hints',
         default='cg',
         parse=parse_str,
         doc='Which cache policy a global transfer that may take a hint gets: '
-            '`cg` (L2 only: `__ldcg`/`__stcg`, what it always was), `cs` '
+            '`cg` (L2 only: `__ldcg`/`__stcg`), `cs` '
             '(streaming, evict first at every level: `__ldcs`/`__stcs`) or '
             '`none`.\n'
             'Which transfers may take one is `hint_outputs`\'s question.  A '
@@ -436,7 +436,7 @@ declare('hint_outputs',
             'A load takes one where it is the only user of its source, and a '
             'store where its register source has no other user -- which an '
             'accumulated image never has.  So no output store of a SeisSol '
-            'kernel took one, and neither did the one read of a `+=` '
+            'kernel takes one, and neither does the one read of a `+=` '
             'destination.  With this, a load takes the hint where it is the '
             'only reader of its source, and a store where nothing reads the '
             'destination but transfers (a `+=` destination\'s own preload).')
@@ -705,7 +705,7 @@ declare('k_roll',
         env='TF_K_ROLL',
         doc='Roll the reduction of a multilinear product into a real loop over '
             'groups of `k_width` steps, with `#pragma unroll <k_roll>` on it.  '
-            '0 unrolls it completely in the generator, as always.  Only where '
+            '0 unrolls it completely in the generator.  Only where '
             'every operand the reduction indexes lives in memory (global, '
             'batch or shared) -- a register image indexed at runtime would go '
             'to local memory -- the reduction is dense, and its extent divides '
@@ -771,8 +771,8 @@ declare('register_temporaries',
             'the buffer would.  SeisSol\'s damage step (order 4, single, 32 '
             'lanes) stored 398 scalars and loaded them 2061 times, each store '
             'followed by a barrier; arrays trade the shared buffer for '
-            'registers that stay live until their last reader.  `all` since '
-            '2026-09-18, on measurement: over 70 corpus cases on sm_120 a '
+            'registers that stay live until their last reader.  `all` by '
+            'default, on measurement: over 70 corpus cases on sm_120 a '
             'geomean of 1 %, with `mixed/ew_then_ew` at +72 % and five cases '
             '4-6 % the other way, and SeisSol\'s damage step 6 % -- 11 % once '
             'its material part is a kernel of its own.  A kernel the trade '
@@ -790,7 +790,7 @@ declare('skip_known_zeros',
             'volume kernel (order 6) reads kDivM dense, 16% of its cells '
             'nonzero, and its first 32-row slot needs 20 of 35 columns.  '
             'Exact for finite operands; a product of zero with an infinity '
-            'or a NaN in the other factor is no longer formed.  It takes the '
+            'or a NaN in the other factor is not formed.  It takes the '
             'description at its word: the buffer the caller passes has to hold '
             'the numbers the description gives -- as SeisSol\'s global '
             'matrices do, and as yateto\'s own sparse kernels assume -- and a '
@@ -856,7 +856,7 @@ declare('tensor_cores',
             'allows.  None takes `primitives.nvidia.ENABLED`, the deployment '
             'switch, which is off; an option so that one build can ask for the '
             'path and the next one not, as a search over configurations has '
-            'to -- flipping the module constant changed it for every build in '
+            'to -- flipping the module constant changes it for every build in '
             'the process.')
 
 declare('mma_prefetch',
@@ -910,15 +910,14 @@ declare('prefetch_data',
             'each per-element source (`Lexic.prefetch_line_bytes`), for '
             '`PTR_BASED` and `STRIDED` operands; a batch-invariant one is '
             'already cached.  At `prefetch_level`.\n'
-            'Off everywhere.  It used to be on under ESIMD, where one '
-            'work-item per element leaves nothing else to cover the latency '
-            'of the next one, at 6.6 % more instructions over the corpus.  '
-            'Measured on pvc it does not pay for them: the SeisSol elastic '
-            'kernels (F32, batch 65536, the grid covering the batch in one '
-            'round) ran 1.12x (order 4) and 1.03x (order 6) faster in '
-            'geometric mean without the hints, single kernels up to 1.35x, '
-            'and 1.28-1.66x before the grid did; nearly every fastest ESIMD '
-            'configuration had it off.  The pointer hint at L1 '
+            'Off everywhere.  Under ESIMD, where one work-item per element '
+            'leaves nothing else to cover the latency of the next one, it '
+            'costs 6.6 % more instructions over the corpus, and measured on '
+            'pvc it does not pay for them: the SeisSol elastic kernels (F32, '
+            'batch 65536, the grid covering the batch in one round) ran 1.12x '
+            '(order 4) and 1.03x (order 6) faster in geometric mean without '
+            'the hints, single kernels up to 1.35x; nearly every fastest '
+            'ESIMD configuration had it off.  The pointer hint at L1 '
             '(`enable_prefetch`, `prefetch_level=l1`) in its place was '
             'neutral, 0.99-1.03x.  Elsewhere never measured faster.')
 

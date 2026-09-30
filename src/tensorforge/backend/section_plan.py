@@ -128,8 +128,9 @@ class SectionPlan:
 
             # Recorded before the symbol lookup: a temporary has no symbol
             # until the operation that first writes it creates one, so
-            # guarding this on the lookup left every temporary with an empty
-            # read union, and `written_in_slices` then saw nothing to cover.
+            # guarding this on the lookup would leave every temporary with an
+            # empty read union, and `written_in_slices` would then see nothing
+            # to cover.
             self._read_union[id(tensor)] = _hull(
                 self._read_union.get(id(tensor)), box)
 
@@ -280,13 +281,13 @@ class SectionPlan:
         """The tensors whose facts answer for `tensor`.
 
         A merged run's body is built against stand-ins, which are made after
-        this plan and appear in no descriptor it saw: asked about one, every
-        query answered as for a tensor nothing writes or reads.  So the body
-        kept in registers what its members, written out, had to assemble in
-        memory -- the poroelastic time derivative writes `dQ(k+1)` in two
-        boxes, and the loop lost one of them.  A stand-in answers as its
-        members do, all of them: what holds for one iteration holds for the
-        body that stands for every one.
+        this plan and appear in no descriptor it saw: asked about one as
+        itself, every query would answer as for a tensor nothing writes or
+        reads, and the body would keep in registers what its members, written
+        out, have to assemble in memory -- the poroelastic time derivative
+        writes `dQ(k+1)` in two boxes, and the loop would lose one of them.  A
+        stand-in answers as its members do, all of them: what holds for one
+        iteration holds for the body that stands for every one.
         """
         members = getattr(tensor, 'variant_members', None)
         return [id(m) for m in members] if members else [id(tensor)]
@@ -298,10 +299,11 @@ class SectionPlan:
         what lets one be shared rather than refused.
 
         A stand-in answers with its members, as in every other query here.
-        Unanswered, the poroelastic derivative's loop staged `dQ(k)` for its
-        first reader's columns only; the second reader re-staged it from row
-        1, the offset pinned the lead origin at 31, and a temporary went into
-        shared memory at `lead - 32` -- the previous multiplication's window.
+        Unanswered, the poroelastic derivative's loop would stage `dQ(k)` for
+        its first reader's columns only; the second reader would re-stage it
+        from row 1, the offset would pin the lead origin at 31, and a temporary
+        would go into shared memory at `lead - 32` -- the previous
+        multiplication's window.
         """
         members = getattr(tensor, 'variant_members', None)
         if members:
@@ -371,8 +373,8 @@ class SectionPlan:
         image back: the product where it reaches, the image elsewhere
         (`MultilinearInstruction`'s `whole_prev`).  The ADER Taylor
         expansion, `I = dQ(0) c_0` then `I += dQ(k) c_k` over fewer rows each
-        time, is the shape; judged as pieces it went through global memory on
-        every term.
+        time, is the shape; judged as pieces it would go through global memory
+        on every term.
         """
         declared = self._dest_boxes.get(key, [])
         eff = self._eff_writes.get(key, [])

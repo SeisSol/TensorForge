@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: MIT
 """Filling an instruction axis, counted rather than argued.
 
-Two decisions turn out to be one: whether to pad a partial block and run its
-spare lanes against zeroes, and whether to put a second term product of a
-split-precision emulation where the contraction does not reach.  Both ask what
-an axis has left over.  These check the counting, and in particular that
-packing never claims a saving the arithmetic does not allow -- a matrix
-instruction computes the same number of products whatever is put in it, so a
-full tile cannot be made cheaper by rearrangement.
+Two decisions are one: whether to pad a partial block and run its spare lanes
+against zeroes, and whether to put a second term product of a split-precision
+emulation where the contraction does not reach.  Both ask what an axis has
+left over.  These check the counting, and in particular that packing never
+claims a saving the arithmetic does not allow -- a matrix instruction computes
+the same number of products whatever is put in it, so a full tile cannot be
+made cheaper by rearrangement.
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def test_spare_counts_what_a_further_product_could_use():
 @pytest.mark.parametrize('block', [4, 8, 16, 32])
 def test_the_matrix_span_boundary_reads_the_same_waste(block):
     """`amd.plan` asks this module where its tail goes, and the answer is the
-    one it stated in remainders: a tail is left to the chain when the block
+    remainder test `n % block < 2`: a tail is left to the chain when the block
     would be empty or would spend all but one position on zeroes."""
     for n in range(0, 200):
         empty = packing.waste(n, block)

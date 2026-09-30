@@ -5,13 +5,14 @@
 
 yateto's `=` defines its whole destination: where the operands support fewer
 rows than the tensor has, the rest is zero.  A store into a shared-memory
-temporary wrote only the rows `_analyze` computed and left the others as the
-buffer held them (`MultilinearBuilder._assignment_zero_box`):
+temporary therefore writes zeros over the rows `_analyze` did not compute
+(`MultilinearBuilder._assignment_zero_box`).  One that wrote only the computed
+rows and left the others as the buffer held them would turn
 
     M(temp) = b0 ; M = b1 ; out = M          b1 stored over [0, 1) of 4
 
-gave `out = [b1[0], b0[1], b0[2], b0[3]]` for `[b1[0], 0, 0, 0]`.  SeisSol's
-free-surface-gravity kernel re-assigns `MPrev` that way.
+into `out = [b1[0], b0[1], b0[2], b0[3]]` instead of `[b1[0], 0, 0, 0]`.
+SeisSol's free-surface-gravity kernel re-assigns `MPrev` that way.
 
 `fixtures/kernels/temporary_reassignment.json` holds the statements as yateto
 describes them (and one face of the free-surface-gravity kernel, which

@@ -7,13 +7,14 @@ The shape of an ADER derivative or flux kernel: several descriptors whose
 destination is the same tensor, the first with ``beta=0`` and the rest with
 ``beta=1``.
 
-Two things used to go wrong here, and both are invisible in a single-writer
-case.  ``_written_in_slices`` counted writers rather than boxes, so a chain
-that writes the *same* box every time was classified as "assembled from
-pieces" and stored out eagerly per term.  Each eager store then left the
-register image ``_get_target_symbol`` had preloaded in place, so every later
-``+=`` read the same stale bias --- the destination ended up holding the first
-write plus the *last* term, with everything in between overwritten.
+Two things can go wrong here, and both are invisible in a single-writer case.
+``SectionPlan.written_in_slices`` has to count boxes rather than writers:
+counting writers classifies a chain that writes the *same* box every time as
+"assembled from pieces" and stores it out eagerly per term.  And an eager
+store must not leave the register image ``_get_target_symbol`` preloaded in
+place, or every later ``+=`` reads the same stale bias --- the destination
+ends up holding the first write plus the *last* term, with everything in
+between overwritten.
 """
 
 import numpy as np

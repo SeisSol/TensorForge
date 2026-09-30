@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: MIT
 """The compute strategy, asserted from numbers rather than from output.
 
-Which arrangement a contraction is emitted as was four conditions in three
-forms spread over the dispatch and the vendor modules, and the only way to ask
-what it had decided was to read the generated code.  Written as a function of
-the shape it can be asked directly -- which is what these do.
+Which arrangement a contraction is emitted as is written as a function of the
+shape, so it can be asked directly -- which is what these do.  As conditions
+spread over the dispatch and the vendor modules, it would be answerable only by
+reading the generated code.
 
 The split is the same one `placement.py` makes.  Legality is about what the
 target and the shape allow; preference is about which of the legal answers is
@@ -92,9 +92,9 @@ def test_the_rungs_are_what_differs_and_not_the_question():
 
 @pytest.mark.parametrize('vendor', ['amd', 'nvidia', 'intel'])
 def test_every_target_answers_the_packed_operand_by_its_route(vendor):
-    """No target names a width any more.  Each asks what the operand would
-    need and whether it writes that, so each lifts by an emitter learning a
-    route rather than by a condition being edited."""
+    """No target names a width.  Each asks what the operand would need and
+    whether it writes that, so each lifts by an emitter learning a route
+    rather than by a condition being edited."""
     import inspect
 
     from tensorforge.backend.instructions.compute.primitives import (
@@ -108,11 +108,11 @@ def test_every_target_answers_the_packed_operand_by_its_route(vendor):
 # -- the layout the plan derives ------------------------------------------- #
 
 def test_the_plan_derives_the_layout_the_emitter_addresses():
-    """The point of deriving it here at all.  A distribution has always been
-    readable off the access -- `layout_of` does it and `LeadIndex.layout()` is
-    what it reads -- but every caller of that sits inside the emission, so by
-    the time a layout exists the arrangement is chosen and an operand in the
-    wrong one can only be refused.
+    """The point of deriving it here at all.  A distribution is readable off
+    the access -- `layout_of` does it and `LeadIndex.layout()` is what it
+    reads -- but every caller of that sits inside the emission, so by the time
+    a layout exists the arrangement is chosen and an operand in the wrong one
+    can only be refused.
 
     So this checks the plan's reading against the address the generator
     writes: for each of the `threads` elements a fragment covers, the layout
@@ -156,10 +156,10 @@ def test_three_operands_have_no_a_and_b():
 
 
 def test_the_lead_width_is_not_asked_here():
-    """It used to be, and refused every arrangement on every target at once.
+    """Asked here, it would refuse every arrangement on every target at once.
     The reasons are not one reason, and a shared refusal cannot lift for one
-    target -- so each `strategies` owns its own now, and this asks only what
-    is true of the operation."""
+    target -- so each `strategies` owns its own, and this asks only what is
+    true of the operation."""
     import inspect
 
     from tensorforge.backend.instructions.compute import strategy
@@ -397,7 +397,7 @@ def test_only_the_exchange_scheme_serves_f64():
 
 def test_both_gates_off_leaves_exactly_the_deployed_scheme():
     """What makes the layer snapshot-neutral: with nothing switched on, the
-    only scheme offered is the one that was running."""
+    only scheme offered is the deployed one."""
     from tensorforge.backend.instructions.compute.primitives.amd import tiling
     assert (tiling.EMULATION, tiling.EXCHANGE) == (False, False)
     for dtype in (Datatype.F32, Datatype.F64):

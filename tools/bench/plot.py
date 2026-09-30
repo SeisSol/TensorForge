@@ -73,7 +73,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def _results(blob) -> List[Dict]:
-    """`run.py` has written both shapes: a bare list and `{'results': [...]}`."""
+    """The rows of a results file, a bare list or `{'results': [...]}`."""
     if isinstance(blob, dict) and 'results' in blob:
         return list(blob['results'])
     return list(blob) if isinstance(blob, list) else []

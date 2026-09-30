@@ -11,9 +11,9 @@ overrides ``__hash__``, so a builtin ``set`` orders them by ``id()``,
 i.e. by heap address.  Iteration order then varies between runs and the
 emitted source is not reproducible.
 
-Observed on ``tests/cases/chain_five.py`` before this was introduced: two
-consecutive generations in one process assigned the two live shared-memory
-buffers *swapped* offsets (0 / 608) **and** placed the ``__syncwarp()``
+With a builtin ``set``, two consecutive generations of
+``tests/cases/chain_five.py`` in one process could assign the two live
+shared-memory buffers *swapped* offsets **and** place the ``__syncwarp()``
 at different points, because barrier insertion keys on region membership.
 A synchronization decision that depends on heap addresses is a race that
 appears and disappears between builds.

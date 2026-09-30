@@ -44,10 +44,9 @@ class MemoryInstruction(AbstractInstruction):
     # scheduler gives up its state at and nothing reorders across, which is
     # exactly the stretch `WrapLoads` wants to move a transfer along.
     #
-    # `flatten_scopes` splices away the ones that declare nothing, so the
-    # emitted source does not change.  What changes is that they are no longer
-    # built, and therefore no longer in the way of the passes that run before
-    # it.
+    # `flatten_scopes` would splice away the ones that declare nothing, so the
+    # emitted source is the same either way; not building them keeps them out
+    # of the way of the passes that run before it.
     gen_write_base = getattr(self, 'gen_write_base', None)
     needs_scope = gen_write_base is not None and getattr(
         self, 'rotates', lambda: False)()
@@ -76,9 +75,9 @@ class AbstractShrMemWrite(MemoryInstruction):
     # Rotation is expressed here, as a property of the allocation, rather than
     # by the pipelining pass cloning the tensor object and renaming it to
     # `preload_*`: a clone is a second symbol that the allocator sizes
-    # separately and liveness cannot relate to the original, which is why the
-    # old MultiBuffer had to copy shared->shared to get the data back into the
-    # buffer the consumers knew about.
+    # separately and liveness cannot relate to the original, so the data would
+    # have to be copied shared->shared back into the buffer the consumers know
+    # about.
     self._stages: int = 1
     self._stage_expr: Union[str, None] = None
     # When a buffer rotates, the stage the *consumer* reads and the stage this
@@ -149,11 +148,11 @@ class AbstractShrMemWrite(MemoryInstruction):
       return
     offset = self._stage_offset(self._write_stage_expr)
     if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
-      # The write side is a value too, and that is what unblocks the last
-      # exclusion in `_structured_copy`.  A rotating buffer writes a different
-      # stage than its declaration names, so the transfer could not use the
-      # symbol's `pir_buffer` -- that one addresses the half the consumers
-      # read.  It gets its own.
+      # The write side is a value too, which is what lets `_structured_copy`
+      # take a rotating buffer.  A rotating buffer writes a different stage
+      # than its declaration names, so the transfer cannot use the symbol's
+      # `pir_buffer` -- that one addresses the half the consumers read.  It
+      # gets its own.
       self._write_buffer = writer.alloc(
           self._dest.get_fptype(), (self.stage_size(),), MemSpace.SHARED,
           hint=self.write_base(), extern=self.write_base(),
@@ -185,10 +184,9 @@ class AbstractShrMemWrite(MemoryInstruction):
         # spell `s0` out, same as the register tiles.
         #
         # Rotating buffers included.  Their offset carries the stage
-        # expression, and `scratch_check` used to compare it against numeric
-        # starts and raise; it reports them as unplaced now, which is the
-        # honest answer -- it cannot order a symbolic start, so it declines to
-        # judge that window rather than judging it wrongly.
+        # expression, which `scratch_check` reports as unplaced -- it cannot
+        # order a symbolic start, so it declines to judge that window rather
+        # than judging it wrongly.
         value = writer.alloc(self._dest.get_fptype(), (self.stage_size(),),
                              MemSpace.SHARED, hint=self._dest.name,
                              extern=self._dest.name,
@@ -205,9 +203,9 @@ class AbstractShrMemWrite(MemoryInstruction):
     """`name` bound to `offset` elements into this transfer's arena.
 
     Both spellings come from the backend, and together, because on a target
-    where a shared address is not a pointer neither half of the old string is
-    right -- and half of it being right is how a declaration ends up naming a
-    type its initializer does not produce.
+    where a shared address is not a pointer neither half of a hand-written
+    string is right -- and half of it being right is how a declaration ends up
+    naming a type its initializer does not produce.
     """
     lexic = self._vm.get_lexic()
     ptr = lexic.shared_pointer_type(self._fp_as_str, restrict=True)
@@ -228,8 +226,8 @@ class AbstractShrMemWrite(MemoryInstruction):
 
     Stated by the writer rather than asked of the permutation, because the
     permutation is decided when the buffer is allocated and the accesses come
-    later.  The decline it replaces -- no swizzle at all wherever a bulk copy
-    could reach the window -- was the same fact with no number attached.
+    later.  A blanket decline -- no swizzle at all wherever a bulk copy could
+    reach the window -- would be the same fact with no number attached.
     """
     return 1
 
@@ -263,7 +261,7 @@ class AbstractShrMemWrite(MemoryInstruction):
     # exactly the spreading it preserves, though -- granule 1 takes a
     # stride-32 column read to 1-way, granule 2 to 2-way, granule 4 to 4-way,
     # because a coarser unit has proportionally fewer distinct keys.  That is
-    # a real option and a real trade, and it is not this change.
+    # a real option and a real trade, and not one taken here.
     if _explicit_simd(self._context):
       return None
 
@@ -274,23 +272,21 @@ class AbstractShrMemWrite(MemoryInstruction):
     # `ptr_manip` binds only on the structured path.
     #
     # It is the text that is the problem, not the bulk.  A structured
-    # `copy_async` permutes its destination like any other access now
+    # `copy_async` permutes its destination like any other access
     # (`PirBuilder.copy_async`), and the width it moves is granted above, so a
     # window filled by one is as permutable as a window filled element by
-    # element.  Until that change this asked `_structured_copy` and took the
-    # answer to mean both things at once.
+    # element.
     #
     # Asked here rather than caught later on purpose: the guard at `finish`
     # can only raise by then, because the permutation is already baked into
     # every index it emitted.  Declining is the only response available before
     # that, and it needs the same question asked earlier.
     # Asked of the loader, not of every writer: it is the loader that decides
-    # whether the transfer goes through `store`, and it is its question.  Asking `self._src.pir_buffer(...)` instead was a
-    # proxy that happened to agree for `GlbToShrLoader` and never did for
-    # `StoreRegToShr`, whose source is a register and has no buffer by
-    # construction -- so when the loader's own bindings moved, every macro
-    # window silently stopped being permuted and 576 accesses went back to
-    # 32-way.  A proxy that agrees today is a proxy that breaks quietly.
+    # whether the transfer goes through `store`, and it is its question.
+    # Asking `self._src.pir_buffer(...)` instead would be a proxy that happens
+    # to agree for `GlbToShrLoader` and never does for `StoreRegToShr`, whose
+    # source is a register and has no buffer by construction -- and a proxy
+    # that agrees today is a proxy that breaks quietly.
     if writer is not None and hasattr(self, '_structured_copy'):
       if not self._structured_copy(writer):
         return None
@@ -302,9 +298,10 @@ class AbstractShrMemWrite(MemoryInstruction):
     # memory, silently, which is the worst failure available here.
     #
     # The largest power of two dividing the volume is safe by construction and
-    # is also the better choice: a 16x16 tile takes 32 rather than 16 and its
-    # column read goes 2-way to 1-way, and a 56x13 window takes 8 where the
-    # row-width rule declined outright, 8-way to 4-way.
+    # is also the better choice: a 16x16 tile takes 32 rather than its row
+    # width 16, and its column read is 1-way rather than 2-way; a 56x13 window
+    # takes 8 where a row-width rule would decline outright, 4-way rather than
+    # 8-way.
     #
     # An odd volume yields 1, which is no swizzle -- and that is the right
     # answer rather than a fallback.  A row width coprime with 32 already
@@ -321,14 +318,13 @@ class AbstractShrMemWrite(MemoryInstruction):
     # the accesses come later and cannot change it -- so the window grants the
     # unit rather than an access claiming it.  At `k_width` 1 and a transfer
     # that writes one element at a time, which is the default and every
-    # recorded kernel, this is exactly the previous rule.
+    # recorded kernel, the granule is 1.
     #
     # The transfer's own hop is a *requirement*, not a wish: a copy that moves
     # four elements into a window permuted per element writes them where the
     # readers will not look.  Where the volume cannot carry a granule that
-    # wide, the answer is no permutation at all -- which is the decline this
-    # replaces, now made for the buffers that actually need it instead of for
-    # every buffer a bulk copy could reach.
+    # wide, the answer is no permutation at all -- for the buffers that
+    # actually need the granule, not for every buffer a bulk copy could reach.
     #
     # Granted as wide as asked, even where that leaves no width to permute --
     # a 180-element window takes granule 4 and then width 1, which is no

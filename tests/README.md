@@ -52,11 +52,13 @@ Cases live under `cases/`, grouped by feature:
 
 | Group                 | Path                  | What it exercises                                                                       |
 |-----------------------|-----------------------|-----------------------------------------------------------------------------------------|
-| Plain GEMM            | `cases/*.py`          | dense GEMM in every dtype, transposes, alpha/beta scaling, fused chains                 |
-| Elementwise           | `cases/elementwise/`  | `ElementwiseDescr` with exactly one nonlinear unary op per `Assignment` (sqrt, exp, …)  |
-| Slicing               | `cases/slicing/`      | non-trivial `BoundingBox` inside larger `Tensor.shape` (sub-region GEMMs)               |
+| Plain GEMM            | `cases/*.py`          | dense GEMM in every dtype, transposes, alpha scaling, accumulation, fused chains        |
+| Elementwise           | `cases/elementwise/`  | `ElementwiseDescr`, mostly one op per case (sqrt, exp, log1p, …)                        |
+| Slicing               | `cases/slicing/`      | non-trivial `BoundingBox` inside larger `Tensor.shape`, temporaries written in parts    |
 | Reductions            | `cases/reduction/`    | `ReductionDescr` for sum/min/max/prod outside the multilinear lowering                  |
-| Barriers              | `cases/barriers/`     | `GridFenceDescr` / `GridBarrierDescr` between descrs (multi-section, cooperative launch)|
+| Mixed                 | `cases/mixed/`        | sequences of multilinear, elementwise and reduction descriptors sharing temporaries     |
+| Barriers              | `cases/barrier/`      | `GridFenceDescr` / `GridBarrierDescr` between descrs (multi-section, cooperative launch)|
+| Flags                 | `cases/flags/`        | the per-element mask: asked for, or attributes without it                               |
 
 Top-level `cases/*.py` also include the *single-feature* coverage
 cases — `trans_b`, `add_true`, `addressing_none`,
@@ -147,14 +149,11 @@ Optional module-level knobs the harness recognizes:
 
 ### Elementwise cases
 
-For an `ElementwiseDescr` case, build `TensorVar`s with the
-`harness.optree_helpers.make_tvar` helper (it skips the yateto-side
-`Assignment.assignTensor` indirection):
+`tensorforge.generators.elementwise` builds an `ElementwiseDescr` per
+operation, destination first:
 
 ```python
-from tensorforge.generators import optree
-from tensorforge.generators.descriptions import ElementwiseDescr
-from harness.optree_helpers import make_tvar
+from tensorforge.generators import elementwise as ew
 
 def descr_list():
     a = SubTensor(Tensor([16, 16], Addressing.STRIDED,
@@ -163,8 +162,7 @@ def descr_list():
     b = SubTensor(Tensor([16, 16], Addressing.STRIDED,
                          BoundingBox([0, 0], [16, 16]),
                          alias="B", datatype=DTYPE))
-    return [ElementwiseDescr(
-        [optree.Assignment(make_tvar(b, 2), optree.sqrt(make_tvar(a, 2)))])]
+    return [ew.sqrt(b, a)]
 
 def reference(inputs, dest_in):
     return np.sqrt(inputs["A"])
@@ -177,12 +175,12 @@ reference. The transform writes through the per-element view, which
 aliases the underlying flat buffer (see `harness/layout.py`), so the
 bytes shipped to the GPU are the post-transform values.
 
-The rule for this group is one unary nonlinear op per `Assignment` —
-no fused chains, no binary nonlinearities. That keeps each case as a
-focused contract: if it fails, the unary in question is the suspect.
-Coverage today: `sqrt`, `exp`, `log`, `sin`, `tanh`, `abs`, `rcp`,
-`pow_int` (the integer-exponent path that the constant-fold table at
-`optree.py:704-728` doesn't short-circuit).
+Most cases in this group apply one operation, which keeps each a focused
+contract: if it fails, that operation is the suspect.  They cover `abs`,
+`exp`, `expm1`, `log`, `log1p`, `rcp`, `sin`, `sqrt` and `tanh`, and the
+general power in `pow_int` (an exponent `ew.pow` does not fold into a
+cheaper operation).  `slice_after_whole` and `sliced_max` combine
+elementwise writes with slices of a shared tensor.
 
 ### Slicing cases
 
@@ -221,57 +219,59 @@ Two invariants the reference must respect:
   contract/operate only over the bbox window, otherwise its result
   silently disagrees with what the kernel actually computes.
 
-Coverage today: `inner_region` (offset bbox in larger storage),
-`offset_a` (only A sliced — exercises the mixed-stride code path),
-`seissol_pattern` (the canonical 20×9-in-56×56 form from
-`example/abb_trans.py`), and `chain` (two-step chain over sliced inputs,
-catches a regression where one GEMM in the middle loses the offset).
+Coverage includes `slicing/inner_region` (offset bbox in larger
+storage), `offset_a` (only A sliced — exercises the mixed-stride code
+path), `slice_offset_a`, and `chain` (a chain over sliced inputs, where a
+GEMM in the middle has to keep the offset); the `slicing/temp_*` cases
+write temporaries in parts and read them back whole or sliced.
 
 ### Barriers
 
 `GridFenceDescr` and `GridBarrierDescr` split the descr list into
 multiple sections; the generator emits *one* kernel that contains all
 sections, with a section boundary inside it. Two cases under
-`cases/barriers/`:
+`cases/barrier/`:
 
 * `fence_two_gemms` — `GridFenceDescr.trueBarrier()` returns `False`;
-  two sections inside one kernel, plain `<<<...>>>` launch.
+  two sections inside one kernel, plain `<<<...>>>` launch.  The two
+  GEMMs are independent, because a fence does not order its sections;
+  the case pins the per-section launcher parameters and the offset
+  traversal that still covers every element.
 * `barrier_two_gemms` — `GridBarrierDescr.trueBarrier()` returns
   `True`; switches the generator into persistent-threading mode and
-  emits `cudaLaunchCooperativeKernel`. Brings in
-  `tensorforge_aux.h::argsPtrs` plus `cooperative_groups.h`; both are
-  routed through `gen.get_helper_headers()` / `toolchain.py`'s include
-  path.
+  emits `cudaLaunchCooperativeKernel`, which needs
+  `tensorforge_aux.h::argsPtrs` (on the driver's include path via
+  `toolchain.py`) and `cooperative_groups.h` (included by
+  `tensorforge_device/cuda.h`).  Its batch exceeds the grid, which is
+  what guards where the grid sync sits.
 
-The cross-section dataflow is verified by the comparison: the second
-GEMM reads what the first wrote, so a fence/barrier that doesn't
-actually synchronize produces a numerically-wrong result.
+The docstrings of both cases say what they can and cannot show.
 
 #### Multi-section dispatch in the driver
 
 The launcher signature carries one `numElements{i}` and one
-`flags{i}` parameter per section (see
-`generator.py:_generate_base_params_list:529,535`). `driver_emit.py`
-detects the section count via `len(gen._sections)` and emits the
-right number of arguments at the call site — older builds of the
-driver hardcoded a single pair and would have produced an arity
-mismatch the moment any barrier-using case landed.
+`flags{i}` parameter per section. `driver_emit.py` counts the sections
+of the generator and emits that many arguments at the call site; a
+fixed single pair would be an arity mismatch for every case with a
+fence or a barrier.
 
 ### Reduction cases
 
 `ReductionInstruction` emits the *non-lead* fold: every contracted axis
 is a sequential axis, so each lane owns one point of the kept iteration
 space and folds into a register, with no cross-lane traffic, no shared
-memory and no barrier. Four of the five cases take that path.
+memory and no barrier. `sum_axis`, `max_axis`, `min_axis` and
+`prod_axis` take that path.
 
-`max_all` contracts the lead axis as well, so its fold crosses lanes: each
+`max_all`, `sum_axis0` and `sum_axis0_40` contract the lead axis, so
+their fold crosses lanes.  In `max_all`, for one, each
 lane folds what it owns, taking the neutral element where it owns nothing,
 then one `tensorforge::reduction` call over the lane partials, then lane 0
 stores. The guard around step one is an `if`/`else` yielding a value rather
 than a bare bounds check, because a shuffle reached by only part of the warp
 is undefined.
 
-The five cases reflect the operator space:
+The cases reflect the operator space:
 
 * `sum_axis` — `AddOperator` (numerically equivalent to
 `cases/trace.py` which uses `MultilinearDescr`);
@@ -285,13 +285,17 @@ sink, and the lead-axis contraction;
 
 * `prod_axis` — `MulOperator` with neutral element
 1 (constrained-domain inputs to avoid overflow), the one operator
-`Op.ACCUM` cannot express since it lowers to `+=`.
+`Op.ACCUM` cannot express since it lowers to `+=`;
+
+* `sum_axis0`, `sum_axis0_40` — the lead axis contracted and the other
+kept, with one lead element per lane and with more lead elements than
+lanes.
 
 ### F64 variants
 
-Each new feature axis gets one F64 sibling: `add_true_f64`,
+Feature axes get an F64 sibling: `add_true_f64`,
 `addressing_none_f64`, `slicing/inner_region_f64`,
-`elementwise/sqrt_f64`, `sparsity_band_f64`. They exist because
+`elementwise/{exp,sqrt,tanh}_f64`, `sparsity_band_f64`. They exist because
 several emit paths split on dtype — `sqrtf` vs `sqrt`, `0.0f` vs `0.0`
 in the sparsity unrolled sequences, dtype-dependent literals in the
 `NONE`/`PTR_BASED` offset arithmetic — and a regression that only
@@ -322,8 +326,8 @@ GEMMs but each tests exactly one feature axis:
 |----------------------------|----------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
 | `trans_a.py`               | `trans_a=True` (transpose first operand)           | green                                                                                                                    |
 | `trans_b.py`               | `trans_b=True` (transpose second operand)          | green                                                                                                                    |
-| `csa_alpha.py`             | `alpha != 1` synthetic-scalar path                 | green; regression test for an earlier datatype-on-synthetic-scalar bug                                                   |
-| `add_true.py`              | `add=True` on bare `MultilinearDescr`              | green; exists because `GemmDescr` positionally hands `strict_match` into the `add` slot (`descriptions.py:147`/`:158`)   |
+| `csa_alpha.py`             | `alpha != 1` synthetic-scalar path                 | green; alpha travels as a scalar tensor with the operands' datatype                                                       |
+| `add_true.py`              | `add=True` on bare `MultilinearDescr`              | green; the constructor the yateto frontend calls, rather than `GemmDescr` with `beta=1`                                  |
 | `addressing_none.py`       | `Addressing.NONE` (batch-constant operator matrix) | green; SeisSol's static-operator pattern                                                                                  |
 | `addressing_ptr_based.py`  | `Addressing.PTR_BASED` (heterogeneous batches)     | green; the driver builds the per-batch pointer array (`T**`)                                                             |
 | `sparsity_band.py`         | `Tensor(..., spp=MaskSPP(...))`                    | green; banded `B` operand with cells outside the mask zeroed by `INPUT_TRANSFORM`                                          |
@@ -332,48 +336,8 @@ GEMMs but each tests exactly one feature axis:
 Each of these has a dedicated host-only smoke test in
 `test_kernels.py` that asserts the distinguishing property (e.g. that
 `trans_b` actually sets `permute=[1, 0]` on the second operand). That
-way a case that gets refactored back into "just another GEMM" is
-caught even if no GPU is available.
-
-## Bugs this suite is designed to expose
-
-These are the open items dev2's pipeline carries today, each of which
-has a deterministic reproducer in the suite:
-
-1. **`GemmDescr` confuses `strict_match` with `add`** — both `super().__init__`
-   call sites in `descriptions.py:147,158` pass arguments positionally,
-   but the parent signature is `(dest, ops, target, permute, add=False,
-   strict_match=False, ...)`. The `strict_match` kwarg therefore lands
-   in the `add` slot. Compounding this, `MultilinearDescr.__init__:23`
-   hardcodes `self._strict_match = False`, so the keyword is lost
-   either way. Reproducer: `add_true.py` documents why it can't be
-   written via `GemmDescr`.
-
-2. **`ElementwiseInstruction._assignment_loop` calls `LeadLoop` without
-   `stride`** — every `cases/elementwise/*` case crashes generation with
-   `TypeError: LeadLoop.__init__() missing 1 required positional
-   argument: 'stride'` (`elementwise.py:57` vs.\\ `symbol.py:196`).
-
-3. **`Operation.TANH` aliases `Operation.TAN`** (and the same for
-   `sinh`/`sin`, `cosh`/`cos`, `asinh`/`asin`, `acosh`/`acos`,
-   `atanh`/`atan`) — duplicate-valued `enum.Enum` members collapse, so
-   `optree.tanh(x)` lowers to a `TAN` node and the CUDA lexic emits
-   `tanf`. Reproducer: `cases/elementwise/tanh.py` will fail
-   numerically once generation works.
-
-4. **A partial lead-axis reduction has no lowering** — contracting the
-   thread-distributed axis works only when every axis is contracted.
-   Keeping some would mean redistributing them over the lanes first.
-   `ReductionInstruction` raises with an explicit message. No case
-   reproduces it; `ReductionDescr` has no shape that reaches it today.
-
-5. **PTR_BASED needs harness driver work** — the generator emits
-   correct device code, but `tests/harness/driver_emit.py:257` only
-   handles `strided`, `none`, and `scalar`. Reproducer:
-   `addressing_ptr_based.py` (XFAIL).
-
-The order of fixes that turns the most XFAIL cases green at once is
-roughly 2 → 3 → 1 → 4 → 5.
+way a case that gets refactored into "just another GEMM" is caught
+even if no GPU is available.
 
 ## Backends
 
@@ -415,6 +379,6 @@ regressions in the case-level descriptors themselves.
   in `harness/layout.py`. The generator already emits the right device
   code; the harness just needs to mirror the host-side allocation.
 * New `OperationDescription` subclass (custom epilogue, fused
-  reduction-then-elementwise, etc.): add an `isinstance` branch in
-  `generator.py:_emit_local_ir` and an `Instruction` to back it; the
-  test side just needs `XFAIL=True` until the path lights up.
+  reduction-then-elementwise, etc.): add a branch in `Generator._emit_ir`
+  and an `Instruction` to back it; the test side just needs `XFAIL=True`
+  until the path lights up.

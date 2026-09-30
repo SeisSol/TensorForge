@@ -108,7 +108,7 @@ def run_case(case, target: Target, cache_root: Path,
     """Generate, build (cached), execute, and compare.
 
     ``case`` is a loaded module object with the contract described in
-    ``tests_new/cases/README.md`` (``NAME``, ``descr_list()``, ``DTYPE``,
+    ``tests/README.md`` (``NAME``, ``descr_list()``, ``DTYPE``,
     ``BATCH``, optional ``reference()`` and ``TOL``).
     """
     dt = case.DTYPE
@@ -154,8 +154,8 @@ def run_case(case, target: Target, cache_root: Path,
     # Which buffer is *the* output.  `reference()` returns one array and gets
     # one `dest_in`, so both ends have to name the same operand --- the
     # snapshot handed to the reference and the buffer read back afterwards.
-    # They used to be picked independently, one taking the last sink and the
-    # other the first, which agreed only because every case had exactly one.
+    # Picked independently, one taking the last sink and the other the first,
+    # they would agree only while every case has exactly one.
     sinks = [o for o in ops_meta if o.is_sink]
     if not sinks:
         return RunResult(False, float("inf"), float("inf"),
@@ -244,8 +244,8 @@ def run_case(case, target: Target, cache_root: Path,
                 )
             # SINK that is also SOURCE (beta != 0): the kernel needs the
             # initial C on device, so dump it under the input name too.
-            # Current GemmDescr with beta != 0 sets SOURCESINK direction,
-            # which already takes the is_source branch above.
+            # A GemmDescr with beta != 0 sets SOURCESINK direction, which
+            # already takes the is_source branch above.
 
         env = os.environ.copy()
         # Pin visible device so the index we pass actually lines up.

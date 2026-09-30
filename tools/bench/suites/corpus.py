@@ -8,12 +8,12 @@ exercise code paths rather than to resemble a solve.  What it is good for is a
 regression signal -- these kernels exist on every branch, so a configuration
 that got slower shows up here before anyone has a SeisSol capture to hand.
 
-The batches are the point.  Every case declares `BATCH` two to four and the
-launcher sizes its grid `min(occupancy_gridsize, numElements0)`, so at the
-corpus's own batches the grid is a handful of blocks and the measurement is
-launch overhead.  1024 is around where a mid-size device saturates, 65536 is
-where per-element cost has stopped moving, and running both is what shows which
-regime a number came from.
+The batches are the point.  Every case declares a `BATCH` between two and 96
+and the launcher sizes its grid `min(occupancy_gridsize, numElements0)`, so
+at the corpus's own batches the grid is a handful of blocks and the
+measurement is launch overhead.  1024 is around where a mid-size device
+saturates, 65536 is where per-element cost has stopped moving, and running
+both is what shows which regime a number came from.
 """
 
 from suite import CONFIGS, from_cases  # noqa: F401

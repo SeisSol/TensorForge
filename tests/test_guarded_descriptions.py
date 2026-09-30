@@ -198,12 +198,12 @@ def test_the_section_sees_the_tensors_a_guard_reads():
 
 
 # ----------------------------------------------------------------------
-# What used to happen instead
+# An operation nothing builds
 # ----------------------------------------------------------------------
 
 def test_a_descriptor_nobody_builds_stops_the_generator():
-    """It used to fall out of the dispatch and be dropped, which turns a
-    missing builder into a wrong kernel rather than an error."""
+    """Falling out of the dispatch and being dropped would turn a missing
+    builder into a wrong kernel rather than an error."""
 
     class Unknown(OperationDescription):
         def matrix_list(self):

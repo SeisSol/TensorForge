@@ -4,18 +4,18 @@
 """`scratch_scope` makes a claim; this is what holds it to account.
 
 Sibling scopes share space, which is how `nvidia.matmul` fits three tiles into
-192 elements rather than 320.  Nothing checked that the sharing was safe.
+192 elements rather than 320.
 
-Deriving the packing instead was the first plan and it does not work.  A
-liveness analysis over the body computes a single interval per buffer, and
-`matmul`'s loops are unrolled, so the C tile's interval --- first touch in
-iteration `i`'s epilogue to last touch in the final one --- covers the A and B
-staging of every iteration in between.  All three interfere, 320 elements, and
-the analysis is right about the question it was asked.  What makes the reuse
-safe is that each burst overwrites the tile completely before reading it, and
-no single store does that: 128 elements, 48 writes.  Proving the union covers
-the buffer is an index-set analysis, and it would be a great deal of machinery
-to re-derive something the emitter knew when it wrote the scopes.
+Deriving the packing instead does not work.  A liveness analysis over the body
+computes a single interval per buffer, and `matmul`'s loops are unrolled, so
+the C tile's interval --- first touch in iteration `i`'s epilogue to last
+touch in the final one --- covers the A and B staging of every iteration in
+between.  All three interfere, 320 elements, and the analysis is right about
+the question it was asked.  What makes the reuse safe is that each burst
+overwrites the tile completely before reading it, and no single store does
+that: 128 elements, 48 writes.  Proving the union covers the buffer is an
+index-set analysis, and it would be a great deal of machinery to re-derive
+something the emitter knew when it wrote the scopes.
 
 So the claim stays where it is made and this checks it, the same arrangement
 as the sparse loader's layout.  The check is necessary, not sufficient, and
@@ -152,24 +152,14 @@ def _bodies(case: str, backend: str, arch: str):
     return collected
 
 
-# How many statements in each case still refuse to say what they touch, so the
+# How many statements in each case refuse to say what they touch, so the
 # packing check has to skip them.  A ratchet, not a target: these numbers may
 # go down and must never go up.
 #
-# Back to zero, one commit after the loop pushed it to 4.
-#
-# Those four were the loop's own scaffolding, raw text that had simply never
-# been inside a body before: two lookahead bindings and the two statements
-# that computed `allowed`.  They are values now -- the bindings a chain of
-# conditional expressions over the induction value, the guard one conditional
-# expression instead of an assignment and a guarded overwrite.
-#
-# The way down, for whoever adds the next entry: 16 before `RegisterAlloc`
-# allocated through the builder, 14 before the `glb_m*` bindings declared
-# their read, 11 before the shared window became a value, 10 before the
-# transfers became `copy.async`, 3 while the `__syncwarp()` calls were left,
-# 0, then 4 when the batch loop moved into the IR and brought its scaffolding
-# with it, then 0 again.
+# The batch loop's own scaffolding sits inside the body, where raw text would
+# count here; it is values instead -- the lookahead bindings a chain of
+# conditional expressions over the induction value, the `allowed` guard one
+# conditional expression rather than an assignment and a guarded overwrite.
 STILL_OPAQUE = {"rectangular.py": 0, "square_notrans.py": 0}
 
 
@@ -177,7 +167,7 @@ STILL_OPAQUE = {"rectangular.py": 0, "square_notrans.py": 0}
 @pytest.mark.parametrize("case_file", ["rectangular.py", "square_notrans.py"])
 def test_the_generated_packing_is_consistent(case_file):
     """The point of all of it: `matmul` overlaps C onto A and gets away with
-    it, and now that is a checked statement rather than a comment."""
+    it, and that is a checked statement rather than a comment."""
     budget = STILL_OPAQUE[case_file]
     seen = 0
     for body in _bodies(case_file, "cuda", "sm_86"):

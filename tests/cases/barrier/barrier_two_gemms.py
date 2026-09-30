@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 """Two GEMMs separated by a :class:`GridBarrierDescr` — cooperative launch.
 
-Same arithmetic as ``fence_two_gemms.py`` (``D = A @ B`` then
-``E = D @ C``) but the section boundary is a true grid-wide barrier.
+``D = A @ B`` then ``E = D @ C``, and the section boundary between
+them is a true grid-wide barrier.
 ``GridBarrierDescr.trueBarrier()`` returns ``True``, which in turn
 sets ``section.barrier`` and triggers ``persistent_threading``:
 
@@ -20,11 +20,10 @@ sets ``section.barrier`` and triggers ``persistent_threading``:
   ``cooperative_groups.h``, which ``tensorforge_device/cuda.h``
   includes.
 
-The fence case is no longer the same arithmetic: it was rewritten to
-two *independent* GEMMs, because a fence does not order its sections
-(see ``fence_two_gemms.py``).  Ordering across a section boundary is
-this case's subject alone, which is why its batch has to exceed the
-grid.
+The fence case, ``fence_two_gemms.py``, runs two *independent* GEMMs
+instead, because a fence does not order its sections.  Ordering across
+a section boundary is this case's subject alone, which is why its batch
+has to exceed the grid.
 
 Cooperative launch has a device-side prerequisite: the GPU must
 support ``cudaDevAttrCooperativeLaunch``. Almost everything ≥ sm_60
@@ -56,8 +55,9 @@ DTYPE = Datatype.F32
 #
 # It does *not* make the case test grid-wide ordering, and no batch size
 # would: a barrier resets the section-1 traversal to `blockId`
-# (`generator.py:511-513`), so both sections walk the same elements in the
-# same blocks and every block only ever reads back what it wrote itself.
+# (`Generator._section_traversal`), so both sections walk the same elements
+# in the same blocks and every block only ever reads back what it wrote
+# itself.
 # Ordering across blocks is not expressible as a case while a section's
 # element mapping is fixed by the block id.
 BATCH = 96

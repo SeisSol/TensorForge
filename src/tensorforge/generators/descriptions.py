@@ -31,8 +31,9 @@ class GuardLiteral:
     self.version = version
     self.negated = negated
     # A condition is read, whether or not an operation also reads it: a
-    # tensor only a guard names had no direction, so its parameter came out
-    # writable where every other operand the kernel only reads is `const`.
+    # tensor only a guard names would otherwise have no direction, and its
+    # parameter would come out writable where every other operand the kernel
+    # only reads is `const`.
     # Written as well elsewhere in the kernel, it becomes SOURCESINK.
     underlying = getattr(tensor, 'tensor', tensor)
     if hasattr(underlying, 'set_data_flow_direction'):
@@ -160,8 +161,8 @@ def _slice_note(view) -> str:
 def view_dict(view, data=False, pack=False) -> dict:
   """One operand as data: the tensor it views and the part it takes.
 
-  The fields `tools/host/dump_descriptors.py` has always written, so that its
-  files and the kernel's `tensorforge-meta` line describe an operand alike.
+  The fields `tools/host/dump_descriptors.py` writes, so that its files and
+  the kernel's `tensorforge-meta` line describe an operand alike.
   `data` and `pack` are the values and the storage order, which are large and
   asked for only where they are needed.
   """
@@ -236,9 +237,9 @@ class MultilinearDescr(OperationDescription):
     The destination, and an operand whose *axis 0* carries the destination's
     lead index.  An operand indexed only by the other axes -- `B` in
     `C[m,n] += A[m,k] B[k,n]` -- is splatted, not loaded wide, so it proves
-    nothing about the vector's address.  `lead_width` said so from the start
-    while the code minimized over every matrix, and that is what held
-    `local_flux` at width one: its 9x9 flux solver claims no alignment.
+    nothing about the vector's address, as `lead_width` says.  Minimizing over
+    every matrix would hold `local_flux` at width one: its 9x9 flux solver
+    claims no alignment.
     """
     out = [self.dest]
     for op, target in zip(self.ops, list(self.target or [])):
@@ -399,22 +400,16 @@ class MultilinearDescr(OperationDescription):
 class ElementwiseDescr(OperationDescription):
   """One scalar operation applied pointwise: ``dest = op(*srcs)``.
 
-  Previously this carried a list of ``optree.Assignment``, i.e. an expression
-  tree, and unified the iteration space across all of them via
-  ``Assignment.getRanges``.  That unification keyed ranges by negative integers
-  and asserted ``-i-1 in ranges``, a convention the test harness needed twenty
-  lines of prose to reproduce.
-
   With a single operation the iteration space is not derived at all: elementwise
   means every tensor operand has the destination's shape, so the space *is*
   ``dest.bbox``.  Compound expressions become several instructions over
   temporaries, which has the side benefit that the intermediate is a ``Symbol``
-  the allocator can see -- an optree ``TempVar`` was a writer-allocated name
-  invisible to every pass.
+  the allocator can see -- a writer-allocated name would be invisible to every
+  pass.
   """
 
-  # Derived from the optree helpers that used to build these nodes, so the
-  # arity a caller may pass is checked rather than discovered at emit time.
+  # The arity of each operation, so that what a caller passes is checked here
+  # rather than discovered at emit time.
   UNARY = frozenset({
       Operation.ABS, Operation.ACOS, Operation.ACOSH, Operation.ASIN,
       Operation.ASINH, Operation.ATAN, Operation.ATANH, Operation.CBRT,
@@ -494,9 +489,8 @@ class ElementwiseDescr(OperationDescription):
 
   def matrix_list(self):
     # Sources first, destination last.  Operand *order* here determines the
-    # launcher's parameter order via Generator._name_operands, and the old
-    # optree path yielded Assignment.tensors() = inputs ++ outputs.  Putting
-    # dest first would silently rotate the kernel ABI.
+    # launcher's parameter order via Generator._name_operands, so putting dest
+    # first would silently rotate the kernel ABI.
     return self.tensor_srcs() + [self.dest]
 
   @staticmethod
@@ -529,8 +523,8 @@ class ReductionDescr(OperationDescription):
 
   A reduction changes shape: its iteration space is the source's, while the
   destination's is that minus ``dims``.  Folding it into ElementwiseDescr would
-  require re-introducing exactly the range unification that was just removed,
-  so it keeps its own descriptor carrying ``op`` and ``dims``.
+  require unifying ranges across operands, which a pointwise operation does
+  without, so it keeps its own descriptor carrying ``op`` and ``dims``.
   """
 
   def __init__(self, dest, var, dims: List[int], op: ReductionOperator,
@@ -622,12 +616,12 @@ class GemmDescr(MultilinearDescr):
     # >= 0 is an output index, < 0 a contraction index.  That mapping is what
     # MultilinearInstruction._analyze reads to build the loop ranges --- and it
     # reads it *without* consulting `permute`.  Encoding a transpose only in
-    # `permute` therefore left `_analyze` pairing the wrong dimensions: for
-    # `trans_a` with a non-square operand it took the output extent for the
-    # contraction extent, so the sum ran over the wrong length and the result
-    # came out short by whatever the two dimensions differed by.
+    # `permute` would therefore leave `_analyze` pairing the wrong dimensions:
+    # for `trans_a` with a non-square operand it would take the output extent
+    # for the contraction extent, so the sum would run over the wrong length
+    # and the result come out short by whatever the two dimensions differ by.
     #
-    # This is also the convention everything else already uses:
+    # This is also the convention everything else uses:
     # `generate_tmp_matrix` writes `[-1, 0] if trans_a`, and yateto's
     # `factory.getIndices` derives `target` from the index letters while
     # emitting `permute` as the identity throughout.
@@ -652,7 +646,7 @@ class GemmDescr(MultilinearDescr):
     else:
       # Inherit datatype from the destination so the synthetic scalar
       # always has a concrete type. Without this, Symbol.get_fptype()
-      # raised in every alpha != 1 case (see Symbol.get_fptype docstring).
+      # would raise in every alpha != 1 case (see Symbol.get_fptype docstring).
       dest_dtype = getattr(c.tensor, 'datatype', None)
       alpha_tensor = SubTensor(Tensor(
           [], Addressing.SCALAR,

@@ -4,19 +4,16 @@
 
 """The per-element loop, as an instruction with a region.
 
-It used to be raw text in ``Generator._generate_kernel``, written three times
-over -- once per traversal strategy -- with the body handed in as a closure.
-Two consequences followed from it not being in the IR:
+In the IR rather than as raw text around a body handed in as a closure,
+because two things depend on it:
 
-*No prologue could be expressed.*  A software-pipelining pass needs to peel an
-iteration, and with no loop to peel from it had to publish the peeled copy
-through a second list (``OptimizationStage._global_instrs``) that the rest of
-the pipeline neither indexed nor verified.  Definition and use ended up in
-different streams, which is why both ``MultiBuffer`` and ``PtrPipe`` are
-disabled.  With a region, a prologue is a peeled iteration in the same stream
-and ``def_use`` sees it.
+*A prologue can be expressed.*  A software-pipelining pass needs to peel an
+iteration, and with no loop to peel from it would have to publish the peeled
+copy through a second list that the rest of the pipeline neither indexes nor
+verifies, with definition and use in different streams.  With a region, a
+prologue is a peeled iteration in the same stream and ``def_use`` sees it.
 
-*Barrier legality was unrepresentable.*  Whether a barrier inside the loop is
+*Barrier legality is representable.*  Whether a barrier inside the loop is
 legal depends on the trip count being uniform across the barrier's scope, and
 the trip count is a property of the traversal strategy.  ``uniform_scope``
 states it, so ``verify`` can check it instead of the invariant living in a
@@ -431,7 +428,7 @@ class BatchLoop(AbstractInstruction):
         -- which is how it ends up hoisted out of the loop that defines what
         it reads.
 
-        ``None`` before the bindings are emitted, and on the legacy writer,
+        ``None`` before the bindings are emitted, and on a plain `Writer`,
         which has no operands to hand out.
         """
         return self._first_lookahead
@@ -547,7 +544,7 @@ class BatchLoop(AbstractInstruction):
         masked element's included, so moving one out is never the unsafe
         direction.  The run is trimmed to start at a marked instruction, so a
         body with nothing marked at its end keeps its closing barrier inside
-        the guard, as before.
+        the guard.
         """
         unguarded = set(self._unguarded) | self._address_prefix()
         if not unguarded:
@@ -577,33 +574,23 @@ class BatchLoop(AbstractInstruction):
 
         `s0 = &localShrMem0[512]` is where a transfer writes, and the offset
         comes from `ShrMemOpt` rather than from `batchId0` -- the window is the
-        same for every element.  It was declared by whichever instruction fills
-        it, so it landed inside the guard, and a transfer cannot be issued
+        same for every element.  Declared by whichever instruction fills it,
+        it would land inside the guard, and a transfer cannot be issued
         outside a guard that defines the buffer it fills.
 
-        That was the last thing keeping the moved transfers in: the address
-        bindings came out one commit ago, and `wrap_prefetch` then refused 13
-        loops for reading their own destination.
+        Same rule as for the address bindings (`_address_prefix`), and it
+        holds more easily here: nothing about this declaration depends on the
+        element, so hoisting it cannot observe anything a masked element would
+        not have.
 
-        Same rule as the addresses, and it holds more easily here: nothing
-        about this declaration depends on the element, so hoisting it cannot
-        observe anything a masked element would not have.
-
-        Unconditional, where this used to run only with `enable_wrap_loads`.
-        That gate made the switch decide something it has no business
-        deciding: whether the window a *consumer* reads is in scope where it
-        reads it.  The declaration is emitted by whichever instruction fills
-        the window first, so when that instruction sits inside the flag guard
-        the name is scoped to the guard -- and every later reader of the same
-        window is then referring to something that was never declared where it
-        stands.  With prefetch on it was hoisted and the kernel compiled; with
-        prefetch off, which is the default, it did not compile at all.
-
-        The corpus never showed it because no case here has a first writer
-        inside the guard and a reader outside it.  Nothing about the hoist
-        depends on prefetching: the offset comes from `ShrMemOpt` and is the
-        same for every element, so there was never a reason for the two to be
-        tied together.
+        Unconditional, not tied to `enable_wrap_loads`: that switch has no
+        business deciding whether the window a *consumer* reads is in scope
+        where it reads it.  The declaration is emitted by whichever instruction
+        fills the window first, so were that instruction left inside the flag
+        guard the name would be scoped to the guard -- and every later reader
+        of the same window would refer to something never declared where it
+        stands.  Nothing about the hoist depends on prefetching: the offset
+        comes from `ShrMemOpt` and is the same for every element.
         """
         for instr in guarded:
             declare = getattr(instr, 'gen_code_declare', None)
@@ -662,8 +649,8 @@ class BatchLoop(AbstractInstruction):
         ``min(occupancy, numElements)`` *blocks* of ``blockDim.y`` rows, so at
         100 elements and 16 rows the last thread starts at 1599: the threads
         whose start is past the end are the common case, not the edge.  They
-        never enter the loop, which is why the loop body never noticed --- but
-        a peeled iteration runs *before* the guard, so it dereferences that
+        never enter the loop, so the loop body never meets them --- but a
+        peeled iteration runs *before* the guard, so it dereferences that
         index unconditionally.  With strided addressing that reads past the
         batch; with ``Addressing.PTR_BASED`` it reads a pointer past the end of
         the pointer array and then follows it.
@@ -681,13 +668,13 @@ class BatchLoop(AbstractInstruction):
 
         A kernel parameter, so it comes through the seam rather than from a
         definition: `GRID`-uniform, `SIZE`, stated once instead of inferred at
-        each use.  As text it had none of the three, which is why a comparison
-        against it came out only as uniform as the index it was compared to --
-        `_join` skips what is not a value, so the answer came from the other
-        operand alone.
+        each use.  As text it would have none of the three, and a comparison
+        against it would come out only as uniform as the index it is compared
+        to -- `_join` skips what is not a value, so the answer would come from
+        the other operand alone.
 
         Falls back to the name where the body is a `Writer` rather than a
-        builder, which is the traversals that are still spelled as text.
+        builder, which is the traversals spelled as text.
         """
         if not hasattr(writer, 'extern_value'):
             return self._num_elements()
@@ -755,8 +742,8 @@ class BatchLoop(AbstractInstruction):
         needs no seam to say so.
 
         No `extern`, so these are the IR's values with the macro layer's name
-        only as a hint.  Nothing spells them any more: the addresses that used
-        to take them as operands, which is what the frame above is for.
+        only as a hint.  Nothing spells them: the addresses take them as
+        operands, which is what the frame above is for.
 
         The first one escapes, and only it.  The loop names its successor index
         in an *attribute* --- `wrap_prefetch` reads it to rewrite a transfer to
@@ -764,8 +751,7 @@ class BatchLoop(AbstractInstruction):
         chain does not see it and `dce` would take the definition away from
         under a pass that has not run yet.  That is what `escapes` says: this
         is referenced from somewhere the graph does not model.  The rest are
-        ordinary values and now disappear where nothing reads them, which is
-        the two dead clamps every kernel used to carry.
+        ordinary values and disappear where nothing reads them.
         """
         if not (hasattr(writer, 'op') and self._induction is not None):
             for n in range(1, self._lookahead + 1):
@@ -951,15 +937,16 @@ class BatchLoop(AbstractInstruction):
         """Does the loop hand the mask from one iteration to the next?
 
         Where it carries prefetches across the back edge, and there is a mask.
-        Read at the head, the element's flag is a load its guard waits on at
-        once, and on AMD that wait is `vmcnt(0)`: the counter retires in
-        order, so it also waits for every copy the previous tail issued, and
-        the pipeline those copies were meant to be is gone -- with a mask
-        passed, `chain_three` keeps one wait per iteration, and it is that
-        one.  So the words ride the loop instead, like the tokens: this
-        element's and the next one's come in, and the one two ahead is read
-        at the head and handed on.  A word is read one iteration before it
-        is first needed, and whatever waits for it waits for loads long done.
+        Read at the head, the element's flag would be a load its guard waits
+        on at once, and on AMD that wait is `vmcnt(0)`: the counter retires in
+        order, so it would also wait for every copy the previous tail issued,
+        and the overlap those copies are there for would be lost -- with a
+        mask passed, `chain_three` would keep one wait per iteration, and it
+        would be that one.  So the words ride the loop instead, like the
+        tokens: this element's and the next one's come in, and the one two
+        ahead is read at the head and handed on.  A word is read one
+        iteration before it is first needed, and whatever waits for it waits
+        for loads long done.
 
         The word and not the `bool`: a comparison right behind the load is a
         use right behind the load, and the wait comes back with it.  The
@@ -1043,16 +1030,14 @@ class BatchLoop(AbstractInstruction):
                 scratch=budget)
 
     def gen_code(self, writer) -> None:
-        # Deliberately no writer.Scope() and no comment: the loop used to be
-        # emitted inline by the generator, and adding either would change the
-        # generated text.
+        # Deliberately no writer.Scope() and no comment: adding either would
+        # change the generated text.
         if self._structured_loop(writer):
             # One body for the whole section, with the loop *inside* it.
             #
-            # Until now the builder was opened by `_emit_body`, one level
-            # further in, so every body sat within the loop and none could
-            # name it.  That is the 2% `tools/macro_surface.py` measures and
-            # the reason a transfer cannot be moved to the previous iteration:
+            # Were the builder opened by `_emit_body`, one level further in,
+            # every body would sit within the loop and none could name it --
+            # and a transfer could not be moved to the previous iteration:
             # `can_reorder` licenses swaps inside a body, and nothing licenses
             # a move across a back edge made of Writer text.
             budget = self.temp_shmem()
@@ -1088,8 +1073,8 @@ class BatchLoop(AbstractInstruction):
             return False
         # `for_` is the builder's; the Writer has only the raw `For`.  Testing
         # for `alloc` would not do it -- `Writer` carries a `VarAlloc` under
-        # that name, so the check passed for neither and the path never ran
-        # while the corpus dutifully reported no drift.
+        # that name, so the check would pass for neither and the path would
+        # never run, while the corpus reported no drift.
         return not hasattr(writer, 'for_')
 
     def gen_code_inner(self, writer) -> None:
@@ -1099,9 +1084,9 @@ class BatchLoop(AbstractInstruction):
         clears `_declare` on the instruction that fills it, so that one does
         not declare it a second time.  That is a statement about one build.  A
         body built twice -- `_fused_if_over_budget`, when a moved broadcast
-        took it over the register budget -- runs this again, and with the flag
-        still cleared nobody declares the window: `chain_five` came out naming
-        an `s0` that no statement introduced.
+        takes it over the register budget -- runs this again, and with the
+        flag still cleared nobody would declare the window: the kernel would
+        name an `s0` that no statement introduces.
         """
         cleared = []
         self._cleared_declarations = cleared
@@ -1144,18 +1129,13 @@ class BatchLoop(AbstractInstruction):
                                    lambda: self._prologue_element(writer),
                                    'allowed_peel', cond=peel_flag)
             if hasattr(writer, 'for_'):
-                # `extern` and `ctype` because the name and the type are the
-                # macro layer's: `batchId0` is spelled out by the lookahead
-                # bindings, the flag guard and every `access_address` in the
-                # body, and it is `size_t` because it is compared against
-                # `numElements`.
                 from tensorforge.backend.pir.core import (SIZE,
                                                           Uniformity)
-                # Neither `extern` nor `ctype`.  The name is nobody's business
-                # now that every reader of the index takes it as an operand,
-                # and the width is the induction value's own -- an override on
-                # the header widened the variable and left everything computed
-                # from it back at `int32_t`.
+                # Neither `extern` nor `ctype`.  The name is nobody's business,
+                # since every reader of the index takes it as an operand, and
+                # the width is the induction value's own -- an override on the
+                # header would widen the variable and leave everything computed
+                # from it at `int32_t`.
                 # Each wrapped shared transfer's tokens ride the loop: the
                 # peel's are the first iteration's arguments, the tail's are
                 # yielded as the next one's, and the wait at the consumer names
@@ -1191,8 +1171,8 @@ class BatchLoop(AbstractInstruction):
                         # inside that mentions `batchId0` has to say so as an
                         # operand, or the IR sees a computation with no inputs and
                         # hoists it out of the loop that defines the thing it
-                        # reads -- which is what happened the first time, silently
-                        # and only in the generated text.
+                        # reads -- silently, with only the generated text to
+                        # show it.
                         self._induction = loop.induction
                         try:
                             with BatchLoop.batch_indices(writer) as bound:
@@ -1332,7 +1312,7 @@ class BatchLoop(AbstractInstruction):
             # next element is whatever the queue answers and there is nothing
             # to compute it from ahead of time.  So an address naming
             # `batchId1` in here is naming the *prologue's* binding, which is a
-            # different element -- and it now says so rather than resolving
+            # different element -- and it says so rather than resolving
             # against a name that happens to be in scope.
             try:
                 with BatchLoop.batch_indices(builder) as bound:
@@ -1391,7 +1371,7 @@ class BatchLoop(AbstractInstruction):
                 f'a block of {self._mults_per_block} multiplications does not '
                 f'hold whole groups of {self._group_size}')
         # The group a wave-collective instruction asked for is traversed as
-        # IR; the block-wide group keeps the text it has always been emitted as.
+        # IR; the block-wide group is emitted as text.
         if (self._narrow_group and self._mode is LoopMode.PERSISTENT
                 and hasattr(writer, 'for_')):
             self._gen_grouped_ir(writer)
@@ -1420,10 +1400,10 @@ class BatchLoop(AbstractInstruction):
         """`_gen_grouped`'s persistent traversal, as IR.
 
         Spelled as text, the lane, the mask, the element and the lookahead
-        clamps were statements that declared no accesses, so every pass
-        reasoning about the body -- the scratch check among them -- had to
-        assume each touched everything.  As values they are arithmetic and one
-        declared read of the flags, and the loop is one the IR can see.
+        clamps would be statements that declare no accesses, so every pass
+        reasoning about the body -- the scratch check among them -- would have
+        to assume each touches everything.  As values they are arithmetic and
+        one declared read of the flags, and the loop is one the IR can see.
 
         The start stays text, as it does for the per-row loop: a bound carries
         no uniformity then, and the induction states it -- the group's, which
@@ -1447,7 +1427,8 @@ class BatchLoop(AbstractInstruction):
             row = writer.op('add', SIZE, group, lane, hint='row')
             # One named declaration, because every global write spells the
             # mask as text (`Symbol.store`), and the flags read folded into it
-            # as the text had it: `&&` keeps a row past the end from reading.
+            # as the text path folds it: `&&` keeps a row past the end from
+            # reading.
             cond = '{0} < ' + self._num_elements()
             kind, space = Effect.NONE, None
             if self._flags is not FlagMode.ABSENT:
@@ -1472,9 +1453,9 @@ class BatchLoop(AbstractInstruction):
                     # No block around the body: the mask holds only the global
                     # writes, so every read runs on every trip -- the case
                     # `_emit_body` fences when the flags are absent, and here
-                    # it is every case.  Without it, local_flux on gfx942 held
-                    # the staged operators across the loop: 332 VGPRs and 76
-                    # AGPRs against 232 and 40 for the per-row loop.
+                    # it is every case.  Without it, local_flux on gfx942 would
+                    # hold the staged operators across the loop: 332 VGPRs and
+                    # 76 AGPRs against 232 and 40 for the per-row loop.
                     fence = lexic.loop_body_fence()
                     if fence:
                         writer(fence, accesses=())

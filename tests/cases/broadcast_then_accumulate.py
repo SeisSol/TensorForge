@@ -7,15 +7,15 @@ The shape the boundary-condition kernels produce: a rank-1 temporary spread
 across a rank-2 destination, accumulated onto, and read back.
 
 The operand carries only index 0, so nothing in the operation mentions index
-1.  Deriving the operation's rank from the operands alone dropped it: the loop
-nest ran over ``n0``, one slot per lead block was written where three were
-needed, and the broadcast never happened.  The accumulation that follows then
-took its array size from the rank-1 image left behind and came out with one
-slot where the store walks three --- one array too short, one too long, which
-is how this shows up in a dump.
+1.  Deriving the operation's rank from the operands alone would drop it: the
+loop nest would run over ``n0``, write one slot per lead block where three are
+needed, and never broadcast.  The accumulation that follows would then take
+its array size from the rank-1 image left behind and come out with one slot
+where the store walks three --- one array too short, one too long, which is
+how this shows up in a dump.
 
-Neither is visible in the numbers: the host interpreter keeps registers in an
-unbounded dict, so a short array reads and writes past its end and still
+Neither would be visible in the numbers: the host interpreter keeps registers
+in an unbounded dict, so a short array reads and writes past its end and still
 produces the right answer, while on a GPU ``float r5[1]`` is one register and
 index 2 is whatever follows it.  ``tools/host/check_structure.py`` compares a
 store's indices against the declared length, which is what catches it.

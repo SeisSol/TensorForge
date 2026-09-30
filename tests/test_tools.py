@@ -3,21 +3,21 @@
 # SPDX-License-Identifier: MIT
 """The diagnostics still measure what they claim to.
 
-`tools/ir_opacity.py` spent an unknown number of commits reporting every case
-in the corpus as a generation failure.  Not because anything failed: its
-`_counting_optimize` wrapper names the parameters of `pir.optimize`, and
-`optimize` had gained an `explicit_simd` argument.  One `TypeError` per case,
-raised inside a `try` whose whole purpose is to keep a case that does not
-generate from stopping the sweep, and swallowed into a `did not generate:`
-list a hundred entries long.
+A diagnostic that reaches into generator internals can stop measuring without
+failing.  `tools/ir_opacity.py` wraps `pir.optimize` in `_counting_optimize`;
+were the wrapper to name the parameters rather than forward them, an argument
+added to `optimize` would raise one `TypeError` per case -- inside a `try`
+whose whole purpose is to keep a case that does not generate from stopping
+the sweep, so every case would be swallowed into a `did not generate:` list a
+hundred entries long.
 
-The output stayed plausible throughout.  It printed a table, a corpus line and
-a percentage; the percentage was of nothing.  A wrong number that looks like a
+The output would stay plausible throughout: a table, a corpus line and a
+percentage, the percentage of nothing.  A wrong number that looks like a
 number is the failure mode worth guarding, because nobody re-derives a
 diagnostic they have no reason to doubt.
 
-Five tools reach into generator internals -- `ir_opacity` patches
-`pir.optimize`, the four censuses wrap builder methods -- and all five can
+Six tools reach into generator internals -- `ir_opacity` patches
+`pir.optimize`, the five censuses wrap builder methods -- and all six can
 break exactly this way when the thing they wrap changes shape.  So the check
 is the same for all of them: run it, and insist it still saw the corpus.
 These are smoke tests, not assertions about the numbers.  Pinning the counts
@@ -74,14 +74,14 @@ def _snapshot_generates(backend: str) -> set:
 
 
 def test_ir_opacity_still_generates_the_corpus():
-    """The specific regression: `112 generated, 4 failed` became `0, 116`.
+    """The failure mode above: every case reported as not generating.
 
     What the tool reports as generated has to agree with what the corpus
     actually generates, which the snapshots already state.  Comparing against
     them rather than against a fraction of the corpus keeps the check exact
-    while the number of deliberately non-generating cases moves: the mixed
-    descriptor cases are seven of them, and a bound tight enough to catch a
-    broken wrapper before them is one they now trip.
+    while the set of cases that refuse to generate moves: a fixed bound tight
+    enough to catch a broken wrapper is one a handful of deliberate refusals
+    would trip.
     """
     out = _run("ir_opacity.py", "--cases")
     m = re.search(r"corpus: (\d+) cases x (\d+) targets, (\d+) generated, "
@@ -110,8 +110,8 @@ def test_ir_opacity_attributes_what_it_counts():
 
 
 def test_no_site_label_is_ambiguous():
-    """`__init__.py:gen_ir` named two different files and was the largest row
-    in the report.  A label that does not identify a file is not attribution."""
+    """A bare `__init__.py:gen_ir` can name two different files at once.  A
+    label that does not identify a file is not attribution."""
     out = _run("ir_opacity.py", "--sites")
     labels = re.findall(r"^(\S+\.py:\w+)\s", out, re.M)
     bare = [l for l in labels if l.startswith("__init__.py:")]
@@ -137,10 +137,10 @@ def test_the_censuses_still_see_something(tool, marker):
 def test_the_runner_agrees_with_the_suite():
     """`tools/syntax_check.py` and `test_syntax.py` read one list.
 
-    They did not.  The suite marked three ESIMD snapshots xfail with a reason;
-    the command-line runner knew nothing about them and printed three failures
-    every time.  A check with standing reds is a check nobody reads, which is
-    the whole reason the xfail table exists on the test side.
+    A runner that knew nothing of what the suite marks xfail would print those
+    snapshots as failures every time.  A check with standing reds is a check
+    nobody reads, which is the whole reason the xfail table exists on the test
+    side.
     """
     from harness import syntax
 
@@ -163,8 +163,7 @@ def test_every_mutation_still_applies():
 
     The harness prints `SKIPPED: the code has moved` when an anchor no longer
     matches, which is it working -- but in a list of a hundred and thirty the
-    line goes by, and the check it stood for is quietly gone.  Five had
-    accumulated by the time anyone counted.
+    line goes by, and the check it stood for is quietly gone.
 
     Only that each anchor is still findable, not that the mutation is caught:
     the full harness takes minutes and a test that slow gets deselected, while
@@ -178,23 +177,23 @@ def test_every_mutation_still_applies():
 
 
 def test_no_shared_access_costs_more_than_four_bank_cycles():
-    """The swizzle stopped being applied and nobody noticed for four commits.
+    """A swizzle that stops being applied is noticed nowhere else.
 
-    `_swizzle` asked whether the *source* symbol had a PIR buffer, as a proxy
-    for "every write to this window goes through `store`".  The proxy agreed
-    with the real question for `GlbToShrLoader` and never did for
+    If `_swizzle` asked whether the *source* symbol has a PIR buffer, as a
+    proxy for "every write to this window goes through `store`", the proxy
+    would agree with the real question for `GlbToShrLoader` and never for
     `StoreRegToShr`, whose source is a register and has no buffer by
-    construction; when the loader's bindings moved, every macro window quietly
-    stopped being permuted and 576 accesses went back to 32-way -- every lane
-    in one bank with a different address.
+    construction; a change to the loader's bindings would then quietly stop
+    every macro window being permuted and send its accesses to 32-way --
+    every lane in one bank with a different address.
 
-    Nothing failed.  The kernels were correct, the snapshots re-recorded
-    cleanly, and the only symptom was a number in a tool nobody had reason to
-    run.  So the number is a test now.
+    Nothing would fail.  The kernels stay correct, the snapshots re-record
+    cleanly, and the only symptom is a number in a tool nobody has reason to
+    run.  So the number is a test.
 
     A ceiling, not an exact count: the census moves whenever a case is added,
     and pinning it would mean re-recording on every unrelated change.  What
-    must not happen is a *class* of conflict reappearing.
+    must not happen is a *class* of conflict appearing.
     """
     import re
 

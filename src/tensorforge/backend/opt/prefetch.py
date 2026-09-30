@@ -63,9 +63,9 @@ class PrefetchBatch(AbstractTransformer):
                 # Outside the flag guard: the address is arithmetic on a
                 # kernel argument and a clamped index, and nothing here
                 # dereferences the pointer it asks for.  Inside, a masked
-                # element issued no hint -- and next to `WrapLoads`, whose
-                # unguarded prefix it preceded, the guard could not be one
-                # block and the kernel did not generate.
+                # element would issue no hint -- and next to `WrapLoads`,
+                # whose unguarded prefix it precedes, the guard could not be
+                # one block and the kernel would not generate.
                 instr.mark_unguarded(hints)
 
     # ------------------------------------------------------------------ #

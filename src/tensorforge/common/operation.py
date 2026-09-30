@@ -92,9 +92,9 @@ class Operator(metaclass=ABCMeta):
 
   `ABCMeta` is the point: without it `@abstractmethod` only sets a flag that
   nothing reads, so an incomplete subclass instantiates happily and fails at
-  the first call instead of at construction.  Seven concrete `format` methods
-  carried the decorator while also being the implementation, which is a
-  contradiction that only stayed harmless because nothing enforced it.
+  the first call instead of at construction.  So a method that is an
+  implementation carries no `@abstractmethod`: under `ABCMeta` its class
+  could not be instantiated.
   """
 
   def absorbing(self):

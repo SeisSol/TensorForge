@@ -46,9 +46,10 @@ def _banded(parts=1):
 
 
 def test_the_trivial_convention_is_the_default():
-    """Nothing states `storage_parts` today, so the default is what the whole
-    corpus is generated under; if it were anything but one, every existing
-    kernel would change address arithmetic on the way past this."""
+    """One part per element unless a caller or a prepared order says
+    otherwise (`MultilinearInstruction._offer_order`); were the default
+    anything but one, every kernel that says nothing would change address
+    arithmetic on the way past this."""
     assert _dense().storage_parts == 1
     assert DataView(shape=[8, 4], permute=None).elem_parts == 1
     assert DataView(shape=[8, 4], permute=None).get_dim_strides() == [1, 8]

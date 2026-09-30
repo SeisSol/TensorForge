@@ -155,9 +155,9 @@ def test_a_transpose_is_swaps_and_merges():
 
 
 def test_the_assembled_exchange_is_emitted_now(monkeypatch):
-    """`laneMerge` is what unblocked it: the regions are one lane out of every
-    `ext`, no `dppUpdate` mask expresses that, and a ternary on the lane id
-    does -- one the runtime's own transpose already writes eight times.
+    """`laneMerge` is what makes it emittable: the regions are one lane out of
+    every `ext`, no `dppUpdate` mask expresses that, and a ternary on the lane
+    id does -- one the runtime's own transpose already writes eight times.
 
     So a width the runtime has no `transpose*` for stays in registers instead
     of falling to the trip."""
@@ -295,8 +295,8 @@ def test_an_unpacked_operand_costs_no_extracts():
 
 
 def test_what_refuses_a_packed_operand_is_the_route_and_not_a_literal():
-    """The refusal is derived now: the lead operand's route to the fragment is
-    the trip through memory, and `takes` says no emitter writes it.  When one
+    """The refusal is derived: the lead operand's route to the fragment is the
+    trip through memory, and `takes` says no emitter writes it.  When one
     does, the offer follows without a condition being edited -- which is the
     difference between this and a width the strategy layer names."""
     from tensorforge.backend.instructions.compute.primitives import amd
@@ -348,7 +348,7 @@ def _flat_lead(wave):
 
 @pytest.mark.parametrize('width', [2, 4])
 def test_unpacking_does_not_close_the_lead_operand_s_gap(width):
-    """The correction that matters, and it is the operand `lead_width` packs.
+    """The operand that matters is the one `lead_width` packs.
 
     Its low bits sit inside the register and the fragment wants the leading
     dimension across the lanes, so moving them into slots is the wrong
@@ -366,8 +366,8 @@ def test_unpacking_does_not_close_the_lead_operand_s_gap(width):
 
 @pytest.mark.parametrize('width', [2, 4])
 def test_so_the_trip_is_what_answers_it(width):
-    """Which gives the staged rung the case it was built for, and corrects
-    the reading that it had none."""
+    """Which gives the staged rung the case it is built for: nothing cheaper
+    closes this gap."""
     indices = _indices(64)
     route = relayout.reach(_packed_lead(width, 64), _flat_lead(64), 4,
                            indices, wave=64)

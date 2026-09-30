@@ -18,9 +18,9 @@ from .hints import cache_hint, readers
 def _hint_allowed(loader) -> bool:
   """Whether a load from global memory may take the cache hint.
 
-  Where it is the only user of its source, as it always was.  With
-  `Options.hint_outputs` also where it is the only *reader*: the one read of a
-  `+=` destination, whose other users only write it.
+  Where it is the only user of its source.  With `Options.hint_outputs` also
+  where it is the only *reader*: the one read of a `+=` destination, whose
+  other users only write it.
   """
   src = loader._src
   if len(src.get_user_list()) == 1:
@@ -216,9 +216,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     work-items: work-item `y` owns lanes `[y * lanes, (y + 1) * lanes)`, and
     those are contiguous granules, so its share begins at `y * lanes`.
 
-    This is text rather than a PIR value, and that is why it had to be said
+    This is text rather than a PIR value, and that is why it has to be said
     here: the transfer is built by the macro layer and never passes the
-    emitter that would have refused `item.get_local_id(0)`.  It reached the
+    emitter that would refuse `item.get_local_id(0)`.  It would reach the
     generated kernel as an ordinary subscript instead -- an address that is
     wrong and compiles.
     """
@@ -252,9 +252,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     src_real_shape = self._tensor.bbox.sizes()
     if self._verbatim:
       # One contiguous run of `storage_volume` scalars.  Counted in elements,
-      # as the other branches do, the copy stopped at the first part of a
+      # as the other branches do, the copy would stop at the first part of a
       # two-part operand: 3136 of 6272 scalars for a split 56x56, and the
-      # kernel multiplied by whatever the arena held behind them.
+      # kernel would multiply by whatever the arena holds behind them.
       volume = self._tensor.storage_volume()
       shape = list(self._tensor.get_actual_shape())
       self._dest.data_view = DataView(shape=shape, permute=None,
@@ -458,7 +458,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       # Every access sixteen bytes, so every access bypasses L1.  The whole
       # rounds first, then the one partial round: the lanes that still have a
       # full access, and then the single lane whose access straddles the end,
-      # which zero-fills the rest.  Two guards where the stepping had two
+      # which zero-fills the rest.  Two guards where the stepping has two
       # narrower passes and a scalar tail -- and the point is not that there
       # are fewer of them.
       pos = (length // (self._num_threads * wide)) * wide
@@ -547,7 +547,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     """`lanes` narrows the transfer's own register without touching the claim
     the fill leaves on the image.
 
-    Two different statements that used to be one number.  The register is what
+    Two different statements, and not one number.  The register is what
     this work-item moves in one go; the claim is how the *image* is spread
     once the fill is done, which every later read of it reports.  A tail chunk
     narrows the first and must not touch the second -- two fills recording
@@ -562,13 +562,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       else:
         typeprefix = ''
 
-      # `_use_cuda_memcpy` used to gate this, which meant every non-NVIDIA
-      # transfer wrote the window as raw text -- `s0[...] = glb_load(...)`
-      # with the address built by `access_address`, never passing through
-      # `store`.  Two consequences, and the second is the one that matters:
-      # nothing could see what the transfer touched, and a permuted window was
-      # read through `load` and written around it.  The reads applied the
-      # swizzle and the writes did not.
+      # Not gated on `_use_cuda_memcpy`: gated, every non-NVIDIA transfer
+      # would write the window as raw text -- `s0[...] = glb_load(...)` with
+      # the address built by `access_address`, never passing through `store`.
+      # Two consequences, and the second is the one that matters: nothing
+      # could see what the transfer touches, and a permuted window would be
+      # read through `load` and written around it -- the reads applying the
+      # swizzle and the writes not.
       structured = self._structured_copy(writer)
       if structured and self._use_cuda_memcpy:
         # One `copy.async` per hop, carrying the hop's extent.  The vector
@@ -578,9 +578,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # The same claim the synchronous branch below records.  A `copy.async`
         # distributes its destination exactly as a load-and-store pair does --
         # the engine moves the bytes, not the mapping -- so leaving it unsaid
-        # here made the answer depend on which transfer the target happens to
-        # use.  66% of the staged reads on CUDA had no claim behind them for
-        # that reason; see `tools/staging_census.py`.
+        # here would make the answer depend on which transfer the target
+        # happens to use.
         self._dest._record_linear_layout(dst_offset, increment,
                                          self._lane_span(), writer)
         dst_buf = self._destination_buffer(writer)
@@ -591,8 +590,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
               _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n,
               zfill=_z, predicate=_p))
       elif structured:
-        # No async engine, so the transfer is a load and a store -- which is
-        # what it always was, spelled in a way every pass can read.
+        # No async engine, so the transfer is a load and a store, spelled in
+        # a way every pass can read.
         from tensorforge.backend.pir.core import (LaneAxis, RegisterLayout,
                                                    ScalarType)
         fpt = self._dest.get_fptype()
@@ -605,11 +604,11 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # Said on the *destination* as well, not only on the value in flight.
         # A later read of this image is `load_linear`, whose address has no
         # lane term at all -- it reports what the fill recorded and can derive
-        # nothing.  Stating the claim only on the loaded value left the symbol
-        # unknown, so every consumer of the staged image had to fail closed:
-        # invisible under SPMD, where unknown costs precision, and fatal under
-        # an explicit vector, where a declaration cannot be written without a
-        # distribution.
+        # nothing.  Stating the claim only on the loaded value would leave the
+        # symbol unknown, so every consumer of the staged image would have to
+        # fail closed: invisible under SPMD, where unknown costs precision, and
+        # fatal under an explicit vector, where a declaration cannot be written
+        # without a distribution.
         #
         # Same call `store_linear` makes for the other fill path, so the two
         # cannot record different claims about the same shape.
@@ -640,9 +639,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       # Only on the destination.  Applying it to both sides is the same
       # rescaling of an address whose rows are still `read` long, which reads
       # the source at the padded stride and copies the wrong elements -- one
-      # `k9` GEMM at `stage_row_bytes` 16 came out with a checksum off in the
-      # fourth digit, and every value in it was a real number from the wrong
-      # place, which is the failure that does not look like one.
+      # `k9` GEMM at `stage_row_bytes` 16 would come out with a checksum off
+      # in the fourth digit, and every value in it a real number from the
+      # wrong place, which is the failure that does not look like one.
       if linscale is None:
         indexwrapper = lambda x: x
       else:
@@ -703,32 +702,30 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       return False
     return self._destination_buffer(writer) is not None
 
-  # `will_be_structured` lived here: `_structured_copy` asked before this body
-  # has bound anything, which is what `_swizzle` needs and cannot have.  The
-  # question is asked from inside `writer.alloc`, the call that binds the
-  # destination, so at that moment neither end is bound and the answer is no
-  # for every transfer in the corpus -- and the same transfer says yes three
-  # times afterwards.  That ordering, not anything about the copies, is why 92
-  # of the 94 unpermuted windows are unpermuted, and 63 of them would take a
-  # real swizzle (47 of those `xor32`).
+  # `_swizzle` needs `_structured_copy`'s answer before this body has bound
+  # anything, and cannot have it: the question is asked from inside
+  # `writer.alloc`, the call that binds the destination, so at that moment
+  # neither end is bound and the answer is no for every transfer in the corpus
+  # -- and the same transfer says yes three times afterwards.  That ordering,
+  # not anything about the copies, is why 92 of the 94 unpermuted windows are
+  # unpermuted, and 63 of them would take a real swizzle (47 of those `xor32`).
   #
   # Predicting the answer instead does not work: `Addressing.NONE` is not the
   # discriminator, and a rolled or pipelined transfer is emitted in a body its
-  # pointer bindings do not reach.  Guessing yes there is caught rather than
-  # shipped -- `_check_swizzles_are_total` refused seven bodies -- but caught
-  # is not fixed.  The fix is to decide the permutation once the body exists,
-  # which means applying it where the address is *emitted* rather than where it
-  # is built; `pir.banks` was written against exactly that point.
+  # pointer bindings do not reach.  Guessing yes there would be caught rather
+  # than shipped -- `_check_swizzles_are_total` refuses such a body -- but
+  # caught is not fixed.  The fix is to decide the permutation once the body
+  # exists, which means applying it where the address is *emitted* rather than
+  # where it is built; `pir.banks` is written against exactly that point.
 
   def _destination_buffer(self, writer):
     """The value this transfer fills.
 
     Not the symbol's for a rotating buffer: that one addresses the stage the
     consumers read, and writing through it would overwrite the data they are
-    about to use.  The write window is a value of its own now, which is what
-    lets a rotating transfer stay on the structured path -- rotation and
-    `copy.async` used to exclude each other, and rotation is what the wrap
-    pass needs.
+    about to use.  The write window is a value of its own, which is what lets
+    a rotating transfer stay on the structured path -- and rotation is what
+    the wrap pass needs.
     """
     if self.rotates():
       return self.write_buffer(writer)
@@ -845,16 +842,15 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       # TODO: box better?
       total_size = self._src.obj.spp.count_nz()
 
-      # The width comes from the *source*, and only from the source.  An
-      # earlier version took the minimum over both ends, which was wrong in a
-      # way that quietly disabled the whole path: the destination is a
-      # register array in the private address space, where AMDGPU interleaves
-      # the lanes at dword granularity, so no alignment of a private address
-      # names a contiguous 16 bytes and asking that end to prove one can only
-      # ever answer "4".  The register side is spelled with the relaxed
-      # vector type instead -- legal at any alignment, split by the compiler
-      # if the array survives to be addressed at all, and free when it is
-      # promoted, which is the case that matters.
+      # The width comes from the *source*, and only from the source.  The
+      # minimum over both ends would quietly disable the whole path: the
+      # destination is a register array in the private address space, where
+      # AMDGPU interleaves the lanes at dword granularity, so no alignment of
+      # a private address names a contiguous 16 bytes and asking that end to
+      # prove one can only ever answer "4".  The register side is spelled with
+      # the relaxed vector type instead -- legal at any alignment, split by
+      # the compiler if the array survives to be addressed at all, and free
+      # when it is promoted, which is the case that matters.
       #
       # So what is being decided here is the width of the *global* read, which
       # is the access with a real hardware alignment requirement.
@@ -863,13 +859,11 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       hops, tail = vectorize.plan_hops(total_size, self._num_threads, widths)
 
       for i, g in hops:
-        # The staging temporary was a C++ name, `v{i}`, declared by the read
-        # and consumed by the write one line later.  Passing the value
-        # instead removes the declaration -- and with it the reason the
-        # `{ }` around this instruction has to stay, since `flatten_scopes`
-        # keeps any region whose raw text declares a name.  Those braces
-        # were 427 blocking nodes: an opaque block head makes the async
-        # scheduler drop its state and nothing reorders across one.
+        # The staged value is passed on as a value rather than through a C++
+        # name.  A named temporary needs a declaration, and `flatten_scopes`
+        # keeps any region whose raw text declares a name: an opaque block
+        # head, across which the async scheduler drops its state and nothing
+        # reorders.
         staged = self._src.load_linear(writer, self._context, None, i, g,
                                        threads=self._num_threads)
         self._dest.store_linear(writer, self._context, staged, i, g,
@@ -878,15 +872,13 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
       if tail:
         # Fewer than `num_threads` elements, so some lanes have nothing to
-        # read.  Emitted unguarded, which is what the `range` loop did by
-        # accident and what this now does on purpose: the lanes past the end
-        # read into the neighboring matrix of the batch and their registers
-        # are never consumed.  It is still a read past the tensor -- 23 of 32
+        # read.  Emitted unguarded, on purpose: the lanes past the end read
+        # into the neighboring matrix of the batch and their registers are
+        # never consumed.  It is still a read past the tensor -- 23 of 32
         # lanes for a 9-element operand -- and at the last matrix in the batch
         # there is no neighbor.  Guarding it is a decision about the buffer,
-        # not about the width, so it is left where it was rather than changed
-        # under cover of this one; `_write_datatransfer` already predicates
-        # its own tail and is the shape to copy when that decision is made.
+        # not about the width; `_write_datatransfer` already predicates its
+        # own tail and is the shape to copy when that decision is made.
         self._dest.store_linear(
             writer, self._context,
             self._src.load_linear(writer, self._context, None,
@@ -980,8 +972,9 @@ class LoadWait(MemoryInstruction, LoadInstruction):
         # iteration arguments the previous iteration yielded -- the peel's on
         # the first -- and after it the loop's results.  Naming them is what
         # lets `asyncmem` count: each wait retires its own group and leaves
-        # the younger ones in flight, where a drain retired all of them, and
-        # `local_flux` waited for all five buffers before its first product.
+        # the younger ones in flight, where a drain would retire all of them
+        # -- `local_flux` would wait for all five buffers before its first
+        # product.
         writer.wait(carried[-1], *carried[:-1])
         return
       writer.wait()

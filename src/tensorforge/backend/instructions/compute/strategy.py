@@ -128,11 +128,11 @@ def lead_layout(threads: int, width: int) -> Optional[BitLayout]:
     """How the lead operand holds the `threads` elements a fragment covers.
 
     Derived where the plan is made, from the index the emitter will build.
-    That is the whole of it: the distribution has always been derivable from
-    the access -- `layout_of` does exactly this and `LeadIndex.layout()` is
-    what it reads -- but every caller of it sits inside the emission, so by
-    the time a layout exists the arrangement has been chosen and an operand
-    in the wrong one can only be refused.  Asking `LeadIndex` here rather than
+    That is the whole of it: the distribution is derivable from the access --
+    `layout_of` does exactly this and `LeadIndex.layout()` is what it reads --
+    but every caller of `layout_of` sits inside the emission, so by the time
+    a layout exists there the arrangement has been chosen and an operand in
+    the wrong one can only be refused.  Asking `LeadIndex` here rather than
     writing a `LaneAxis` out by hand is what keeps the plan's reading and the
     emitter's the same reading.
 
@@ -154,16 +154,16 @@ def is_contraction(operands: int) -> bool:
     an `A` and a `B`, and a product of three or more operands has no such
     split, so only the nest walks it.
 
-    The lead width used to be a second condition here, refusing every
-    arrangement on every target at once.  That was true of all of them and
-    owned by none, and the reasons were not the same reason -- a matrix core
+    The lead width is not a second condition here.  Refusing a packed operand
+    for every arrangement on every target at once would be a refusal owned by
+    none of them, and the reasons are not the same reason -- a matrix core
     cannot take a packed operand because the fragment wants those elements
     across the lanes, a broadcast chain because it indexes an element per lane
     and has been given no conversion.  A shared refusal also cannot lift for
     one target: the moment a route is emitted somewhere, the condition here
     would have to grow a vendor it does not know.  So each `strategies`
-    answers for its own arrangements now, and this asks only what is true of
-    the operation itself.
+    answers for its own arrangements, and this asks only what is true of the
+    operation itself.
     """
     return operands == 2
 

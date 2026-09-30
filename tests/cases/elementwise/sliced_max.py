@@ -8,10 +8,10 @@ two are bounds that fold by a maximum.  The maximum reads two *slices*, views
 with a slicing offset of 17 columns, into a temporary that a multilinear then
 copies back through a view with the same offset.
 
-The elementwise operation used to index its operands by their box alone and
-drop the offset, so it read columns 0 and 1 -- which the sum had just
-overwritten -- while the store back applied the 17.  Every other entry came
-out right, so only a check on the two bound columns saw it.
+The elementwise operation has to index its operands by box *and* offset.  By
+the box alone it would read columns 0 and 1 -- which the sum has just
+overwritten -- while the store back applies the 17.  Every other entry would
+come out right, so only a check on the two bound columns sees it.
 """
 
 import numpy as np

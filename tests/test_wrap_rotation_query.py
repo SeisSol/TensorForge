@@ -8,9 +8,9 @@ body exists -- `ShrMemOpt` sizes the arena long before any PIR pass runs.  So
 something has to predict what `wrap_prefetch` will say, and the tempting thing
 is a second predicate written to match it.
 
-That is the failure this codebase keeps paying for: two spellings of one rule,
-agreeing until one of them is edited.  `_can_swap` and `can_reorder` had
-already drifted by the time they were noticed.
+That is the failure to avoid: two spellings of one rule, agreeing until one of
+them is edited.  `_can_swap` calls `can_reorder` rather than restating it for
+the same reason.
 
 `assume_rotated` avoids it by asking the pass.  It drops exactly one refusal --
 the one about *space* rather than legality -- and leaves every other check in

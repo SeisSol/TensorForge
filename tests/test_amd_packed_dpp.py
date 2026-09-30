@@ -11,12 +11,12 @@ Two of them, both one row-share move followed by packed FMAs:
 * lead width above one -- the lanes hold pairs of rows and pairs of
   contraction steps, and one move carries two steps.
 
-Where the move does not repay, the chain stays fused, at width one as it was
-and at width two per component.  Numbers for `local_flux` (ROCm 7.2, IGC-free
-counts from `hipcc -S`): gfx1251 5892 instructions fused, 5591 with column
-pairs; at lead width two 6085 through the nest, 4599 through the packed chain,
-161 VGPRs.  The `pin` after each row is what keeps those VGPRs: without it the
-moves of a whole body came first and gfx1251 needed 740.
+Where the move does not repay, the chain stays fused, at width one as a plain
+chain and at width two per component.  Numbers for `local_flux` (ROCm 7.2,
+IGC-free counts from `hipcc -S`): gfx1251 5892 instructions fused, 5591 with
+column pairs; at lead width two 6085 through the nest, 4599 through the packed
+chain, 161 VGPRs.  The `pin` after each row is what keeps those VGPRs: without
+it the moves of a whole body would come first and gfx1251 would need 740.
 """
 
 from __future__ import annotations
@@ -76,10 +76,10 @@ def test_where_a_pair_takes_two_moves_the_chain_stays_fused():
 
 
 def test_a_packed_lead_operand_takes_the_dpp_chain():
-    """At lead width two the nest used to broadcast every `B` element with a
-    lane read or a swizzle.  The DPP chain now moves a lane's pair of
-    contraction steps once per row, and each step feeds both rows of the
-    accumulator pair."""
+    """At lead width two the nest would broadcast every `B` element with a
+    lane read or a swizzle.  The DPP chain moves a lane's pair of contraction
+    steps once per row, and each step feeds both rows of the accumulator
+    pair."""
     src = _kernel('local_flux', 'gfx942', width=2)
     assert PAIR_MOVE.search(src)
     assert re.search(r'_acc \+= \(\(v\d+_bc\[[01]\]\) \* v\d+_data\)', src)
@@ -87,7 +87,7 @@ def test_a_packed_lead_operand_takes_the_dpp_chain():
 
 
 def test_without_the_move_the_wide_chain_is_left_to_the_nest():
-    """gfx1150 has no packed FMA, and the chain fused per component ran 7 %
+    """gfx1150 has no packed FMA, and the chain fused per component runs 7 %
     behind the nest there (`FUSED_WIDE`): at lead width two the products stay
     the nest's -- vectors of rows, `B` broadcast -- and no DPP chain is
     emitted."""
@@ -110,7 +110,7 @@ def _fused_order(order, name, arch, width=1):
 def test_the_fused_chain_walks_rows_with_the_same_products():
     """The row order emits what the column order emits -- the same fused
     products, the same count -- and pins each row's accumulators, which the
-    column order never needed: there every `A` value was read first and held
+    column order never needs: there every `A` value is read first and held
     for the whole chain.  At lead width two with the fused wide chain
     switched on, which it is not by default."""
     for width in (1, 2):
@@ -145,8 +145,8 @@ def test_the_order_weighs_what_the_columns_would_hold():
 
 def test_an_amd_block_keeps_its_threads_at_lead_width_two():
     """NVIDIA holds the mults and halves the block; on AMD the halved block
-    was measured slower (gfx1150, `local_flux`: 242 against 153 ns an
-    element), so the lanes a mult covers no longer shrink the block there."""
+    measures slower (gfx1150, `local_flux`: 242 against 153 ns an element),
+    so the lanes a mult covers do not shrink the block there."""
     from tensorforge.common.basic_types import Datatype
     from tensorforge.generators.generator import RegmaxBlockPolicy
 

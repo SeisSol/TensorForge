@@ -131,9 +131,9 @@ def test_an_operator_built_per_step_does_not_break_the_run():
 
     The frontend builds one operator object per use, so a run that reduces
     once per step holds a different instance in every chunk while nothing
-    about what the body computes differs.  Compared by identity there is no
-    run at all -- which is how the chunk of 362 operations that SeisSol's
-    damage step states four times stayed written out in full.
+    about what the body computes differs.  Compared by identity there would
+    be no run at all, and the chunk of 362 operations that SeisSol's damage
+    step states four times would stay written out in full.
     """
     descrs = flat([step(k) + reduce_max(k) for k in range(4)])
     runs = find_repeats(descrs)
@@ -234,9 +234,9 @@ def test_a_longer_run_wins_over_a_shorter_one():
 def test_the_hashed_search_finds_what_comparing_every_skeleton_finds():
     """Chunks are compared by a hash of per-descriptor signatures, and a
     skeleton is built only where the hashes agree.  Building one per chunk and
-    period took SeisSol's damage step (1787 operations) over an hour before a
-    line was generated; the runs have to come out the same all the same, at
-    every period and with and without an arity bound."""
+    period would take SeisSol's damage step (1787 operations) over an hour
+    before a line is generated; the runs have to come out the same all the
+    same, at every period and with and without an arity bound."""
     import seissol_suite as suite
     from tensorforge.analysis import families
     from tensorforge.frontend.yateto import DescriptionReader

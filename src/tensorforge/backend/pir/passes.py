@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileContributor: David Schneller
 
-"""Pseudo-IR: verifier and the first three real passes.
+"""Pseudo-IR: the verifier and the passes.
 
 All passes are pure functions ``body -> body``.  Nothing mutates in place, so
 dumping between passes is a one-liner and a bad pass can never corrupt the
@@ -39,8 +39,9 @@ def verify(body: Tuple[Stmt, ...], strict: bool = True) -> List[str]:
 
     Returns a list of diagnostics.  With ``strict`` it raises on the first
     batch instead, which is what ``gen_ir`` should do in debug builds.
-    Legacy ``raw*`` statements are checked more loosely on purpose --- they are
-    opaque by construction, and a hard error there would just block migration.
+    Raw statements (``raw*``) are checked more loosely on purpose --- they are
+    opaque by construction, and a hard error there would reject every body
+    that uses one.
     """
     diag: List[str] = []
 
@@ -72,8 +73,8 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
     Only what the IR can resolve is checked.  The index of an access built
     through `Symbol.build_address` is an expression tree over loop counters
     with stated bounds, which is enough to bound it; an index that arrives as
-    raw text is opaque and passes silently.  Which accesses those are shifts
-    as the migration proceeds, so this reports what it can prove wrong rather
+    raw text is opaque and passes silently.  Which accesses those are depends
+    on how the body was built, so this reports what it can prove wrong rather
     than claiming coverage it does not have.
     """
     sizes: Dict[str, int] = {}
@@ -151,11 +152,11 @@ _NAMED = re.compile(r'\bv(\d+)_\w*\b')
 def _check_dangling_names(body: Tuple[Stmt, ...]) -> List[str]:
     """Raw text must not name a value that no statement defines.
 
-    During migration a value's *name* is often interpolated into text the IR
-    cannot rewrite.  `escapes` protects such a value from being folded,
-    eliminated or inlined --- but a pass that forgets the marker leaves the
-    text pointing at nothing, and the result is generated source that does not
-    compile.  Cheap to check, and it catches the whole class at once.
+    A value's *name* is often interpolated into text the IR cannot rewrite.
+    `escapes` protects such a value from being folded, eliminated or inlined
+    --- but a pass that forgets the marker leaves the text pointing at
+    nothing, and the result is generated source that does not compile.  Cheap
+    to check, and it catches the whole class at once.
     """
     defined = set()
     for s in walk_stmts(body):
@@ -215,9 +216,8 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # travels with the access and is checked for *sufficiency* here.
         #
         # Missing is the case worth catching.  A width chosen without anyone
-        # asking about alignment is exactly what the parked `for g in [4, 2,
-        # 1]` would have reintroduced, and it has no symptom until a tensor
-        # happens not to be padded.
+        # asking about alignment has no symptom until a tensor happens not to
+        # be padded.
         if s.op in (Op.LOAD, Op.STORE):
             carrier = s.target[:1] if s.op == Op.LOAD else s.args[1:2]
             wide = [t for t in carrier
@@ -273,8 +273,8 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
 
         # -- a barrier may not out-reach the region it sits in -------------- #
         #
-        # Legal iff every thread the barrier waits for actually gets here.  The
-        # check used to be "is this region divergent at all", which forbade a
+        # Legal iff every thread the barrier waits for actually gets here.
+        # Asking only "is this region divergent at all" would forbid a
         # multiplication-wide barrier inside a multiplication-wide loop -- a
         # rendezvous of exactly the threads that agree on the trip count, and
         # therefore fine.
@@ -497,18 +497,18 @@ def _operand_uniformity(x) -> Uniformity:
 def _entry_uniformity(s: Stmt) -> Uniformity:
     """Across how many threads is *entering* this statement's regions agreed?
 
-    This replaces a boolean "is it divergent".  Two levels could not express a
-    loop whose trip count is the same for every thread of one multiplication and
-    different between the multiplications sharing a block -- which is what a
-    batch loop is.  Such a loop is not divergent enough to forbid a
+    A level rather than a boolean "is it divergent": two levels cannot express
+    a loop whose trip count is the same for every thread of one multiplication
+    and different between the multiplications sharing a block -- which is what
+    a batch loop is.  Such a loop is not divergent enough to forbid a
     multiplication-wide barrier, and far too divergent to allow a block-wide
-    one; the boolean had to pick one answer and was wrong for the other.
+    one; a boolean would have to pick one answer and be wrong for the other.
     """
     if s.op == Op.IF:
         return _operand_uniformity(s.cond)
     if s.op == Op.FOR:
-        # The induction variable alongside the bounds.  A bound that is still
-        # raw text carries no uniformity, so the bounds alone answer `GRID`
+        # The induction variable alongside the bounds.  A bound that is raw
+        # text carries no uniformity, so the bounds alone answer `GRID`
         # for a loop over the batch, whose variable is
         # `threadIdx.y + blockDim.y * blockIdx.x` and therefore differs
         # between the rows of a block.  The induction states what the text
@@ -702,16 +702,16 @@ def _cse_key(s: Stmt, with_predicate: bool = True):
     # statements can agree on op, text and arguments and still land their
     # results in different lanes -- a broadcast is exactly that.  Merging them
     # would silently drop the relayout.  Untracked (`None`) only ever matches
-    # untracked, which is what every call site produces today.
+    # untracked.
     #
-    # The result *type* is there for the same reason, and `Op.CONST` is why it
-    # had to be: a constant carries its value in `attrs` and takes no
-    # arguments, so `const(0, INDEX)` and `const(0, float)` had identical keys
-    # and were merged.  Whichever survived decided the spelling for both, and
-    # `Datatype.literal` spells them differently -- a float accumulator seeded
-    # from an integer zero came out as `0_i32`.  For an operator whose neutral
-    # element is 0 that still computes the right answer; the same merge on an
-    # infinity would not.
+    # The result *type* is there for the same reason, and `Op.CONST` is why: a
+    # constant carries its value in `attrs` and takes no arguments, so without
+    # the type `const(0, INDEX)` and `const(0, float)` would have identical
+    # keys and be merged.  Whichever survived would decide the spelling for
+    # both, and `Datatype.literal` spells them differently -- a float
+    # accumulator seeded from an integer zero would come out as `0_i32`.  For
+    # an operator whose neutral element is 0 that still computes the right
+    # answer; the same merge on an infinity would not.
     return (s.op, tuple(k(a) for a in s.args), s.text, s.attrs,
             tuple((t.layout, t.type) for t in s.target)) + (
         (None if s.predicate is None else s.predicate.id,)
@@ -790,10 +790,10 @@ def load_cse(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     yields the same value only if nothing wrote ``r0`` in between --- so it
     needs an availability analysis, which is what this pass adds.
 
-    Until it exists, every `Access` the builder declares is inert: the model
+    Without it, every `Access` the builder declares would be inert: the model
     is there, but the gate in `cse` rejects anything with a memory effect
     before alias information is ever consulted, so declaring an access more
-    precisely changes nothing.  This is the pass that consumes the model.
+    precisely would change nothing.  This is the pass that consumes the model.
 
     Availability is killed by any conflicting write (`accesses_conflict`) and,
     for everything that is not thread-private, additionally by a barrier or an
@@ -876,8 +876,8 @@ _M_CLOBBER = int(Effect.WRITE | Effect.ATOMIC | Effect.UNKNOWN)
 class _Avail:
     """Availability map for `load_cse`, indexed by what a write can kill.
 
-    The plain dict version re-tested every live entry against every access of
-    every statement, so one kill cost O(|available|) and a body cost
+    A plain dict would re-test every live entry against every access of
+    every statement, so one kill would cost O(|available|) and a body
     O(n^2) --- on a fully unrolled 56x56x56 GEMM that is ~14k statements
     against ~2.3k live loads, i.e. millions of `accesses_conflict` calls.
 
@@ -885,8 +885,8 @@ class _Avail:
     space only for the same base or an unknown one, so the entries a write can
     reach are known from `(space, base)` alone.  Indexing on that pair turns
     the scan into a couple of set lookups and makes the pass linear in
-    practice.  The kill set is exactly the one the scan produced --- this is a
-    faster spelling of the same predicate, not a weaker one.
+    practice.  The kill set is exactly the one the scan would produce --- this
+    is a faster spelling of the same predicate, not a weaker one.
     """
 
     __slots__ = ('entries', '_by_space', '_by_base', '_nonregister')
@@ -1075,11 +1075,9 @@ def fold(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     ``mul(c1, c2)`` produces a constant that may then make ``add(x, 0)`` an
     identity, and applying an identity may hand a constant to a foldable op.
 
-    The identities are the ones the frontend used to apply inline while building
-    the expression tree (``optree.mul`` returned its other operand for a
-    multiplication by one, and so on) --- a rewrite that had to happen at
-    construction time because there was no pass to do it later.  They belong
-    here: the caller writes what it means, and the IR simplifies.
+    The identities -- a multiplication by one is its other operand, and so on
+    -- belong here rather than in the frontend's expression tree: the caller
+    writes what it means, and the IR simplifies.
 
     Conservative by construction: only ``pure`` region-free single-target
     statements are touched, division by a constant zero is left alone rather
@@ -1294,10 +1292,9 @@ def converge_crosslane(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     that lane executes it too.  Under `if (lead < 6)` the lanes from six on do
     not, and what the read returns there is the target's business: DPP with
     `bound_ctrl` gives zero on AMD, so `slice_offset_a` at lead width two on
-    gfx1150 lost `B`'s rows 12 to 15 -- the lanes that hold them are the ones
-    the guard turned off -- and came out wrong by 8.8.  `__shfl_sync` inside
-    the same branch names lanes that do not execute it, which CUDA leaves
-    undefined and sm_120 happened to answer.
+    gfx1150 would lose `B`'s rows 12 to 15 -- the lanes that hold them are
+    the ones the guard turns off.  `__shfl_sync` inside the same branch names
+    lanes that do not execute it, which CUDA leaves undefined.
 
     So a statement marked `crosslane` leaves each guard whose condition varies
     between lanes, together with what it reads, where what it reads can be
@@ -1419,13 +1416,12 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     Register arrays are counted as the slots they become once the compiler has
     unrolled the loops over them: each slot from its first access to its last
     (`_register_slot_events`) -- under SPMD.  Under an explicit vector they
-    are still whole for the whole body; see the note at the sweep.  They used to be a floor, every array whole for
-    the whole body, and that is what made the figure useless as a spill
-    predictor: `local_flux`'s four faces each keep an intermediate that is
-    dead before the next face starts, and the floor added all of them up --
-    3868 B at eight lanes for a kernel that fits in 255 registers without a
-    spill, while `chain_three`, which really does hold 518 floats at once,
-    came out lower.
+    are whole for the whole body; see the note at the sweep.  A floor --
+    every array whole for the whole body -- would make the figure useless as
+    a spill predictor: `local_flux`'s four faces each keep an intermediate
+    that is dead before the next face starts, and the floor adds all of them
+    up, for a kernel that fits in 255 registers without a spill, while
+    `chain_three`, which really does hold 518 floats at once, comes out lower.
 
     `explicit_simd` says whose registers are being counted, and the byte form
     is wrong on the wrong setting rather than merely imprecise.  See
@@ -1461,7 +1457,7 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     than as a value.  A broadcast of one lane's element is a *region* on Intel
     -- `r20.3<0;1,0>` -- so it occupies no register of its own, and the ISA
     says so: the order-6 derivative's simd32 build has 8033 scalar regions
-    and not one message that is not a spill.  Counted as values they were 1944
+    and not one message that is not a spill.  Counted as values they are 1944
     of the 3400 bytes a lane, 57 % of a figure that is compared against a
     register file.  Where the exchange is an instruction instead (`__shfl_sync`
     writes a register) the default stands.
@@ -1522,11 +1518,10 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     # An address offset is not a register.  `lane + 2800` feeds a load, and
     # the compiler puts the 2800 in the instruction's immediate (`LDG
     # [R+0xaf0]`, and the offset field on AMD) and keeps only `lane`.  Counted
-    # as a value each, the merged `local_flux` -- its offsets hoisted out of
-    # the loop over the faces by `licm`, so all of them live across it --
-    # peaked at 14864 B at eight lanes, 13868 B of it such offsets, for a
-    # kernel ptxas fits in 255 registers without a spill; written out, the
-    # same kernel peaked at 816 B.  So an integer `add`/`sub` of a value and a
+    # as a value each, the offsets of the merged `local_flux` -- hoisted out
+    # of the loop over the faces by `licm`, so all of them live across it --
+    # would make up nearly all of its peak, for a kernel ptxas fits in 255
+    # registers without a spill.  So an integer `add`/`sub` of a value and a
     # constant weighs nothing, and the value it offsets stays live as long as
     # the offset is used, since that is where the register actually is.
     #
@@ -1535,8 +1530,9 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
     # an integer is taken as `root * scale + offset`, every distinct `root *
     # scale` other than the root itself is one register, and the rest are
     # immediates (`_affine_costs`).  Without the scale, the prepared merged
-    # `local_flux` stayed at 14900 B for ptxas's 255 registers, and every lead
-    # width of two -- whose rows are `lane * 2 + c` -- read three times high.
+    # `local_flux` would still read far above ptxas's 255 registers, and every
+    # lead width of two -- whose rows are `lane * 2 + c` -- would read several
+    # times high.
     root, carrier = _affine_costs(order)
     for vid, keep in root.items():
         if vid in last:
@@ -1544,8 +1540,8 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
 
     # A sweep over interval ends rather than a sum per statement: the slots
     # below add thousands of intervals to a body of tens of thousands of
-    # statements, and the product was the cost.  Ends sort before starts at
-    # the same point, so two ranges that only touch are not both counted.
+    # statements, and the product would be the cost.  Ends sort before starts
+    # at the same point, so two ranges that only touch are not both counted.
     v_none = Value(id=-1, type=ScalarType(Datatype.I32))
     # What the target reads as an operand modifier holds no register of its
     # own; its source does, and that one is counted as usual.
@@ -1573,11 +1569,11 @@ def pressure(body: Tuple[Stmt, ...], in_bytes: bool = False,
         if by_file is not None:
             split[0].extend(slots)
     elif in_bytes:
-        # Under an explicit vector the array stays whole for the whole body,
-        # as it always was here.  Not because slots cannot be freed there but
-        # because nobody has checked that IGC frees them: `local_flux` spilled
-        # heavily on PVC even at 256 GRF, and the slot count says it fits in
-        # 128.  Until that is understood the warning keeps its old footing.
+        # Under an explicit vector the array stays whole for the whole body.
+        # Not because slots cannot be freed there but because nobody has
+        # checked that IGC frees them: `local_flux` spills heavily on PVC even
+        # at 256 GRF, and the slot count says it fits in 128.  Until that is
+        # understood the warning counts the whole array.
         floor = sum(register_bytes(v, explicit_simd) for v in values.values()
                     if isinstance(v.type, BufferType))
         raised = [(0, floor), (len(order), -floor)] if floor else []
@@ -1730,8 +1726,8 @@ def _register_slot_events(order, span, enclosing, values, reach):
 
     A slot is live from its first access to its last, extended out of any loop
     it is used in but was not first touched in, as a value is.  What cannot be
-    resolved is counted the way the array used to be, so the figure only moves
-    where the access says which slot it is:
+    resolved is counted conservatively, so the figure only narrows where the
+    access says which slot it is:
 
     * a runtime index touches every slot, for the whole innermost loop around
       it -- which slot a given iteration takes is not known here;
@@ -1876,10 +1872,10 @@ def register_bytes(v: Value, explicit_simd: bool = True) -> int:
         # reported that kernel as comfortable.
         #
         # Its whole volume: what the array occupies with every slot live.
-        # `pressure` no longer charges that for the whole body -- it counts
-        # the slots live at each point, `_register_slot_events` -- but a
-        # caller asking what one array costs still gets all of it.  Every
-        # other space is memory and costs no registers.
+        # `pressure` does not charge that for the whole body -- it counts the
+        # slots live at each point, `_register_slot_events` -- but a caller
+        # asking what one array costs gets all of it.  Every other space is
+        # memory and costs no registers.
         return (t.volume * t.elem.size()
                 if t.space is MemSpace.REGISTER else 0)
     if not isinstance(t, ScalarType):
@@ -1898,17 +1894,10 @@ def register_bytes(v: Value, explicit_simd: bool = True) -> int:
 #: A raw statement that introduces a C++ name.  What may follow the name is
 #: the whole question: `=` for an initializer, `;` for a bare declaration, `[`
 #: for an array --- and also `{` for brace initialization and `,` for a second
-#: declarator, both of which this missed.  10% of the declarations the corpus
-#: emits took one of those two forms, and every one of them was invisible to
-#: `flatten_scopes`, which then spliced away braces that were the only thing
-#: keeping two declarations of one name apart.
-#:
-#: Nothing had gone wrong yet because the misses were masked: the accumulator
-#: array `float v58[4][2]{};` matches on `[`, so the scope holding it was kept,
-#: and the `float v58_0{};` beside it survived by association.  Making the
-#: array a structured value removed the match and the braces went with it ---
-#: six declarations of one name, at one level, in a kernel that had compiled
-#: the day before.
+#: declarator.  10% of the declarations the corpus emits take one of those two
+#: forms, and a declaration this misses is invisible to `flatten_scopes`, which
+#: would then splice away braces that are the only thing keeping two
+#: declarations of one name apart.
 #:
 #: Over-matching here costs a pair of braces that could have been removed.
 #: Under-matching costs a kernel that does not compile, so the character class
@@ -1927,8 +1916,8 @@ def _declares(body: Tuple[Stmt, ...]) -> bool:
     or `if (...)`, and a name introduced there is scoped to the block it opens
     -- it cannot collide with anything in the enclosing scope, which is the
     only thing this predicate exists to prevent.  Reading the head as a
-    declaration kept 38 anonymous scopes alive across the corpus, every one of
-    them around an unrolled hop loop whose `i` was never visible outside it.
+    declaration would keep an anonymous scope alive around every unrolled hop
+    loop, whose `i` is never visible outside it.
     """
     for s in body:
         if s.regions:
@@ -1941,14 +1930,14 @@ def _declares(body: Tuple[Stmt, ...]) -> bool:
 def flatten_scopes(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     """Splice away anonymous `{ }` regions that cannot cause a redeclaration.
 
-    One of these used to wrap every instruction body, so that `value` or
-    `data0` from one instruction would not collide with the next.  Once the
-    names come from the shared allocator the braces are pure noise --- and
-    expensive noise: an opaque block head makes the async scheduler give up its
-    state, and nothing can be reordered across one.
+    Such a region keeps `value` or `data0` from one instruction from colliding
+    with the next.  Where the names come from the shared allocator the braces
+    are pure noise --- and expensive noise: an opaque block head makes the
+    async scheduler give up its state, and nothing can be reordered across
+    one.
 
-    Conservative on purpose: a region that still declares a name in raw text
-    keeps its braces.
+    Conservative on purpose: a region that declares a name in raw text keeps
+    its braces.
     """
     out: List[Stmt] = []
     for s in body:
@@ -2094,17 +2083,15 @@ def _reads_only(s: Stmt) -> bool:
 def _can_swap(earlier: Stmt, later: Stmt) -> bool:
     """May `later` move in front of `earlier`?
 
-    `schedule.can_reorder` answers the same question, and having two spellings
-    of it is how they grow apart: this one tested `later.movable` but not
-    `earlier.movable`, and `earlier`'s effect but not `later`'s, so a swap that
-    dragged a pinned statement *down* past a movable one was licensed.  Nothing
-    in the corpus hit it -- `cluster_loads` hoists reads, and a read that is
-    blocked by an allocation is blocked by def-use first -- but it was licensed
-    by the predicate rather than by the caller.
+    `schedule.can_reorder` answers the same question, and two spellings of it
+    grow apart: a copy here that tests `later.movable` but not
+    `earlier.movable`, and `earlier`'s effect but not `later`'s, would license
+    a swap that drags a pinned statement *down* past a movable one --
+    licensed by the predicate rather than by the caller.
 
-    Kept as a name because `cluster_loads` reads better for it, and because a
-    later caller may want a directional variant; if one does, it should say so
-    here rather than by omitting a check.
+    A name of its own because `cluster_loads` reads better for it, and
+    because a later caller may want a directional variant; if one does, it
+    should say so here rather than by omitting a check.
     """
     return can_reorder(earlier, later)
 
@@ -2116,8 +2103,8 @@ def cluster_loads(body: Tuple[Stmt, ...], max_pressure: int = 32,
     The generated bodies put every load immediately in front of its use, so the
     memory pipeline never sees more than one or two requests in flight.  This
     hoists independent reads together, which is the source-level version of the
-    prefetch idiom --- and it is the first pass that has to be *stopped* by
-    something, because every position gained costs a live value.
+    prefetch idiom --- and a pass that has to be *stopped* by something,
+    because every position gained costs a live value.
 
     Not in the default pipeline: whether it pays depends on what the vendor
     compiler already does with the same block, and that needs measurement on
@@ -2142,10 +2129,10 @@ def cluster_loads(body: Tuple[Stmt, ...], max_pressure: int = 32,
         out = out[:j] + [s] + out[j:i] + out[i + 1:]
 
     # Pressure is checked once for the whole region rather than per hoist:
-    # `pressure` is a full sweep, and calling it inside the loop made the pass
-    # quadratic on bodies with thousands of statements.  If the region ends up
-    # over budget the hoists are undone wholesale, which is coarse but keeps
-    # the pass linear in practice.
+    # `pressure` is a full sweep, and calling it inside the loop would make the
+    # pass quadratic on bodies with thousands of statements.  If the region
+    # ends up over budget the hoists are undone wholesale, which is coarse but
+    # keeps the pass linear in practice.
     if moved and pressure(tuple(out)) > max_pressure:
         return tuple(original)
     return tuple(out)
@@ -2174,21 +2161,21 @@ def optimize(body: Tuple[Stmt, ...], dump_hook=None,
     whole body, so it is not in the pipeline.
 
     `schedule.hoist_issues` and `schedule.sink_waits` are deliberately *not*
-    here.  Both are correct and both were measured on the corpus: between them
-    they move nothing but comments, on 15 of 232 outputs, and the mean
-    issue-to-wait distance goes 7.7 to 8.1 statements entirely through comments
-    changing places.  The schedule the macro layer produces is already at the
-    fixed point of those two greedy moves --- the wait sits immediately before
-    the read that needs it, and the issue sits immediately after the pointer
-    binding it reads.
+    here.  Both are correct, and on the corpus they move nothing but comments
+    between them, on 15 of 232 outputs, and the mean issue-to-wait distance
+    goes 7.7 to 8.1 statements entirely through comments changing places.
+    The schedule the macro layer produces is already at the fixed point of
+    those two greedy moves --- the wait sits immediately before the read that
+    needs it, and the issue sits immediately after the pointer binding it
+    reads.
 
     That is worth knowing rather than working around.  The distance that is
-    still missing is not reachable by any local swap: more than half the
-    transfers have five statements or fewer of cover, and getting more means
-    moving an issue across the loop back edge, which is a different
-    transformation with a distance parameter and a prologue.  When that pass
-    exists it will run here, and `schedule_async` after it, since the wait
-    counts describe the final issue order.
+    missing is not reachable by any local swap: more than half the transfers
+    have five statements or fewer of cover, and getting more means moving an
+    issue across the loop back edge, which is a different transformation with
+    a distance parameter and a prologue -- `wrap.wrap_prefetch`, which runs
+    after this pipeline where it is enabled, with `schedule_async` again after
+    it, since the wait counts describe the final issue order.
 
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have

@@ -96,7 +96,7 @@ def _meta_view(row, pool, tensors):
 
 def parse_meta(text, pool=None):
     """The multilinear operations of a kernel carrying a `tensorforge-meta`
-    line, or None for one that does not (generated before it existed)."""
+    line, or None for one that does not."""
     import json
     found = META.search(text)
     if found is None:
@@ -119,7 +119,7 @@ def parse_kernel(text, pool=None):
     """Every operation stated in one kernel's comment block, in order.
 
     From the `tensorforge-meta` line where the kernel has one, and from the
-    descriptor lines older kernels carry otherwise."""
+    descriptor lines otherwise."""
     pool = {} if pool is None else pool
     meta = parse_meta(text, pool)
     if meta is not None:

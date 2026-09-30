@@ -54,9 +54,9 @@ for r in results:
         print(f'    {line.strip()}')
 
 # `known` is reported apart from `ill-formed` for the same reason the suite
-# marks them xfail: three standing failures are how a check stops being read,
-# and the day one of them starts compiling is a thing to notice, not to miss
-# in a count that was already red.
+# marks them xfail: standing failures are how a check stops being read, and
+# the day one of them starts compiling is a thing to notice, not to miss in a
+# count that was already red.
 print(f'\n--- {kinds["ok"]} well-formed, {bad} ill-formed, '
       f'{kinds["known"]} known-bad, '
       f'{kinds["skipped"]} without a kernel section '

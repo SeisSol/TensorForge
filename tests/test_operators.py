@@ -3,22 +3,19 @@
 # SPDX-License-Identifier: MIT
 """The operator contract, checked on the host.
 
-Two things had gone wrong here and neither could fail a test, because neither
-had one.
+`Operator` is abstract through `ABCMeta`, and that is what gives
+`@abstractmethod` any effect: the decorator only sets `__isabstractmethod__`,
+and without the metaclass nothing reads it.  A concrete reduction operator
+marked abstract *on its own implementation* of `format` would then instantiate
+fine; under `ABCMeta` it is a `TypeError` on every case file that builds one.
+Both ends are pinned below.
 
-`Operator` was a plain class while its methods carried `@abstractmethod`.  The
-decorator only sets `__isabstractmethod__`; without `ABCMeta` nothing reads it.
-So the seven concrete reduction operators were each marked abstract *on their
-own implementation* of `format` -- a contradiction that instantiated fine and
-would have turned into a `TypeError` on every case file the moment anyone gave
-the base class a metaclass.
-
-`neutral()` answered without being told the type.  For `add` and `mul` that is
-fine.  For everything else it is not: `AndOperator` returned `True`, which is
-the identity for one bit and clears every bit above it on anything wider, and
-`Min`/`Max` returned infinities that no integer type can hold.  A reduction
-kernel starting from the wrong identity produces a plausible number, which is
-the kind of defect worth a cheap test.
+`neutral()` is told the type.  For `add` and `mul` the identity does not
+depend on it.  For everything else it does: `True` is the identity of `and`
+for one bit and clears every bit above it on anything wider, and the
+infinities `min` and `max` start from in floating point fit in no integer
+type.  A reduction kernel starting from the wrong identity produces a
+plausible number, which is the kind of defect worth a cheap test.
 
 Neither needs a GPU, a toolchain, or a generated kernel.
 """
@@ -60,8 +57,8 @@ def test_reduction_operator_is_abstract():
 def test_concrete_reduction_operators_instantiate(cls):
     """Every concrete operator satisfies the contract it inherits.
 
-    This is the test the stray decorators would have failed: a concrete class
-    that marks its own `format` abstract is not instantiable under `ABCMeta`.
+    A concrete class that marks its own `format` abstract fails here: under
+    `ABCMeta` it is not instantiable.
     """
     op = cls()
     assert op.num_operands() == 2
@@ -116,9 +113,9 @@ def test_min_max_neutral_is_representable_in_integers(dtype):
 def test_min_max_neutral_is_infinite_in_floats(dtype):
     """`lowest()`, not `min()`.
 
-    The distinction the C++ side got wrong: the smallest *positive normal*
-    float is a perfectly good-looking seed that makes `max` over negative data
-    return roughly zero.
+    The same distinction holds on the C++ side (`base.h`): the smallest
+    *positive normal* float is a perfectly good-looking seed that makes `max`
+    over negative data return roughly zero.
     """
     assert MaxOperator().neutral(dtype) == -math.inf
     assert MinOperator().neutral(dtype) == math.inf

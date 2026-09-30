@@ -12,9 +12,9 @@
 
 The shape of SeisSol's free-surface-gravity step `MPrev = U - invImp*(rhoG*MPrev
 + P)`.  The third store is narrowed by `_analyze` to rows 0..4; written to the
-shared buffer without the zeros, rows 4..12 kept whatever the buffer held --
-the old `tmp`, or `u` where the allocator overlaid it -- and the `+=` added to
-that.
+shared buffer without the zeros, rows 4..12 would keep whatever the buffer
+holds -- the first `tmp`, or `u` where the allocator overlays it -- and the
+`+=` would add to that.
 """
 
 import numpy as np

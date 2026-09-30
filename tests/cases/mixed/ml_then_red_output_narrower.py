@@ -7,8 +7,8 @@
     V = sum_j N[:, j]   <- N has rows 4..8 only, and the view is the tensor
                            itself: entries 4..8 get sums, the rest zeros
 
-The reduction's side of `mixed/ml_then_ew_output_narrower`: it wrote its
-four entries in place, and the other twelve kept `X`.
+The reduction's side of `mixed/ml_then_ew_output_narrower`: writing only its
+four entries in place, it would leave the other twelve holding `X`.
 """
 
 import numpy as np

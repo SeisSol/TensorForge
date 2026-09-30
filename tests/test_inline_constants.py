@@ -164,9 +164,10 @@ def test_the_harness_still_passes_the_buffer():
                                       'argument_constants': False}],
                          ids=['literals', 'by-value', 'memory'])
 def test_the_call_yateto_is_given_matches_the_launcher(options):
-    """The yateto frontend writes the call through `generate_call_site`,
-    which skipped every `Data` symbol -- an inlined one included, whose
-    pointer the launcher still takes: one argument short of the signature."""
+    """The yateto frontend writes the call through `generate_call_site`.
+    Skipping every `Data` symbol there would skip an inlined one too, whose
+    pointer the launcher still takes, and leave the call one argument short
+    of the signature."""
     generator, _ = product(**options)
     generator.register()
     names = {s.obj.alias: s.obj.alias

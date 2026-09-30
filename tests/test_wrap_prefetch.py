@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Moving a prefetch across the back edge, and the four times it must not.
+"""Moving a prefetch across the back edge, and the times it must not.
 
-`schedule.can_reorder` licenses swaps inside a body, and the census that came
-with it said the schedule is already at their fixed point.  The distance that
-is missing is one iteration away, and this is the pass that goes there.
+`schedule.can_reorder` licenses swaps inside a body, and the schedule is
+already at their fixed point.  The distance that is missing is one iteration
+away, and this is the pass that goes there.
 
 Most of what follows is the refusals.  A transformation that changes what a
 loop reads and when is only as good as the cases where it declines, and

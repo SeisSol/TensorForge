@@ -17,7 +17,7 @@ callers with different needs:
   a plain store needs.  An element written twice with the same value costs a
   store and nothing else.
 * **exactness** -- every element touched exactly once.  What an atomic
-  accumulation needs, and what `placement.atomic_write_is_exact` gates on.
+  accumulation needs.
 
 The distinction is why a defect here can sit in the tree for a long time
 looking like a performance question.
@@ -134,10 +134,9 @@ class Recorder:
         guards the whole body to that lane, which is also what removes the
         cross-lane read of a value the writing lane already has.
 
-        This counted `threads` before, and that was not a modeling choice: it
-        was the behavior.  The peeled write had no guard at all, so the wave
-        stored the element -- right under `=`, and `threads` times the
-        contribution under `+=`.
+        The count of one is not a modeling choice but the behavior: without
+        the guard the wave would store the element -- right under `=`, and
+        `threads` times the contribution under `+=`.
         """
         seen = Counter()
         for block in self.blocks:
@@ -249,13 +248,12 @@ def test_a_scalar_nest_stays_inside_its_range(end, threads):
 @pytest.mark.parametrize('threads', THREADS)
 @pytest.mark.parametrize('end', EXTENTS)
 def test_every_width_writes_each_element_exactly_once(end, threads, width):
-    """Exactness at every width, which is new.
+    """Exactness at every width.
 
-    It held at width 1 and failed at 2 and 4 for one reason: the peeled tail
-    was written by the whole wave.  With that write guarded to the lane that
-    owns the element, the nest partitions its range at every width -- so the
-    condition `placement.atomic_write_is_exact` was carrying is no longer
-    about the nest.
+    The peeled tail is written by the lane that owns the element; written by
+    the whole wave it would leave the nest exact at width 1 and not at 2 or 4.
+    Guarded, the nest partitions its range at every width -- so an atomic
+    result has no exactness condition to ask of the nest.
     """
     seen, _ = cover(0, end, threads, width)
     twice = {e: n for e, n in seen.items() if n > 1}

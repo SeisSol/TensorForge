@@ -96,8 +96,8 @@ class MultLayout:
         """Whether a multiplication is a run of lanes in one wave.
 
         Then the unit is the multiplication itself or the wave, the group is
-        one wave, and the layout is what it always was: `threadIdx.x` is the
-        lane and `threadIdx.y` the multiplication.
+        one wave, and the layout is the plain one: `threadIdx.x` is the lane
+        and `threadIdx.y` the multiplication.
         """
         return self.threads <= self.wave and self.wave % self.threads == 0
 

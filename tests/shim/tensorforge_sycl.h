@@ -12,9 +12,9 @@
 // The surface below is not "SYCL"; it is exactly the names the generator
 // emits, which `tools/sycl_surface.py` enumerates from the corpus.  Anything
 // outside that set is deliberately absent -- a shim that accepts more than
-// the real header would make this check green for the wrong reason, which is
-// the failure mode `tensorforge_host.h` already ran into once with
-// `vector_size` on an alias template.
+// the real header would make this check green for the wrong reason, the way
+// a `vector_size` attribute on an alias template would in
+// `tensorforge_host.h`.
 //
 // This is a copy of a fact that lives in someone else's specification, and
 // copies drift.  `tests/test_syntax.py` therefore treats a real front end
@@ -256,10 +256,8 @@ namespace tensorforge {
 //
 // Present here because the SPMD lowering emits `VectorT<float, N>` for a
 // vectorized transfer just as the CUDA and HIP ones do -- it is not an
-// AMD-specific spelling, and this shim's not having it meant `aligned_operands`
-// on acpp compiled everywhere except where it was checked.  It surfaced when
-// the wrapped-syntax test grew from two backends to four; the gap was older
-// than the pass.
+// AMD-specific spelling, and without it `aligned_operands` on acpp would
+// compile everywhere except where it is checked.
 // --------------------------------------------------------------------------
 
 namespace tfshim_vec {
@@ -527,8 +525,8 @@ using TF32 = tf32;
 /// conversion to `T*`, so a shared window reaching something that wants a
 /// pointer -- `copy_from`, a reinterpret cast, `&s0[i]` -- is a compile error
 /// here as well as there.  That is the whole point of the type, and a shim
-/// that quietly allowed it would make this check green for the case the
-/// change was made to rule out.
+/// that quietly allowed it would make this check green for exactly the case
+/// the type exists to rule out.
 
 template <typename T> class SlmRef;
 

@@ -141,7 +141,7 @@ def test_the_builder_accepts_the_arithmetic_vocabulary():
 
 
 def test_the_emitter_refuses_to_invent_a_callee():
-    """An unspellable name used to become `name(args)`.
+    """An unspellable name is refused rather than printed as `name(args)`.
 
     C++ resolves that against whatever the translation unit has pulled in, so
     the failure is a link error at best and a silently different overload at

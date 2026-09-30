@@ -87,17 +87,17 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
     def _dtype(self):
         """What the reduction runs in: its operand's datatype.
 
-        It was the kernel's floating-point type throughout -- accumulator,
-        neutral element, combine and exchange -- so `all(B >= C)`, an `And`
-        over booleans, instantiated `ReductionOperation<float, And>`, whose
-        `&&` does not exist for `float`: no target compiled it.  The kernel's
-        type is only the answer where the operand states none.
+        The kernel's floating-point type throughout -- accumulator, neutral
+        element, combine and exchange -- would make `all(B >= C)`, an `And`
+        over booleans, instantiate `ReductionOperation<float, And>`, whose
+        `&&` does not exist for `float`: no target would compile it.  The
+        kernel's type is only the answer where the operand states none.
         """
         dtype = (getattr(self._op.symbol.obj, 'datatype', None)
                  or self._context.fp_type)
         # Narrower than a register, a value is widened for the exchange: the
         # cross-lane moves are defined in whole 32-bit words (`hip.h` asserts
-        # it, and gfx1150 refused `all` over booleans), and 0/1 in an int is
+        # it, and gfx1150 refuses `all` over booleans), and 0/1 in an int is
         # what `&`, `|` and `^` fold correctly.  The store narrows it again.
         if dtype in (Datatype.BOOL, Datatype.I8, Datatype.I16):
             return Datatype.I32
@@ -190,12 +190,10 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
     def temp_shmem(self) -> int:
         """One slot per wave, per multiplication, for the super-wave fold.
 
-        Declared even though `_check_cross_lane_is_available` currently
-        refuses that case: the budget is read before any body is built, the
-        figure is a property of the thread count alone, and stating it here
-        keeps the reservation and the use in one place for when the barrier
-        arrives.  `tempShrMem` is already striped by `threadIdx.y`, so this is
-        per multiple and not per block.
+        The budget is read before any body is built, and the figure is a
+        property of the thread count alone, so stating it here keeps the
+        reservation and the use in one place.  `tempShrMem` is already striped
+        by `threadIdx.y`, so this is per multiple and not per block.
         """
         if not self._contracts_lead():
             return 0
@@ -282,16 +280,16 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         # writes its own copy, and every copy has to hold the answer.  A
         # temporary's image is written to its buffer by every lane at once
         # (`StoreRegToShr`: one value, the same on every lane) or read where
-        # it is.  Guarded, lane 0 alone held it, and the other lanes stored
-        # their zeros to the address lane 0 stored the answer to: SeisSol's
-        # damage step takes the `max` of ten temporaries this way, and read
-        # back whichever lane won.  `_exchange_width` makes the all-reduce
-        # reach every lane for it.
+        # it is.  Guarded, lane 0 alone would hold it, and the other lanes
+        # would store their zeros to the address lane 0 stores the answer to:
+        # SeisSol's damage step takes the `max` of ten temporaries this way,
+        # and would read back whichever lane won.  `_exchange_width` makes the
+        # all-reduce reach every lane for it.
         #
         # A register image with axes is the same, one element at a time: its
         # element is written by the lane that owns it, into its slot there,
         # which `Symbol.store` guards by itself for an element named by number
-        # (`_image_axis`).  Guarded to lane 0 as well, lane 0 wrote every
+        # (`_image_axis`).  Guarded to lane 0 as well, lane 0 would write every
         # element of a kept axis into its own slot 0 -- and past it.
         if (writer._explicit_simd() or self._into_registers()
                 or self._image_axis(kept, writer) is not None):
@@ -321,14 +319,14 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         The lanes are spoken for by the contracted axis, so the kept ones are
         walked sequentially -- and an image spread over the lanes is not
         addressed by a sequential index: `Symbol.build_address` takes a loop
-        variable on its lead axis for the slot.  Every element went to lane
-        0's slot `k`, past the end of an image one slot deep, and the image
-        stored back one wrong value.  A temporary written first by such a
-        reduction had it; the pointwise path's register images
-        (`OperationBuilder.pointwise_dest`) would have spread it.
+        variable on its lead axis for the slot.  Walked by one, every element
+        would go to lane 0's slot `k`, past the end of an image one slot deep,
+        and the image would store back one wrong value -- for a temporary
+        written first by such a reduction and for the pointwise path's
+        register images (`OperationBuilder.pointwise_dest`) alike.
 
         Not under an explicit vector, where the work-item holds the whole
-        wave and the fold's one value is stored as it always was.
+        wave and the fold's one value is stored plainly.
         """
         if (self._dest.bbox.rank() == 0 or not self._contracts_lead()
                 or self._dest.bbox.rank() != len(kept)
@@ -493,14 +491,14 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
     def _neutral(self):
         """The operator's identity, as a literal of the reduction's dtype.
 
-        The operator answers per type, so the integer case no longer needs
-        rejecting here: `min` over `I32` starts at `INT32_MAX`, not at an
-        infinity that the type cannot hold.
+        The operator answers per type, so the integer case needs no rejecting
+        here: `min` over `I32` starts at `INT32_MAX`, not at an infinity that
+        the type cannot hold.
         """
         # The raw Python value, not `fp.literal(...)` of it: the emitter calls
-        # `literal` itself on a CONST's value.  Formatting here too worked by
-        # accident for the infinities, since `float('-INFINITY')` parses, and
-        # not at all for `0.0f`, which does not.
+        # `literal` itself on a CONST's value.  Formatting here too would work
+        # by accident for the infinities, since `float('-INFINITY')` parses,
+        # and not at all for `0.0f`, which does not.
         return self._operation.neutral(self._dtype)
 
     def _combine(self, writer: Writer, acc, value):
@@ -522,8 +520,8 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
             # nested inside a sequential axis hands its None to `_combine`
             # instead of returning it: the loop result is a value either way,
             # so the miss is invisible one frame up.  `Symbol.load` answers
-            # None for every structured load under `simd_mode`, and the fold
-            # built `max(acc, None)` out of it.
+            # None for every structured load under `simd_mode`, and unchecked
+            # the fold would build `max(acc, None)` out of it.
             raise InternalError(
                 f'reduction: {self._op.symbol.name} has no structured load on '
                 f'this backend, so there is no value to fold. The reduction '

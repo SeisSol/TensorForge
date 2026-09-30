@@ -3,12 +3,12 @@
 # SPDX-License-Identifier: MIT
 """``D = A B`` whose staged operand needs every width to cover it.
 
-`aligned_operands` is the only other case that promises an aligned stride,
-and its extent divides evenly: 128 elements over 16 lanes is two hops of four
-and nothing else. So the cascade in `GlbToShrLoader._write_datatransfer` --
-whole hops at four, then at two, then at one -- was reachable in principle
-and never generated. This case makes it happen: 176 elements over 16 lanes is
-two hops of four, one of two, one of one, and no remainder.
+`aligned_operands` promises an aligned stride too, and its extent divides
+evenly: 128 elements over 16 lanes is two hops of four and nothing else, so
+the cascade in `GlbToShrLoader._write_datatransfer` -- whole hops at four,
+then at two, then at one -- is not generated there. This case makes it
+happen: 176 elements over 16 lanes is two hops of four, one of two, one of
+one, and no remainder.
 
 No predicated tail here, deliberately. The extent divides by the lane count,
 so every lane copies in every hop, and what is under test is the width

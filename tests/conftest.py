@@ -8,7 +8,7 @@ Discovery flow:
 1. At session start, find GPUs (``gpu_detect``) and probe available
    toolchains (``toolchain.discover_targets``). The result is cached on
    pytest's config-cache so repeated runs skip the probe compile.
-2. Walk ``tests_new/cases/**/*.py``; each file is one case module.
+2. Walk ``tests/cases/**/*.py``; each file is one case module.
 3. ``pytest_generate_tests`` parametrizes every test taking a
    ``case``/``target`` fixture pair across the cross product.
 
@@ -18,7 +18,8 @@ override with ``TF_TEST_CACHE``. Failing runs leave artifacts under
 
 When no GPU + toolchain combination is present, all GPU-bound tests
 are skipped with a clear reason — ``pytest`` itself still runs (and
-``test_layout``, ``test_reference`` exercise the host-only pieces).
+``test_layout_roundtrip`` and ``test_reference_matches_einsum`` in
+``test_kernels.py`` exercise the host-only pieces).
 """
 
 from __future__ import annotations
@@ -128,9 +129,9 @@ def pytest_collection(session):
     The harness restores its own mutations on the next invocation, which
     covers the case where the next thing you run is the harness. It is not,
     usually: it is pytest, and then every result in the session describes
-    source nobody meant to test. That has already happened here once, and the
-    only symptom was a large snapshot diff -- indistinguishable from the large
-    snapshot diff a migration produces.
+    source nobody meant to test. The only symptom is a large snapshot diff --
+    indistinguishable from the large snapshot diff a deliberate refactoring
+    produces.
 
     Refusing is right rather than restoring silently: the tree may also hold
     edits made since, and guessing which is which is not this hook's job.

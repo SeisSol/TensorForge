@@ -9,13 +9,6 @@ This is the canonical smoke-test for the elementwise pipeline: one
 Domain: ``sqrt`` requires non-negative input; ``INPUT_TRANSFORM`` maps
 ``standard_normal`` samples to ``|x| + 0.1`` before they hit either the
 kernel or the reference.
-
-Known issue exposed by this case:
-``ElementwiseInstruction._assignment_loop`` constructs ``LeadLoop``
-without the required ``stride`` argument (see
-``backend/instructions/compute/elementwise.py:57`` vs.\\
-``backend/symbol.py:LeadLoop.__init__``). Until that is fixed, every
-elementwise case raises ``TypeError`` at generation time.
 """
 
 import numpy as np

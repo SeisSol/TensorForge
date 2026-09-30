@@ -55,11 +55,11 @@ class HipLexic(CudaLexic):
     A named space is worth spelling here and nowhere else: the attribute sits
     on the *pointee*, so `SpacePtr<T, S>` and `T*` are different types and the
     conversion between them runs one way only -- a space-qualified pointer
-    converts to a generic one implicitly, and back only through a cast.  Which
-    is why this used to be a cast on the right of one binding with `auto` on
-    the left: with the type unsayable, the only way to have it was to never
-    name it.  A pass declaring a copy of that value from its type got the
-    generic pointer and lost the space silently.
+    converts to a generic one implicitly, and back only through a cast.  With
+    the type unsayable, the only way to have it would be never to name it -- a
+    cast on the right of one binding with `auto` on the left -- and a pass
+    declaring a copy of that value from its type would get the generic pointer
+    and lose the space silently.
 
     Restrict is fused rather than appended.  The alias carries both, and
     `SpacePtr<T, S> __restrict` is not the same declaration -- the attribute
@@ -91,7 +91,7 @@ class HipLexic(CudaLexic):
     # ROCm up to 7.2 sizes a block's LDS against one CU's 64 KB even in WGP
     # mode, where a "multiprocessor" is a WGP of two CUs and 128 KB -- the
     # waves and SIMDs it does count per WGP, so only the LDS bound is halved.
-    # An LDS-bound kernel therefore got half the grid on RDNA: `local_flux`
+    # An LDS-bound kernel therefore gets half the grid on RDNA: `local_flux`
     # with its 51 KB preload one block per WGP where two fit, 36 % slower on
     # gfx1150.  Fixed upstream (`localMemSizePerCU_ * (isWGPMode_ ? 2 : 1)` in
     # clr's `hip_platform.cpp`), so this only ever raises the runtime's answer
@@ -181,8 +181,8 @@ class HipLexic(CudaLexic):
     """A fence at wavefront scope: no instruction on any AMD target (the
     memory model orders a wave's own accesses), but a statement LLVM will not
     move a load across.  Without it, `X1 = all(B >= C)` stored by the owner
-    lane and read back by the guard read the old `X1` in the other lanes on
-    gfx1150 -- one element in a thousand took both branches."""
+    lane and read back by the guard would read the old `X1` in the other lanes
+    on gfx1150 -- one element in a thousand would take both branches."""
     return '__builtin_amdgcn_fence(__ATOMIC_ACQ_REL, "wavefront");'
 
   def active_sub_group_mask(self):
@@ -260,19 +260,19 @@ class HipLexic(CudaLexic):
     # conservative; the lever for that is `sched_group_barrier`, not a wait
     # written by hand.
     #
-    # Writing one by hand was worse than redundant.  Inline asm with a
-    # `"memory"` clobber is opaque to the very pass that would have computed
-    # the count, and to the scheduler that decides the issue order the count
-    # is derived from -- so it degraded the result it was meant to control.
+    # Writing one by hand would be worse than redundant.  Inline asm with a
+    # `"memory"` clobber is opaque to the very pass that would compute the
+    # count, and to the scheduler that decides the issue order the count is
+    # derived from -- so it would degrade the result it is meant to control.
     #
-    # And it was wrong ahead of gfx12.  `vmcnt` is deprecated there: the
+    # And it would be wrong ahead of gfx12.  `vmcnt` is deprecated there: the
     # counter is split into loadcnt, storecnt, dscnt, kmcnt, samplecnt,
     # bvhcnt and expcnt, and gfx1250 adds asynccnt and tensorcnt for exactly
     # this class of transfer, reachable through `s_wait_asynccnt` rather than
     # through an encoded `s_waitcnt` immediate.  An instruction spelled here
     # would have to be respelled per target; a count left in the IR does not.
     #
-    # The `prior` the IR derives stays: it is what a future emitter needs to
+    # The IR derives `prior` all the same: it is what a future emitter needs to
     # pick `s_wait_asynccnt` on gfx125x, and what `verify` checks the token
     # pairing against.  It is information, not an instruction.
     return ''
@@ -347,8 +347,8 @@ class HipLexic(CudaLexic):
     both accepted.
 
     HIP compiles for NVIDIA as well, where neither builtin is declared; that
-    is the condition `glb_store` and `glb_load` have always carried, stated
-    here once so `atomic_store` and these two answer it the same way.
+    is the condition `glb_store` and `glb_load` carry, stated here once so
+    `atomic_store` and these two answer it the same way.
     """
     return self._underlying_hardware == 'amd'
 
@@ -367,13 +367,13 @@ class HipLexic(CudaLexic):
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """The intrinsic where this target has one, `__hip_atomic_fetch_add` else.
 
-    The intrinsic was emitted unconditionally, on every target and for both
-    types.  `__builtin_amdgcn_global_atomic_fadd_f32` is gated on
-    `atomic-fadd-rtn-insts` and `..._f64` on `gfx90a-insts`, so that was a
-    compile error on gfx900, gfx906, gfx908, gfx1010 and gfx1030 -- and on
-    gfx1250 and gfx1251 for f64, which have the instruction under a different
-    feature and not the builtin.  `atomics.amd_add_builtin` asks LLVM's own
-    table instead of the vendor string.
+    `__builtin_amdgcn_global_atomic_fadd_f32` is gated on
+    `atomic-fadd-rtn-insts` and `..._f64` on `gfx90a-insts`, so emitting the
+    intrinsic unconditionally would be a compile error on gfx900, gfx906,
+    gfx908, gfx1010 and gfx1030 -- and on gfx1250 and gfx1251 for f64, which
+    have the instruction under a different feature and not the builtin.
+    `atomics.amd_add_builtin` asks LLVM's own table rather than the vendor
+    string.
 
     Where there is no builtin the fallback is not a retreat to a
     compare-and-swap loop: agent scope and relaxed ordering are what let the
@@ -385,7 +385,7 @@ class HipLexic(CudaLexic):
 
     And it is reached at all only when `_underlying_hardware` is AMD.  HIP
     compiles for NVIDIA as well, where every name here is undeclared -- the
-    same condition `glb_store` has always had and this never did.
+    same condition `glb_store` carries.
     """
     if self._underlying_hardware != 'amd':
       return super().atomic_store(ctx, access, variable, op, datatype, length)

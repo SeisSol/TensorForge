@@ -283,7 +283,7 @@ class FlagMode(enum.Enum):
   ``OPTIONAL``
       Parameter defaulting to ``nullptr``, guarded by a null check.  This is
       what a frontend that passes no attributes at all gets, so a caller that
-      predates the attribute channel keeps working unchanged.
+      knows nothing of the attribute channel may pass a mask or leave it out.
   """
 
   ABSENT = 'absent'

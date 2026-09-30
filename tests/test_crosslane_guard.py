@@ -4,10 +4,10 @@
 """Cross-lane reads leave the guards that split the lanes.
 
 A lane broadcast reads another lane's register, so it is defined only where
-that lane executes it too.  The generic nest at lead width two put the
-broadcast of `B` inside its tail guard, `if (lead < 6)`: on gfx1150 the DPP
-row share read zero from the lanes the guard had turned off, and
-`slice_offset_a` came out wrong by 8.8.  `passes.converge_crosslane` takes such
+that lane executes it too.  The generic nest at lead width two guards its tail
+with `if (lead < 6)`; a broadcast of `B` inside that guard would read zero
+from the lanes the guard turns off -- on gfx1150 the DPP row share does -- and
+`slice_offset_a` would come out wrong.  `passes.converge_crosslane` takes such
 a read out of the guard, with the register read it broadcasts.
 """
 import re

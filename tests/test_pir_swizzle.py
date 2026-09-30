@@ -109,12 +109,9 @@ def test_both_a_load_and_a_store_apply_it():
     idx = b.rawexpr('threadIdx.x', type_=INDEX, hint='a')
     b.store(tile, b.load(tile, idx, hint='v'), idx)
     text = emitted(b.finish())
-    # Both sides have to subscript the permuted index.  Counting the `^`
-    # instead would count how many times it was *computed*, and the builder
-    # shares a pure result: one xor reaching two subscripts is the same
-    # address on both sides, which is what this is about.
     # Every access to the tile has to go through the permutation, however
-    # many times the permutation is *written down*: the builder shares a pure
+    # many times the permutation is *written down*.  Counting the `^` would
+    # count how many times it was *computed*: the builder shares a pure
     # result, so one xor reaching both subscripts is the same address on both
     # sides, and a single-use one is inlined into the subscript instead.
     named = {line.split('=', 1)[0].split()[-1]
@@ -166,7 +163,7 @@ def test_the_swizzle_shows_in_the_type():
 
 
 # --------------------------------------------------------------------------- #
-# What it was for
+# What it is for
 # --------------------------------------------------------------------------- #
 
 def _ways(addr, lanes=32):
@@ -211,9 +208,9 @@ def test_an_extern_buffer_may_be_swizzled_if_nothing_names_it_in_text():
     """`extern` is about the *name* escaping; what matters is whether an
     *access* does.
 
-    Those were the same question only while every named access was text.  The
-    macro layer's windows are extern -- other instructions still spell `s0`
-    out -- and every read and write of one now goes through `load` and `store`,
+    The two would be the same question only if every named access were text.
+    The macro layer's windows are extern -- other instructions spell `s0`
+    out -- and every read and write of one goes through `load` and `store`,
     which is what applies the permutation.
     """
     b = builder()
@@ -225,7 +222,7 @@ def test_an_extern_buffer_may_be_swizzled_if_nothing_names_it_in_text():
 
 
 def test_a_raw_access_to_a_swizzled_buffer_is_refused():
-    """The failure the earlier guard was aiming at, asked properly.
+    """A raw access would skip the permutation, so it is refused.
 
     A permutation applied to some accesses and not others is a store and a
     load that disagree about where an element lives: a wrong kernel, not a
@@ -245,25 +242,24 @@ def test_a_raw_access_to_a_swizzled_buffer_is_refused():
 
 
 def test_extern_without_a_swizzle_is_still_fine():
-    """The macro layer's windows are extern and unswizzled, which is the
-    arrangement today and has to keep working."""
+    """A macro window `_swizzle` declines is extern and unswizzled, and that
+    has to keep working."""
     b = builder()
     assert b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
                    extern='s0', arena='arena', offset=0) is not None
 
 
 def test_a_named_load_still_takes_the_structured_path():
-    """The prerequisite that made the rest of this reachable.
+    """The prerequisite that makes the rest of this reachable.
 
-    `Symbol.load` used to leave the structured path whenever the consumer
-    needed a particular identifier, which was almost always.  Measured on the
-    cases with the worst bank conflicts, all 5650 accesses to a shared symbol
-    took the text path -- so a swizzle on such a buffer would have applied to
-    nothing, and would have become wrong rather than useless the moment one of
-    them was converted.
+    The consumer of a load almost always needs a particular identifier.  If
+    that sent the load down the text path, every access to a shared symbol
+    would take it -- so a swizzle on such a buffer would apply to nothing, and
+    would become wrong rather than useless the moment one of them took the
+    structured path.
 
     `extern` on the load supplies the name, so the address goes in as an
-    operand and the emitted line is unchanged.
+    operand and the emitted line is the one the text path would write.
     """
     b = builder()
     tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0')
@@ -333,7 +329,7 @@ def _window_width(volume, banks=32):
 @pytest.mark.parametrize("rows,cols,want", [
     (32, 16, 32),   # 512
     (16, 16, 32),   # 256 -- takes 32, not the row width, and reads 1-way
-    (56, 13, 8),    # 728 = 8 * 91; the row-width rule declined outright
+    (56, 13, 8),    # 728 = 8 * 91; a row-width rule would decline outright
     (12, 8, 32),    # 96
     (32, 32, 32),   # 1024, capped at the bank count
     (9, 9, 1),      # 81 is odd: no swizzle, and that is the right answer
@@ -443,12 +439,13 @@ def test_the_granule_shows_in_the_type():
 # --------------------------------------------------------------------------- #
 
 def test_a_wide_access_to_an_element_permuted_buffer_is_refused():
-    """What the damage step died of at `k_width` 2.
+    """A wide access would read its neighbors unpermuted.
 
     The permutation is applied to the *index*, once, and a vector access uses
     its index once: the address names the first element and the hardware reads
-    the rest from beside it, unpermuted.  `s0[21]` -- the image of 20 under
-    `xor4` -- was both the wrong element and, being odd, a misaligned address.
+    the rest from beside it, unpermuted.  In the damage step at `k_width` 2,
+    `s0[21]` -- the image of 20 under `xor4` -- would be both the wrong element
+    and, being odd, a misaligned address.
     """
     from tensorforge.backend.pir.core import ScalarType
 
@@ -516,9 +513,9 @@ def _window(volume, want, banks=32):
 
 
 def test_the_default_width_leaves_every_window_as_it_was():
-    """`k_width` 1 is the default, and at 1 this is the previous rule
-    exactly -- otherwise the whole corpus would move for a lever nobody
-    pulled."""
+    """`k_width` 1 is the default, and at 1 this is the granule-free rule
+    (`_window_width`) exactly -- otherwise the whole corpus would move for a
+    lever nobody pulled."""
     for volume in (512, 256, 728, 96, 1024, 81, 169, 180):
         assert _window(volume, 1) == (_window_width(volume), 1)
 
@@ -554,12 +551,12 @@ def test_a_granted_window_permutes_whole_granules_inside_itself(volume, want):
 # --------------------------------------------------------------------------- #
 
 def test_an_async_copy_permutes_its_destination():
-    """The last path that did not.
+    """The destination goes through the permutation like any other access.
 
-    `copy_async` passed its destination index straight through, and the guard
-    at `finish` could never have caught that: it reads raw text and this emits
-    none.  What kept it safe was the loader declining the swizzle wherever a
-    bulk copy might reach the window -- a decline standing in for a rule.
+    A `copy_async` that passed its destination index straight through would
+    slip past the guard at `finish`: the guard reads raw text, and a copy
+    emits none.  Declining the swizzle wherever a bulk copy might reach the
+    window would keep that safe only as a decline standing in for a rule.
     """
     b = builder()
     tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',

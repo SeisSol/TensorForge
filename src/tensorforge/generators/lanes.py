@@ -15,11 +15,11 @@ one register image, so a lane count one of them needs is a lane count all of
 them must have -- which is also why changing it means rebuilding the section
 rather than revising one operand.
 
-Stated as a value rather than computed in place so that it can be *chosen*.
-Nothing here chooses yet: `deduce` returns what the generator has always
-produced, and an explicit config overrides it. That is the whole point --
-"build this section with 64 lanes instead" was not previously expressible, and
-a search over configurations cannot start from a constant.
+Stated as a value rather than computed in place so that it can be *chosen*:
+`deduce` returns the geometry the descriptors ask for, and an explicit config
+overrides it. That is the whole point -- "build this section with 64 lanes
+instead" has to be expressible, and a search over configurations cannot start
+from a constant.
 """
 
 from dataclasses import dataclass
@@ -36,8 +36,8 @@ from tensorforge.generators.descriptions import (ElementwiseDescr,
 #:
 #: It is also not arbitrary. Running gfx90a at the full wave halves the
 #: per-lane register footprint and has measured *slower* on some kernels, so
-#: the ceiling encodes a result rather than an oversight. What it lacked was
-#: anywhere to say so, and any way to ask for the other answer.
+#: the ceiling encodes a result rather than an oversight. Named here so that
+#: it can say so, and so that the other answer can be asked for (`ceiling`).
 DEFAULT_LANE_CEILING = 32
 
 
@@ -49,7 +49,8 @@ class LaneConfig:
     num_threads: int
     #: Of those, how many do useful work; the rest are masked off at the edges.
     num_active_threads: int
-    #: Lead-dimension elements one lane covers where it used to cover one.
+    #: Lead-dimension elements one lane covers, where an unvectorized lane
+    #: covers one.
     lead_width: int
 
 
@@ -71,7 +72,7 @@ def deduce(descr_list: List[OperationDescription],
     An elementwise descriptor asks for lanes only where nothing else does.  It
     runs at whatever count it is given -- its loop strides by it, and the
     layout is the lead axis spread cyclically either way -- so letting it raise
-    the section's count, or waive the ceiling, bought nothing and handed the
+    the section's count, or waive the ceiling, would buy nothing and hand the
     contraction beside it more lanes than a wave.
     """
     num_threads = 0
@@ -89,12 +90,11 @@ def deduce(descr_list: List[OperationDescription],
     if num_threads == 0:
         num_threads, num_active = pointwise
 
-    # Deliberately *not* also clamped to the wave width, which is what the
-    # generator has always done.  Clamping would be a change, and a large one:
-    # the Intel targets report a 16-wide vector unit, so a ceiling of 16 would
-    # take 35 kernels from refusing to generate -- a group barrier inside a
-    # simd-uniform loop -- to generating. That is a lead worth following and
-    # not a side effect to take while extracting a decision.
+    # Deliberately *not* also clamped to the wave width.  Clamping would be a
+    # large change: the Intel targets report a 16-wide vector unit, so a
+    # ceiling of 16 would take the kernels that refuse to generate -- a group
+    # barrier inside a simd-uniform loop -- to generating.  That is a lead
+    # worth following on its own and not a side effect to take in passing.
     hw = context.get_vm().get_hw_descr()
     wave = hw.vec_unit_length
     if (0 < num_threads < wave
@@ -105,7 +105,7 @@ def deduce(descr_list: List[OperationDescription],
         # the wave has no rendezvous of its own -- SYCL under SPMD, whose
         # narrowest barrier is the whole sub-group -- the barrier waits for
         # the neighbor sharing the sub-group, which may not take the branch:
-        # yateto's `conditional` kernels were refused by `verify` for exactly
+        # `verify` would refuse yateto's `conditional` kernels for exactly
         # that on oneapi.  At the full wave the barrier is the
         # multiplication's own.
         num_threads = wave
@@ -122,19 +122,18 @@ def candidates(descr_list: List[OperationDescription],
                context: Context) -> List[LaneConfig]:
     """The lane geometries worth building this section at, widest first.
 
-    Two today: what the descriptors ask for under the default ceiling, and the
-    same at the wave width.  They coincide wherever the ceiling does not bind,
-    which is every target whose wave is 32 or narrower -- so on NVIDIA and on
-    RDNA there is one candidate and no search to run.
+    Two from the ceiling: what the descriptors ask for under the default
+    ceiling, and the same at the wave width.  They coincide wherever the
+    ceiling does not bind, which is every target whose wave is 32 or narrower.
 
     Deduplicated by lane count rather than by config, since two ceilings that
     land on the same width give the same kernel and building it twice buys a
     tie.
 
-    And the widths a multiplication may take at all, which used to be nothing
-    on a 32-wide wave: the *divisors of the lead extent*, because those cover
-    the rows with no padding, and the powers of two, because those are what
-    `narrower` has always offered and what the measurements were taken at.  A
+    And the widths a multiplication may take at all, without which a 32-wide
+    wave has nothing to search: the *divisors of the lead extent*, because
+    those cover the rows with no padding, and the powers of two, because those
+    are what `narrower` offers and what the measurements were taken at.  A
     width is offered only where its group fits a block -- `lcm(wave, width)`
     threads, `MultLayout` -- so 35 lanes over 56 rows is not a candidate (1120
     threads) while 28 is (224).
@@ -197,7 +196,7 @@ def narrower(descr_list: List[OperationDescription],
     no padding) to five times slower (`chain_five` at 16, spilling), and
     among those that did not spill from -5 % to +9 % with nothing in padding
     or rows per lane that predicted the sign.  `peak_pressure` separates the
-    spilling ones now that it counts register slots rather than whole arrays
+    spilling ones, since it counts register slots rather than whole arrays
     -- on sm_120 every build that spilled more than a few registers was above
     about 85 % of the 255 -- but it says nothing about the sign among the
     rest.  So these are for a search that builds and times, which

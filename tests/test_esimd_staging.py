@@ -6,14 +6,15 @@
 The staging loader builds its addresses as *text*, in the macro layer, and so
 never passes the emitter that refuses a lane index.  Everything the emitter
 guarantees about the explicit-vector lowering therefore stops at this one
-path, and what came out of it was an SPMD address: `4 * item.get_local_id(0)`,
-which is a work-group coordinate used as a lane number.
+path, and an SPMD address formatted there -- `4 * item.get_local_id(0)`, a
+work-group coordinate used as a lane number -- would reach the output
+unrefused.
 
 Two properties are worth testing rather than one, because only the second
-catches what actually went wrong.  That no lane index survives is a syntactic
-check and finds the term.  That the tile is covered exactly once is the
-semantic one -- with sixteen work-items in the x extent, each writing a full
-vector at `4 * its own id`, every element of the tile was written by several
+catches the consequence.  That no lane index survives is a syntactic check
+and finds the term.  That the tile is covered exactly once is the semantic
+one -- with sixteen work-items in the x extent, each writing a full vector at
+`4 * its own id`, every element of the tile would be written by several
 parties and most of it by none.  A kernel like that compiles, runs, and is
 wrong, which is the failure mode this file exists for.
 """
@@ -77,7 +78,7 @@ def test_no_work_group_coordinate_is_used_as_a_lane(name, preload):
     use for it.  `EsimdEmitter._thread_idx('x')` says exactly that and raises;
     this is the same rule applied to the paths that reach the output without
     passing the emitter -- the staging loader, and `Symbol.load_linear` /
-    `store_linear`, all three of which formatted the index into a string.
+    `store_linear`, all three of which format the index into a string.
     """
     try:
         src = _generate(name, preload_globals=preload).get_kernel()
@@ -91,7 +92,7 @@ def test_no_work_group_coordinate_is_used_as_a_lane(name, preload):
 # --------------------------------------------------------------------------
 
 def test_the_x_extent_is_one_work_item():
-    """The lane count moved into the type, so it must leave the launch.
+    """The lane count is in the type, so it must not be in the launch.
 
     A block of `(num_threads, mults, 1)` launches the whole multiplication
     `num_threads` times over under this lowering, each copy writing the full
@@ -132,7 +133,7 @@ def test_a_wave_spanning_multiplication_is_still_one_work_item():
 
 
 def test_the_spmd_split_is_untouched():
-    """The same case on the lowering the split was written for."""
+    """The same case on the lowering the split exists for."""
     block = re.search(r'sycl::range<3> block \(([^)]*)\)',
                       _generate('local_flux',
                                 backend='oneapi').get_launcher()).group(1)
@@ -143,7 +144,7 @@ def test_the_spmd_split_is_untouched():
 # the tile is covered exactly once
 # --------------------------------------------------------------------------
 
-#: A staged write, with its width in the call.  The preload fill moved into
+#: A staged write, with its width in the call.  The preload fill is built in
 #: the PIR upstream, so the whole transfer goes out as one of these rather
 #: than as a hand-built temporary -- the width is the vector's, which is what
 #: this needs, and there is nothing to correlate across lines.
@@ -202,7 +203,7 @@ def test_the_preloaded_tile_is_written_exactly_once(name, tiles):
     A gap leaves the tile holding whatever was there before, and an overlap
     means two work-items wrote the same word -- with the same value, here, so
     the result is not even reliably wrong.  Both are invisible in the emitted
-    text and both were present.
+    text.
     """
     gen = _generate(name, preload_globals=True)
     mults = int(re.search(r'sycl::range<3> block \(\s*\d+\s*,\s*(\d+)',
@@ -230,7 +231,7 @@ def test_the_tail_is_a_width_and_not_a_lane_guard():
 
     Under this lowering the condition is a scalar, so the branch is taken
     whole and the transfer inside moves the register's full width -- past the
-    end of the tile.  What the guard meant is that the transfer is `rest`
+    end of the tile.  What the guard means is that the transfer is `rest`
     elements wide, which is a compile-time width here.
     """
     src = _generate('local_flux', preload_globals=True).get_kernel()
@@ -241,11 +242,11 @@ def test_the_tail_is_a_width_and_not_a_lane_guard():
 
 
 def test_an_operator_larger_than_the_register_file_is_read_in_place():
-    """`chain_five_multiplies` stages its two 56 x 56 operators in registers:
-    112 floats a lane under SPMD, 3584 in the one work-item here -- 14 kB
-    against 8, and 17.5 kB of spill.  Here they are read where they lie, a
-    column per reduction step; the SPMD staging on the same device is
-    unchanged."""
+    """Staged in registers, the two 56 x 56 operators of
+    `chain_five_multiplies` are 112 floats a lane under SPMD and 3584 in the
+    one work-item here -- 14 kB against 8, and 17.5 kB of spill.  So here they
+    are read where they lie, a column per reduction step, while SPMD on the
+    same device keeps its staging."""
     esimd = _generate('chain_five').get_kernel()
     spmd = _generate('chain_five', backend='oneapi').get_kernel()
     staged = re.compile(r'// r\d+ = load\{g>r\}\(glb_m[02]\)')

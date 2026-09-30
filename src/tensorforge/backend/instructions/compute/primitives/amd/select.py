@@ -32,8 +32,8 @@ def wanted_fmadpp_step(datatype, threads, ctx):
 
     Deliberately says nothing about whether the target defines it; see
     `select_fmadpp_step`.  Keeping the two apart is what stops a performance
-    tweak from silently becoming a link error, which is how gfx900 came to
-    emit a call to a template that has only a declaration there.
+    tweak from silently becoming a link error -- on gfx900, a call to a
+    template that has only a declaration there.
     """
     step = 1
     if threads >= 4 and datatype == Datatype.F32 and gfx906(ctx):

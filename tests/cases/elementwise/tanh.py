@@ -5,17 +5,15 @@
 
 Domain: ``tanh`` saturates at ±1 and is signed-safe.
 
-Known issue exposed by this case (separate from the LeadLoop bug):
-``Operation.TANH`` aliases ``Operation.TAN`` in ``common/operation.py``
-because both have value ``102``. Python's :class:`enum.Enum` collapses
-duplicate-valued members, so ``ew.tanh`` would lower to a
-``Operation.TAN`` node, which the CUDA lexic table emits as ``tanf``.
-The kernel therefore computes ``tan`` while the reference computes
-``tanh``, and the numerical comparison fails by design. The same
-collision exists for ``sinh``/``sin``, ``cosh``/``cos``,
-``asinh``/``asin``, ``acosh``/``acos``, and ``atanh``/``atan`` — only
-this case tests it; once the collision is fixed by giving each operator
-a unique value, the case starts passing.
+The case also guards the operator values in ``common/operation.py``. An
+``Operation.TANH`` sharing its value with ``Operation.TAN`` would be
+collapsed into it by Python's :class:`enum.Enum`, so ``ew.tanh`` would
+lower to an ``Operation.TAN`` node, which the CUDA lexic table emits as
+``tanf``: the kernel would compute ``tan`` while the reference computes
+``tanh``, and the numerical comparison would fail. ``sinh``/``sin``,
+``cosh``/``cos``, ``asinh``/``asin``, ``acosh``/``acos`` and
+``atanh``/``atan`` pair up the same way, and the tanh cases are the only
+ones that run a hyperbolic function.
 """
 
 import numpy as np

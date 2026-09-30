@@ -10,9 +10,9 @@ a time and read a column at a time is the usual way to get that wrong, and the
 usual first fix -- padding the row -- does not always work: eight rows of nine
 wrap past 64 and collide again.
 
-This was done by hand for the NVIDIA B tile, found a 2-way conflict, and led
-to `XorSwizzle`.  Doing it by hand does not scale to four backends and 58
-cases, and more to the point it does not notice when a conflict *appears*.
+A count by hand finds the 2-way conflict `XorSwizzle` removes from the NVIDIA
+B tile, but it does not scale to four backends and the whole corpus, and more
+to the point it does not notice when a conflict *appears*.
 
 Read off the generated source rather than the IR, because the address the
 hardware sees is the one that was emitted: a swizzle folded into a constant, a
@@ -61,9 +61,9 @@ _WINDOW = re.compile(
 _ASSIGN = re.compile(r'^\s*(?:const\s+)?[\w:<>,\s*]+?\s(\w+)\s*=\s*([^;]+);\s*$')
 
 #: `for (int32_t v18_i1 = 0; ...)`.  A loop variable is never declared by a
-#: statement the assignment pattern can see, so 77 accesses in the corpus came
-#: back unresolved -- and an unresolved access is one the census does not
-#: count, which is a blind spot rather than a caveat.
+#: statement the assignment pattern can see, so without this every access
+#: through one would come back unresolved -- and an unresolved access is one
+#: the census does not count, which is a blind spot rather than a caveat.
 #:
 #: Substituting the initializer is sound because these are loop bounds over
 #: tensor dimensions: every lane in the wave is on the same iteration, so the
@@ -79,9 +79,9 @@ _ELEM_BYTES = {'float': 4, 'double': 8, 'int32_t': 4, 'uint32_t': 4,
 
 #: `*(tensorforge::VectorT<float, 4>*)&tile[i] = v;` -- a wide access is
 #: spelled as a reinterpret cast, and the width is inside the type.  Matching
-#: only `\w+` there missed every one of them, which put a `float4` store in the
-#: 4-byte column and reported it as conflicting when the hardware serves it in
-#: phases that are not.
+#: only `\w+` there would miss every one of them, putting a `float4` store in
+#: the 4-byte column and reporting it as conflicting when the hardware serves
+#: it in phases that are not.
 _CAST = re.compile(r'\*\(\s*([^)]*?)\s*\*\s*\)\s*&\s*\w+\[')
 _VECTOR_WIDTH = {}
 for _t in ('float', 'double', 'int32_t', '_Float16'):
@@ -137,7 +137,7 @@ def _to_python(expr: str) -> str:
     # Uniform within a warp, so they shift every lane's address equally and
     # leave the bank pattern alone.  `threadIdx.y` indexes the warp inside the
     # block and `blockDim`/`blockIdx` are the same for all of them; refusing
-    # the access instead left three of them uncounted.
+    # the access instead would leave it uncounted.
     expr = expr.replace('threadIdx.y', '0').replace('threadIdx.z', '0')
     expr = re.sub(r'\bblockDim\.[xyz]\b', str(LANES), expr)
     expr = re.sub(r'\bblockIdx\.[xyz]\b', '0', expr)
@@ -197,8 +197,8 @@ def _resolve(expr: str, defs: dict, depth: int = 24) -> str:
 
     Any identifier that has a definition, not only the generator's own
     `v{n}` names: a loop variable is spelled `i`, and matching the allocator's
-    naming convention meant 38 accesses in `accumulate_chain` stayed
-    unresolved while their definition sat in the table.
+    naming convention would leave accesses in `accumulate_chain` unresolved
+    while their definition sits in the table.
     """
     for _ in range(depth):
         # Not after a dot: `threadIdx.x` ends in an identifier that a plain
@@ -220,8 +220,8 @@ def ways(expr: str, base_bytes: int, width: int = 1, lanes=None):
     access covers -- the two are separate because the *index* is in base
     elements even when the access is a vector: `*(VectorT<float,4>*)&tile[i]`
     reads floats `i .. i+3`, so the byte address is `i * 4` and the span is
-    16.  Folding them into one number said the lane stride was 64 bytes when
-    it is 16, and turned a conflict-free store into a reported 4-way.
+    16.  Folding them into one number would say the lane stride is 64 bytes
+    when it is 16, and turn a conflict-free store into a reported 4-way.
 
     A wide access is served in phases of `128 // span` lanes, which is what
     makes that store conflict-free where a whole-warp model calls it 2-way:
@@ -256,10 +256,10 @@ def accesses(source: str):
             ctype, name, arena = m.groups()
             # The arena a window is cut from is itself declared this way, and
             # subscripting it is how a window is *made*, not a data access.
-            # Counting those put `localShrMem0` and `tempShrMem` in the
-            # population beside the tiles, which is a different denominator
-            # from the one the IR analysis uses and part of why the two
-            # disagreed on totals while agreeing on conflicts.
+            # Counting those would put `localShrMem0` and `tempShrMem` in the
+            # population beside the tiles, a different denominator from the
+            # one the IR analysis uses, and the two would disagree on totals
+            # while agreeing on conflicts.
             arenas.add(arena)
             windows[name] = _ELEM_BYTES.get(ctype, 4)
             continue
@@ -284,8 +284,8 @@ def accesses(source: str):
             wide = _CAST.search(line)
             width = _VECTOR_WIDTH.get(wide.group(1).strip()) if wide else None
             # A cast store writes through the cast, so the line does not begin
-            # with the buffer name.  Deciding direction on that alone put every
-            # vectorized store in the load column.
+            # with the buffer name.  Deciding direction on that alone would
+            # put every vectorized store in the load column.
             written = (line.strip().startswith(f'{name}[')
                        or (wide is not None
                            and re.search(re.escape(name) + r'\[[^\]]*\]\s*=',

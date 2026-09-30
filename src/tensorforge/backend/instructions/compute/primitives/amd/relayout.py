@@ -118,8 +118,8 @@ def _transpose4x4_result(threads):
 
     At 64 lanes that is `LaneAxis(4, 1)` beside `LaneAxis(16, 4)` --- lane `l`
     holds `(l % 4, l // 4)`, one lane per pair, replication 1.  Describing it
-    with a single axis, as this row first did, throws away the half of the
-    answer that says which element of the other dimension a lane is holding.
+    with a single axis would throw away the half of the answer that says
+    which element of the other dimension a lane is holding.
     """
     return RegisterLayout((LaneAxis(4, 1), LaneAxis(max(threads // 4, 1), 4)))
 
@@ -135,10 +135,7 @@ TRANSPOSE4X4 = Relayout(
          'moves a dimension between slots and lanes',
 )
 
-#: Everything whose lane map has been established.  `transpose16x16b32` is
-#: absent on purpose: it is defined in the runtime, but its body uses row and
-#: wave DPP controls that the simulator does not model, so no row for it could
-#: be checked.
+
 def nest_shared(ext: int, threads: int) -> bitlayout.BitLayout:
     """The shared matrix as the loop nest hands it over.
 
@@ -236,7 +233,7 @@ def takes(route) -> bool:
     """Whether an emitter has a form for this route.
 
     `reach` never says `None`, so having an answer and being able to write it
-    are two questions now, and this is the second.  Three of the four rungs
+    are two questions, and this is the second.  Three of the four rungs
     are written: nothing to do, the runtime's transpose, and the exchange
     assembled out of swaps and merges.  The trip through memory is priced and
     not emitted -- the buffer has to be reserved before any body exists, and
@@ -299,6 +296,10 @@ def transpose_exchange(ext: int):
     return tuple((1 << bit, 1 << bit) for bit in range((ext - 1).bit_length()))
 
 
+#: Everything whose lane map has been established.  `transpose16x16b32` is
+#: absent on purpose: it is defined in the runtime, but its body uses row and
+#: wave DPP controls that the simulator does not model, so no row for it could
+#: be checked.
 RELAYOUTS = (BROADCAST, MOVDPP16, TRANSPOSE4X4)
 
 

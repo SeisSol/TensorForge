@@ -42,13 +42,13 @@ class CrossLaneFold:
     def _lane(self, writer: Writer):
         """Which element of the distributed dimension this lane is at.
 
-        `writer.lane_index`, not `threadIdx.x % num_threads` spelled out.  The
-        arithmetic here was the SPMD answer written as though it were the only
-        one -- and it is not: an explicitly vectorized lowering holds every
-        element at once, so the answer is a vector of all `num_threads`
-        indices rather than one of them.
+        `writer.lane_index`, not `threadIdx.x % num_threads` spelled out.
+        Spelled out, that arithmetic would be the SPMD answer written as
+        though it were the only one -- and it is not: an explicitly vectorized
+        lowering holds every element at once, so the answer is a vector of all
+        `num_threads` indices rather than one of them.
 
-        Same call `LeadLoop._lead` makes, so `cse` still merges the two.
+        Same call `LeadLoop._lead` makes, so `cse` merges the two.
         """
         return writer.lane_index(self._num_threads, 1, hint='lead')
 

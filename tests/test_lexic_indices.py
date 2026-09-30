@@ -4,11 +4,10 @@
 """Every lexic answers the index questions the staging loader asks it.
 
 `GlbToShrLoader._linear_idx()` reads `thread_idx_x`, `thread_idx_y` and
-`block_dim_x` off the lexic as text.  Three of the five backends had the
-third, and the two that did not were not caught by anything: a blockwide
-transfer is what reads it, `preload_globals` is what builds one, and its
-default rule is "AMD only" -- so no SYCL or OpenCL target ever reached the
-line until the option was turned on by hand.
+`block_dim_x` off the lexic as text.  Nothing else catches a backend that
+lacks the third: a blockwide transfer is what reads it, `preload_globals` is
+what builds one, and its default rule is "AMD only" -- so no SYCL or OpenCL
+target reaches the line unless the option is turned on by hand.
 
 A field that is read by name and set in five constructors is exactly the kind
 of hole a test finds and a reviewer does not, which is why this checks the

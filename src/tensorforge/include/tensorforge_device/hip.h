@@ -64,9 +64,9 @@ __device__ __forceinline__ auto readlane(T value, int lane) -> T {
 /// `llvm.amdgcn.update.dpp` is declared over `llvm_any_ty` and
 /// `llvm.amdgcn.mov.dpp` over `llvm_anyint_ty`, so both take a 64-bit operand
 /// and the backend decides what to emit --- one `v_mov_b64_dpp` where the
-/// target has DPP64, two 32-bit moves where it does not, which is what this
-/// header used to do unconditionally.  Splitting here takes that choice away
-/// and costs a `double` twice the DPP moves on every CDNA 2 and later part.
+/// target has DPP64, two 32-bit moves where it does not.  Splitting here would
+/// take that choice away and cost a `double` twice the DPP moves on every
+/// CDNA 2 and later part.
 ///
 /// Scalars only, and at most 8 bytes.  A vector or a struct would also be
 /// accepted by `llvm_any_ty`, but what the backend does when legalizing one
@@ -82,8 +82,9 @@ inline constexpr bool DppNative = std::is_arithmetic_v<T> && sizeof(T) <= 8;
 /// the backend makes of a vector *operand*, is avoided by handing it `long
 /// long`s.  One `v_mov_b64_dpp` per unit where the target moves 64 bits
 /// (gfx942, gfx950, gfx1251), two 32-bit moves where it does not, the
-/// backend's choice either way.  Splitting a pair into `int`s here took that
-/// choice away: `movdpp16` on a `VectorT<float, 2>` was two moves everywhere.
+/// backend's choice either way.  Splitting a pair into `int`s here would take
+/// that choice away: `movdpp16` on a `VectorT<float, 2>` would be two moves
+/// everywhere.
 template <typename T>
 inline constexpr bool DppWide =
     std::is_trivially_copyable_v<T> && sizeof(T) % 8 == 0;
@@ -326,18 +327,15 @@ __device__ __forceinline__ auto permlane16(T value) -> T {
 /// lane index bits, which is how a register reordering into a matrix fragment
 /// gets built.
 ///
-/// The branches used to implement two different maps.  `Block` 4, 16 and 64
-/// toggled one bit, as above; `Block` 8 and 32 read lane `i ^ (Block - 1)`,
-/// the *mirror* lane, which the comment in `reduction` also described.  Both
-/// are defensible readings of the name and nothing here could tell them
-/// apart: the sole caller is a butterfly reduction, where each group is
-/// already uniform, so any lane of the neighboring group answers and the two
-/// maps are indistinguishable.
+/// Toggling one bit and reading the *mirror* lane, `i ^ (Block - 1)`, are both
+/// defensible readings of the name, and a butterfly reduction cannot tell them
+/// apart: each group is already uniform there, so any lane of the neighboring
+/// group answers.
 ///
-/// They are not indistinguishable to anything that needs an exact
-/// permutation.  One bit toggled is the useful one -- mirroring flips every
-/// low bit at once, which does not compose into an arbitrary bit permutation
-/// -- so that is what this is, for every `Block`.
+/// Anything that needs an exact permutation can.  One bit toggled is the
+/// useful one -- mirroring flips every low bit at once, which does not compose
+/// into an arbitrary bit permutation -- so that is what this is, for every
+/// `Block`.
 template <std::size_t Block, typename T>
 __device__ __forceinline__ T swap(T value) {
   if constexpr (Block == 1) {
@@ -443,9 +441,8 @@ template <typename T> __device__ __forceinline__ void pin(T &v) {
 /// The row share as an instruction of its own: every lane of a 16-lane row
 /// gets lane `Row`'s value.  Any trivially copyable value -- `dpp` moves it
 /// in 64-bit units where the target can, so a float pair or a `double` is one
-/// `v_mov_b64_dpp` on gfx942, gfx950 and gfx1251.  This used to be inline
-/// assembly for `float2` alone, opaque to the optimizer and written into a
-/// zeroed register.
+/// `v_mov_b64_dpp` on gfx942, gfx950 and gfx1251.  A builtin rather than
+/// inline assembly, which the optimizer cannot see into.
 template <int Row, typename T> __device__ __forceinline__ T movdpp16(T a) {
   return dpp<0x150 + Row, 0xf, 0xf, true>(a);
 }
@@ -823,9 +820,10 @@ __device__ __forceinline__ bool ballotReduction(bool value) {
   const auto thread = (threadIdx.x / Block) * Block;
   const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
 
-  // `(1 << subthread) << thread` named a single lane, so the And test reduced
-  // to "is my own bit set" and returned this lane's input unchanged.  It was
-  // also an `int`, which a wavefront's 64 lanes overflow from lane 31 on.
+  // Every lane of the group, and in 64 bits.  A single lane,
+  // `(1 << subthread) << thread`, would reduce the And test to "is my own bit
+  // set" and return this lane's input unchanged, and an `int` overflows from
+  // lane 31 of a wavefront's 64 on.
   const auto mask = groupMask<Block, Subblock>() << (thread + subthread);
 
   if constexpr (Op::Op == Operation::And) {
@@ -856,16 +854,15 @@ __device__ __forceinline__ T reduction(const T &value) {
   // `swap<N>` exchanges the two halves of an N-sized group.  Once each
   // Subblock-sized group holds a uniform value, exchanging across
   // `2*Subblock` pairs each group with its neighbor, which is the butterfly
-  // step -- so the width has to grow with the recursion.  `swap<Block>`
-  // repeated the same full-width exchange at every level instead.
+  // step -- so the width has to grow with the recursion; `swap<Block>` would
+  // repeat the same full-width exchange at every level.
   //
   // This reads any lane of the neighboring group, and the group is uniform,
-  // so it cannot tell which lane it got. That is why `swap` could carry two
-  // different maps for as long as this was its only caller.
+  // so it cannot tell which lane it got, nor one map of `swap` from another.
   const auto other = swap<(Subblock << 1)>(value);
   const auto result = Op::applyOperation(value, other);
-  // Argument order is <Op, Block, Subblock, T>: `T` was being passed where
-  // `Block` is declared, which does not compile once this branch is reached.
+  // Argument order is <Op, Block, Subblock, T>: passing `T` where `Block` is
+  // declared does not compile once this branch is reached.
   return reduction<Op, Block, (Subblock << 1), T>(result);
 }
 
@@ -877,8 +874,8 @@ constexpr std::size_t ConstantMemspace = 4;
 // drops it -- with a `-Wattributes` warning, not an error -- and `VectorT<T,
 // N>` silently becomes plain `T`: size 4, alignment 4, and a
 // `*(VectorT<float,4>*)&buf[i] = v` that moves one element instead of four.
-// Clang applies it, so hipcc never saw this; `target_lexic` spells the same
-// type for a host target, which does not.
+// Clang applies it, so hipcc does not see this; `target_lexic` spells the
+// same type for a host target, which does not apply it.
 template <typename T, std::size_t N> struct VectorOf {
   //: Naturally aligned: `N * sizeof(T)`.  This is the type a wide access uses
   //: when the base *proves* that much alignment.
@@ -951,11 +948,11 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
 
   // Banks 1 and 3 are lanes 4-7 and 12-15, and in an 8x8 butterfly those read
   // four lanes *back* -- `row_ror:12`, since `(l + 12) % 16 == l - 4`.  Banks
-  // 0 and 2 read four forward, `row_ror:4`.  The two were the other way
-  // round, so lane 4 read lane 8 where it wanted lane 0 and half the tile
-  // came out holding another row's data.  `transpose16x2` is unaffected:
-  // `row_ror:8` is its own inverse over sixteen lanes, so both directions are
-  // the same control and the same mistake could not be made.
+  // 0 and 2 read four forward, `row_ror:4`.  The other way round, lane 4
+  // would read lane 8 where it wants lane 0 and half the tile would hold
+  // another row's data.  `transpose16x2` has no such choice: `row_ror:8` is
+  // its own inverse over sixteen lanes, so both directions are the same
+  // control.
   const T u1 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v5, v1);
   const T u2 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v6, v2);
   const T u3 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v7, v3);

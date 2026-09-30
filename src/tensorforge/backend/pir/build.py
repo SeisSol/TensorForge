@@ -8,10 +8,10 @@
 ``IRBuilder`` is deliberately call-compatible with ``backend.writer.Writer``
 for the subset that instruction code actually uses (``__call__``, ``varalloc``,
 ``If``, ``For``, ``Block``, ``Scope``, ``Comment``, ``Pragma``).  Call sites
-written against the writer keep working unchanged and simply
-produce opaque ``raw*`` nodes; new code uses the structured constructors
-(``for_``, ``if_``, ``load``, ``store``, ``alloc``, ``op``) and gets real
-optimization.  Migration progress is measurable: count the ``raw*`` nodes.
+written against the writer work as they are and produce opaque ``raw*``
+nodes; the structured constructors (``for_``, ``if_``, ``load``, ``store``,
+``alloc``, ``op``) produce nodes the passes can optimize.  How much of a body
+is structured is measurable: count the ``raw*`` nodes.
 
 The builder knows nothing about C++ syntax.  Rendering lives in ``pir.emit``.
 """
@@ -45,9 +45,9 @@ def _unroll_pragma(unroll) -> str:
     """`#pragma unroll` for `True`, `#pragma unroll N` for a count, nothing else.
 
     `True` is also an `int`, so it is asked first: a loop that says "unroll"
-    has always meant the bare pragma, and a count is the new case -- a rolled
-    loop that keeps a few iterations per trip, which is what the compiler
-    otherwise cannot be told once the bare pragma has fully unrolled it.
+    means the bare pragma, and a count means a rolled loop that keeps a few
+    iterations per trip, which is what the compiler otherwise cannot be told
+    once the bare pragma has fully unrolled it.
     """
     if unroll is True:
         return '#pragma unroll\n'
@@ -232,8 +232,7 @@ class IRBuilder:
         False -> LANE.  New code should pass a :class:`Uniformity`.
 
         ``layout`` is how the value is spread over the lanes, when the caller
-        knows.  Left ``None`` it stays untracked, which is what every existing
-        call site produces and therefore changes nothing."""
+        knows.  Left ``None`` it stays untracked."""
         if self._alloc is not None:
             ident = self._alloc.next_index()
         else:
@@ -248,15 +247,17 @@ class IRBuilder:
         """Drop-in for ``Writer.varalloc``.
 
         Returns a ``Value`` whose ``__str__`` is a valid C++ identifier, so
-        existing f-strings that interpolate the result keep working.  The type
-        defaults to the kernel's floating point type rather than a hard-coded
-        F32 --- SeisSol builds both fp32 and fp64.
+        f-strings of the text-based Writer interface that interpolate the
+        result produce valid C++.  The type defaults to the kernel's floating
+        point type rather than a hard-coded F32 --- SeisSol builds both fp32
+        and fp64.
         """
         v = self.value(ScalarType(self._fptype),
                        hint='' if prefix == 'v' else prefix)
-        # A name reservation, not a value the IR defines anywhere.  Legacy
-        # bodies redeclare one of these per scope --- `float v35[4][2]{};`
-        # inside each iteration --- which is ordinary C++ and not SSA at all.
+        # A name reservation, not a value the IR defines anywhere.  Bodies
+        # written against the text-based Writer interface redeclare one of
+        # these per scope --- `float v35[4][2]{};` inside each iteration ---
+        # which is ordinary C++ and not SSA at all.
         # `_check_declared_accesses` must not ask a raw statement to claim
         # such a name as a use or a definition: there is no defining statement
         # for `dce` to remove, so the argument the check rests on does not
@@ -273,7 +274,7 @@ class IRBuilder:
 
         A loop counter and an address are the same in every lane: the loop is
         entered the same number of times and the subscript is computed from
-        the same operands.  `None` here said *unknown*, which is a weaker
+        the same operands.  `None` here would say *unknown*, which is a weaker
         claim than the truth and one an explicitly vectorized emitter cannot
         act on -- it has to decide between `int` and `simd<int, N>` at the
         declaration, and unknown is not one of the two.
@@ -370,13 +371,13 @@ class IRBuilder:
         if shared is not None:
             return shared
         # Same shape as the uniformity join, and for the same reason: an
-        # elementwise result lives where its operands live.  Until something
-        # attaches a layout this is `None` in, `None` out.
+        # elementwise result lives where its operands live.  Where no operand
+        # carries a layout this is `None` in, `None` out.
         v = self.value(type_, hint=hint, uniform=uniform,
                        layout=join_layout(args))
         # `escapes`: the name is referenced from raw text, so the value must
-        # neither be eliminated nor folded into its consumer.  Migration
-        # scaffolding -- it disappears once the consumer takes a Value.
+        # neither be eliminated nor folded into its consumer.  A consumer
+        # that takes the Value itself needs no such flag.
         attrs = (('escapes', True),) if escapes else ()
         self._emit_op(name, (v,), args, pure=pure, attrs=attrs)
         self._share(key, v)
@@ -447,17 +448,16 @@ class IRBuilder:
 
         The accumulator of a hand-written intrinsic sequence is written by
         `fmacdpp` through a reference, so it is not the result of any single
-        statement and cannot be an SSA producer.  Until now that meant emitting
-        the declaration as raw text, which left the value *used but never
-        defined* --- invisible to the verifier, and untouchable by every pass,
-        because nothing connected the name to a statement.
+        statement and cannot be an SSA producer.  Emitted as raw text, the
+        declaration would leave the value *used but never defined* ---
+        invisible to the verifier, and untouchable by every pass, because
+        nothing would connect the name to a statement.
 
-        This node closes that hole without changing what is emitted: the value
-        has a definition point, so def-use analysis works, while the C++ text
-        stays byte-for-byte what the raw statement produced.  It is
-        deliberately *not* in ``Op.DECLARING``: there is no initializer to fold
-        a predicate into, so a predicated declaration is rejected rather than
-        silently lowered to a select.
+        This node gives the value a definition point, so def-use analysis
+        works, while the C++ text stays byte-for-byte what a raw statement
+        would produce.  It is deliberately *not* in ``Op.DECLARING``: there is
+        no initializer to fold a predicate into, so a predicated declaration
+        is rejected rather than silently lowered to a select.
 
         `escapes` is set: the value is written through a reference elsewhere,
         so it must keep its own name and must not be folded into a consumer.
@@ -472,11 +472,11 @@ class IRBuilder:
     def assign(self, target: Value, value: Operand) -> Stmt:
         """``target = value;`` where `target` was produced by `declare`.
 
-        The one shape `declare` left without a verb.  A declared value is not
+        The one shape `declare` leaves without a verb.  A declared value is not
         an SSA producer --- it exists because something writes it through a
         reference or across a guard --- so the write has to be its own
-        statement, and until now that statement was raw text.  864 of them in
-        the NVIDIA epilogue alone, each naming two values the IR already knew.
+        statement rather than raw text naming two values the IR already
+        knows.
 
         Modeled exactly as `call_stmt`'s ``writes``: a declared register
         access keyed on the target, so two assignments to different values
@@ -535,8 +535,8 @@ class IRBuilder:
         The reference-out spelling is the vendor's, not the operation's, so it
         belongs in the emitter.  Here it is what it is: `n` values from one
         argument, pure, and hash-consed like any other expression.  `cse`
-        already handles several results -- it zips `s.target` against what it
-        recorded -- so nothing there had to change.
+        handles several results -- it zips `s.target` against what it
+        recorded -- so nothing there needs to know about this op.
 
         The callee travels as an attribute rather than as the op name, for the
         same reason `call` puts it there: an op name is a thing pir assigns a
@@ -611,9 +611,9 @@ class IRBuilder:
         The C++ these calls reach takes its outputs by non-const reference, so
         a literal in a written position is ill-formed --- and nothing in this
         repository compiles, so it would surface as a build failure at a user
-        site rather than here.  It has happened: a padded MFMA tail block used
-        to hand `0.0f` to `transpose4x4b32`'s third and fourth parameters,
-        which are `T &`.
+        site rather than here -- a padded MFMA tail block handing `0.0f` to
+        `transpose4x4b32`'s third and fourth parameters, which are `T &`, for
+        one.
 
         Cheap to check and worth checking eagerly rather than in `verify`,
         which only runs under `TF_IR_DEBUG`.
@@ -757,9 +757,9 @@ class IRBuilder:
         Not the same question as :meth:`thread_id`, even though SPMD answers
         both with the same register.  ``thread_id`` asks *which thread am I*;
         this asks *where does my share of this dimension start*.  They coincide
-        only because SPMD spreads the dimension across the threads -- so the
-        two were one call, and separating them is what lets a second model
-        answer them differently.
+        only because SPMD spreads the dimension across the threads -- so one
+        call could answer both, and separating them is what lets a second
+        model answer them differently.
 
         SPMD: ``(tid / stride) % block``, the lane's element of the dimension.
 
@@ -795,16 +795,16 @@ class IRBuilder:
         The seam between the two layers, and the only thing it does is let the
         micro IR *name* something the macro layer owns.  There is no statement
         to make: the emitter binds the value to `name` and writes nothing, so
-        the generated text is what it was and the IR gains an operand where it
-        had a substring.
+        the generated text is the same as with the name spelled inline, and
+        the IR has an operand where the text has a substring.
 
         What that buys is one thing and it is not small.  A name baked into a
         raw expression has no uniformity, no type and no def-use edge, so every
-        pass that reads those has to guess from the other operands -- which is
-        how a comparison against `numElements0` came out only as uniform as the
-        index it was compared to, and how `substitute` found nothing to rewrite
-        in an address that mentioned an element. Stated once here, it is stated
-        for every use.
+        pass that reads those has to guess from the other operands -- a
+        comparison against `numElements0` would come out only as uniform as
+        the index it is compared to, and `substitute` would find nothing to
+        rewrite in an address that mentions an element.  Stated once here, it
+        is stated for every use.
 
         What it does *not* buy is an edge to a definition, because there is no
         definition in this body to have an edge to.  A value with no arguments
@@ -875,14 +875,12 @@ class IRBuilder:
         region membership.  So a shared alloc is a suballocation of the tail
         this instruction declared, handed out here by bump.
 
-        The declared budget stays the contract, and it is now checked.  It was
-        not before: `nvidia.matmul` carries an
-        ``assert 32 * max(aregs + bregs, cregs) <= shmsize`` precisely because
-        the size in ``temp_shmem()`` and the hand-written offsets in the body
-        are two statements of one fact, kept in agreement by hand.  Every
-        caller that allocates through here gets that check for free, against
-        what it actually asked for rather than against a formula restated at
-        the use site.
+        The declared budget stays the contract, and it is checked here.  The
+        size in ``temp_shmem()`` and hand-written offsets in a body are two
+        statements of one fact, and kept in agreement by hand they need an
+        ``assert`` restating the formula at the use site.  Every caller that
+        allocates through here gets that check for free, against what it
+        actually asked for.
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
@@ -900,22 +898,20 @@ class IRBuilder:
             attrs = self._suballocate(v, elem)
             self._shared_buffers.append(v)
         if extern is not None:
-            # A name the macro layer owns and other instructions still spell
-            # out as text.  Transitional, and measurably so: with one PIR body
-            # per loop body, 89.8% of buffers have their definition and all
-            # their uses inside one body and need no name at all once the
-            # consumers take the value (tools/buffer_spans.py).  What is left
-            # is the shared arena, its scratch tail, and the tiles of the two
-            # cases that have two batch loops -- things that genuinely outlive
-            # a body.  So this set shrinks per migrated consumer rather than
-            # becoming the permanent way values are addressed.
+            # A name the macro layer owns and other instructions spell out as
+            # text.  With one PIR body per loop body, 89.8% of buffers have
+            # their definition and all their uses inside one body and need no
+            # name at all once the consumers take the value
+            # (tools/buffer_spans.py).  What needs one is the shared arena,
+            # its scratch tail, and the tiles of the two cases that have two
+            # batch loops -- things that genuinely outlive a body.
             #
-            # `escapes` is not decoration here.  Making the allocation
-            # structured also makes it deletable, and the reads that justify
-            # it are still raw text the IR cannot see, so DCE removes the
-            # declaration and leaves the uses referring to a name that no
-            # longer exists.  That produces a corpus which still renders and
-            # no longer compiles, which the snapshot harness cannot catch.
+            # `escapes` is not decoration here.  A structured allocation is
+            # also deletable, and where the reads that justify it are raw text
+            # the IR cannot see, DCE would remove the declaration and leave
+            # the uses referring to a name that does not exist -- a corpus
+            # which renders and does not compile, which the snapshot harness
+            # cannot catch.
             attrs = attrs + (('extern', extern), ('escapes', True))
         if init:
             attrs = attrs + (('init', init),)
@@ -935,9 +931,9 @@ class IRBuilder:
         """Buffers allocated inside are dead at the end of it.
 
         The hand form of what a liveness analysis over this body would derive,
-        and it is here only because that analysis cannot yet run: a raw
+        and it is here because that analysis cannot run on raw text: a raw
         statement that does not declare its accesses conflicts with every
-        buffer in every space, so a body still made mostly of raw text has an
+        buffer in every space, so a body made mostly of raw text has an
         interference graph in which everything interferes and a coloring that
         reuses nothing.
 
@@ -1013,10 +1009,10 @@ class IRBuilder:
         """This buffer's permutation, whichever way the access names it.
 
         A `Symbol` base resolves to its buffer the same way the rest of the
-        access path does.  Reading `.type` off the base alone missed every
-        macro-level window -- `Symbol.load` passes the symbol, not the value
-        -- so a swizzle set at the alloc was accepted and then applied to
-        nothing.
+        access path does.  Reading `.type` off the base alone would miss
+        every macro-level window -- `Symbol.load` passes the symbol, not the
+        value -- so a swizzle set at the alloc would be accepted and then
+        applied to nothing.
         """
         buf = base.pir_buffer(self) if hasattr(base, 'pir_buffer') else base
         t = getattr(buf if buf is not None else base, 'type', None)
@@ -1037,11 +1033,11 @@ class IRBuilder:
         odd the two elements come back swapped, and the address itself is odd,
         which on NVIDIA is a misaligned-address fault rather than wrong data.
 
-        SeisSol's damage step read a 9x20 staging buffer that way at
-        `k_width` 2: `*(VectorT<float,2>*)&s0[21]`, where 21 is the permuted
-        image of 20.  The kernel faulted -- and the three conditions
-        `MultilinearInstruction._pack_is_aligned` had proved (strides, start
-        offset, base alignment) were all true, because every one of them is
+        Read that way at `k_width` 2, a 9x20 staging buffer of SeisSol's
+        damage step would be `*(VectorT<float,2>*)&s0[21]`, where 21 is the
+        permuted image of 20, and the kernel would fault -- with the three
+        conditions `MultilinearInstruction._pack_is_aligned` proves (strides,
+        start offset, base alignment) all true, because every one of them is
         about the tensor's layout and the permutation is not in it.
 
         Raised here rather than checked at the call site, for the reason
@@ -1160,10 +1156,10 @@ class IRBuilder:
             # IR having to understand the arithmetic.
             attrs += [('align', align)]
         if extern:
-            # The name the macro layer already handed out.  A load that has to
-            # produce a particular identifier used to be text for that reason
-            # alone, which cost every pass its view of an access that was
-            # otherwise fully described.
+            # The name the macro layer already handed out.  Without it a load
+            # that has to produce a particular identifier would have to be
+            # text for that reason alone, which would cost every pass its view
+            # of an access that is otherwise fully described.
             attrs += [('extern', extern)]
         if valid is not None:
             # Lanes that hold data, of a value that spans more: a full-lane
@@ -1198,9 +1194,9 @@ class IRBuilder:
         its own: as an attribute the emitter hands to ``lexic.glb_store``.
 
         It has to travel with the statement rather than be baked into a string
-        at the call site, because baking it in is what kept global stores off
-        this path -- ``Symbol.store`` asked the lexic for a finished statement
-        and then had nothing structured left to emit."""
+        at the call site, because baked in it would keep global stores off
+        this path -- a caller that asks the lexic for a finished statement has
+        nothing structured left to emit."""
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
@@ -1282,19 +1278,18 @@ class IRBuilder:
         accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
                     Access(Effect.WRITE, dst_space, self.alias_root(dst)))
 
-        # The last access path that did not permute.  It was safe only because
-        # the loader declines the swizzle wherever a bulk copy might reach the
-        # window (`AbstractShrMemWrite._swizzle`), which is a decline standing
-        # in for a rule -- and the check at `finish` could not have caught the
-        # mistake, since it reads raw text and this emits none.  Asked and
-        # applied here, the copy is like every other access: it permutes what
-        # it writes, and it is refused where it cannot.
+        # Asked and applied here, the copy is like every other access: it
+        # permutes what it writes, and it is refused where it cannot.  Relying
+        # on the loader to decline the swizzle wherever a bulk copy might
+        # reach the window (`AbstractShrMemWrite._swizzle`) would be a decline
+        # standing in for a rule -- and the check at `finish` could not catch
+        # the mistake, since it reads raw text and this emits none.
         #
         # `elems` adjacent elements move as one, so the same question a vector
         # load asks -- and the same answer, which a granule of that width makes
         # yes.  The source is asked too, though nothing swizzles global memory
-        # today: a path that asks only where it expects an answer is the shape
-        # this bug had.
+        # today: a path that asks only where it expects an answer misses the
+        # case it does not expect.
         self._check_width(dst, elems)
         dst_index = tuple(self._swizzled(dst, i) for i in dst_index)
         src_index = tuple(self._swizzled(src, i) for i in src_index)
@@ -1515,9 +1510,8 @@ class IRBuilder:
         A loop that already exists in generated code does not -- the operand
         table's counter is spelled out by every select chain that reads it.
 
-        Same trade as `extern` on `alloc`, and it ends the same way: the name
-        is needed while the things that spell it are still text, and stops
-        being needed as they migrate.
+        Same trade as `extern` on `alloc`: the name is needed while the things
+        that spell it are text.
 
         `index_type` is the induction's own type: `SIZE` for a loop over the
         batch, `INDEX` for a loop over a tile.  On the value and not on the
@@ -1567,15 +1561,14 @@ class IRBuilder:
         can derive it from the branch."""
         return _IfHandle(self, cond, tuple(types), layouts=layouts)
 
-    # -- speculative emission (replaces the throw-away Writer hack) -------- #
+    # -- speculative emission ---------------------------------------------- #
 
     @contextmanager
     def speculative(self):
         """Try something out; keep it only if it worked.
 
-        Replaces the ``op.symbol.load(Writer(), ...)`` probe in
-        ``multilinear.py``, where a whole load had to be *emitted* into a
-        scratch Writer just to find out whether it would succeed::
+        A caller that needs to know whether a load would succeed emits it
+        here rather than into a scratch Writer, and discards it if not::
 
             with builder.speculative() as spec:
                 ok = all(op.symbol.load(builder, ...) for op in self._ops)
@@ -1615,10 +1608,10 @@ class IRBuilder:
         # fill records on its symbol how the image it writes is distributed
         # (`Symbol._record_linear_layout`), and that claim is a fact about the
         # emitted body -- a discarded attempt emitted no fill, so the claim is
-        # not true and must go with it.  Left behind, the second attempt sees
-        # a symbol the first did not, and the same case generates two
-        # different kernels: `test_generation_is_deterministic` caught exactly
-        # that, at 1828 lines against 796.
+        # not true and must go with it.  Left behind, the second attempt would
+        # see a symbol the first did not, and the same case would generate two
+        # different kernels, which `test_generation_is_deterministic` checks
+        # for.
         while len(self._undo) > undo_mark:
             self._undo.pop()()
 
@@ -1626,13 +1619,13 @@ class IRBuilder:
         """Register how to undo something this emission did outside the body.
 
         Callers that mutate state a `_rollback` cannot reach say so here.  The
-        alternative was for `speculative` to know which state exists and
-        snapshot it, which puts the list of everything mutable in the one
+        alternative is for `speculative` to know which state exists and
+        snapshot it, which would put the list of everything mutable in the one
         place that cannot see any of it.
         """
         self._undo.append(undo)
 
-    # -- legacy Writer facade ---------------------------------------------- #
+    # -- text-based Writer interface --------------------------------------- #
 
     #: What a raw statement is assumed to touch when it does not say.
     _TOUCHES_EVERYTHING = (Access(Effect.READ | Effect.WRITE,
@@ -1644,7 +1637,7 @@ class IRBuilder:
                  fmt: bool = False) -> Stmt:
         """Raw statement text.  Opaque, therefore impure and pinned.
 
-        Two separable facts, and they were being answered by one default.
+        Two separable facts, which one default would answer together.
         *What it is* --- opaque text, unmovable, not a candidate for CSE ---
         stays `Effect.UNKNOWN` no matter what: nothing here can reason about
         the statement as code.  *What it touches* is a different question, and
@@ -1654,15 +1647,13 @@ class IRBuilder:
         `Access(base=None)` conflicts with everything in its space, and
         `MemSpace.UNKNOWN` conflicts with every space, so a single raw
         statement between two shared-memory accesses keeps every buffer live.
-        A body that is nine tenths converted therefore analyses exactly as
-        badly as one that is not converted at all --- which makes the
-        conversion all-or-nothing, and an all-or-nothing conversion is one
-        that does not get done.
+        A body that is nine tenths structured would therefore analyse exactly
+        as badly as one that is all raw text.
 
         So a caller that knows may say.  ``accesses=()`` is the common case:
         this statement touches no memory the IR models (a `__syncwarp`, a
-        register declaration).  Omitting the argument keeps the old answer, so
-        every existing call site means exactly what it meant before.
+        register declaration).  Omitting the argument gives the conservative
+        answer.
 
         This is a promise the text cannot be made to keep, which is why
         `_check_declared_accesses` holds it to the part that *is* checkable:
@@ -1679,18 +1670,18 @@ class IRBuilder:
         Declaring an access is not the same as declaring a use, and the
         difference is not academic: an `Access` tells the aliasing question
         which buffers a statement may touch, while the use chain is what keeps
-        the buffer's definition alive.  A `float4` store that named its tile
-        only inside the text had a correct access set and no use edge, so the
-        `alloc` that produced the tile was reachable by nothing, was removed,
-        and the kernel referred to an undeclared pointer.  It compiled cleanly
-        as IR and not at all as C++.
+        the buffer's definition alive.  A `float4` store that names its tile
+        only inside the text has a correct access set and no use edge, so the
+        `alloc` that produces the tile would be reachable by nothing and
+        removed, and the kernel would refer to an undeclared pointer: clean as
+        IR, and not C++ at all.
 
         ``fmt`` says the text carries `{0}`.. placeholders for the operands
         rather than their names.  A use edge and a spelling are separable, and
-        for the statements that were already passing operands they had to be:
-        the text spelled a name the IR also held a value for, so the two agreed
-        only as long as nothing renamed or inlined the value.  With `fmt` the
-        emitter fills them in, and there is one spelling again.
+        for a statement that passes operands they have to be: text that spells
+        a name the IR also holds a value for agrees with it only as long as
+        nothing renames or inlines the value.  With `fmt` the emitter fills
+        them in, and there is one spelling.
         """
         if accesses is None:
             accesses = self._TOUCHES_EVERYTHING
@@ -1752,8 +1743,7 @@ class IRBuilder:
         """One escape hatch with a *single* convention: ``{0}`` is ``args[0]``.
 
         The result is declared by the emitter; the text is an expression, never
-        a full statement.  (The old writer mixed both conventions --- ``{0}``
-        meant the target in ``write()`` but the loop variable in ``For``.)
+        a full statement.
 
         ``crosslane`` says the text reads other lanes' registers -- a lane
         broadcast -- so it has to run where those lanes run too; the text is
@@ -1764,8 +1754,8 @@ class IRBuilder:
         uniform = _join(args)
         # Same join as `op()`, and for the same reason: an expression over
         # operands that are spread across the lanes produces a value spread the
-        # same way.  Left off, every elementwise result was untracked -- the
-        # text is opaque to the IR, but its *shape* is not, and a raw
+        # same way.  Left off, every elementwise result would be untracked --
+        # the text is opaque to the IR, but its *shape* is not, and a raw
         # expression is still elementwise over its operands.
         # An explicit `layout` overrides the join: a raw expression whose
         # *text* introduces a distribution its operands do not have -- a lane
@@ -1794,12 +1784,11 @@ class IRBuilder:
                     fmt: bool = False) -> Stmt:
         """Raw statement text whose memory effect is *known*.
 
-        The migration end state for a memory access is not that the text
-        disappears -- vendor intrinsics and inline assembly will always want
-        text -- but that it stops being opaque.  `Effect.UNKNOWN` conflicts
-        with everything and makes the alias model a no-op; a declared
-        `Access(kind, space, base)` lets two accesses to different symbols be
-        seen as independent.
+        What a memory access needs is not that the text disappears -- vendor
+        intrinsics and inline assembly will always want text -- but that it is
+        not opaque.  `Effect.UNKNOWN` conflicts with everything and makes the
+        alias model a no-op; a declared `Access(kind, space, base)` lets two
+        accesses to different symbols be seen as independent.
 
         `args` carries the value operands the text mentions (the address, in
         practice) so the dependency is visible and a pass cannot lift the
@@ -1895,14 +1884,12 @@ class IRBuilder:
         """The buffer an operand's accesses should be recorded against.
 
         A symbol and the value that stands for it *in this body* are one
-        buffer, so they have to reach the access model as one object.  They
-        did not: the structured path (`load`/`store`) records against the
-        value, the text path (`load_expr`/`access_stmt`) against the symbol,
-        and `may_alias` compares bases with `is` --- so a write through one
-        was invisible to a read through the other and `load_cse` could reuse
-        a load across it.  Nothing in the corpus takes both paths for one
-        symbol in one body today, which is why it never fired; the gate that
-        keeps it that way is `vec == 1` in `Symbol.load_linear`.
+        buffer, so they have to reach the access model as one object.
+        Otherwise the structured path (`load`/`store`) would record against
+        the value, the text path (`load_expr`/`access_stmt`) against the
+        symbol, and since `may_alias` compares bases with `is`, a write
+        through one would be invisible to a read through the other and
+        `load_cse` could reuse a load across it.
 
         `pir_buffer` returns `None` for a value belonging to another body,
         which is the wanted answer there: in that body the symbol is the only
@@ -1925,12 +1912,11 @@ class IRBuilder:
                   kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
                   args: Sequence[Operand] = (), hint: str = 'ld',
                   layout: Optional[RegisterLayout] = None) -> Value:
-        """A declaration whose right-hand side is still text, but whose result
-        is a real SSA value.
+        """A declaration whose right-hand side is text, but whose result is a
+        real SSA value.
 
-        The bridge for migrating a body from the inside out: the access itself
-        may stay a vendor-specific string, while everything that consumes it
-        becomes structured.
+        The access itself may stay a vendor-specific string, while everything
+        that consumes it is structured.
 
         ``layout`` is how the loaded value ends up spread over the lanes, when
         the caller can say.  A load is where a distribution *enters* the IR:
@@ -1950,9 +1936,9 @@ class IRBuilder:
         """Aggregate initialization: ``VecTy v{a, b};``.
 
         The vendor path builds a short vector to hand a pair of accumulators
-        to one cross-lane instruction.  As raw text the elements were names
-        baked into a string; here they are operands, so the loads that
-        produced them are reachable from this statement.
+        to one cross-lane instruction.  As raw text the elements would be
+        names baked into a string; here they are operands, so the loads that
+        produce them are reachable from this statement.
         """
         v = self.value(type_, hint=hint, uniform=_join(parts),
                        layout=join_layout(parts))
@@ -2025,12 +2011,11 @@ class IRBuilder:
     def _check_swizzles_are_total(self, body: Tuple[Stmt, ...]) -> None:
         """No access to a swizzled buffer may bypass `load` and `store`.
 
-        The earlier form of this asked whether the buffer was `extern`, which
-        was the same question only for as long as every named access was text.
-        It is not the same question: `extern` is about the *name* escaping, and
-        what matters is whether an *access* does.  A buffer whose name the
-        macro layer owns is fine as long as every read and write of it goes
-        through the two methods that apply the permutation.
+        Whether the buffer is `extern` is not the same question: `extern` is
+        about the *name* escaping, and what matters is whether an *access*
+        does.  A buffer whose name the macro layer owns is fine as long as
+        every read and write of it goes through the two methods that apply the
+        permutation.
 
         Asked here, over the finished body, because that is the first point at
         which the answer is knowable -- the buffer is allocated long before its
@@ -2048,9 +2033,9 @@ class IRBuilder:
                     continue
                 swizzled[str(t)] = t
                 # Also the name the macro layer gave it, which is what raw
-                # text spells.  Checking only the value's own identifier is
-                # how an unpermuted `memcpy_async` into a swizzled window got
-                # past this: it writes `s0[...]`, not `v12_s0[...]`.
+                # text spells.  Checking only the value's own identifier would
+                # let an unpermuted `memcpy_async` into a swizzled window past
+                # this: it writes `s0[...]`, not `v12_s0[...]`.
                 #
                 # Only half a guard even so, and worth saying plainly: the
                 # copy is emitted by a *different* instruction's body, which
@@ -2090,7 +2075,7 @@ class _Speculation:
 
 
 class _RawBlock:
-    """Legacy ``Writer.Block`` equivalent: an opaque head plus a region."""
+    """The ``Writer.Block`` equivalent: an opaque head plus a region."""
 
     def __init__(self, builder: IRBuilder, text: str, pragma: Optional[str] = None):
         self.builder = builder
@@ -2129,8 +2114,8 @@ class _ForHandle:
         # ... and what it calls the *first* element, for the same reason.  `lo`
         # is where the traversal starts, which is not the same as an element
         # that exists: a row whose start is past the end never enters the loop,
-        # so nothing in the body ever noticed.  A peel runs before the guard
-        # and does notice.
+        # so nothing in the body notices.  A peel runs before the guard and
+        # does notice.
         self._peel_index = peel_index
         self.builder = builder
         self._args = (lo, hi, step) + inits
@@ -2140,8 +2125,8 @@ class _ForHandle:
                                        type_=index_type)
         # A loop-carried value is distributed exactly like the init it starts
         # from -- the back edge cannot change how a value is spread across the
-        # lanes, only what it holds.  Left untracked, an accumulator became a
-        # hole in the middle of an otherwise fully tracked body.
+        # lanes, only what it holds.  Left untracked, an accumulator would be
+        # a hole in the middle of an otherwise fully tracked body.
         self.iter_args = tuple(
             builder.value(t, hint=f'acc{i}',
                           layout=(inits[i].layout

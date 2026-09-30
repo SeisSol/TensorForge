@@ -6,11 +6,11 @@
 The reduction contracts the lane axis, so its fold crosses lanes, and its
 destination is a temporary: a register image without axes, one value that
 every lane of the multiplication reads afterwards.  So every lane has to hold
-it.  The fold used to store its answer from lane 0 alone -- enough for an
+it.  A fold that stored its answer from lane 0 alone would be enough for an
 address, which wants one writer, and wrong for a register array, of which each
-lane has its own: the other lanes kept their zeros, and the image went to its
-shared buffer from every lane at once, the answer and thirty-one zeros to one
-address.  SeisSol's damage step takes ten `max`es this way.
+lane has its own: the other lanes would keep their zeros, and the image would
+go to its shared buffer from every lane at once, the answer and thirty-one
+zeros to one address.  SeisSol's damage step takes ten `max`es this way.
 
 40 rows over 32 lanes: two slots, the second ragged, so lanes past the end fold
 the neutral element.  `abs` keeps the maximum away from zero, which is what a

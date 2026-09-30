@@ -24,7 +24,8 @@ for path in sorted(src.glob('*.json')):
     blob = json.loads(path.read_text())
     source = source or blob['source']
     cfg = blob['config']
-    # recorded before the field existed, and by runs the workaround never acted on
+    # absent from exports without the field, and from runs the workaround
+    # never acted on
     cfg.setdefault('workarounds', [])
     system = by_system[f'{cfg["equation"]}-{cfg["solver"]}']
     kernels = {}

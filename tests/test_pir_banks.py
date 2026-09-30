@@ -3,15 +3,14 @@
 # SPDX-License-Identifier: MIT
 """Bank conflicts, computed from the IR instead of from the emitted C++.
 
-`tools/bank_conflicts.py` answers this by parsing generated source, and it had
-to: the addresses were `rawexpr` text and there was nothing to evaluate.  They
-are operations now, and the only leaf that is not a constant is
+`tools/bank_conflicts.py` answers this by parsing generated source.  In the IR
+the addresses are operations, and the only leaf that is not a constant is
 `thread_idx_x`, which a pass can read as "the lane".
 
 Checked against the text version rather than replacing it.  Over the corpus
 the two agree on what matters -- 280 four-way accesses against 282, and the
-same everywhere else -- and the text version is still the one that decides,
-because it measures the addresses the hardware will actually see.
+same everywhere else -- and the text version is the one that decides, because
+it measures the addresses the hardware will actually see.
 
 The absolute counts differ by about two percent (14807 accesses against
 15143) and I have not accounted for it.  Raw statements subscripting a shared
@@ -75,9 +74,9 @@ def test_a_guard_narrows_the_lanes():
     """`Op.IF` carries its condition as a value in `cond`, so the same
     evaluator answers it per lane.
 
-    Without this the analysis counts all 32 into every bank, and the staging
-    steps here are guarded to a quarter or a half of the wave -- which read 72
-    conflict-free accesses in `rectangular` as 2-way.
+    Without this the analysis would count all 32 into every bank, and the
+    staging steps here are guarded to a quarter or a half of the wave -- it
+    would read conflict-free accesses in `rectangular` as 2-way.
     """
     b = builder()
     tile = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
@@ -93,8 +92,9 @@ def test_a_vector_store_takes_its_width_from_the_value():
     """A load produces the value and a store consumes it, so which operand
     carries the width depends on the direction.
 
-    Reading `target` for both made every vector store look scalar, and a
-    scalar model of a `float4` store puts four times the stride between lanes.
+    Reading `target` for both would make every vector store look scalar, and
+    a scalar model of a `float4` store puts four times the stride between
+    lanes.
     """
     from tensorforge.backend.pir.core import ScalarType
 
@@ -133,7 +133,7 @@ def test_a_swizzle_is_visible_because_it_is_in_the_index():
 def test_a_raw_address_is_refused_not_guessed():
     """An address the analysis cannot read is one it must not count.
 
-    Nine remain in the corpus, all of them `Symbol.load_linear`'s text form.
+    The corpus has nine, all of them `Symbol.load_linear`'s text form.
     Saying so is the difference between a number and a number-shaped thing.
     """
     b = builder()
@@ -146,8 +146,8 @@ def test_a_raw_address_is_refused_not_guessed():
 
 def test_a_numpy_integer_is_an_integer():
     """Shapes and offsets arrive as `numpy.int64`, which is an integer
-    everywhere except to `isinstance`.  Two dozen addresses were unresolved
-    for that alone."""
+    everywhere except to `isinstance`.  Not recognized as one, it would leave
+    every address it appears in unresolved."""
     import numpy as np
 
     b = builder()
@@ -159,7 +159,8 @@ def test_a_numpy_integer_is_an_integer():
 
 def test_a_loop_variable_resolves_to_its_bound():
     """A loop variable is a region argument, not a statement result, so it has
-    no producer to find -- 159 addresses came back unresolved for that.
+    no producer to find -- looked up as one, every address that uses it would
+    come back unresolved.
 
     Substituting the bound is sound here: these are loops over tensor
     dimensions, every lane is on the same iteration, so the value shifts every
@@ -179,9 +180,9 @@ def test_the_analysis_belongs_after_the_passes():
 
     `chain_three` has 1172 shared loads at `finish()` and 587 after
     optimization, and the emitted source shows 590 -- so measuring the
-    unoptimized body counted twice as many accesses as the hardware will make.
-    That is also where a pass acting on this would sit: after the passes that
-    change what is there, before the emitter that fixes it.
+    unoptimized body would count twice as many accesses as the hardware will
+    make.  That is also where a pass acting on this would sit: after the
+    passes that change what is there, before the emitter that fixes it.
     """
     from tensorforge.backend.pir import passes
 

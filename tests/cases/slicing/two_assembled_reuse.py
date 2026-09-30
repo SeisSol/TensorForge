@@ -8,10 +8,11 @@
     y[0:6,:] = B1 @ C ; y[6:12,:] = B2 @ C
     D       += y @ E
 
-Legitimate reuse, and the allocation makes it.  The emit-time check used to
-refuse it: it flattened the nest, so the batch loop -- whose `defs` are its
-body's -- stood ahead of the body as a write of both buffers, each first slice
-counted as a second one and did not kill, and `x` looked live to the end.
+Legitimate reuse, and the allocation makes it.  An emit-time check that
+flattened the nest would refuse it: the batch loop -- whose `defs` are its
+body's -- would stand ahead of the body as a write of both buffers, each first
+slice would count as a second one and not kill, and `x` would look live to the
+end.
 """
 
 import numpy as np

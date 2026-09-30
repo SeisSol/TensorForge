@@ -341,8 +341,7 @@ class NsightCompute(Profiler):
 
     Kernel replay is the default and re-runs a kernel once per pass. A
     cooperative launch cannot be replayed that way, so the barrier cases need
-    `--replay-mode application`, and the adapter says so rather than producing
-    an empty report.
+    `--replay-mode application`, which `commands` does not pass.
     """
 
     def commands(self, exe, workload, batch, iters, warmup, symbol, outdir,
@@ -509,10 +508,9 @@ class Vtune(Profiler):
         # collection read three ways: `-report hw-events` writes a header row
         # and nothing under it, `-report gpu-hotspots` writes nothing at all,
         # and `-report summary` writes 60 rows under overview against 28
-        # under the source analysis this used to ask for.  The pair that was
-        # here produced an empty table on every kernel, which reads as "the
-        # profiler found nothing" rather than as "the wrong report was asked
-        # for".
+        # under the source analysis.  A wrong pair produces an empty table on
+        # every kernel, which reads as "the profiler found nothing" rather
+        # than as "the wrong report was asked for".
         collect = [self.invocation(), '-collect', 'gpu-hotspots',
                    '-knob', 'characterization-mode=overview',
                    '-result-dir', str(result), '--', *program]

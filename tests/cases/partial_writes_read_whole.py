@@ -16,8 +16,8 @@ where each face contributes to the rows it touches.
 Judged on the declared boxes those look like one writer covering everything,
 and deferring the value in registers looks safe.  It is not: the image left
 behind holds only the last writer's rows, and the read that follows wants the
-union.  It used to be refused outright --- the elastic build stopped there --
-which is why the boxes that matter are the ones actually written.
+union.  Refusing the shape outright would stop the elastic build, which is why
+the boxes that matter are the ones actually written.
 """
 
 import numpy as np

@@ -26,9 +26,9 @@ def lanes_of(src):
     Not a round number: with `threadIdx.y` held at 0, every lane past the
     kernel's own width is another copy of one of its lanes, on the same
     element.  A copy that repeats an assignment changes nothing, which is why
-    32 went unnoticed; one that repeats an accumulation whose load and store
-    share a phase adds its term again -- eight times over for a 4-lane
-    kernel.  `kernel_eval.launch_geometry` makes the same point for the
+    a round 32 can look right; one that repeats an accumulation whose load
+    and store share a phase adds its term again -- eight times over for a
+    4-lane kernel.  `kernel_eval.launch_geometry` makes the same point for the
     single-wave runner, which reads the launcher this does not have.
     """
     m = re.search(r"tensorforge-meta: (\{.*\})\s*$", src, re.M)
@@ -46,8 +46,8 @@ def extract(path, kernel):
               for i, l in enumerate(lines)
               if re.match(r"\s*kernel_kernel_\w+\(.*\{$", l)]
     s = [a for a, b in starts if b == kernel][0]
-    # up to the brace that closes the kernel: what follows it is no longer
-    # just the launcher -- a launch configuration and a namespace sit between
+    # up to the brace that closes the kernel: what follows it is not just
+    # the launcher -- a launch configuration and a namespace sit between
     depth, e = 0, s
     for e in range(s, len(lines)):
         depth += lines[e].count("{") - lines[e].count("}")
@@ -60,9 +60,8 @@ def flatten_batching(src):
     """One element, no extra offset: make every global pointer point at 0.
 
     A pointer-based operand is indexed by the element first, and the loop
-    variable carries a prefix these days (`&m0[v5_batchId0][0 +
-    m0_extraOffset]`); the offset within the element stays, the extra offset
-    is bound to zero.
+    variable carries a prefix (`&m0[v5_batchId0][0 + m0_extraOffset]`); the
+    offset within the element stays, the extra offset is bound to zero.
     """
     src = re.sub(r"&(m\d+)\[batchId0\]\[[^\]]*\]", r"&\1[0]", src)
     src = re.sub(r"&(m\d+)\[\w*batchId\d+\]\[([^\]]*)\]", r"&\1[\2]", src)
@@ -189,8 +188,8 @@ def run(src, inputs, shapes, storage=None, lanes=None):
         "totalShrMemPtr": ke.Ptr(mem, "shr"),
     }
     # a SCALAR-addressed tensor is passed by value, not as a pointer -- in
-    # either precision: a `double` one was taken for a pointer, and the first
-    # product with it aborted a double-precision kernel
+    # either precision: a `double` one taken for a pointer would abort a
+    # double-precision kernel at the first product with it
     k = src.index("kernel_kernel_")
     sig = src[src.index("(", k):src.index(")", k)]
     scalars = set(re.findall(r"(?<!\*)\b(?:float|double) (m\d+)\b", sig))
@@ -223,7 +222,7 @@ def run(src, inputs, shapes, storage=None, lanes=None):
 def _storage(storage, name, shape):
     """(actual shape, bbox lower, pack map) for one tensor.
 
-    Tolerates the two-element form an older capture carries, which says the
+    Tolerates the two-element form a capture can carry, which says the
     tensor is stored dense over its box.
     """
     entry = (storage or {}).get(name)

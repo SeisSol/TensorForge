@@ -6,8 +6,7 @@
 `__ldcg` and `__stcg` are an overload set, so a hint on a type outside it is
 not a slower access but a compile error --- and one the host check cannot
 see, because `g++` never reads the intrinsic's declaration.  The device front
-end does see it, which is how `gemm_square_16_f128` was found, but it needs
-`nvcc` present; these run anywhere.
+end does see it, but it needs `nvcc` present; these run anywhere.
 
 What they pin is the *decision*, not the spelling: which types get a hint and
 which are emitted plainly.  Whether the hint should be `.cg` or `.cs` is a
@@ -56,10 +55,10 @@ def test_cuda_hints_the_types_the_intrinsic_declares(datatype):
 def test_cuda_emits_a_plain_access_for_the_rest(datatype):
     """No overload, so the hint is dropped rather than spelled.
 
-    `__float128` is the one that reached a front end: 16 bytes, no `__ldcg`
-    declared over it at any architecture, and the error names the argument
-    list rather than the type, which is what made it look like an
-    architecture fact next to the other reason that case is refused.
+    `__float128` is the one in the corpus: 16 bytes, no `__ldcg` declared
+    over it at any architecture, and the front end's error names the argument
+    list rather than the type, which makes it look like an architecture fact
+    next to the other reason that case is refused.
     """
     lex = _cuda()
     assert not lex.has_nontemporal(datatype)
@@ -73,11 +72,10 @@ def test_cuda_emits_a_plain_access_for_the_rest(datatype):
 def test_cuda_declines_a_wide_access(length):
     """A wide value is a `VectorT`, which the overloads are not declared over.
 
-    Not hypothetical and not only about the overloads: `_write_hop` spells
-    both sides of a staged transfer as `*(VectorT<T, N>*)&...` above a width
-    of one, and a GNU vector value does not survive the device front end at
-    all.  Reaching a hint here needs a different value type, not a different
-    intrinsic.
+    Not hypothetical: `_write_hop` spells both sides of a staged transfer as
+    `*(VectorT<T, N>*)&...` above a width of one, and on CUDA that is a
+    struct of `cuda.h`, not `floatN`.  Reaching a hint here needs a different
+    value type, not a different intrinsic.
     """
     lex = _cuda()
     assert not lex.has_nontemporal(Datatype.F32, length)
@@ -108,9 +106,9 @@ def test_hip_on_nvidia_hardware_has_neither():
 def test_the_type_cannot_be_left_out():
     """Keyword-only and no default: a call site that forgets is a TypeError.
 
-    The defect this replaces was a `glb_load` that never asked, so every
-    caller was silently right until one of them loaded a type the intrinsic
-    does not take.  A default would restore exactly that.
+    A `glb_load` that never asked would leave every caller silently right
+    until one of them loaded a type the intrinsic does not take, and a
+    default would amount to exactly that.
     """
     with pytest.raises(TypeError):
         _cuda().glb_load("g[i]", True)          # noqa: FBT003
@@ -142,7 +140,7 @@ def test_f128_keeps_its_hint_on_amd():
 
 
 def test_an_f32_kernel_still_gets_one():
-    """The other half of the claim: the gate turned away one type, not all.
+    """The other half of the claim: the gate turns away one type, not all.
 
     Without this, dropping every hint would pass the test above.
     """

@@ -5,16 +5,15 @@
 
 """Pseudo-IR: moving a prefetch across the back edge.
 
-`schedule.can_reorder` licenses swaps within a body, and the measurement that
-came with it said the schedule is already at their fixed point: the wait sits
-immediately before the read that needs it, the issue immediately after the
-binding it reads, and more than half the transfers have five statements or
-fewer of cover.  The distance that is missing is not reachable by any local
-move.  It is one iteration away.
+`schedule.can_reorder` licenses swaps within a body, and the schedule is
+already at their fixed point: the wait sits immediately before the read that
+needs it, the issue immediately after the binding it reads, and more than half
+the transfers have five statements or fewer of cover.  The distance that is
+missing is not reachable by any local move.  It is one iteration away.
 
-So this is the transformation the whole chain was for.  A transfer issued for
-element `k` and waited in the same iteration becomes a transfer issued for
-element `k+1` and waited in the *next* iteration::
+So this pass reaches across the back edge.  A transfer issued for element `k`
+and waited in the same iteration becomes a transfer issued for element `k+1`
+and waited in the *next* iteration::
 
     %t0 = copy.async  ...                 # peeled, for element 0
     %tn = for %k iter(%t = %t0) {
@@ -25,13 +24,12 @@ element `k+1` and waited in the *next* iteration::
           }
     wait %tn                              # drain
 
-The accounting is the one from the very first slot census.  A body of `n`
-compute slots carrying a transfer at distance `d` needs `ceil((d + 1) / n)`
-copies of its buffer, so `d <= n - 1` is free: one copy, no rotation, no stage
-index.  This pass does `d = n`, one whole iteration, which is the first value
-that needs two -- and that is why it takes the destination buffer as something
-the caller has already double-buffered, rather than pretending the copies are
-free.
+The accounting is the slot census's.  A body of `n` compute slots carrying a
+transfer at distance `d` needs `ceil((d + 1) / n)` copies of its buffer, so
+`d <= n - 1` is free: one copy, no rotation, no stage index.  This pass does
+`d = n`, one whole iteration, which is the first value that needs two -- and
+that is why it takes the destination buffer as something the caller has
+already double-buffered, rather than pretending the copies are free.
 
 What it refuses, and why each one would be wrong:
 
@@ -62,13 +60,12 @@ from .schedule import (_defines, _touches_fixed, _uses, can_reorder,
 def _why_not(group: Sequence[Stmt], fixed: Stmt) -> str:
     """Name what blocks a crossing, because "a rawblock" is not a reason.
 
-    The refusal that cost the most to diagnose said only that a `rawblock` was
-    in the way.  It was in the way because it *writes the same shared buffer*
-    the transfer does -- which, once said out loud, is not an obstacle at all
-    but a symptom: a macro copy is split into hops, some of them direct
-    statements of the guard and the rest inside an unrolled loop, and the
-    group only ever collected the direct ones.  The block is the same
-    transfer, and the pass was refusing to move a transfer past itself.
+    A `rawblock` may be in the way because it *writes the same shared buffer*
+    the transfer does -- which, said out loud, is not an obstacle at all but
+    a symptom: a macro copy is split into hops, some of them direct
+    statements of the guard and the rest inside an unrolled loop, and a group
+    that collected only the direct ones would refuse to move a transfer past
+    itself.
     """
     if not fixed.movable:
         detail = 'immovable'
@@ -138,10 +135,10 @@ def _sole_async(region: Region) -> Tuple[int, Stmt, Optional[int]]:
     #
     # A macro copy is split into hops of 4, 2 and 1 elements per lane plus a
     # predicated tail.  Some hops are direct statements; the rest are inside
-    # an unrolled loop.  Collecting only the direct ones left the loop
+    # an unrolled loop.  Collecting only the direct ones would leave the loop
     # standing between a transfer and its wait, writing the same buffer -- so
-    # the pass refused to move a transfer past itself, and said so as `both
-    # touch s0`.
+    # the pass would refuse to move a transfer past itself, and say so as
+    # `both touch s0`.
     #
     # Widening the group to reach *into* the loop would be wrong: pulling
     # statements out of a loop changes how many times they run.  What crosses
@@ -252,8 +249,8 @@ def _wrap_one(loop: Stmt, make_value,
 
     # The destination must not be read anywhere in the body.
     #
-    # This is the slot accounting from the first census, enforced rather than
-    # assumed.  A transfer at distance `d` in a body of `n` slots needs
+    # This is the slot census's accounting, enforced rather than assumed.
+    # A transfer at distance `d` in a body of `n` slots needs
     # `ceil((d + 1) / n)` copies of its buffer; this pass does `d = n`, one
     # whole iteration, which is the first value that needs two.  With one
     # copy, the transfer this iteration issues for element k+1 lands in the
@@ -264,34 +261,33 @@ def _wrap_one(loop: Stmt, make_value,
     # Rotating the buffer is a separate transformation with its own cost, and
     # a pass that quietly assumed someone else had done it would be wrong in
     # exactly the cases where nobody had.
-    # From the subtree on *both* sides, and the writer side is the one that was
-    # missing.  The reader side below already says why; the same is true of the
-    # write, and more quietly: a group member is a `rawblock` or a hop loop,
-    # neither of which carries an access of its own, so `g.accesses` was empty
-    # and `any(... for w in dst_writes)` was `any([])` for every reader in the
-    # body.  The refusal could not fire at all -- the pass accepted every
-    # single-buffered destination it was ever given, which is the third time in
-    # this function that reading the top level of a group has meant reading
-    # nothing (`g.args[:1]` and `g.target[0]` were the first two).
+    # From the subtree on *both* sides.  The reader side below says why; the
+    # same is true of the write, and more quietly: a group member is a
+    # `rawblock` or a hop loop, neither of which carries an access of its own,
+    # so `g.accesses` would be empty and `any(... for w in dst_writes)` would
+    # be `any([])` for every reader in the body -- the refusal could not fire
+    # at all, and every single-buffered destination would be accepted.
     dst_writes = [a for g in group for x in walk_stmts((g,)) for a in x.accesses
                   if a.writes]
     # The whole subtree, not the top level.  The compute reads its operand
-    # inside nested loops, so a one-level scan found no read of the
-    # destination and accepted a transfer that fills the buffer the current
+    # inside nested loops, so a one-level scan would find no read of the
+    # destination and accept a transfer that fills the buffer the current
     # element is still reading -- the exact race this check exists to refuse,
-    # slipping through because the read was two regions down.
+    # slipping through because the read is two regions down.
     #
-    # A group's own statements are not readers of it, and now that the scan
+    # A group's own statements are not readers of it, and since the scan
     # descends they are in `scan` as well: the `copy.async` inside a member
     # reads the source and writes the destination, so excluding only the
-    # member itself left its subtree to be compared against its own write.
+    # member itself would leave its subtree to be compared against its own
+    # write.
     #
-    # By identity, where `s in group` was structural.  `Stmt` is a frozen
-    # dataclass, so `==` walks the whole subtree: over a set this size that is
-    # quadratic in the body and deep in each comparison.  Identity is also what
-    # was meant -- these are the statements `_sole_async` picked out of this
-    # very body, not statements that merely look like them, and two that happen
-    # to render alike are two transfers, only one of which is the group's.
+    # By identity, not structurally as `s in group` would compare.  `Stmt` is
+    # a frozen dataclass, so `==` walks the whole subtree: over a set this
+    # size that is quadratic in the body and deep in each comparison.
+    # Identity is also what is meant -- these are the statements `_sole_async`
+    # picked out of this very body, not statements that merely look like
+    # them, and two that happen to render alike are two transfers, only one of
+    # which is the group's.
     in_group = {id(x) for g in group for x in walk_stmts((g,))}
     scan = [] if assume_rotated else [st for st in walk_stmts(region.body)]
     for s in scan:
@@ -314,19 +310,19 @@ def _wrap_one(loop: Stmt, make_value,
     # compile, which is the failure mode `test_syntax` exists for and the
     # corpus alone would not show.
     #
-    # Declaring the window ahead of the loop is the fix, and it is the same
-    # move that took the address bindings and the windows out of the guard --
-    # one scope further out.  Until then this declines rather than emitting
+    # Declaring the window ahead of the loop would lift this -- the same move
+    # that puts the address bindings and the windows outside the guard, one
+    # scope further out.  Without it this declines rather than emitting
     # something that cannot build.
     defined_in_loop = {t.id for st in region.body for t in st.target}
     if guard_at is not None:
         defined_in_loop |= {t.id for st in region.body[guard_at].regions[0].body
                             for t in st.target}
     # From the subtree: a section member is a hop loop with no args of its
-    # own, so reading `g.args[:1]` stopped finding the destination the moment
-    # the group became a section -- and a rotating write window *is* declared
-    # inside the loop, because its offset moves with the stage counter.  The
-    # peel then names it before it exists, which renders and does not compile.
+    # own, so reading `g.args[:1]` would not find the destination -- and a
+    # rotating write window *is* declared inside the loop, because its offset
+    # moves with the stage counter.  The peel would then name it before it
+    # exists, which renders and does not compile.
     dests = [x.args[0] for g in group for x in walk_stmts((g,))
              if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) and x.args]
     if any(isinstance(a, Value) and a.id in defined_in_loop for a in dests):
@@ -342,7 +338,7 @@ def _wrap_one(loop: Stmt, make_value,
     # nothing to substitute.  What has to move is the backward slice: every
     # statement the group transitively reads that mentions the induction, with
     # the successor index put in its place.  That slice *is* the rolling
-    # pointer the old macro-level pipeline built by hand.
+    # pointer the macro-level pipeline builds by hand.
     # The whole subtree, since a section member may be a hop loop and the
     # index it reads is an operand of a statement inside it, not of the block.
     def _names_index(st):
@@ -359,9 +355,7 @@ def _wrap_one(loop: Stmt, make_value,
 
     # From the subtree: a section member may be a hop loop, which has no
     # target of its own -- the tokens belong to the `copy.async` statements
-    # inside it.  Reading `g.target[0]` worked only while the group was a set
-    # of copies, and raised an IndexError the first time a real section
-    # reached here.
+    # inside it, and reading `g.target[0]` would raise an IndexError.
     tokens = [t for g in group for x in walk_stmts((g,))
               if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) for t in x.target]
     carried = [make_value(t.type, 'cp') for t in tokens]
@@ -401,8 +395,8 @@ def _wrap_one(loop: Stmt, make_value,
     # geometry rather than by the element count, and the rows whose start is
     # past the end are the common case, not the edge: 100 elements over a grid
     # of 100 blocks with 16 rows puts the last start at 1599.  Those rows skip
-    # the loop, which is why the body never had to care -- the peel runs ahead
-    # of the guard and reads that element unconditionally.
+    # the loop, which is why the body need not care; the peel does, because it
+    # runs ahead of the guard and reads that element unconditionally.
     #
     # So the loop says which index the peel should use, the same way it says
     # which one comes next.  Falling back to `lo` keeps a loop that clamps
@@ -511,8 +505,8 @@ def _advance(slice_: Sequence[Stmt], mapping: Dict[int, Value],
     The clones drop `decl` and `extern`.  Those carry a declarator the caller
     wrote with a name in it, and a second statement declaring `glb_m2` would
     be a redefinition rather than a second pointer.  Without them the emitter
-    names the value itself and renders the type -- which now carries what the
-    declarator used to spell: `const` and the address space come off the type,
+    names the value itself and renders the type, which carries what a
+    declarator would spell: `const` and the address space come off the type,
     and `restrict` off the source value's `quals`.
 
     Carrying the promise is sound here because of what is being cloned.  The

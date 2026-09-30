@@ -3,14 +3,13 @@
 # SPDX-License-Identifier: MIT
 """``tmp = abs(A)`` then ``C = tmp @ B`` — an elementwise feeding a multilinear.
 
-The other direction, and it fails earlier and for a different reason.
-`MultilinearBuilder.plan` walks the descriptor list to decide which temporaries
-are written where, and skips every descriptor that is not a `MultilinearDescr`.
-An elementwise write is therefore invisible to it, so `_check_initialized` sees
-a temporary that is read and never written and refuses to generate.
+The other direction.  `SectionPlan` decides which temporaries are written where
+from the geometry every descriptor states, whatever its kind.  A plan that
+walked only the `MultilinearDescr`s would not see the elementwise write, and
+`_check_initialized` would refuse a temporary that is read and never written.
 
-Nothing about the refusal is wrong except its premise: the write exists, the
-analysis just cannot see it.
+Nothing about such a refusal would be wrong except its premise: the write
+exists, the analysis just would not see it.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

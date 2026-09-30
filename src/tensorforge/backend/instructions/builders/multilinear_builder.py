@@ -102,12 +102,12 @@ class MultilinearBuilder(OperationBuilder):
     # register staging already assumes this dimension is the lane axis:
     # `_lead_origin_shift` pins the origin on `target[i].index(0)`, and
     # `MultilinearInstruction._check_offsets` checks the slicing remainder
-    # there.  Only the staging itself used to hardcode dimension 0, so an
-    # operand whose lead index sits elsewhere --- a transposed one --- got an
-    # image whose lane axis was a *contraction* dimension.  `Symbol.load` then
-    # found a loop constant on what it believed was the lane axis and emitted a
-    # cross-lane broadcast, which hands every lane the same element and drops
-    # the lane-distributed index entirely.
+    # there.  A staging that hardcoded dimension 0 would give an operand whose
+    # lead index sits elsewhere --- a transposed one --- an image whose lane
+    # axis is a *contraction* dimension.  `Symbol.load` would then find a loop
+    # constant on what it believes is the lane axis and emit a cross-lane
+    # broadcast, which hands every lane the same element and drops the
+    # lane-distributed index entirely.
     lead_pos = self._descr.target[i].index(0) if has_lead_dim else 0
     self._lead_pos[i] = lead_pos
 
@@ -164,20 +164,18 @@ class MultilinearBuilder(OperationBuilder):
     # packing and the per-dimension addressing describe different images, so
     # take the dimension-wise loader instead; it is correct for any lane axis.
     #
-    # `is_dense` is the other half, and it is the half that was missing.  The
-    # comment here used to claim flat packing "can only ever make the first
-    # dimension the lane axis"; that holds only when the first extent is a
-    # multiple of the lane count.  At 16 elements over 32 lanes it is false,
-    # and the reader --- `MultilinearInstruction._second_operand_is_sparse`,
-    # which picks the accessor --- was deciding the same question separately
-    # and on other grounds.  Two answers to one question is what produced
-    # register slots nobody wrote.
+    # `is_dense` is the other half.  Flat packing makes the first dimension
+    # the lane axis only when the first extent is a multiple of the lane count
+    # -- at 16 elements over 32 lanes it does not -- and the reader,
+    # `MultilinearInstruction._second_operand_is_sparse`, which picks the
+    # accessor, decides the same question.  Two answers to one question, on
+    # different grounds, would leave register slots nobody writes.
     #
-    # So the flat fill is now for compressed operands and no others: their
-    # cells have no dimension-wise address in the first place, which is why
-    # the flat map is the right one there and the only one there.  Both sides
-    # read the same predicate.  Note this says *which map*, not how wide it is
-    # walked -- a vectorized fill stays available under either.
+    # So the flat fill is for compressed operands and no others: their cells
+    # have no dimension-wise address in the first place, which is why the flat
+    # map is the right one there and the only one there.  Both sides read the
+    # same predicate.  Note this says *which map*, not how wide it is walked
+    # -- a vectorized fill stays available under either.
     dense = symbol.obj is None or symbol.obj.is_dense()
     linearize = lane_axis_needs_moving and lead_pos == 0 and not dense
 
@@ -397,12 +395,12 @@ class MultilinearBuilder(OperationBuilder):
         home first -- zero-filled over what its producer promised, as its
         store at the end would have -- and then read back like a preload.
 
-    The second used to be refused, on the grounds that the missing part was
+    The second is not refused on the grounds that the missing part may be
     produced by some other instruction.  It need not be: an assignment covers
     rows 0..10 and a copy reads rows 0..20, the rest zero by the assignment's
-    promise.  The straight-line build never met it, because its stores go out
-    as they are made; a merged run keeps its accumulations in registers, and
-    SeisSol's time derivative (`dQ(k+1) = dQext(k+1)`) met it on every
+    promise.  The straight-line build never meets it, because its stores go
+    out as they are made; a merged run keeps its accumulations in registers,
+    and SeisSol's time derivative (`dQ(k+1) = dQext(k+1)`) meets it on every
     iteration.  A part written by another instruction is still safe: a
     destination written in slices is never kept in registers.
     """
@@ -505,8 +503,8 @@ class MultilinearBuilder(OperationBuilder):
     # The one that *does* carry it keeps the whole width, and that is the
     # point of the arrangement: its rows are the destination's rows, split
     # over the lanes, while the operand every row needs is copied.  Replicated
-    # too, it held rows 0..31 in both sub-groups and rows 32..55 in neither --
-    # `gemm_56x18_x_18x18` at 64 lanes came out with a relative error of 1.
+    # too, it would hold the same rows in every sub-group: at 56 rows over 64
+    # lanes, rows 0..31 in both sub-groups and rows 32..55 in neither.
     lead = lead_pos
     width = getattr(self._context.get_vm().get_lexic(), 'sub_group_width', None)
     if width is not None and self._num_threads and not carries_lead:
@@ -577,13 +575,13 @@ class MultilinearBuilder(OperationBuilder):
     than the destination declares --- which leaves slots unused, and that is
     harmless.
 
-    An accumulation used to take the *bias image's* box instead.  That is what
+    Not from the *bias image's* box, even for an accumulation: that is what
     the operation reads, not what it writes, and the two part company whenever
-    the image does not match the destination: a broadcast leaves a rank-1
-    image behind for a rank-2 destination, and the array came out with one
-    slot where the store walks three.  The destination's box says the same
-    thing as a matching image and stays right when it does not match, so ask
-    it directly.
+    the image does not match the destination -- a broadcast leaves a rank-1
+    image behind for a rank-2 destination, and an array sized from it would
+    have one slot where the store walks three.  The destination's box says
+    the same thing as a matching image and stays right when it does not
+    match, so ask it directly.
 
     The lane axis is 0 because `MultilinearDescr._lead_dim` aligns the thread
     count to the destination's axis 0 and the whole multilinear path is built
@@ -602,9 +600,10 @@ class MultilinearBuilder(OperationBuilder):
     the whole kernel, so what a destination finds under its name may have been
     staged for something else entirely --- most often an *operand* read of a
     different slice of the same tensor.  Taking it as the accumulation bias
-    then reads the wrong elements, from the wrong lanes: in the poroelastic
-    space-time predictor `m2[:, 11] += ...` picked up the image of
-    `m2[:, 12]`, staged one descriptor earlier, and accumulated onto that.
+    would then read the wrong elements, from the wrong lanes: in the
+    poroelastic space-time predictor `m2[:, 11] += ...` would pick up the
+    image of `m2[:, 12]`, staged one descriptor earlier, and accumulate onto
+    that.
 
     An accumulation chain onto the same box --- the case the reuse exists for
     --- has the staged region equal to the destination's, so require that.
@@ -628,10 +627,11 @@ class MultilinearBuilder(OperationBuilder):
     The destination has no such rebasing.  `_lead_origin_shift` pins theta on
     `_dest_obj.offset[0]`, and `_analyze` shifts the whole lead loop by it, so
     the compute and the store address row `n0` in lane `n0 % T`.  An absorbed
-    offset puts the preloaded bias somewhere else entirely: for
-    `m2[10:20, 12] += ...` the loader filled lanes 0..9 while lanes 10..19 did
-    the arithmetic and stored, so every accumulation read a bias of zero and
-    the destination's previous value was dropped.  `+=` silently became `=`.
+    offset would put the preloaded bias somewhere else entirely: for
+    `m2[10:20, 12] += ...` the loader would fill lanes 0..9 while lanes 10..19
+    do the arithmetic and store, so every accumulation would read a bias of
+    zero and the destination's previous value would be dropped -- `+=`
+    silently becoming `=`.
 
     Folding the *lead* offset into the box instead leaves that axis in tensor
     coordinates, where lane `l` holds row `l` --- which is what theta assumes.
@@ -704,9 +704,9 @@ class MultilinearBuilder(OperationBuilder):
     # whole box -- it fits exactly or it is not handed out -- so the result is
     # written over all of it: the product where this term reaches, `prev`
     # elsewhere.  Left to this term's own box, a chain whose terms narrow (the
-    # ADER Taylor expansion, `I += dQ(k) c_k` over fewer rows each time) kept
-    # only the last term's rows, which is why such a chain went through memory
-    # on every term.
+    # ADER Taylor expansion, `I += dQ(k) c_k` over fewer rows each time) would
+    # keep only the last term's rows, and such a chain would have to go
+    # through memory on every term.
     whole_prev = (prev is not None and prev.stype == SymbolType.Register
                   and any(e.image is prev for _, e in self._residency.items()))
     # Whether this result is built on the pending image; `_narrows_pending`
@@ -743,9 +743,9 @@ class MultilinearBuilder(OperationBuilder):
     out of memory --- which is what `_get_target_symbol` falls back to for a
     shared temporary --- does not: the loop indices are the descriptor's own,
     and its slicing offset has to be added, exactly as `_make_store` adds it on
-    the way out.  Without it a `t0[10:20, 8] += ...` read its bias from
-    `t0[0:10, 0]` and wrote the sum to the right place, so the temporary
-    accumulated onto the wrong elements.
+    the way out.  Without it a `t0[10:20, 8] += ...` would read its bias from
+    `t0[0:10, 0]` and write the sum to the right place, so the temporary
+    would accumulate onto the wrong elements.
     """
     if prev is None:
       return None
@@ -756,8 +756,8 @@ class MultilinearBuilder(OperationBuilder):
   def _store_offset(self):
     """Destination offset seen by the store, in the shifted origin.
 
-    The accumulator is indexed by the lead loop variable, which now runs in
-    the theta-shifted space; the global destination is not, so the shift has
+    The accumulator is indexed by the lead loop variable, which runs in the
+    theta-shifted space; the global destination is not, so the shift has
     to come back out on the way to memory.  Dimension 0 of the destination is
     the one carrying the lead index.
     """
@@ -784,10 +784,10 @@ class MultilinearBuilder(OperationBuilder):
 
     The assignment it adds to promised zeros outside what it covered, and the
     store keeps that promise -- the store that is now this entry's, since the
-    residency holds one entry per name.  Dropped, as it used to be, a merged
-    run's `dQext(k+1) = ...; dQext(k+1) += ...` went out with rows 10..20 as
-    whatever the buffer held.  Carried only while it means the same cells: in
-    the same frame, with nothing the pending image held left out.
+    residency holds one entry per name.  Dropped, it would send a merged run's
+    `dQext(k+1) = ...; dQext(k+1) += ...` out with rows 10..20 as whatever the
+    buffer held.  Carried only while it means the same cells: in the same
+    frame, with nothing the pending image held left out.
     """
     if (pending is None or pending.is_preload or pending.promise is None
         or pending.covered is None
@@ -844,10 +844,10 @@ class MultilinearBuilder(OperationBuilder):
     The shared-memory side of the promise `StoreRegToGlb` keeps: an
     assignment defines its whole promised box (`_promised_box`), the part
     `_analyze` narrowed away as zeros.  Without it, a temporary assigned anew
-    from a narrower operand kept whatever its buffer held outside the new
-    values -- SeisSol's free-surface-gravity kernel re-assigns `MPrev` from a
-    product that one row of the Taylor derivative supports, and the
-    accumulation that followed added to the previous step's rows.
+    from a narrower operand would keep whatever its buffer held outside the
+    new values -- SeisSol's free-surface-gravity kernel re-assigns `MPrev`
+    from a product that one row of the Taylor derivative supports, and the
+    accumulation that follows would add to the previous step's rows.
 
     In buffer coordinates, as `StoreRegToShr` takes it.  None for an
     accumulation, which promises nothing, and where the accumulator covers
@@ -1043,10 +1043,11 @@ class MultilinearBuilder(OperationBuilder):
     appended here is provisional -- and provisional barriers are not free.
     They stand in the stream for the whole optimization pipeline, and
     `MoveLoads` treats a barrier as a wall for any transfer that touches
-    shared memory.  On `local_flux` that pinned all five global-to-shared
-    transfers where they were built: not one moved, so every
-    `__pipeline_commit` ended up next to its `__pipeline_wait_prior(0)` and
-    the asynchronous copies were issued and awaited in the same breath.
+    shared memory.  On `local_flux` that would pin all five global-to-shared
+    transfers where they are built: not one would move, so every
+    `__pipeline_commit` would end up next to its `__pipeline_wait_prior(0)`
+    and the asynchronous copies would be issued and awaited in the same
+    breath.
 
     So they are inserted only where they are the final word.  With the pass
     off, nothing else derives a barrier and these are the kernel's own; with

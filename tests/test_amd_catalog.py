@@ -9,15 +9,14 @@ lives in `hip.h`, so they are checked against it -- the same seam, and the same
 reason, as the `fmacdpp` capabilities in `test_amd_caps.py`.
 
 The 32-wide tile is the case worth having a test for.  Its transpose does not
-exist, and the way that used to be expressed was a commented-out call site:
-nothing said why it was commented out, and uncommenting it would have emitted
-a call to an undeclared template. `available_for` refuses the tile instead,
-which is a statement a reader can act on.
+exist, and `available_for` refuses the tile, which is a statement a reader can
+act on -- a commented-out call site would say nothing about why, and
+uncommenting it would emit a call to an undeclared template.
 
-The `scale` argument gets its own tests because it stopped being data.  It was
-three nested dicts of hand-written constants; it is `log2(threads // block)`.
-Tabulating a formula does not just duplicate it, it introduces holes -- a legal
-combination missing from the table raised `KeyError` from an unrelated entry.
+The `scale` argument gets its own tests because it is a formula, not data:
+`log2(threads // block)`.  Tabulating a formula does not just duplicate it, it
+introduces holes -- a legal combination missing from a table would raise
+`KeyError` from an unrelated entry.
 """
 
 from __future__ import annotations
@@ -38,8 +37,8 @@ HIP_H = (Path(__file__).parent.parent / "src" / "tensorforge" / "include" /
 ARCHS = ["gfx900", "gfx906", "gfx908", "gfx90a", "gfx940", "gfx942", "gfx950",
          "gfx1010", "gfx1030", "gfx1100", "gfx1200", "gfx1250", "gfx1251"]
 
-#: The scale table that used to be written out by hand, kept as the reference
-#: the formula has to reproduce.
+#: The scale values written out by hand, as the reference the formula has to
+#: reproduce.
 LEGACY_SCALE = {
     4: {64: 4, 32: 3, 16: 2, 8: 1, 4: 0},
     16: {64: 2, 32: 1, 16: 0},
@@ -148,11 +147,11 @@ def test_scale_rejects_a_thread_count_the_tile_does_not_divide():
 
 @pytest.mark.parametrize("arch", ARCHS)
 def test_tiles_are_offered_only_where_mfma_exists(arch):
-    """`mai-insts`, where a family range used to stand in for it.
+    """`mai-insts`, rather than a family range standing in for it.
 
-    The two agree on every target here and differ on gfx90b--gfx90f, which
-    `cdna1`'s `>= 0x90a` admitted and the hardware does not have. The
-    predicate is gone; this is the property it was carrying.
+    The two would agree on every target here and differ on gfx90b--gfx90f,
+    which a bound like `>= 0x90a` admits and the hardware does not have. This
+    is the property such a range would only approximate.
     """
     ctx = _ctx(arch)
     expected = amd.has_feature(ctx, "mai-insts")
@@ -418,8 +417,8 @@ def test_xf32_is_tf32_and_says_so():
 
     AMD's XF32 is the same E8M10 as NVIDIA's TF32, which `Datatype.TF32`
     already names and `intel.py` already counts terms against. Carrying a
-    private constant here would have said eleven a second time, in a place
-    where nothing forces the two to stay equal.
+    private constant here would say eleven a second time, in a place where
+    nothing forces the two to stay equal.
 
     The register type stays `F32`, and that is not a loose end: the builtin
     takes `_ExtVector<2, float>` and there is no conversion instruction, so
@@ -449,13 +448,13 @@ def test_a_direct_row_needs_a_single_term():
 @pytest.mark.parametrize("op", [o for o in catalog.MATRIX_OPS if o.broadcast],
                          ids=lambda op: op.builtin)
 def test_cbsz_never_names_a_block_the_instruction_does_not_have(op):
-    """The bound that `threads // block` did not respect.
+    """The bound that `threads // block` does not respect.
 
     `cbsz` selects a broadcast group, so it cannot exceed `log2(blocks)`. That
-    was invisible while every entry had `k == 1`, because there `blocks ==
-    wave // n` makes `threads // n` and `blocks` the same number at a full
-    wave. `mfma_f64_4x4x4f64` has four blocks and sixteen lanes per row, and
-    the old expression asked it for `cbsz = 4`.
+    is invisible where `k == 1`, because there `blocks == wave // n` makes
+    `threads // n` and `blocks` the same number at a full wave.
+    `mfma_f64_4x4x4f64` has four blocks and sixteen lanes per row, and an
+    expression built on `threads // block` would ask it for `cbsz = 4`.
     """
     for threads in (4, 8, 16, 32, 64):
         if threads % op.n:
@@ -465,10 +464,10 @@ def test_cbsz_never_names_a_block_the_instruction_does_not_have(op):
 
 
 def test_cbsz_reproduces_the_hand_written_table():
-    """Same numbers as before, from the instruction instead of the tile.
+    """The hand-written numbers, from the instruction instead of the tile.
 
-    `LEGACY_SCALE` is reproduced exactly, which is what makes this a
-    refactoring of the K=1 path rather than a change to it.
+    `LEGACY_SCALE` is reproduced exactly, so on the K=1 path the instruction
+    and the tile give the same answer.
     """
     for block, table in LEGACY_SCALE.items():
         op = next(o for o in catalog.MATRIX_OPS
@@ -526,9 +525,9 @@ def test_the_fp64_mfmas_are_offered_but_not_lane_batched():
 def test_the_router_and_the_emitter_ask_the_same_question(arch, dtype):
     """`matmul()` gates on `mfma_tile_for`; so does `matmul32`.
 
-    They used to ask differently -- a family predicate at the router, a
-    `next()` without a default at the emitter -- and a disagreement surfaced
-    as `StopIteration` out of code generation.
+    Asked differently -- a family predicate at the router, a `next()` without
+    a default at the emitter -- a disagreement would surface as
+    `StopIteration` out of code generation.
     """
     ctx = _ctx(arch, dtype)
     for threads in (4, 16, 32, 64):
@@ -543,10 +542,10 @@ def test_the_router_and_the_emitter_ask_the_same_question(arch, dtype):
 
 
 def test_f64_still_takes_the_dpp_path():
-    """Now because no tile fits, not because the condition named F32.
+    """Because no tile fits, not because a condition names F32.
 
     `fmacdpp16(double&, double, double)` is in the runtime and `select` picks
-    it on CDNA 2, so F64 is served -- the point is that the reason is now a
+    it on CDNA 2, so F64 is served -- the point is that the reason is a
     structural one the catalog states.
     """
     for arch in ("gfx90a", "gfx942", "gfx950"):

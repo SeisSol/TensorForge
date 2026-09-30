@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Plain dense GEMM ``C = A @ B`` with square matrices.
+"""Plain dense GEMM ``C = A @ B`` in quadruple precision.
 
-The smallest useful case: square 16x16, alpha=1, beta=0, no transposes,
-STRIDED addressing. If this passes, the whole pipeline (generate, emit,
-compile, run, compare) is working end to end.
+Square 2x2, alpha=1, beta=0, no transposes, STRIDED addressing: the plainest
+kernel that carries `__float128` through generation and emission, whose cache
+hints `test_nontemporal.py` checks per vendor.
 """
 
 from tensorforge.common.basic_types import Addressing, Datatype

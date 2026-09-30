@@ -4,18 +4,18 @@
 """Whose registers `pressure(in_bytes=True)` counts.
 
 The byte form sums two things: register arrays, which are per lane, and live
-SSA values, which `register_bytes` scaled by the lane axis.  Under an explicit
-vector that is right -- one work-item holds the whole wave, so a value really
-does occupy `lanes` of its registers.  Under SPMD it is not: the lane axis is
-threads, each holding one, and multiplying by it reports the wave's total
-register file.  The sum was then in two different units.
+SSA values, which `register_bytes` scales by the lane axis only under an
+explicit vector.  There that is right -- one work-item holds the whole wave,
+so a value really does occupy `lanes` of its registers.  Under SPMD it is not:
+the lane axis is threads, each holding one, and multiplying by it would report
+the wave's total register file and put the sum in two different units.
 
 That has a direction, which is what makes it worth a test rather than a
-comment.  Doubling the lane count halves every array and doubles the per-value
-figure, so the two nearly cancel and the total barely moves -- while the thing
-a caller wants, one lane's footprint, halves.  A search minimizing the old
-figure would pick 32 lanes on gfx90a precisely where 64 is what relieves the
-pressure.
+comment.  Doubling the lane count halves every array and doubles the
+wave-total per-value figure, so the two nearly cancel and the total barely
+moves -- while the thing a caller wants, one lane's footprint, halves.  A
+search minimizing the wave total would pick 32 lanes on gfx90a precisely where
+64 is what relieves the pressure.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def test_a_value_costs_one_lane_under_spmd_and_a_wave_under_explicit_simd():
 def test_an_array_is_per_lane_either_way():
     """Its volume is what one lane holds, whichever way the body is lowered.
 
-    Which is exactly why the scalar half had to be asked: two terms of one sum
+    Which is exactly why the scalar half has to be asked: two terms of one sum
     cannot be in different units.
     """
     a = _array(74)
@@ -118,8 +118,8 @@ def test_a_broadcast_the_target_folds_holds_no_register():
     `r20.3<0;1,0>` reads one element of a register and spreads it over the
     instruction's lanes, so it occupies nothing of its own -- the order-6
     derivative's simd32 build has 8033 such regions and no message that is not
-    a spill.  Counted as values they were 1944 of the 3400 bytes a lane that
-    the kernel is judged by.
+    a spill.  Counted as values they would be more than half of the bytes a
+    lane that the kernel is judged by.
     """
     from tensorforge.backend.pir.build import IRBuilder
     from tensorforge.backend.pir.core import MemSpace

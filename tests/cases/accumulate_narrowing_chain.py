@@ -8,8 +8,8 @@ The shape of SeisSol's ADER Taylor expansion, ``I = dQ(0) c_0`` followed by
 ``_analyze`` narrows each accumulation to the rows its operand has.  The
 assignment covers the whole box, so its register image holds everything and
 each later term adds into it.  Held to its own rows instead, a term's image
-would lose the others; the destination went through global memory on every
-term to avoid that.
+would lose the others, and avoiding that would take the destination through
+global memory on every term.
 """
 
 import numpy as np

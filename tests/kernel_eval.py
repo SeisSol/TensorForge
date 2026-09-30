@@ -5,10 +5,10 @@
 
 """Numeric equivalence of two generated kernels.
 
-Every migration step so far could be checked structurally --- byte-identical,
-canonically identical, or the same statement sequence --- because nothing ever
-moved between regions.  If-conversion does move statements between regions, and
-then only one question matters: does the kernel still compute the same thing?
+A transform that moves nothing between regions can be checked structurally ---
+byte-identical, canonically identical, or the same statement sequence.
+If-conversion does move statements between regions, and then only one question
+matters: does the kernel still compute the same thing?
 
 This interprets the generated CUDA directly for a small subset (declarations,
 assignments, `if`/`else`, counted `for`, ternaries, array and pointer
@@ -36,11 +36,10 @@ _DECL = re.compile(
     # onto it, and the oracle has to read past it to find the array.
     r'^(?:alignas\s*\(\s*\d+\s*\)\s+)?'
     r'(?:const\s+)?(?:__restrict__\s+)?'
-    # `uint32_t` was missing, and with it every kernel built with prefetch:
-    # `wrap.py` emits `uint32_t pipeStage0` as its bookkeeping, the
-    # declaration did not match, and the whole configuration aborted at the
-    # first line of the loop.  So the one path that most needed an oracle had
-    # none.
+    # `uint32_t` is what every kernel built with prefetch needs: `wrap.py`
+    # emits `uint32_t pipeStage0` as its bookkeeping, and without a match the
+    # whole configuration would abort at the first line of the loop -- the one
+    # path that most needs an oracle would have none.
     r'(?:tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>|float[234]|double[234]|'
     r'u?int(?:8|16|32|64)_t|float|double|int|unsigned|size_t|bool|auto|'
     r'__float128|char)'
@@ -139,7 +138,8 @@ class Vec(tuple):
     """A short vector value: `VectorT<T, N>`, `floatN`, or a `{a, b}` list.
 
     Arithmetic is elementwise, which is what the generated code means by it --
-    the device types are GNU vector types, not structs.  Mixing with a scalar
+    GNU vector types on HIP, and on CUDA a struct whose operators are
+    elementwise as well.  Mixing with a scalar
     is deliberately *not* supported: the generator splats a broadcast operand
     into a full vector before the product, so a scalar meeting a vector here
     means the splat went missing and silently broadcasting it would hide
@@ -362,9 +362,9 @@ class Interp:
                   + ((Subblock * Lane + L % Subblock) % Block)
 
         Without this the narrow extents -- the ones whose operand broadcast
-        takes the template form -- had no numerical coverage at all: every
-        such case aborted, and an abort that a caller turns into a skip looks
-        exactly like a pass.
+        takes the template form -- would have no numerical coverage at all:
+        every such case would abort, and an abort that a caller turns into a
+        skip looks exactly like a pass.
         """
         block, subblock, lane = int(block), int(subblock), int(lane)
         if block == 1 or block == subblock:
@@ -433,7 +433,8 @@ class Interp:
         # A global window bound through a memory-space pointer,
         # `tensorforge::SpacePtrRestrict<double, tensorforge::GlobalMemspace>
         # const glb_m0 = ...`, is a pointer to its element type here: the
-        # comma inside the template arguments kept `_DECL` from matching it.
+        # comma inside the template arguments would keep `_DECL` from matching
+        # it.
         stmt = re.sub(r'^tensorforge::SpacePtr\w*\s*<\s*((?:const\s+)?[\w:]+)\s*,[^>]*>'
                       r'\s*(?:const\s+)?(\w+\s*=)', r'\1 * const \2', stmt)
         m = _DECL.match(stmt)
@@ -445,7 +446,7 @@ class Interp:
         if vm:
             # `*(SomeVecType*)&name[expr] = value;`  The components go to
             # consecutive slots, which is the whole content of a wide store --
-            # and the reason this had to be modeled rather than skipped: a
+            # and the reason this has to be modeled rather than skipped: a
             # cyclic reader of a blocked image produces plausible code and
             # wrong numbers, and nothing else in the harness looks at numbers.
             _ty, name, idx, rhs = vm.groups()
@@ -529,10 +530,10 @@ class Interp:
             # ordering an atomic also promises does not change a sum.
             #
             # Modeled rather than skipped, and rather than treated as a
-            # store.  Skipping leaves the accumulation out of the comparison
-            # entirely, which is how the atomic path came to have no numerical
-            # coverage on the host at all; treating it as `=` would agree with
-            # the correct answer whenever exactly one lane arrives, which is
+            # store.  Skipping would leave the accumulation out of the
+            # comparison entirely, and the atomic path without numerical
+            # coverage on the host; treating it as `=` would agree with the
+            # correct answer whenever exactly one lane arrives, which is
             # precisely the case that is never in doubt.
             base, index, value = am.group('base'), am.group('idx'), am.group('val')
             ptr = self.env[base]
@@ -700,8 +701,8 @@ def launch_geometry(launcher: str) -> Tuple[int, int]:
     A hop loop is only guarded where the extent does not divide evenly, so the
     invented lanes execute unguarded copies at their own offsets and read past
     the end of the operand -- which reads as a generator overrun and is not
-    one.  It stayed invisible for as long as the async copy was swallowed,
-    because a lane that copies nothing reads nothing either.
+    one.  It would stay invisible if the async copy were swallowed, because a
+    lane that copies nothing reads nothing either.
     """
     m = _BLOCK_DIM.search(launcher)
     if not m:
@@ -719,11 +720,11 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     one memory *and* can see each other's registers, which is what a
     `readlane` needs. Everything a single-lane run could check, this checks
     too; what it adds is the cross-lane traffic -- the broadcast of an operand
-    and the peeled tail of a widened lead dimension, neither of which had any
-    numerical coverage before.
+    and the peeled tail of a widened lead dimension, neither of which a
+    single-lane run can evaluate.
 
     `lanes` is the kernel's own, from `launch_geometry`, not a round number:
-    see there for what a surplus lane does once the copies are modeled.
+    see there for what a surplus lane does with the copies modeled.
     """
     body = src[src.index('{'):]
     mem = Slot(seed)
@@ -784,10 +785,10 @@ def compare(a: str, b: str, tids=DEFAULT_TIDS, seeds=DEFAULT_SEEDS,
 
     Compares *all* of memory by default, not just the global arrays: an
     intermediate a transform got wrong often never reaches a global store for
-    the lanes being probed, and restricting the comparison to globals was the
-    main reason a changed constant went unnoticed.  Several seeds matter for
-    the same reason as several lanes -- a wrong expression can agree with the
-    right one at one particular input.
+    the lanes being probed, and restricting the comparison to globals would let
+    a changed constant go unnoticed.  Several seeds matter for the same reason
+    as several lanes -- a wrong expression can agree with the right one at one
+    particular input.
     """
     for seed in seeds:
         for tid in tids:

@@ -9,7 +9,7 @@ registers into a matrix fragment. That is a claim about three things at once
 it is to execute it: tag every source slot, run the plan, and read off whether
 each lane of the result holds what `layouts` says that lane should hold.
 
-Which makes this the first test in the AMD package that checks the layouts
+Which makes this a test in the AMD package that checks the layouts
 against something other than their own source. A wrong row in `FRAGMENT_BITS`
 survives `test_amd_layouts.py`, because that file checks the table against the
 vendored extract of the same table. It does not survive here, because the plan
@@ -108,7 +108,7 @@ def test_the_plan_covers_every_lane_exactly_once(op, which):
 # --------------------------------------------------------------------------- #
 
 def test_the_fp64_fragment_costs_eight_instructions():
-    """The instruction this work has been heading for, priced.
+    """The instruction this work targets, priced.
 
     Four regions, so four merges; the swaps are what each region's XOR needs,
     which over the four is 0, 1, 1 and 2. Eight instructions per k-block for a

@@ -13,8 +13,8 @@ An image holds the scalars its operator is stored in, not its elements: a
 TF32-split operator is twice its element count, and an operator offered its
 fragment order is padded to that order's slots.  Operators that would leave no
 room for one multiplication are read from global memory instead.  `local_flux`
-checks all of it through the source; the numbers were checked on sm_120 and
-gfx1150 with the probe.
+checks all of it through the source; the numbers agree with the probe on
+sm_120 and gfx1150.
 """
 
 from __future__ import annotations
@@ -109,8 +109,8 @@ def test_a_fragment_ordered_operator_is_preloaded_in_its_order(monkeypatch):
 
 
 def test_operators_that_leave_no_room_are_read_from_global():
-    """Split, the four take 100 kB: under sm_120's 99 kB for a block they
-    passed the prologue's check and left nothing for one multiplication."""
+    """Split, the four take 100 kB: under sm_120's 99 kB for a block, so they
+    fit on their own and leave nothing for one multiplication."""
     gen, _ = _generate("sm_120", parts=2)
     kernel = gen.get_kernel()
     assert not _images(kernel)

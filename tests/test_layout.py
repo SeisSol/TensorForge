@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: MIT
 """The register-layout vocabulary, and the node that vendor intrinsics use.
 
-Neither of these changes generated code today.  They exist so that the two
-questions a later pass has to ask -- *do these two register images have the
-same distribution?* and *do these two intrinsics touch the same accumulator?*
--- have an answer that is looked up rather than re-derived from a string.
+They exist so that the two questions a pass has to ask -- *do these two
+register images have the same distribution?* and *do these two intrinsics
+touch the same accumulator?* -- have an answer that is looked up rather than
+re-derived from a string.
 
 The tests are therefore about semantics, not about output: equality,
 hashing, and that an untracked layout never silently matches a tracked one.
@@ -209,12 +209,11 @@ def _emitted_index(tid, slot, block, stride):
 def test_holders_matches_the_generated_index(block, stride, threads):
     """The definition and the emitted formula have to agree.
 
-    They did not: the first version of `LaneAxis` documented element `s` as
-    living in lane `(s // stride) % block`, when the generator emits
-    `((tid / stride) % block) + slot * block` -- which puts `s` in a run of
-    `stride` *consecutive* threads at `(s % block) * stride`. Same symbols,
-    different map. Nothing consumed layouts yet, so nothing broke; the first
-    consumer would have inherited the error.
+    The generator emits `((tid / stride) % block) + slot * block`, which puts
+    element `s` in a run of `stride` *consecutive* threads at
+    `(s % block) * stride` -- and not in lane `(s // stride) % block`: same
+    symbols, different map. Every consumer of layouts inherits the map
+    `LaneAxis` documents, so a wrong one would be wrong in all of them.
     """
     axis = LaneAxis(block, stride)
     for slot in range(2):
@@ -373,9 +372,10 @@ def test_the_degenerate_axis_is_normalized():
 
     Equality is the one thing this type exists for, so distributions that are
     the same have to compare the same. Without normalizing, `movdpp16` at 16
-    threads produced `LaneAxis(1, 16)` while the hardware simulation recovered
-    `LaneAxis(1, 1)` -- the same distribution, unequal, and a relayout search
-    that would not find an instruction sitting right in the table.
+    threads would produce `LaneAxis(1, 16)` while the hardware simulation
+    recovers `LaneAxis(1, 1)` -- the same distribution, unequal, and a
+    relayout search that would not find an instruction sitting right in the
+    table.
     """
     assert LaneAxis(1, 16) == LaneAxis(1, 1)
     assert LaneAxis(1, 16).stride == 1
@@ -392,11 +392,11 @@ def test_the_degenerate_axis_is_normalized():
 def test_a_constant_cannot_be_written_through_a_reference():
     """The C++ takes its outputs by non-const reference.
 
-    A padded MFMA tail block used to hand `0.0f` to `transpose4x4b32`'s third
-    and fourth parameters, which are `T &`. Ill-formed, and invisible here:
-    nothing in this repository compiles, so it would have surfaced as a build
-    failure at a user site. Snapshots, symbolic equivalence and the PIR
-    verifier all passed it -- none of them models C++ overload resolution.
+    A padded MFMA tail block that handed `0.0f` to `transpose4x4b32`'s third
+    and fourth parameters, which are `T &`, would be ill-formed. Snapshots,
+    symbolic equivalence and the PIR verifier would all pass it -- none of
+    them models C++ overload resolution -- so without this refusal only a
+    compile of the generated source would see it.
     """
     from tensorforge.backend.pir.core import IRError, ScalarType
     b = IRBuilder(Datatype.F32)

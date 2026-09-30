@@ -117,11 +117,11 @@ class OperationBuilder(AbstractBuilder):
         """`resolve_operands`, for an operation that can read a register image.
 
         A temporary whose newest copy is still the register image its producer
-        computed into is read there; everything else settles as before.  The
-        image *is* the value -- the writeback is pending because the registers
-        are the only copy -- so reading it gives what the store and the load
-        back would have given, without either of them and without the barrier
-        the store needs before another lane may load.
+        computed into is read there; everything else settles.  The image *is*
+        the value -- the writeback is pending because the registers are the
+        only copy -- so reading it gives what the store and the load back would
+        have given, without either of them and without the barrier the store
+        needs before another lane may load.
 
         The entry is left where it is.  A later reader that cannot take the
         image settles it then, one that can reads it too, and at the end of the
@@ -179,8 +179,8 @@ class OperationBuilder(AbstractBuilder):
         # An image is allocated in the kernel's floating-point type
         # (`Temporaries.register_array`) whatever the tensor holds, so a
         # condition is a number there and a boolean again only in its buffer.
-        # Read in place, `and(a, b)` over two of them was `&` on two floats,
-        # which CUDA refuses (SeisSol's damage step).
+        # Read in place, `and(a, b)` over two of them would be `&` on two
+        # floats, which CUDA refuses (SeisSol's damage step).
         held = getattr(entry.image, 'datatype', None)
         declared = getattr(symbol.obj, 'datatype', None)
         if held is not None and declared is not None and held != declared:
@@ -293,29 +293,27 @@ class OperationBuilder(AbstractBuilder):
         destination is the tensor with a narrower window, of which the window
         gets the values and the rest zeros (`SubTensor.owed_zeros`); a slice
         only its own box.  The contraction keeps it in its stores
-        (`MultilinearBuilder._promised_box`); a pointwise operation wrote its
-        window where the destination already was and nothing else, so a
-        temporary assigned anew from a narrower operand kept its old values
-        around the new ones, and so did an output.
+        (`MultilinearBuilder._promised_box`).  A pointwise operation writing
+        its window where the destination already is, and nothing else, would
+        not: a temporary assigned anew from a narrower operand would keep its
+        old values around the new ones, and so would an output.
 
         So the result is computed into a register image and stored the way
         the contraction stores one:
 
         * a temporary nothing wrote yet, which one operation writes whole,
-          keeps its image as a pending writeback, as before
-          (`materialize_dest`);
+          keeps its image as a pending writeback (`materialize_dest`);
         * one assembled in shared memory from several writes, or one that
-          already has a buffer, is stored there now: into the buffer as it
-          is laid out (`_buffer_box`), cleared where the plan found a use of
-          cells nothing defined (`SectionPlan.zero_first`, which the
-          pointwise path used to refuse), and zeroed over the rest of its
-          promise.  Through the store and not in place: a store tells
-          liveness whether it defines the buffer or a part of it
-          (`partial_defs`), and the barrier pass fences shared writes that
+          already has a buffer, is stored there at once: into the buffer as
+          it is laid out (`_buffer_box`), cleared where the plan found a use
+          of cells nothing defined (`SectionPlan.zero_first`), and zeroed
+          over the rest of its promise.  Through the store and not in place:
+          a store tells liveness whether it defines the buffer or a part of
+          it (`partial_defs`), and the barrier pass fences shared writes that
           are stores -- a compute instruction writing a buffer in place is
           neither;
         * an output owed zeros goes out through `StoreRegToGlb`, which zero-
-          fills the promise; one that is not is written in place, as before.
+          fills the promise; one that is not is written in place.
         """
         dest = descr.writes()
         tensor = dest.tensor
@@ -368,9 +366,8 @@ class OperationBuilder(AbstractBuilder):
         went out as a pending image holds the range its producer computed,
         which can be narrower than the descriptors declare -- a contraction
         whose operands support fewer rows than its destination names.  Laid
-        over the declared union instead, the store re-strided the buffer and
-        cleared rows past its end, where the in-place write it replaces had
-        stayed inside it.
+        over the declared union instead, the store would re-stride the buffer
+        and clear rows past its end.
         """
         union = self._plan.dest_union(dest.tensor)
         view = None if first else symbol.data_view

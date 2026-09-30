@@ -4,20 +4,22 @@
 """No output element is computed twice.
 
 `matmul32` splits the N columns between two instruction paths: whole blocks of
-four through MFMA, and whatever is left through DPP.  The handoff point used
-to be recomputed as `(N // 4) * 4` instead of read off what the MFMA path had
-actually covered.  Those agree only when the tail is 0 or 1 columns wide; at
-`N % 4 >= 2` the MFMA path pads the last block and does the tail as well, and
-both paths then computed the same elements.
+four through MFMA, and whatever is left through DPP.  The handoff point is
+stated once, by the plan, and each path covers its own span.  Recomputed as
+`(N // 4) * 4` instead, it would agree with what the MFMA path covered only
+when the tail is 0 or 1 columns wide; at `N % 4 >= 2` the MFMA path pads the
+last block and does the tail as well, and both paths would compute the same
+elements.
 
-The result stayed correct -- the stores overwrite rather than accumulate, so
-whichever landed last won -- which is why nothing failed.  What it cost was a
-full padded MFMA block of dead work per tail, at every one of the operator
-widths where `N % 4` lands on 2 or 3.  N=18 is one; it is not exotic.
+The result would stay correct -- the stores overwrite rather than accumulate,
+so whichever lands last wins -- which is why no numerical check can see it.
+What it would cost is a full padded MFMA block of dead work per tail, at every
+one of the operator widths where `N % 4` lands on 2 or 3.  N=18 is one; it is
+not exotic.
 
-The property is asserted over a range of N rather than on the two corpus cases
-that happened to hit it, because "no case in the corpus has N % 4 == 2" is a
-fact about the corpus, not about the generator.
+The property is asserted over a range of N rather than on the corpus cases
+that reach it, because "no case in the corpus has N % 4 == 2" would be a fact
+about the corpus, not about the generator.
 """
 
 from __future__ import annotations
@@ -146,7 +148,8 @@ def test_every_element_is_computed_once(M, N):
 @pytest.mark.parametrize("N", [2, 3, 6, 7, 18, 19, 22, 23])
 def test_the_tail_goes_to_one_path_only(N):
     """At `N % 4 >= 2` the tail belongs to the padded MFMA block, and the DPP
-    path must not see it at all -- that split is the point of `cap4`."""
+    path must not see it at all -- that split is the point of
+    `tiling.boundary`."""
     rec = _run(M=2, N=N, K=8)
     tail = set(range((N // 4) * 4, N))
     dpp_cols = {j for path, _, j in rec.stores if path == "dpp"}

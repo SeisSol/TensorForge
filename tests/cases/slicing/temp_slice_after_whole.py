@@ -10,9 +10,10 @@
     tmp[0:4,:] = N @ C              <- a slice: rows 4..12 are still the first write's
     D         += A @ tmp            <- reads all 12 rows
 
-Taken as a fresh start, the slice killed `tmp`, so between the two writes it
-was dead and the allocator laid `x`'s operands over it; rows 4..12 came back as
-whatever those held (`LivenessAnalysis._assembling`).
+Taken as a fresh start, the slice would kill `tmp`, so between the two writes
+it would be dead and the allocator would lay `x`'s operands over it; rows 4..12
+would come back as whatever those held.  `LivenessAnalysis._assembling` keeps
+the slice from killing it.
 """
 
 import numpy as np

@@ -5,13 +5,13 @@
 
 yateto narrows a result's box to where it can be non-zero, and an assignment
 to the tensor itself through that window means zeros around it -- the promise
-the contraction keeps in its stores (`MultilinearBuilder._promised_box`).  The
-pointwise path wrote the window in place and nothing else:
+the contraction keeps in its stores (`MultilinearBuilder._promised_box`).  A
+pointwise path that wrote the window in place and nothing else would turn
 
     M(temp) = b0 ; M = sqrt(b1) ; out = M       b1 storing [0,1) of 4
 
-gave `out = [sqrt(b1[0]), b0[1], b0[2], b0[3]]` for `[sqrt(b1[0]), 0, 0, 0]`,
-and an output assigned the same way kept whatever it held.  SeisSol's
+into `out = [sqrt(b1[0]), b0[1], b0[2], b0[3]]` for `[sqrt(b1[0]), 0, 0, 0]`,
+and an output assigned the same way would keep whatever it held.  SeisSol's
 free-surface-gravity kernel has this shape on its contraction side.
 
 `fixtures/kernels/pointwise_assignment.json` holds the two statements as
@@ -152,7 +152,7 @@ def test_one_piece_is_the_destination_and_owes_its_zeros(name, alias, arch):
     # M = b0 ; M = b1 / b2 over [0,1), b1 storing [0,1) and b2 all of [0,4).
     # `_cells` clamps b2's box to the window and cuts nothing: its one piece
     # is the destination itself, which owes zeros over [1,4) -- as a slice
-    # it owed none, and M kept b0 there.
+    # it would owe none, and M would keep b0 there.
     read = run(name, arch)
     b1, b2 = read("b1", 1), read("b2", 1)
     assert np.allclose(read(alias, 4), [b1[0] / b2[0], 0.0, 0.0, 0.0])
@@ -161,7 +161,7 @@ def test_one_piece_is_the_destination_and_owes_its_zeros(name, alias, arch):
 @pytest.mark.parametrize("arch", ARCHS)
 def test_a_first_write_read_back_wider_is_zero_around_it(arch):
     # M = |b1| over [0,1) ; out = M over [0,4).  The first write clears the
-    # buffer (`SectionPlan.zero_first`), which the pointwise path refused.
+    # buffer (`SectionPlan.zero_first`) on the pointwise path too.
     read = run("pointwise_temporary_first_write_read_wider", arch)
     b1 = read("b1", 1)
     assert np.allclose(read("out", 4), [abs(b1[0]), 0.0, 0.0, 0.0])
@@ -237,7 +237,7 @@ def test_a_buffer_that_went_out_as_an_image_keeps_its_layout(arch):
     product's image holds five rows, and it reaches the buffer that way when
     `M = |N|` over those rows settles it.  The pointwise store then keeps the
     five-row buffer -- laid over the eight rows the descriptors declare, it
-    re-strided the buffer and cleared three rows past the end of what the
+    would re-stride the buffer and clear three rows past the end of what the
     first store allocated."""
     def t(shape, hi, alias, tmp=False):
         return Tensor(list(shape), Addressing.STRIDED,

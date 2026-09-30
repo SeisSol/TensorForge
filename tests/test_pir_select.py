@@ -8,15 +8,13 @@ where the pattern has nothing.  Which lane that applies to is known only at
 run time, so the choice is per lane -- and how it is spelled decides whether
 it costs a predicate or a divergent branch.
 
-`if_else` is what the sparse compute path reaches for today, and it emits an
-`if`: a 16x16 band operand comes out with 144 more of them than the dense
-build of the same shape, all inside the inner loop.  `select` emits `a ? b :
-c`, which the compiler predicates, and it has been in the emitter the whole
-time with nothing producing one.
+`if_else` emits an `if`: a 16x16 band operand expanded through it comes out
+with 144 more of them than the dense build of the same shape, all inside the
+inner loop.  `select` emits `a ? b : c`, which the compiler predicates.
 
-So this pins the primitive before anything is built on it: that a select
-survives to a ternary, that it does not become a branch on the way, and that
-it takes its operands the way an if/else would have yielded them.
+So this pins the primitive: that a select survives to a ternary, that it does
+not become a branch on the way, and that it takes its operands the way an
+if/else would have yielded them.
 """
 
 from __future__ import annotations
@@ -97,10 +95,10 @@ def test_a_predicated_wide_load_falls_back_to_a_vector_and_not_a_scalar():
 
     A vector is `VectorStruct`, an aggregate, and no scalar converts to one --
     so `pred ? vec : 0.0f` has no common type and does not compile.  It is a
-    shape that only appears where a wide access meets a lane guard, which is
-    why it went unnoticed until `k_width` 2 put wide reads in the reduction:
-    `chain_five` and the three `slicing/register_operand` cases went straight
-    from slow to unbuildable, with 16 to 28 errors each.
+    shape that only appears where a wide access meets a lane guard, as it does
+    once `k_width` 2 puts wide reads in the reduction: with a scalar zero,
+    `chain_five` and the three `slicing/register_operand` cases would not
+    build.
     """
     builder = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 512))
     tile = builder.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0')
@@ -111,7 +109,7 @@ def test_a_predicated_wide_load_falls_back_to_a_vector_and_not_a_scalar():
 
     src = _emit(builder)
     assert '?' in src, src
-    # The arm, not the cast in front of the load: `: (0.0f)` is the bug.
+    # The arm, not the cast in front of the load: `: (0.0f)` is ill-typed.
     arm = src.split('?', 1)[1].split(':', 1)[1]
     assert '0.0f' not in arm, f"a scalar zero for a vector:\n{src}"
     assert 'VectorT<float, 2>{}' in arm or '{}' in arm, src

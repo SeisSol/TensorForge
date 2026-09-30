@@ -28,8 +28,8 @@ SNAPSHOT_DIR = TESTS / "snapshots"
 
 #: Which shim answers for which backend.  A snapshot is named
 #: ``<case>.<backend>.cpp``, so the backend is recoverable from the path and
-#: no caller has to pass it -- the alternative was a default argument, and a
-#: default here means a CUDA shim silently checking a SYCL kernel and
+#: no caller has to pass it -- the alternative would be a default argument,
+#: and a default here means a CUDA shim silently checking a SYCL kernel and
 #: reporting that `sycl::queue` does not exist as if the *generator* were at
 #: fault.
 _SHIMS = {
@@ -59,20 +59,20 @@ _KERNEL = re.compile(r"^// === kernel ===\n(.*?)(?=^// === |\Z)", re.M | re.S)
 
 #: Generated source known not to compile, by snapshot name.
 #:
-#: Empty, and the mechanism stays because emptying it was the point.
+#: Empty, with the mechanism in place: keeping it empty is the point.
 #:
-#: It held six ESIMD snapshots that reached a predicated store: a guard on the
-#: lead axis that narrowing could not remove, because the vector had to
-#: *start* somewhere other than element zero and `LeadIndex` had no base
-#: offset to say it with.  It has one since the `VarOffset` merge, and
-#: `DataView.split_lead_shift` puts the leftover lanes into a register address
-#: -- so a head block, a ragged tail and a later slot are all just a vector
-#: with a base now, and no mask survives the corpus.
+#: An ESIMD snapshot does not compile where it reaches a predicated store: a
+#: guard on the lead axis that narrowing cannot remove.  A vector that has to
+#: *start* somewhere other than element zero needs a base offset to say it
+#: with, which `LeadIndex` carries, and `DataView.split_lead_shift` puts the
+#: leftover lanes into a register address -- so a head block, a ragged tail
+#: and a later slot are all just a vector with a base, and no mask survives
+#: the corpus.
 #:
-#: A list and not a pattern.  The first version matched on "contains a mask
-#: and an `if`", which stopped describing the set as soon as narrowing changed
-#: which cases failed and why -- and a heuristic that quietly misclassifies is
-#: worse than none, because the entry it wrongly excuses looks reviewed.
+#: A list and not a pattern.  A pattern such as "contains a mask and an `if`"
+#: stops describing the set as soon as narrowing changes which cases fail and
+#: why -- and a heuristic that quietly misclassifies is worse than none,
+#: because the entry it wrongly excuses looks reviewed.
 NOT_YET_ESIMD: dict = {}
 
 
@@ -80,9 +80,9 @@ def known_bad(path) -> str:
     """The recorded reason this snapshot does not compile, or ``''``.
 
     Here rather than in `test_syntax.py` because `tools/syntax_check.py` needs
-    the same answer.  It did not have it, so the command-line runner reported
-    three permanent failures for cases the suite already tracks as expected --
-    and three standing reds are how a check stops being read.
+    the same answer.  Without it the command-line runner would report
+    permanent failures for cases the suite already tracks as expected -- and
+    standing reds are how a check stops being read.
     """
     return NOT_YET_ESIMD.get(path.name, "")
 
@@ -152,20 +152,17 @@ def snapshots(pattern: str = "*.cpp") -> List[Path]:
 # ----------------------------------------------------------------------
 #
 # `g++ -fsyntax-only` answers "is this well-formed C++", which is the class of
-# defect that escaped everything else and is worth the four seconds.  It does
+# defect that escapes everything else and is worth the four seconds.  It does
 # not answer "will the *device* front end take it", and the two differ: a GNU
 # `vector_size` typedef is well-formed to g++ and rejected by nvcc in device
 # code with "is a vector, which is not supported in device code".
 #
 # That difference is not hypothetical.  `CudaLexic.get_fptype` renders a packed
 # value as `tensorforge::VectorT<float, 4>`, deliberately and with its reasons
-# written down; the NVIDIA matrix path is the only live emitter that makes a
-# *value* of that type, and it produces 101 nvcc errors on a kernel that g++
-# passes without a word.  The path is parked behind `nvidia.ENABLED`, so the
-# corpus never reaches it -- which is exactly the arrangement where a defect
-# waits.  `cuda.h` predicted this one in as many words: "If nvcc ever ...
-# declines `vector_size` in device code at all -- these turn a silent
-# quarter-width copy into a build error."
+# written down, and nvcc's refusal is why `cuda.h` defines that type as a
+# struct rather than a `vector_size` typedef.  The NVIDIA matrix path makes
+# *values* of that type and is parked behind `nvidia.ENABLED`, so the corpus
+# never reaches it -- which is exactly the arrangement where a defect waits.
 #
 # Neither invocation below generates an object: `-ptx` stops nvcc after the
 # device compile, `--cuda-device-only -fsyntax-only` stops clang before code

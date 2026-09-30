@@ -48,8 +48,8 @@ class Candidate(NamedTuple):
 class PipelineAnalysis:
     """Which transfers in a loop body may be pipelined, and why not.
 
-    Kept separate from the transform so that the decision is inspectable: the
-    old passes made it implicitly, by transforming everything they recognized.
+    Kept separate from the transform so that the decision is inspectable
+    rather than implicit in whatever a transform happens to recognize.
     """
 
     def __init__(self, body: Sequence[AbstractInstruction]):
@@ -69,8 +69,7 @@ class PipelineAnalysis:
         # bodies: the CUDA path emits GlbToShrLoader, the AMD path
         # GlbToRegLoader, because preloading the Addressing.NONE operators into
         # LDS up front leaves only register loads per element.  A pass that
-        # matched one class would silently do nothing on the other backend --
-        # which is what the old MultiBuffer did.
+        # matched one class would silently do nothing on the other backend.
         for index, instr in enumerate(self._body):
             if not isinstance(instr, (GlbToShrLoader, GlbToRegLoader)):
                 continue
@@ -114,8 +113,6 @@ class PipelineAnalysis:
             return (f'source pointer comes from {type(producer).__name__}, '
                     f'not a GetElementPtr')
         if producer_index > index:
-            # this is the implicit ordering MultiBuffer assumed and would have
-            # died on with a KeyError
             return 'source pointer is produced after the load'
         if isinstance(producer._batch_offset, str):
             return 'source pointer already uses a named index; already pipelined'
@@ -132,8 +129,9 @@ class PipelineAnalysis:
         # iteration.
         #
         # An allocation is not a write of data, so it does not count -- with it
-        # counted, every register buffer looked unrotatable, since RegisterAlloc,
-        # the load and the accumulating compute all appear in defs().
+        # counted, every register buffer would look unrotatable, since
+        # RegisterAlloc, the load and the accumulating compute all appear in
+        # defs().
         # LoadWait is excluded too: it delegates defs() to the transfer it
         # awaits, which is right for ordering -- consumers must come after the
         # wait, not merely after the issue -- but it completes that write rather
@@ -356,11 +354,10 @@ class Pipeline(AbstractTransformer):
     def _advance_pointers(self, loop: BatchLoop, analysis: PipelineAnalysis):
         """Hoist the address computation, leaving the transfers in place.
 
-        This is what ``PtrPipe`` attempted, minus transforming every
-        ``GetElementPtr`` whether or not it fed anything: only producers of a
-        pipelineable transfer are advanced, and the peeled copy uses the loop's
-        prologue index rather than the loop variable, which does not exist
-        outside the loop.
+        Only producers of a pipelineable transfer are advanced, not every
+        ``GetElementPtr`` whether or not it feeds anything, and the peeled copy
+        uses the loop's prologue index rather than the loop variable, which
+        does not exist outside the loop.
 
         No buffer rotation, so no aliasing question: the transfer still writes
         the same buffer in the same iteration, only its source pointer is

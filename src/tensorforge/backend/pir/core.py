@@ -271,9 +271,8 @@ INDEX = ScalarType(Datatype.I32)
 # right width for a loop over 36 rows and the wrong one here -- an index
 # compared against `numElements` and multiplied into an address would cap what
 # a caller can express at 17.2 GB into an f32 buffer, losing the high bits
-# silently at the call site.  The batch loop's header used to say so with a
-# `ctype` override, which widened the variable and left everything computed
-# from it back at 32 bits.
+# silently at the call site.  A `ctype` override on the batch loop's header
+# would widen the variable and leave everything computed from it at 32 bits.
 SIZE = ScalarType(Datatype.SIZE)
 
 
@@ -327,8 +326,9 @@ class Access:
     def __post_init__(self):
         """One fact, one place: a base that knows its space decides it.
 
-        Two things were saying where an access lands -- the space passed here
-        and the space on the base's own type -- and nothing held them together.
+        Two things say where an access lands -- the space passed here and the
+        space on the base's own type -- and without this nothing would hold
+        them together.
         The same shape as ``uniformity`` against ``layout.is_distributed``, and
         the same reason it matters: a disagreement is invisible, since both
         answers are well-formed, and `may_alias` reads the one on the access.
@@ -405,8 +405,8 @@ def accesses_conflict(a: Access, b: Access) -> bool:
 class Uniformity(IntEnum):
     """How wide a value is the same across.
 
-    The flag used to be a bool: uniform, or "thread-dependent (derived from lane
-    id)".  Two levels cannot express the batch id, which is
+    A bool -- uniform, or "thread-dependent (derived from lane id)" -- is not
+    enough.  Two levels cannot express the batch id, which is
 
         batchId0 = threadIdx.y + blockDim.y * blockIdx.x
 
@@ -529,8 +529,8 @@ class LaneAxis:
         """Which threads hold `element`.  The definition, executable.
 
         Exists so that the mapping can be *checked* against the index the
-        generator emits rather than restated in prose next to it --- the two
-        had already drifted once.
+        generator emits rather than restated in prose next to it, where the
+        two can drift apart.
         """
         want = element % self.block
         return tuple(t for t in range(threads)
@@ -617,8 +617,7 @@ class RegisterLayout:
 
         Same field, same number, opposite meaning, decided by the rest of the
         layout.  Which is why this defers to :meth:`replication` rather than
-        carrying a second rule of its own: two rules for one fact drift, and
-        the structural one had already disagreed with the count.
+        carrying a second rule of its own: two rules for one fact drift.
         """
         return self.replication(threads) == 1
 
@@ -666,11 +665,11 @@ def join_layout(operands) -> Optional[RegisterLayout]:
 
     A replicated operand does not veto.  ``alpha * A`` where ``alpha`` is a
     scalar broadcast to every lane and ``A`` is spread across them produces a
-    value spread exactly like ``A``; the old rule saw two distinct layouts,
-    called it a disagreement, and returned ``None``.  That is not
-    conservative, it is a loss: ``None`` means *unknown*, so every consumer
-    downstream of a single scaling had to fail closed, and a scaling is on
-    almost every operator SeisSol generates.
+    value spread exactly like ``A``.  Calling that a disagreement between two
+    distinct layouts and returning ``None`` would not be conservative, it
+    would be a loss: ``None`` means *unknown*, so every consumer downstream of
+    a single scaling would have to fail closed, and a scaling is on almost
+    every operator SeisSol generates.
 
     Genuine disagreement -- two *different distributions* -- still gives
     ``None``.  A vendor intrinsic may legitimately consume two of those, so it
@@ -682,10 +681,11 @@ def join_layout(operands) -> Optional[RegisterLayout]:
         # definition, so anything computed from literals alone is too -- the
         # same argument that gives `const` its layout, one step further along.
         #
-        # This is the biggest single hole it closes: `LeadIndex.build` emits
-        # `mul(nonlead, block)` for the slot offset, and both operands are
-        # plain integers, so the result was *unknown* rather than *replicated*
-        # -- and every address derived from it inherited the unknown.
+        # It matters most for `LeadIndex.build`, which emits
+        # `mul(nonlead, block)` for the slot offset with both operands plain
+        # integers: without this the result would be *unknown* rather than
+        # *replicated* -- and every address derived from it would inherit the
+        # unknown.
         #
         # Zero operands is deliberately not covered.  A `rawexpr` with no
         # arguments is text the IR cannot read, and `threadIdx.x` is exactly
@@ -715,17 +715,17 @@ class Value:
 
     id: int
     type: IRType
-    # NOTE: `uniform` below is a *derived* property, kept so that every existing
-    # check kept its exact meaning when the lattice was introduced.  A pass that
-    # wants the extra precision reads `uniformity` instead.
+    # NOTE: `uniform` below is a *derived* property, the block-uniform reading
+    # of this field for checks that ask exactly that.  A pass that wants the
+    # extra precision reads `uniformity` instead.
     uniformity: Uniformity = Uniformity.GRID
     hint: str = ''          # debug-only name fragment, e.g. 'acc' or 'data0'
     # How the value is spread over the lanes, when that is known.  `None` is
     # *untracked*, and untracked is not a layout: two untracked values say
     # nothing about each other, so every check that compares layouts has to
-    # fail closed.  Nothing attaches one yet -- the field exists so that the
-    # loaders, the vendor intrinsics and the passes can start agreeing on a
-    # vocabulary one at a time instead of all at once.
+    # fail closed.  Optional, so that the loaders, the vendor intrinsics and
+    # the passes can adopt the vocabulary one at a time instead of all at
+    # once.
     layout: Optional[RegisterLayout] = None
     #: Promises about this value that its type does not carry; see `Qual`.
     quals: Tuple['Qual', ...] = ()
@@ -734,10 +734,10 @@ class Value:
         """One fact, one place: a distributed value is lane-varying.
 
         ``uniformity`` and ``layout.is_distributed`` are two statements about
-        the same thing, and they disagreed on 71443 of the 93837 values in the
-        corpus that carried a layout -- always in the unsafe direction, with
-        ``uniformity`` reading ``GRID`` ("the same everywhere") for a value
-        spread across the lanes.
+        the same thing, and as the call sites compute them they disagree for
+        most values in the corpus that carry a layout -- always in the unsafe
+        direction, with ``uniformity`` reading ``GRID`` ("the same everywhere")
+        for a value spread across the lanes.
 
         Not an oversight at those call sites.  ``op()`` and ``load()`` join the
         uniformity of their *operands*, and for a register-resident tile the
@@ -784,12 +784,12 @@ class Value:
 
     @property
     def uniform(self) -> bool:
-        """Block-uniform, the level the original boolean meant.
+        """Whether the value is at least block-uniform.
 
         Anything narrower -- a lane index, or a per-multiplication value like
-        the batch id -- reads False here, which is what every existing check
-        expects.  New checks should compare ``uniformity`` against the level
-        they actually need.
+        the batch id -- reads False here, which is what the checks reading
+        this expect.  New checks should compare ``uniformity`` against the
+        level they actually need.
         """
         return self.uniformity >= Uniformity.BLOCK
 
@@ -797,8 +797,9 @@ class Value:
         return hash(self.id)
 
     def __str__(self):
-        # Kept identical in spirit to Writer.varalloc(): legacy f-strings that
-        # interpolate a value still produce a valid C++ identifier.
+        # Kept identical in spirit to Writer.varalloc(): f-strings of the
+        # text-based Writer interface that interpolate a value produce a valid
+        # C++ identifier.
         return f'v{self.id}_{self.hint}' if self.hint else f'v{self.id}'
 
     def __repr__(self):
@@ -873,7 +874,7 @@ class Op:
     PACK = 'pack'           # `VecTy v{a, b};`  -- aggregate initialization
     EXTRACT = 'extract'     # `v[i]`            -- element of a packed vector
     SPLIT = 'split'         # one argument, several results; `callee` names it
-    # legacy escape hatches
+    # escape hatches into raw text
     RAWEXPR = 'rawexpr'     # exactly one target; `text` is an *expression*
     RAWSTMT = 'rawstmt'     # no target;          `text` is a *statement*
     RAWBLOCK = 'rawblock'   # one region;         `text` is the block *head*

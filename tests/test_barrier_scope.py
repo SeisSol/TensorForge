@@ -3,12 +3,11 @@
 # SPDX-License-Identifier: MIT
 """A barrier says what it covers; who must arrive follows from that.
 
-Two questions used to share one answer and that is what the merged ladder
-separates. `Participants` says what the barrier covers in hardware -- WAVE,
-MULT, MULTGROUP, BLOCK, GRID -- and is what the emitter turns into an
-instruction. `Uniformity` says who therefore has to arrive, and is what
-`verify` weighs against the region: a barrier at level S inside a construct
-whose entry is only U-uniform deadlocks unless `U >= S`.
+Two questions, answered separately. `Participants` says what the barrier
+covers in hardware -- WAVE, MULT, MULTGROUP, BLOCK, GRID -- and is what the
+emitter turns into an instruction. `Uniformity` says who therefore has to
+arrive, and is what `verify` weighs against the region: a barrier at level S
+inside a construct whose entry is only U-uniform deadlocks unless `U >= S`.
 
 The wave is on the first list and deliberately not on the second. It sits
 above a 16-thread multiplication and below a 64-thread one, so a rung for it
@@ -169,11 +168,11 @@ def test_a_target_without_a_sub_block_rendezvous_gets_the_block():
 def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
     """The invariant, checked from the outside.
 
-    A 64-thread multiplication, asked for outright.  An elementwise descriptor
-    beside the contraction used to lift the lane ceiling and produce one; it
-    no longer does (`lanes.deduce`).  What a block then holds is exactly what
-    the target can tell apart: CUDA has `barrier.sync id, count` and packs
-    several, and ESIMD holds a multiplication in one work-item.
+    A 64-thread multiplication, asked for outright: an elementwise descriptor
+    beside the contraction does not lift the lane ceiling to produce one
+    (`lanes.deduce`).  What a block then holds is exactly what the target can
+    tell apart: CUDA has `barrier.sync id, count` and packs several, and ESIMD
+    holds a multiplication in one work-item.
     """
     from tensorforge.common.basic_types import Addressing
     from tensorforge.common.exceptions import GenerationError
@@ -203,8 +202,8 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
                                          num_active_threads=56, lead_width=1))
         if backend == "hip":
             # No block to pack.  The AMD SIMT path refuses a multiplication
-            # wider than the wave: across waves it came out wrong with no error
-            # (measured on gfx1150).
+            # wider than the wave: across waves it would come out wrong with no
+            # error (measured on gfx1150).
             with pytest.raises(GenerationError):
                 gen.generate()
             continue

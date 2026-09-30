@@ -7,10 +7,9 @@ The shape a plasticity kernel has: a contraction produces stresses, a pointwise
 operation evaluates a yield criterion on them.
 
 `MultilinearBuilder` leaves the result of the contraction in a register array
-and records a pending writeback, and `Generator._emit_ir` hands the elementwise
-a `SymbolView` on the shared-memory symbol that writeback has not reached yet.
-The residency is private to the builder, so the elementwise cannot ask where
-the newest copy is.
+and records a pending writeback in the residency.  The elementwise has to ask
+the residency where the newest copy is: read through the shared-memory symbol
+alone, the temporary is a buffer that writeback has not reached yet.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

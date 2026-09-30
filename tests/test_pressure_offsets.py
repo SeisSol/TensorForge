@@ -4,17 +4,18 @@
 """What the register model counts, against what a compiler allocates.
 
 Calibrated against ptxas on sm_100a over `local_flux` at b = 20..120, four lane
-geometries and four option sets.  Two things read far high, and neither was a
-matter of degree:
+geometries and four option sets.  Two things would read far high, and neither
+would be a matter of degree:
 
 * Address offsets.  `lane + 2800` feeds a load, and the compiler keeps `lane`
-  and puts 2800 in the instruction; the model kept each offset as a register.
-  Where `licm` had hoisted them out of the loop over merged faces, the merged
-  kernel peaked at 14864 B for a kernel ptxas fits in 255 registers.
-* A peeled element written as text.  The last row of an odd extent at width
-  two was a raw `r[k] = ...` statement, and an array named in raw text is
-  taken as live whole for the whole body: 2312 B at 35 rows for 213
-  registers.
+  and puts 2800 in the instruction; a model that kept each offset as a
+  register would count every one.  With `licm` hoisting them out of the loop
+  over merged faces, the merged kernel would peak at 14864 B where ptxas fits
+  it in 255 registers.
+* A peeled element written as text.  As a raw `r[k] = ...` statement, the
+  last row of an odd extent at width two would name its array in raw text,
+  and an array named in raw text is taken as live whole for the whole body:
+  2312 B at 35 rows for 213 registers.
 
 Both are checked here on the smallest body that shows them.
 """
@@ -107,8 +108,9 @@ def _peak(mod, width):
 
 def test_a_peeled_element_is_one_slot_and_not_the_whole_array():
     """35 rows at width two peel the last one.  Its store names one slot; as
-    raw text it made every register array of the kernel live throughout, four
-    times the figure at width one (ptxas: 213 registers against 146)."""
+    raw text it would make every register array of the kernel live
+    throughout, four times the figure at width one (ptxas: 213 registers
+    against 146)."""
     mod = _local_flux(35)
     assert _peak(mod, 2) < 2 * _peak(mod, 1)
 

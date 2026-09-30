@@ -111,10 +111,11 @@ def test_the_multiplications_handing_it_on_run_in_step():
 @pytest.mark.parametrize('arch', ['gfx942', 'gfx90a'])
 def test_a_batch_constant_operator_is_read_once_per_wave(arch):
     """`local_flux`: 32 lanes, so two multiplications a wave, each step read
-    by one of them and handed to both -- `blgp` 1 and 2 alike.  The steps a
-    contraction has left over read as before (`blgp` 0).  The loop is the
-    wave group's, fenced at its head: it has no guard around the body, and
-    without one LLVM held the staged operators across it."""
+    by one of them and handed to both -- `blgp` 1 and 2 alike.  Each
+    multiplication reads the steps a contraction has left over on its own
+    (`blgp` 0).  The loop is the wave group's, fenced at its head: it has no
+    guard around the body, and with neither guard nor fence LLVM would hold
+    the staged operators across it."""
     src = _kernel('local_flux', arch)
     blgps = _blgps(src)
     assert blgps.count(1) == blgps.count(2) > 0

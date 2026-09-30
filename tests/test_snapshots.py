@@ -45,13 +45,13 @@ BACKENDS = (
     ("hip", "gfx90a"),
     # SPMD SYCL, and the explicitly vectorized lowering of the same device.
     #
-    # `oneapi` in SPMD mode used to sit here as a third SYCL entry and was
-    # dropped: it differed from `acpp` in two lines out of several hundred --
-    # `local_accessor` instead of `accessor`, and the kernel attributes -- so
-    # 54 files bought almost nothing and every cross-cutting change had to be
-    # reviewed four times instead of three.
+    # `oneapi` in SPMD mode is not a third SYCL entry: it differs from `acpp`
+    # in two lines out of several hundred -- `local_accessor` instead of
+    # `accessor`, and the kernel attributes -- so its files would buy almost
+    # nothing and every cross-cutting change would have to be reviewed four
+    # times instead of three.
     #
-    # What that costs is named rather than waved away: nothing now generates
+    # What that costs is named rather than waved away: nothing here generates
     # `[[intel::reqd_sub_group_size(16)]]`, since the `esimd` target takes the
     # other branch of the same `if`.  The `oneapi` half of `local_accessor`
     # stays covered through `esimd`.
@@ -98,15 +98,16 @@ def test_generated_source_matches_snapshot(snapshot_case, backend, arch,
     path = _path_for(snapshot_case, backend)
 
     if request.config.getoption("--snapshot-update"):
-        # A case that used to generate and now raises is a regression, never an
-        # intended snapshot update.  Without this the harness happily replaces
-        # 285 lines with a single `FAILED:` line and reports success, and the
-        # broken output becomes the thing every later run is compared against.
+        # A case that raises where its snapshot records a kernel is a
+        # regression, never an intended snapshot update.  Without this the
+        # harness happily replaces a whole kernel with a single `FAILED:` line
+        # and reports success, and the broken output becomes the thing every
+        # later run is compared against.
         #
-        # Not hypothetical: a killed `mutation_check.py` left a mutation in the
-        # tree, the next `--snapshot-update` baked it into 57 files, and the
-        # only visible symptom was that the diff was large -- which it is
-        # during a migration anyway.
+        # A killed `mutation_check.py`, for one, can leave a mutation in the
+        # tree; the next `--snapshot-update` would bake it into every file it
+        # touches, and the only visible symptom would be a large diff -- which
+        # a migration produces anyway.
         if (actual.startswith("FAILED:") and path.exists()
                 and not path.read_text().startswith("FAILED:")
                 and not request.config.getoption("--snapshot-accept-failures")):
@@ -147,8 +148,8 @@ def test_generated_source_matches_snapshot(snapshot_case, backend, arch,
 def test_no_orphaned_snapshots(request):
     """A snapshot with no case behind it means a case was renamed or lost.
 
-    Four of the suite's stale failures came from exactly this --- a case
-    moved, and nothing noticed that the old path stopped being covered.
+    A case that moves leaves its old snapshot behind, and without this nothing
+    would notice that the old path stopped being covered.
     """
     if request.config.getoption("--snapshot-update"):
         pytest.skip("snapshots are being rewritten")
@@ -171,8 +172,8 @@ def test_generation_is_deterministic(snapshot_case):
     """Two generations in one process must agree, byte for byte.
 
     The whole harness rests on this.  It is not free: iteration over a
-    ``set`` of IR nodes has silently reordered barrier placement here
-    before, and that class of bug is invisible until a snapshot flaps.
+    ``set`` of IR nodes can silently reorder barrier placement, and that
+    class of bug is invisible until a snapshot flaps.
     """
     backend, arch = BACKENDS[0]
     first = _render(snapshot_case, backend, arch)

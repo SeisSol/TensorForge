@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: MIT
 """The data prefetch: a statement whose whole content is where it sits.
 
-`Op.PREFETCH` has no result, so three of the mechanisms the IR runs on had an
-answer for it before it existed, and two of those answers were wrong. Dead
-code elimination deletes statements that produce nothing; the emitter prints
-what a lexic hands it and nothing where it hands back None; and the reordering
-machinery decides from effects and accesses whether a statement may move.
+`Op.PREFETCH` has no result, so three of the mechanisms the IR runs on would
+answer for it from their defaults, and two of those answers would be wrong.
+Dead code elimination deletes statements that produce nothing; the emitter
+prints what a lexic hands it and nothing where it hands back None; and the
+reordering machinery decides from effects and accesses whether a statement may
+move.
 
 What these pin is that the three agree on what a hint *is*: something that may
 move, may not be deleted, and may be missing from a target's output without
@@ -75,9 +76,8 @@ def test_a_hint_survives_dce():
     """The rule it would otherwise fall to is "produces nothing, does nothing".
 
     Half right, and that is the trap: a prefetch does produce nothing, and
-    deleting it never changes a result. It would have been deleted from every
-    body, on every target, and the only symptom would have been that the op
-    bought nothing.
+    deleting it never changes a result. It would be deleted from every body,
+    on every target, and the only symptom would be that the op buys nothing.
     """
     body = _body()
     assert [s.op for s, _ in walk(dce(body))] == [Op.ALLOC, Op.PREFETCH]
@@ -154,7 +154,7 @@ def test_the_gfx_number_is_read_as_hexadecimal():
 
 
 def test_hip_on_nvidia_declines():
-    """The same condition `glb_store` and `atomic_store` already carry."""
+    """The same condition `glb_store` and `atomic_store` carry."""
     assert not HipLexic('hip', 'nvidia').has_prefetch(_Hw('sm_80'))
 
 

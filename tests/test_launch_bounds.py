@@ -4,8 +4,8 @@
 """What the kernel tells the compiler about its block.
 
 With only the thread count in `__launch_bounds__`, ptxas -O3 sizes registers
-for an occupancy it guesses: SeisSol's viscoelastic time derivative got 40 of
-255, spilled 58 KB and ran five times slower than with one block per SM
+for an occupancy it guesses: SeisSol's viscoelastic time derivative gets 40 of
+255, spills 58 KB and runs five times slower than with one block per SM
 stated.  The second argument is CUDA's; HIP reads it as warps per execution
 unit, so it stays out there.
 """

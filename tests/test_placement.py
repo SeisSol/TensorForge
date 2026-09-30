@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 """The placement decision, asked directly.
 
-Legality and preference were four booleans set from a vendor string in a
-constructor and read in the middle of the code that emits loads.  In that shape
-neither half could be asked a question: the only way to find out what a vendor
-did was to generate a kernel and count instructions, and the only way to add a
-target was to guess which of the four to flip.
+Legality and preference are functions to ask, not booleans set from a vendor
+string in a constructor and read in the middle of the code that emits loads.
+In that shape neither half could be asked a question: the only way to find out
+what a vendor does would be to generate a kernel and count instructions, and
+the only way to add a target would be to guess which boolean to flip.
 
 These are the two halves stated apart.  The legality tests say what would be
 *wrong*; the preference tests say what each vendor picks among answers that are
@@ -117,8 +117,8 @@ def test_the_broadcast_claim_is_dropped_under_explicit_simd():
 
     So the same Intel hardware admits the placement under one lowering and not
     under the other, and a table keyed on the vendor alone gets it wrong for
-    half the targets: setting it for Intel outright fixed ten kernels under
-    SYCL and broke twenty-five under ESIMD.
+    half the targets: set for Intel outright, it would fix kernels under SYCL
+    and break more of them under ESIMD.
     """
     hw = _Hw("intel")
     assert policy_for(hw).broadcast_without_staging
@@ -172,9 +172,8 @@ def test_a_destination_written_in_slices_cannot_stay_in_registers():
 def test_what_each_vendor_does_with_a_plain_operand(policy, expected):
     """A vendor with no row reads global memory on every iteration.
 
-    Correct and slow, and it was every vendor but two: Intel read a 16x16 GEMM
-    out of global memory 263 times in its loop body against 5 on NVIDIA, purely
-    because the flags named a list rather than describing a machine.
+    Correct and slow: read in place, a GEMM goes back to global memory for
+    every operand read in its loop body.
     """
     assert choose_operand_placement(_legal(policy), policy) is expected
 
@@ -188,9 +187,9 @@ def test_preference_never_overrides_legality():
 def test_an_unclaimed_alternative_is_named_rather_than_dead():
     """No vendor preloads operands into shared memory today.
 
-    The flag was `vendor in []`, which reads as a mistake and is not one: it is
-    an alternative nobody currently picks. Stated as a table field it stays
-    reachable by writing a row, instead of by editing a branch.
+    As a condition, `vendor in []`, it would read as a mistake and is not one:
+    it is an alternative nobody currently picks. Stated as a table field it
+    stays reachable by writing a row, instead of by editing a branch.
     """
     assert not any(p.preload_operands_into_shared for p in POLICIES.values())
     shared_first = VendorPolicy(preload_operands_into_shared=True)
@@ -281,9 +280,9 @@ def test_a_lane_share_keeps_the_second_large_operator_out():
     """Under SPMD each image is a slice per lane, and several together are not.
 
     `chain_five_multiplies` stages two 56 x 56 operators at 448 B a lane each;
-    gfx1150's lane file is 1 kB, and the kernel ran at 256 VGPR with 428 B of
-    scratch.  With half the file for staged images the second one is read in
-    place, and the spill is gone.
+    gfx1150's lane file is 1 kB, and with both staged the kernel runs at 256
+    VGPR with 428 B of scratch.  With half the file for staged images the
+    second one is read in place, and nothing spills.
     """
     import contextlib
     import importlib.util

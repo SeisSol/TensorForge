@@ -5,9 +5,9 @@
 
 `strategy.py` splits the choice of *arrangement* into what the target allows
 and what it prefers.  This is the same split one level down: there are three
-emitters behind `Strategy.MATRIX` on this target, they overlap, and which one
-runs was an if-chain in `matmul` -- the shape that layer above was written to
-remove, and it goes wrong the same way.
+emitters behind `Strategy.MATRIX` on this target and they overlap.  An
+if-chain in `matmul` choosing among them would be the shape the layer above
+exists to remove, and would go wrong the same way.
 
 A scheme is a mapping from the generator's dimensions onto an instruction's,
 and the three differ in it rather than in what they compute:

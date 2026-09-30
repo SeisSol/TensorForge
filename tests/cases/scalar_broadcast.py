@@ -4,11 +4,12 @@
 """``O[i] = B[i]``, then ``O[i] += 3 * 2`` --- a term whose operands are all scalars.
 
 A multilinear moves every rank-0 operand into its scalar factor, so a term made
-of scalars alone has no tensor operand left.  Its accumulator was then never
-written and kept the sum's neutral element, and the epilogue multiplied that
-zero by the scalars: every broadcast of a scalar onto an index came out zero.
-SeisSol's damage step lost ``1 - B`` (to ``-B``) and ``2 * mu0`` that way.  What
-such a term accumulates is the empty product, the product's neutral element.
+of scalars alone has no tensor operand left.  What such a term accumulates is
+the empty product, the product's neutral element.  An accumulator left at the
+sum's neutral element would never be written, and the epilogue would multiply
+that zero by the scalars: every broadcast of a scalar onto an index would come
+out zero, and SeisSol's damage step would lose ``1 - B`` (to ``-B``) and
+``2 * mu0``.
 """
 
 import numpy as np

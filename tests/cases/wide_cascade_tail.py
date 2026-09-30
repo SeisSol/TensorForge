@@ -9,8 +9,8 @@ only some lanes copy.
 
 That combination is what makes it worth a case of its own. A width decision
 and a lane predicate are separately simple; together they are where an offset
-computed in one unit meets a bound computed in the other, and the corpus had
-no kernel where both happened to the same transfer.
+computed in one unit meets a bound computed in the other, which only a kernel
+with both on the same transfer exercises.
 """
 
 import numpy as np

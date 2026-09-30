@@ -6,10 +6,9 @@
 
 # Host oracle for TensorForge kernels
 
-Checking a generated kernel by reading it stopped working somewhere around the
-fourth defect: the code looks right, the numbers are wrong, and the guessing
-takes a round each time.  These tools replace the guessing with an oracle that
-needs no GPU.
+Checking a generated kernel by reading it does not scale: the code looks right,
+the numbers are wrong, and the guessing takes a round each time.  These tools
+replace the guessing with an oracle that needs no GPU.
 
 The idea is small.  `tests/kernel_eval.py` already interprets one thread of a
 generated CUDA kernel.  Shared memory is where threads meet, so a single thread
@@ -20,9 +19,8 @@ by statement, gives the same guarantee the hardware does, on one shared
 descriptor list the frontend handed the backend.  Agreement to machine
 precision is then a real statement about the kernel.
 
-Validated against the poroelastic order-4 set: 56 of 60 kernels run (the other
-four use vectorized loads the interpreter does not model), and on a correct
-backend all 56 match with a relative deviation below 1e-15.
+Validated against the poroelastic order-4 set: on a correct backend, every
+kernel that runs matches with a relative deviation below 1e-15.
 
 ## Setup
 
@@ -73,7 +71,7 @@ at --- small enough to read the generated code for, and to turn into a test.
 | `dump_descriptors.py` | Capture, per kernel, the description yateto handed over and the descriptors built from it. Everything else works off this file. |
 | `validate_dump.py` | Run each kernel on the host, all lanes, and compare with NumPy. |
 | `prefix_bisect.py` | Rebuild a descriptor list as live objects and bisect to the shortest prefix that is wrong. |
-| `check_structure.py` | Structural checks over a dump, no reference needed: results computed and discarded, a register serving as bias twice, a load overtaken by a store to what it reads, a register array indexed outside its declared range. Each of these was a real defect. |
+| `check_structure.py` | Structural checks over a dump, no reference needed: results computed and discarded, a register serving as bias twice, a load overtaken by a store to what it reads, a register array indexed outside its declared range. None of these stops a kernel from compiling. |
 | `read_before_write.py` | Per descriptor, in program order: which regions does a kernel read that nothing wrote first? |
 | `lockstep.py` | The lane-parallel runner. |
 | `reference.py` | The NumPy evaluation of a descriptor list. |
@@ -96,16 +94,14 @@ is worth running on any new generation:
   included, and nothing else.
 * `+=` adds where it computed and defines nothing.
 
-It used to assign the computed part only and keep whatever the tensor held
-elsewhere --- which is exactly what a kernel does that forgets the zeros, so
-the oracle agreed with it.  A temporary assigned anew from a narrower product
-is the case that went through (SeisSol's free-surface-gravity kernel).
+A reference that assigned the computed part only and kept whatever the
+tensor held elsewhere would do exactly what a kernel does that forgets the
+zeros, and agree with it -- a temporary assigned anew from a narrower product
+is the shape that shows it (SeisSol's free-surface-gravity kernel has one).
 
 `validate_dump.py` and `prefix_bisect.py` give every destination in memory a
 nonzero value on entry, so that each of the three shows when it is broken: a
-missing zero, a slice that reaches past its box, a dropped bias.  They seeded
-only destinations nothing assigns to, while the reference could not say which
-cells an assignment clears.
+missing zero, a slice that reaches past its box, a dropped bias.
 
 ## What it does not cover
 
@@ -114,11 +110,11 @@ recorded but skipped (`reference.evaluable`): the reference has nothing for
 what one writes, so neither that nor anything computed from it is checked ---
 including whether a pointwise assignment writes the zeros it owes.
 
-SeisSol's elastic order-4 GPU set runs whole: all 116 kernels agree.  Until
-the lanes moved statement by statement, a barrier inside a loop (a rolled
-face loop) and a cross-lane read (`readlane`) were outside the model, and
-`kernel_eval` read a chained ternary, `k == 0 ? a : k == 1 ? b : c`, from the
-left -- 54 of them aborted or disagreed.
+SeisSol's elastic order-4 GPU set runs whole: all 116 kernels agree.  It has
+barriers inside loops (a rolled face loop) and cross-lane reads (`readlane`),
+which need every lane at the same statement, and chained ternaries,
+`k == 0 ? a : k == 1 ? b : c`, which `kernel_eval` groups from the right, as C
+does.
 
 `read_before_write.py` reports reads with no preceding write.  Not all of them
 are defects: a global output may be filled by the caller.  In the poroelastic
@@ -126,6 +122,6 @@ set it flags `spaceTimePredictor` row 0 and the alignment padding, which are
 SeisSol's to initialize --- worth confirming on that side, since nothing in the
 kernel does it.
 
-One kernel is executed per run, for one batch element, with `flags0 == nullptr`
-and no extra offset.  Backends other than CUDA are not interpretable: HIP
+One kernel is executed per run, for one batch element, with its flag set and
+no extra offset.  Backends other than CUDA are not interpretable: HIP
 kernels use cross-lane primitives the interpreter has no model for.

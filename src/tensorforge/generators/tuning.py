@@ -60,7 +60,7 @@ def backend_of(context: Context) -> str:
 
     Not `hw.backend`: that is the device's, and `esimd` runs on the `oneapi`
     device -- a context rebuilt from it is SPMD SYCL, so every ESIMD candidate
-    was built, compiled and scored as the other lowering.
+    would be built, compiled and scored as the other lowering.
     """
     from tensorforge.common.vm.lexic import EXPLICIT_SIMD_BACKENDS
     backend = context.get_vm().get_hw_descr().backend
@@ -181,8 +181,8 @@ def _roll_values(descrs) -> List[int]:
     what a kernel at the register limit wants.  `elastic-o6s:derivative`
     contracts over 55, so the divisors offer 11 and 5; on a GH200 it runs at
     21.2 ns/el rolled by two and 25.7 rolled by four, and rolled by eleven it
-    is slower than the 23.2 it reaches unrolled.  Two was not in the space, so
-    no ranking could have found it.
+    is slower than the 23.2 it reaches unrolled.  Without two in the space no
+    ranking could find it.
     """
     ks = contraction_lengths(descrs)
     if not ks:
@@ -214,7 +214,7 @@ def _geometries(descrs, context) -> List[LaneConfig]:
     """The lane candidates, and each power of two of them at width 2 where the
     backend spells a widened lead (CUDA and HIP) and the pair still fits the
     rows -- width 2 at 16 lanes was GB200's fastest from b = 80 on, and no
-    lane candidate had it."""
+    lane candidate has it."""
     flat = _flat(descrs)
     out = list(lane_config.candidates(flat, context))
     backend = getattr(context.get_vm().get_lexic(), '_backend', None)
@@ -330,8 +330,8 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     divisor up to 32.  Not `prepare_operands`: the host packs for it.  Not
     the matrix path, whose default is per vendor and not yet measured.
 
-    `preload_globals` on Intel, where it is now measured and where the answer
-    is per kernel rather than per vendor.  Under the explicit-vector lowering
+    `preload_globals` on Intel, where it is measured and where the answer is
+    per kernel rather than per vendor.  Under the explicit-vector lowering
     it is the difference between 0.31x and 0.74x of the SPMD default over the
     order-6 elastic kernels -- the operators are one shared copy there instead
     of one per work-item -- and up to 1.22x once the block holds the
@@ -429,8 +429,8 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # the option can leave, which no divisor offers where the contraction is
     # prime to it.  `elastic-o6s:derivative` contracts over 55, so the
     # divisors are 11 and 5: on a GH200 it runs at 21.2 ns/el rolled by two,
-    # 23.2 unrolled and 25.7 rolled by four, and the value that wins was not
-    # in the space at all.
+    # 23.2 unrolled and 25.7 rolled by four, and the value that wins is not a
+    # divisor at all.
     rolls = _roll_values(descrs)
     rolls = rolls[:2] + [r for r in rolls[2:] if r == 2]
     if len(rolls) > 1:
@@ -462,8 +462,9 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     #
     # So this is a stay of execution and not a verdict on the option: with
     # nothing to gain here it is one build per kernel spent on a decision the
-    # default already makes correctly.  It comes back when a tuned ESIMD build
-    # beats its own default, which is a measurement and not an opinion.
+    # default already makes correctly.  It belongs in the space once a tuned
+    # ESIMD build beats its own default, which is a measurement and not an
+    # opinion.
     if (hw.vendor == 'intel'
             and not getattr(context.get_vm().get_lexic(), 'simd_mode', False)
             and any(t.addressing == Addressing.NONE for t in _tensors(descrs))):
@@ -544,9 +545,9 @@ def build(descr_factory, base: Context, candidate: Candidate) -> Build:
     from tensorforge.generators.generator import Generator
     # Tuning off for the trial: it asks what *this* candidate costs, so it
     # builds this one and does not go looking for another.  With a knob pinned
-    # the tuner no longer stands aside when a geometry is given, so a trial
-    # that kept `autotune` would open a walk of its own, once per trial, all
-    # the way down.
+    # the tuner does not stand aside when a geometry is given, so a trial that
+    # kept `autotune` would open a walk of its own, once per trial, all the
+    # way down.
     ctx = candidate.context(base, autotune='off')
     ctx.measure_pressure = True
     try:
@@ -592,39 +593,40 @@ def static_score(result: Build):
     the first that it spills at all, the second what that is worth against
     everything else.
 
-    Ranking the overshoot by size ahead of the issue estimate is what the
-    measurement removed (2026-09-20).  Over twenty elastic kernels on pvc with
-    the lane count free it is a wash -- 15 of 20 picks against 14, geomean 1.079
-    against 1.089 -- and over the ten where `preload_globals` is the question it
-    is not: 3 of 10 against 8, geomean 1.822 against 1.035.  Staging the
-    operators into shared memory moves bytes out of the register file, which is
-    exactly the quantity the old first key sorted on, so it decided that axis by
-    itself and always the same way.  Taken together, 1.285 against 1.071.  The
-    same shape wins on the compiled scorer's own corpus (`~/tf/beast/spillrank.py`,
-    72 workloads on sm_90 and sm_80): the cliff *and* the penalty, at 9.6 %
-    mean against 10.1 % for the cliff alone and 9.7 % for the penalty alone.
-    A cliff that keeps its size but moves behind the issue estimate changes
-    nothing on either axis (15 of 20, 3 of 10), so it is the precedence and not
-    the granularity that was wrong.
+    Measured against ranking the overshoot by size ahead of the issue estimate
+    (2026-09-20): over twenty elastic kernels on pvc with the lane count free
+    it is a wash -- 15 of 20 picks against 14, geomean 1.079 against 1.089 --
+    and over the ten where `preload_globals` is the question it is not: 3 of 10
+    against 8, geomean 1.822 against 1.035.  Staging the operators into shared
+    memory moves bytes out of the register file, which is exactly the quantity
+    that first key would sort on, so it would decide that axis by itself and
+    always the same way.  Taken together, 1.285 against 1.071.  The same shape
+    wins on the compiled scorer's own corpus (`~/tf/beast/spillrank.py`, 72
+    workloads on sm_90 and sm_80): the cliff *and* the penalty, at 9.6 % mean
+    against 10.1 % for the cliff alone and 9.7 % for the penalty alone.  A
+    cliff that keeps its size but ranks behind the issue estimate picks the
+    same on either axis (15 of 20, 3 of 10), so what decides is the precedence
+    and not the granularity.
 
     Then multiplications resident per SM -- blocks times the multiplications a
     block holds, since eight lanes put four times as many in a block as 32.
 
     Only then how far the body is past the instruction cache
-    (`_icache_over`), and that is where measuring moved it (2026-09-17,
+    (`_icache_over`), which is where measuring puts it (2026-09-17,
     ~/tf-probe/tune_order.py, 100 items on sm_120, geomean of the pick against
     the default: 0.911 here against 0.973 with the cache ahead of everything).
-    It used to rank second, as a cliff: a body that does not fit is fetched
-    again on every iteration of the batch loop.  The cliff is real where one
-    candidate fits and another does not -- which is what merging local_flux
-    decides -- but ahead of the issue estimate it also decides between two
-    candidates that both overflow, and there the smaller one is not the
-    faster one.  SeisSol's elastic time derivative at order 8: rolled by 17 it
-    is 230 kB past the cache and whole 625 kB, and whole is 28 % faster.  The
-    same key picked `k_roll=11` for the order 6 derivative, which is 75 %
-    slower than the default.  Ranking it as a cliff only (fits or not) fixes
-    the rolling but keeps three of four such picks unmade -- 0.920 -- so the
-    excess ranks after the issue estimate and nothing ranks before it.
+    The case for ranking it second, as a cliff, is that a body that does not
+    fit is fetched again on every iteration of the batch loop.  The cliff is
+    real where one candidate fits and another does not -- which is what
+    merging local_flux decides -- but ahead of the issue estimate it also
+    decides between two candidates that both overflow, and there the smaller
+    one is not the faster one.  SeisSol's elastic time derivative at order 8:
+    rolled by 17 it is 230 kB past the cache and whole 625 kB, and whole is
+    28 % faster.  The same key, ranked second, would pick `k_roll=11` for the
+    order 6 derivative, which is 75 % slower than the default.  Ranking it as
+    a cliff only (fits or not) fixes the rolling but keeps three of four such
+    picks unmade -- 0.920 -- so the excess ranks after the issue estimate and
+    nothing ranks before it.
 
     Then the modeled register footprint, in granules of sixteen registers
     (`_GRANULE`).  Last the length of the source: where nothing else differs,
@@ -690,7 +692,7 @@ def _least_cycles(gen, lanes: int, wave: int, spill_bytes: float = 0.0,
     of the `issue` resource, which is the SM's warp schedulers (four on
     NVIDIA since Volta) -- rather than against a fresh constant.  Where the
     caller knows neither the residency nor the hardware, nothing is
-    stretched and this is the bound as before.
+    stretched and this is the bound itself.
     """
     from tensorforge.analysis import pipeline
     b = pipeline.of(gen, spill_bytes=spill_bytes)
@@ -791,8 +793,8 @@ def _over_budget(result: Build) -> float:
     has, or 0 where it fits -- an amount and not a verdict, because where
     every candidate is past it (`local_flux` at b = 120 on gfx942, all of
     them spilling) the one past it least is the one that spills least: 880 B
-    of scratch at 32 lanes against 11 KB at eight, which a yes/no left to the
-    next key to decide the wrong way.
+    of scratch at 32 lanes against 11 KB at eight, which a yes/no would leave
+    to the next key to decide the wrong way.
 
     First, before anything is ranked: a build that spills is slower than any
     difference the other keys can see.  Calibrated against ptxas on sm_100a
@@ -811,8 +813,8 @@ def _over_budget(result: Build) -> float:
         return _over_scalar_budget(result)
     if hw.vendor == 'amd':
         # hipcc allocates about 1.26 registers per modeled four bytes, so the
-        # byte budget alone let eight lanes at b = 56 through (2449 B against
-        # 2048) that gfx942 spilled 2 KB for.  In bytes, like the rest.
+        # byte budget alone would let eight lanes at b = 56 through (2449 B
+        # against 2048) that gfx942 spills 2 KB for.  In bytes, like the rest.
         #
         # Against the *whole* figure and not the lane-varying part of it,
         # although the vector file is what this budget is: the fit was taken
@@ -829,12 +831,12 @@ def _over_budget(result: Build) -> float:
         # what has to fit is the lane's footprint times the sub-group.
         #
         # Compared against the whole file, as every other target is, the guard
-        # never fired on Intel at all: `elastic-o6s:derivative` models 1716 B
-        # a lane against 8192, and IGC spills it hard.  Per thread it is 54.9
-        # KB at 32 lanes against 31.6 at sixteen -- 6.7 and 3.9 times the file
-        # -- and the IGC dump agrees about which of the two that hurts: 1108
-        # scratch messages against 9, which is the whole difference in sends
-        # between the two builds.
+        # would never fire on Intel at all: `elastic-o6s:derivative` models
+        # 1716 B a lane against 8192, and IGC spills it hard.  Per thread it is
+        # 54.9 KB at 32 lanes against 31.6 at sixteen -- 6.7 and 3.9 times the
+        # file -- and the IGC dump agrees about which of the two that hurts:
+        # 1108 scratch messages against 9, which is the whole difference in
+        # sends between the two builds.
         lanes = result.generator.lanes
         share = lanes.num_threads if lanes else 1
         return max(0, peak * share - budget) + _over_scalar_budget(result)
@@ -979,7 +981,7 @@ def _zeinfo_spill(path: str) -> Optional[int]:
     Three answers and not two.  No object: nothing is known.  An object whose
     note is there and names neither a `spill_size` nor a scratch buffer: no
     spilling, which is what the note not mentioning it means.  An object with
-    no note at all: nothing is known either, and that used to be read as zero.
+    no note at all: nothing is known either, which is not the same as zero.
 
     Two spellings, because the two backends do not write the same note.  A
     SPMD build states `spill_size:`.  A `-vc-codegen` build -- every
@@ -993,7 +995,7 @@ def _zeinfo_spill(path: str) -> Optional[int]:
 
     That is the 32-lane build of `elastic-o6d:localFluxAll`, whose ISA carries
     1376 spill messages; the same kernel at sixteen lanes has no such buffer
-    and spills nothing.  Reading only the first spelling made every
+    and spills nothing.  Reading only the first spelling would make every
     explicit-SIMD candidate come back spill-free -- the two lane counts
     indistinguishable to the one scorer able to tell them apart, since the
     modelled footprint puts them half a percent apart (79760 B against
@@ -1117,7 +1119,7 @@ class CompiledScore:
             # reads a recompilation as "spilled, amount unknown", and IGC
             # recompiles for other reasons too -- the 32-lane
             # `neighboringFlux` build retries and spills nothing, which that
-            # heuristic reported as a spill and the ranking acted on.
+            # heuristic would report as a spill for the ranking to act on.
             report = replace(report, spill_bytes=spilled)
         if hw.vendor == 'nvidia' and report.registers:
             gen = result.generator
@@ -1155,8 +1157,8 @@ class CompiledScore:
             # count is the vector's width, and a narrower one does strictly
             # less work per instruction; the only thing it buys is a value
             # the allocator can place.  Where nothing spills there is nothing
-            # to buy, and letting the rest of the tuple decide is how the
-            # axis lost 16 % over the twenty elastic kernels on pvc --
+            # to buy, and letting the rest of the tuple decide loses 16 %
+            # over the twenty elastic kernels on pvc --
             # `o6s:derivative` 15.92 -> 35.10 ns an element, `o6s:localFluxAll`
             # 11.02 -> 24.34, neither of which spills at either width, while
             # `o6d:localFluxAll` spills 10688 B at 32 lanes and none at
@@ -1391,7 +1393,7 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     it.  A caller who states the geometry is stating that and not "do not
     tune" -- `elastic-o6s:derivative` is built at a geometry the benchmark
     harness passes explicitly, and with the whole space abandoned for it
-    nothing was ever tuned there.
+    nothing would be tuned there.
     """
     descrs = descr_factory()
     # A measurement first: where one says what is best for this device and
@@ -1459,12 +1461,11 @@ def _bound_cycles(result: Optional['Build']) -> Optional[float]:
     The same yardstick on purpose.  `_worth_it` asks whether the move the
     ranking chose is worth its margin, and a margin measured on a different
     figure does not check the decision, it overrules it with another one.
-    `poroelastic-stp` order 8 in double precision is where that showed:
-    ranked on the stretched bound the walk takes 128 lanes (339960 against
-    584025) and is right by 2.26x on the clock, and the raw bound then reads
-    339960 against 146006, calls the move a threefold loss and puts the
-    default back.  Every candidate the widening exists for was discarded
-    exactly this way.
+    `poroelastic-stp` order 8 in double precision is where that shows: ranked
+    on the stretched bound the walk takes 128 lanes (339960 against 584025)
+    and is right by 2.26x on the clock, while the raw bound would read 339960
+    against 146006, call the move a threefold loss and put the default back
+    -- as it would for every candidate the widening exists for.
     """
     if result is None or not result.ok:
         return None

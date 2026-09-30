@@ -35,9 +35,9 @@ _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 # A predicate becomes a select only where suppressing the statement is not the
 # point.  Reads -- synchronous or asynchronous -- may be evaluated under a
 # ternary; anything that writes, is atomic, synchronizes or is opaque has to
-# keep a real branch, or the effect would happen when it must not.  This used
-# to be a test on the *shape* of the statement (does it have a target?), which
-# would silently fold a value-returning atomic into a ternary.
+# keep a real branch, or the effect would happen when it must not.  A test on
+# the *shape* of the statement (does it have a target?) would silently fold a
+# value-returning atomic into a ternary.
 _MUST_BRANCH = Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN
 
 
@@ -87,12 +87,12 @@ _INFIX = {
 }
 
 # Ops with no infix form that the lexic already spells correctly.  Without
-# this they fell through to the generic `f'{op}({args})'`, i.e. unqualified
-# `min(a, b)` -- which happens to resolve in CUDA and HIP device code through
-# the vendor headers' global-namespace overloads, and so worked by accident
-# while silently depending on which headers a translation unit had pulled in.
-# `get_operation` gives `fminf`/`fmin` by dtype, which is what the elementwise
-# path has always emitted for the same operator.
+# this they would fall through to the generic `f'{op}({args})'`, i.e.
+# unqualified `min(a, b)` -- which happens to resolve in CUDA and HIP device
+# code through the vendor headers' global-namespace overloads, and so would
+# work by accident while silently depending on which headers a translation
+# unit has pulled in.  `get_operation` gives `fminf`/`fmin` by dtype, which is
+# what the elementwise path emits for the same operator.
 _LEXIC_BINOP = {'min': Operation.MIN, 'max': Operation.MAX}
 
 
@@ -231,14 +231,15 @@ class Emitter:
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
     def _record_work(self) -> None:
-        # The emitter is handed a context or, from older call sites, the VM;
+        # The emitter is handed a context or, from some call sites, the VM;
         # only the former counts (`Context.record_work`).
         # Times the trip counts of the loops around it: a loop the compiler
         # unrolls, or one rolled by `k_roll`, is written once and runs its
-        # count.  Counted once, rolling a reduction by ten made a kernel look
-        # like a tenth of the arithmetic, and a search ranking by the count
-        # rolled everything it could.  A loop without constant bounds -- the
-        # batch loop -- counts once, so the figure stays per element.
+        # count.  Counted once, rolling a reduction by ten would make a kernel
+        # look like a tenth of the arithmetic, and a search ranking by the
+        # count would roll everything it could.  A loop without constant
+        # bounds -- the batch loop -- counts once, so the figure stays per
+        # element.
         record = getattr(self.context, 'record_work', None)
         if record is not None:
             record(self._work_scale)
@@ -301,10 +302,10 @@ class Emitter:
             if op == Op.LOAD:
                 key = f'{level}.read'
                 # Read by every lane at one address: one broadcast per warp,
-                # not a word per lane -- counted per lane it made a shared
-                # operand's bandwidth bind `gpu_volume` above its measured
-                # time.  And a batch-invariant operand comes out of a cache,
-                # not out of what each element streams in.
+                # not a word per lane -- counted per lane it would make a
+                # shared operand's bandwidth bind `gpu_volume` above its
+                # measured time.  And a batch-invariant operand comes out of a
+                # cache, not out of what each element streams in.
                 if getattr(value, 'uniformity', None) not in (None,
                                                               Uniformity.LANE):
                     key += '.bcast'
@@ -387,10 +388,10 @@ class Emitter:
 
         `str(x)` is fine for the index arithmetic that supplies most
         immediates, and wrong for a float one: Python prints an infinity as
-        `inf`, which is not C++. That only became reachable once a loop
-        carried an operator's neutral element -- `MaxOperator`'s is
-        `-math.inf` -- as its initial value, since `Op.CONST` spells its
-        value through `Datatype.literal` and a loop init did not.
+        `inf`, which is not C++.  A loop that carries an operator's neutral
+        element -- `MaxOperator`'s is `-math.inf` -- as its initial value
+        hands one here, so a typed immediate is spelled through
+        `Datatype.literal`, as `Op.CONST` spells its value.
         """
         if isinstance(x, Value):
             if x.id in self._consts:
@@ -403,12 +404,12 @@ class Emitter:
         if x is None:
             # `str(None)` is `None`, which is a perfectly good C++ identifier
             # and a perfectly bad one to emit.  It arrives when a producer
-            # answered with nothing and the consumer used the answer anyway --
-            # `Symbol.load` returns None for every structured load under
-            # `simd_mode`, and the value flowed into an arithmetic op, which
-            # came out as `sycl::max(float(acc), float(None))`.  Loud here,
-            # because the alternative is a compiler error pointing at the
-            # arithmetic rather than at the load that had no value.
+            # answers with nothing and the consumer uses the answer anyway --
+            # `Symbol.load` answering None for a structured load under
+            # `simd_mode`, say, with the value flowing into an arithmetic op,
+            # which would come out as `sycl::max(float(acc), float(None))`.
+            # Loud here, because the alternative is a compiler error pointing
+            # at the arithmetic rather than at the load that had no value.
             raise IRError(
                 'a None operand reached the emitter; some producer returned '
                 'no value and its consumer used the result anyway')
@@ -441,18 +442,18 @@ class Emitter:
             # A buffer *declaration* renders its element type and puts the
             # extent in the declarator -- `float r0[36]`, which `Op.ALLOC`
             # spells itself.  A buffer in a *value* position is a pointer to
-            # that element type, and there are such positions now: a rolling
+            # that element type, and there are such positions: a rolling
             # pointer carried across a loop's back edge is an `iter_args`
             # entry, and the loop declares it from its type alone.
             #
-            # Rendering the element type there produced `float v4 = p0;` for a
-            # carried pointer, which is a narrowing conversion the compiler
-            # rejects rather than a wrong answer -- but only because the
-            # element type happened to be arithmetic.
+            # Rendering the element type there would produce `float v4 = p0;`
+            # for a carried pointer, which is a narrowing conversion the
+            # compiler rejects rather than a wrong answer -- but only because
+            # the element type happens to be arithmetic.
             # The backend's spelling, not one assembled here.  A pointer's
             # address space is part of its type wherever the target has spaces
-            # in its type system, and dropping it produced a declaration that
-            # converts the space away -- silently, and only where a pass
+            # in its type system, and dropping it would produce a declaration
+            # that converts the space away -- silently, and only where a pass
             # declares a copy of a pointer rather than the site that bound it.
             lex = self._lexic()
             if lex is not None:
@@ -692,11 +693,10 @@ class Emitter:
 
         A vector-typed one needs a vector.  `pred ? vec : 0.0f` does not
         compile: `VectorStruct` is an aggregate and a scalar does not convert
-        to one, so the ternary has no common type -- which is how `k_width` 2
-        turned four corpus cases from slow into unbuildable, all of them a
-        wide load under a lane guard.  Value-initialized rather than filled,
-        because the guard is the statement's own and the elements it covers
-        are the ones the false branch stands for: all of them.
+        to one, so the ternary has no common type, and a wide load under a
+        lane guard (`k_width` 2) would not build.  Value-initialized rather
+        than filled, because the guard is the statement's own and the elements
+        it covers are the ones the false branch stands for: all of them.
         """
         if isinstance(t, ScalarType) and t.is_vector:
             return f'{self.ctype(t, value)}{{}}'
@@ -758,16 +758,15 @@ class Emitter:
 
         A buffer is typed by its element, so a vector-typed access reads or
         writes several of them at once and has to be spelled through a pointer
-        of the wider type.  That cast is not new -- ``load_linear`` and
-        ``store_linear`` formatted the same one into a raw string.  Putting it
-        *here* is what lets a vectorized access stay an ``Op.LOAD``/``Op.STORE``
-        with the buffer as an operand: the string form had to leave the
-        structured path (``pir_buffer`` was consulted only for ``vec == 1``),
-        which cost every pass its view of which buffer the access touches.
+        of the wider type.  Putting that cast *here* is what lets a vectorized
+        access stay an ``Op.LOAD``/``Op.STORE`` with the buffer as an operand;
+        formatted into a raw string, the access would leave the structured
+        path, and every pass would lose its view of which buffer the access
+        touches.
 
         The cast is only defined when ``addr`` is aligned to the wider type.
-        Nothing here checks that, exactly as nothing checked it before; the
-        legality belongs with whoever chooses the width, not with the spelling.
+        Nothing here checks that; the legality belongs with whoever chooses
+        the width, not with the spelling.
         """
         # `pointer` overrides the *name* written through, never the base the
         # accesses are attributed to: a rotating buffer's stages are one
@@ -793,7 +792,7 @@ class Emitter:
         try:
             return lex.get_fptype(t.base.ctype(), t.length, relaxed=relaxed)
         except TypeError:
-            # A lexic that predates the flag spells one type for both.
+            # A lexic without the flag spells one type for both.
             return lex.get_fptype(t.base.ctype(), t.length)
 
     # -- driver ------------------------------------------------------------ #
@@ -802,10 +801,10 @@ class Emitter:
         """Values that should become expressions rather than declarations.
 
         A pure single-use value is written straight into its consumer, so a
-        migrated construct emits as compactly as the string it replaces.
-        Without this every structured op leaves a named temporary behind, and
-        the generated source grows with the migration instead of staying
-        comparable to it.
+        structured construct emits as compactly as the equivalent raw string.
+        Without this every structured op would leave a named temporary behind,
+        and the generated source would grow instead of staying comparable to
+        the raw form.
 
         The use has to sit *directly* in the same region: pushing a
         computation into a nested loop would change how often it runs.
@@ -995,11 +994,11 @@ class Emitter:
                 # writes, an integer -- is a window of that type into it, and
                 # `&arena[off]` is still a pointer to the arena's.  Where the
                 # window is an offset rather than a pointer (explicit SIMD), it
-                # is the same byte address counted in the other element: it
-                # used to be left alone, and `SlmPtr<bool> = SlmPtr<float> +
-                # off` does not compile (every SeisSol `damageStep`).  The room
-                # reserved is in arena elements, so one no larger than those
-                # fits.
+                # is the same byte address counted in the other element, and
+                # it is retyped all the same: `SlmPtr<bool> = SlmPtr<float> +
+                # off` does not compile, which would break every SeisSol
+                # `damageStep`.  The room reserved is in arena elements, so one
+                # no larger than those fits.
                 fp = getattr(self.context, 'fp_type', None)
                 elem = getattr(t.elem, 'base', t.elem)
                 if fp is not None and elem != fp:
@@ -1081,8 +1080,8 @@ class Emitter:
             # `Op.LOAD` above goes through `glb_load`: the nontemporal hint is
             # `__stcg` on NVIDIA and `__builtin_nontemporal_store` on AMD, and
             # neither is expressible as an assignment.  Without this the hint
-            # would be silently dropped for every store that reaches here --
-            # which is why global stores had to stay on the text path.
+            # would be silently dropped for every store that reaches here, and
+            # a global store would have to stay on the text path.
             space = s.accesses[0].space if s.accesses else None
             lex = self._lexic()
             if space is MemSpace.GLOBAL and lex is not None:
@@ -1226,18 +1225,17 @@ class Emitter:
         if op == Op.DECLARE:
             v = s.target[0]
             # No initializer to inline, so `declare()`'s folding machinery does
-            # not apply -- this is the plain declaration the raw text used to
-            # emit, byte for byte.
+            # not apply -- this is the plain declaration, byte for byte what
+            # the equivalent raw text would emit.
             w(f'{self.ctype(v.type, v)} {self.name(v)}{s.attr("init", "{}")};')
             return
 
         if op == Op.PACK:
             # Never inlined -- see `_plan_inlining`.  `{a, b}` is an
             # *initializer*, not an expression: `x * {a, b}` is not C++, and
-            # inlining a pack into its consumer produced exactly that as soon
-            # as a splatted operand met a multiply.  It has to keep its own
-            # declaration, which is also how the vendor path has always used
-            # it.
+            # inlining a pack into its consumer would produce exactly that as
+            # soon as a splatted operand meets a multiply.  It has to keep its
+            # own declaration, which is also how the vendor path uses it.
             v = s.target[0]
             parts = ', '.join(self.operand(a) for a in s.args)
             self.declare(v, f'{{{parts}}}', s)
@@ -1353,9 +1351,9 @@ class Emitter:
             advance = f'--{i}'
         else:
             advance = f'{i} += {self.operand(step)}'
-        # `ctype` is an override for a loop the macro layer owns: the batch
-        # loop compares its induction variable against `numElements`, so it is
-        # `size_t` and not the `int32_t` that `INDEX` renders to.
+        # The induction's own type: the batch loop compares its induction
+        # variable against `numElements`, so it is `SIZE` and not the
+        # `int32_t` that `INDEX` renders to.
         ind_ctype = self.ctype(ind.type, ind)
         head = (f'{ind_ctype} {i} = {self.operand(lo)}; '
                 f'{i} {cmp_} {self.operand(hi)}; {advance}')
@@ -1426,8 +1424,8 @@ def emit(body: Tuple[Stmt, ...], writer, context: Any = None) -> None:
 
     The choice is the lexic's because the lexic is where the rest of the
     model already lives -- the kernel attributes, the broadcast spelling, the
-    wave barrier.  Splitting the decision between here and there is how the
-    old arrangement ended up with an ESIMD kernel attribute on an SPMD body.
+    wave barrier.  Splitting the decision between here and there could put
+    an ESIMD kernel attribute on an SPMD body.
     """
     lex = getattr(context, 'get_vm', None)
     simd = False

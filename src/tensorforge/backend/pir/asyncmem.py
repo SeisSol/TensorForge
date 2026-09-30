@@ -19,12 +19,12 @@ knows the target, picks one.
 On the copy class the counted unit is not the copy but the *group*, and a
 group is closed by a `commit.async`.  That is why the commit is a statement
 here rather than a line the emitter appends to each copy: `cp.async.commit_group`
-and `__pipeline_commit` are **per thread**, so a lane that skipped a copy also
-skipped its commit and has one group fewer in flight than its neighbor, while
+and `__pipeline_commit` are **per thread**, so a lane that skips a copy would
+skip its commit too and have one group fewer in flight than its neighbor, while
 the `wait` that counts them is one statement for all of them.  A lane-predicated
-tail hop and a hop loop therefore both used to make the count describe one
-lane's path and not another's.  Nothing went wrong only because every wait in
-the corpus was a full drain, where the difference does not show.
+tail hop and a hop loop would therefore both make the count describe one lane's
+path and not another's -- invisible under a full drain, wrong under any other
+wait.
 
 `place_commits` puts the commit where the wait is: tokens accumulate per scope
 and rise out of the regions that issued them, and the commit lands after the
@@ -220,9 +220,7 @@ def _insert(body: Tuple[Stmt, ...], toks, exact: bool) -> Tuple[Stmt, ...]:
     statement that issued any of them* -- which in this scope is the region
     they rose out of.
 
-    Reconstructed rather than recovered: `43230d48` added the call and never
-    the function, so every path reaching it raised `NameError`.  Nothing did
-    until `WrapLoads` learned to move a shared transfer, which peels a copy
+    Reached where `WrapLoads` moves a shared transfer, which peels a copy
     into the prologue and leaves its group to be closed a scope up.  Three
     statements in this module pin what it has to do, and they agree:
 
@@ -323,11 +321,12 @@ def _place(body: Tuple[Stmt, ...], waits: Dict[int, int]):
                     # whose copies the wait after it retires -- but in a loop
                     # body that waits, the wait that retires a copy issued near
                     # the tail is the one at the head of the *next* iteration,
-                    # which in program order is behind nobody.  Rising put the
-                    # commit after the loop, and every iteration's wait then
-                    # counted groups that had never been closed:
-                    # `wait_prior(0)` retires committed groups only.  So the
-                    # run closes before the back edge, behind its last issue.
+                    # which in program order is behind nobody.  Rising would
+                    # put the commit after the loop, and every iteration's
+                    # wait would then count groups that have never been
+                    # closed: `wait_prior(0)` retires committed groups only.
+                    # So the run closes before the back edge, behind its last
+                    # issue.
                     inner = _insert(inner, up, up_exact)
                     up = ()
                 regions.append(replace(r, body=inner))
@@ -426,13 +425,14 @@ def _sched(body: Tuple[Stmt, ...], state: _State,
             # copies cannot: a copy joins the outstanding list at its commit,
             # and the commit is not in here.
             #
-            # The blanket clear cost the whole point of issuing early.  A
-            # predicated tail copy -- `if (threadIdx.x < 24) memcpy_async(...)`
-            # -- is one such block, and it sits between the two transfers of
-            # `local_flux`.  With the count unknown from there on, every wait
-            # fell back to a full drain: two groups in flight and
-            # `__pipeline_wait_prior(0)` waiting for both, so the transfer that
-            # had just been hoisted was awaited immediately anyway.
+            # Forgetting the list after every such block would cost the whole
+            # point of issuing early.  A predicated tail copy
+            # -- `if (threadIdx.x < 24) memcpy_async(...)` -- is one such
+            # block, and it sits between the two transfers of `local_flux`.
+            # With the count unknown from there on, every wait would fall back
+            # to a full drain: two groups in flight and
+            # `__pipeline_wait_prior(0)` waiting for both, so the transfer just
+            # hoisted would be awaited immediately anyway.
             if state.outstanding and _alters_flight(s.regions):
                 state.known = False
             out.append(replace(s, regions=regions))
@@ -604,7 +604,7 @@ def _merge_by_suffix(ends: List[_State]) -> _State:
     counts only what comes after as well, so the same holds there.
 
     Anything else -- different younger entries, or an unknown branch -- stays
-    unknown, as it did before.
+    unknown.
     """
     if not all(e.known for e in ends):
         return _State(ends[0].outstanding, known=False)
@@ -625,10 +625,9 @@ def check_commits(body: Tuple[Stmt, ...]) -> List[str]:
     This is the whole property, and it is worth checking rather than trusting,
     because breaking it produces code that runs: the count is derived from the
     statements, so it stays self-consistent while describing a path only some
-    lanes take.  The corpus went a long time with a commit inside a hop loop
-    and a commit inside a lane predicate, and nothing showed, because every
-    wait was a full drain -- where the difference between one group and three
-    does not change what the wait does.
+    lanes take.  A commit inside a hop loop or inside a lane predicate shows
+    nothing as long as every wait is a full drain -- where the difference
+    between one group and three does not change what the wait does.
 
     The test is on the nesting chains: the statements enclosing the commit
     have to be a prefix of those enclosing the wait.  A commit further out

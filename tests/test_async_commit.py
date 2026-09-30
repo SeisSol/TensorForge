@@ -6,10 +6,10 @@
 `cp.async.commit_group` and `__pipeline_commit` are per *thread*.  A commit
 inside a lane predicate or a hop loop therefore makes the number of groups in
 flight a property of which lanes ran, while the wait that counts them is one
-statement for all of them.  Nothing showed for a long time because every wait
-in the corpus was a full drain, and a drain does not care how many groups it
-retires -- which is exactly why this is pinned here rather than left to the
-snapshots, where it would go on not showing.
+statement for all of them.  Nothing shows while every wait in the corpus is a
+full drain, because a drain does not care how many groups it retires -- which
+is exactly why this is pinned here rather than left to the snapshots, where it
+would not show.
 """
 
 from __future__ import annotations
@@ -78,8 +78,8 @@ def test_a_predicated_tail_hop_commits_for_every_lane():
     """The lane that copies nothing still closes a group.
 
     An empty group is legal and retires immediately, which is what makes this
-    the cheap fix: the copy may keep its predicate, and only the commit has to
-    leave it.
+    cheap: the copy may keep its predicate, and only the commit has to leave
+    it.
     """
     b = _scratch()
     dst = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
@@ -168,8 +168,8 @@ def _two_groups():
 def test_prior_counts_groups_and_not_copies():
     """Three copies, two groups: the first wait leaves one group, not one copy.
 
-    This is the half of the change that is not about lanes.  `prior` used to
-    count tokens, which agreed with the hardware only because a commit sat
+    This is the half of the design that is not about lanes.  A `prior` that
+    counted tokens would agree with the hardware only while a commit sits
     behind every copy; with a group per transfer the two would drift, and the
     wait would leave a number of things in flight that nobody counts.
     """
@@ -327,10 +327,11 @@ def test_a_staged_operand_is_read_behind_a_barrier_after_its_wait(source):
     """`cp.async.wait` makes a copy visible to the lane that issued it, and a
     staged operator is read by every lane.  So a barrier has to stand between
     the wait and the first read; one before the wait fences nothing of it.
-    The sync pass armed the write at the issue, and took the barrier some
-    other buffer's consumer needed for this one's: every staged operator after
-    the first went unfenced -- racecheck on the poroelastic derivative, and 8 %
-    off there once a merged run moved the timing."""
+    A sync pass that armed the write at the issue would take the barrier some
+    other buffer's consumer needs for this one's: every staged operator after
+    the first would go unfenced -- racecheck would report the race on the
+    poroelastic derivative, and it would show in the numbers once the timing
+    moves."""
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
 

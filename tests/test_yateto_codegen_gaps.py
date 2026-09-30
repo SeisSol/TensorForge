@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""The kernels of yateto's own code-gen tests that did not build everywhere.
+"""Kernels of yateto's own code-gen tests that ask something of this side.
 
 Recorded in `fixtures/kernels/yateto_codegen_gaps.json` (seissol/yateto
-50200d3, interface 7).  Three gaps, each closed on this side:
+50200d3, interface 7), and each built for CUDA, HIP and SYCL.  Three shapes
+among them:
 
 * a guard on SYCL -- the barrier of a multiplication narrower than the
-  sub-group is the sub-group's, and waited inside the guard for a neighbor
-  that may not take the branch; `verify` refused it;
-* `LogicalNot`, which had no counterpart;
+  sub-group is the sub-group's, and would wait inside the guard for a neighbor
+  that may not take the branch, which `verify` refuses; a guarded
+  multiplication takes the width of the sub-group instead;
+* `LogicalNot`, which is a comparison with zero;
 * an operand whose box is narrower than the destination (`trace` stores three
-  of eight entries): yateto reads zero outside it, and the elementwise
-  descriptor refused an operand of another shape.
+  of eight entries): yateto reads zero outside it, and the destination is cut
+  at the operand's edge.
 """
 
 from __future__ import annotations

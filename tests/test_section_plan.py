@@ -3,17 +3,16 @@
 # SPDX-License-Identifier: MIT
 """The section analysis, asked directly.
 
-`SectionPlan` answers three questions about a descriptor list, and until it
-became an object of its own the only way to ask any of them was to generate a
-kernel and read the answer back out of the emitted source.  That made every
-statement about it a statement about a whole pipeline, which is why the corpus
-grew a case per geometry.
+`SectionPlan` answers three questions about a descriptor list, and as an object
+of its own it can be asked them directly.  Otherwise the only way to ask any of
+them would be to generate a kernel and read the answer back out of the emitted
+source, which makes every statement about it a statement about a whole
+pipeline.
 
-These are the geometries themselves.  They matter most for the step that comes
-next: teaching the analysis to see elementwise and reduction descriptors
-changes which boxes it collects, and a snapshot corpus containing no mixed
-kernel that generates cannot notice a shift in `written_in_slices`.  Here it
-would be one failing assertion.
+These are the geometries themselves.  A change to which boxes the analysis
+collects -- the elementwise and reduction descriptors it sees, say -- shows up
+here as one failing assertion, where a snapshot corpus would need a kernel of
+exactly that shape to notice a shift in `written_in_slices`.
 """
 
 from __future__ import annotations
@@ -185,8 +184,8 @@ def test_nested_accumulations_after_a_whole_assignment_are_not_written_in_slices
     but the assignment before them covers the whole box, so the register image
     it leaves holds everything and every later term is added into that image.
     One image, stored once.  The ADER Taylor expansion (`I = dQ(0) c_0;
-    I += dQ(k) c_k`, each term over fewer rows) went through global memory on
-    every term for want of this.
+    I += dQ(k) c_k`, each term over fewer rows) has this shape, and without it
+    would go through global memory on every term.
     """
     q, m = _tensor("Q"), _tensor("M")
     f0 = _tensor("F0", shape=(N // 2, N))
@@ -231,10 +230,11 @@ def test_a_writer_narrower_than_the_read_is_written_in_slices():
 
     The destination here is global, and it has to be.  For a *temporary* this
     geometry never reaches the question: reading `tmp[:, 4:8]` where only
-    `tmp[:, 0:4]` was written is an uncovered gap, and the initialization check
-    refuses the section before anything asks `written_in_slices`.  So the
-    second half of that predicate -- the declared write union against the
-    declared read union -- is reachable only for a tensor the check exempts,
+    `tmp[:, 0:4]` is written makes the store that first writes `tmp` clear its
+    buffer (`zero_first`, and the first test of the next section), and a
+    cleared buffer is written in slices before any box is compared.  So the
+    last half of that predicate -- the declared write union against the
+    declared read union -- is reachable only for a tensor nothing clears,
     which is a global destination the caller may have filled.
     """
     a = _tensor("A")
@@ -361,9 +361,9 @@ def test_a_global_output_may_be_read_without_being_written():
 def test_an_elementwise_write_initializes_a_temporary():
     """`tmp = abs(A)` counts as writing `tmp`.
 
-    While the analysis only looked at contractions, a temporary produced
-    pointwise looked to it like one nothing ever wrote, and the section was
-    refused on a premise that was false.
+    An analysis that looked only at contractions would take a temporary
+    produced pointwise for one nothing ever wrote, and refuse the section on a
+    premise that is false.
     """
     a, b = _tensor("A"), _tensor("B")
     tmp = _tensor("TMP", tmp=True)
@@ -381,9 +381,9 @@ def test_an_elementwise_write_initializes_a_temporary():
 def test_an_elementwise_read_counts_toward_coverage():
     """`C = abs(tmp)` where only half of `tmp` was ever written.
 
-    This is the direction that used to pass silently: the read was invisible,
-    so nothing compared it against the writes and the kernel went on to read
-    whatever the buffer held.
+    This is the direction that would pass silently with the read invisible:
+    nothing would compare it against the writes, and the kernel would go on to
+    read whatever the buffer held.
     """
     a = _tensor("A")
     b = _tensor("B", shape=(N, 4))

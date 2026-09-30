@@ -195,15 +195,11 @@ def test_slicing_cases_construct_and_generate():
 def test_reduction_descr_constructs():
     """Reduction cases build a :class:`ReductionDescr` and generate.
 
-    Generation *is* exercised here for every case that is not marked
-    XFAIL, which since the non-lead fold landed is all of them except
-    ``max_all``: that one contracts the lead axis and needs the
-    cross-lane path.
+    Generation *is* exercised here for every case, ``max_all`` included,
+    which contracts the lead axis and needs the cross-lane path.
 
-    The XFAIL assertion this test used to carry — every reduction case
-    must be marked — has been inverted rather than deleted. A case that
-    silently regains the marker is a case that stopped working, and that
-    is worth failing on in the same place the original assertion was.
+    No case may carry the XFAIL marker. A case that silently gains it is
+    a case that stopped working, and that is worth failing on here.
     """
     from pathlib import Path
     import importlib.util
@@ -230,9 +226,7 @@ def test_reduction_descr_constructs():
             f"{path.name}: not a ReductionDescr ({type(d).__name__})")
         # `.tensor.direction`, not `.direction`: the cases pass `SubTensor`,
         # and it is the wrapped `Tensor` that carries the flow direction --
-        # which is also what `ReductionDescr.__init__` sets.  The old spelling
-        # never ran, because the loop aborted one assertion earlier on a
-        # misfiled multilinear case that has since moved out of this directory.
+        # which is also what `ReductionDescr.__init__` sets.
         assert d.var.tensor.direction == DataFlowDirection.SOURCE
         assert d.dest.tensor.direction == DataFlowDirection.SINK
 
@@ -251,7 +245,7 @@ def test_reduction_descr_constructs():
 # Per-feature host smokes for the D-block cases. Each one asserts the
 # distinguishing property of the case (so a case that gets accidentally
 # rewritten as a plain GEMM is caught), and runs generation where the
-# feature is known to work on dev2.
+# feature is known to work.
 
 def _import_case(filename):
     from pathlib import Path
@@ -287,10 +281,6 @@ def test_add_true_sets_accumulate_and_promotes_dest():
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
 
-    # `reduction/add_true.py` never existed -- the directory held
-    # `add_true_f64.py`, which is a multilinear case and has since moved up
-    # next to this one.  The test has been failing on the import ever since it
-    # was written.
     mod = _import_case("add_true.py")
     descrs = mod.descr_list()
     assert any(d.add for d in descrs), "add_true case: no add=True descr"

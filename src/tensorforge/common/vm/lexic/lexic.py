@@ -56,8 +56,7 @@ class Lexic(ABC):
     together and the backend decides.
 
     The default is the generic pointer, which is what every backend without
-    address spaces in its type system wants and what the emitter spelled by
-    hand before this existed.
+    address spaces in its type system wants.
 
     `readonly` is about the pointee and `const` about the pointer: a binding
     the pipelined form advances is `T *` and the ordinary one `T *const`, and
@@ -78,14 +77,13 @@ class Lexic(ABC):
   def shared_pointer_type(self, elem: str, restrict: bool = False) -> str:
     """The declarator for a window into the shared arena, without the name.
 
-    Separate from `pointer_type` and not a call into it, so that the spelling
-    the macro layer has always used stays exactly what it was: these two call
-    sites wrote `float*` where `pointer_type` writes `float *`, and a
-    whitespace change here is a change to every snapshot on every backend for
-    no reason anybody reading the diff could recover.
+    Separate from `pointer_type` and not a call into it, because the two
+    spell it differently -- `float*` here where `pointer_type` writes
+    `float *` -- and a whitespace change here is a change to every snapshot on
+    every backend for no reason anybody reading the diff could recover.
 
     What the hook buys is the question, not the answer: a target where a
-    shared address is not a pointer can now say so in one place instead of
+    shared address is not a pointer can say so in one place rather than
     having four call sites format `{elem}*` at it.
     """
     tail = f' {self.restrict_kw}' if restrict and self.restrict_kw else ''
@@ -200,8 +198,9 @@ class Lexic(ABC):
     one per step) the result is a value like any other.
 
     Read by `pir.pressure` through `_record_pressure`: counted as values, the
-    broadcasts were 1944 of the 3400 bytes a lane that the order-6 derivative
-    is judged by, which is 57 % of a figure compared against a register file.
+    broadcasts would be 1944 of the 3400 bytes a lane that the order-6
+    derivative is judged by, which is 57 % of a figure compared against a
+    register file.
     """
     return False
 
@@ -300,10 +299,9 @@ class Lexic(ABC):
     `subblock`.
 
     Declared here so a backend that has no answer says so.  `CudaLexic`
-    implements it and `HipLexic` inherits that; `SyclLexic` has `broadcast`
-    but not this, so a cross-lane reduction reached it as
-    `AttributeError: 'SyclLexic' object has no attribute 'reduction'` --- a
-    missing attribute reads as a typo, and this is a missing feature.
+    implements it and `HipLexic` inherits that; a backend without it would
+    meet a cross-lane reduction as an `AttributeError` --- a missing attribute
+    reads as a typo, and this is a missing feature.
 
     Not implemented for SYCL because the signature is the open question, not
     the body.  `sycl::reduce_over_group` takes a whole group and has no
@@ -346,18 +344,15 @@ class Lexic(ABC):
     return f'{rhs}'
 
   # --- atomic accumulation --------------------------------------------------
-  # Declared here because the three implementations had drifted into three
-  # different interfaces: `CudaLexic.atomic_store` took three arguments where
-  # the one call site passes four, `SyclLexic` had neither method, and
-  # `has_atomic_store` existed on `HipLexic` alone and returned True without
-  # looking at anything.  Two of the three targets could not have reached this
-  # path without a TypeError or an AttributeError, which is a fair description
-  # of the state they were in.
+  # Declared here so that every backend answers through one interface, the one
+  # the single call site uses.  Declared per backend, the interfaces drift
+  # apart, and a target whose override takes other arguments, or that has
+  # none, reaches this path with a TypeError or an AttributeError.
   #
   # `ctx` is a parameter and not a field because the lexic is constructed with
   # the vendor alone (`vm.py` passes `descr.vendor`), while the answer here
-  # turns on the architecture.  That is the whole of the bug this replaces:
-  # a per-vendor answer to a per-architecture question.
+  # turns on the architecture; a field would give a per-vendor answer to a
+  # per-architecture question.
 
   def has_atomic_store(self, ctx, op, datatype, length=1):
     """Whether an atomic update of `length` x `datatype` is one instruction.

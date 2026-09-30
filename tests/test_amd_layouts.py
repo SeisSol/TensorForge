@@ -4,9 +4,9 @@
 """The fragment layouts against AMD's own tool.
 
 `layouts.FRAGMENT_BITS` says where each element of a matrix operand lives.
-That is a claim about hardware of exactly the kind this package keeps getting
-wrong, and it is not one a reader can check: the layouts are irregular enough
-that two instructions of the same shape and the same block count place their
+That is a claim about hardware of exactly the kind that is easy to get wrong,
+and it is not one a reader can check: the layouts are irregular enough that
+two instructions of the same shape and the same block count place their
 accumulators differently.
 
 AMD publishes them as a calculator rather than a table, so the check runs
@@ -247,11 +247,10 @@ def test_the_contraction_rule_reproduces_every_measured_row():
 def test_the_granule_is_eight_bytes_and_the_cap_matters():
     """The two corrections that turn a plausible rule into a correct one.
 
-    A first attempt used `slot = k % per_lane`, which reproduces every CDNA
-    row and fails on RDNA 4. A second used a fixed four-element granule, which
-    fails on `mfma_f32_16x16x8bf16` -- two BF16 per lane, so the granule
-    cannot be four -- and on RDNA 3, where replication has already taken the
-    lane row the rule wanted to give `k`.
+    `slot = k % per_lane` reproduces every CDNA row and fails on RDNA 4. A
+    fixed four-element granule fails on `mfma_f32_16x16x8bf16` -- two BF16 per
+    lane, so the granule cannot be four -- and on RDNA 3, where replication
+    has already taken the lane row such a rule would give `k`.
     """
     narrow = next(o for o in MEASURED if o.builtin == "mfma_f32_16x16x8bf16")
     assert narrow.b.per_lane == 2
@@ -436,9 +435,9 @@ def test_a_third_term_is_the_contraction_coming_back_to_the_slots():
     have gone and somewhere to have left.
 
     Worth pinning because it is the cost the paths this work is heading
-    towards will pay, and because an earlier version of this test asserted
-    the wrong cause -- that only accumulators reach three -- which is true of
-    every instruction the calculator measured and false of four it did not.
+    towards will pay, and because a wrong cause is easy to assert here --
+    that only accumulators reach three -- which is true of every instruction
+    the calculator measures and false of four it does not.
     """
     def returns_to_slots(op, which):
         frag = op.a if which == "A" else op.b
@@ -476,7 +475,7 @@ def test_the_bf16_tile_reads_its_contraction_out_of_one_register():
     0..3` of one row -- contiguous. With `k` the fastest axis in shared
     memory that is a single 64-bit read per lane, at ``(lane & 3) * pitch +
     ((lane >> 2) & 15) * blockpitch``. No cross-lane movement at all on the
-    operand side, which is what the shifts-and-swizzles question was really
+    operand side, which is what the shifts-and-swizzles question is really
     asking.
     """
     op = next(o for o in catalog.MATRIX_OPS

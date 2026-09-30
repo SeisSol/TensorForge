@@ -10,8 +10,9 @@
 
 Under the atomic-accumulation policy, the default on AMD, an accumulation
 reads no old value: the atomic store adds onto what global memory holds.  A
-temporary's buffer is stored plainly, though, so the accumulation onto it
-found nothing to add to and `t` came out as `w` alone.
+temporary's buffer is stored plainly, though, so the accumulation onto it has
+to read the old value; one that did not would find nothing to add to, and `t`
+would come out as `w` alone.
 """
 
 import numpy as np

@@ -120,23 +120,16 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
   def __init__(self, context, global_mem, mem_size_per_mult, num_threads,
                lead_width=1):
     super().__init__(context, global_mem, mem_size_per_mult, num_threads)
-    #: Lanes times width is what the lane count *was* before the lead
-    #: dimension was vectorized, and it is the right divisor here.
-    #:
-    #: This is the whole occupancy story of the vectorization, so it is worth
-    #: stating: `256 // num_threads` binds in every case in the corpus -- the
-    #: memory bound never does -- so halving the lane count would otherwise
-    #: double the mults, double the shared memory per block and halve the
-    #: occupancy above roughly 256 elements per mult.  Holding the mults
-    #: instead makes the block smaller: shared memory per block unchanged,
-    #: blocks per SM unchanged or better, and the same work in flight with
-    #: half the instructions issued to do it.
-    #: Width times blocking: how many lead-dimension elements one lane now
-    #: covers where it used to cover one.  `num_threads * this` is the lane
-    #: count the operators started with, which is what `mults_per_block` has
-    #: to be sized from -- sizing it from the *reduced* count would double
-    #: the mults, double the shared memory per block and halve the occupancy,
-    #: spending the whole win on memory.
+    #: Width times blocking: how many lead-dimension elements one lane
+    #: covers, where an unvectorized lane covers one.  `num_threads * this` is
+    #: the lane count the operators started with, which is what
+    #: `mults_per_block` has to be sized from.  Sized from the *reduced*
+    #: count, the thread bound on the mults would double, and where it binds
+    #: so would the shared memory per block, halving the occupancy and
+    #: spending the whole win on memory.  Holding the mults instead makes the
+    #: block smaller: shared memory per block unchanged, blocks per SM
+    #: unchanged or better, and the same work in flight with fewer
+    #: instructions issued to do it.
     #:
     #: Not on AMD, where the smaller block is measured to lose: `local_flux`
     #: at lead width two on gfx1150 took 242 ns an element at 128 threads
@@ -153,13 +146,13 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     # than one large one.  Through the generator on sm_120: `local_flux`
     # -6.0 %, `chain_three`, `square_notrans` and `wide_cascade` within the
     # noise (+0.1 to +1.5 %).  Not on AMD: on gfx1150 the halved block made
-    # `chain_three` 3.6 % and `wide_cascade` 4.1 % slower, so it stays at
-    # 256 there and on the other vendors until something says otherwise.
+    # `chain_three` 3.6 % and `wide_cascade` 4.1 % slower, so it is 256
+    # there and on the other vendors until something says otherwise.
     #
     # And not where the block preloads operators into shared memory
     # (`global_mem`): its multiplications share that one copy, and halving
     # the block doubles the copies and halves the blocks that fit.  A
-    # multiplication wider than 128 threads keeps the old bound.
+    # multiplication wider than 128 threads takes the 256-thread bound.
     lanes = self._num_threads * self._lane_factor
     vendor = self._context.get_vm().get_hw_descr().vendor
     threads = 128 if vendor == 'nvidia' and self._global_mem == 0 else 256
@@ -291,10 +284,10 @@ class _GuardGrouping:
     A result the region leaves in registers has to reach its home *inside*
     the region. Both halves of a hoisted `where` write one tensor, so the
     second half asks the residency to flush what the first left behind -- and
-    that store was emitted where the asking happened, in the region under the
-    opposite condition. It then ran when the value did not exist and did not
-    run when it did, and the register it read was not even in scope there,
-    which the host compiler says out loud.
+    a store emitted where the asking happens would land in the region under
+    the opposite condition. It would then run when the value does not exist
+    and not run when it does, and the register it reads would not even be in
+    scope there, which the host compiler says out loud.
 
     So every entry whose image this region defined is flushed here, before the
     region closes. A guard is a scope: what is computed under it is stored
@@ -382,8 +375,8 @@ class Generator:
     self._rotate: Optional[set] = None
     #: Switches the frontend's caller set on this kernel, or None from a
     #: frontend that has no attribute channel.  Only the flag mask reads
-    #: these; the distinction between None and {} is what keeps a frontend
-    #: without one generating the same kernels it did before.
+    #: these; the distinction between None and {} is what gives a frontend
+    #: without one a mask it may leave out (`FlagMode.OPTIONAL`).
     self._attrs: Optional[dict] = attrs
     self._flags: FlagMode = FlagMode.from_attrs(attrs)
     self._thread_block_policy_type: Type[AbstractThreadBlockPolicy] = thread_block_policy_type
@@ -404,7 +397,7 @@ class Generator:
     self._is_registerd: bool = False
     #: Tables substituted into the kernel's signature in place of their
     #: members.  Empty unless something registers one, so a generator that
-    #: never sees a repeated run emits exactly what it did before.
+    #: never sees a repeated run keeps every member in its signature.
     self._param_tables = []
     self._table_member = {}
     #: Whether a `ForDescr` becomes a loop or is expanded into its iterations.
@@ -647,7 +640,7 @@ class Generator:
     # Rotated-and-not-wrapped is not a missed optimization, it is wrong code:
     # the compute reads stage `pipeStage % 2` and the transfer fills the other
     # one, so no iteration ever fills the stage it reads and the first element
-    # computes from whatever the arena held.  `trans_a` did exactly that.
+    # computes from whatever the arena holds.
     #
     # Hence the invariant this restores: rotated if and only if wrapped.
     confirmed: set = set()
@@ -693,10 +686,10 @@ class Generator:
       return
     # Request it, not merely name it.  `stage_counter_name()` answers what the
     # counter is called; `_declare_stage_counter` only emits one when a depth
-    # has been requested.  Naming it without requesting it produced kernels
-    # that read `pipeStage0` and never declared it -- which renders, and which
-    # nothing in the suite compiles, because the syntax check runs on
-    # snapshots taken with this flag off.
+    # has been requested.  Naming it without requesting it would produce
+    # kernels that read `pipeStage0` and never declare it -- which renders,
+    # and which nothing in the suite compiles, because the syntax check runs
+    # on snapshots taken with this flag off.
     stage = loop.request_stage_counter(2)
     for instr in getattr(loop, 'region', []) or []:
       if not isinstance(instr, GlbToShrLoader):
@@ -739,10 +732,9 @@ class Generator:
 
     What the caller fixed stays fixed and the rest is still tuned: an explicit
     `lanes`, or `Options.lanes_per_mult`, pins that knob and leaves the others
-    in the space.  Standing aside instead -- which is what a fixed geometry
-    used to do -- turns tuning off for every caller that states one, and
-    `tools/bench/build.py` states one for every build, so nothing measured
-    through it was ever tuned.
+    in the space.  Standing aside instead would turn tuning off for every
+    caller that states one, and `tools/bench/build.py` states one for every
+    build, so nothing measured through it would be tuned.
 
     The candidates are built from deep copies, because preparing and rolling
     leave their marks on the tensors; the pick is then built here, on the
@@ -795,15 +787,15 @@ class Generator:
     target's instruction cache this generator is rebuilt merged, as many runs
     as it takes to fit, largest saving first (`rolling.roll`, `fit_within`).
     A run's share of the measured code is taken to be its share of the
-    arithmetic -- a split of a measured size, not a model of one; what
-    `roll` weighed before was a line count fitted to one SeisSol corpus.
+    arithmetic -- a split of a measured size, not a model of one such as a
+    line count fitted to one SeisSol corpus.
 
     Nothing to decide where nothing repeats, where the target states no
     instruction cache, or where the probe does not build.  And nothing merged
     where the merged build fails: a default is not entitled to break a kernel
     that builds without it, so the kernel is built written out, with a
     warning -- SeisSol's `gpu_derivative`, whose merged chain carries each
-    derivative into the next, was the first to need it.  Asked for with
+    derivative into the next, needs it.  Asked for with
     `merge_variants=1`, a failure is a failure.
     """
     opts = self._context.get_user_options()
@@ -904,10 +896,9 @@ class Generator:
         self._emit_ir(codesection)
 
         # Build the loop *before* optimizing, so that the passes see one stream
-        # with the body as a region.  This is what removes the
-        # `_global_instrs` side channel: a pipelining pass that wants a prologue
-        # now peels an iteration into this same list, ahead of the loop, instead
-        # of publishing it through a second list nothing else indexed.
+        # with the body as a region: a pipelining pass that wants a prologue
+        # peels an iteration into this same list, ahead of the loop, rather
+        # than publishing it through a second list nothing else indexes.
         index = len(self._sections)
         start, stride = self._section_traversal(index)
         loop = BatchLoop(context=self._context,
@@ -962,7 +953,7 @@ class Generator:
           # With nothing preloaded left to drop, a block that holds no
           # multiplication is not a smaller launch but no launch: block
           # height 0 and a shared window never declared.  SeisSol's damage
-          # step at order 6 in double precision went that far, in silence.
+          # step at order 6 in double precision would go that far, in silence.
           obj = self._section.shr_mem_obj
           if not obj.get_mults_per_block():
             per_mult = obj.get_size_per_mult() or 0
@@ -973,9 +964,9 @@ class Generator:
             # answers: shared memory for a narrower multiplication or fewer
             # preloaded operators, the thread count for a narrower one only.
             # `RegmaxBlockPolicy` caps a block at 128 threads on NVIDIA and
-            # 256 elsewhere, so a multiplication 512 lanes wide got no block
-            # and was refused as though its 11 KB of shared memory were the
-            # problem.
+            # 256 elsewhere, so a multiplication 512 lanes wide gets no block,
+            # and one message for both would refuse it as though its 11 KB of
+            # shared memory were the problem.
             asked = per_mult * size + obj.get_global_size() * size
             if asked <= cap:
               raise GenerationError(
@@ -1034,8 +1025,7 @@ class Generator:
     barrier scope from ``uniform_scope`` rather than the caller passing a flag.
     """
     # `check_ready` needs the thread-block policy, which has run by now: this
-    # is the emit-time call the pass manager's comment defers to, and which
-    # nothing was actually making.
+    # is the emit-time call the pass manager's comment defers to.
     diags = verify(stream,
                    predefined=list(self._scopes.get_global_scope().values()),
                    backend=self._context.get_vm().get_lexic()._backend,
@@ -1142,7 +1132,7 @@ class Generator:
     An operand's storage order is offered where the matrix path is emitted,
     and the section prologue's copies of it were sized when they were built,
     before any body existed.  An order with padding slots -- a fragment image
-    is tiled, 3584 slots for a 56x56 -- then outgrew its copy.  So the orders
+    is tiled, 3584 slots for a 56x56 -- then outgrows its copy.  So the orders
     are settled here, on the final stream, and the images laid out again from
     the start of the prologue's arena in the order they were built.
 
@@ -1245,8 +1235,8 @@ class Generator:
     addressing, the guards, the barriers and the batch loop, and every one of
     them asks the lexic for the spelling.  Rebinding the spelling for the
     length of the section reaches all of them at once, and `block_dim_y` goes
-    with them -- the batch stride is multiplications per block, which is no
-    longer the `y` extent.
+    with them -- the batch stride is multiplications per block, which is then
+    not the `y` extent.
     """
     lexic = self._context.get_vm().get_lexic()
     wave = self._context.get_vm().get_hw_descr().vec_unit_length
@@ -1263,7 +1253,7 @@ class Generator:
     if layout.contiguous or layout.whole_waves:
         # A run of lanes inside one wave, or a whole number of waves: either
         # way every wave holds one shape already, and `threadIdx.x` is the
-        # lane it always was.
+        # lane.
         yield layout
         return
     saved = (lexic.thread_idx_x, lexic.thread_idx_y, lexic.block_dim_y)
@@ -1308,9 +1298,8 @@ class Generator:
 
           # Everything is in place now (offsets from ShrMemOpt, arena size from
           # the thread-block policy), so this is the point where the full check
-          # is meaningful.  Previously each instruction was tested one at a time
-          # and the first unprepared one aborted, hiding every other problem
-          # behind it.
+          # is meaningful.  Testing one instruction at a time and aborting at
+          # the first unprepared one would hide every other problem behind it.
           self._set_mult_stride(section)
           self._verify_section(section.stream, i)
 
@@ -1397,10 +1386,10 @@ class Generator:
     One launch serves all sections, so they have to agree on how many
     multiplications a block holds: a section planned for fewer would find
     per-multiplication windows and groups it never laid out.  None of the
-    corpus's multi-section kernels disagree; the launcher took the last
-    section's figure and the launch bounds the smallest, so a disagreement
-    would have been a wrong launch rather than an error.  The shared memory
-    is the largest any section needs.
+    corpus's multi-section kernels disagree, and one that does is an error:
+    taking one section's figure for the launcher and another's for the launch
+    bounds would make it a wrong launch instead.  The shared memory is the
+    largest any section needs.
     """
     sections = tuple(
         SectionLaunch(section.shr_mem_obj.get_mults_per_block(),
@@ -1668,9 +1657,10 @@ class Generator:
     for symbol in scope:
       symbol.embedded = None
       # Undone whole, not only flagged: asked a second time, a symbol left a
-      # `Data` one without the flag fell through the filter below as not a
-      # batch operand -- the launcher and the call site then disagreed about
-      # whether it is a parameter, which is a signature mismatch in the caller.
+      # `Data` one without the flag would fall through the filter below as not
+      # a batch operand -- the launcher and the call site would then disagree
+      # about whether it is a parameter, which is a signature mismatch in the
+      # caller.
       if getattr(symbol, 'inlined', False):
         symbol.stype = SymbolType.Batch
       symbol.inlined = False
@@ -1803,11 +1793,12 @@ class Generator:
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._section.shr_mem_obj, self._num_threads)
       # A stand-in of a merged run is not an argument: which member it is
       # changes per iteration, through a table over the members.  Preloading
-      # the stand-in took the address of a name no kernel declares; preloading
-      # its members would make that table select between shared copies while
-      # its binding claims global memory -- a wrong address space that only a
-      # target spelling the space in the type (AMD) notices.  So a merged run
-      # reads its members from global, as it does where nothing is preloaded.
+      # the stand-in would take the address of a name no kernel declares;
+      # preloading its members would make that table select between shared
+      # copies while its binding claims global memory -- a wrong address space
+      # that only a target spelling the space in the type (AMD) notices.  So a
+      # merged run reads its members from global, as it does where nothing is
+      # preloaded.
       scope = self._scopes.get_global_scope()
       merged = {id(member) for symbol in scope.values()
                 if getattr(symbol.obj, 'is_variant', False)
@@ -1834,15 +1825,16 @@ class Generator:
                             - {id(s.obj) for s in chosen})
 
       # Bytes against bytes: `shmem_load` counts elements, the cap is the
-      # hardware's figure in bytes.  Compared as they were, 57600 floats of
-      # preloaded operators (local_flux at b = 120, 225 KB) passed a 64 KB
+      # hardware's figure in bytes.  Compared as they are, 57600 floats of
+      # preloaded operators (local_flux at b = 120, 225 KB) would pass a 64 KB
       # cap on gfx942 -- and FP64 at b = 56 (98 KB) with it -- and the launch
-      # asked for more LDS than the device has.
+      # would ask for more LDS than the device has.
       if chosen and shmem_load * self._context.fp_type.size() < shmem_cap:
         # Waited for before the barrier that publishes them.  A barrier orders
         # the threads, not the copies they issued: without the waits the
-        # block went past `__syncthreads()` with the transfers still in flight
-        # wherever they were asynchronous -- on NVIDIA, every one of them.
+        # block would go past `__syncthreads()` with the transfers still in
+        # flight wherever they are asynchronous -- on NVIDIA, every one of
+        # them.
         from tensorforge.backend.instructions.memory.load import (
             GlbToShrLoader, LoadWait)
         load_ir += [LoadWait(instr) for instr in load_ir
@@ -1882,9 +1874,9 @@ class Generator:
       if getattr(symbol.obj, 'is_variant', False):
         # A stand-in is not a parameter: it is bound inside the merged loop,
         # from the table, and `_emit_ir` skips it for the same reason.  Bound
-        # here as well it came out as `glb_v0 = &v0[0]` over a name nothing
-        # declares -- and `get_symbol` then found that binding for the table,
-        # so the loop's own one was named `glb_glb_v0`.
+        # here as well it would come out as `glb_v0 = &v0[0]` over a name
+        # nothing declares -- and `get_symbol` would then find that binding
+        # for the table, naming the loop's own one `glb_glb_v0`.
         continue
       if symbol.obj.addressing == Addressing.SCALAR or (symbol.obj.addressing == Addressing.NONE and (symbol.stype == SymbolType.Data or not self._preload_globals or id(symbol.obj) in self._preload_left)):
         builder.build(symbol)
@@ -2023,8 +2015,8 @@ class Generator:
 
     A result left in registers is final once no later descriptor reads or
     writes its tensor, and holding it to the section's end only holds its
-    registers: SeisSol's elastic derivative kept every `dQ(k)` until the last
-    line.  Only a global home -- a shared temporary no one reads is simply
+    registers: SeisSol's elastic derivative would keep every `dQ(k)` until the
+    last line.  Only a global home -- a shared temporary no one reads is simply
     dead.  The guard's open run is closed first, so that the store is not
     conditional on it.  A tensor the list does not name -- a merged run's
     stand-in -- keeps its place at the end.
@@ -2096,8 +2088,9 @@ class Generator:
     # it reads memory and never asks the residency.  So a member whose newest
     # copy is still in registers has to be stored before the loop, or the loop
     # reads the buffer as it was.  SeisSol's anelastic time derivative is the
-    # case -- the peeled level left `dQ(1)` in registers, stored after the
-    # loop, and the next level read the launch's input in its place.
+    # case -- the peeled level leaves `dQ(1)` in registers, and if that were
+    # stored only after the loop, the next level would read the launch's
+    # input in its place.
     for variant in variants:
       for view in variant.members:
         member = self._member_symbol(view)
@@ -2114,17 +2107,17 @@ class Generator:
       # parameter's addressing was -- and the binding after the table reads
       # it as such.  So the table holds plain data pointers, which is what a
       # batch-invariant operand's are.  Typed by the stand-in's addressing it
-      # declared `const float **` over `const float *` members.
+      # would declare `const float **` over `const float *` members.
       # A member staged into shared memory (`s0`, the peeled first one of a
       # preloaded run) is a data pointer as much as a binding is: left out,
-      # SeisSol's `gpu_localFluxAll` typed its table `const float **` over
-      # `s0` and `glb_m5` and nvcc refused it.
+      # SeisSol's `gpu_localFluxAll` would type its table `const float **`
+      # over `s0` and `glb_m5`, which nvcc refuses.
       resolved = all(m.name.startswith(GeneralLexicon.GLOBAL_MEM_PREFIX)
                      or m.stype == SymbolType.SharedMem for m in members)
       # A scalar stays a scalar: its bindings are values, and a table of them
-      # is a select over values -- typed as data pointers because they were
-      # named `glb_`, it declared `const float *` over `float`s.  And a table
-      # over members the loop writes is not `const`.
+      # is a select over values -- typed as data pointers because they are
+      # named `glb_`, it would declare `const float *` over `float`s.  And a
+      # table over members the loop writes is not `const`.
       if stand_in.obj.addressing == Addressing.SCALAR:
         addressing = Addressing.SCALAR
       else:
@@ -2157,8 +2150,8 @@ class Generator:
     # And only what the body reads before it assigns it rides the back edge.
     # A tensor assigned first starts afresh on every pass: each of the damage
     # model's projections computes `I = dQ(0) ...; I += ...` and reads it
-    # back, and chaining that `I` round the loop renamed its reload and not
-    # the product reading it -- `QDR(1..3)` came out zero.
+    # back, and chaining that `I` round the loop would rename its reload and
+    # not the product reading it -- `QDR(1..3)` would come out zero.
     def carries(tensor) -> bool:
       for descr in body:
         if any(view.tensor is tensor for view in descr.reads()):
@@ -2192,9 +2185,8 @@ class Generator:
           region.extend(builder.get_instructions())
           break
       else:
-        # A descriptor nobody recognizes used to fall out of the loop and be
-        # dropped, which turns a missing builder into a wrong kernel rather
-        # than an error.
+        # A descriptor nobody recognizes is an error: dropped, it would turn
+        # a missing builder into a wrong kernel.
         raise InternalError(
             f'no builder for {descr.__class__.__name__}: {descr}')
 
@@ -2208,7 +2200,7 @@ class Generator:
     region = [i for i in region if not isinstance(i, RegisterAlloc)]
     # A preload at the end is a value memory holds, so nothing rides the back
     # edge.  Kept as (key, init, result): pairing a filtered key list with the
-    # pairs afterwards lost step as soon as one key was not carried.
+    # pairs afterwards would lose step as soon as one key is not carried.
     carried = []
     for key in keys:
       entry = self._residency.get(key)
@@ -2229,8 +2221,9 @@ class Generator:
       # writeback is emitted after this returns and would otherwise store a
       # register the substitution has just made unreachable.
       # Only the image moves: what it covers and what its store owes stay.
-      # Re-recorded bare, the store forgot the assignment's promise and left
-      # rows 20..24 of the anelastic derivative's `I` as the buffer had them.
+      # Re-recorded bare, the store would forget the assignment's promise and
+      # leave rows 20..24 of the anelastic derivative's `I` as the buffer has
+      # them.
       entry = self._residency.get(key)
       self._residency.record_writeback(key, init, entry.home,
                                        covered=entry.covered,
@@ -2288,15 +2281,16 @@ class Generator:
     instead -- `glb_` and the tensor's name -- agrees with that for exactly
     one kind of operand: a kernel parameter, whose binding is `glb_m115`
     where the tensor is `m115`.  A temporary is `s233` where its tensor is
-    `t232`, so every one of them missed, silently, and a merged run carried
-    its parameters round the back edge and none of its temporaries.
+    `t232`, so every one of them would miss, silently, and a merged run would
+    carry its parameters round the back edge and none of its temporaries.
 
     SeisSol's damage step is where that shows: the seven integrals its
     outputs are read from are temporaries, the peeled copy leaves each as a
-    register image, and with the chain never closed every iteration read the
-    image the peel left.  `I` and `sourceI` came out at three fifths of what
-    the written-out kernel computes, while `transportDer(0..3)` -- kernel
-    parameters, and so the one kind the key matched -- were right.
+    register image, and with the chain never closed every iteration would
+    read the image the peel left.  `I` and `sourceI` would come out at three
+    fifths of what the written-out kernel computes, while
+    `transportDer(0..3)` -- kernel parameters, and so the one kind such a key
+    matches -- would be right.
     """
     sym = self._scopes.get_symbol(view.tensor)
     return None if sym is None else sym.name
@@ -2338,8 +2332,8 @@ class Generator:
     dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{stand_in.name}',
                   stype=SymbolType.SharedMem, obj=stand_in.obj)
     dest.block_shared = True
-    # a verbatim copy, laid out as the member is (`GlobalLoaderBuilder`)
-    # a verbatim copy: indexed as the tensor is (`GlobalLoaderBuilder`)
+    # a verbatim copy, indexed and laid out as the member is
+    # (`GlobalLoaderBuilder`)
     dest.verbatim = True
     self._scopes.add_symbol(dest)
     loader = GlbToShrLoader(context=self._context, src=src, dest=dest,
@@ -2657,9 +2651,8 @@ class Generator:
   def _base_params(self, symbol_list, substitute_tables=False):
     """The kernel's parameters, once, as parameters.
 
-    Four callers used to walk this list building four different strings from
-    it, and nothing but a shared loop body kept the four in step.  They now
-    read one list and ask each entry what it looks like on their surface.
+    Four callers read this one list and ask each entry what it looks like on
+    their surface, so that nothing but the list has to keep the four in step.
     """
     params = []
     emitted_tables = set()
@@ -2828,13 +2821,10 @@ class Generator:
     reader decides the precedence.  It reaches the loop as `lo`, and
     `wrap_prefetch` puts `lo` in the induction's place when it peels an
     iteration: the peeled address then reads `lo * stride`, which without the
-    parentheses parsed as `threadIdx.y + blockDim.y * blockIdx.x * stride` --
-    the right element for row 0 and the wrong one for every other row.
+    parentheses would parse as `threadIdx.y + blockDim.y * blockIdx.x * stride`
+    -- the right element for row 0 and the wrong one for every other row.
     """
     lexic = self._context.get_vm().get_lexic()
     if block is None:
       block = lexic.block_idx_x
     return f'({lexic.thread_idx_y} + {lexic.block_dim_y} * ({block}))'
-
-  # NOTE: _get_element_size_guard and _get_flag_guard moved onto BatchLoop,
-  # which is the only thing that needed them.

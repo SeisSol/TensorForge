@@ -42,19 +42,19 @@ class RegisterAlloc(AbstractInstruction):
       # stop needing it once symbol.py takes the value instead.
       #
       # `gen_ir` is already the inside of `through_pir`, so the sink is the
-      # builder.  On the unmigrated path it is the Writer, which has no
-      # structured alloc, so that path keeps emitting the line.
+      # builder.  On the direct path (`_use_pir` off) it is the Writer, which
+      # has no structured alloc, so that path emits the line.
       if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
-        # Deliberately *not* over-aligned.  An earlier version declared this
-        # `alignas(16)` so a wide access could be cast onto it; that was a
-        # category error.  A register array lives in the private address
-        # space, where AMDGPU interleaves the lanes at dword granularity --
+        # Deliberately *not* over-aligned.  Declaring this `alignas(16)` so a
+        # wide access could be cast onto it would be a category error.  A
+        # register array lives in the private address space, where AMDGPU
+        # interleaves the lanes at dword granularity --
         # `(private_addr / 4) * wave_size * 4 + lane * 4 + private_addr % 4`.
         # Four consecutive private dwords are `wave_size * 4` bytes apart in
         # the backing memory, so a 16-byte-aligned private address does not
         # name a contiguous 16 bytes and a wide private access cannot be one
-        # transfer however it is aligned.  The alignment bought nothing there
-        # and padded the scratch frame, which is occupancy.
+        # transfer however it is aligned.  The alignment would buy nothing
+        # there and pad the scratch frame, which is occupancy.
         #
         # In the case that matters the array is promoted and there is no
         # address at all.  What the cast needs is to be well-defined C++, and
@@ -98,11 +98,11 @@ class ShrMemAlloc(AbstractInstruction):
     `Op.ALLOC` to carry, which is why this is the one buffer in the section
     that keeps a name: it exists before any body does.
 
-    The two windows are ordinary bindings, and were three bare statements --
-    `Effect.UNKNOWN`, conflicting with every access in the body and pinning
-    everything on both sides.  As values they declare what they touch and
-    carry a def-use edge, so a scheduler knows a read through a window cannot
-    rise above the binding of it.
+    The two windows are ordinary bindings, not bare statements -- a bare
+    statement is `Effect.UNKNOWN`, conflicting with every access in the body
+    and pinning everything on both sides.  As values they declare what they
+    touch and carry a def-use edge, so a scheduler knows a read through a
+    window cannot rise above the binding of it.
 
     Recorded against the arena, not against themselves: `may_alias` treats
     distinct bases as never aliasing, so a window claiming its own identity
@@ -126,8 +126,8 @@ class ShrMemAlloc(AbstractInstruction):
 
     # Asked, not spelled.  A window into shared memory is a pointer on four
     # of the five backends and an offset on the fifth, and the declaration
-    # and the initializer have to agree about which -- they were two
-    # independently formatted strings, so on the fifth they did not.
+    # and the initializer have to agree about which -- as two independently
+    # formatted strings, on the fifth they would not.
     def declarator(name):
       return f'{lexic.shared_pointer_type(self._fp_as_str)} {name}'
 

@@ -13,7 +13,8 @@ about.
 The search is cheap for a reason worth stating.  Two bodies generalize exactly
 when their skeletons are equal -- the comparison has no third outcome -- so a
 run of chunks can be found by computing one skeleton per chunk and testing
-equality, and the generalization itself is built once, for the run that wins.
+equality, and the generalization itself is built once per run found, not
+once per comparison.
 
 A chunk is a contiguous slice, and everything in it takes part: a fence sitting
 between two operations is a descriptor like any other, with no slots and an
@@ -86,10 +87,10 @@ _BASE = 1_000_003
 class _Chunks:
     """Chunk comparisons for one descriptor list, at every period.
 
-    Equal skeletons are the test, and building one per chunk and period was
-    the search's whole cost: every period up to half the list, every start,
-    every operand key again -- quadratic in the period, and over an hour for
-    SeisSol's damage step (1787 operations) before anything was generated.
+    Equal skeletons are the test, and building one per chunk and period would
+    be the search's whole cost: every period up to half the list, every start,
+    every operand key again -- quadratic in the period, over a list that for
+    SeisSol's damage step is 1787 operations long.
 
     A skeleton's shape and keys come one descriptor at a time, so two chunks
     can only be equal where their strings of per-descriptor signatures are.

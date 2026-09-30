@@ -104,7 +104,7 @@ template <typename T> struct ReductionOperation<T, Operation::Max> {
 
   // `lowest()`, not `min()`.  For an integer type they agree; for floating
   // point `min()` is the smallest positive *normal* value, so a max-reduction
-  // over data that happens to be entirely negative returned about 1e-38
+  // over data that happens to be entirely negative would return about 1e-38
   // instead of the largest element -- a plausible-looking number, which is the
   // worst kind.
   static constexpr T neutral() {
@@ -120,17 +120,14 @@ template <typename T> struct ReductionOperation<T, Operation::And> {
     return a1 & a2;
   }
 
-  // All ones.  `max()` is `0x7fff...` on a signed type, so the sign bit came
-  // back cleared no matter what the data held.  Converting -1 sets every bit
-  // at every width and signedness, and gives `true` for `bool`, where `~T(0)`
-  // would promote to `int` first and warn.
+  // All ones.  `max()` is `0x7fff...` on a signed type, so the sign bit would
+  // come back cleared no matter what the data held.  Converting -1 sets every
+  // bit at every width and signedness, and gives `true` for `bool`, where
+  // `~T(0)` would promote to `int` first and warn.
   static constexpr T neutral() { return static_cast<T>(-1); }
 };
 
 template <typename T> struct ReductionOperation<T, Operation::Or> {
-  // Was `Operation::And`, copied along with the rest of the specialization.
-  // Every `Op::Op == Operation::Or` test was therefore false, and an Or
-  // reduction took whichever branch And had been given.
   static constexpr Operation Op = Operation::Or;
   static constexpr T applyOperation(const T &a1, const T &a2) {
     return a1 | a2;

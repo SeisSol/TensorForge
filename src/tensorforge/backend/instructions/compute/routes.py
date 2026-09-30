@@ -14,9 +14,9 @@ belong to whoever has them.
 This module owns the first two and the order.  A target hands in the middle
 two as `Rungs`, or hands in nothing and gets the two that are always true.
 Handing in nothing is a real answer and not a stub: it says this target has
-no register route between these layouts, which is exactly NVIDIA's position
-and was the reason its refusal had to be a literal while `reach` lived in
-`primitives/amd`.
+no register route between these layouts, which is exactly NVIDIA's position.
+Were `reach` part of `primitives/amd`, NVIDIA could state it only as a literal
+refusal.
 """
 
 from dataclasses import dataclass

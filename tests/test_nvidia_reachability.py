@@ -4,31 +4,21 @@
 """Everything in `primitives/nvidia.py` is reachable, or is listed as not.
 
 The same guard as `test_amd_reachability.py`, on the same machinery, for the
-same reason -- but the module it guards had a sharper version of the problem.
-`nvidia.py` was never reached at all: `_is_matmul` asked
-`vendor in ['amd']`, so the `elif vendor == 'nvidia'` branch below it could
-not run, and had not been able to since the line was written.  Nothing in the
-file was covered, so nothing in it could fail, so 23 definitions accumulated
-that no case could reach.
+same reason, and with the whole module at stake: a dispatch that never
+selected it would leave nothing in it covered, nothing in it able to fail,
+and definitions that no case can reach free to accumulate unseen.
 
-Two of those were second module-level definitions of a name already taken.
-`matmul` was one, and the shadowed twin was the broken one: it declared
-`{Areg}[]{}`, an array of size zero, and called `atom.generate(..., [], [],
-[])` with empty operand lists.  The working emitter survived only because
-Python keeps the *last* definition.  That is the specific reason to delete
-duplicates before turning a path on rather than after: with the path live and
-the twins still present, "which one runs" is decided by file order.
+The sharpest form of that is a second module-level definition of a name
+already taken.  Python keeps the *last* definition, so where a working
+emitter and a broken twin share a name, the working one runs only because it
+comes second.  That is the specific reason to delete duplicates before
+turning a path on rather than after: with the path live and the twins
+present, "which one runs" is decided by file order.
 
-The rest -- `reduction_generic`, `full_reduction`, `ballot_reduction`,
-`minmaxfloatint`, the four `shuffle_*` helpers, `atomic`, `read_shared`,
-`CUTEAtom`, `ATOMS`, `MatmulCall`, `MMAWrapper`, `bfconvert`,
-`prefer_rowload` -- was deleted rather than kept, because none of it was
-repairable in the sense the AMD `unused.py` entries are.  These do not carry
-a known defect to fix; they reference names that do not exist at all.
-`reduction_generic` uses `value` and `dtype`, `full_reduction` uses `ARCH`,
-`sm80` and `Operation`, and calls itself with one argument where it takes
-five.  That is not code with bugs in it, it is code that was never run once.
-`bfconvert` opens with `raise NotImplementedError()` and then has a body.
+An unreachable definition that references names which do not exist at all is
+not repairable in the sense the AMD `unused.py` entries are.  It carries no
+known defect to fix; it is code that has never run once, and it is deleted
+rather than kept.
 
 So the allow-list here is empty, and that is the point: an entry would mean
 someone decided a specific thing is worth keeping unreachable, with a reason
@@ -50,15 +40,14 @@ MODULES = ["nvidia"]
 
 #: What `multilinear.py` reads.  `supports` is an entry point in its own
 #: right, not something `matmul` reaches -- the gate is asked *before* the
-#: emitter, which is the whole change that made this file live -- and
-#: `ENABLED` likewise: it is a module-level constant the caller consults, and
-#: without it here the deployment switch reads as dead.  `scratch` is the
-#: third: what the path needs staged has to be answerable before any body
-#: exists, so it cannot sit behind the emitter.  `shmsize` is reached through
-#: it and is listed as well, since a direct reader is free to size a buffer
-#: without going through the routing table.  `prepared_order` is the fifth,
-#: and it is asked at a different time from all of them: before the operand's
-#: buffer is sized, because the answer decides how big it is.
+#: emitter -- and `ENABLED` likewise: it is a module-level constant the
+#: caller consults, and without it here the deployment switch reads as dead.
+#: `scratch` is the third: what the path needs staged has to be answerable
+#: before any body exists, so it cannot sit behind the emitter.  `shmsize` is
+#: reached through it and is listed as well, since a direct reader is free to
+#: size a buffer without going through the routing table.  `prepared_order`
+#: is the fifth, and it is asked at a different time from all of them: before
+#: the operand's buffer is sized, because the answer decides how big it is.
 #: `fragment_order` hangs off it and is reached rather than listed.
 #: `convergence` is the sixth: whether the plan needs the multiplications of a
 #: warp in step, asked while the batch loop is built -- before any body, and
@@ -86,9 +75,8 @@ def test_entry_points_exist(analysis):
 def test_no_name_is_defined_twice(analysis):
     """A second definition of the same name silently discards the first.
 
-    Both `reduction` and `matmul` had one here.  The `matmul` case is the one
-    that matters: the twin that lost is the one with the zero-size array, so
-    the file worked by accident of ordering.
+    Where the twin that loses is the working one, the file breaks; where it
+    is the broken one, the file works by accident of ordering.
     """
     defs, _ = analysis
     dupes = reachability.duplicate_definitions(defs)
@@ -113,9 +101,9 @@ def test_allow_list_does_not_outlive_its_entries(analysis):
 def test_no_amd_intrinsics_in_the_nvidia_module(mod):
     """The mirror of the CUDA-intrinsic check on the AMD side.
 
-    Nothing here uses one today; the check exists because the AMD package did
-    acquire two routines written against `__shfl_xor_sync`, and there is no
-    reason the traffic cannot go the other way.
+    Nothing here uses one today.  A routine written against one vendor's
+    intrinsics can land in the other vendor's package, and nothing makes that
+    traffic go only one way.
     """
     src = reachability.code_only(PRIMITIVES / f"{mod}.py")
     for token in ("__builtin_amdgcn_", "fmacdpp", "transpose4x4b32",
@@ -124,9 +112,6 @@ def test_no_amd_intrinsics_in_the_nvidia_module(mod):
 
 
 def test_module_has_no_empty_stubs(analysis):
-    """`def f(...): pass` reads as an implemented hook and is not one.
-
-    `atomic` and `read_shared` were exactly that.
-    """
+    """`def f(...): pass` reads as an implemented hook and is not one."""
     defs, _ = analysis
     assert not reachability.empty_stubs(defs)

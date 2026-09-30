@@ -3,11 +3,10 @@
 # SPDX-License-Identifier: MIT
 """Reachability over a vendor package's call graph.
 
-Lifted out of `test_amd_reachability.py` unchanged when the same guard was
-needed for `primitives/nvidia.py`.  Two copies of a static analysis is two
-places for it to be subtly different, and the interesting content -- which
-names are unreachable on purpose, and why -- belongs to each vendor, not to
-the mechanism.
+Shared by the AMD and the NVIDIA reachability guards.  Two copies of a static
+analysis would be two places for it to be subtly different, and the
+interesting content -- which names are unreachable on purpose, and why --
+belongs to each vendor, not to the mechanism.
 
 Reachability is a stronger statement than coverage: coverage says no case
 happened to run this, reachability says no case can.
@@ -85,9 +84,9 @@ def code_only(path: Path) -> str:
     """The module's source with comments and docstrings stripped.
 
     Vendor-purity checks are about what a module *emits*, not about what it is
-    allowed to say.  A comment recording that two routines used to be written
-    against the other vendor's intrinsic is exactly the note a reader wants,
-    and a check that forbade naming it would delete its own explanation.
+    allowed to say.  A comment explaining why a routine is not written against
+    the other vendor's intrinsic is exactly the note a reader wants, and a
+    check that forbade naming it would delete its own explanation.
     """
     out = []
     with open(path, "rb") as fh:

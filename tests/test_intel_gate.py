@@ -167,7 +167,7 @@ def _dense(explicit_simd=True):
 
 def test_the_default_build_does_not_take_dpas(monkeypatch):
     """Unset, the option defers to `ENABLED` -- off -- so a default build is
-    the one it was before the option reached this module."""
+    the one `ENABLED` gives."""
     monkeypatch.delenv('TF_TENSOR_CORES', raising=False)
     ctx = _ctx()
     assert ctx.get_user_options().tensor_cores is None
@@ -193,7 +193,8 @@ def test_the_option_wins_over_the_module_default(monkeypatch):
 def test_spmd_never_takes_dpas():
     """`esimd::xmx::dpas` is ESIMD's, and an SPMD kernel cannot call it --
     yet the SPMD lowering reaches the gate with 16-wide multiplications too
-    (20 cases of the corpus under `oneapi`, had the old gate been on)."""
+    (20 cases of the corpus under `oneapi`, were the gate blind to the
+    lowering)."""
     ctx = _ctx('oneapi', tensor_cores=True)
     assert Strategy.MATRIX not in intel.strategies(_dense(False), ctx)
 
@@ -217,7 +218,7 @@ def _kernel(case, backend, **options):
 def test_the_option_reaches_the_emitter(monkeypatch):
     """`gemm_square_16`: a 16x16 GEMM, one 16-wide multiplication.  Asked for,
     two column blocks of eight at three TF32 products each; not asked for,
-    the same kernel as before; SPMD, never."""
+    the kernel without DPAS; SPMD, never."""
     monkeypatch.delenv('TF_TENSOR_CORES', raising=False)
     on = _kernel('square_notrans', 'esimd', tensor_cores=True)
     assert on.count('intel_xmx::dpas<') == 2 * intel.TF32_TERMS * 2
@@ -250,8 +251,9 @@ def _src2_runs(case):
 
 def test_the_second_block_of_depths_reads_the_upper_lanes():
     """`gemm_square_16`: K = 16, so two blocks of eight out of one 16-lane
-    vector of B.  The second starts at lane 8.  It started at lane 0 -- k = 0..7
-    twice and k = 8..15 never -- and nothing on the host could tell."""
+    vector of B.  The second starts at lane 8.  Starting it at lane 0 would
+    read k = 0..7 twice and k = 8..15 never -- and nothing on the host would
+    tell."""
     runs = _src2_runs('square_notrans')
     assert runs, 'the Src2 fills are no longer where this test looks'
     assert set(runs) == {(8, 0), (8, 8)}
@@ -269,7 +271,7 @@ def test_every_lead_slot_is_multiplied():
 
     Per face, `X = A_f @ B` is two column blocks of eight over seven depth
     blocks, and `X @ C_f` two over two -- eighteen, at three TF32 products
-    each, in every slot.  Only slot 0 used to be computed: a quarter of the
+    each, in every slot.  Computing slot 0 alone would be a quarter of the
     products, the other 40 rows never stored.  And each operator is read in
     every slot: column 0 at rows 0, 16, 32 and 48.
     """
@@ -343,7 +345,7 @@ def test_the_order_is_offered_where_an_arrangement_reads_it():
 def test_a_prepared_operator_is_read_in_runs():
     """`local_flux` at 16 lanes: each 56x56 operator stored slot-major, and
     its 224 lane vectors read in 56 block messages of four -- where the
-    broadcast chain read them a row stride apart, one message each."""
+    broadcast chain reads them a row stride apart, one message each."""
     import re
     src, operands = _prepared('local_flux', lanes_per_mult=16,
                               prepare_operands=True)
@@ -369,8 +371,9 @@ def test_dpas_reads_the_halves_it_was_stored_as():
     """With DPAS the operators are stored as their TF32 halves, planar.  Src1
     is converted from what it reads (`castTF32`) rather than split, and the
     lower halves are read a plane -- the order's length -- further on.  The
-    view asks the operand for its part count: copied when the view was made,
-    before the order split it, the lower half was read one float on."""
+    view asks the operand for its part count: a count copied when the view is
+    made, before the order splits the operand, would read the lower half one
+    float on."""
     import re
     src, operands = _prepared('local_flux', lanes_per_mult=16,
                               prepare_operands=True, tensor_cores=True)
@@ -424,8 +427,8 @@ def test_every_reader_of_an_operator_shares_its_order():
 
 @pytest.mark.parametrize('case_file', ['square_notrans', 'csa_alpha'])
 def test_a_run_is_as_wide_as_its_select(case_file):
-    """A run of B's lane vector was declared `simd<float, 16 * 8>` around an
-    8-wide `select`: it inherited B's distribution over the lanes."""
+    """A run of B's lane vector that inherited B's distribution over the lanes
+    would be declared `simd<float, 16 * 8>` around an 8-wide `select`."""
     import re
     src = _kernel(case_file, 'esimd', tensor_cores=True)
     wrong = [(w, name, sel) for w, name, sel, _ in re.findall(_DECLARED, src)
@@ -502,8 +505,8 @@ def _products(src):
     # The scalar goes through a cast where the element's type is not the
     # accumulator's, so the read may sit inside `static_cast<T>(...)`.  Without
     # this the match finds nothing and every assertion below passes or fails
-    # for the wrong reason -- `test_one_b_vector_per_output_column` was green
-    # on an empty set.
+    # for the wrong reason -- `test_one_b_vector_per_output_column` would be
+    # green on an empty set.
     for m in re.finditer(
             r'(\w+_acc) \+= \(\((?:static_cast<\w+>\()?(\w+)\[(\d+)\]\)?\) \* (\w+)\)',
             src):
@@ -515,9 +518,9 @@ def _products(src):
 def test_the_contraction_is_complete_and_has_no_repeats():
     """A 16x16 GEMM: sixteen accumulators, each sweeping the whole K.
 
-    This is the check that would have caught the `Mx` for `M` mix-up, which
-    made every accumulator receive the same product -- an error nowhere, and
-    wrong everywhere.
+    This is the check that catches an `Mx` for `M` mix-up, which would make
+    every accumulator receive the same product -- an error nowhere, and wrong
+    everywhere.
     """
     per = _products(_esimd_kernel('square_notrans'))
     assert len(per) == 16, 'one accumulator per output column'
@@ -625,10 +628,10 @@ def test_tf32_is_its_own_type_and_four_bytes_wide():
 
 
 def test_both_matrix_paths_name_the_same_type():
-    """The NVIDIA halves used to be `U32` -- "four bytes of something", chosen
-    because `splitFloatTF32` took `uint32_t&`.  It still does on CUDA, where
-    the PTX constraint letter forces a typedef; what changed is that the
-    *generator* now knows what those four bytes are."""
+    """The NVIDIA halves are `TF32`, not `U32` -- "four bytes of something".
+    `splitFloatTF32` takes `uint32_t&` on CUDA, where the PTX constraint
+    letter forces a typedef; the *generator* knows what those four bytes are
+    all the same."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     assert nvidia.TF32_HALF.base is Datatype.TF32
 
@@ -636,8 +639,8 @@ def test_both_matrix_paths_name_the_same_type():
 # -- the repeat count ------------------------------------------------------ #
 
 def test_the_default_repeat_is_what_the_table_held():
-    """The ranking has to be inert where nothing bounds it, or the change is
-    not a refactor."""
+    """The ranking has to be inert where nothing bounds it, so that a kernel
+    without a register bound is not changed by it."""
     assert intel.atom_for(Datatype.F32).repeat == 8
     assert intel.atom_for(Datatype.F32, columns=9, lead=56, depth=56).repeat == 8
 

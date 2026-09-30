@@ -8,8 +8,9 @@ and the inner indexing ``i0 * 1 + i1 * shape[0]`` in a 2D tensor):
 
 * **batch axis outermost**, contiguous (stride = product of shape).
 * inside each element, **column-major** (Fortran order) over ``shape``.
-* bounding-box and offsets are ignored here — the MVP only exercises
-  cases where the full shape is used (dense bbox, zero offset).
+* bounding-box and offsets are ignored here — the ``shape`` a caller
+  passes is the stored region (``driver_emit`` hands over the bbox extent),
+  so every buffer is dense over it.
 
 Wrapping NumPy arrays with ``order='F'`` per element and a leading batch
 axis makes ``tobytes()`` produce exactly the layout the kernel expects,
@@ -138,11 +139,10 @@ def pack(view: np.ndarray, pack_index: np.ndarray,
     A slot naming ``-1`` is the other direction, and it is the one thing a
     gather cannot express on its own: a slot with no cell.  A tiled storage
     order has them wherever the tiling runs past the end of the matrix, and
-    they read zero -- which is what the kernel's own padding registers held
-    before the order moved into memory, so the product is unchanged and not
-    merely harmless.  Written as a gather from cell 0 followed by a mask,
-    because ``dense[:, -1]`` is a legal read of the last cell and would put
-    the wrong value there rather than fail.
+    they read zero -- the value a tile padded in registers would hold, so the
+    product is unchanged and not merely harmless.  Written as a gather from
+    cell 0 followed by a mask, because ``dense[:, -1]`` is a legal read of the
+    last cell and would put the wrong value there rather than fail.
     """
     batch = view.shape[0]
     # Each element is F-contiguous, so the flat cell order within one element

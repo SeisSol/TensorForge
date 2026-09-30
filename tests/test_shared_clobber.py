@@ -9,16 +9,16 @@ run's body twice, for its back edge -- and keeps, per buffer, whether another
 buffer placed on overlapping memory has been written since the buffer was last
 written in full; a read of a buffer in that state is a clobber.  Coverage is
 judged from the boxes each write names, not from `partial_defs`, so the check
-does not reuse the reasoning it checks: that is what let a slice written into
-a buffer a whole write defined (`temp_slice_after_whole`), a pointwise write
-into a slice (`elementwise_slice_after_whole`) and a slice written first
-inside a merged run (below) all come out clobbered while the verifier stayed
-green.
+does not reuse the reasoning it checks: a flaw there would leave the verifier
+green while a slice written into a buffer a whole write defined
+(`temp_slice_after_whole`), a pointwise write into a slice
+(`elementwise_slice_after_whole`) or a slice written first inside a merged run
+(below) comes out clobbered.
 
 A merged run whose body reads the image it carries after re-computing it is
 the other thing pinned here: closing the chain renames the image register,
-and a reader holding it as a view kept the old name -- a register nothing
-writes.
+and a reader holding it as a view that kept the old name would read a
+register nothing writes.
 
 And a store into a buffer a clearing store wrote waits for a barrier: the
 zeros go out on the clearing nest's lanes, the later store writes some of the

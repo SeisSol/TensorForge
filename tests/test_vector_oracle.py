@@ -45,16 +45,14 @@ def _build(name, widen, blocking=1):
 def _destination(name, widen, blocking=1):
     """The destination, run as one block over one memory.
 
-    This used to run each lane on its own and merge the results, over a fixed
-    64 tids.  Both halves of that stopped being true once `kernel_eval` began
-    modeling the async copy.  A staged operand arrives cooperatively --- lane
-    `t` copies its own stripe and no other --- so a lane on its own memory
-    computes from a window that is one stripe of operand and seed fill
-    everywhere else, and two configurations then agree because they were both
-    reading the same fill.  And 64 is not this kernel's width: the widened
-    build here is launched with four lanes, so sixty of those tids were a
-    second block's threads addressing one block's memory, copying past the end
-    of the operand as they went.
+    A staged operand arrives cooperatively --- lane `t` copies its own stripe
+    and no other --- so a lane run on its own memory would compute from a
+    window that is one stripe of operand and seed fill everywhere else, and
+    two configurations would agree because they were both reading the same
+    fill.  And no fixed count is this kernel's width: the widened build here
+    is launched with four lanes, so of 64 tids, sixty would be a second
+    block's threads addressing one block's memory, copying past the end of
+    the operand as they went.
     """
     src, (lanes, mults) = _build(name, widen, blocking)
     mem = kernel_eval.evaluate_wave(src, lanes, seed=11, globals_only=True,
@@ -66,13 +64,13 @@ def _destination(name, widen, blocking=1):
 @pytest.mark.parametrize('vcase', VEC_CASES)
 def test_blocking_does_not_move_the_destination(vcase, blocking):
     """More than one vector per lane, which is where the two readings of a
-    slot number stopped agreeing.
+    slot number can disagree.
 
     `build` answers in elements and `build_nonlead` in register floats, and
-    the width separates them; taking the scaled one in both applied it twice.
-    At one slot per lane -- every arrangement the width alone produces -- the
-    slot is 0 and the two readings agree, so nothing showed it until a lane
-    held two.
+    the width separates them; taking the scaled one in both would apply it
+    twice.  At one slot per lane -- every arrangement the width alone
+    produces -- the slot is 0 and the two readings agree, so only a lane
+    holding two can show it.
     """
     _, base = _destination(vcase, widen=False)
     _, wide = _destination(vcase, widen=True, blocking=blocking)
@@ -83,7 +81,7 @@ def test_blocking_does_not_move_the_destination(vcase, blocking):
 
 @pytest.mark.parametrize('vcase', VEC_CASES)
 def test_the_widened_kernel_writes_the_same_numbers(vcase):
-    """The check that would have caught the store-side lane mismatch.
+    """The check that catches a store-side lane mismatch.
 
     The compute instruction writes the register image blocked by the width;
     the store, the loader and the linear pass all read it back, and a cyclic
@@ -102,9 +100,9 @@ def test_the_widened_kernel_writes_the_same_numbers(vcase):
 def test_the_widened_kernel_is_not_trivially_empty(vcase):
     """Guards the guard.
 
-    A destination of all zeros compares equal to nothing and would have made
-    the test above vacuous -- which is exactly what the `'::'` catch-all
-    produced before it was narrowed.
+    A destination of all zeros compares equal to nothing and would make the
+    test above vacuous -- which is exactly what a `'::'` catch-all broad
+    enough to swallow the computation produces.
     """
     _, wide = _destination(vcase, widen=True)
     assert wide

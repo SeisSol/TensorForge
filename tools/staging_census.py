@@ -5,7 +5,7 @@
 
 A shared buffer between two stages of a kernel is there to *move* data: the
 fill spreads an operand one way over the lanes and the reads take it back
-another way.  Which way each is, is now recorded -- `Symbol._note_layout` and
+another way.  Which way each is, is recorded -- `Symbol._note_layout` and
 `_record_linear_layout` state how a fill distributes an image, and
 `layout_of` says how a read wants it -- so the pair can be compared, and the
 comparison says what the buffer is for:

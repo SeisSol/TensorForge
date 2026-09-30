@@ -4,19 +4,16 @@
 
 """Builders for :class:`ElementwiseDescr`.
 
-Replaces the 48 operator helpers in ``generators/optree.py``, which existed only
-to wrap an ``Operation`` member in a ``LexicOpNode``.  Here they produce
-descriptors directly, so there is no node hierarchy in between.
+Each produces a descriptor directly, so there is no node hierarchy in between.
 
-The algebraic simplifications that ``optree.mul`` / ``div`` / ``pow`` performed
-inline are kept, and they are kept *here* rather than in the instruction: they
-rewrite one operation into another before anything is built, which is a frontend
-concern.  The comment in the original read ``# TODO: move these optimizations to
-a visitor``; the eventual home is a fold pass over the macro stream (``pir`` has
-``dce``, ``cse`` and ``licm`` but no fold yet), at which point these can go.
+The algebraic simplifications of ``mul`` / ``div`` / ``pow`` are kept *here*
+rather than in the instruction: they rewrite one operation into another before
+anything is built, which is a frontend concern.  A fold over the macro stream,
+as ``pir.passes.fold`` is one over the IR, would be their home, and these
+could go.
 
 ``op(dest, *srcs)`` throughout, i.e. destination first, matching assignment
-order rather than the wrapped expression the optree required.
+order.
 """
 
 from __future__ import annotations
@@ -101,12 +98,11 @@ def div(dest, x, y, **kw) -> ElementwiseDescr:
 
 
 def pow(dest, x, y, **kw) -> ElementwiseDescr:
-    """``dest = x ** y``, with the exponent special-cases the optree had.
+    """``dest = x ** y``, with special cases for some exponents.
 
-    ``y == 2`` used to become ``MUL(x, x)``.  That is kept, and note it is now
-    a single instruction with a repeated operand rather than a tree with a
-    shared subnode -- the shared-subnode case is what CSE over the macro stream
-    is for.
+    ``y == 2`` becomes ``MUL(x, x)``, a single instruction with a repeated
+    operand; a shared subexpression in general is what CSE over the macro
+    stream is for.
     """
     if _is_num(y):
         if y in (2, 2.0):

@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Rectangular dense GEMM matching ``example/gemm.py``.
+"""Rectangular dense GEMM.
 
 A 56x18 = 56x18 * 18x18 GEMM is the canonical SeisSol-shaped operator
-(small leading dim, square inner). Keeping the same shape as the
-shipped example means: if this case goes green, ``example/gemm.py``
-will too, and we have a regression test for the ``Symbol.get_fptype``
-crash documented in the structural analysis.
+(small leading dim, square inner).
 """
 
 from tensorforge.common.basic_types import Addressing, Datatype

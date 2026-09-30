@@ -3,19 +3,16 @@
 # SPDX-License-Identifier: MIT
 """One kernel parameter, and the surfaces it has to appear on.
 
-The signature was assembled four times: with types for the kernel prototype,
-without them for the call into it, with types and defaults for the launcher,
-and without them for the call site.  Four passes over the same symbols,
-building four strings, and the only thing keeping them in step was that they
-read the same loop.  A parameter that renders itself is the same list read four
-ways instead.
+The signature appears four times: with types for the kernel prototype, without
+them for the call into it, with types and defaults for the launcher, and
+without them for the call site.  A parameter that renders itself makes those
+the same list read four ways, where four passes building four strings from the
+same symbols would be kept in step only by reading the same loop.
 
-What that buys beyond the duplication is a place to ask the question.  The
-declaration used to be concatenated here from `addr2ptr_type`, a `const`, and a
-literal `'size_t'`, which is why `ocl_lexic.kernel_definition` is `pass`: an
-address space has to go *inside* the declaration, and by the time the backend
-saw the parameter list it was a finished string.  A parameter carrying its
-space can be spelled by whoever knows how.
+What that buys beyond the duplication is a place to ask the question.  An
+address space has to go *inside* the declaration, and a backend handed the
+parameter list as a finished string cannot put it there.  A parameter carrying
+its space can be spelled by whoever knows how.
 """
 
 from dataclasses import dataclass
@@ -94,7 +91,7 @@ class KernelParam:
 
         A named local rather than a cast in the argument list: a cooperative
         launch hands the arguments over by address (`argsPtrs(Args &...)`),
-        and a cast has none -- `barrier_two_gemms_16x16` stopped compiling.
+        and a cast has none -- `barrier_two_gemms_16x16` would not compile.
         """
         kernel = self._kernel_type(lexic)
         if kernel is None:
@@ -154,9 +151,9 @@ class KernelParam:
         express -- 2^32-1 elements is 17.2 GB into an f32 buffer and 34.4 GB
         into an f64 one, both reachable on a current card, and a caller past
         them loses the high bits at the call site, which is a wrong answer
-        rather than a diagnostic.  The arithmetic was never the problem: the
-        product is already 64-bit and the unsigned offset promotes into it.
-        What was capped is what the signature can carry.
+        rather than a diagnostic.  The arithmetic is not the limit: the
+        product is 64-bit already and the unsigned offset promotes into it.
+        What a narrower type caps is what the signature can carry.
         """
         return cls(name, Datatype.SIZE, MemSpace.NONE, depth=0)
 

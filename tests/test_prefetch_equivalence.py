@@ -8,12 +8,11 @@ to the previous iteration when that runs off the front of the body. It is a
 scheduling change; the results are supposed to be identical, bit for bit,
 because the same values are read in the same order.
 
-Nothing checked that. The snapshot tests record one configuration, the syntax
-tests only ask whether it compiles, and the host oracle could not read a
-prefetched kernel at all: `wrap.py` emits `uint32_t pipeStage0` as its
-bookkeeping and `_DECL` had no `uint32_t`, so the very first line of the loop
-aborted the run. The one configuration that most needed an oracle was the one
-it could not evaluate.
+The snapshot tests record one configuration and the syntax tests only ask
+whether it compiles, so this is where the numbers are compared, by running
+both builds on the host oracle. That needs the oracle to read a prefetched
+kernel: `wrap.py` emits `uint32_t pipeStage0` as its bookkeeping, and without
+`uint32_t` in `_DECL` the very first line of the loop would abort the run.
 """
 
 from __future__ import annotations
@@ -50,12 +49,11 @@ def _generate(mod, wrap):
 def _run(src, geometry):
     """One block over one memory, at the width the launcher starts.
 
-    Not lane by lane over a fixed set of tids, which is what this was.  A
-    staged operand arrives cooperatively, so a lane running on its own memory
-    fills one stripe of the window and reads seed fill for the rest --- and
-    two builds then agree about a window neither of them wrote.  Half of the
-    fixed tid set was also past the end of the block, where the unguarded hops
-    copy from beyond the operand.
+    Not lane by lane over a fixed set of tids.  A staged operand arrives
+    cooperatively, so a lane running on its own memory fills one stripe of the
+    window and reads seed fill for the rest --- and two builds then agree about
+    a window neither of them wrote.  A fixed tid set can also reach past the
+    end of the block, where the unguarded hops copy from beyond the operand.
     """
     lanes, mults = geometry
     return kernel_eval.evaluate_wave(src, lanes, seed=17, globals_only=True,
@@ -75,13 +73,13 @@ def _compare(name):
 
 
 def test_the_oracle_can_read_a_prefetched_kernel():
-    """The gap that hid everything else.
+    """The gap that would hide everything else.
 
     Without `uint32_t` in the declaration pattern a rotated kernel aborts on
     the loop's first statement -- `wrap.py` declares `uint32_t pipeStage0`
     there -- and every case below silently becomes unevaluable.  Stated
     against the declaration itself rather than against a generated kernel,
-    because whether any case still rotates is a separate question with its own
+    because whether any case rotates is a separate question with its own
     answer below.
     """
     assert kernel_eval._DECL.match('uint32_t pipeStage0 = 0;')
@@ -107,19 +105,18 @@ def test_a_rotation_is_only_granted_where_the_wrap_survives_it():
     """The invariant: rotated if and only if wrapped.
 
     The rotation is decided before a body exists, by asking the pass whether
-    it *would* wrap -- and that question used to be put to an unrotated body,
-    where the windows are static and declared ahead of the loop.  Granting the
-    rotation then declares the write window inside the loop, because its
-    offset moves with the stage counter, and that is one of the pass's own
+    it *would* wrap.  Put to an unrotated body, where the windows are static
+    and declared ahead of the loop, that question can get the wrong answer:
+    granting the rotation declares the write window inside the loop, because
+    its offset moves with the stage counter, and that is one of the pass's own
     refusal conditions.  So a transfer could be accepted while unrotated,
     rotated on the strength of that, and declined for a reason the rotation
     created.
 
-    What came out was not a missed optimization: the compute reads stage
+    What would come out is not a missed optimization: the compute reads stage
     `pipeStage % 2` while the transfer fills the other one, so no iteration
     ever fills the stage it reads and the first element computes from whatever
-    the arena held.  `trans_a` did exactly that -- 192 of 432 destination
-    entries wrong, stable across seeds.
+    the arena held.  `trans_a` is the case that shows it.
     """
     plain, wrapped = _compare('trans_a')
     for key in sorted(set(plain) | set(wrapped)):
@@ -128,15 +125,16 @@ def test_a_rotation_is_only_granted_where_the_wrap_survives_it():
 
 
 def test_no_case_in_the_corpus_currently_earns_a_rotation():
-    """Recorded, because the fix above has a cost and it should be visible.
+    """Recorded, because the invariant above has a cost and it should be
+    visible.
 
-    Every shared transfer that qualified before now fails the confirming
-    probe, for one reason: a rotating write window is declared inside the
-    loop and the peeled transfer would name it before it exists.  The pass
-    says so itself.  Declaring that window ahead of the loop is the fix --
-    the same move that took the address bindings and the static windows out
-    of the guard, one scope further -- and until it is made, rotation is off
-    rather than wrong.
+    Every shared transfer in these cases fails the confirming probe, for one
+    reason: a rotating write window is declared inside the loop and the peeled
+    transfer would name it before it exists.  The pass says so itself.
+    Declaring that window ahead of the loop is the fix -- the address bindings
+    and the static windows already sit outside the guard, and this is the same
+    move one scope further out -- and until it is made, rotation is off rather
+    than wrong.
 
     This asserts the *current* state.  When the window is hoisted it should
     fail, and that failure is the signal to delete it.

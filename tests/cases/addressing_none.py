@@ -6,13 +6,13 @@
 SeisSol's static differentiation operators are the textbook example:
 the same 56×56 matrix multiplied against every element's solution
 vector. With :data:`Addressing.NONE` the kernel skips the
-``batchId * volume`` term in ``A``'s pointer (see ``ptr_manip.py:67-71``)
+``batchId * volume`` term in ``A``'s pointer (see ``ptr_manip.py``)
 and reads from one shared storage block; the host allocates a single
 ``volume(shape) * sizeof(T)`` block rather than ``batch *
 volume(shape) * sizeof(T)``.
 
 The harness already handles this: ``op_batch = 1 if op.addressing ==
-"none"`` (see ``runner.py:136``) — the per-element view has a leading
+"none"`` (see ``harness/runner.py``) — the per-element view has a leading
 ``1`` axis instead of ``batch``, and the reference broadcasts it
 naturally against the per-batch ``B``.
 """

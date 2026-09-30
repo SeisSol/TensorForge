@@ -5,9 +5,8 @@
 
 The layouts in `amd/relayout.py` are claims about hardware: *this* instruction
 turns *that* distribution into *this other* one.  Claims like that cannot be
-checked by reading, and the attempt has already failed twice in this codebase
---- once in the `LaneAxis` docstring, once in the broadcast annotation derived
-from it, both times producing the right numbers in the wrong roles.
+checked by reading: a reading can produce the right numbers in the wrong
+roles, and an annotation derived from it inherits them.
 
 So the claims are checked against an execution instead.  Each primitive is
 modeled from its own definition in `include/tensorforge_device/hip.h`: give
@@ -81,11 +80,10 @@ def transpose16x16b32(regs: Sequence[Sequence]) -> List[Lanes]:
     `transpose4x4b32` blocks, then an 8x8 stage on `row_ror:4` and `row_ror:12`
     with alternating bank masks, then a 16x16 stage on `row_ror:8`.
 
-    Two of its controls were the wrong way round when this was written, and
-    that is how it was found. Modeled because nothing checked it. The runtime has had it since before
-    the relayout table, and `test_amd_relayout.py` covers `transpose4x4b32`
-    only -- so what this one does to a lane index was, until now, whatever the
-    reader assumed.
+    Modeled because nothing else checks it: `test_amd_relayout.py` covers
+    `transpose4x4b32` only, so without a model what this one does to a lane
+    index would be whatever the reader assumes -- two rotate controls the
+    wrong way round included.
     """
     if len(regs) != 16:
         raise ValueError(f'transpose16x16b32 takes 16 registers, got {len(regs)}')
@@ -124,8 +122,8 @@ def swap(vals: Sequence, block: int) -> Lanes:
     """`tensorforge::swap<Block>`, from the branch that Block selects.
 
     Each branch is modeled from its own source rather than from the map the
-    template documents, which is the point: the template documented one map
-    and two of its branches implemented another.
+    template documents, which is the point: a template can document one map
+    while some of its branches implement another.
     """
     if block == 1:
         return list(vals)
@@ -232,8 +230,9 @@ def transpose16x4(regs: Sequence[Sequence]) -> List[Lanes]:
 
     Four registers against the top two bits of the lane index inside each row
     of sixteen: an 8x8 butterfly on `row_ror`, then `transpose16x2` on
-    `row_ror:8`. It carried the same swapped pair as the 8x8 stage of
-    `transpose16x16b32`, from the same shape of mistake.
+    `row_ror:8`. The butterfly uses the pair of controls the 8x8 stage of
+    `transpose16x16b32` does, `row_ror:12` and `row_ror:4`, which are each
+    other's inverse and not their own -- a pair that can be swapped.
     """
     if len(regs) != 4:
         raise ValueError(f'transpose16x4 takes 4 registers, got {len(regs)}')
@@ -250,9 +249,8 @@ def transpose16x4(regs: Sequence[Sequence]) -> List[Lanes]:
 def transpose16x2(regs: Sequence[Sequence]) -> List[Lanes]:
     """`tensorforge::transpose16x2`.
 
-    Unaffected by the swap above: `row_ror:8` is its own inverse over sixteen
-    lanes, so both directions are the same control and there was no pair to
-    get the wrong way round.
+    `row_ror:8` is its own inverse over sixteen lanes, so both directions are
+    the same control and there is no pair to get the wrong way round.
     """
     if len(regs) != 2:
         raise ValueError(f'transpose16x2 takes 2 registers, got {len(regs)}')

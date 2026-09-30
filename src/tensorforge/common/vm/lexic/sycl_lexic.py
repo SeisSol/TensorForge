@@ -12,13 +12,13 @@ class SyclLexic(Lexic):
     self._backend = backend
     # CUDA's x is SYCL's dimension 2, and y is 1: SYCL linearizes with the
     # *last* dimension fastest, and that is the one sub-groups are cut along.
-    # With the lanes in dimension 0 a block of 32 x 8 put two lanes of each
-    # of eight multiplications into every sub-group, so a sub-group broadcast
-    # read another multiplication's lane.  The groups are counted along the
-    # same dimension (`kernel_definition`), and their number is the group
-    # range: `get_global_range` is work-items, and with it the batch loop
-    # stepped 32 times too far and every group started at group 0's element
-    # -- 64 of 1000 elements written on the CPU device, and those wrong.
+    # With the lanes in dimension 0 a block of 32 x 8 would put two lanes of
+    # each of eight multiplications into every sub-group, and a sub-group
+    # broadcast would read another multiplication's lane.  The groups are
+    # counted along the same dimension (`kernel_definition`), and their number
+    # is the group range: `get_global_range` is work-items, and with it the
+    # batch loop would step 32 times too far and every group would start at
+    # group 0's element.
     self.thread_idx_y = "item.get_local_id(1)"
     self.thread_idx_x = "item.get_local_id(2)"
     self.thread_idx_z = "item.get_local_id(0)"
@@ -33,18 +33,9 @@ class SyclLexic(Lexic):
 
     # Which *lowering* the kernel body uses, not which hardware it runs on.
     #
-    # This used to be derived -- `intel and oneapi` -- and that derivation was
-    # the defect: selecting a target implied selecting a programming model,
-    # and the model it selected had no emitter behind it.  What it did have
-    # was a set of branches in `symbol.py` that returned early instead of
-    # emitting, so an Intel target silently produced a kernel with the
-    # arithmetic missing.
-    #
-    # Now it is a request the caller makes, and the only thing it still
-    # governs is the *spelling* the lexic hands out: the kernel attributes,
-    # the broadcast, and the wave-level barrier.  Nothing outside this file
-    # asks about it, which is the property that has to hold until an ESIMD
-    # emitter exists to answer for the body as well.
+    # A request the caller makes rather than something derived from the
+    # target -- `intel and oneapi`, say: a derivation would make selecting a
+    # target select a programming model as well.
     self.simd_mode = explicit_simd
 
   def bounds_grid(self) -> bool:
@@ -57,21 +48,13 @@ class SyclLexic(Lexic):
     return False
 
   def get_launch_size(self, func_name, block, shmem, resident=False):
-    # `shmem` was missing here while `generator.py` has passed three arguments
-    # for as long as the persistent-launch path has existed, so every SYCL
-    # target that reaches it died with a TypeError before emitting a line --
-    # which is also why nothing noticed: the path is only taken for some
-    # arch/occupancy combinations, and no SYCL target was in the snapshot
-    # corpus to take it.
-    #
-    # And once it took three arguments it returned nothing, while the grid
-    # right after it is `std::min(gridsize, ...)`: the first real compile of
-    # an ESIMD kernel stopped at an undeclared `gridsize`.  One work-group per
-    # compute unit, which is what the CUDA/HIP launchers fall back to when
-    # their occupancy query answers nothing; SYCL has no such query.  The
-    # queue is read from the pointer here because the launcher binds `stream`
-    # only after this, and not dereferenced when null -- the null check that
-    # follows is what reports that.
+    # Declares `gridsize`, which the grid right after this reads:
+    # `std::min(gridsize, ...)`.  One work-group per compute unit, which is
+    # what the CUDA/HIP launchers fall back to when their occupancy query
+    # answers nothing; SYCL has no such query.  The queue is read from the
+    # pointer here because the launcher binds `stream` only after this, and
+    # not dereferenced when null -- the null check that follows is what
+    # reports that.
     ptr = GeneralLexicon.STREAM_PTR_STR
     return (f"static std::size_t gridsize = 0;\n"
             f"if (gridsize == 0 && {ptr} != nullptr) {{\n"
@@ -98,9 +81,9 @@ class SyclLexic(Lexic):
     as a second operand for no gain: the offsets are the same numbers either
     way.  So the arena becomes the chunk, and its base is offset zero.
 
-    `slm_init` wants the size as a template argument, which is why this now
-    takes one.  The generator has it -- `ShrMemOpt` fixes the arena before any
-    body is built -- but it used to keep it to itself.
+    `slm_init` wants the size as a template argument, which is why this takes
+    one.  The generator has it: `ShrMemOpt` fixes the arena before any body is
+    built.
     """
     if not self.simd_mode:
       return ""
@@ -195,20 +178,20 @@ class SyclLexic(Lexic):
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
       if self.simd_mode:
         add_items = '[[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]]'
-        # The large register file as a kernel property.  It was an attribute,
+        # The large register file as a kernel property, not as the attribute
         # `[[intel::grf_size(256)]]`, which DPC++ 2026 does not know: it warns
-        # "unknown attribute ignored" and compiles for the small file, so the
-        # kernels that were sized for 256 registers got 128.
+        # "unknown attribute ignored" and compiles for the small file, so a
+        # kernel sized for 256 registers gets 128.
         props = ('sycl::ext::oneapi::experimental::properties{'
                  'sycl::ext::intel::experimental::grf_size<256>}, ')
       else:
-        # The sub-group follows the multiplication.  It was 16 always, while
-        # the lane search puts 32 lanes on a multiplication -- the ceiling is
-        # deliberately not the 16-wide vector unit (`lanes.deduce`) -- so a
-        # multiplication spanned two sub-groups, and a broadcast addressed
-        # within one read undefined lanes: on the CPU the kernel wrote
-        # nothing, or 1e27 (chain_five).  A kernel of no multiplication
-        # asks what it always did.
+        # The sub-group follows the multiplication.  The lane search puts 32
+        # lanes on a multiplication -- the ceiling is deliberately not the
+        # 16-wide vector unit (`lanes.deduce`) -- so at a fixed 16 a
+        # multiplication would span two sub-groups, and a broadcast addressed
+        # within one would read undefined lanes: on the CPU the kernel writes
+        # nothing, or 1e27 (chain_five).  A kernel of no multiplication asks
+        # for 16.
         size = (self.sub_group_for(lanes) or
                 next((s for s in self.SUB_GROUP_SIZES if s >= lanes),
                      self.SUB_GROUP_SIZES[-1])) if lanes else 16
@@ -250,12 +233,11 @@ class SyclLexic(Lexic):
     # `SyncThreads.barrier_scope()` reports `SIMD` whenever the thread count
     # fits in a wave, and `verify()` admits the instruction on that basis --
     # a `BatchLoop` is only SIMD-uniform, so a GROUP barrier inside it is
-    # rejected as a deadlock.  Emitting `item.barrier()` here made the code
-    # do exactly what the check had just forbidden: the scope said SIMD and
-    # the instruction was work-group wide.  On CUDA and HIP the two agree
-    # (`__syncwarp`, `s_waitcnt`); only SYCL had the claim and the code
-    # disagreeing, and only on SYCL is the wave narrow enough (16 on PVC) for
-    # ordinary operator shapes to reach it.
+    # rejected as a deadlock.  Emitting `item.barrier()` here would make the
+    # code do exactly what the check has just forbidden: the scope would say
+    # SIMD and the instruction would be work-group wide.  On CUDA and HIP the
+    # two agree (`__syncwarp`, `s_waitcnt`), and only on SYCL is the wave
+    # narrow enough (16 on PVC) for ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
 
   def folds_broadcast(self) -> bool:
@@ -285,12 +267,12 @@ class SyclLexic(Lexic):
     states it (`reqd_sub_group_size`, `_pins_sub_group`) and states it as the
     multiplication's own width where one of the supported sizes fits.  Where
     it does, the sub-group *is* the multiplication and its barrier meets
-    exactly the threads that have to meet.  Asking the wave instead cost
-    every 32-lane kernel on a 16-wide PVC its block: the cap fell to one
-    multiplication per work-group -- 32 work-items where the thread budget
-    allows 256 -- and `elastic-o6s:derivative` ran at 30.2 ns an element
-    against 12.7 at sixteen lanes, where the multiplication happens to equal
-    the wave and no cap applies.
+    exactly the threads that have to meet.  Asking the wave instead would
+    cost every 32-lane kernel on a 16-wide PVC its block: the cap would fall
+    to one multiplication per work-group -- 32 work-items where the thread
+    budget allows 256 -- and `elastic-o6s:derivative` runs that way at 30.2 ns
+    an element against 12.7 at sixteen lanes, where the multiplication
+    happens to equal the wave and no cap applies.
     """
     if self.simd_mode:
       return True
@@ -316,10 +298,6 @@ class SyclLexic(Lexic):
     if self.simd_mode:
       return f'{variable}.select<{block}, {subblock}>({lane})'
     else:
-      # `group_broadcast(-1, ...)` before: an unqualified name and `-1` where
-      # a group object belongs.  A placeholder nothing had ever reached, which
-      # is how it survived -- the Intel register path is the first caller.
-      #
       # `lane` counts within the multiplication, and `group_broadcast` takes
       # one index for the whole sub-group.  The two agree only where the
       # sub-group *is* the multiplication, which is known where the kernel
@@ -363,9 +341,9 @@ class SyclLexic(Lexic):
 
   def get_headers(self):
     # The explicit-SIMD lowering spells its body through `tensorforge::
-    # intel_esimd`, which `isycl.h` defines; without it the first real compile
-    # stopped at the first vector.  Only there: the header includes the ESIMD
-    # extension, which AdaptiveCpp does not have.
+    # intel_esimd`, which `isycl.h` defines; without it a compile stops at the
+    # first vector.  Only there: the header includes the ESIMD extension,
+    # which AdaptiveCpp does not have.
     if self.simd_mode:
       return ['sycl/sycl.hpp', 'tensorforge_device/isycl.h']
     return ['sycl/sycl.hpp']
@@ -712,7 +690,7 @@ class SyclLexic(Lexic):
     # thread holding a copy, and "the result" is that copy.  Here they are
     # not: the reduction *collapses* the lane axis, so its result is one
     # value, and a caller that stores it stores one element.  Broadcasting it
-    # back into a vector produced `glb_m1[k] = simd<float, 16>(...)`, a
+    # back into a vector would produce `glb_m1[k] = simd<float, 16>(...)`, a
     # sixteen-wide value assigned to a scalar destination.
     #
     # A caller that does want it in every lane spells that itself, and

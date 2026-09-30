@@ -20,8 +20,8 @@ class ShrMemObject:
     """Give back everything allocated since `mark` (a `get_global_size()`).
 
     For a preload that is built and then abandoned: its loaders reserve as
-    they are built, and dropping the loaders without this left the
-    reservation in the total -- the launch then asked for LDS nothing used.
+    they are built, and dropping the loaders without this would leave the
+    reservation in the total -- the launch would ask for LDS nothing uses.
     """
     self._global_size = mark
 
@@ -42,9 +42,9 @@ class ShrMemObject:
 
   def get_total_size(self):
     # ShrMemAlloc.is_ready() calls this and tests the result against None, so
-    # it must not raise before the thread-block policy has set the factors.
-    # get_total_size_as_str() already had this guard; this one did not, and
-    # any caller reaching it early died with a TypeError instead.
+    # it must not raise before the thread-block policy has set the factors:
+    # without the guard, a caller reaching it early would die with a
+    # TypeError.
     if self._size_per_mult is None or self._mults_per_block is None:
       return None
     return self._size_per_mult * self._mults_per_block + self._global_size

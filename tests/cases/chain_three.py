@@ -6,12 +6,6 @@
 The chain forces the generator to allocate a temporary inside the
 kernel; nothing about the harness side changes since both temporaries
 and intermediate results stay on-device.
-
-Note: the original ``example/three_matrices.py`` uses ``beta=1.0``,
-which currently has no effect in the generator (beta is silently
-dropped from the kernel — separate bug). We keep ``beta=0.0`` here
-so the case validates an actual chain rather than masking a known
-arithmetic error.
 """
 
 import numpy as np

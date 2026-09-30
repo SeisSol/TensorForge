@@ -14,10 +14,9 @@
 
 namespace tensorforge {
 
-// The participation mask for the `_sync` intrinsics.  Every call site here
-// passed `warpSize`, which is the *width* of a warp -- 32, i.e. the single bit
-// 0x20 -- so the mask named lane 5 alone and no other lane took part in the
-// exchange.
+// The participation mask for the `_sync` intrinsics: every lane.  `warpSize`
+// is the *width* of a warp -- 32, i.e. the single bit 0x20 -- so as a mask it
+// would name lane 5 alone, and no other lane would take part in the exchange.
 inline constexpr unsigned FullWarpMask = 0xffffffffu;
 
 // CUDA's own `float2`/`float4` are `__align__(8)`/`__align__(16)`, which is
@@ -32,15 +31,15 @@ inline constexpr unsigned FullWarpMask = 0xffffffffu;
 /// nvcc declines `vector_size` in device code outright --- as the type of a
 /// value, and as the target of a cast, with "is a vector, which is not
 /// supported in device code".  So on this target there is no spelling of the
-/// typedef that reaches a kernel, which is why nothing here has ever emitted
-/// one and why the matrix path could not be turned on without 101 errors.
+/// typedef that reaches a kernel, and nothing here emits one.
 ///
 /// The subscript is what makes this a drop-in: everything the generator emits
 /// for a vector value --- `v[i]` to take a component, an assignment through a
 /// cast to move one --- is spelled the same way for both, so only this
 /// definition changes and no call site does.  `__align__` is what makes it a
 /// *wide* access rather than N narrow ones: the natural pair is eight bytes
-/// and the relaxed twin is element-aligned, exactly as the typedefs were.
+/// and the relaxed twin is element-aligned, exactly as the typedefs of
+/// `hip.h` are.
 ///
 /// Alignment is a *parameter*, not a second struct.  That is forced: under
 /// `vector_size` the natural and the relaxed spelling are the same type
@@ -50,7 +49,7 @@ inline constexpr unsigned FullWarpMask = 0xffffffffu;
 /// about for `float2`.  One template with the alignment in the type keeps them
 /// related, and the conversion below restores the assignment in both
 /// directions.  It is a member-wise copy of a trivially copyable POD of
-/// identical layout, so it costs nothing the attribute version did not.
+/// identical layout, so it costs nothing the `vector_size` spelling does not.
 ///
 /// Elementwise arithmetic is not built in, as it is for a GNU vector, and is
 /// supplied below: the lead-vectorized multilinear body spells its products as
@@ -139,7 +138,7 @@ TENSORFORGE_VECTOR_OP(/)
 /// is what a lead-vectorized accumulator holds.
 ///
 /// sm_120 declares `__ffma2_rn` as well, but has no paired unit: it lowers to
-/// two FFMA.  Not left to do so, because packing the pairs still changed the
+/// two FFMA.  Not left to do so, because packing the pairs still changes the
 /// code around them -- the same FFMA count, but 8 and 16 more instructions
 /// (moves, NOP padding, address arithmetic) in the two kernels compared.  So
 /// the pairs are formed on 10.x and 11.x only, and everywhere else the plain
@@ -179,10 +178,10 @@ fma(const VectorStruct<T, N, A> &x, const VectorStruct<T, N, B> &y,
 // fraction of what it names -- silently, since the subscripts still compile.
 // Alignment second: `VectorT` is wide *because* it is over-aligned, and its
 // relaxed twin is castable *because* it is not; swap either and the code is
-// still valid C++ that does the wrong thing.  A GNU `vector_size` typedef used
-// to carry both, and got it wrong once already in `hip.h`, where an alias
-// template with a dependent element type made GCC drop the attribute with a
-// warning and turn `VectorT<float, 4>` into plain `float`.
+// still valid C++ that does the wrong thing.  A GNU `vector_size` typedef
+// carries both, and can get it wrong: in an alias template with a dependent
+// element type GCC drops the attribute with a warning and turns
+// `VectorT<float, 4>` into plain `float` (see `hip.h`).
 static_assert(sizeof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
               "VectorT is padded: it is not as wide as it claims");
 static_assert(alignof(tensorforge::VectorT<float, 4>) == 4 * sizeof(float),
@@ -240,10 +239,10 @@ __device__ __forceinline__ bool ballotReduction(bool value) {
   const auto thread = (threadIdx.x / Block) * Block;
   const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
 
-  // `(1 << subthread) << thread` was a single bit, so `(mask & ballot) == mask`
-  // only ever re-read this lane's own contribution and every reduction
-  // returned it unchanged.  The mask has to name all Block/Subblock lanes that
-  // participate.
+  // The mask has to name all Block/Subblock lanes that participate: a single
+  // bit, `(1 << subthread) << thread`, would make `(mask & ballot) == mask`
+  // re-read only this lane's own contribution, and every reduction would
+  // return it unchanged.
   const auto mask = groupMask<Block, Subblock>() << (thread + subthread);
 
   if constexpr (Op::Op == Operation::And) {
@@ -260,16 +259,9 @@ __device__ __forceinline__ bool ballotReduction(bool value) {
 // A butterfly all-reduce: after it, every lane of a Block-sized group holds
 // the same result.
 //
-// Four things were wrong here at once, and the first two cancel any effect the
-// others might have had:
-//
-//   - the return type was `bool`, so every reduction of a numeric type came
-//     back as 0 or 1;
-//   - `value` was never read.  `result` started at the neutral element and
-//     nothing else fed the loop, so the answer was the neutral element;
-//   - the shuffle mask was `warpSize`, i.e. lane 5 only (see FullWarpMask);
-//   - the XOR distance was `i - 1`, a mask of low bits rather than the single
-//     bit `i`, so lanes paired with the wrong partners.
+// The shuffle mask is `FullWarpMask` -- `warpSize` as a mask is lane 5 only --
+// and the XOR distance is the single bit `i`; `i - 1` would be a mask of low
+// bits and pair lanes with the wrong partners.
 template <typename Op, typename T, std::size_t Block, std::size_t Subblock>
 __device__ __forceinline__ T fullReduction(T value) {
   T result = value;
@@ -316,8 +308,9 @@ __device__ __forceinline__ T broadcast(T value) {
 // `cuda::ptx` spells the cluster-launch-control wrappers from CCCL 2.8 on, and
 // only for PTX ISA 8.6 (CUDA 12.8) or newer; the mbarrier ones used alongside
 // are missing from CCCL 2.3 as well.  Unguarded, every translation unit that
-// includes this header needed that toolkit -- sm_80 and sm_90 included, where
-// nothing can ask for `launch_control` -- and CUDA 12.4 refused all of them.
+// includes this header would need that toolkit -- sm_80 and sm_90 included,
+// where nothing can ask for `launch_control` -- and CUDA 12.4 would refuse all
+// of them.
 #if defined(CCCL_VERSION) && CCCL_VERSION >= 2008000 &&                        \
     defined(__cccl_ptx_isa) && __cccl_ptx_isa >= 860
 

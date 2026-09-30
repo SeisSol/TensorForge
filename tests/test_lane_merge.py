@@ -5,8 +5,8 @@
 
 `dppUpdate` carries a region in a row mask and a bank mask, which express a
 product and stop at four lanes.  One lane out of every four -- what transposing
-a 4x4 needs -- is outside them, and the merge refused it on the grounds that
-the path reads no lane id.  It does: `transpose4x4b32` writes
+a 4x4 needs -- is outside them, and the merge selects it by lane id, which the
+path already reads: `transpose4x4b32` writes
 ``__lane_id() % 2 == 0 ? v1 : vv2`` four times, and the assembly it keeps in a
 comment fuses that with the shuffle as `v_cndmask_b32_dpp`.
 """
@@ -45,7 +45,7 @@ def _merge(hip, lanes, into=True):
                                            ftype)
 
 
-# -- the reason the refusal was wrong -------------------------------------- #
+# -- the path already reads the lane id ------------------------------------ #
 
 def test_the_runtime_transpose_already_reads_the_lane_id():
     """Which is what makes the ternary a mechanism the path has rather than
@@ -70,7 +70,7 @@ def test_the_fused_form_is_what_the_assembly_would_have_written():
 
 def test_a_region_finer_than_a_bank_is_merged(hip):
     """One lane out of every four: the region a transpose's decomposition
-    produces, and the one that was refused."""
+    produces, and one no mask expresses."""
     select, merged = _merge(hip, {0, 4, 8, 12})
     assert select.kind == 'cndmask'
     assert merged is not None
@@ -94,7 +94,7 @@ def test_a_maskable_region_still_takes_the_free_path(hip):
 
 
 def test_mergeable_is_not_free(hip):
-    """Conflating the two is what kept the assembled exchange out of reach: a
+    """Conflating the two would keep the assembled exchange out of reach: a
     `cndmask` costs an instruction of its own and is still emittable."""
     fine = reorder.Select.of({0, 4, 8, 12}, 64)
     coarse = reorder.Select.of(set(range(16)), 64)

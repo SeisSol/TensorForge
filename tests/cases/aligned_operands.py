@@ -3,13 +3,11 @@
 # SPDX-License-Identifier: MIT
 """``D = A B`` with operands that promise a 16-byte aligned stride.
 
-Every other case in this directory leaves ``Tensor.alignment`` at its default
-of 0, which means *unknown* -- and unknown is what `widths_for` turns into
-"scalar only". So until this case existed, the whole width-selection path was
-unreachable from the corpus: `plan_hops` was exercised at width 1 in 52
-linearized loads and at no other width anywhere, and the reinterpret casts it
-guards were dead code that only the model tests in ``test_vector_hops`` spoke
-to.
+``Tensor.alignment`` defaults to 0, which means *unknown* -- and unknown is
+what `widths_for` turns into "scalar only". With every case at that default,
+the whole width-selection path would be unreachable from the corpus:
+`plan_hops` would run at width 1 alone, and the reinterpret casts it guards
+would be reached only by the model tests in ``test_vector_hops``.
 
 16 is what ``yateto.py`` attaches when the memory layout reports
 ``alignedStride()``, which is the ordinary situation for a SeisSol operator:

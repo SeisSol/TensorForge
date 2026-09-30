@@ -3,26 +3,20 @@
 # SPDX-License-Identifier: MIT
 """A wide access is an access, not a string.
 
-`load_linear` and `store_linear` have taken a `vec` argument all along, and it
-has always left the structured path: `pir_buffer` was consulted only for
-`vec == 1`, so a vectorized read became a `load_expr` around a hand-formatted
-reinterpret cast. The buffer was then not an operand of anything, which costs
-every pass its view of the one access that moves the most bytes -- CSE cannot
-match two of them, LICM cannot hoist one, the scratch checker cannot see the
-window it touches, and liveness cannot see the read at all.
+`load_linear` and `store_linear` take a `vec` argument, and a vectorized
+access takes the structured path like any other. A `load_expr` around a
+hand-formatted reinterpret cast would leave the buffer an operand of nothing,
+which costs every pass its view of the one access that moves the most
+bytes -- CSE cannot match two of them, LICM cannot hoist one, the scratch
+checker cannot see the window it touches, and liveness cannot see the read at
+all.
 
-The width itself needed nothing new. `ScalarType.length` is where a value
-spanning several consecutive elements already lived, and `LaneAxis` says so
-in as many words: packing is a vector type over the slot dimension, not a
-lane axis. The ESIMD emitter already reads it -- `span * (length or 1)` is
-its `simd<>` width. All that was missing was an emitter that spells a
-subscript for a value wider than the buffer's element.
-
-These tests do not run through the corpus, and cannot: `GlbToRegLoader`
-still iterates `for g in [1]` with the wider widths commented out, so nothing
-generated today takes this path. That is the reason to pin it here rather
-than in a snapshot -- a snapshot of a path nothing reaches proves nothing,
-and this is the path the vectorization work turns on next.
+The width needs no new state. `ScalarType.length` is where a value spanning
+several consecutive elements lives, and `LaneAxis` says so in as many words:
+packing is a vector type over the slot dimension, not a lane axis. The ESIMD
+emitter reads it too -- `span * (length or 1)` is its `simd<>` width. The
+emitter supplies the rest: a subscript for a value wider than the buffer's
+element.
 """
 
 from __future__ import annotations
@@ -59,7 +53,7 @@ def buf(b, n=64, space=MemSpace.SHARED):
 # --------------------------------------------------------------------------- #
 
 def test_a_scalar_load_is_a_plain_subscript():
-    """The unchanged case, stated so the vector one is visibly a departure."""
+    """The scalar case, stated so the vector one is visibly a departure."""
     b = builder()
     v = b.load(buf(b), 'i', type_=F32)
     b.store(buf(b), v, 'j')
@@ -95,15 +89,16 @@ def test_a_vector_store_reinterprets_the_destination_too():
 
 
 # --------------------------------------------------------------------------- #
-# What it buys: the access is visible again
+# What it buys: the access is visible
 # --------------------------------------------------------------------------- #
 
 def test_a_vector_load_is_an_op_with_the_buffer_as_an_operand():
-    """The point of the change, and the part a text diff cannot show.
+    """The point of the structured path, and the part a text diff cannot show.
 
-    Same emitted characters as the old cast string; a completely different
-    IR. `load_expr` produced a value with no buffer operand and no recorded
-    access, so nothing downstream could tell which memory it read.
+    The same emitted characters a hand-formatted cast would give; a
+    completely different IR. A `load_expr` would produce a value with no
+    buffer operand and no recorded access, so nothing downstream could tell
+    which memory it read.
     """
     b = builder()
     a = buf(b)
@@ -137,7 +132,7 @@ def verify_diags(body):
 
 
 def test_a_wide_load_without_a_claim_is_reported():
-    """The bug the parked width list would have reintroduced.
+    """What a width list that never asked about alignment would produce.
 
     A width chosen without anyone asking about alignment has no symptom until
     a tensor happens not to be padded, so it has to be a state the IR cannot

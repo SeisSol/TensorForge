@@ -53,9 +53,9 @@ def slots_for(lower: int, upper: int, block: int,
 
     `block` is how many elements of this dimension one round of the lanes
     holds, which is the wave for a single-axis image and is `Symbol.lead_block`
-    in general -- it was named `num_threads` while those were the same number,
-    and a name that is only true of the case in hand is how the width came to
-    be missing from this formula the first time.
+    in general -- not `num_threads`, which is the same number only in the
+    single-axis case, and a name that is only true of the case in hand invites
+    leaving the width out of this formula.
     """
     span = block * lead_width
     return lead_width * (-(-upper // span) - lower // span)
@@ -94,8 +94,8 @@ class DataView:
     Every view made with an owner is made with the owner's count, so the two
     readings agree when it is made -- and only this one still agrees once an
     order offered later has split the operand (`MultilinearInstruction.
-    _offer_order`).  Copied, the second half of a split read one scalar on
-    from the first instead of a plane on.
+    _offer_order`).  Copied, the second half of a split would read one scalar
+    on from the first instead of a plane on.
     """
     o = self._owner
     if o is None:
@@ -129,8 +129,9 @@ class DataView:
 
   def get_bbox(self):
     # `BoundingBox` has no mutating API -- `_lower`/`_upper` are tuples and
-    # every operation returns a new box -- so the defensive deepcopy that used
-    # to be here bought nothing and cost ~700k copies on a single large GEMM.
+    # every operation returns a new box -- so the box is returned as it is; a
+    # defensive copy would buy nothing and cost ~700k copies on a single large
+    # GEMM.
     return self._bbox
 
   def rank(self):
@@ -158,12 +159,12 @@ class DataView:
     expressible.  Moving by whole slots keeps every element in the lane that
     held it, so it is a change of register index; the remainder moves data
     *between* lanes, which under SPMD is a shuffle and not something an
-    address can say -- hence the assertion that has always guarded this.
+    address can say -- hence the assertion that guards this.
 
     When the work-item holds the whole wave there are no lanes to move
     between: the remainder is simply where the vector starts inside the slot
     run, and the address can say it.  Which is the difference the assertion
-    now tests for rather than forbidding outright.
+    tests for, rather than forbidding a remainder outright.
     """
     span = num_threads * width
     return shift // span, (shift % span) // width
@@ -178,9 +179,8 @@ class DataView:
 
     On the type this is the same number twice -- the allocation's size and the
     address's stride -- and they have to agree or the next dimension aliases
-    onto this one.  There were already two copies of the slot-count formula
-    for that reason (see `get_dim_slots`), and this is deliberately not a
-    third: both sides call here.
+    onto this one.  The slot-count formula is stated once for that reason (see
+    `get_dim_slots`), and so is this: both sides call here.
     """
     return num_threads if explicit_simd else 1
 
@@ -190,8 +190,7 @@ class DataView:
     `w * (ceil(u/(B*w)) - floor(l/(B*w)))`: whole *slots* are rebased away and
     the ragged ends survive as predicates (see LeadLoop.write).  A slot is
     `B*w` elements, of which this lane holds `w`, so the span to divide by and
-    the count to multiply back are both the width -- and at `w == 1` this is
-    character for character the expression that was here.
+    the count to multiply back are both the width.
 
     `B` is the block of this dimension's axis and not the wave.  They are the
     same number for a single-axis image, which is every image in the tree; for
@@ -201,19 +200,19 @@ class DataView:
     Not `ceil((u-l)/(T*w)) * w` either, as soon as [l,u) straddles a slot
     boundary: for l=31, u=33, T=32, w=1 the two give 2 and 1.
 
-    The width is what this was missing.  It returned `ceil(u/T)`, which is the
-    lane's slot count and not its float count, and the two differ whenever
-    `T*w` does not divide the extent the way `T` does: at u=12, T=4, w=4 it
-    said 3 where a four-wide read needs 4.  Consecutive non-lead indices then
-    addressed overlapping windows -- column 1 starting one register inside
+    The width is what makes this a float count.  `ceil(u/T)` is the lane's
+    slot count and not its float count, and the two differ whenever `T*w`
+    does not divide the extent the way `T` does: at u=12, T=4, w=4 it says 3
+    where a four-wide read needs 4.  Consecutive non-lead indices would then
+    address overlapping windows -- column 1 starting one register inside
     column 0 -- which is every destination cell wrong on 12, 20, 24, 40 and 48
     and none on 8, 16, 32 and 64, where the two expressions happen to agree.
 
     Addressing has to agree with allocation, or the next dimension aliases
     onto this one.  Both allocation sites (`MultilinearInstruction._iregs`,
-    `MultilinearBuilder._alloc_register_array`) call here now rather than
-    restating it; they were the two copies that had to be found and changed
-    together, and finding one of them is how this stayed wrong.
+    `MultilinearBuilder._alloc_register_array`) call here rather than
+    restating it: two copies would have to be found and changed together, and
+    finding only one is how a formula stays wrong.
     """
     assert index >= 0 and index < len(self.shape)
     return slots_for(self._bbox.lower()[index], self._bbox.upper()[index],
@@ -332,16 +331,16 @@ def _linear_addr(context: Context, index, vec) -> str:
 
   Under SPMD a linear image is spread over the lanes, so lane `t` starts at
   `t * vec` and the term belongs in the address.  Asked of the lexic rather
-  than spelled `threadIdx.x`, which stood here and was right by accident on
-  the two backends that reached the path.
+  than spelled `threadIdx.x`, which would be right only by accident, on the
+  backends that happen to spell the lane that way.
 
   Under an explicit vector there is no lane to ask about: the work-item holds
   the whole run and the distribution has moved into the type of the value
   being loaded, which is a `simd<T, span * vec>` whose width `_lane_span`
-  recorded when the image was filled.  Leaving the term in produced
+  recorded when the image was filled.  Leaving the term in would produce
   `s0 + item.get_local_id(0) * 1` -- an index into a work-group coordinate
-  that the ESIMD emitter refuses everywhere it can see it, and here could
-  not, because the address is text by the time it arrives.
+  that the ESIMD emitter refuses everywhere it can see it, and here cannot,
+  because the address is text by the time it arrives.
 
   """
   lexic = context.get_vm().get_lexic()
@@ -361,8 +360,8 @@ class LeadIndex:
 
   That distinction is what `layout()` hands out, and it is the only reason
   this class is comparable: a pass that wants to know whether two values may
-  be treated as one needs to ask, and asking used to mean re-deriving the
-  answer from a generated string.
+  be treated as one needs to ask, and without it asking would mean
+  re-deriving the answer from a generated string.
   """
 
   # TODO: make nonlead a variable
@@ -389,18 +388,18 @@ class LeadIndex:
     self._value = value
     #: A slicing shift, in *elements*.
     #:
-    #: This used to be a `VarOffset` wrapped around the index, and 649 of the
-    #: 661 offsets in the corpus wrapped a `LeadIndex` -- but the wrapper is
-    #: the wrong place for it, and not only because it is nearly always this
-    #: one case.  The offset's unit depends on which view of the index you
-    #: take: `write`/`build` answer in elements, `write_nonlead`/`build_nonlead`
-    #: answer in *slots*, and converting between them needs `block` and
-    #: `width`, which only this class has.  `VarOffset.write_nonlead` added an
-    #: element count to a slot index and got `2 + 32` where the answer is `4`;
-    #: nothing called it, so nothing noticed.
+    #: Carried here rather than by a `VarOffset` around the index -- 649 of
+    #: the 661 slicing offsets in the corpus fall on a `LeadIndex` -- and a
+    #: wrapper is the wrong place for it, not only because it is nearly always
+    #: this one case.  The offset's unit depends on which view of the index
+    #: you take: `write`/`build` answer in elements,
+    #: `write_nonlead`/`build_nonlead` answer in *slots*, and converting
+    #: between them needs `block` and `width`, which only this class has.  A
+    #: wrapper adding an element count to a slot index gets `2 + 32` where the
+    #: answer is `4`.
     #:
-    #: `unwrap_lead` keeps handing the raw element shift to its caller, which
-    #: is what the register paths convert.  Moving that conversion in here is
+    #: `unwrap_lead` hands the raw element shift to its caller, which is what
+    #: the register paths convert.  Moving that conversion in here is
     #: the next step and the one that makes an ESIMD base offset expressible:
     #: a shift that is not a whole number of slots moves data between lanes,
     #: which is a shuffle in SPMD and simply a different vector base when the
@@ -419,10 +418,10 @@ class LeadIndex:
     #: lane + 2*block, ...`, which are `block` apart and cannot be one wide
     #: access however the base is aligned; at `width == 2` it holds
     #: `2*lane, 2*lane+1` and then the pair `2*block` further on.  Cyclic
-    #: becomes blocked-by-`width`, and that is the whole content of the
-    #: change -- `layout()` is unchanged, because *which lane holds what
-    #: share* is still `LaneAxis(block, stride)`; the width lives on the
-    #: value's `ScalarType.length`, where `LaneAxis` says packing belongs.
+    #: becomes blocked-by-`width`, and that is all the width changes --
+    #: `layout()` is the same, because *which lane holds what share* is
+    #: `LaneAxis(block, stride)` either way; the width lives on the value's
+    #: `ScalarType.length`, where `LaneAxis` says packing belongs.
     self._width = width
     if width < 1:
       raise InternalError(f'lead width must be >= 1, got {width}')
@@ -527,14 +526,14 @@ class LeadIndex:
     Floats, not vectors.  A register-resident lead dimension addresses
     `r[slot]` directly -- the lane term is implicit in "each lane has its own
     array" -- so at width `w` one slot covers `w` consecutive floats and the
-    next one starts `w` further on.  Returning the bare slot number put slot
-    1 at float 1, overlapping the second half of slot 0.
+    next one starts `w` further on.  Returning the bare slot number would put
+    slot 1 at float 1, overlapping the second half of slot 0.
 
-    Invisible in everything generated so far: every operator in the corpus
-    has at most one slot per lane once the lane count is chosen for the
-    width, so `slot` and `slot * w` are both 0.  It bites at the first
-    operator whose lead dimension is longer than `threads * w` -- 120 over 32
-    lanes is the first, and it is an ordinary order-5 shape.
+    The difference is invisible wherever a lane has at most one slot, which
+    is every operator in the corpus once the lane count is chosen for the
+    width: `slot` and `slot * w` are both 0.  It shows at the first operator
+    whose lead dimension is longer than `threads * w` -- 120 over 32 lanes is
+    the first, and it is an ordinary order-5 shape.
     """
     nl = self._nonlead if self._value is None else self._value
     if self._width == 1:
@@ -548,23 +547,23 @@ class LeadIndex:
     # the same number and scaling is what separates them: `build_nonlead`
     # answers in register floats, where a slot spans `width` of them, while
     # this answers in elements and applies the width once to the whole
-    # address below.  Taking the scaled one here applied it twice --
+    # address below.  Taking the scaled one here would apply it twice --
     # `(lane + slot*width*block) * width` instead of `(lane + slot*block) *
     # width`.
     #
     # Invisible at one slot per lane, which is every arrangement the width
     # alone produces, because `slot` is 0 and both readings agree.  It
     # appears the moment a lane holds two, which is exactly what register
-    # blocking does -- and it showed up as the destination being written at
-    # eight of sixteen rows per column and one column too far.
+    # blocking does -- the destination would be written at eight of sixteen
+    # rows per column and one column too far.
     nl = self._nonlead if self._value is None else self._value
     if self._block > 1:
       # The lane's share of this dimension, asked of the builder rather than
-      # spelled out here.  The arithmetic used to be inline -- `(tid/stride) %
-      # block` -- which is the SPMD answer written down as though it were the
-      # only one there is.  It is not: an explicitly vectorized lowering holds
-      # the whole dimension in one register and contributes nothing to the
-      # address, and the difference belongs where the model is known.
+      # spelled out here.  Written inline, `(tid/stride) % block` would be the
+      # SPMD answer written down as though it were the only one there is.  It
+      # is not: an explicitly vectorized lowering holds the whole dimension in
+      # one register and contributes nothing to the address, and the
+      # difference belongs where the model is known.
       lane = writer.lane_offset(self._block, self._stride, hint='lane')
       addr = writer.op('add', INDEX, lane,
                        writer.op('mul', INDEX, nl, self._block, hint='lead'),
@@ -600,9 +599,9 @@ class VarOffset:
   the reason is a unit mismatch this class cannot resolve: the offset counts
   elements, `write_nonlead` answers in slots, and converting between the two
   needs `block` and `width`, which are the lead index's and not the wrapper's.
-  Before the merge this method returned `2 + 32` where the answer was `4`; it
-  was unreachable, so nothing found it.  The assertion is what keeps it that
-  way now that `add_offset` folds instead of wrapping.
+  Around a lead index, `write_nonlead` would return `2 + 32` where the answer
+  is `4`.  The assertion keeps that from happening, and `add_offset` folds
+  instead of wrapping.
   """
 
   def __init__(self, variable, offset):
@@ -661,10 +660,10 @@ def layout_of(index, num_threads=None):
   """The register layout a loaded value ends up with, from its index list.
 
   A load is where a distribution enters the IR: the index expression already
-  says which lane holds what, and `LeadIndex` has said so all along --- it
-  just printed the answer instead of returning it.  Everything downstream is
-  either derived from one of these or produced by an explicit relayout, so a
-  load that stays untracked leaves its whole consumer chain untracked.
+  says which lane holds what, and `LeadIndex.layout()` returns it.
+  Everything downstream is either derived from one of these or produced by an
+  explicit relayout, so a load that stays untracked leaves its whole consumer
+  chain untracked.
 
   Several distributed dimensions give a multi-axis layout, in dimension
   order -- a fused operator can put four lanes on each entry of dimension 0
@@ -682,8 +681,8 @@ def layout_of(index, num_threads=None):
   leads = [x[0] for x in leads if x is not None]
   if not leads:
     # Thread-independent: every lane computes the same address, so every lane
-    # loads the same element.  That is *replicated*, which is a layout --- and
-    # `None` here said *unknown*, the strictly weaker claim, on every load of
+    # loads the same element.  That is *replicated*, which is a layout ---
+    # `None` would say *unknown*, the strictly weaker claim, on every load of
     # a scalar or a broadcast operand.  The distinction is invisible to the
     # SPMD emitter (both spell the value `float x`) and load-bearing for an
     # explicitly vectorized one, where replicated is `T` and unknown is a
@@ -783,10 +782,12 @@ def unwrap_lead(index):
   """Peel `VarOffset` wrappers and report the accumulated shift.
 
   Returns `(lead_index, shift)` when a `LeadIndex` sits underneath, else
-  `None`.  `add_offset` wraps a slicing offset around whatever index it is
-  handed, which is exactly right for a global or shared-memory symbol: the
-  address is built from the full index expression, so the shift is just
-  another constant in the sum.
+  `None`: the lead index unshifted, and the shift in elements.  On a lead
+  index the shift is the index's own -- `add_offset` folds a slicing offset
+  into a `LeadIndex` rather than wrapping it, since `VarOffset` refuses one.
+  A global or shared-memory symbol needs none of this: its address is built
+  from the full index expression, where the shift is just another constant in
+  the sum.
 
   Registers distribute the lead dimension across lanes --- element `s` lives
   in lane `s % T`, slot `s // T`.  A shift of `q*T` moves whole blocks and so
@@ -800,11 +801,10 @@ def unwrap_lead(index):
     shift += index.offset
     index = index.variable
   if isinstance(index, LeadIndex):
-    # The contract is unchanged -- `(index, shift in elements)` -- but the
-    # shift now usually comes off the index itself rather than off a wrapper.
-    # The index handed back is the one *without* it applied, because the
-    # register callers convert the shift to slots and would otherwise count
-    # it twice.
+    # `(index, shift in elements)`, the shift usually coming off the index
+    # itself rather than off a wrapper.  The index handed back is the one
+    # *without* it applied, because the register callers convert the shift to
+    # slots and would otherwise count it twice.
     return index.with_offset(0), shift + index.offset()
   return None
 
@@ -847,12 +847,12 @@ class LeadLoop:
     one non-uniform source, so everything derived from it is marked
     non-uniform and the barrier-in-divergent-region check becomes live.
 
-    The arithmetic used to be written out here as `(tid / stride) % threads`.
-    That is the SPMD answer, and it is only *an* answer: the explicitly
-    vectorized lowering holds every element of the dimension in one register
-    and returns all `threads` indices at once, which makes the guard below a
-    mask instead of a branch.  Asking the builder is what lets the two
-    differ without this function knowing which one it is talking to.
+    Written out here, `(tid / stride) % threads` would be the SPMD answer,
+    and it is only *an* answer: the explicitly vectorized lowering holds every
+    element of the dimension in one register and returns all `threads`
+    indices at once, which makes the guard below a mask instead of a branch.
+    Asking the builder is what lets the two differ without this function
+    knowing which one it is talking to.
     """
     return writer.lane_index(self.threads, self.stride, hint='lead')
 
@@ -892,8 +892,8 @@ class LeadLoop:
     `lo`/`hi` are lane bounds and `elem_lo`/`elem_hi` the element range the
     block actually covers.  Both are passed rather than re-derived: the three
     call sites (a single-slot block, a wave-unaligned head, a ragged tail)
-    each intersect the range differently, and deriving it here once got two of
-    the three wrong before it was passed in.
+    each intersect the range differently, and one derivation here would get
+    two of the three wrong.
 
     Returns `(extent in lanes, base offset in elements)`.  The slot goes into
     the offset, so the index is always slot zero -- `nonlead * block` stops
@@ -923,9 +923,9 @@ class LeadLoop:
     # Neither bound is a mask.  A lower one is a vector that *starts* later,
     # an upper one is a vector that stops earlier, and a later slot is a
     # vector that starts a whole slot run in.  All three are a base offset in
-    # elements, which `LeadIndex` carries since the offset moved out of
-    # `VarOffset` -- and which `split_lead_shift` can put into a register
-    # address now that the leftover lanes have a run to sit in.
+    # elements, which `LeadIndex` carries -- and which `split_lead_shift` can
+    # put into a register address, since the leftover lanes have a run to sit
+    # in.
     return hi - base, elem_lo
 
   def _full(self, lo) -> bool:
@@ -941,9 +941,9 @@ class LeadLoop:
     the lanes it does not use; a head loses those *and* leaves the rest based
     at an element the vector cannot address -- 31 of 32 lanes, reading from
     element 1 -- so the block arrives through a shuffle instead of a load.
-    `elastic-o6s:volume` under the explicit vector spends 114 of them, and
-    they are what its register moves were: 7479 of 23964 instructions, down
-    to 1814 of 9169 once the head runs whole."""
+    Narrowed, `elastic-o6s:volume` under the explicit vector spends 114 of
+    them, and they make up its register moves: 7479 of 23964 instructions,
+    against 1814 of 9169 with the head run whole."""
     return self.full_lane and lo is not None and self.width == 1
 
   def _widened(self, narrowed, lo):
@@ -971,9 +971,9 @@ class LeadLoop:
     handed to `inner` as an integer, which is a *fixed* element of a
     distributed dimension -- `Symbol.load` broadcasts it from the lane that
     owns it and `Symbol.store` guards the write to that lane, both of which
-    already existed for sliced constants.  So the tail is scalar FMAs on the
-    existing machinery rather than a component mask on a new one, and there
-    are at most `width - 1` of them per lead loop.
+    serve sliced constants as well.  So the tail is scalar FMAs on that
+    machinery rather than a component mask on a new one, and there are at
+    most `width - 1` of them per lead loop.
     """
     for c in range(self._peeled(offset)):
       inner([first + c])
@@ -987,20 +987,20 @@ class LeadLoop:
     one-lane-owns-it guard already handle, and reusing them costs at most
     `width - 1` scalar operations at the end of a lead loop.
 
-    Peeling rather than over-computing.  The earlier arrangement let the
-    straddling lane carry a component from outside the box and relied on
-    nothing reading it back -- true for the destination, whose own guard is
-    at element granularity, and true only by accident for the *source*, whose
-    read left the operand window whenever the window was sized for the exact
-    extent.  A scalar tail has neither problem and costs one FMA.
+    Peeling rather than over-computing.  Letting the straddling lane carry a
+    component from outside the box would rely on nothing reading it back --
+    true for the destination, whose own guard is at element granularity, and
+    true only by accident for the *source*, whose read leaves the operand
+    window whenever the window is sized for the exact extent.  A scalar tail
+    has neither problem and costs one FMA.
     """
     return offset % self.width
 
   def _lane_hi(self, offset):
     """One past the last lane whose vector lies wholly below element `offset`.
 
-    Floor now, not ceiling: the straddling lane is excluded here and its
-    valid components come back as `_peeled`.
+    Floor, not ceiling: the straddling lane is excluded here and its valid
+    components come back as `_peeled`.
 
     That is deliberate, and it rests on two conditions the width policy
     checks rather than this loop:
@@ -1033,8 +1033,7 @@ class LeadLoop:
 
   def write(self, context: Context, writer: Writer, inner):
     # A slot is `threads * width` elements wide, so every division that turns
-    # an element range into a slot range takes the product.  At `width == 1`
-    # this is the arithmetic that was here before, character for character.
+    # an element range into a slot range takes the product.
     span = self.threads * self.width
     actualstart = self.start // span
     realstart = (self.start + span - 1) // span
@@ -1044,8 +1043,8 @@ class LeadLoop:
     # Eager in SPMD, on demand where a guard may be narrowed away.
     #
     # Every branch below uses the lane index in SPMD, so building it up front
-    # costs nothing and keeps the value numbering exactly where it was --
-    # deferring it renumbers 83 snapshot files for no change in meaning.
+    # costs nothing and keeps the value numbering stable -- deferring it would
+    # renumber 83 snapshot files for no change in meaning.
     # Under narrowing it can go unused, and then it must not be built: a
     # `rawexpr` is opaque text, so `dce` cannot know it is free of effects and
     # leaves a `simd<int, 16>` in the output that nothing reads.
@@ -1097,9 +1096,9 @@ class LeadLoop:
     else:
       if self.start % span != 0:
         # the guard compares against a *lane*, so the bound has to be the
-        # in-block remainder.  Without the `* self.threads` this only happened
-        # to be right while actualstart == 0, i.e. start < threads; for
-        # start=37, threads=32 it read `lead >= 36` and dropped the head block.
+        # in-block remainder.  Without the `* self.threads` it would be right
+        # only while actualstart == 0, i.e. start < threads; for start=37,
+        # threads=32 it would read `lead >= 36` and drop the head block.
         lo = self._lane_lo(self.start - actualstart * span)
         # The head block of a wave-unaligned range, and the same shape as the
         # ragged tail seen from the other end: a vector that starts later
@@ -1162,9 +1161,9 @@ class Loop:
     self.unroll = unroll
     self.var = name
     #: For a real loop (`unroll=False`): the pragma it carries -- `True` for
-    #: the bare `#pragma unroll` every real loop had so far, or a count.  A
-    #: rolled reduction wants a count, since the bare pragma lets the compiler
-    #: unroll a loop with a known trip count all the way back.
+    #: the bare `#pragma unroll`, or a count.  A rolled reduction wants a
+    #: count, since the bare pragma lets the compiler unroll a loop with a
+    #: known trip count all the way back.
     self.pragma = pragma
 
   def write(self, context: Context, writer: Writer, inner):
@@ -1174,9 +1173,9 @@ class Loop:
     elif self.start < self.end:
       # a real `for` region instead of a text block.
       # The body stays raw for now -- `inner` interpolates the induction
-      # variable into strings -- but the loop itself is now a node the passes
-      # can reason about, and every loader and store that goes through
-      # `write_loops` gets it at once.
+      # variable into strings -- but the loop itself is a node the passes can
+      # reason about, and every loader and store that goes through
+      # `write_loops` gets it.
       loop = writer.for_(self.start, self.end, self.step,
                          unroll=self.pragma, hint=self.var)
       with loop:
@@ -1217,8 +1216,8 @@ class Symbol:
     #: tensor is whatever the reading instruction chooses to distribute.
     #:
     #: The default is a guess, and every site that creates a register image
-    #: now overrides it -- `multilinear_builder` for both the staged operands
-    #: and the destination accumulator.  The compute instructions read it from
+    #: overrides it -- `multilinear_builder` for both the staged operands and
+    #: the destination accumulator.  The compute instructions read it from
     #: here rather than keeping their own copy.
     #:
     #: None for a tensor without axes: there is no axis to spread.
@@ -1226,10 +1225,10 @@ class Symbol:
     #: How many adjacent lead-dimension elements one lane of this symbol's
     #: image holds.  A property of the *image*, not of whoever is walking it:
     #: every loop over it and every fixed-element access has to resolve
-    #: positions the same way, and three separate bugs came from one of them
-    #: using the cyclic rule while the rest used the blocked one -- the store
-    #: reading back what the compute wrote, `build` double-scaling a slot, and
-    #: a peeled tail element asking the wrong lane for its value.
+    #: positions the same way, and one of them using the cyclic rule while the
+    #: rest use the blocked one breaks each in its own way -- the store
+    #: reading back what the compute wrote, `build` double-scaling a slot, a
+    #: peeled tail element asking the wrong lane for its value.
     self.lead_width = 1
     #: How this symbol's register image is distributed across the wave, when
     #: that is known.  Set by whoever fills it -- `store_linear` is the only
@@ -1295,9 +1294,9 @@ class Symbol:
 
     `id()` is not one.  A body that has been finished and collected frees its
     address, and the next builder can be given the same address -- so a
-    buffer declared in the pre-loop preload was recognized as belonging to
-    the batch loop's body, and its reads were emitted against a value whose
-    declaration was in another scope.  That compiles to a name that does not
+    buffer declared in the pre-loop preload would be recognized as belonging
+    to the batch loop's body, and its reads emitted against a value whose
+    declaration is in another scope.  That compiles to a name that does not
     exist, which the corpus renders happily and only the syntax check catches.
     """
     return getattr(builder, 'uid', None)
@@ -1626,11 +1625,10 @@ class Symbol:
         been threaded with explicit dtype arguments.
 
     Resolution order is ``self.datatype`` first, then the underlying
-    tensor object's ``datatype``. A missing datatype now raises a
-    descriptive error instead of an opaque ``assert False`` — that
-    case almost always means a synthetic operand (e.g. the scalar
-    constructed inside ``GemmDescr.__init__`` for ``alpha != 1``) was
-    built without a ``datatype=`` keyword.
+    tensor object's ``datatype``. A missing datatype raises a
+    descriptive error — that case almost always means a synthetic
+    operand (e.g. the scalar constructed inside ``GemmDescr.__init__``
+    for ``alpha != 1``) was built without a ``datatype=`` keyword.
     """
     if self.datatype is not None:
       return self.datatype
@@ -1655,18 +1653,20 @@ class Symbol:
 
     Same arithmetic as `access_address` --- sum of `(index - offset) * stride`
     --- but as nodes, so `fold` removes the `- 0` and `* 1` terms the string
-    path always wrote out, CSE shares subexpressions between the loads of one
-    body, and LICM can lift the loop-invariant part.
+    path writes out, CSE shares subexpressions between the loads of one body,
+    and LICM can lift the loop-invariant part.
 
     `shift`, a run-time addend, joins the terms that vary before the constant
     ones: `(lane + shift) + 56 * k` is one base for every step of a run and an
     immediate offset each, where `(lane + 56 * k) + shift` is a base per step.
-    LLVM did not reassociate the second into the first -- local_flux at b = 80
-    on gfx942 computed a 64-bit address for each of its global loads.
+    LLVM does not reassociate the second into the first -- with it,
+    local_flux at b = 80 on gfx942 computes a 64-bit address for each of its
+    global loads.
     """
     # Bound here, under a name of its own: the register branch below unpacks
     # the *slicing* shift into `shift`, and reading the parameter after it
-    # added that as a second addend -- `r0[k - 16]` in `bbox_shared_lower`.
+    # would add that as a second addend -- `r0[k - 16]` in
+    # `bbox_shared_lower`.
     addend = shift
     def arith(name, a, b, py):
       # fold right here when both sides are numbers: an address that is fully
@@ -1727,17 +1727,14 @@ class Symbol:
               and isinstance(index[i], (int, np.integer))):
           # A *fixed element* of the distributed dimension, which
           # `unwrap_lead` does not recognize -- it looks for a `LeadIndex`,
-          # and this is a bare integer.  It used to fall through to the branch
-          # below, which treats the index as an ordinary coordinate and takes
-          # it as the register address unchanged: a store to element 34 of a
-          # 35-row operand wrote `r[34]` into an array with eight floats per
-          # lane.
+          # and this is a bare integer.  The branch below would treat the
+          # index as an ordinary coordinate and take it as the register
+          # address unchanged: a store to element 34 of a 35-row operand
+          # would write `r[34]` into an array with eight floats per lane.
           #
-          # Nothing reached it before.  A fixed lead element only arises from
-          # a peeled tail, and the tail is what the vectorization introduced;
-          # the same resolution in `load` was added for the same reason and
-          # this is its other half, so a peeled element is now written and
-          # read at the same place.
+          # A fixed lead element only arises from a peeled tail.  `load`
+          # resolves it the same way and this is its other half, so a peeled
+          # element is written and read at the same place.
           #
           # No guard: each lane has its own array, so the lanes that do not
           # own the element write their own copy and nothing reads it back --
@@ -1826,18 +1823,17 @@ class Symbol:
           stride *= self.data_view.get_dim_slots(i, block, self.lead_width)
         elif (i in self.lead_dims
               and isinstance(index[i], (int, np.integer))):
-          # A *fixed element* of the distributed dimension.  It used to fall
-          # through to the branch below, which treats the index as an ordinary
-          # coordinate and takes it as the register address unchanged -- so a
-          # store to element 34 of a 35-row operand wrote `r[34]` into an array
-          # with eight floats per lane.
+          # A *fixed element* of the distributed dimension.  The branch below
+          # would treat the index as an ordinary coordinate and take it as the
+          # register address unchanged -- so a store to element 34 of a 35-row
+          # operand would write `r[34]` into an array with eight floats per
+          # lane.
           #
-          # Nothing reached it before: a fixed lead element only arises from a
-          # peeled tail, and the tail is what the vectorization introduced.
-          # The resolution is the one `load` already uses for the same case,
-          # and it lives here so both go through it: the element first divides
-          # by the blocking, then distributes, and the remainder picks the
-          # component inside the lane's vector.
+          # A fixed lead element only arises from a peeled tail.  The
+          # resolution is the one `load` uses for the same case, and it lives
+          # here so both go through it: the element first divides by the
+          # blocking, then distributes, and the remainder picks the component
+          # inside the lane's vector.
           #
           # No guard.  Each lane has its own array, so the lanes that do not
           # own the element write their own copy and nothing reads it back --
@@ -1874,7 +1870,7 @@ class Symbol:
 
     Every other index is a number by now; the lead index is not -- it is the
     lane's.  The entry at `runIdx` as it stands is row 0's, and reading that
-    gave every lane row 0's number.  So each row that has a number is a
+    would give every lane row 0's number.  So each row that has a number is a
     literal, and the lane whose row it is selects it; a row with none, or a
     zero, leaves the lane at zero.  Selects, not a branch: the condition
     differs across the lanes.
@@ -1925,7 +1921,7 @@ class Symbol:
           if value is not None:
             # No lead index: one entry at a constant address, the same in
             # every lane -- replicated, which is what `layout_of` answers for
-            # a thread-independent index.  `None` said *unknown*, and the
+            # a thread-independent index.  `None` would say *unknown*, and the
             # ESIMD emitter cannot type an unknown value.
             wrote = writer.load(self, value,
                              type_=ScalarType(self.get_fptype()), hint='data',
@@ -1980,8 +1976,8 @@ class Symbol:
               # none until the loop runs, so the bounds are those of every
               # slot at once: every run then clips, and is chosen per lane by
               # its condition at run time, which is exact for any slot.  (Its
-              # name times the block width is Python string repetition, and
-              # this used to stop the build: `C_ab = A_a` over a sparse `A`,
+              # name times the block width would be Python string repetition,
+              # which stops the build: `C_ab = A_a` over a sparse `A`,
               # yateto's `sparse_layouts`.)
               slots = -(-self.data_view.get_dim_size(leadidx) // lead._block)
               bndS, bndE = 0, slots * lead._block
@@ -2004,7 +2000,7 @@ class Symbol:
 
                 # A run that only clips the lane block is a choice per lane,
                 # and how it is spelled decides what it costs.  An if/else
-                # branches, and on a band operand that came to 144 more
+                # branches, and on a band operand that comes to 144 more
                 # branches than the dense build of the same shape, all inside
                 # the inner loop.  A select is a ternary, which predicates.
                 #
@@ -2030,10 +2026,11 @@ class Symbol:
                                     cond, local_load, other, hint='masked')
                 elif getattr(writer, '_explicit_simd', lambda: False)():
                   # Under explicit SIMD the condition is a lane mask, and there
-                  # is no branch on a mask: the if/else below left a result the
-                  # emitter had no layout for. A predicated load is the masked
-                  # read itself -- a lane the mask leaves out issues no access,
-                  # so the bounds that ruled out the select above do not arise.
+                  # is no branch on a mask: the if/else below would leave a
+                  # result the emitter has no layout for. A predicated load is
+                  # the masked read itself -- a lane the mask leaves out issues
+                  # no access, so the bounds that ruled out the select above do
+                  # not arise.
                   other = (wrote if wrote is not None
                            else writer.const(0.0, ScalarType(self.get_fptype())))
                   wrote = writer.load(self, validx, type_=ScalarType(self.get_fptype()), hint='data',
@@ -2072,9 +2069,9 @@ class Symbol:
             if isinstance(index[pos], (str, int, float, np.int64)):
               idxvar = index[pos] - offset
             else:
-              # This dimension's own index, compared against its own range:
-              # it used to be the address of the lead index, which is a
-              # different dimension and not a list to form an address from.
+              # This dimension's own index, compared against its own range --
+              # not the address of the lead index, which is a different
+              # dimension and not a list to form an address from.
               strindex = index[pos].build(writer, context)
               idxvar = writer.op('sub', INDEX, strindex, offset, hint='idx')
             cond = writer.op('eq', BOOL, idxvar, runIdx[pos], hint='cond')
@@ -2114,8 +2111,8 @@ class Symbol:
     `LaneAxis(threads, 1)` -- so the loader, which knows `threads`, passes it,
     and the claim is made under the same condition as the fill's.
 
-    It was `None` for every global read, which under SPMD costs precision and
-    under ESIMD is an IRError: a declaration cannot be written without the
+    `None` for a global read would cost precision under SPMD and be an
+    IRError under ESIMD: a declaration cannot be written without the
     distribution (`damageCellIntegral` at k_roll 4, 16 lanes, lead_vectorize).
     """
     if self.layout is not None or threads is None:
@@ -2143,17 +2140,16 @@ class Symbol:
       # definition point, or the def-use edge to this read does not exist.
       buf = self.pir_buffer(writer)
       if buf is not None and hasattr(writer, 'load'):
-        # Addressed rather than named, the pair to `store_linear`.  There
-        # were two structured mechanisms here: `load_expr` wraps a string
-        # in a value so the def-use edge exists, and `load` makes the
-        # buffer an operand so the *access* is known too.  The second
-        # subsumes the first wherever the buffer is a value in this body.
+        # Addressed rather than named, the pair to `store_linear`.  Two
+        # structured mechanisms serve here: `load_expr` wraps a string in a
+        # value so the def-use edge exists, and `load` makes the buffer an
+        # operand so the *access* is known too.  The second subsumes the
+        # first wherever the buffer is a value in this body.
         #
-        # `addr` rather than a formula rebuilt here.  The first version
-        # inlined `index // self.num_threads`, which is the *register*
-        # address; the day the shared window became a value that branch
-        # started taking shared symbols too, and `num_threads` is None for
-        # those.  One address, computed once, for whichever branch runs.
+        # `addr` rather than a formula rebuilt here: the *register* address,
+        # `index // self.num_threads`, is wrong for the shared symbols this
+        # branch takes too, whose `num_threads` is None.  One address,
+        # computed once, for whichever branch runs.
         #
         # The layout claim is carried across unchanged: it is recorded by
         # the fill in `_record_linear_layout` and only reported here, since
@@ -2161,11 +2157,11 @@ class Symbol:
         #
         # The width rides on the *type* rather than on a second parameter.
         # `ScalarType.length` is where a lane holding several consecutive
-        # elements already lived (`LaneAxis` says so in as many words: packing
-        # is a vector type over the slot dimension, not a lane axis), and the
-        # ESIMD emitter already reads it -- `span * (length or 1)` is its
-        # `simd<>` width.  So the vectorized path needs no new state, only the
-        # type it always had and an emitter that spells the access for it.
+        # elements lives (`LaneAxis` says so in as many words: packing is a
+        # vector type over the slot dimension, not a lane axis), and the
+        # ESIMD emitter reads it -- `span * (length or 1)` is its `simd<>`
+        # width.  So the vectorized path needs no state of its own, only the
+        # type and an emitter that spells the access for it.
         from tensorforge.backend.pir.core import ScalarType
         ltype = (ScalarType(self.get_fptype()) if vec == 1
                  else ScalarType(self.get_fptype(), vec))
@@ -2197,9 +2193,9 @@ class Symbol:
     Each run `(i, g)` of the fill put entries `i + t*g` to `i + t*g + g - 1`
     into lane `t`, from slot `i // T` on.  So entry `p` of the pattern has one
     owner and one slot, and every lane takes it from there by a broadcast.
-    Read by the pattern's index as if it were the slot -- what this did before
-    -- `gemm_sparse_band_B` under SYCL read up to `r1[45]` of a 16-entry
-    image; read as a box, it broadcast rows the fill never put there.
+    Read by the pattern's index as if it were the slot, `gemm_sparse_band_B`
+    under SYCL would read up to `r1[45]` of a 16-entry image; read as a box,
+    it would broadcast rows the fill never put there.
 
     Fixed entries only: an entry chosen per lane would have its slot chosen
     per lane too, and a register array is not indexed by a lane's value.
@@ -2219,7 +2215,7 @@ class Symbol:
     if p is None:
       # A structural zero is no read at all, as for packed memory in
       # `encode_values`: the caller leaves the product out.  A zero constant
-      # kept it, as `a * 0.0f`, in every cell outside the band.
+      # would keep it, as `a * 0.0f`, in every cell outside the band.
       return None
     threads = self.num_threads
     for start, width in self.linear_runs:
@@ -2272,8 +2268,8 @@ class Symbol:
     emitted, rather than re-derived in `load_linear` from the read.  The read
     is `reg[i // num_threads]` and carries no lane term at all: nothing about
     the distribution is recoverable from it, so a reader stating one would be
-    restating a fact owned by another file --- the arrangement that produced
-    two wrong layout claims in the relayout table already.
+    restating a fact owned by another file --- which is how a layout claim
+    goes wrong.
 
     Only for registers, and only for the shape the loader actually emits.
     Anything else leaves `layout` alone, which keeps it `None`, which means
@@ -2286,11 +2282,11 @@ class Symbol:
     # loader that writes the run does know, and it is the only party that
     # does, so it passes it.
     #
-    # Without this the claim was simply absent for shared images, and `None`
-    # means unknown: every consumer had to fail closed.  Invisible under SPMD,
-    # where an unknown distribution costs only precision -- and fatal under an
-    # explicit vector, where a declaration cannot be written without one.  24
-    # values in `accumulate_chain` alone.
+    # Without this the claim would be absent for shared images, and `None`
+    # means unknown: every consumer would have to fail closed.  Invisible
+    # under SPMD, where an unknown distribution costs only precision -- and
+    # fatal under an explicit vector, where a declaration cannot be written
+    # without one: 24 values in `accumulate_chain` alone.
     threads = threads if threads is not None else self.num_threads
     if self.stype not in (SymbolType.Register, SymbolType.SharedMem):
       return
@@ -2347,13 +2343,12 @@ class Symbol:
     if buf is not None and hasattr(writer, 'store'):
       # Structured: the buffer is an operand, so the write declares what
       # it touches by construction instead of by a hand-passed alias
-      # base.  The emitted text is the same while the allocation still
-      # carries its `extern` name; it stops being the same on the commit
-      # that drops the name, which is the point.
+      # base.  The emitted text is the same as the unstructured spelling's
+      # while the allocation carries its `extern` name; it stops being the
+      # same once the name is dropped, which is the point.
       #
-      # No longer gated on `vec == 1`.  A wide write used to be excluded
-      # from this branch and spelled as a cast into a raw string, which put
-      # the one access that moves the most bytes outside every pass's view.
+      # Wide writes included: spelled as a cast into a raw string, the one
+      # access that moves the most bytes would be outside every pass's view.
       # The width is on the stored value's type, so the emitter spells the
       # cast and the buffer stays an operand.
       writer.store(buf, variable, addr,
@@ -2384,10 +2379,10 @@ class Symbol:
     whether it can take it at all.
 
     The default is one axis over the whole wave, cyclic, which is what every
-    image in the tree is and what `lead_dims` alone has meant all along.  A
-    producer that leaves its result on something else says so in `lead_axes`,
-    and then this is the statement every reader takes it from rather than
-    each deriving a distribution from a position.
+    image in the tree is and what `lead_dims` alone means.  A producer that
+    leaves its result on something else says so in `lead_axes`, and then this
+    is the statement every reader takes it from rather than each deriving a
+    distribution from a position.
 
     `None` where the axes do not tile the wave: the lanes then hold copies,
     an element has no one owner, and an address that names a single lane
@@ -2424,9 +2419,8 @@ class Symbol:
     The number every register address divides a distributed coordinate by,
     and the number a distributed extent is allocated in units of.  Those two
     have to be the same number or the next dimension aliases onto this one,
-    which is why `slots_for` was already the one statement of the rule --
-    this is the same argument one level up, about *which* number the rule is
-    given.
+    which is why `slots_for` is the one statement of the rule -- this is the
+    same argument one level up, about *which* number the rule is given.
 
     The wave, for the single-axis image every symbol in the tree is.  The
     axis's block for one whose producer said otherwise, which is the whole of
@@ -2436,11 +2430,11 @@ class Symbol:
 
     Asked only about a dimension being addressed as distributed, which is
     not always one this symbol declared: a `LeadIndex` can arrive on a
-    dimension outside `lead_dims`, and it has always meant the wave there.
-    So that is the answer for one, rather than the 1 a genuinely undistributed
-    dimension would deserve -- a dimension nobody is spreading never reaches
-    here, and a caller that treats an undeclared lead index as unspread
-    changes an address that has been right since before there were axes.
+    dimension outside `lead_dims`, and it means the wave there.  So that is
+    the answer for one, rather than the 1 a genuinely undistributed dimension
+    would deserve -- a dimension nobody is spreading never reaches here, and
+    treating an undeclared lead index as unspread would change an address
+    that is right as it stands.
     """
     if dim not in self.lead_dims:
       return self.num_threads
@@ -2456,18 +2450,18 @@ class Symbol:
     register-resident, a lead index that is still distributed, or an index
     this cannot resolve to a number.
 
-    One function because three callers need the same answer and have already
-    disagreed twice.  `load` computes it to broadcast the element; `store`
-    computes it to guard the write to the lane that holds it; and
-    `StoreRegToGlb` needs it to decide whether either is required at all.  The
-    store used to derive it separately and got `threadIdx.x == 32` in a
-    32-lane wave, which is the bug this shape removes rather than fixes again.
+    One function because three callers need the same answer.  `load` computes
+    it to broadcast the element; `store` computes it to guard the write to the
+    lane that holds it; and `StoreRegToGlb` needs it to decide whether either
+    is required at all.  Derived separately, the store's answer can drift --
+    `threadIdx.x == 32` in a 32-lane wave -- and one function removes that
+    rather than fixing it case by case.
 
     Asked of the layout rather than computed here.  `holders` is the same map
-    executable, and it answers at any rank -- which the arithmetic could not:
-    dividing one axis by the wave has no reading when there are two, and
-    returning `None` there was the shape of the restriction rather than a
-    fact about the element.  The width is divided out first, because a
+    executable, and it answers at any rank -- which arithmetic on one axis
+    cannot: dividing one axis by the wave has no reading when there are two,
+    and returning `None` there would be the shape of a restriction rather
+    than a fact about the element.  The width is divided out first, because a
     packing is a property of the register and not of the distribution: an
     axis says which lane, and a lane holding `lead_width` neighbors does not
     change which.
@@ -2624,9 +2618,9 @@ class Symbol:
         break
     lane = writer.lane_index(lead._block, lead._stride, hint='lead')
     # No `other`: a folded read's default is the type's zero, spelled at the
-    # use.  A constant value here was declared wherever the builder first made
-    # it, and a pass that moves the read ahead of that (the wrap pass does)
-    # left it naming a variable that was never declared.
+    # use.  A constant value here would be declared wherever the builder first
+    # made it, and a pass that moves the read ahead of that (the wrap pass
+    # does) would leave it naming a variable that is never declared.
     held = None
     if first:
       held = writer.op('ge', BOOL, lane, first, hint='g')
@@ -2673,12 +2667,12 @@ class Symbol:
       # Read as a bare name it is a value with no operands, which `licm` takes
       # for loop-invariant -- rightly for a kernel parameter and wrongly for a
       # merged run's stand-in, whose name the loop's own table binds. Hoisted
-      # out, the read leaves the scope the name is declared in: the multilinear
-      # epilogue of SeisSol's damage step read two stand-ins that way, and the
-      # kernel did not compile once the run was merged.
-      # Only where there is one: a name bound around this body is read the way
-      # it was before, since a value standing for it carries no distribution
-      # across the lanes and the ESIMD lowering needs one.
+      # out, the read would leave the scope the name is declared in: the
+      # multilinear epilogue of SeisSol's damage step reads two stand-ins that
+      # way, and the kernel would not compile once the run is merged.
+      # Only where there is one: a name bound around this body is read by
+      # name, since a value standing for it carries no distribution across the
+      # lanes and the ESIMD lowering needs one.
       bound = self.pir_scalar(writer)
       if bound is not None:
         return bound
@@ -2688,9 +2682,9 @@ class Symbol:
     # storage: it is laid out densely over the box, in slots
     # (`TemporaryManager` sizes it from the box), and holds zero wherever the
     # pattern has nothing, because the load that filled it wrote every slot.
-    # Read by the pattern's storage index it was read past its end --
-    # `C_ab = A_a` over a sparse `A`, yateto's `sparse_layouts`: row 3 read
-    # `r0[1]` of a one-entry image, a different number on every target.
+    # Read by the pattern's storage index it would be read past its end --
+    # `C_ab = A_a` over a sparse `A`, yateto's `sparse_layouts`: row 3 would
+    # read `r0[1]` of a one-entry image, a different number on every target.
     packed = (not self.obj.is_dense()
               and not isinstance(self.obj.spp, BoundingBoxSPP))
     if (packed and self.stype == SymbolType.Register and self.linear_runs):
@@ -2749,12 +2743,10 @@ class Symbol:
       bc_lane, bc_index = None, None
       if self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
         if len(self.lead_dims) > 1 and self.register_layout() is None:
-          # What the assertion here used to say, kept and narrowed.  It read
-          # `len(self.lead_dims) == 1`, which refused every rank-two image
-          # including the ones that state their axes; this refuses only the
-          # ones that do not.  Letting them through would address both
-          # dimensions by the wave and alias them onto each other, which is
-          # the outcome the assertion existed to prevent.
+          # A rank-two image is refused only where it does not state its
+          # axes; requiring `len(self.lead_dims) == 1` would refuse the ones
+          # that do as well.  Letting an unstated one through would address
+          # both dimensions by the wave and alias them onto each other.
           raise InternalError(
               f'{self.name}: {len(self.lead_dims)} distributed dimensions and '
               f'no axes stating how they share the lanes')
@@ -2771,13 +2763,11 @@ class Symbol:
           # Which lane owns a fixed element, and where in its registers it
           # sits.  Asked of `owning_lane` rather than recomputed: it is the
           # same question the store asks to guard its write and `StoreRegToGlb`
-          # asks to decide whether either is needed, its docstring already
-          # names this as one of the three callers, and it was the one still
-          # deriving its own answer.  It also answers at any rank now, which
-          # is what the assertion that used to stand here could not.
+          # asks to decide whether either is needed, and its docstring names
+          # this as one of the three callers.  It also answers at any rank.
           #
-          # `None` covers everything this branch used to fall through: an
-          # index still distributed, one that resolves to no number, and a
+          # `None` covers everything this branch does not resolve: an index
+          # still distributed, one that resolves to no number, and a
           # distribution the symbol cannot state.
           bc_lane = self.reading_lane(index)
           if bc_lane is not None:
@@ -2785,16 +2775,16 @@ class Symbol:
             # width: this access reads *one* element, so it has to stay
             # scalar.  Handing over a width-`w` index would make the load
             # vector-typed and the value would be the lane's whole pair --
-            # which the generated code then assigned to a scalar slot, a
-            # type error the C++ compiler would have caught and the snapshot
-            # tests would not.
+            # which the generated code would then assign to a scalar slot, a
+            # type error the C++ compiler catches and the snapshot tests do
+            # not.
             #
             # `w * slot + component`, pre-scaled, so `build_nonlead` returns
             # it unchanged, and one per distributed dimension -- each in its
             # own block, because that is the number the address divides by.
-            # At `lead_width == 1` a slot is the cyclic rule that was here
-            # before; wider, a lane holds `w` adjacent elements, so the
-            # element first divides by the width and only then distributes.
+            # At `lead_width == 1` this is the cyclic rule; wider, a lane
+            # holds `w` adjacent elements, so the element first divides by the
+            # width and only then distributes.
             #
             # This is the resolution a peeled tail element goes through -- the
             # loop hands it over as a plain integer -- so getting it from the
@@ -2821,11 +2811,11 @@ class Symbol:
               SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
               SymbolType.Batch, SymbolType.Global):
         # The dereference itself, with the address as an operand rather than
-        # as a name spliced into a string.  Everything the string version
-        # declared -- the symbol it reads, the effect, the layout -- survives;
-        # what it could not say is that `base` and the address are *operands*,
-        # so a pass could neither see the def-use edge to the address nor
-        # recognize two reads of the same place.
+        # as a name spliced into a string.  Everything the string spelling
+        # declares -- the symbol it reads, the effect, the layout -- is
+        # declared here too; what it cannot say is that `base` and the address
+        # are *operands*, so a pass can neither see the def-use edge to the
+        # address nor recognize two reads of the same place.
         #
         # A Scalar stays on the text path below: it is not a subscripted
         # access at all -- `access` returns the bare name -- so `Op.LOAD`
@@ -2887,7 +2877,7 @@ class Symbol:
                                    SymbolType.SharedMem)):
           # Rewritten rather than handled: from here on this is an ordinary
           # read of a run, and the parts, the tail's `valid` and the layout
-          # claim below are the same questions they always were.
+          # claim below are the same questions as for any read.
           read_index = self._slot_major_index(writer, context, read_index)
         addr = self.address_value(writer, context, read_index, shift=shift)
         # Planar parts are `plane` elements apart instead of adjacent: the
@@ -2915,11 +2905,11 @@ class Symbol:
             # element `e` begins at `parts * e`, which for two 4-byte parts is
             # always 8-byte aligned.
             #
-            # Adjacency alone was not enough.  Emitted as separate scalar
-            # reads, ptxas merged the *shared* pair (2269 -> 477 LDS plus 896
-            # LDS.64) and left the *global* one alone at 1809 LDG.E against
+            # Adjacency alone is not enough.  Emitted as separate scalar
+            # reads, ptxas merges the *shared* pair (2269 -> 477 LDS plus 896
+            # LDS.64) and leaves the *global* one alone at 1809 LDG.E against
             # 905 for the single-part kernel, whether or not the two reads
-            # were neighbors in the instruction stream.  So the width is
+            # are neighbors in the instruction stream.  So the width is
             # stated rather than hoped for.
             #
             # And the alignment with it, which is the difference between a
@@ -2970,21 +2960,20 @@ class Symbol:
           # element sits in the owning lane's registers, and that lane reading
           # its own is the same number the broadcast would have handed out.
           return value
-        # A broadcast is a load *wrapped* in a vendor intrinsic, and it used
-        # to be spelled whole: the buffer named inside a string, which is what
-        # kept the name alive for every register tile a contraction reads from
-        # a single lane.  Split, the load is an ordinary structured read and
-        # only the intrinsic is text -- with the value as its operand, so the
-        # buffer needs no name.
+        # A broadcast is a load *wrapped* in a vendor intrinsic, and the two
+        # are split: spelled whole, the buffer would be named inside a string,
+        # which keeps the name alive for every register tile a contraction
+        # reads from a single lane.  Split, the load is an ordinary structured
+        # read and only the intrinsic is text -- with the value as its
+        # operand, so the buffer needs no name.
         #
         # It also lets four broadcasts of four different lanes of one tile
-        # share the read they all perform, which they could not while it sat
-        # inside a string.
+        # share the read they all perform, which they could not inside a
+        # string.
         #
         # `pure` and `movable`: reading one lane of a register image has no
         # effect and the same operands give the same result, so the emitter
-        # may inline it into the use, which keeps the emitted source the shape
-        # it was.
+        # may inline it into the use.
         # The lanes the image's map runs over before it repeats, not the
         # multiplication's width: they differ where the image is replicated,
         # and it is that span which says whether a broadcast can stay inside
@@ -2998,7 +2987,7 @@ class Symbol:
           # replicated once per lane -- so there is nothing to read from
           # another lane, and the vector spelling does not even apply: the
           # value is a `float` rather than a `simd`, and
-          # `mixed_red_scalar_then_ew` came out as
+          # `mixed_red_scalar_then_ew` would come out as
           # `float v56_bc = v55_data.select<1, 1>(0);`, which no compiler
           # accepts.  The same answer the guarded path above gives, for the
           # same reason: the owning lane is this one.
@@ -3026,14 +3015,14 @@ class Symbol:
             access, ScalarType(self.get_fptype()), self,
             args=_operands(variable, addrs),
             hint='data', layout=layout_of(index, self.num_threads))
-      # A named load is still a load.  It took the text path for one reason --
-      # the consumer needs a particular identifier -- and `extern` supplies
-      # that, so the address goes in as an operand instead of a string.  What
-      # the string form could declare was the symbol and the effect; what it
-      # could not was *which address*, and that is what aliasing, liveness and
-      # a swizzled buffer all read.
+      # A named load is still a load.  The one reason for the text path would
+      # be that the consumer needs a particular identifier, and `extern`
+      # supplies that, so the address goes in as an operand instead of a
+      # string.  What the string form can declare is the symbol and the
+      # effect; what it cannot is *which address*, and that is what aliasing,
+      # liveness and a swizzled buffer all read.
       #
-      # A broadcast still stays on the text path here: the value form above
+      # A broadcast stays on the text path here: the value form above
       # splits it into a load and a wrapper, which needs a value to wrap, and
       # a named load has to produce the name itself.
       if (bc_lane is None and self.stype in (
@@ -3079,14 +3068,13 @@ class Symbol:
     kind = Effect.ATOMIC if atomic else Effect.WRITE
     from tensorforge.backend.pir.core import Value as _Value
     lead = index[self.lead_dims[0]] if len(self.lead_dims) == 1 else None
-    # `unwrap_lead`, not `isinstance`: a slicing offset wraps the lead index
-    # in a `VarOffset`, and `build_address` has always peeled that -- so the
-    # only thing the narrower test achieved was to send a sliced store back to
-    # the text path, where its address is a pinned name instead of an operand.
+    # A sliced store qualifies as well: its slicing offset sits in the
+    # `LeadIndex` itself (`add_offset` folds it), so its address is an operand
+    # here rather than a pinned name on the text path.
     #
-    # `base` no longer disqualifies.  It overrides the pointer *name*, which
-    # `Op.STORE` now carries as an attribute; the base it attributes accesses
-    # to is still the symbol, which is what a rotating buffer's stages are.
+    # `base` does not disqualify.  It overrides the pointer *name*, which
+    # `Op.STORE` carries as an attribute; the base it attributes accesses to
+    # is the symbol, which is what a rotating buffer's stages are.
     structured = (not atomic and isinstance(variable, _Value)
                   and lead is not None and unwrap_lead(lead) is not None
                   and self.stype in (SymbolType.Register, SymbolType.Scratch,
@@ -3094,12 +3082,11 @@ class Symbol:
 
     if structured and self.stype in (SymbolType.SharedMem,
                                     SymbolType.Register):
-      # The third fill path, and the third place the same statement was
-      # missing.  A shared image is filled linearly by the loader
+      # The third fill path.  A shared image is filled linearly by the loader
       # (`store_linear`), in bulk by the transfer, or -- here -- one element at
       # a time by a compute instruction writing an intermediate out of its
-      # registers.  The first two record how the image ends up distributed;
-      # this one did not, so an image written this way read back as unknown.
+      # registers.  Each records how the image ends up distributed; without
+      # this, an image written this way would read back as unknown.
       #
       # Derivable, unlike the linear paths: the index carries a `LeadIndex`,
       # which is exactly the distribution, so this reports what `layout_of`
@@ -3111,18 +3098,17 @@ class Symbol:
     # it survives DCE whether or not anything reads it -- building one for a
     # store that then takes the structured path leaves a second, identical
     # address chain in the output next to the one `address_value` produces.
-    # That waste already existed for registers; extending the structured path
-    # to global memory would have doubled it rather than exposed it.
     mask_name = (elementmask.active()[1]
                  if self.stype == SymbolType.Global else None)
 
     # One fixed element of a register dimension -- the peeled last row of an
     # odd extent at a lead width of two -- written by the lane that owns it.
     # Structured like the rest: `build_address` resolves a fixed element to
-    # its slot.  As text, the array was named in a raw statement, which the
-    # register model has to take as the whole array live for the whole body:
-    # `local_flux` at 35 rows and width two read 2312 B for ptxas's 213
-    # registers, 2160 B of it arrays counted whole for one element each.
+    # its slot.  As text, the array would be named in a raw statement, which
+    # the register model has to take as the whole array live for the whole
+    # body: `local_flux` at 35 rows and width two would read 2312 B for
+    # ptxas's 213 registers, 2160 B of it arrays counted whole for one element
+    # each.
     named = (not structured and not atomic
              and self.stype in (SymbolType.Register, SymbolType.Scratch)
              and isinstance(lead, (int, np.integer))
@@ -3146,9 +3132,9 @@ class Symbol:
               access, var, datatype=self.get_fptype(),
               length=lead_width_of(index), nontemporal=nontemp)
       else:
-        # `atomic` used to reach here and be dropped: the update came out as
-        # `access = var;`, an assignment where an accumulation was asked for,
-        # with nothing said.  Nothing builds one today -- the builder only
+        # An `atomic` reaching here would be dropped: the update would come
+        # out as `access = var;`, an assignment where an accumulation was
+        # asked for, with nothing said.  Nothing builds one -- the builder only
         # marks a `SymbolType.Global` destination atomic -- so this states the
         # precondition rather than implementing a second path.  The shared
         # one, when it is wanted, is `ds_add_*` and gated separately;
@@ -3164,23 +3150,22 @@ class Symbol:
     if structured:
       # The symmetric case to the structured load: the destination address and
       # the stored value are operands, not names inside a string.  A pass can
-      # now see that this write and a later read touch the same place, and the
+      # see that this write and a later read touch the same place, and the
       # address arithmetic is foldable instead of pinned behind a name the
       # text refers to.
       #
-      # Global joins Register and Scratch here.  It could not before, because
-      # the nontemporal hint was resolved into a finished statement by
-      # `lexic.glb_store` at this call site, leaving nothing structured to
-      # emit; `Op.STORE` carries the hint now and the emitter asks the lexic.
+      # Global takes this path with Register and Scratch: `Op.STORE` carries
+      # the nontemporal hint and the emitter asks the lexic, where resolving it
+      # into a finished statement with `lexic.glb_store` at this call site
+      # would leave nothing structured to emit.
       #
-      # Three cases stay on the text path, each for its own reason.  `base` is
-      # an override of the pointer name -- a rotating buffer writing to a
-      # stage other than its own -- which `Op.STORE` cannot express, since its
-      # base *is* the symbol.  A non-Value variable is a literal, and the
-      # spelling a literal gets is the emitter's to decide; routing it here
-      # would change `0` into `0.0f` or the reverse for reasons unrelated to
-      # this change.  And an atomic goes through `atomic_store`, which returns
-      # an expression rather than a statement.
+      # Two cases stay on the text path, each for its own reason.  A
+      # non-Value variable is a literal, and the spelling a literal gets is
+      # the emitter's to decide; routing it here would change `0` into `0.0f`
+      # or the reverse for reasons unrelated to the store.  And an atomic
+      # goes through `atomic_store`, which returns an expression rather than a
+      # statement.  A `base` override does not keep a store off this path
+      # (see above).
       # The width comes off the *stored value*, as it does in the emitter:
       # the buffer is typed by its element and would narrow every wide write
       # to its first component.  `RELAXED` for the same reason as in `load`.
@@ -3190,8 +3175,8 @@ class Symbol:
         # The tail written whole: its lanes past `valid` are the tensor's
         # padding, which the caller may overwrite -- with zeros, so that
         # nothing a later kernel multiplies by a zero-padded operator can
-        # carry a NaN out of it.  One select, where the narrow write was two
-        # messages (16 + 8) or a branch.
+        # carry a NaN out of it.  One select, where the narrow write would be
+        # two messages (16 + 8) or a branch.
         lane = writer.lane_index(padded._block, padded._stride, hint='lead')
         inside = writer.op('lt', BOOL, lane, padded.valid, hint='g')
         variable = writer.op('select', variable.type, inside, variable, 0.0,
@@ -3201,7 +3186,7 @@ class Symbol:
                      self.address_value(writer, context, index),
                      align=None if wide is None else RELAXED,
                      # the kind of hint, not only whether there is one
-                     # (`hints.cache_hint`): `bool` made every one `cg`
+                     # (`hints.cache_hint`): `bool` would make every one `cg`
                      nontemporal=nontemp or False, pointer=base,
                      **({} if padded is not None else
                         self._valid_access(writer, index,
@@ -3211,13 +3196,14 @@ class Symbol:
       # One named element of a dimension that lives in the registers, so
       # exactly one lane holds it and the others must not write.
       #
-      # *Which* lane is the question this got wrong.  It compared the thread
-      # index against the element index, and those are the same number only
-      # at `lead_width == 1`.  At width 2 a peeled element 32 produced
+      # *Which* lane is the question to get right.  The thread index and the
+      # element index are the same number only at `lead_width == 1`: compared
+      # directly, at width 2 a peeled element 32 would give
       # `threadIdx.x == 32` in a 32-lane wave -- a lane that does not exist,
-      # so the accumulator for that element was never written and the store's
-      # `readlane` of it read whatever the guarded main block had left there.
-      # One wrong element per column, always the last, on every odd extent.
+      # so the accumulator for that element would never be written and the
+      # store's `readlane` of it would read whatever the guarded main block
+      # had left there.  One wrong element per column, always the last, on
+      # every odd extent.
       #
       # The owning lane is `(element // width) % threads`, which is exactly
       # what `Symbol.load` computes for `bc_lane` when it broadcasts the same
@@ -3229,12 +3215,13 @@ class Symbol:
       # Global memory is shared: every lane addresses it directly, so no lane
       # owns an element and this guard would be answering a question global
       # memory does not ask.  What global *does* need is that exactly one lane
-      # writes -- which is a different requirement, and one only an atomic
-      # accumulation is sensitive to; see `placement.atomic_write_is_exact`.
+      # writes -- a different requirement, which `StoreRegToGlb` settles
+      # where the source and the destination are both in scope.
       owner = self.owning_lane(index)
       # No lane owns an element of an image without a distributed axis: a
       # value without axes is the same on every lane, and each lane writes
-      # its own copy.  Guarding it on `owner` wrote `threadIdx.x == None`.
+      # its own copy.  Guarding it on `owner` would write
+      # `threadIdx.x == None`.
       conds = []
       if owner is not None:
         conds.append(f'{context.get_vm().get_lexic().thread_idx_x} == {owner}')

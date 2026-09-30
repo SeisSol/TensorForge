@@ -3,24 +3,24 @@
 # SPDX-License-Identifier: MIT
 """SeisSol's damage-model kernel, as yateto describes it.
 
-`fixtures/kernels/seissol_damage.json` is the description yateto sent: thirteen
+`fixtures/kernels/seissol_damage.json` holds the description: thirteen
 material parameters picked out into temporaries without axes, then per
 direction a flux built in two terms -- the velocity part assigned, the stress
 part accumulated onto the columns the first term leaves out -- and
-`Q += kDivM(d) @ flux`.  It stopped at three places, one per target family,
-and each is pinned here:
+`Q += kDivM(d) @ flux`.  Three places in it are pinned here:
 
-* `rhoInv[] * stressToFlux[c,p]` wrote row 0 of its destination: the axisless
-  factor was given the destination's axis 0 (`MultilinearDescr` now gives it a
-  contracted one of its own);
+* `rhoInv[] * stressToFlux[c,p]` runs over all of its destination: the
+  axisless factor takes no axis at all, and given the destination's axis 0 it
+  would write row 0 only;
 * the flux temporaries are read where no term defines them and accumulated
-  onto cells the assignment left out -- zero in yateto's meaning, garbage in
+  onto cells the assignment leaves out -- zero in yateto's meaning, garbage in
   the buffer -- so their first store clears them (`SectionPlan.zero_first`);
-* the sparse flux operators left values without a layout, which the ESIMD
-  emitter cannot type.
+* the values the sparse flux operators leave carry a layout, without which
+  the ESIMD emitter cannot type them.
 
-The numbers were checked on hardware against a numpy evaluation of the
-description, not here: the host oracle does not model pointer-based operands.
+The numbers agree on hardware with a numpy evaluation of the description; the
+host oracle does not model pointer-based operands, so they are not checked
+here.
 """
 
 from __future__ import annotations

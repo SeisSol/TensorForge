@@ -8,19 +8,17 @@ either alone is wrong.
 
 *How wide* is a property of the base: reinterpreting ``&buf[i]`` as a
 ``T2``/``T4`` is defined only when that address is aligned to the wider type,
-and the base's alignment is the only thing that can promise it.  Nothing
-promised anything before -- ``GlbToRegLoader`` carried ``for g in [4, 2, 1]``
-commented down to ``[1]``, which is a width decision written as a disabled
-list, so re-enabling it would have cast unaligned addresses on whichever
-operand happened not to be padded.
+and the base's alignment is the only thing that can promise it.  A width list
+chosen without that promise casts unaligned addresses on whichever operand
+happens not to be padded.
 
-*Where the hops go* is a property of the extent, and it was wrong in a way
-the width made much worse.  The old loop emitted a hop per ``range`` step and
-then set ``start = (total // granularity) * granularity`` from the granularity
-it had just finished with, so a partial hop at the end both overran the buffer
-and was covered again by the next, narrower width.  At width 1 that overruns
-by up to ``threads - 1`` elements; at width 4 by four times as many, and into
-a 16-byte access that a padded batch stride no longer covers.
+*Where the hops go* is a property of the extent, and the width makes getting
+it wrong much worse.  A loop that emits a hop per ``range`` step and then sets
+``start = (total // granularity) * granularity`` from the granularity it has
+just finished with lets a partial hop at the end both overrun the buffer and
+be covered again by the next, narrower width.  At width 1 that overruns by up
+to ``threads - 1`` elements; at width 4 by four times as many, and into a
+16-byte access that a padded batch stride does not cover.
 """
 
 from __future__ import annotations
@@ -57,11 +55,11 @@ def plan_hops(total: int, threads: int,
     hop moves ``threads * width`` consecutive elements, and ``tail`` is what is
     left over -- fewer than ``threads`` elements once ``widths`` ends in 1.
 
-    Three properties the old arithmetic did not have, and which
-    :mod:`tests.test_vector_hops` states as tests rather than as prose:
+    Three properties, which :mod:`tests.test_vector_hops` states as tests
+    rather than as prose:
 
     * no hop runs past ``total`` -- ``(total - pos) // step`` counts *whole*
-      hops, where ``range(pos, total, step)`` counted started ones;
+      hops, where ``range(pos, total, step)`` would count started ones;
     * no element is covered twice -- ``pos`` advances by the hops actually
       emitted, not by a quantity recomputed from the granularity;
     * every hop offset is a multiple of its own width, which is what makes
@@ -157,16 +155,15 @@ def _round_up_pow2(n: int, cap: int) -> int:
 #: The widest lead vector that has been shown to compute the right numbers.
 #:
 #: 4, which is also what `lead_width_cap` permits for an FP32 base of 16-byte
-#: alignment, so the two agree today and the pair is kept because they are
-#: still different questions: one is about the address and one is about us.
+#: alignment, so the two agree today, and the pair is kept because they are
+#: different questions: one is about the address and one is about us.
 #:
-#: It was 2, and what held it there was the slot-count formula.  The register
-#: image sized a lane's share of a distributed dimension as `ceil(u/T)`, its
-#: *slot* count, where a `w`-wide read needs its *float* count -- and the rule
-#: was stated three times, in the addressing and in both allocation sites, so
-#: the width reached none of them.  At u=12, T=4, w=4 that is 3 against 4, and
-#: consecutive non-lead indices addressed overlapping windows.  One statement
-#: of the rule now, in `symbol.slots_for`.
+#: What it rests on is the slot-count formula, stated once, in
+#: `symbol.slots_for`, for the addressing and both allocation sites: a
+#: `w`-wide read needs a lane's *float* count of a distributed dimension, not
+#: its *slot* count `ceil(u/T)`.  At u=12, T=4, w=4 that is 4 against 3, and
+#: sized by slots, consecutive non-lead indices would address overlapping
+#: windows.
 #:
 #: 114 shapes per width across FP32 and FP64, both alignments, odd and even
 #: extents: widths 2 and 4 agree with the scalar kernel everywhere.
@@ -176,10 +173,11 @@ VALIDATED_LEAD_WIDTH = 4
 def lead_width_cap(elem_bytes: int, align_bytes: int) -> int:
     """The widest lead vector worth taking, from what the address proves.
 
-    Was the constant 2, and the constant hid a question rather than answering
-    it: `widths_for` offers 4 for an FP32 base of 16-byte alignment and 2 for
-    an FP64 one, so `float4` was unreachable and `double2` reachable only
-    because 2 happened to be both the cap and the ceiling.
+    Asked of the address rather than fixed: `widths_for` offers 4 for an FP32
+    base of 16-byte alignment and 2 for an FP64 one, and a constant cap of 2
+    would hide that question rather than answer it -- `float4` unreachable,
+    and `double2` reachable only because 2 happens to be both the cap and the
+    ceiling.
 
     The *FMA* width is deliberately not part of this, and that is the part
     worth stating because the intuition runs the other way.  A vector wider
@@ -223,13 +221,13 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
     the extent -- so the two are one decision.
 
     At width `w` the lane count needed is `ceil(extent / w)`, rounded up to a
-    power of two as before.  A 32-element dimension becomes 16 lanes each
+    power of two as at width 1.  A 32-element dimension becomes 16 lanes each
     holding a `float2` instead of 32 lanes each holding a `float`: same
     elements, same total registers for the operator, half the load and address
     instructions, and one packed FMA where the target has one.
 
     **Total** registers are what is neutral here, not per-lane registers.  A
-    lane now carries twice as many, and there are half as many lanes.  Per
+    lane then carries twice as many, and there are half as many lanes.  Per
     block that cancels; against a per-*thread* register cap it does not, which
     is the constraint that already binds in FP64 at order 6.  So this is safe
     where register pressure is not already the limit and needs a measurement
@@ -261,11 +259,11 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
     is a wash and the whole gain of the width is in the loads.  `R == 2` is
     where the packed form starts paying for its own splat.
 
-    Total registers stay neutral as before, and per-*thread* registers go up
-    by `R` on top of `w`.  That is the number to watch: at order 6 in FP64 it
-    is already the binding constraint, so the default stays at 1.
+    Total registers stay neutral as with the width, and per-*thread* registers
+    go up by `R` on top of `w`.  That is the number to watch: at order 6 in
+    FP64 it is already the binding constraint, so the default stays at 1.
 
-    Returns ``(threads, width)``; ``width == 1`` reproduces today's choice.
+    Returns ``(threads, width)``; ``width == 1`` is the scalar choice.
     """
     if extent < 1:
         return 1, 1
@@ -295,18 +293,13 @@ def lead_pair(extent: int, elem_bytes: int, align_bytes: int,
 
     `lead_threads_and_width` returns a pair because the two are one choice --
     at width `w` the lane count needed is `ceil(extent / w)`, so picking
-    either without the other is picking neither.  Two callers then took one
-    component each, from their own call: `get_num_threads` read the lane count
-    and `lead_width` the width, and nothing made the two calls pass the same
-    arguments.
-
-    They did not.  One passed the cap and one took the default, and for a
-    16-element FP32 extent at 16-byte alignment that is `(8, 2)` against
-    `(4, 4)` -- so the nest ran at 8 lanes and width 4, which is 32 slots for
-    16 elements and a register image blocked for a pair nobody had computed.
-    120 of `aligned_operands`' 128 destination cells came out wrong, and the
-    loop nest was not at fault: it covered its range exactly once, as
-    `test_lead_coverage` says it does at every width.
+    either without the other is picking neither.  Two callers each taking one
+    component from a call of its own -- `get_num_threads` the lane count and
+    `lead_width` the width -- would have nothing making the two calls pass the
+    same arguments.  One passing the cap and one taking the default gives, for
+    a 16-element FP32 extent at 16-byte alignment, `(8, 2)` against `(4, 4)`
+    -- a nest at 8 lanes and width 4, which is 32 slots for 16 elements and a
+    register image blocked for a pair nobody computed.
 
     So the cap is applied here rather than passed in, and the pair is taken
     whole.  `lead_threads_and_width` keeps its `cap` argument, which is what
@@ -325,9 +318,10 @@ def lead_pair(extent: int, elem_bytes: int, align_bytes: int,
 def lead_vectorize_supported(context) -> bool:
     """Whether this backend can spell what the widened compute path emits.
 
-    CUDA and HIP can: `VectorT`/`VectorRelaxedT` are GNU vector types, so
-    they carry arithmetic and the naturally-aligned and element-aligned
-    spellings convert to each other.
+    CUDA and HIP can: `VectorT`/`VectorRelaxedT` carry arithmetic, and the
+    naturally-aligned and element-aligned spellings convert to each other --
+    on HIP as GNU vector types, on CUDA through the operators and conversion
+    `cuda.h` gives its `VectorStruct`.
 
     SYCL cannot, and for two separate reasons.  `sycl::vec` has no
     element-aligned twin, so a relaxed cast has nowhere to go; and it does

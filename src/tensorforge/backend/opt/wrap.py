@@ -23,11 +23,10 @@ Everything below the last instruction that touches the buffer is crossed by
 construction, so the tail of the body is a legal place, and it is the one that
 keeps the transfer outside the per-element flag guard: a masked element has to
 go on prefetching its successor, which a mid-body placement under the guard
-cannot.  The same placement for register and shared destinations.  Registers
-used to be placed by *slot* -- ``slots.py`` still has the accounting of what a
-distance costs -- which put the transfer mid-body, under the guard, and gave a
-body with a single compute nothing to move.  Placing by dependence has neither
-problem.
+cannot.  The same placement for register and shared destinations.  Placing a
+register by *slot* -- ``slots.py`` has the accounting of what a distance costs
+-- would put the transfer mid-body, under the guard, and give a body with a
+single compute nothing to move.  Placing by dependence has neither problem.
 
 Which transfers go is ``move_distance``, the number ``MoveLoads`` travels by.
 In the loop unrolled once, the ``j``-th transfer of an iteration moves up past
@@ -142,9 +141,9 @@ class WrapLoads(AbstractTransformer):
             # tokens.  A wrapped transfer would be issued for every element
             # but the first, and the first iteration would read a buffer
             # nothing filled -- no crash, wrong numbers (`local_flux` at 16
-            # lanes on the MMA path: 7 % off).  Nor is `index_name(1)` a row's
-            # next element there: the group's element is `active ? row :
-            # group`, and an inactive row's successor would be its group's.
+            # lanes on the MMA path).  Nor is `index_name(1)` a row's next
+            # element there: the group's element is `active ? row : group`,
+            # and an inactive row's successor would be its group's.
             # Refused wherever the loop may be grouped: whether a block-wide
             # group is depends on the block's multiplication count, which is
             # settled after the passes run.
@@ -239,9 +238,9 @@ class WrapLoads(AbstractTransformer):
         # through among its `defs()`, and a store ahead of the transfer in its
         # own iteration is a write the transfer has to see: `d += ...; out +=
         # d * c` reads `d` back after writing it.  Moved to the previous
-        # iteration's tail, the transfer read element k + 1 before k + 1 wrote
-        # it -- `sliced_write_view`, `accumulate_then_read` and two more, all
-        # computing from the stale value.  A batch-invariant source is one
+        # iteration's tail, the transfer would read element k + 1 before k + 1
+        # writes it, and `sliced_write_view` or `accumulate_then_read` would
+        # compute from the stale value.  A batch-invariant source is one
         # address for every element, so there any store in the body counts.
         src = load._src
         batch_invariant = getattr(src.obj, 'addressing', None) is Addressing.NONE
@@ -317,8 +316,8 @@ class WrapLoads(AbstractTransformer):
             # the window, in the loop's body, where `_declare_windows_early`
             # puts it -- and the peel, emitted in that same body right after,
             # writes through a window the body knows.  Making the peel the
-            # first user instead moved the declaration into a body of its own,
-            # and both transfers fell back to text.
+            # first user instead would move the declaration into a body of its
+            # own, and both transfers would fall back to text.
         else:
             peeled_load = GlbToRegLoader(context=self._context,
                                          src=peeled,
@@ -346,8 +345,9 @@ class WrapLoads(AbstractTransformer):
             # it fetches, and that pointer is promised only for an element the
             # caller did not mask.  `BatchLoop` puts it under that element's
             # flag -- the transfer, not the address, since reading the array
-            # entry is in range.  Refusing instead left `local_flux`, whose
-            # operands all come out of pointer arrays, entirely unwrapped.
+            # entry is in range.  Refusing instead would leave `local_flux`,
+            # whose operands all come out of pointer arrays, entirely
+            # unwrapped.
             transfer._guard_by_own_flag = True
             peeled_load._guard_by_own_flag = True
 
@@ -370,9 +370,9 @@ class WrapLoads(AbstractTransformer):
 
         # The binding may now feed nothing -- but a store names the pointer it
         # writes through among its `defs()`, not its `uses()`.  Asking `uses()`
-        # alone took `glb_m0` away from under the store to `C` once the load of
-        # `C` for an accumulation had been moved to `wrap_glb_m0`, and the
-        # kernel did not compile.
+        # alone would take `glb_m0` away from under the store to `C` once the
+        # load of `C` for an accumulation is moved to `wrap_glb_m0`, and the
+        # kernel would not compile.
         if not any(any(x is old_src for x in tuple(i.uses()) + tuple(i.defs()))
                    for i in body):
             body.remove(plan.producer)
@@ -395,9 +395,9 @@ class WrapLoads(AbstractTransformer):
         once per source symbol.  A second transfer out of the same pointer, `C`
         read into registers and into shared memory, say, reuses them; the
         instructions come back as `None` so it does not bind them again.
-        Binding them per transfer declared `peel_glb_m0` twice in one scope,
-        which does not compile -- and each is a 64-bit pointer held across the
-        loop, so a second copy is two registers for nothing.
+        Binding them per transfer would declare `peel_glb_m0` twice in one
+        scope, which does not compile -- and each is a 64-bit pointer held
+        across the loop, so a second copy is two registers for nothing.
 
         Names stay unique even so: two distinct symbols may carry the same
         name, and then the second pair gets a suffix.

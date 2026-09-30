@@ -170,8 +170,7 @@ def _canon_expr(expr):
     """Minimal-paren form with the identity terms folded.
 
     One fold pass suffices: `NodeTransformer` rewrites bottom-up, so a nested
-    `0 + (0 + x)` collapses on the way out.  Measured over the corpus, a second
-    pass changes nothing in 60848 accesses.
+    `0 + (0 + x)` collapses on the way out.
     """
     text = _SUFFIX.sub(r'\1', expr)
     for c, py in _INTRINSIC:
@@ -220,7 +219,7 @@ def accesses(src):
 
 #: The kernel section of a snapshot.  A snapshot also records the header and
 #: the launcher, whose `block[3]` and `grid[3]` read like subscripts and are
-#: no accesses of the kernel -- compared whole, every target differed.
+#: no accesses of the kernel -- compared whole, every target would differ.
 _KERNEL = re.compile(r'^// === kernel ===\n(.*?)(?=^// === |\Z)', re.M | re.S)
 
 
@@ -234,7 +233,7 @@ def _at_rev(rev, path):
 
 
 def _case_paths():
-    """Recursive, matching `conftest.py`: the subdirectories hold 24 cases."""
+    """Recursive, matching `conftest.py`: the subdirectories hold cases too."""
     return [p for p in sorted(Path('tests/cases').rglob('*.py'))
             if '__pycache__' not in p.parts]
 

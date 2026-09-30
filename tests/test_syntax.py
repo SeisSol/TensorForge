@@ -3,28 +3,25 @@
 # SPDX-License-Identifier: MIT
 """Does the generated code parse, and do its calls resolve?
 
-Nothing in this repository compiled, and that turned out to be a hole with a
-shape.  A padded MFMA tail block handed ``0.0f`` to ``transpose4x4b32``'s third
-and fourth parameters, which are ``T &``.  Ill-formed C++ --- and the snapshot
-corpus, the symbolic equivalence checker and the PIR verifier all passed it,
-because none of them models overload resolution.  It surfaced by accident,
-while chasing an unrelated difference, and the fix for it was a side effect of
-something else.
+Without a compile, well-formedness is a hole with a shape.  A padded MFMA
+tail block that handed ``0.0f`` to ``transpose4x4b32``'s third and fourth
+parameters, which are ``T &``, would be ill-formed C++ --- and the snapshot
+corpus, the symbolic equivalence checker and the PIR verifier would all pass
+it, because none of them models overload resolution.
 
 A full device compile needs a GPU toolchain.  Deciding whether the *source is
 well-formed* does not: the intrinsics get declaration-only stubs in
 ``tests/shim/tensorforge_host.h``, and ``g++ -fsyntax-only`` answers for every
 line the generator emitted.  It is not a statement about semantics --- the
 stubs have no bodies --- but well-formedness is exactly the class of defect
-that escaped everything else, and it costs about four seconds for both
+that everything else lets through, and it costs about four seconds for both
 corpora.
 
-This replaces the earlier ``test_signatures.py``, which lifted
-reference-taking calls out with a regex and checked those alone.  That check
-bailed out (silently, as a skip) on 17 of 46 HIP snapshots whenever an operand
-did not match its declaration pattern, and it saw nothing outside the argument
-lists.  Two overlapping checks where one is strictly weaker is the arrangement
-this codebase keeps finding at the bottom of its bugs, so there is now one.
+The whole source is compiled, not only the reference-taking calls.  A regex
+that lifts those out skips, silently, any snapshot with an operand that does
+not match its declaration pattern, and sees nothing outside the argument
+lists -- and two overlapping checks where one is strictly weaker is an
+arrangement bugs hide in, so there is one.
 
 Skipped when no host compiler is present, rather than silently passing.
 """
@@ -52,43 +49,33 @@ def _snapshots():
 
 #: Backends whose generated source is known not to compile, with the reason.
 #:
-#: Empty, and the mechanism stays because emptying it was the point.  It held
-#: `oneapi` while `SyclLexic.simd_mode` selected the branches in `symbol.py`
-#: that did not emit a kernel so much as one with the data flow removed --
-#: `Symbol.load` returned Python `None` for the structured path and the caller
-#: interpolated it, so the source said `None = r0[i];`.  Those branches are
-#: gone; `oneapi` now gets the same SPMD lowering as every other backend and
-#: compiles.
-#:
-#: `strict=True` is what made the removal happen rather than be remembered:
-#: the entry turned from xfail to XPASS in the same run that fixed it, and the
-#: suite stayed red until it was deleted.  A non-strict list is where a fixed
-#: defect goes to be forgotten.
+#: Empty.  The mechanism is here regardless, because `strict=True` keeps an
+#: entry from outliving its defect: the entry turns from xfail to XPASS in the
+#: same run that fixes it, and the suite stays red until it is deleted.  A
+#: non-strict list is where a fixed defect goes to be forgotten.
 KNOWN_BAD_BACKENDS: dict = {}
 
 
 #: Generated source known not to compile, with the reason.
 #:
-#: These six reach a *predicated store* that could not be narrowed away.
+#: The shape that would land here is a *predicated store* that narrowing
+#: cannot remove.
 #:
 #: `_folds_predicate` refuses to fold a predicate into a select when the
 #: statement writes -- rightly, or the write would happen when it must not --
 #: so the base emitter wraps it in `if (mask)`, and a `simd_mask` is not a
 #: branch condition.
 #:
-#: Twelve before `LeadLoop._narrow`: most lead guards are a ragged end, and an
+#: Most lead guards never get that far: they are a ragged end, and an
 #: explicitly vectorized kernel answers those with a shorter vector rather
-#: than a mask.  What is left needs a base offset (`lane >= lo`) or sits in a
-#: later slot, and both change the address rather than just the width -- see
-#: `_narrow` for why guessing there would put a wrong address behind a
-#: correct-looking type.
+#: than a mask (`LeadLoop._narrow`).
 #:
 #: Not a scatter, incidentally.  Measured over the corpus, no lead guard has
 #: both bounds, so no interior window arises and per-element store masking is
 #: never the thing that is missing.
 #:
-#: `strict=True`, so this shrinks deliberately: when the remaining cases land
-#: they turn XPASS and the suite goes red until the entries go.
+#: `strict=True`, so an entry goes as soon as its case compiles: it turns
+#: XPASS and the suite goes red until the entry is deleted.
 def _known_bad(path) -> str:
     return syntax.known_bad(path)
 
@@ -190,8 +177,8 @@ def _signatures(text: str, names) -> dict:
 def test_shim_matches_the_device_headers():
     """The shim declares what the runtime declares --- no more, no less.
 
-    Not tidiness.  ``test_amd_caps.py`` already records the failure mode: a
-    test that shares an assumption with the code it checks cannot report the
+    Not tidiness.  ``test_amd_caps.py`` records the failure mode: a test
+    that shares an assumption with the code it checks cannot report the
     assumption being wrong.  A shim that is *more permissive* than the header
     is that failure mode in this file --- it would accept a call the runtime
     rejects, which is precisely the situation this whole check exists to
@@ -247,13 +234,13 @@ def test_the_check_accepts_well_formed_source():
 
 
 @pytest.mark.parametrize("name,mutation", [
-    # the defect that motivated all of this
+    # the defect shape the module docstring describes
     ("a literal in a reference position",
      lambda s: s.replace("transpose4x4b32(a, b, c, d,",
                          "transpose4x4b32(a, b, 0.0f, d,")),
     ("an argument dropped from a transpose",
      lambda s: s.replace(", x, y, z, w);", ", x, y, z);")),
-    # things the old extracted-call check could not see
+    # things a check of the extracted calls alone would not see
     ("an undeclared operand",
      lambda s: s.replace("tensorforge::fmacdpp16<3>(a, x, y);",
                          "tensorforge::fmacdpp16<3>(a, x, undeclared);")),
@@ -301,9 +288,7 @@ def test_generated_kernel_survives_the_device_front_end(dev_case, backend):
     The check above asks whether the emitted source is well-formed C++.  This
     one asks whether the *device* compiler takes it, and the two answers differ
     for a class the corpus cannot otherwise see: a GNU `vector_size` typedef
-    passes g++ and is rejected by nvcc in device code.  The NVIDIA matrix path
-    emits exactly that, produces 101 nvcc errors on a kernel g++ passes
-    silently, and sat behind `nvidia.ENABLED = False` where nothing looked.
+    passes g++ and is rejected by nvcc in device code.
 
     Not a substitute for the host check and not a superset of it either: this
     one compiles only the device half, so a defect in host code the front end

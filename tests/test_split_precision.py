@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Split-precision arithmetic, asked of one place instead of two.
+"""Split-precision arithmetic, asked of one place rather than one per target.
 
 The term count and the product order are an error analysis, and an error
-analysis written out per target is one that nothing compares.  The AMD
-catalog derived both from the significand widths and no emitter read it; the
-DPAS path wrote its three products out as a tuple and named the product count
-`TF32_TERMS`, which is not the term count.  These pin what the two agree on
-and what the move changed.
+analysis written out per target is one that nothing compares.  `split`
+derives both from the significand widths, and the DPAS path reads them there;
+its `TF32_TERMS` is the product count, which is not the term count.  These
+pin what the formula says and what the DPAS path takes from it.
 """
 
 from __future__ import annotations
@@ -66,12 +65,11 @@ def test_dropping_below_keep_removes_the_smallest():
     assert all(i + j < 2 for i, j in reduced)
 
 
-# -- what the DPAS path now reads ------------------------------------------ #
+# -- what the DPAS path reads ---------------------------------------------- #
 
 def test_the_dpas_products_are_the_same_set_as_before():
-    """The move reorders and nothing else.  Written out, the path accumulated
-    `hi*hi`, `hi*lo` and `lo*hi`; the formula returns those three, largest
-    last instead of first."""
+    """The same set a split written out by hand accumulates -- `hi*hi`,
+    `hi*lo` and `lo*hi` -- in the formula's order, largest last."""
     assert set(split.products(intel.TF32_SPLIT_TERMS)) == {(0, 0), (0, 1),
                                                            (1, 0)}
 

@@ -4,20 +4,16 @@
 """``B[i, j] = A[i, j] ** 3`` — single-(constant-folded)-op ElementwiseDescr.
 
 This case exercises a binary elementwise op with a scalar operand:
-``ew.pow(b, a, 3.0)``. The exponent 3.0 matches none of the folding
-special cases (2, ±0.5, ±1/3, ±1), so it does lower to a ``POW``
-only short-circuits exponents ``-1, 0.5, -0.5, 1, 2, 1/3, -1/3`` —
-exponent 3 falls through to ``LexicOpNode([x, 3], Operation.POW)`` and
-will hit ``powf`` in CUDA.
+``ew.pow(b, a, 3.0)``.  ``ew.pow`` folds the exponents 2, 1, -1, 0.5,
+-0.5, 1/3 and -1/3 into cheaper operations; 3.0 matches none of them,
+so it lowers to ``Operation.POW`` and reaches ``powf`` in CUDA.
 
 Two reasons to include it:
 
-* it is genuinely the only nonlinear op left (after sqrt/cbrt/rcp
-  swallowed the obvious short-circuits);
-* it provides a stable fixed point to detect regressions in the
-  fold-table — if someone adds a fold for ``y == 3``, this case's
-  generated kernel will change, which a golden-output check would
-  catch (not in scope for the MVP, but the case is the prerequisite).
+* it is the one case whose nonlinear op is the general power, the
+  obvious exponents being folded into sqrt/cbrt/rcp and friends;
+* it pins the fold table: a fold for ``y == 3`` would change this case's
+  generated kernel, and its snapshot would show it.
 
 Domain: signed; ``a**3`` is well-defined everywhere and bounded for
 ``standard_normal``-magnitude inputs.

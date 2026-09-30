@@ -12,13 +12,13 @@ accumulated range does not reach.  GEMM libraries call it the epilogue.
 A contraction whose every operand is a scalar -- a broadcast, `t[i] = s[]` --
 has moved all of them here and accumulated nothing.  What it would have
 accumulated is the empty product, the product's neutral element, and it is the
-same at every point of the box; reading the accumulator instead read the sum's
-neutral element, and every broadcast came out zero.
+same at every point of the box; reading the accumulator instead would read the
+sum's neutral element, and every broadcast would come out zero.
 
-It was the tail of `MultilinearInstruction` (`_apply_linear`), which made the
-accumulator and the destination two views inside one instruction.  Apart, the
-contraction writes exactly what it accumulates, and this is the one place the
-two boxes meet.
+An instruction of its own, not the tail of `MultilinearInstruction`: there the
+accumulator and the destination would be two views inside one instruction.
+Apart, the contraction writes exactly what it accumulates, and this is the one
+place the two boxes meet.
 """
 
 from typing import List, Optional
@@ -157,10 +157,10 @@ class MultilinearEpilogue(ComputeInstruction):
             bounds need not be: theta is chosen mod num_threads for lane
             alignment, but here `block` is this loop's own per-dimension stride
             factor, which can differ.  Comparing a block-start against raw,
-            non-block-aligned bounds silently answered `False` for a lead
-            dimension whose coverage was in fact exact, which is exactly the
-            static case above already resolves --- so this fallback is only
-            reached for the genuinely partial-overlap case it was written for.
+            non-block-aligned bounds would silently answer `False` for a lead
+            dimension whose coverage is in fact exact, which is exactly the
+            case the static check above resolves --- so this fallback is only
+            reached for the genuinely partial-overlap case it is meant for.
             """
             lo_i = self._acc.data_view.get_bbox().lower()[i]
             hi_i = self._acc.data_view.get_bbox().upper()[i]
@@ -179,9 +179,10 @@ class MultilinearEpilogue(ComputeInstruction):
             # The body's own width, read off the indices exactly as the
             # contraction's nest reads it.  The loads already take theirs from
             # there and come back wide; typing the arithmetic with the
-            # instruction's scalar type instead made the sum a scalar, and the
-            # store wrote a vector into one register slot -- on CUDA an error,
-            # on HIP the same, since a GNU vector does not narrow either.
+            # instruction's scalar type instead would make the sum a scalar,
+            # and the store would write a vector into one register slot -- on
+            # CUDA an error, on HIP the same, since a GNU vector does not
+            # narrow either.
             width = lead_width_of(
                 [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)])
             btype = (ftype if width == 1

@@ -3,13 +3,10 @@
 # SPDX-License-Identifier: MIT
 """``C = alpha * A @ B`` — exercises the synthetic-scalar operand path.
 
-This is the regression test for the symbol/datatype fix:
-
-* Before fix: ``Symbol.get_fptype()`` raised ``assert False`` because
-  ``GemmDescr`` constructed the synthetic ``alpha`` tensor without a
-  datatype.
-* After fix: the launcher gains a ``float`` parameter for alpha, the
-  driver bakes the constant in, and the kernel multiplies by it.
+``GemmDescr`` carries ``alpha`` as a synthetic scalar tensor, which needs
+the operands' datatype like any other operand: the launcher gains a
+``float`` parameter for alpha, the driver bakes the constant in, and the
+kernel multiplies by it.
 """
 
 from tensorforge.common.basic_types import Addressing, Datatype

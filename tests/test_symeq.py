@@ -10,8 +10,8 @@ changed how the arithmetic is written down, not what it computes" --- and a
 comparison that always returns "equivalent" would back that claim equally
 well while being worthless.
 
-So these tests perturb a kernel in the two ways the AMD conversion could
-plausibly have gone wrong and require the checker to notice:
+So these tests perturb a kernel in two ways a change to the AMD lowering
+could plausibly go wrong and require the checker to notice:
 
 * a link dropped from an MFMA accumulator chain --- what a mis-set `movable`
   or an over-eager DCE would produce;
@@ -110,10 +110,11 @@ def test_renaming_temporaries_is_not_a_difference(name, perturbed):
 def test_accumulator_chain_is_visible_to_the_checker():
     """Guards the checker's own blind spot.
 
-    The pre-SSA kernels update the accumulator with a bare `v15 = mfma(...)`.
-    A parser that recognizes declarations and array stores but not scalar
-    reassignment silently drops the entire chain --- and then every output
-    slot compares equal as an untouched zero, which reads as success.
+    A kernel not in SSA form updates the accumulator with a bare
+    `v15 = mfma(...)`.  A parser that recognizes declarations and array
+    stores but not scalar reassignment silently drops the entire chain ---
+    and then every output slot compares equal as an untouched zero, which
+    reads as success.
     """
     p = _snapshot(CASES[0])
     env = interpret(p)

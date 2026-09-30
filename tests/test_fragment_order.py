@@ -5,8 +5,9 @@
 
 `nvidia.fragment_order` says where each element of a prepared `A` operand
 lives.  The claim it makes is not "some permutation" but a specific one: the
-order the emitter's *own* shared tile put the elements in, so that a read that
-used to hit `Ashm[lane + threads * f]` hits memory at the same offset instead.
+order the emitter's *own* shared tile puts the elements in, so that a read that
+would hit `Ashm[lane + threads * f]` when staged hits memory at the same offset
+instead.
 
 That claim is exactly checkable and nothing else checks it.  The emitter and
 the layout function are two derivations of one layout, and two derivations are
@@ -100,9 +101,9 @@ def test_the_d_layout_factors_into_bits(atom):
 @pytest.mark.parametrize('atom', _atoms(),
                          ids=lambda a: f'm{a.m}n{a.n}k{a.k}_{a.d.name}')
 def test_the_offsets_are_the_ones_the_closed_form_gave(atom):
-    """`accumulator_slots` reads the bits back now.  The offsets it used to
-    compute are what the epilogue writes at, so they have to be the same
-    tuple in the same order or every accumulator lands somewhere else."""
+    """`accumulator_slots` reads the bits back, and the closed form below is
+    what the epilogue writes at, so the two have to be the same tuple in the
+    same order or every accumulator lands somewhere else."""
     closed = tuple((2 * g + e, e + g * MTILE * atom.n)
                    for g in range(atom.m // MTILE)
                    for e in range(2))
@@ -445,10 +446,10 @@ def test_a_merged_run_stores_every_member_in_the_stand_ins_order(monkeypatch,
                                                                  parts):
     """Faces 1-3 of `local_flux` merge into one body that reads whichever
     member the counter selects, in the stand-in's order and at its part
-    count.  Only the stand-in used to be marked: the peeled first face was
-    stored in fragment order and the other three were not, which moved the
-    checksum by 0.8 % -- and by 38 % with the split on top, where the
-    stand-in also read one scalar where two were stored."""
+    count.  Marking only the stand-in would leave faces 1-3 in their plain
+    order while the body reads them in fragment order, which moves the
+    checksum -- and with the split on top the stand-in would also read one
+    scalar where two are stored."""
     src, operands = _merged_local_flux(monkeypatch, parts)
     members = [o for o in operands if not getattr(o, 'is_variant', False)]
     stand_ins = [o for o in operands if getattr(o, 'is_variant', False)]

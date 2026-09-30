@@ -193,10 +193,10 @@ def from_cases(pattern: str = '*', root: Optional[Path] = None
     """Workloads from the correctness corpus, matched on `NAME`.
 
     The corpus is the right source of *shapes* and the wrong source of *load*:
-    every case runs at `BATCH` two to four, and the launcher sizes its grid as
-    `min(occupancy_gridsize, numElements0)`, so at those batches a run measures
-    launch overhead and nothing else.  The case's own `BATCH` is therefore
-    dropped here rather than carried; the suite says what to run at.
+    every case runs at a `BATCH` between two and 96, and the launcher sizes its
+    grid as `min(occupancy_gridsize, numElements0)`, so at those batches a run
+    measures launch overhead and nothing else.  The case's own `BATCH` is
+    therefore dropped here rather than carried; the suite says what to run at.
 
     A case whose descriptors refuse to construct is skipped, not raised: a
     benchmark that stops on one measures nothing rather than most things.

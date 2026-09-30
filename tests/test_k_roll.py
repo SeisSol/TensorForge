@@ -6,7 +6,7 @@
 Every loop of a multilinear product is unrolled in the generator: sparsity
 and the register broadcasts need their indices at compile time.  A dense
 reduction over operands in memory does not, and on a large kernel the fully
-unrolled body is what no longer fits the instruction cache.  These tests hold
+unrolled body is what does not fit the instruction cache.  These tests hold
 the three things the option promises: nothing changes without it, the count
 reaches the loop with it, and a reduction it cannot roll stays as it was --
 and the cap that rolls a long reduction unasked (`Options.k_unroll_max`).

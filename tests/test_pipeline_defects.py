@@ -1,18 +1,16 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Two defects in `backend.opt.pipeline`, pinned rather than described.
+"""Two properties of `backend.opt.pipeline`, pinned rather than described.
 
-Both are dormant: `enable_pipeline` and `enable_multibuffer` default to False,
-so nothing in the corpus generates them today.  They matter because the
-wrap-around schedule builds on exactly this machinery -- the peeled prologue,
-the rolling pointer, the loop's lookahead bindings -- and inheriting a
-prefetch that is skipped for masked elements, or a stage index that does not
-alternate, would surface as wrong values in the new pass rather than the old.
-
-Both are marked `xfail(strict=True)`, so the day the fix lands these turn into
-XPASS failures asking for the marker to be removed.  That is the point: the
-tests should stop being expected failures at the same commit that fixes them.
+A rotated buffer's stage index is not the element id, and the rolling pointer
+does not advance under the per-element guard.  Both paths are dormant:
+`enable_pipeline` and `enable_multibuffer` default to False, so nothing in the
+corpus generates them today.  They matter because the wrap-around schedule
+builds on exactly this machinery -- the peeled prologue, the rolling pointer,
+the loop's lookahead bindings -- and inheriting a prefetch that is skipped for
+masked elements, or a stage index that does not alternate, would surface as
+wrong values in the wrap-around schedule rather than here.
 """
 
 from __future__ import annotations

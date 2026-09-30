@@ -192,7 +192,7 @@ def test_the_compiler_is_the_callers_then_the_environments_then_the_paths(monkey
 
 def test_rolling_a_reduction_does_not_change_its_work():
     """A rolled loop is written once and runs its trip count; counted once, a
-    roll by 28 made `local_flux` look like a 28th of its arithmetic."""
+    roll by 28 would make `local_flux` look like a 28th of its arithmetic."""
     mod = _case("local_flux.py")
 
     def work(**opts):

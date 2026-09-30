@@ -4,13 +4,13 @@
 """A lead-vectorized body, spelled in each target's vector types.
 
 With a lead width above one a lane holds adjacent rows, and the multilinear
-body loads, multiplies and stores them as one vector.  Two places did not
-follow: the pass that folds an accumulator into a destination already holding
-values typed its sum as a scalar, so the store wrote a whole vector into one
-register slot; and the fused multiply-add had only the infix spelling, which
-CUDA's vector structs contract into scalar FMAs where sm_100 has a paired one.
-A small version of `local_flux` -- two faces, the second adding to the first
--- reaches both.
+body loads, multiplies and stores them as one vector.  Two places have to
+follow.  The pass that folds an accumulator into a destination already holding
+values types its sum as a vector; typed as a scalar, the store would write a
+whole vector into one register slot.  And the fused multiply-add needs more
+than the infix spelling, which CUDA's vector structs contract into scalar FMAs
+where sm_100 has a paired one.  A small version of `local_flux` -- two faces,
+the second adding to the first -- reaches both.
 """
 
 from __future__ import annotations

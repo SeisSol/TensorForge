@@ -11,9 +11,10 @@
 The assignment clears what it promised and did not compute (`StoreRegToShr`,
 `clear_within`), which makes it a whole write of the buffer, so the first slice
 is a store whose value nothing reads.  It still writes its bytes: recorded only
-from the live-out, its buffer was live nowhere at that store, the allocator laid
-`tmp` over the staged `C` -- read by the very next multiplication -- and the
-dead slice overwrote it (`LivenessAnalysis._forward`).
+from the live-out, its buffer would be live nowhere at that store, the
+allocator could lay `tmp` over the staged `C` -- read by the very next
+multiplication -- and the dead slice would overwrite it
+(`LivenessAnalysis._forward`).
 """
 
 import numpy as np

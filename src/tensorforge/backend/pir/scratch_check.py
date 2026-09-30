@@ -5,9 +5,9 @@
 
 `IRBuilder.scratch_scope` states a lifetime by nesting, and the suballocator
 turns that into offsets --- so two buffers in sibling scopes share space.  That
-is a claim, and until now nothing checked it.
+is a claim, and this module checks it.
 
-The obvious ambition was to derive the packing instead, from a liveness
+The obvious alternative is to derive the packing instead, from a liveness
 analysis over the body, and retire the declaration.  That does not work here,
 and the reason is worth writing down rather than rediscovering.
 
@@ -99,9 +99,8 @@ def windows(body: Sequence[Stmt]) -> Tuple[Dict[int, Window], List[int]]:
     against the numeric ones.  Ordering windows by their start is how the
     check proves two of them do not overlap, so a symbolic start is not a
     window this check can reason about.  Reporting it is the point: the
-    alternative was comparing an int against a string, which raised where it
-    should have declined, and the alternative to *that* was excluding rotation
-    from the structured path entirely.
+    alternatives are comparing an int against a string, which raises where it
+    should decline, or excluding rotation from the structured path entirely.
     """
     out: Dict[int, Window] = {}
     unplaced: List[int] = []

@@ -10,7 +10,7 @@ body contains, so no pass can move anything across the back edge.
 
 Before restructuring the generator around that, the cheap half is worth
 checking on its own: does a PIR loop *emit* the header that is there today,
-character for character?  Two things had to give.  The induction variable
+character for character?  Two things have to give.  The induction variable
 carries the name `batchId0` that the lookahead bindings, the flag guard and
 every `access_address` in the body spell out, so the IR cannot pick one
 unrelated to it -- it names the value from that hint and its own number,

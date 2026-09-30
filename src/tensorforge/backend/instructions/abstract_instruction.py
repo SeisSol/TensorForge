@@ -58,19 +58,18 @@ def _explicit_simd(context) -> bool:
 def _check_register_budget(body, simd: bool, context, where: str) -> None:
   """Warn when a body asks for more register file than a thread has.
 
-  Nothing enforced this before because nothing came close: under SPMD a value
-  is one register per thread and a register-resident tile is split across the
-  threads that hold it.  Under an explicit vector the work-item holds the
-  *whole* tile -- `align(lead, threads) x nonlead` elements -- and 11 of the
-  corpus's 46 ESIMD kernels are over the 8 kB a PVC thread gets, the worst by
-  a factor of five.
+  Only an explicit vector comes close: under SPMD a value is one register per
+  thread and a register-resident tile is split across the threads that hold
+  it.  Under an explicit vector the work-item holds the *whole* tile --
+  `align(lead, threads) x nonlead` elements -- and 11 of the corpus's 46 ESIMD
+  kernels are over the 8 kB a PVC thread gets, the worst by a factor of five.
 
   A warning and not an error, deliberately.  Spilling to scratch is slow and
   correct, the compiler already does it silently, and refusing to generate
   would take a working kernel away over a budget this generator cannot
   enforce anyway -- `[[intel::grf_size(256)]]` doubles it at the cost of
   halving the threads in flight, which is a decision and not a fallback.  What
-  was missing is that nobody was told.
+  the warning adds is that somebody is told.
 
   Narrowing the vector barely helps, and it is worth saying why: `lanes *
   slots` is the lead dimension rounded up to a multiple of the thread count,
@@ -162,12 +161,12 @@ class AbstractInstruction(ABC):
   # ----------------------------------------------------------------- #
   # Data-flow interface
   #
-  # Until now every pass had to discriminate on ``isinstance`` against a
-  # concrete class and then reach for whichever of ``get_dest`` /
-  # ``get_src`` / ``get_operands`` / ``._dest`` / ``._src`` that class
-  # happened to expose.  These three methods are the single interface;
-  # the defaults below adapt the existing accessors so that no subclass
-  # has to change at once.
+  # These three methods are the single interface, so that no pass has to
+  # discriminate on ``isinstance`` against a concrete class and then reach
+  # for whichever of ``get_dest`` / ``get_src`` / ``get_operands`` /
+  # ``._dest`` / ``._src`` that class happens to expose.  The defaults
+  # below adapt those accessors, so a subclass that has them needs nothing
+  # more.
   #
   # Contract: a subclass that cannot describe itself must *not* look
   # pure.  The default ``accesses()`` returns an UNKNOWN-space access in
@@ -198,13 +197,11 @@ class AbstractInstruction(ABC):
         changed = True
       # An operand held as a view (`SymbolView`: the multilinear's `_ops`,
       # the pointwise `_srcs`) names its symbol one level down.  Missed, a
-      # merged run closing its chain (`Generator`, `carried`) renamed the
-      # epilogue writing the image and left every reader of it in the body
+      # merged run closing its chain (`Generator`, `carried`) would rename the
+      # epilogue writing the image and leave every reader of it in the body
       # on the register the substitution retired -- never written inside the
-      # loop.  SeisSol's viscoelastic free-surface-gravity kernel at order 6,
-      # merged, read two of its carried temporaries that way.  A copy, not
-      # the view itself: a view may be shared with instructions outside the
-      # region.
+      # loop.  A copy, not the view itself: a view may be shared with
+      # instructions outside the region.
       if isinstance(held, list) and any(
           getattr(x, 'symbol', None) is old for x in held):
         setattr(self, attr, [_renamed(x, new)
@@ -341,9 +338,9 @@ class AbstractInstruction(ABC):
   def gen_code(self, writer: Writer) -> None:
     """Route this instruction's body through the pseudo-IR.
 
-    Concrete now, not abstract: `gen_ir` is the single hook an instruction
-    overrides, and routing is the same for all of them.  `BatchLoop` still
-    overrides this, because it drives child instructions that route
+    Concrete, not abstract: `gen_ir` is the single hook an instruction
+    overrides, and routing is the same for all of them.  `BatchLoop` does
+    override this, because it drives child instructions that route
     themselves.
     """
     self.through_pir(writer, self.gen_ir)
@@ -352,10 +349,10 @@ class AbstractInstruction(ABC):
   #
   # An instruction builds its body into an `IRBuilder` instead of writing text
   # straight into the `Writer`.  Because `IRBuilder` is call-compatible with
-  # `Writer`, an un-migrated instruction produces opaque `raw*` nodes and comes
-  # out byte-identical; a migrated one overrides `gen_ir` and uses the
-  # structured constructors, at which point the passes have something to work
-  # with.  Progress is countable: the number of `raw*` nodes left.
+  # `Writer`, an instruction that writes text into it produces opaque `raw*`
+  # nodes and comes out byte-identical to the direct path; one that overrides
+  # `gen_ir` and uses the structured constructors gives the passes something
+  # to work with.  What they cannot see is countable: the `raw*` nodes.
   #
   # Set False on a subclass to bypass the IR entirely -- useful for bisecting a
   # suspected emitter difference.
@@ -442,8 +439,8 @@ class AbstractInstruction(ABC):
     if getattr(context.get_user_options(), 'enable_wrap_loads', False):
       # After `optimize`, not before.  The transfers sit inside the anonymous
       # scopes the loaders open, and `flatten_scopes` is what removes them --
-      # running first meant the pass looked at a body whose every transfer was
-      # still two rawblocks deep and reported that it found none.
+      # run first, the pass would look at a body whose every transfer is
+      # still two rawblocks deep and report that it found none.
       #
       # Before `schedule_async`, because moving an issue across the back edge
       # changes what is outstanding at every wait, and those counts describe

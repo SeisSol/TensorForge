@@ -7,15 +7,15 @@ Every check added here is only worth its runtime if it can fail.  A test that
 passes because the property is trivially true, or because the test and the
 code under test share a mistake, is worse than no test: it reads as coverage.
 
-So each guard has a matching mutation --- the defect it was written for, put
-back --- and this runs them all and reports which are caught.  The mutations
-are the real ones from the session's history, not invented ones:
+So each guard has a matching mutation --- the defect it exists to catch, put
+in --- and this runs them all and reports which are caught.  The mutations
+are defects this code can actually have, not invented ones:
 
 * `fmacdpp4` emitted for gfx900, where the specializations are switched off
 * `fmacdpp8` selected, which the runtime declares nowhere
-* the MFMA tail recomputed, so two paths wrote the same columns
-* the `LaneAxis` lane map as first documented, with `stride` read as packing
-* the broadcast layout as first annotated: right numbers, wrong roles
+* the MFMA tail recomputed, so two paths write the same columns
+* the `LaneAxis` lane map with `stride` read as packing
+* the broadcast layout with the right numbers in the wrong roles
 * `0.0f` handed to a `T &` parameter of `transpose4x4b32`
 * a shared buffer declared inside a body, outside the sized arena
 * two scratch windows handed out at the same offset
@@ -27,9 +27,9 @@ A `finally` does not survive SIGKILL, and a timeout is SIGKILL.  When that
 happens the tree is left mutated, and the next thing anyone runs is usually
 `pytest --snapshot-update`, which records the mutated generator's output as
 the new baseline across dozens of files -- during a migration the only symptom
-is a large diff, which there would be anyway.  That has happened.  So the
-mutated paths are also written to a lock file, checked on startup and restored
-from git before anything else runs.
+is a large diff, which there would be anyway.  So the mutated paths are also
+written to a lock file, checked on startup and restored from git before
+anything else runs.
 
     python3 tools/mutation_check.py            # all groups
     python3 tools/mutation_check.py layout     # one group
@@ -81,10 +81,9 @@ def sub(path, old, new, count=0):
     """
     def make():
         if not path.exists():
-            # Same failure as a mutation that no longer applies, and it used to
-            # be worse: a `FileNotFoundError` here aborts the whole sweep, so
-            # one stale path hides every group after it.  The move to `src/`
-            # left 38 of them and the harness stopped running entirely.
+            # Same failure as a mutation that no longer applies, and reported
+            # as one: a `FileNotFoundError` here would abort the whole sweep,
+            # so one stale path would hide every group after it.
             raise AssertionError(
                 f'{path} does not exist: the file has moved, so this check is '
                 f'no longer testing anything')
@@ -125,17 +124,8 @@ def resub(path, pattern, repl, count=1):
     return make
 
 GROUPS = {
-    # The diagnostics themselves.  `ir_opacity` reported the whole corpus as
-    # failing to generate for as long as nobody re-derived its number.
-    # `flatten_scopes` decides which braces are load-bearing, and it decides
-    # it with a regex over raw text.
-    # The PTX node.  Its numbering check is the one that matters: a mismatch
-    # reads different registers and still compiles.
-    # A tile's permutation lives on the buffer so no access can forget it.
-    # The bank model.  Every mistake it made over-reported, which is the
-    # direction that gets a check ignored.
-    # The IR-level bank analysis.  Every mistake it made over-reported, which
-    # is the direction that gets a check ignored.
+    # The IR-level bank analysis.  A mistake in it that over-reports is the
+    # kind that gets a check ignored.
     'irbanks': ('tests/test_pir_banks.py', [
         ('the volume rule picks a width the pattern does not want',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
@@ -178,6 +168,8 @@ GROUPS = {
              "                pass", 1)),
     ]),
 
+    # The bank model.  A mistake in it that over-reports is the kind that gets
+    # a check ignored.
     'banks': ('tests/test_bank_conflicts.py', [
         ('the arena counted as a window again',
          sub(Path('tools/bank_conflicts.py'),
@@ -228,6 +220,7 @@ GROUPS = {
              "      if self._src.pir_buffer(writer) is None:", 1)),
     ]),
 
+    # A tile's permutation lives on the buffer so no access can forget it.
     'swizzle': ('tests/test_pir_swizzle.py', [
         ('esimd allowed to swizzle, so a vector read reorders itself',
          sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
@@ -327,6 +320,8 @@ GROUPS = {
              "                expr = f'{op}({\", \".join(args)})'", 1)),
     ]),
 
+    # The PTX node.  Its numbering check is the one that matters: a mismatch
+    # reads different registers and still compiles.
     'asm': ('tests/test_pir_asm.py', [
         ('the split goes back to a side-effecting call',
          sub(Path('src/tensorforge/backend/pir/build.py'),
@@ -374,6 +369,8 @@ GROUPS = {
              "           Datatype.U32: 'int32_t',", 1)),
     ]),
 
+    # `flatten_scopes` decides which braces are load-bearing, and it decides
+    # it with a regex over raw text.
     'cdecl': ('tests/test_flatten_scopes.py', [
         ('brace initialization not seen as a declaration',
          sub(Path('src/tensorforge/backend/pir/passes.py'),
@@ -389,6 +386,9 @@ GROUPS = {
              '                and True):', 1)),
     ]),
 
+    # The diagnostics themselves.  A broken `ir_opacity` reports the whole
+    # corpus as failing to generate for as long as nobody re-derives its
+    # number.
     'tools': ('tests/test_tools.py::test_ir_opacity_still_generates_the_corpus', [
         ('the counting wrapper stops accepting what it wraps',
          sub(Path('tools/ir_opacity.py'),
@@ -420,9 +420,9 @@ GROUPS = {
              '#if defined(__gfx940__)', 1)),
     ]),
 
-    # The boundary between the two spans, which `plan` states once.  Stating
-    # it twice is what let the spans overlap, so the first two mutations put
-    # the boundary back where each half of that mistake had it.
+    # The boundary between the two spans, which `plan` states once.  Stated
+    # twice, it can let the spans overlap, so the first two mutations put the
+    # boundary where each half of such a mistake would have it.
     'tiling': ('tests/test_amd_tiling.py', [
         ('the boundary ignores the padding decision',
          sub(PKG / 'tiling.py', '    return ((n // fit.width) * fit.width) if empty in (0, fit.width - 1) else n',
@@ -845,10 +845,10 @@ GROUPS = {
     # `test_syntax.py` reads the committed snapshots, so a mutation to the
     # generator would not reach it.  The snapshots are the input here.
     #
-    # The last three could not be expressed against the old
-    # `test_signatures.py`: it lifted reference-taking calls out with a regex
-    # and looked at those alone, so a defect anywhere else in the kernel --- or
-    # in an argument it could not type --- was outside what it could see.
+    # The last three are what a check of the reference-taking calls alone
+    # would miss: lifting those out with a regex leaves a defect anywhere else
+    # in the kernel --- or in an argument the regex cannot type --- outside
+    # what it can see.
     'syntax': ('tests/test_syntax.py', [
         ('a literal handed to a reference parameter',
          resub(Path('tests/snapshots/gemm_56x18_x_18x18.hip.cpp'),
@@ -873,10 +873,8 @@ GROUPS = {
              1)),
     ]),
 
-    # The shim is a copy of a C++ fact; the check that it stays one has to
-    # fail when the copy drifts, in either direction.
-    # One list, two readers.  The tool reported three permanent failures for
-    # cases the suite already tracked, which is how a check stops being read.
+    # One list, two readers.  A tool that reports permanent failures for
+    # cases the suite already tracks is how a check stops being read.
     'knownbad': ('tests/test_tools.py::test_the_runner_agrees_with_the_suite', [
         ('the tool stops recognizing a tracked failure',
          sub(Path('tools/syntax_check.py'),
@@ -888,6 +886,8 @@ GROUPS = {
              "        kinds['ok'] += 1", 1)),
     ]),
 
+    # The shim is a copy of a C++ fact; the check that it stays one has to
+    # fail when the copy drifts, in either direction.
     'shim': ('tests/test_syntax.py::test_shim_matches_the_device_headers', [
         ('an overload dropped from the shim',
          sub(Path('tests/shim/tensorforge_host.h'),
@@ -942,8 +942,8 @@ GROUPS = {
              '    cloned.layout = self.layout\n', '', 1)),
     ]),
 
-    # The contract on `Tensor.data`, and the two test patterns that the PIR
-    # refactor made stale without making anything fail loudly enough.
+    # The contract on `Tensor.data`, and two test patterns a refactor can make
+    # stale without anything failing loudly enough.
     'data': ('tests/test_regressions.py', [
         ('a list handed to Tensor.data',
          sub(Path('src/tensorforge/generators/descriptions.py'),
@@ -959,9 +959,8 @@ GROUPS = {
              '            if False:', 1)),
     ]),
 
-    # The nvidia path is live now; the guard that keeps it from silently
-    # going dead again, and the gate that keeps it from aborting cases it
-    # cannot take.
+    # The guard that keeps the nvidia path from silently going dead, and the
+    # gate that keeps it from aborting cases it cannot take.
     'nvidia': ('tests/test_nvidia_reachability.py', [
         ('a second definition of matmul',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
@@ -1238,9 +1237,9 @@ def _dry_run(wanted):
     """Report anchors that no longer match, without running a test.
 
     Applying a mutation costs a full test run; checking that its anchor is
-    still findable costs a string search.  The second is the part that rots --
-    five anchors had gone stale before anyone counted -- and separating them
-    is what lets a test assert freshness without taking minutes.
+    still findable costs a string search.  The second is the part that rots,
+    and separating them is what lets a test assert freshness without taking
+    minutes.
     """
     stale = 0
     for group in wanted:

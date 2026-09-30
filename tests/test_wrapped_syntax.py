@@ -6,14 +6,14 @@
 `test_syntax` compiles the recorded snapshots, and those are generated with
 `enable_wrap_loads` off.  So everything the wrap pass emits -- the peeled
 prologue, the advanced pointers, the rotating write window, the carried
-tokens -- had no compiling test at all, and "the pass accepted this loop" was
-a claim about the IR rather than about the code.
+tokens -- would otherwise have no compiling test at all, and "the pass
+accepted this loop" would be a claim about the IR rather than about the code.
 
-It was wrong twice.  Once the peel named a shared window whose `extern` binding
-happened later; once a rotating buffer read `pipeStage0` that nothing declared,
-because the generator asked the loop what the counter was *called* without
-asking it for one.  Both rendered.  Both would have been caught here in a
-second.
+Such a claim can be wrong and still render: a peel that names a shared window
+whose `extern` binding comes later, or a rotating buffer that reads a
+`pipeStage0` nothing declares -- what a generator gets by asking the loop what
+the counter is *called* without asking it for one.  A compile catches either
+in a second.
 
 This generates every case with the flag on and runs the same `g++
 -fsyntax-only` the snapshot test uses.  It is slower than reading a diff, which
@@ -40,12 +40,11 @@ pytestmark = pytest.mark.skipif(
     syntax.compiler() is None,
     reason="no host compiler available for a syntax check")
 
-# All four, because the pass is not backend-specific and two of them were the
-# ones this test was written after missing something on.
+# All four, because the pass is not backend-specific.
 TARGETS = [("cuda", "sm_86"), ("hip", "gfx90a"),
            ("acpp", "pvc"), ("esimd", "pvc")]
 
-#: Defects this test found, pinned rather than described.
+#: Defects this test finds, pinned rather than described.
 #:
 #: The clone `_advance` makes of a slice member drops `decl` and `extern`,
 #: because a declarator with a name in it cannot be emitted twice.  The
@@ -59,18 +58,16 @@ TARGETS = [("cuda", "sm_86"), ("hip", "gfx90a"),
 #: because the fix is to give the clone a declarator, and that is a change to
 #: `decl_expr` rather than to this test.
 #:
-#: Stated as the class it is, rather than as the one case that first reached
-#: it: the SPMD lowering and a rendered `VectorT` in the same kernel.  That is
-#: the defect itself, so nothing has to be kept in step with it -- listing
-#: cases instead grows by a line for every case added to the corpus and never
-#: says why, and `aligned_operands` stood here alone only because it was the
-#: only case whose operands promised an aligned stride.
+#: Stated as the class it is, rather than as the cases that reach it: the
+#: SPMD lowering and a rendered `VectorT` in the same kernel.  That is the
+#: defect itself, so nothing has to be kept in step with it -- a list of
+#: cases grows by a line for every case added to the corpus and never says
+#: why.
 #:
-#: The promise is not the condition, though it sounds like it.  Stating it
-#: that way put `aligned_odd_lead` in the class, whose operands promise the
-#: same and which compiles anyway, because an odd lead leaves nothing to
-#: widen and no vector type is rendered.  The condition is what comes out,
-#: not what goes in.
+#: Operands that promise an aligned stride are not the condition, though they
+#: sound like it: `aligned_odd_lead` promises one and compiles anyway,
+#: because an odd lead leaves nothing to widen and no vector type is
+#: rendered.  The condition is what comes out, not what goes in.
 KNOWN_BAD_REASON = (
     "the advanced clone renders VectorT where the SPMD lowering wants "
     "sycl::vec -- dropping `decl` on a clone drops the backend's spelling")
@@ -118,9 +115,9 @@ def test_wrapped_kernel_is_well_formed(name, backend, arch):
         # Only a skip if it fails *both* ways.  A case that generates without
         # the pass and not with it is a regression the pass caused, and
         # skipping on any exception is how this test would hide exactly what
-        # it exists to find: the reason `pipeStage0` reached a kernel
-        # undeclared was that nothing compiled the wrapped output, and a skip
-        # here is the same hole one level in.
+        # it exists to find: a wrapped kernel nothing compiles can carry an
+        # undeclared `pipeStage0`, and a skip here is the same hole one level
+        # in.
         try:
             _generate(mod, backend, arch, wrap=False)
         except Exception:

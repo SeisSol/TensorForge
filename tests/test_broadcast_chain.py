@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 """The broadcast chain, and the claim that it belongs to no vendor.
 
-It sat in `primitives/intel.py` and its own docstring said what it was: the
-same shape as the AMD DPP path, differing in what the replication costs rather
-than in what it computes.  A shared arrangement kept inside one target's module
-is one no other target can reach without importing that module, which is the
-thing these check has stopped being true.
+It has the same shape as the AMD DPP path, differing in what the replication
+costs rather than in what it computes.  A shared arrangement kept inside one
+target's module is one no other target can reach without importing that
+module, so these check that the chain has a module of its own and that no
+target keeps a copy.
 """
 
 from __future__ import annotations
@@ -45,9 +45,9 @@ def _ops(recorder, n, threads=32, lead_slots=2, sparse=None):
 # -- it names no target ---------------------------------------------------- #
 
 def test_the_chain_imports_no_vendor_module():
-    """The property the move was for.  A shared arrangement that reaches into
-    one target's package is shared in name only: the next target to want it
-    inherits that target's gates along with the emitter."""
+    """The property a module of its own is for.  A shared arrangement that
+    reaches into one target's package is shared in name only: the next target
+    to want it inherits that target's gates along with the emitter."""
     tree = ast.parse(SOURCE.read_text())
     imported = []
     for node in ast.walk(tree):

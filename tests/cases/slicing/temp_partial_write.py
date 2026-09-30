@@ -6,17 +6,16 @@
     tmp[:, 0:6] = B @ C          <- one writer, half the columns
     D           = A @ tmp        <- reads all 12 columns
 
-The point is `_written_in_slices`. Deferring a store is right while one
-operation writes the whole tensor: the value stays in registers and goes
-straight to the next consumer. Here the single writer covers only half, so the
-deferred registers hold half of what the consumer reads, and the rest is
-whatever the buffer happened to contain.
+The point is `SectionPlan.written_in_slices`. Deferring a store is right while
+one operation writes the whole tensor: the value stays in registers and goes
+straight to the next consumer. Here the single writer covers only half, so
+deferred registers would hold half of what the consumer reads, and the rest
+would be whatever the buffer happened to contain.
 
-No case in the corpus reaches either of that predicate's True branches --- it
-returns False for every case, either because a single writer covers everything
-or because no read union was recorded at all. So the branch that decides
-"materialize this, do not keep it in registers" is exercised by nothing, while
-it is on the hot path for any chain of yateto-style contractions.
+A single writer covering everything leaves that predicate False. This case
+makes it True, and so takes the branch that decides "materialize this, do not
+keep it in registers" --- a branch on the hot path for any chain of
+yateto-style contractions.
 """
 
 import numpy as np

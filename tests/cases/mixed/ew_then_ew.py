@@ -3,12 +3,9 @@
 # SPDX-License-Identifier: MIT
 """``tmp = abs(A)`` then ``C = neg(tmp)`` — no multilinear anywhere.
 
-The minimal statement of the gap: a temporary only ever gets a symbol inside
-`MultilinearBuilder._make_store`, so with no multilinear in the section nothing
-ever creates one.  `Generator._emit_ir` then builds a `SymbolView` over `None`.
-
-This is also the case that shows the fix does not belong in the multilinear
-builder: neither descriptor here has anything to do with contraction.
+A temporary no multilinear produces: `MultilinearBuilder._make_store` is where
+a multilinear's temporary gets its symbol, and neither descriptor here has
+anything to do with contraction, so the temporary has to get one without it.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

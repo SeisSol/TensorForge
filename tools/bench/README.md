@@ -44,10 +44,10 @@ TF_BENCH_DUMP=descriptors.json python3 tools/bench/run.py suites/seissol.py
 
 Two sources of workloads ship with it. `from_cases()` takes the correctness
 corpus, which is the right source of shapes and the wrong source of load —
-every case declares `BATCH` two to four, and the launcher sizes its grid
-`min(occupancy_gridsize, numElements0)`, so at those batches a run measures
-launch overhead. The suite says what batch to run at and the case's own is
-dropped. `from_dump()` takes a capture from
+every case declares a `BATCH` between two and 96, and the launcher sizes its
+grid `min(occupancy_gridsize, numElements0)`, so at those batches a run
+measures launch overhead. The suite says what batch to run at and the case's
+own is dropped. `from_dump()` takes a capture from
 `tools/host/dump_descriptors.py`, which is the production corpus: real
 operators, real sparsity, real chain lengths.
 

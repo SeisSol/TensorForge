@@ -311,7 +311,7 @@ def test_a_summary_with_nothing_in_it_says_so():
 
 
 def test_vtune_collects_in_the_mode_whose_report_has_rows():
-    """`profiling-mode=source-analysis` with `-report hw-events` wrote a
+    """`profiling-mode=source-analysis` with `-report hw-events` writes a
     header row and nothing under it, on every kernel."""
     steps = _commands("vtune", Path("/tmp"))
     assert "characterization-mode=overview" in steps[0]

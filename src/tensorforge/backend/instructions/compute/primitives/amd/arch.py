@@ -5,7 +5,7 @@
 
 Nothing here says what a target can *do* -- that is `caps`.  Keeping the
 two apart is not tidiness: answering a capability question with a family
-predicate is what let the generator emit `fmacdpp4` on gfx900, where the
+predicate would let the generator emit `fmacdpp4` on gfx900, where the
 specializations are switched off.
 """
 
@@ -29,11 +29,9 @@ def cdna2(ctx):
     return (amdarch(ctx) < 0x1000 and amdarch(ctx) >= 0x90a) or gfx1251(ctx)
 
 
-# `cdna1` used to sit here, and its only caller was the matmul router asking
-# "does this target have MFMA".  That is `features.has_feature(ctx,
-# 'mai-insts')`, which answers it without admitting gfx90b--gfx90f the way a
-# range does.  Removed rather than left unreferenced: an unused family
-# predicate is the shape the gfx900 bug came in.
+# Deliberately no `cdna1`: the question it would answer, "does this target
+# have MFMA", is `features.has_feature(ctx, 'mai-insts')`, which answers it
+# without admitting gfx90b--gfx90f the way a range does.
 
 
 def rdna(ctx):

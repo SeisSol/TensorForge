@@ -3,26 +3,24 @@
 # SPDX-License-Identifier: MIT
 """A raw statement may say what it touches, and must say what it uses.
 
-`Op.RAWSTMT` had one default answering two questions.  *What it is* -- opaque
-text, unmovable, not a candidate for CSE -- is settled and stays
-`Effect.UNKNOWN`.  *What it touches* was answered the same way, with
-`Access(READ|WRITE, UNKNOWN, None)`, which conflicts with every buffer in
-every space.
+`Op.RAWSTMT` answers two questions.  *What it is* -- opaque text, unmovable,
+not a candidate for CSE -- is settled and stays `Effect.UNKNOWN`.  *What it
+touches* defaults to the same answer, `Access(READ|WRITE, UNKNOWN, None)`,
+which conflicts with every buffer in every space.
 
-That has a specific cost.  One raw statement between two shared-memory
+That default has a specific cost.  One raw statement between two shared-memory
 accesses keeps every buffer live, so a body that is nine tenths converted has
 the same interference graph as one that is not converted at all, and a
-coloring over it reuses nothing.  The conversion is all-or-nothing, and an
-all-or-nothing conversion does not get done.  `accesses=` is the way out;
-omitting it means exactly what it meant before.
+coloring over it reuses nothing.  The conversion would be all-or-nothing, and
+an all-or-nothing conversion does not get done.  `accesses=` is the way out;
+omitting it keeps the conservative default.
 
-The operand requirement arrived by way of a defect, which is why it is here.
-`nvidia.matmul` stages A through a `float4` store that names its tile only
-inside the text.  Given a correct `accesses=` and no operand, the alloc that
-produced the tile was reachable by nothing, `dce` removed it, and the kernel
-referred to an undeclared pointer.  Correct as IR, not C++ at all -- the
-snapshot showed a diff and the verifier saw nothing wrong.  Declaring an
-access is not declaring a use.
+The operand requirement is here because declaring an access is not declaring a
+use.  Take a `float4` staging store that names its tile only inside the text:
+given a correct `accesses=` and no operand, the alloc that produces the tile is
+reachable by nothing, `dce` removes it, and the kernel refers to an undeclared
+pointer.  Correct as IR, not C++ at all -- a snapshot shows a diff and the
+verifier sees nothing wrong.
 """
 
 from __future__ import annotations
@@ -54,7 +52,7 @@ def emitted(body):
 # --------------------------------------------------------------------------- #
 
 def test_omitting_the_argument_keeps_the_conservative_answer():
-    """Every call site that predates this means what it meant before."""
+    """A call site that says nothing gets the conservative answer."""
     b = builder()
     s = b('__syncwarp();')
     assert len(s.accesses) == 1
@@ -131,8 +129,8 @@ def test_a_declaration_says_defines_not_args():
 def test_a_varalloc_name_is_not_asked_to_claim_anything():
     """`varalloc` reserves a C++ identifier; it does not define an IR value.
 
-    Legacy bodies redeclare one per scope --- `float v35[4][2]{};` inside each
-    iteration --- which is ordinary C++ and not SSA at all.  There is no
+    Text-based bodies redeclare one per scope --- `float v35[4][2]{};` inside
+    each iteration --- which is ordinary C++ and not SSA at all.  There is no
     defining statement for `dce` to remove, so the argument the check rests on
     does not apply, and demanding a claim would only teach callers to drop the
     `accesses` argument that turns the check on.
@@ -160,7 +158,7 @@ def test_a_prefix_of_a_value_name_does_not_count_as_a_use():
 
 
 # --------------------------------------------------------------------------- #
-# The defect itself
+# The use edge
 # --------------------------------------------------------------------------- #
 
 def test_an_operand_keeps_the_allocation_alive_through_dce():
@@ -184,7 +182,7 @@ def test_an_operand_keeps_the_allocation_alive_through_dce():
 # --------------------------------------------------------------------------- #
 
 def test_siblings_reuse_the_same_offset():
-    """The packing `nvidia.matmul` used to write out as three constants."""
+    """Sibling scopes pack their buffers without constants written by hand."""
     b = builder(192)
     with b.scratch_scope():
         a = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='atile')

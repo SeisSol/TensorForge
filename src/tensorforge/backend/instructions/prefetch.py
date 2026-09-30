@@ -42,8 +42,8 @@ class PrefetchBatchPointer(AbstractInstruction):
   def gen_ir(self, writer):
     """Nothing where the loop bound no lookahead value.
 
-    Two paths reach here with none. The legacy writer emits the bindings as
-    text, so there is no operand to name the next element with -- and a hint
+    Two paths reach here with none. The text-based `Writer` emits the bindings
+    as text, so there is no operand to name the next element with -- and a hint
     whose address is a string would be the thing `Op.PREFETCH` was given a
     base and an index to avoid. A body that is not a loop has no next element
     at all.

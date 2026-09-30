@@ -67,10 +67,9 @@ def _spp_key(tensor) -> Tuple:
     which for the operators this is aimed at is a few thousand entries at
     worst and is computed once per tensor.
 
-    Once, that is, now: it was computed per chunk the run search tried, and
-    SeisSol's damage step -- 1787 operations -- spent over 99 % of an hour in
-    it.  Kept on the tensor for as long as its pattern and shape are the ones
-    it was computed from.
+    Once, because the run search asks for it again in every chunk it builds a
+    skeleton of: the key is kept on the tensor for as long as its pattern and
+    shape are the ones it was computed from.
     """
     spp, shape = tensor.spp, tuple(tensor.shape)
     cached = getattr(tensor, '_spp_key_cache', None)
@@ -176,7 +175,7 @@ def _op_key(op):
     Keyed by identity those are two different bodies, and that is enough to
     hide a repetition entirely: SeisSol's damage step states one chunk of 362
     operations four times, every chunk holds two such reductions, and the run
-    covering 81 % of the kernel was not even a candidate.
+    covering 81 % of the kernel would not even be a candidate.
 
     An operator that does carry state keeps it in the key, and one whose
     state cannot be hashed keeps its identity -- calling two bodies the same
@@ -264,10 +263,9 @@ def _scratch_origins(body: Sequence[OperationDescription],
     body reading another one is a different body: SeisSol's damage step adds
     its nodal sources into `alphaNodal` and `breakageNodal` in turn, all four
     temporaries, and with position alone standing for every one of them a run
-    of six such additions varied in nothing but a scalar -- so the loop added
-    the first source six times and the breakage contributions were never
-    computed.  Read `unroll(roll(x))` against `x` by tensor and 35 of the step
-    kernel's 2271 descriptors came back as another operation.
+    of six such additions would vary in nothing but a scalar -- the loop would
+    add the first source six times and never compute the breakage
+    contributions.
 
     So the first use decides: a write that does not read the destination back
     makes the tensor here, anything else names one from elsewhere.  An
@@ -566,10 +564,10 @@ def _through(window, view):
     A binding is the view the *first* slot of its hole holds, and the other
     slots may read the same tensor through windows of their own: SeisSol's
     time derivative contracts `dQ(k)` with three operators over rows 1..18,
-    1..19 and 1..20.  Written into every slot, the first window narrowed the
-    other two reductions to its rows, and the merged kernel was 2..6 % off
-    without a word.  The windows agree slot by slot across the members --
-    `operand_key` compares them -- so the template's is every member's.
+    1..19 and 1..20.  Written into every slot, the first window would narrow
+    the other two reductions to its rows, and the merged kernel would come out
+    wrong without a word.  The windows agree slot by slot across the members
+    -- `operand_key` compares them -- so the template's is every member's.
     """
     if _window(window) == _window(view):
         return view
@@ -582,11 +580,11 @@ def _fresh(view):
     """A view of its own, with its own offset and box.
 
     Builders adjust a view in place -- rebasing its offset onto a staged image,
-    for one -- and every body substituted from one generalization shared the
-    template's views: the peeled iteration and then the loop built from the
-    same objects, and the loop rebased what the peel already had.  A
-    temporary of the poroelastic time derivative was stored at `lead - 32`
-    instead of `lead - 1`, into the previous multiplication's window.
+    for one -- and the peeled iteration and then the loop are built from the
+    bodies one generalization substitutes.  Were those to share the
+    template's views, the loop would rebase what the peel already rebased,
+    and a temporary of the poroelastic time derivative would be stored into
+    the previous multiplication's window.
     """
     from tensorforge.common.matrix.tensor import SubTensor
     if not isinstance(view, SubTensor):

@@ -3,8 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Discover GPUs on the local machine.
 
-MVP scope: NVIDIA via ``nvidia-smi``. AMD/Intel are stubbed out with clear
-extension points.
+NVIDIA via ``nvidia-smi``, AMD via ``rocminfo``, Intel via ``sycl-ls``.
 
 A :class:`DetectedGPU` is purely a statement about present hardware; it
 does not imply that a working toolchain for the arch is installed. The
@@ -134,7 +133,8 @@ def detect_intel() -> List[DetectedGPU]:
     Zero where it lists any GPU, OpenCL otherwise (a node whose DRM cards
     the user may not open still shows its GPUs through OpenCL).
     """
-    # sycl-ls loads every adapter first; five seconds was not always enough.
+    # sycl-ls loads every adapter first, which can take longer than the five
+    # seconds `_run` allows by default.
     out = _run(["sycl-ls"], timeout=60.0)
     if out is None:
         return []

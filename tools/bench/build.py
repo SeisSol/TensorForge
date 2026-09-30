@@ -18,8 +18,8 @@ the harness path before a number from here means anything.
 
 A corpus contains cases a given toolchain refuses; the snapshots record several
 per backend. Compiling each workload separately and linking the survivors keeps
-one refusal from costing the other sixty measurements, and records which
-refused and why -- which is a result rather than an accident, and is the same
+one refusal from costing every other measurement, and records which refused
+and why -- which is a result rather than an accident, and is the same
 arrangement `lanes.search` uses for a candidate that does not build.
 
 ## What the compiler is asked on the way past
@@ -207,8 +207,8 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
                       fp_type=unit.datatype, options=options)
         # `Options.lanes_per_mult` first: the generator takes an explicit
         # `lanes` over the option (`Generator` builds with `self._lanes or
-        # lanes.requested(...)`), so passing only the deduction here built
-        # every lane-count configuration at the deduced count.
+        # lanes.requested(...)`), so passing only the deduction here would
+        # build every lane-count configuration at the deduced count.
         #
         # And only what the configuration asked for is passed: a geometry
         # given here is one the tuner holds fixed, so handing it the deduction
@@ -218,8 +218,8 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
         # A stated ceiling counts as asked; the default one does not.  Every
         # `Config` carries `lane_ceiling`, and it is `DEFAULT_LANE_CEILING`
         # unless the configuration says otherwise -- so testing it for
-        # truthiness pins every build again, which is the whole of what this
-        # was meant to stop.
+        # truthiness would pin every build, which is the whole of what this
+        # is here to stop.
         ceiling = unit.config.lane_ceiling
         stated = unit.config.wave_wide or ceiling != lanes.DEFAULT_LANE_CEILING
         asked = (lanes.requested(descrs, ctx)
@@ -295,8 +295,8 @@ def build(unit: BuildUnit, cache: Path = CACHE,
     # generate is a fact about the generator, and a caller that has no
     # toolchain -- a dry run printing profiler command lines, a check that a
     # configuration still produces code -- has a use for it. Returning early on
-    # a missing compiler would have made that answer unavailable for the same
-    # reason the answer was wanted.
+    # a missing compiler would make that answer unavailable for the same reason
+    # the answer is wanted.
     sources: Dict[str, str] = {}
     records: List[WorkloadBuild] = []
     first: Dict[str, str] = {}
@@ -378,7 +378,7 @@ def build(unit: BuildUnit, cache: Path = CACHE,
 
     # The driver is rewritten for the survivors only: a symbol declared in the
     # table but never defined is a link error, and losing the whole binary to
-    # one workload is exactly what compiling them apart was meant to avoid.
+    # one workload is exactly what compiling them apart is there to avoid.
     driver_path.write_text(
         driver_bench.emit_driver([r.name for r in records if r.ok],
                                  unit.target.backend))

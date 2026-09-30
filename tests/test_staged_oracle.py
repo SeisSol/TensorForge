@@ -68,7 +68,7 @@ def test_a_staged_kernel_computes_the_product(name):
 
     Both operands reach the multiply through the staging window; if the
     transfer is a no-op the window holds seed fill and this is off by two
-    orders of magnitude, which is what it was.
+    orders of magnitude.
     """
     mod, src, (lanes, mults) = _build(name)
     assert '__pipeline_memcpy_async' in src, 'this case no longer stages'
@@ -102,8 +102,8 @@ def test_the_copy_writes_the_slots_it_names():
 def test_an_unmodeled_copy_refuses_instead_of_vanishing():
     """The four-argument zero-fill form, or anything else new.
 
-    A transfer that quietly does nothing is the defect this branch exists to
-    keep from recurring, so an unrecognized spelling is an abort rather than a
+    A transfer that quietly did nothing would leave the seed fill in place,
+    plausible and wrong, so an unrecognized spelling is an abort rather than a
     return.
     """
     interp = kernel_eval.Interp(kernel_eval.Slot(0), {})
@@ -112,7 +112,7 @@ def test_an_unmodeled_copy_refuses_instead_of_vanishing():
 
 
 def test_the_commit_and_the_wait_still_move_nothing():
-    """They are what the catch-all was written for, and they stay in it."""
+    """They are what the catch-all is for, and they stay in it."""
     interp = kernel_eval.Interp(kernel_eval.Slot(0), {})
     interp.assign('__pipeline_commit()')
     interp.assign('__pipeline_wait_prior(0)')
@@ -129,7 +129,8 @@ def test_the_geometry_is_the_launcher_s():
 
 
 def test_a_launcher_without_block_dimensions_refuses():
-    """Rather than falling back on a round number, which is the bug."""
+    """Rather than falling back on a round number, which would read past the
+    end of the operand."""
     with pytest.raises(kernel_eval.Abort):
         kernel_eval.launch_geometry('void launcher() { }')
 
@@ -140,7 +141,7 @@ def test_the_widened_build_is_narrower_than_the_plain_one():
     Widening the lead does not make the block wider; it makes it narrower,
     because each lane carries four elements instead of one.  A harness that
     names one number for both configurations is over by a factor of four in
-    exactly the configuration it was added to test.
+    exactly the configuration it is meant to test.
     """
     _, _, plain = _build('aligned_operands', lead_vectorize=False, lead_blocking=1)
     _, _, wide = _build('aligned_operands', lead_vectorize=True, lead_blocking=1)
@@ -174,7 +175,7 @@ def test_no_lane_reads_past_its_operand(name):
 # --------------------------------------------------------------------------- #
 
 #: The copy's size, and the zero-fill after it where there is one.  Written
-#: out because the size is no longer the last number in the call.
+#: out because, with a zero-fill, the size is not the last number in the call.
 _COPY = re.compile(r'__pipeline_memcpy_async\([^;]*?,\s*(\d+)(?:,\s*(\d+))?\)')
 
 
@@ -198,18 +199,17 @@ def test_an_aligned_transfer_moves_everything_sixteen_bytes_at_a_time():
 
 
 def test_the_cascade_is_still_reached_where_the_covering_declines():
-    """Stated as a property, because it silently stopped being true once.
+    """Stated as a property, because it can stop being true silently.
 
     `alignment` defaults to 0 and 0 is *unknown*, which `widths_for` turns
-    into scalar.  With `aligned_operands` alone the corpus reached one width
-    and one hop count: 128 elements over 16 lanes is two hops of four and
-    nothing else, so the cascade below four was unreachable and the code for
-    it was as good as absent from every snapshot diff.
+    into scalar.  With `aligned_operands` alone the corpus would reach one
+    width and one hop count: 128 elements over 16 lanes is two hops of four
+    and nothing else, so the cascade below four would be unreachable and the
+    code for it as good as absent from every snapshot diff.
 
-    It stopped being true a second time, and for a better reason: every
-    aligned transfer in the corpus now takes the covering above.  The cascade
-    is what serves the rest -- a sub-box copy, a transposed staging, an
-    unstructured transfer -- so it is reached here through a case built
+    Every aligned transfer in the corpus takes the covering above.  The
+    cascade is what serves the rest -- a sub-box copy, a transposed staging,
+    an unstructured transfer -- so it is reached here through a case built
     without the rounding the covering needs.
     """
     seen = set()
@@ -223,8 +223,8 @@ def test_a_cascade_case_drops_lanes_in_its_tail():
     """The width decision and the lane predicate, on one transfer.
 
     Separately each is simple.  Together they are where an offset counted in
-    elements per lane meets a bound counted in elements, and no kernel in the
-    corpus had both happen to the same transfer.
+    elements per lane meets a bound counted in elements, and without this case
+    no kernel in the corpus would have both happen to the same transfer.
     """
     _, src, _ = _build('wide_cascade_tail')
     assert re.search(r'if \(threadIdx\.x < \d+\)', src)

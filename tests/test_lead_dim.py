@@ -10,16 +10,16 @@ symbols, `GlbToShrLoader` writes a register image with the lane on it, and
 operand carries the destination's lead index elsewhere — `lead_index_off_dim0`
 is that case, and `test_regressions.py` pins it.
 
-Every compute instruction also kept its own copy: `self._lead_dims = [0]`, in
-elementwise and in multilinear, plus a third local `lead_dim = [0]` inside
-`_alloc_register_array` that decided the destination image's register slot
-count while the symbol's own attribute stayed at the constructor default.
+A compute instruction that kept its own copy -- `self._lead_dims = [0]` in its
+constructor, or a local `lead_dim = [0]` deciding the destination image's
+register slot count while the symbol's own attribute stays at the constructor
+default -- would state the axis without reading it.
 
-All four said 0 and none of them read the others, which is the arrangement
+Copies that all say 0 and none of which reads the others are the arrangement
 that produces a wrong answer with no shape check able to notice: an image
 written with the lane on axis 0 while every reader addresses it on axis 1
 hands each lane an element belonging to another. `load.py` carries a comment
-about exactly that failure, having already had it once.
+about exactly that failure.
 
 These tests do not check that the answer is 0. They check that the answer
 comes from one place, which is the property that survives the day it stops
@@ -140,11 +140,11 @@ def test_operands_that_disagree_are_refused():
                                  ReductionInstruction],
                          ids=lambda c: c.__name__)
 def test_no_instruction_hardcodes_the_lane_axis(cls):
-    """The literal that used to sit in each `__init__`.
+    """No `__init__` states the lane axis as a literal.
 
-    Written against the source because that is where the duplicate lived: an
-    instruction can agree with the symbol today and still be stating the fact
-    itself, which is the thing being removed.
+    Written against the source because that is where a duplicate would live:
+    an instruction can agree with the symbol today and still be stating the
+    fact itself, which is the thing this rules out.
     """
     import inspect
 

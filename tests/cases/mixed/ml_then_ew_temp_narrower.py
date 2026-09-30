@@ -10,12 +10,12 @@
     D   = u @ tmp       <- reads all 12 rows back
 
 The pointwise side of SeisSol's free-surface-gravity step, which re-assigns a
-temporary from a product one row of its operand supports.  The pointwise
-operation wrote its four rows into the shared buffer in place and nothing
-else, so the other eight kept the old `tmp` -- or `u`, where the allocator
-overlaid it.  Now the result goes through a store that zeroes the rest of the
-promise (`OperationBuilder.pointwise_dest`).  The window starts past row 0,
-so the zeros go on both sides of it.
+temporary from a product one row of its operand supports.  Writing its four
+rows into the shared buffer in place and nothing else, the pointwise
+operation would leave the other eight holding the old `tmp` -- or `u`, where
+the allocator overlays it.  The result goes through a store that zeroes the
+rest of the promise (`OperationBuilder.pointwise_dest`).  The window starts
+past row 0, so the zeros go on both sides of it.
 
 The step accumulates onto the temporary next; that is left out here, since on
 the AMD targets an accumulation onto a shared temporary loses what the buffer

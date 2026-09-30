@@ -5,18 +5,19 @@
 
 With 32 lanes a lead window of 15 rows starting at row 20 covers lanes 20..31
 of one register block and lanes 0..2 of the next, so the accumulator needs two
-slots per remaining index.  ``_analyze`` works that out and the store walks
-both blocks; ``_alloc_register_array`` sized the array for one, because it
-added theta to a box that already carried it --- the bias image is staged in
-the tensor's own lead coordinates.  The store then read past the end of the
-register array, which on a GPU is whatever register happens to follow.
+slots per remaining index.  ``_analyze`` works that out, the store walks both
+blocks, and ``_alloc_register_array`` has to size the array for both.  The
+bias image is staged in the tensor's own lead coordinates, so its box already
+carries theta; adding theta to it again would size the array for one block,
+and the store would read past the end of the register array, which on a GPU
+is whatever register happens to follow.
 
-Order 4 never showed this: with 32 or fewer rows every window fell inside a
-single block, and the double-counted theta canceled.  Order 6 has 64 rows.
+Order 4 cannot show this: with 32 or fewer rows every window falls inside a
+single block, and a double-counted theta would cancel.  Order 6 has 64 rows.
 
-Nothing in the emitted numbers gives it away either --- the host interpreter
-does not enforce array bounds, so this needs the structural check that
-compares a store's indices against the declared length.
+Nothing in the emitted numbers would give it away either --- the host
+interpreter does not enforce array bounds, so this needs the structural check
+that compares a store's indices against the declared length.
 """
 
 import numpy as np

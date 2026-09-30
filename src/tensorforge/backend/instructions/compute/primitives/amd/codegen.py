@@ -33,31 +33,29 @@ SPLIT_BF16 = 'tensorforge::splitFloatx4BF16'
 PIN_MOVED = False
 
 #: How the fused chain walks its products.  `'columns'` is the order `hfma`
-#: was written for: every `A(i, k)` read first (`_load_a`) and held while the
+#: is written for: every `A(i, k)` read first (`_load_a`) and held while the
 #: columns go by one after the other.  `'rows'` is the order of the packed
 #: arrangements: the contraction outermost, each `A(i, k)` read at its row and
 #: dead after the last column, the accumulators pinned at the end of each row.
 #: Every accumulator receives the same products in the same order either way,
 #: so the two agree to the bit -- what differs is what is live.  `'auto'`
-#: picks per chain (`_fused_order`).  Measured on gfx1150, `local_flux`: 219
-#: VGPRs down to 130, occupancy 4 to 7, 3.6 % faster; at 16 lanes with the
-#: faces merged 23.5 % faster, and no longer spilling.
+#: picks per chain (`_fused_order`).  Measured on gfx1150, `local_flux`: 130
+#: VGPRs in rows against 219 in columns, occupancy 7 against 4, 3.6 %
+#: faster; at 16 lanes with the faces merged 23.5 % faster, and no spill.
 FUSED_ORDER = 'auto'
 
 #: The size of the `A` image, in registers a lane, from which `'auto'`
 #: considers the rows at all.  `local_flux` holds 112 (two slots over 56
-#: steps), which on gfx1150 was half of its 219 VGPRs; below this the image
-#: does not decide the occupancy, and the rows' extra reads and branches are
-#: all that is left of them.
+#: steps), which on gfx1150 is half of the 219 VGPRs it takes in columns;
+#: below this the image does not decide the occupancy, and the rows' extra
+#: reads and branches are all that is left of them.
 AUTO_ROWS_FROM = 64
 
 #: Whether lead width above one takes the fused chain where the packed one
 #: does not pay (`_matmuldpp_wide`), rather than leaving it to the nest.  Off:
-#: on gfx1150 (`local_flux`, eight mults, no packed FMA) it ran 7 % behind the
-#: nest at the same occupancy -- 153 ns an element against 143, 129 VGPRs
-#: against 141 -- in either order.  It was on while the nest computed
-#: `slice_offset_a` wrong at lead width two, from a broadcast inside a lane
-#: guard; `passes.converge_crosslane` took that out.
+#: on gfx1150 (`local_flux`, eight mults, no packed FMA) it runs 7 % behind
+#: the nest at the same occupancy -- 153 ns an element against 143, 129 VGPRs
+#: against 141 -- in either order.
 FUSED_WIDE = False
 
 
@@ -85,8 +83,8 @@ def _check_mfma_operand(operand, threads, callee, tile=None):
 def _refuse_multiwave(threads, ctx):
     """A multiplication wider than the wave is refused on the DPP paths.
 
-    Measured on gfx1150 (local_flux, 64 lanes over 32-wide waves): the kernel
-    came out wrong with no error and no spill -- first through the DPP
+    Measured on gfx1150 (local_flux, 64 lanes over 32-wide waves), such a
+    kernel comes out wrong with no error and no spill -- through the DPP
     broadcast, which ends at the wave, and still wrong with the broadcast
     narrowed to one lane, so it is not the exchange alone.  A wrong kernel is
     worse than none; on a 64-wide wave the same width is one wave and builds.
@@ -148,8 +146,7 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
 
         ftype = ScalarType(datatype)
         # A packed pair for the `movdpp16` path.  `ScalarType(base, length)`
-        # is what the lexic renders as `float2` -- the hard-coded name the
-        # commented-out line above was reaching for.
+        # is what the lexic renders as `float2`.
         vtype = ScalarType(datatype, localstep) if localstep > 1 else ftype
 
         for i in range(0, len(B[0]) // repeat, step):
@@ -159,13 +156,12 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                 a = []
                 for aa in A:
                     # What the instruction downstream needs, asked of the
-                    # table rather than assumed.  `hfma` used to name the
-                    # broadcast directly and state its result layout beside
-                    # it; the two disagreed for a while, because a name and a
-                    # claim written in two places can.  Now the requirement is
-                    # stated once, the table answers with the instruction that
-                    # meets it, and `fmadpp` checks the same requirement on
-                    # arrival.
+                    # table rather than assumed.  Naming the broadcast here
+                    # and stating its result layout beside it would put a
+                    # name and a claim in two places, where they can
+                    # disagree.  So the requirement is stated once, the table
+                    # answers with the instruction that meets it, and
+                    # `fmadpp` checks the same requirement on arrival.
                     want = fmadpp_operand_layout(step)
                     found = find_relayout(want, threads)
                     if found is None:
@@ -224,10 +220,11 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                 for jj in range(repeat):
                     for bx in range(localstep):
                         if idx + jj < len(B[bx]):
-                            # NOTE: `b` used to shadow the loop variable of the
-                            # enclosing `for b in range(0, len(Cs), bcststep)`,
-                            # so the block index was destroyed on the first
-                            # iteration that got here.
+                            # NOTE: `bv`, not `b`: that would shadow the loop
+                            # variable of the enclosing
+                            # `for b in range(0, len(Cs), bcststep)` and
+                            # destroy the block index on the first iteration
+                            # that gets here.
                             bv = B[bx][idx + jj]
                             c = C[bx][idx + jj]
                             if bv is not None:
@@ -334,11 +331,11 @@ def _blgp(mults, q):
 def _shared_fragment(writer, tile, ftype, threads, regs):
     """The shared matrix at the layout the A fragment wants.
 
-    Asked rather than assumed.  `matmul32` transposed unconditionally because
-    that is what its own operands need, which is true and is not the same
-    statement as the instruction needing it -- and an operand arriving already
-    right would have been transposed anyway.  `None` here is the gap this
-    instruction does not close; the caller declines rather than emitting
+    Asked rather than assumed.  Transposing unconditionally, because that is
+    what `matmul32`'s own operands need, would rest on something true that is
+    not the same statement as the instruction needing it -- and an operand
+    arriving already right would be transposed anyway.  `None` here is the gap
+    this instruction does not close; the caller declines rather than emitting
     something that does not reach the fragment.
     """
     block = tile.block
@@ -453,8 +450,8 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                             # contraction walks, `kx` later -- as `_load_a`
                             # keys it for the chain.  Step `r` of the lead is
                             # therefore step `kx + r` of the shared matrix.
-                            # Counting both from the block's start paired the
-                            # lead's step `r + kx` with the shared matrix's
+                            # Counting both from the block's start would pair
+                            # the lead's step `r + kx` with the shared matrix's
                             # `r` wherever a window starts inside the block:
                             # SeisSol's time derivative, from depth 1.
                             if lead_quad is not None:
@@ -512,8 +509,9 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 # `p`-th reads `k + p` -- and every MFMA of
                                 # the group takes one of them from its lanes
                                 # (`blgp`).  One read of `mults` steps where
-                                # each step was read `mults` times.  A tail
-                                # shorter than the group reads as before.
+                                # otherwise each step is read `mults` times.
+                                # A tail shorter than the group reads each
+                                # step itself.
                                 for g in range(0, K, mults):
                                     if all(zero(i, r) for r in
                                            range(g, min(g + mults, K))):
@@ -543,14 +541,13 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                             for k in range(0, K + kx, threads):
                                 dk = min(threads, K + kx - k)
                                 for kk in range(0, dk, block):
-                                    # NOTE: no scope here.  It used to isolate
-                                    # the `tmpB_*` names; those now come from
-                                    # the shared allocator and are unique
-                                    # anyway.  Keeping it would trap the
-                                    # accumulator: with the chain in SSA the
-                                    # updated value is *declared* at the MFMA,
-                                    # not assigned to a variable that outlives
-                                    # the braces.
+                                    # NOTE: no scope here.  The `tmpB_*` names
+                                    # come from the shared allocator and are
+                                    # unique without one, and a scope would
+                                    # trap the accumulator: with the chain in
+                                    # SSA the updated value is *declared* at
+                                    # the MFMA, not assigned to a variable
+                                    # that outlives the braces.
                                     tB = [None] * block
                                     dkk = min(block, dk - kk)
                                     for kkk in range(dkk):
@@ -622,12 +619,12 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
             lane `t` of the block at `k0` holds step `k0 + w * t + c` in
             component `c`.  So each component is transposed on its own, and
             its fragment serves the steps `w` apart that it holds, with `abid`
-            picking the quad as before.  The same count of MFMAs as at width
-            one -- `M` is a `w`-th of it and each step issues `w`.  Not quite
-            the same count of transposes: one per component of a contraction
-            block `w` times as long, so a contraction shorter than the block
-            transposes `w` times where width one did once (`local_flux`'s 9x9
-            products: 32 against 24).
+            picking the quad as at width one.  The same count of MFMAs as at
+            width one -- `M` is a `w`-th of it and each step issues `w`.  Not
+            quite the same count of transposes: one per component of a
+            contraction block `w` times as long, so a contraction shorter than
+            the block transposes `w` times where width one does once
+            (`local_flux`'s 9x9 products: 32 against 24).
             """
             block = tile.block
             scale = tile.scale(threads)
@@ -685,17 +682,16 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                     for acc in accs)), i, j + jj)
             return True
 
-        # The tiling policy, now separate from what the tiles are.  Only the
-        # 4-wide tile is reachable today: the 16-wide one needs a shared-memory
-        # staging step that is not written, and the 32-wide one has no
-        # transpose in the runtime, which `available_for` already refuses.
+        # The tiling policy, separate from what the tiles are: the tile `rank`
+        # chose among the widths `catalog.LANE_BATCHED_BLOCKS` admits, 4 and
+        # 16, where the caller passes it; the narrowest otherwise, for a
+        # direct caller.  The 32-wide one is held back there, and has no
+        # transpose in the runtime, which `available_for` refuses as well.
         #
         # `matmul()` is the gate; this is the guard for a direct caller, and
-        # both ask `mfma_tile_for`.  A `next()` without a default raised
+        # both ask `mfma_tile_for`.  A `next()` without a default would raise
         # `StopIteration` here instead, which unwinds out of generation as an
         # unrelated-looking error.
-        # The tile `rank` chose, where the caller passes it; the narrowest
-        # otherwise, for a direct caller.
         if tile is None:
             tile = mfma_tile_for(threads, dtype, ctx)
         if tile is None:
@@ -866,7 +862,7 @@ def _pin(writer, accumulators):
     is free to be linearized after every input it reads -- a body's moves all
     first, each live until its FMA.  Measured on `local_flux` (gfx1251, lead
     width two): 740 VGPRs and 252 moves ahead of the first FMA; pinned every
-    row, 161 and 10.  Every fourth row was not enough for the column pairs
+    row, 161 and 10.  Every fourth row is not enough for the column pairs
     (512 VGPRs and 800 B of scratch against 230 and none).
     """
     for acc in accumulators:
@@ -916,11 +912,12 @@ def matmuldpp(writer, start, C, A, B, M, N, K, kx, threads, dtype, sparse,
         # One contraction row -- an outer product, `t[i,j,l] = A[i,j] v[l]`.
         # There is nothing to spread over the lanes: `B(0, j)` is read at the
         # same address by all of them, and the row share only repeats it.  It
-        # was also wrong: that uniform value lives in an SGPR once its operand
-        # is in the constant space, LLVM copies it into a VGPR only under the
-        # lane mask where it is used, and the DPP in the inline assembly reads
-        # lanes the copy never reached (`lead_window_spans_two_blocks`,
-        # gfx1150, 18 % off).  The nest multiplies by the scalar.
+        # would also be wrong: that uniform value lives in an SGPR once its
+        # operand is in the constant space, LLVM copies it into a VGPR only
+        # under the lane mask where it is used, and the DPP in the inline
+        # assembly reads lanes the copy never reaches
+        # (`lead_window_spans_two_blocks`, gfx1150, 18 % off).  The nest
+        # multiplies by the scalar.
         return False
     _refuse_multiwave(threads, ctx)
     if width > 1:
@@ -964,8 +961,9 @@ def _fused_order(cols, M, K, dtype, step, threads, a_resident, a_vector=False):
     nothing stops LLVM from issuing ahead of the products they feed.
     `add_true_f64` on gfx1150 has 128 of those in FP64: 256 VGPRs and 176 B
     of scratch, against 83 and none in rows.  A wider broadcast relays one
-    register a sub-block only; counting those took one chain of `chain_five`
-    into rows, for 4 to 7 % more instructions and not a register less.
+    register a sub-block only; counting those would take one chain of
+    `chain_five` into rows, for 4 to 7 % more instructions and not a register
+    less.
 
     A single column reads each value once in either order -- unless `A` is
     read several steps at a time (`a_vector`, the k-quads of
@@ -979,7 +977,7 @@ def _fused_order(cols, M, K, dtype, step, threads, a_resident, a_vector=False):
     The row order keeps every column's accumulators and its `B` register,
     and pays elsewhere: an `A` value read at one row is one LLVM may sink
     into a branch of its own where the read is guarded (`rectangular` on
-    gfx1150, 34 more), and one it no longer shares with a neighboring chain
+    gfx1150, 34 more), and one it then cannot share with a neighboring chain
     (`local_flux` on gfx942, 220 more LDS reads).  So the rows only where the
     column order holds a lot and the row order less than half of it.
     """
@@ -1061,8 +1059,8 @@ def _a_on_demand(writer, A, K, kx):
     read, consumed by every column, and dead -- where `_load_a` reads them all
     first and holds every one across every column.  At two lead slots and 56
     contraction steps that is 112 registers held for the whole chain, and a
-    packed FMA wants each splat operand in an aligned pair besides: gfx1251
-    went from 226 VGPRs to 512 and 1.6 KB of scratch on it.
+    packed FMA wants each splat operand in an aligned pair besides: on gfx1251
+    that takes 512 VGPRs and 1.6 KB of scratch, against 226.
     """
     cache = {}
 
@@ -1091,8 +1089,9 @@ def _paired_columns(writer, C, A, B, pairs, M, K, kx, threads, dtype, step):
     Pairing the slots is what keeps the operands where they are.  Splatting
     `A(i, k)` itself across a column pair instead wants each of them in the
     low half of an aligned pair, and an operator held as a register image --
-    `chain_three`, 112 values a lane -- came out 100 VGPRs over its fused
-    count on gfx1251 and spilled.  Needs an even `M`, which `matmuldpp` asks.
+    `chain_three`, 112 values a lane -- would come out 100 VGPRs over its
+    fused count on gfx1251 and spill.  Needs an even `M`, which `matmuldpp`
+    asks.
 
     The contraction is the outer loop and the pairs the inner one, so an
     `A(i, k)` is read, used by every column and dead; what stays resident is

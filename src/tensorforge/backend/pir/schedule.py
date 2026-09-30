@@ -5,19 +5,19 @@
 
 """Pseudo-IR: moving statements past each other.
 
-Every pass so far rewrote statements in place or deleted them.  This one is the
-first that changes their *order*, which is the whole reason the last several
-commits went to the trouble of making buffers into values, pointer bindings
-into definitions and transfers into `copy.async`: order is exactly what cannot
-be changed safely while a body is full of raw text whose effects are unknown.
+Rewriting statements in place or deleting them leaves their *order* alone;
+this module is about changing it.  Order is exactly what cannot be changed
+safely while a body is full of raw text whose effects are unknown, which is why
+buffers are values, pointer bindings definitions and transfers `copy.async`.
 
 `can_reorder(a, b)` is the predicate, and it is deliberately one function
 rather than a rule spread across the passes that need it.  Two adjacent
 statements may swap when none of these holds:
 
-* **`b` uses what `a` defines.**  The def-use edge, which is why the migration
-  mattered: a read through `glb_m1` used to be text, so nothing connected it
-  to the binding above it, and any reorder had to assume the worst.
+* **`b` uses what `a` defines.**  The def-use edge, which is why a pointer
+  binding is a definition: a read through `glb_m1` written as text would
+  connect to nothing, not even the binding above it, and any reorder would
+  have to assume the worst.
 * **Their accesses conflict.**  `accesses_conflict` is read-after-read free
   and compares alias roots, so a window is the buffer it is a window into.
   An access with `base=None` conflicts with everything in its space --- which
@@ -26,15 +26,16 @@ statements may swap when none of these holds:
 * **Either is immovable, carries an unknown effect, or is a barrier.**
   A barrier orders *all* threads, not just this one's memory, so no access
   analysis can license moving across it.
-* **Either has regions.**  A loop or conditional is not opaque to this pass in
-  principle, but its body may touch anything its header does not say, and the
-  cheap thing to do is treat it as a wall.  Widening that is a later pass with
-  its own test, not a flag here.
+* **Either holds such a statement in its regions.**  A region is not a wall by
+  itself: its accesses are the union of its body's (`touches`), and it is a
+  wall only when something *inside* it is.  A barrier or an unknown effect
+  anywhere in the subtree still stops everything; a loop that merely reads
+  and writes buffers it declares does not.
 
-`sink_waits` and `hoist_issues` are the first two users, one in each
-direction, and they are in the pipeline nowhere.  That is a measurement, not
-an oversight: between them they move nothing but comments on the corpus --- 15
-of 232 outputs differ, all of them in comment placement, and the mean
+`sink_waits` and `hoist_issues` apply it greedily, one in each direction, and
+they are in the pipeline nowhere.  That is a measurement, not an oversight:
+between them they move nothing but comments on the corpus --- 15 of 232
+outputs differ, all of them in comment placement, and the mean
 issue-to-wait distance goes 7.7 to 8.1 statements entirely through comments
 changing places.  The macro layer already emits the wait immediately before
 the read that needs it and the issue immediately after the pointer binding it
@@ -45,8 +46,8 @@ the transfers have five statements or fewer of cover; getting more means
 moving an issue *across the loop back edge*, which is a different
 transformation --- it has a distance parameter, it needs a prologue, and it
 changes how many copies of a buffer are live.  This module is what that
-transformation will check its moves against, and `overlap` is what will show
-whether it worked.
+transformation checks its moves against, and `overlap` is what shows whether
+it works.
 
 So what this module does *not* do is decide how far anything should move.
 "As late as legal" has no free parameter; a modulo schedule has several, and
@@ -104,10 +105,10 @@ def may_cross(mover: Stmt, fixed: Stmt) -> bool:
     exactly where it is, and whether it could have moved is not a question
     anyone asked.
 
-    That distinction cost six of the corpus's loops, where the only thing
-    between a transfer and its wait is a `rawblock` that nobody wanted to
-    move.  What still matters about the fixed statement is what it *touches*,
-    and `touches` says that for a whole subtree or says nothing at all.
+    The distinction matters wherever the only thing between a transfer and
+    its wait is a `rawblock` that nobody wants to move.  What still matters
+    about the fixed statement is what it *touches*, and `touches` says that
+    for a whole subtree or says nothing at all.
     """
     # Describable, not movable.  Since the mover may be a whole section --
     # a hop loop moved as a unit -- it is a `rawblock`, and a raw block is

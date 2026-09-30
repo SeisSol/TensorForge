@@ -108,12 +108,11 @@ class MatmulOperands:
     #: for a BF16 one --- so that the parts a matrix instruction would compute
     #: are read instead.
     #:
-    #: A count and not a field per part, which is the version this replaced:
-    #: `A_lo` names "the second of two" and a three-part scheme would have
-    #: needed an `A_lo2` beside it, and a four-part one another.  What the
-    #: parts *mean* is the instruction mode's business --- the TF32 branch
-    #: takes two and multiplies three products of them --- and what they are
-    #: *numbered* is this.
+    #: A count and not a field per part: an `A_lo` would name "the second of
+    #: two", and a three-part scheme would need an `A_lo2` beside it, and a
+    #: four-part one another.  What the parts *mean* is the instruction mode's
+    #: business --- the TF32 branch takes two and multiplies three products of
+    #: them --- and what they are *numbered* is this.
     a_parts: int = 1
 
     #: Whether `A` is the same for every multiplication -- batch-constant --
@@ -178,8 +177,8 @@ class MatmulOperands:
     #: skip its staging tile because a batch-constant operand may be permuted
     #: once on the host; `B` is per-element and may not, and does not need to
     #: be --- its fragment coordinate is two lane distributions, so the address
-    #: is computable per lane and the tile was only ever compensating for an
-    #: accessor that could express one distribution and not two.
+    #: is computable per lane and a tile would only compensate for an accessor
+    #: that can express one distribution and not two.
     B_frag: Optional[Callable] = None
 
     #: ``B_direct(kblock, nblock) -> bool``: whether :attr:`B_frag` can address
@@ -194,7 +193,7 @@ class MatmulOperands:
     #: batch-constant tensor the description gives numbers for
     #: (`Options.skip_known_zeros`); a path asks it per tile and leaves out
     #: the instruction of a tile that is all zero.  `False` means unknown as
-    #: well as nonzero, so a path that never asks is exactly as before.
+    #: well as nonzero, so a path that never asks leaves every tile in.
     A_zero: Optional[Callable] = None
 
 

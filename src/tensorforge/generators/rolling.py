@@ -52,12 +52,11 @@ def _selects_a_temporary(run) -> bool:
 
     So a run that varies in a temporary is left written out.  Third of three
     refusals, and the one that is a limitation rather than a decision: the
-    damage step's sums over nodal sources are exactly this shape, and they
-    were rolled while every temporary was identified by its slot -- which is
-    what made the loop add one node's source six times
-    (`antiunify._scratch_origins`).  Telling the temporaries apart turns that
-    wrong loop into a correct written-out run, and lifting this needs the
-    loop to bind a buffer per iteration.
+    damage step's sums over nodal sources are exactly this shape.  With every
+    temporary identified by its slot they would roll into a loop that adds
+    one node's source six times (`antiunify._scratch_origins`); telling the
+    temporaries apart leaves them a correct written-out run, and lifting this
+    needs the loop to bind a buffer per iteration.
     """
     return any(getattr(getattr(view, 'tensor', view), 'is_tmp', False)
                for binding in run.general.bindings for view in binding)
@@ -94,9 +93,9 @@ def roll(descrs: Sequence[OperationDescription],
 
     Both are stated in whatever `size` answers in -- what a list of
     descriptors becomes.  The generator measures it: bytes of code from an
-    unmerged build, split over the list by arithmetic (`Generator._auto_merge`).
-    It used to be a line count from a regression over one SeisSol corpus,
-    which was twice too large at the other end of the scale.
+    unmerged build, split over the list by arithmetic (`Generator._auto_merge`)
+    -- a line count from a regression over one SeisSol corpus would be twice
+    too large at the other end of the scale.
 
     Left unset neither is weighed and every run is rolled.
     """

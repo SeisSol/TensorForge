@@ -363,10 +363,10 @@ def compose_exchange(have, want, indices, wave: int, base_have=None,
 def emittable(groups) -> bool:
     """Whether every region of an assembled exchange can be written at all.
 
-    `mergeable`, not `free`.  The two are different questions and conflating
-    them is what kept this form out of reach: a region finer than a bank costs
-    a `laneMerge` of its own and is emitted all the same, so it is dearer
-    rather than impossible.  `Move.cost` already carries the difference, which
+    `mergeable`, not `free`.  The two are different questions, and conflating
+    them would put this form out of reach: a region finer than a bank costs a
+    `laneMerge` of its own and is emitted all the same, so it is dearer rather
+    than impossible.  `Move.cost` already carries the difference, which
     is why the ranking needs no second opinion here.
     """
     return all(move.select.mergeable for group in groups for move in group)

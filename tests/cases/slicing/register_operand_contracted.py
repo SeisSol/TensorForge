@@ -12,7 +12,7 @@ slice's lane residue (`_lead_origin_shift`, 35 % 32 = 3), so ``t`` holds its
 row ``l`` in lane ``(l + 3) % 32``.  The last GEMM reads ``t`` as its second
 operand, where the lead dimension is the reduction ``k`` rather than the
 output's lead ``n0`` -- and a vendor path that reads ``B`` a register slot at
-a time found the lanes three places off, which it cannot address. The
+a time would find the lanes three places off, which it cannot address. The
 reduction has a free origin just like ``n0`` has; shifting it by the same
 residue makes ``t``'s effective offset vanish and moves the compensating
 shift onto ``K``, which lives in memory and takes any offset.

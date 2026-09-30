@@ -3,12 +3,10 @@
 # SPDX-License-Identifier: MIT
 """The ESIMD emitter turns a distribution into a type, and refuses to guess.
 
-Tested on hand-built values rather than through the generator, because the
-generator cannot reach the emitter yet: `LeadIndex.build` still constructs an
-SPMD address, so every case stops at the lane index before a declaration is
-ever written.  That is the next piece of work, and it is not a reason to leave
-the piece that *is* written unverified -- the type mapping is the part the
-whole lowering rests on, and it is decidable from a `Value` alone.
+Tested on hand-built values rather than through the generator: the type
+mapping is the part the whole lowering rests on, and it is decidable from a
+`Value` alone, so each case can be stated exactly instead of being found in a
+generated kernel.
 """
 
 from __future__ import annotations
@@ -91,7 +89,7 @@ def test_an_untracked_value_is_recorded_not_guessed(emitter):
 def test_untracked_and_replicated_do_not_collapse(emitter):
     """Both hold one value per lane; only one of them is *known* to.
 
-    In SPMD they are spelled identically and nothing noticed the difference.
+    In SPMD they are spelled identically and nothing tells them apart.
     Here the replicated case is an answer and the untracked case is a hole,
     and a lowering that treats them alike writes `float` where a vector
     belongs -- which compiles, runs, and is wrong.
@@ -118,10 +116,10 @@ def test_strict_mode_raises_at_the_end_of_a_body():
 def test_asking_for_a_lane_index_is_an_error_not_a_substitution(emitter):
     """One work-item *is* the vector.
 
-    `item.get_local_id(0)` is the work-item's place in the ND-range, and the
-    previous ESIMD attempt used it as a lane -- indexing a vector with a
-    work-group coordinate.  Refusing here is what turns that from a silent
-    wrong answer into the message that names the next piece of work.
+    `item.get_local_id(0)` is the work-item's place in the ND-range, and using
+    it as a lane would index a vector with a work-group coordinate.  Refusing
+    here is what turns that from a silent wrong answer into the message that
+    names the next piece of work.
     """
     with pytest.raises(IRError, match='no lane index'):
         emitter._thread_idx('x')
@@ -365,8 +363,8 @@ def test_a_lower_bound_narrows_to_a_vector_that_starts_later():
     """`lane >= 4` is not a mask either.
 
     It needs the vector to *start* at element 4, which is a base offset --
-    `LeadIndex` carries one since the `VarOffset` merge, and
-    `split_lead_shift` puts its leftover lanes into a register address.
+    `LeadIndex` carries one, and `split_lead_shift` puts its leftover lanes
+    into a register address.
     """
     out = _leadloop(start=4, end=16)._narrow(_FakeWriter(True), 0, 4, None, 4, 16)
     assert out == (12, 4)
@@ -398,10 +396,10 @@ def test_a_slot_is_one_entry_per_thread_in_spmd():
 def test_a_slot_is_a_run_of_lanes_when_the_work_item_holds_the_wave():
     """Every lane's entry is in *this* array, so a slot is `threads` of them.
 
-    Sizing per thread while addressing per work-item is what made twenty-one
-    kernels read past the end of an array -- and that compiled, which is why
-    the allocation and the addressing call one function instead of repeating
-    a formula that already exists in three places.
+    Sizing per thread while addressing per work-item would make kernels read
+    past the end of an array -- and that compiles, which is why the
+    allocation and the addressing call one function instead of each stating
+    the formula.
     """
     from tensorforge.backend.symbol import DataView
     assert DataView.lead_lanes(None, True, 16) == 16
@@ -417,22 +415,22 @@ def test_narrowing_refuses_a_straddling_vector():
 
 
 # --------------------------------------------------------------------------
-# the last two text-path stores
+# sliced and rotating stores on the structured path
 # --------------------------------------------------------------------------
 
 def test_a_sliced_lead_index_still_takes_the_structured_path():
     """`unwrap_lead`, not `isinstance`.
 
-    A slicing offset wraps the lead index in a `VarOffset`, which
-    `build_address` has always peeled -- so testing for `LeadIndex` alone only
-    ever sent a sliced store back to the text path, where its address is a
-    pinned name instead of an operand.
+    Both store paths ask `unwrap_lead`, as `build_address` does, so a sliced
+    store takes the structured path however its offset is carried.  A test
+    for `LeadIndex` alone would tie that to the representation, and whatever
+    it missed would go back to the text path, where its address is a pinned
+    name instead of an operand.
     """
     from tensorforge.backend.symbol import LeadIndex, unwrap_lead
-    # Since the merge this *is* a LeadIndex rather than a wrapper around one,
-    # and `unwrap_lead` is what both store paths ask.  `isinstance(...,
-    # LeadIndex)` happens to work again -- but only by accident, and the
-    # narrower test is what sent a sliced store to the text path before.
+    # A sliced lead index *is* a LeadIndex, the offset a field on it, so
+    # `isinstance(..., LeadIndex)` would hold here too -- but only by accident
+    # of the representation; `unwrap_lead` is what both store paths ask.
     idx = LeadIndex(0, 16, 1, offset=32)
     assert unwrap_lead(idx) is not None
 
@@ -472,9 +470,9 @@ def test_wrapping_a_lead_index_is_refused():
     """The unit mismatch, made unreachable.
 
     `VarOffset.write_nonlead` adds an element count to a slot index -- for
-    slot 2 shifted by 32 elements over 16 lanes it produced `2 + 32` where the
-    answer is `4`.  Nothing called it, so nothing found it; now nothing can
-    build the state that would.
+    slot 2 shifted by 32 elements over 16 lanes it would produce `2 + 32`
+    where the answer is `4`.  Refusing the wrapper means nothing can build the
+    state that would reach it.
     """
     from tensorforge.backend.symbol import LeadIndex, VarOffset
     from tensorforge.common.exceptions import InternalError
@@ -494,8 +492,9 @@ def test_unwrap_lead_keeps_its_contract():
 
 
 def test_the_element_view_applies_the_offset_and_the_slot_view_does_not():
-    """The whole reason the offset moved in here: its unit depends on the view,
-    and only the index knows `block` and `width` to convert between them."""
+    """The whole reason the offset lives in the index: its unit depends on the
+    view, and only the index knows `block` and `width` to convert between
+    them."""
     from tensorforge.backend.symbol import LeadIndex
     idx = LeadIndex(2, 16, 1, offset=32)
     assert idx.write_nonlead() == '2'
@@ -552,8 +551,8 @@ def test_a_register_allocation_is_register_file():
     """And on this path it is the biggest thing in it.
 
     `lead_window_spans_two_blocks` peaks at 540 bytes of SSA values beside a
-    `float r0[4992]` -- 19 KB.  Counting only the values reported that kernel
-    as comfortable.
+    `float r0[4992]` -- 19 KB.  Counting only the values would report that
+    kernel as comfortable.
     """
     from tensorforge.backend.pir.core import BufferType, MemSpace
     from tensorforge.backend.pir.passes import register_bytes
@@ -624,8 +623,8 @@ def test_an_explicit_vector_has_nobody_to_wait_for():
     registers.  A 32-thread multiplication is a 32-wide vector executed in
     order by one work-item.
 
-    This is the structural difference the path was chosen for, and it is what
-    the sub-group-16 finding from the very first review turns into.
+    This is the structural difference the path exists for, and it is what
+    PVC's 16-wide sub-group turns into under this lowering.
     """
     from tensorforge.backend.pir.core import Uniformity
     assert _sync(16, 'esimd') is Uniformity.MULT
@@ -742,7 +741,7 @@ def test_the_result_is_a_scalar_not_a_broadcast():
 
     In SPMD an all-reduce leaves every thread holding a copy and "the result"
     is that copy, so the two readings coincide.  Here they do not: broadcasting
-    back produced `glb_m1[k] = simd<float, 16>(...)`, a sixteen-wide value
+    back would produce `glb_m1[k] = simd<float, 16>(...)`, a sixteen-wide value
     assigned to a scalar destination.  A caller that wants it in every lane
     spells `simd<T, N>(scalar)` itself.
     """
@@ -894,10 +893,10 @@ def _select_src(result_type=F32, cond_layout=SPREAD16, other=0.0):
 def test_a_masked_select_is_a_merge_and_not_a_ternary():
     """`m ? a : b` on a `simd_mask` has no single bit to test.
 
-    The same answer `declare` already gave a folded predicate, for the select
-    the sparse path builds directly.  Reached through a different route --
+    The same answer `declare` gives a folded predicate, for the select the
+    sparse path builds directly.  Reached through a different route --
     `if_convert` attaches a predicate, `Symbol.encode_values` emits the op --
-    and lowered by the base emitter as a ternary until this was here.
+    and without this lowered by the base emitter as a ternary.
     """
     src = _select_src()
     assert '.merge(' in src, src
@@ -907,8 +906,8 @@ def test_a_masked_select_is_a_merge_and_not_a_ternary():
 def test_the_merge_is_not_inlined_into_its_consumer():
     """Which is why the interception cannot live in `declare`.
 
-    A single-use select is inlined, so the ternary landed inside a `copy_to`
-    argument and no declaration was ever written to override.
+    A single-use select is inlined, so the ternary lands inside a `copy_to`
+    argument and no declaration is ever written to override.
     """
     src = _select_src()
     assert 'copy_to' in src
@@ -960,8 +959,8 @@ def test_a_register_array_read_in_ranges_is_one_simd():
     """A private array is memory to IGC: every `copy_from`/`copy_to` through
     it is a transfer, and what it cannot promote it keeps in scratch.  The
     same array as a `simd`, read and written through `select`, is registers
-    -- `local_flux` on pvc went from 33088 B of spill to 26048 B on this
-    alone."""
+    -- on this alone `local_flux` on pvc spills 26048 B against 33088 B as an
+    array."""
     from tensorforge.backend.pir import MemSpace
 
     def build(b):
@@ -991,8 +990,8 @@ def test_a_register_array_named_in_raw_text_stays_an_array():
 
 def test_a_comment_naming_the_array_does_not_keep_it():
     """The macro layer writes the instruction above its lowering, which names
-    every buffer it touches; `chain_five_multiplies` kept all six of its
-    arrays over those lines and spilled 17 kB for it."""
+    every buffer it touches; counted as uses, those lines would keep all six
+    arrays of `chain_five_multiplies` whole and cost 17 kB of spill."""
     from tensorforge.backend.pir import MemSpace
 
     def build(b):
@@ -1006,14 +1005,13 @@ def test_a_comment_naming_the_array_does_not_keep_it():
 def test_register_arrays_are_simd_whatever_the_file_holds():
     """An array too big for the register file is still better as a `simd`.
 
-    It was not taken -- and neither was any other, since the rule was all or
-    none -- on the evidence of two kernels where taking *some* of them was
-    worse than taking none.  Taking all of them is a different arrangement: a
-    `simd` that does not fit spills in blocks, an array that stays an array is
-    a `copy_from` per access.  Measured on pvc: `gemm_56x18_x_18x18` 266.11 ->
-    4.93 ns an element, `register_operand_lead_slice` 661.92 -> 6.47,
-    `elastic-o6s:derivative` 2126.83 -> 111.32, and the two kernels the old
-    rule was built on within a hundredth.
+    Taking *some* of a kernel's arrays can be worse than taking none, but
+    taking all of them is a different arrangement: a `simd` that does not fit
+    spills in blocks, an array that stays an array is a `copy_from` per
+    access.  Measured on pvc, arrays against `simd`s: `gemm_56x18_x_18x18`
+    266.11 against 4.93 ns an element, `register_operand_lead_slice` 661.92
+    against 6.47, `elastic-o6s:derivative` 2126.83 against 111.32, and within
+    a hundredth on the two kernels where taking some is worse than none.
     """
     from tensorforge.backend.pir import MemSpace
 
@@ -1028,7 +1026,7 @@ def test_register_arrays_are_simd_whatever_the_file_holds():
 
 
 def test_a_register_array_read_past_its_end_stays_an_array():
-    """`select` checks its range where the array read the next variable; a
+    """`select` checks its range where the array reads the next variable; a
     known offset past the end is left as it was rather than made an error."""
     from tensorforge.backend.pir import MemSpace
 

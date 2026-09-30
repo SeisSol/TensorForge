@@ -3,30 +3,23 @@
 # SPDX-License-Identifier: MIT
 """The NVIDIA matmul path is asked whether it can emit, not told to try.
 
-`primitives/nvidia.py` was unreachable: `_is_matmul` asked
-`vendor in ['amd']`, so the `elif vendor == 'nvidia'` branch under it could
-never run.  Turning it on is one word, and one word is exactly the wrong size
-for this change -- the emitter's preconditions were `assert` statements, which
-were harmless only while nothing reached them.
+The emitter's preconditions are a question the caller asks first,
+`nvidia.supports()`, and `_is_matmul` consults it.  As `assert` statements in
+the emitter they would not be a rejection but an abort: a case with a 16-wide
+wave would stop generating altogether, when the generic path handles it
+perfectly well.  This file checks both halves -- that the gate turns the right
+cases away, and that a case it turns away still comes out of the generator.
 
-With the path live an assertion is not a rejection, it is an abort: a case
-with a 16-wide wave would stop generating altogether, when the generic path
-handles it perfectly well.  So the preconditions became `nvidia.supports()`, a
-question the caller asks first, and `_is_matmul` consults it.  This file
-checks both halves -- that the gate turns the right cases away, and that a
-case it turns away still comes out of the generator.
-
-Measured while enabling it: 9 of the corpus's CUDA cases take the path, and
-the same 9 snapshots changed.  No HIP snapshot moved.
+With the path enabled, 9 of the corpus's CUDA cases take it, and the same 9
+snapshots change.  No HIP snapshot moves.
 
 The path is parked (`nvidia.ENABLED`) pending a run on real hardware: `"+f"`
 versus `"=f"`/`"f"` on the accumulator is a register-allocation difference no
 front end can see.  The tests below that need the emitter's output turn it on
-for themselves.  A parked path whose tests skip is a path that quietly rots --
-that is how `nvidia.py` accumulated 23 unreachable definitions in the first
-place -- so what is checked here is the emitter, which is worth checking
-whether or not it is deployed.  `test_the_switch_is_off` is the separate,
-one-line statement of the deployment decision.
+for themselves.  A parked path whose tests skip is a path that quietly rots,
+so what is checked here is the emitter, which is worth checking whether or not
+it is deployed.  `test_the_switch_is_off` is the separate, one-line statement
+of the deployment decision.
 """
 
 from __future__ import annotations
@@ -119,8 +112,9 @@ def enabled(monkeypatch):
 def test_a_sparse_a_stages_its_zeros(config, kernel):
     """SeisSol's damage operators are sparse, and a structural zero of `A` is
     no read at all (`Symbol.load`).  The staging tile still needs the zero;
-    handed on as it came it was a store of nothing, and neither kernel
-    generated under tensor cores ("a None operand reached the emitter")."""
+    handed on as it comes it would be a store of nothing, and neither kernel
+    would generate under tensor cores ("a None operand reached the
+    emitter")."""
     import contextlib
     import io
 
@@ -144,8 +138,9 @@ def test_a_sparse_a_stages_its_zeros(config, kernel):
 def test_a_deep_atom_reads_zero_past_b(config):
     """sm_90's F64 atom is sixteen deep, so the last step of a reduction can
     reach a slot of `B` past the operand's depth -- one the staging never
-    filled, since nothing lies there to read.  It was a KeyError; `A`'s
-    padding makes every product there zero, and the slot reads zero."""
+    fills, since nothing lies there to read.  Looking it up would be a
+    KeyError; `A`'s padding makes every product there zero, so the slot reads
+    zero."""
     import contextlib
     import io
 
@@ -223,17 +218,17 @@ def test_the_operand_numbering_survives_the_fold(enabled):
 
 
 def test_the_matmul_emits_no_raw_statements(enabled):
-    """The end of the conversion, asserted rather than remembered.
+    """No raw statement in the path, asserted rather than remembered.
 
-    Every operand in this path is a value now: the accessors hand back the
-    value instead of a name to write into, the accumulator slots and the
-    padding fragments are `declare`, the warp syncs are `barrier`, the staging
-    store is `store` over a `pack`, and `mma.sync` is `asm_stmt`.
+    Every operand in this path is a value: the accessors hand back the value
+    instead of a name to write into, the accumulator slots and the padding
+    fragments are `declare`, the warp syncs are `barrier`, the staging store
+    is `store` over a `pack`, and `mma.sync` is `asm_stmt`.
 
     A count, not a list, because the list would need re-recording on every
     unrelated change.  Zero is the only number here that means anything: one
     raw statement is a place where a pass cannot see what the code does, and
-    the whole point of the conversion was that there is no such place left.
+    the point is that there is no such place.
     """
     import traceback
 
@@ -261,12 +256,11 @@ def test_the_matmul_emits_no_raw_statements(enabled):
 def test_the_matmul_emits_no_raw_index_expressions(enabled):
     """The addresses are operations, not text.
 
-    Raw statements went first; the addresses stayed as `rawexpr` for a while
-    after, in six shapes over 5908 instances, all of them `threadIdx.x` and
-    constants.  Text is where an address stops being analysable: `cse` cannot
-    merge two identical `rawexpr` nodes because they are not pure, the bank
-    census has to parse the generated source to answer a question the IR could
-    answer directly, and a pass wanting to reason about the access pattern had
+    The addresses in this path are `threadIdx.x` and constants.  Text is
+    where an address stops being analysable: `cse` cannot merge two identical
+    `rawexpr` nodes because they are not pure, the bank census would have to
+    parse the generated source to answer a question the IR can answer
+    directly, and a pass wanting to reason about the access pattern would have
     nothing to reason over.
 
     A count, not a list, for the same reason as the statement test beside it.
@@ -295,12 +289,11 @@ def test_the_matmul_emits_no_raw_index_expressions(enabled):
 
 
 def test_the_repeated_thread_reads_collapse(enabled):
-    """What the conversion bought beyond the opacity count.
+    """What operations buy beyond the opacity count.
 
-    Every one of those addresses started with `threadIdx.x`, and a `rawexpr`
-    naming it is opaque and impure, so each was its own read.  As operations
-    they are one value: 660 reads in this kernel became 192, and the kernel
-    lost 234 lines.
+    Every one of those addresses starts with `threadIdx.x`, and a `rawexpr`
+    naming it is opaque and impure, so each would be its own read.  As
+    operations they are one value.
     """
     source = _generate(CASE_THAT_TAKES_THE_PATH)
     assert source.count('threadIdx.x') < 300, (
@@ -311,11 +304,10 @@ def test_the_repeated_thread_reads_collapse(enabled):
 # -- which instruction, and why that one ----------------------------------- #
 
 def test_the_ranking_reproduces_the_indices_it_replaced():
-    """Two hardcoded dicts indexed the same list by hand, in `shmsize` and in
-    `matmul`.  A size computed for one entry and an issue of another is a
-    buffer nobody fills; the point of one function is that they cannot
-    differ.  That it lands on the same entries is what makes the change
-    inert."""
+    """The entry is picked by one function, `instr_for`, rather than by an
+    index kept by hand at each call site.  A size computed for one entry and
+    an issue of another is a buffer nobody fills; the point of one function
+    is that they cannot differ."""
     assert nvidia.instr_for(Datatype.F32, 9, 56, 56, sm=80) is nvidia.INSTRS[1]
     assert nvidia.instr_for(Datatype.F64, 9, 56, 56, sm=80) is nvidia.INSTRS[2]
 
@@ -341,7 +333,7 @@ def test_the_reservation_covers_whichever_entry_is_issued(sm):
     """`shmsize` is asked without the shape the ranking reads, so it cannot
     reproduce the choice -- it bounds it instead.
 
-    Now asked per capability, because the capability is what makes the bound
+    Asked per capability, because the capability is what makes the bound
     load-bearing: the sm_90 F64 entries are wider than the sm_80 one, so a
     reservation sized against one table and an issue out of another is the
     overrun this bounds -- reached through the arch rather than through the
@@ -360,14 +352,12 @@ def test_the_reservation_covers_whichever_entry_is_issued(sm):
 def test_the_baseline_excludes_rather_than_guesses():
     """The floor for a caller with no target, and it is set to exclude.
 
-    This test used to assert the opposite fact: that the baseline was 80 and
-    that the SM_90 F64 entries stayed out of reach "until something plumbs the
-    target's compute capability".  Something does now -- `sm_of` reads it off
-    the context and `matmul`, `strategies` and `scratch` all pass it -- so what
-    is left for the baseline is the case where there is no context at all.
+    `sm_of` reads the target's compute capability off the context, and
+    `matmul`, `strategies` and `scratch` all pass it, so what is left for the
+    baseline is the case where there is no context at all.
 
     75 rather than 80 for that case, because a floor should refuse.  Every F32
-    entry in the table is sm_80, so a caller with no target now selects nothing
+    entry in the table is sm_80, so a caller with no target selects nothing
     and falls through to the generic nest, instead of being handed sm_80 PTX
     for a target that may not run it.
     """
@@ -380,8 +370,8 @@ def test_the_context_is_what_brings_an_entry_into_reach():
     """`sm_of` is the plumbing, and this is what it buys.
 
     The SM_90 F64 entries are wider in both m and k, so a ranking prefers them
-    -- and before the context reached this far they were unreachable on every
-    target, sm_120 included.
+    -- and without the context they would be unreachable on every target,
+    sm_120 included.
     """
     wide = [op for op in nvidia.INSTRS if op.d is Datatype.F64 and op.sm > 80]
     assert wide, 'the table carries SM_90 F64 entries'
@@ -424,10 +414,11 @@ def test_the_accumulator_epilogue_lands_every_slot_exactly_once(atom):
     cells; a store that misses one leaves the caller's previous value there,
     and a store that leaves the tile corrupts whatever follows it.
 
-    This is the check the F64 path did not have.  `m8n8k4.f64` stored one of
-    its two slots at `2 * t + 64` in a tile of 64 elements and never stored the
-    other: out of bounds and short by half, and the only symptom anywhere was
-    NaN out of a device run with the deployment switch flipped.
+    Nothing else would catch a slip here.  An `m8n8k4.f64` epilogue that
+    stored one of its two slots at `2 * t + 64` in a tile of 64 elements and
+    never stored the other would be out of bounds and short by half, and the
+    only symptom anywhere would be NaN out of a device run with the deployment
+    switch flipped.
     """
     threads = 32
     cregs = (atom.m * atom.n) // threads
@@ -458,6 +449,6 @@ def test_the_accumulator_epilogue_lands_every_slot_exactly_once(atom):
 
 
 def test_every_entry_states_the_capability_it_needs():
-    """It was a comment on each row, which a selection cannot read."""
+    """On the entry itself, which a selection can read, not in a comment."""
     for op in nvidia.INSTRS:
         assert op.sm in (75, 80, 90), op.name

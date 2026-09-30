@@ -3,20 +3,20 @@
 # SPDX-License-Identifier: MIT
 """``M = A @ B`` then ``C = abs(M)``, with ``M`` a global output.
 
-The one case in this group that generates.  It is also the only one that is
-wrong, which is the reason it exists.
-
-With a global destination the store is deferred to the epilogue so the value
-can stay in registers, and the epilogue is emitted after every descriptor of
-the section.  The elementwise therefore reads `M` from global memory before
-anything has written it, and the contraction's result overwrites `M` afterwards:
+With a global destination the store is deferred so the value can stay in
+registers.  Deferred to the end of the section, it would come after every
+descriptor in it, so the elementwise would read `M` from global memory before
+anything had written it, and the contraction's result would overwrite `M`
+afterwards:
 
     // glb_m3 = abs(glb_m0);     <- reads whatever the caller left there
-    // glb_m0 = store{r>g}(r1);  <- writes it only now
+    // glb_m0 = store{r>g}(r1);  <- writes it only then
 
-`verify` cannot see it, because `m0` is a kernel parameter and so a symbol with
-a definition on entry.  `test_mixed_residency.py` states the ordering the
-generated source has to have; that test is the failing one, not this snapshot.
+The elementwise cannot consult the residency, so `M` is settled into memory
+before it runs.  `verify` would not see the wrong order, because `m0` is a
+kernel parameter and so a symbol with a definition on entry.
+`test_residency_ordering.py` states the ordering the generated source has to
+have; a snapshot records whichever order is generated.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

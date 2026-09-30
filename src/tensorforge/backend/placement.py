@@ -18,13 +18,6 @@ deferring a store pays when it saves a read-modify-write and costs when it
 serializes against the next slice.  Getting one wrong produces a kernel that is
 slower.
 
-They were interleaved, as five booleans set in a constructor from a vendor
-string and consulted in the middle of the code that emits loads.  Written out,
-the five say less than they look like: two of them carry the same list, one is
-empty, and every vendor not named reads every operand out of global memory on
-every iteration -- which is why a 16x16 GEMM on Intel had 263 global reads in
-its loop body against 5 on NVIDIA.
-
 Keeping preference in a table is what makes it replaceable.  The eventual
 producer of these decisions is a pass with the shared-memory budget and the
 register pressure in hand, or the PIR once staging arrays are values with a
@@ -185,11 +178,11 @@ def choose_operand_placement(legal: FrozenSet[Placement],
     over the lanes and a lane holds a slice of it; under the explicit-SIMD
     lowering one work-item holds all of it, and an image larger than a
     thread's register file is scratch memory with a register's name --
-    `chain_five_multiplies` on pvc staged two 56 x 56 operators, 14 kB each
-    against 8 kB, and spilled 17.5 kB.  Read in place instead, the operator is
-    one column per reduction step, which the lead loop reads once for all of
-    the destination's columns anyway.  `None` for either figure: no limit to
-    check against.
+    staging the two 56 x 56 operators of `chain_five_multiplies` on pvc,
+    14 kB each against 8 kB, spills 17.5 kB.  Read in place instead, the
+    operator is one column per reduction step, which the lead loop reads once
+    for all of the destination's columns anyway.  `None` for either figure: no
+    limit to check against.
     """
     if len(legal) == 1:
         return next(iter(legal))
@@ -215,20 +208,17 @@ def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
     why it is an argument rather than a row of the table.  The policy says
     this hardware is *worth* accumulating atomically on; whether the
     architecture has the instruction for this datatype and width is a separate
-    fact, and keeping it in the table made every AMD target answer for gfx90a.
-    Where there is no instruction the compiler emits a compare-and-swap loop,
-    so saying yes here is slower than saying no -- and on the four targets
-    whose builtin does not exist, it did not compile at all.
+    fact, and keeping it in the table would make every AMD target answer for
+    gfx90a.  Where there is no instruction the compiler emits a
+    compare-and-swap loop, so saying yes here is slower than saying no -- and
+    on a target whose builtin does not exist, it does not compile at all.
 
-    There was a fourth, `atomic_write_is_exact`, and it is gone rather than
-    always true.  An atomic add needs each destination element written exactly
-    once where a plain store needs only coverage, and the nest failed that at
-    every width above one: the peeled tail was stored by the whole wave, which
-    is the same value `threads` times under `=` and the contribution `threads`
-    times under `+=`.  That write is guarded to the lane that owns the element
-    now, so the nest partitions its range at every width and there is no
-    condition left to ask -- `tests/test_lead_coverage` checks the property the
-    argument used to stand for.
+    No condition asks whether each element is written exactly once, which an
+    atomic add needs where a plain store needs only coverage: the nest
+    partitions its range at every width.  The peeled tail is stored by the
+    lane that owns the element, not by the whole wave, which would be the
+    same value `threads` times under `=` and the contribution `threads` times
+    under `+=`.  `tests/test_lead_coverage` checks the property.
     """
     return (policy.atomic_accumulation and accumulating and pending_is_atomic
             and supported)

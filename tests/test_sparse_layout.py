@@ -1,14 +1,11 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""What the sparse loader now says it produces, checked against what it emits.
+"""What the sparse loader says it produces, checked against what it emits.
 
-`load_linear` used to hand back a value with no layout, and it was the largest
-untracked population in the corpus: 3053 operand checks exempted because the
-annotation was absent, 1841 of them the broadcast operand of an `fmacdpp16`
-whose DPP pattern assumes a particular distribution.  `emitters.fmadpp` says
-so in as many words -- `None` is allowed through because *the sparse loader
-does not yet say what it produces*.
+A value from `load_linear` without a layout is exempt from every operand
+check -- `emitters.fmadpp` lets `None` through -- and the broadcast operand of
+an `fmacdpp16` has a DPP pattern that assumes a particular distribution.
 
 The distribution is not recoverable from the read.  A linearized register
 operand is read as ``r[i / threads]``, which has no lane term at all; every
@@ -19,10 +16,9 @@ checks that recording against the code the fill emits, rather than against the
 prose next to it.
 
 That is the same arrangement as `test_amd_relayout.py`, and for the same
-reason: the two previous layout claims in this codebase were both wrong while
-reading correctly.  `LaneAxis.holders` is the executable form of the map, and
-agreement with a *parsed* fill means something that agreement with a docstring
-does not.
+reason: a layout claim can read correctly and still be wrong.
+`LaneAxis.holders` is the executable form of the map, and agreement with a
+*parsed* fill means something that agreement with a docstring does not.
 """
 
 from __future__ import annotations
@@ -47,10 +43,8 @@ SPARSE_CASE = "sparsity_band.py"
 
 #: `float v23_lin = glb_m2[0 + threadIdx.x * 1];`
 #:
-#: The temporary used to be `v0`, named by the loader.  It is a PIR value now,
-#: so the name comes from the shared allocator and carries the builder's hint:
-#: `v23_lin`.  Only the spelling moved -- the fill this test checks is the same
-#: two statements in the same order.
+#: The temporary is a PIR value, so its name comes from the shared allocator
+#: and carries the builder's hint: `v23_lin`.
 _READ = re.compile(
     r"^\s*\w+\s+(?P<tmp>v\d+\w*)\s*=\s*(?P<src>\w+)\[(?P<base>\d+)\s*\+\s*"
     r"threadIdx\.x\s*\*\s*(?P<vec>\d+)\]\s*;", re.M)
@@ -127,8 +121,8 @@ def test_a_sparse_operand_reaches_the_intrinsic_with_a_layout():
     """The point of all of it: `fmacdpp` sees a distribution, not a `None`.
 
     `emitters.fmadpp` compares what arrives against
-    `fmadpp_operand_layout(step)` and lets `None` through unchecked.  Before
-    this, every sparse operand took that exemption.
+    `fmadpp_operand_layout(step)` and lets `None` through unchecked, so a
+    sparse operand without a layout would take that exemption.
     """
     source = _generate(SPARSE_CASE)
     assert "fmacdpp" in source, "case no longer reaches the DPP path"
@@ -214,12 +208,9 @@ def test_a_symbol_without_a_thread_count_says_nothing():
 def test_a_shared_image_records_the_same_distribution():
     """A shared staging image is filled by the same linearized run.
 
-    This test asserted the opposite -- that only register images were
-    described -- and it was right when the register case was the only one the
-    recorder had been shown to hold for.  It stopped being right when the
-    explicit-vector lowering arrived: an unknown distribution costs only
-    precision under SPMD, and a declaration cannot be written without one
-    under ESIMD, so the shared case had to be answered too.
+    Under SPMD an unknown distribution costs only precision, but under ESIMD
+    a declaration cannot be written without one -- so the explicit-vector
+    lowering needs the shared case answered too.
 
     The thread count is the difference.  A register image knows its own; a
     shared one does not, because a shared buffer is not owned by one

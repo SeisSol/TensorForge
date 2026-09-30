@@ -5,15 +5,15 @@
 
 Slicing and accumulation at the same time.  Each is handled on its own:
 several writers covering different boxes must go out as they are produced,
-because ``_deferred_stores`` holds one entry per symbol name; several writers
+because ``Residency`` holds one entry per symbol name; several writers
 covering the same box are an accumulation chain and belong in registers.
-Together they used to fall between the two.
+Together they fall between the two.
 
-On a vendor with atomic updates the accumulating writes took the
-``can_use_atomic`` path, which *deferred* them --- so the second slice's
-pending update displaced the first, and one term's contribution was computed
-into a register array that nothing ever read.  Two writes reached memory where
-three were produced.
+On a vendor with atomic updates, an atomic path that *deferred* the
+accumulating writes would let the second slice's pending update displace the
+first, and one term's contribution would be computed into a register array
+that nothing ever reads.  Two writes would reach memory where three are
+produced.
 
 The slices are on the second dimension deliberately.  On the lead dimension
 they would pin the accumulator's origin (see

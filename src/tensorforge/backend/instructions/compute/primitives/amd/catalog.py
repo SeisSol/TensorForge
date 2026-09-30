@@ -5,9 +5,9 @@
 
 What an instruction *is* --- its shape, how many blocks it computes, what each
 lane holds of A, B and D --- is a fact about the target; which one to use is a
-policy.  They used to be interleaved, and the entries covered exactly one
-family: square, ``K == 1``, F32, A fed by a cross-lane transpose.  Every
-direction this has to grow breaks a different one of those assumptions.
+policy, and the two are kept apart.  The plainest entries are square,
+``K == 1``, F32, with A fed by a cross-lane transpose, and every other
+direction the catalog covers breaks a different one of those assumptions.
 
 ======================================  ==================================
 want                                    breaks
@@ -24,11 +24,10 @@ So the descriptor carries the shape, the block count, the per-lane widths, the
 wave it is defined against, the LLVM feature that gates it, and the argument
 order of the call.  Nothing here says which one to pick.
 
-**Every row is a claim about hardware**, and this package has already been
-bitten twice by claims stated in the wrong role.  So none of the rows is
-written from memory: `tools/amd_matrix_table.py` extracts the shapes, per-lane
-widths and feature gates from LLVM's own ``BuiltinsAMDGPU.td``, ``AMDGPU.td``
-and ``GCNProcessors.td`` into ``tests/data/amd_matrix_builtins.json``, and
+**Every row is a claim about hardware**, so none of the rows is written from
+memory: `tools/amd_matrix_table.py` extracts the shapes, per-lane widths and
+feature gates from LLVM's own ``BuiltinsAMDGPU.td``, ``AMDGPU.td`` and
+``GCNProcessors.td`` into ``tests/data/amd_matrix_builtins.json``, and
 `tests/test_amd_catalog.py` fails if a row here disagrees with it.
 
 The one thing the table cannot supply is the split between `blocks` and
@@ -221,13 +220,12 @@ class MatrixOp:
         owns: below a full wave, several multiplications share it and each
         needs its own A.
 
-        This was `threads // block`, and it was right for as long as every
-        entry had `k == 1` --- there `blocks == wave // n` and the two
-        expressions agree, which is why a table of hand-written constants and
-        then a formula both reproduced the same numbers.  They stop agreeing
-        at the first `k > 1` entry: `mfma_f64_4x4x4f64` has four blocks where
-        `threads // n` is sixteen, and a `cbsz` of 4 on a four-block
-        instruction names a block that does not exist.
+        `threads // n` alone would be right only while every entry had
+        `k == 1` --- there `blocks == wave // n` and the two expressions
+        agree.  They stop agreeing at the first `k > 1` entry:
+        `mfma_f64_4x4x4f64` has four blocks where `threads // n` is sixteen,
+        and a `cbsz` of 4 on a four-block instruction names a block that does
+        not exist.
         """
         if threads <= 0 or threads % self.n:
             raise ValueError(f'{self.builtin} needs threads to be a multiple '
@@ -476,9 +474,7 @@ DEFINED_TRANSPOSES = frozenset({
 #: Tile width -> the transpose that feeds its A operand, and whether that
 #: transpose declares its outputs separately from its inputs.  No
 #: `transpose32x32b32` exists, so `available_for` refuses the 32-wide tile and
-#: the wider path stays unreachable --- which is what the commented-out
-#: `write_matmul(32, ...)` call used to express, silently and without saying
-#: why.
+#: the wider path stays unreachable.
 _TILE_TRANSPOSES = {
     4: ('tensorforge::transpose4x4b32', True),
     16: ('tensorforge::transpose16x16b32', False),
@@ -493,7 +489,7 @@ class MfmaTile:
     A `MatrixOp` plus the one fact the catalog does not carry --- the
     cross-lane transpose that feeds A.  That transpose is *ours*: it is how
     this generator arranges the operand, not something the instruction
-    requires, and it is the reason this type still exists beside `MatrixOp`.
+    requires, and it is the reason this type exists beside `MatrixOp`.
     Everything else is delegated, so the intrinsic name and the broadcast
     control have one source and the check against LLVM covers them.
     """
@@ -523,8 +519,7 @@ class MfmaTile:
     def scale(self, threads: int) -> int:
         """The intrinsic's `cbsz`, from the instruction rather than the tile.
 
-        `MatrixOp.cbsz` says why the two used to be the same expression and
-        are not one.
+        `MatrixOp.cbsz` says why the two are not one expression.
         """
         if not self.fits(threads):
             raise ValueError(
@@ -544,10 +539,10 @@ class MfmaTile:
         tile whose transpose is missing produces a call to an undeclared
         template, exactly like `fmacdpp4` on gfx900.
 
-        The first used to be `cdna1(ctx) and not gfx1251(ctx)`, a family
-        predicate standing in for the `mai-insts` feature.  They agree on
-        every target this is tested against and disagree on gfx90b--gfx90f,
-        which the range admits and the hardware does not have.
+        The first is the `mai-insts` feature itself, not a family predicate
+        such as `cdna1(ctx) and not gfx1251(ctx)` standing in for it.  The two
+        agree on every target this is tested against and disagree on
+        gfx90b--gfx90f, which the range admits and the hardware does not have.
         """
         if dtype != Datatype.F32:
             return False
@@ -638,12 +633,12 @@ def mfma_tile_for(threads, dtype, ctx):
     """The tile `matmul32` would emit here, or `None`.
 
     One function, asked twice: once by `matmul()` deciding which path to take
-    and once by `matmul32` picking the tile. They used to ask different
-    questions --- a family predicate at the router, a `next()` over the usable
-    tiles at the emitter --- and agreed only because both happened to be true
-    on the same targets. A router that says yes where the emitter finds
-    nothing raises `StopIteration` out of code generation, which is not a
-    diagnosis of anything.
+    and once by `matmul32` picking the tile. Two different questions --- a
+    family predicate at the router, a `next()` over the usable tiles at the
+    emitter --- would agree only where both happen to be true on the same
+    targets. A router that says yes where the emitter finds nothing raises
+    `StopIteration` out of code generation, which is not a diagnosis of
+    anything.
     """
     # The narrowest, as the scheme's representative: whether the scheme runs
     # here at all.  Which width runs is `rank`'s, over `mfma_tiles_for`.
@@ -653,7 +648,7 @@ def mfma_tile_for(threads, dtype, ctx):
 
 #: The tile widths the lane-batched scheme may rank.
 #:
-#: 16 since its accumulator is gathered back to the lanes the store reads
+#: 16 because its accumulator is gathered back to the lanes the store reads
 #: (`codegen._accumulator_direct`): four blocks of 16x16 spread each block's
 #: output over the whole wave, slot `4b + (m & 3)` of lane `n + 16 (m >> 2)`,
 #: where the 4-wide tile leaves element `(m, n)` of block `b` in slot `m` of

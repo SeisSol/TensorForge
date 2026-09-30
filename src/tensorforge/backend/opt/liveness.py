@@ -14,9 +14,7 @@ is because the loop may execute zero times.  The lattice is finite (subsets of
 the tracked symbols) and the transfer function monotone, so the iteration
 terminates; the bound is asserted rather than assumed.
 
-On a straight-line stream this reduces to the previous single pass, which is the
-test criterion: the emitted code must not change until a region actually
-carries a live range.
+On a straight-line stream this reduces to a single backward pass.
 """
 
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -112,28 +110,28 @@ class LivenessAnalysis(AbstractOptStage):
     Every partial write of a buffer after an earlier write of it in this
     block.  A partial write leaves the cells outside its slice as they were,
     so whatever wrote them before is still wanted: between two slices the
-    first -- killing the buffer at the second made the first dead in between,
-    and the allocator gave that stretch to a buffer read there
+    first -- killing the buffer at the second would make the first dead in
+    between, and the allocator would give that stretch to a buffer read there
     (`mixed/ml_slices_then_ew`) -- and just as much a whole write followed by
-    a slice.  That one had counted as a fresh start: between the whole write
-    and the slice the buffer was dead, and the allocator laid another buffer
-    read there over it (`slicing/temp_slice_after_whole`).  An assignment
-    that clears what it promised and did not compute (`StoreRegToShr`,
-    `clear_within`) is such a whole write, which made the shape common.
+    a slice.  Counted as a fresh start, that slice would leave the buffer dead
+    between the whole write and itself, and the allocator would lay another
+    buffer read there over it (`slicing/temp_slice_after_whole`).  An
+    assignment that clears what it promised and did not compute
+    (`StoreRegToShr`, `clear_within`) is such a whole write, which makes the
+    shape common.
 
     The first write in the block does kill, slice or not: nothing written to
-    the buffer before it is needed, and sparing a first slice too made an
-    assembled buffer live across the whole body and around the back edge,
-    which grew two arenas in the corpus by a third and by nine tenths for
-    nothing.
+    the buffer before it is needed, and sparing a first slice too would keep
+    an assembled buffer live across the whole body and around the back edge,
+    which grows the arena for nothing.
 
     Per straight-line block, which is what `_backward` is handed; a nested
     region is its own block, and `written` is what the blocks around it wrote
     before it (`entering`, returned alongside for each region-bearing
-    instruction).  Without it the first slice inside a region killed a buffer
-    the enclosing block had written whole, and the stretch before the region
-    went to another buffer: a temporary assigned ahead of a merged run whose
-    body rewrites some of its rows and reads all of them.
+    instruction).  Without it the first slice inside a region would kill a
+    buffer the enclosing block has written whole, and the stretch before the
+    region would go to another buffer: a temporary assigned ahead of a merged
+    run whose body rewrites some of its rows and reads all of them.
     """
     seen, out, entering = set(written), set(), {}
     for instr in body:
@@ -190,9 +188,10 @@ class LivenessAnalysis(AbstractOptStage):
       # A write occupies its buffer where it happens, whether or not anything
       # reads the value: a store whose value a later whole write kills before
       # any read (a slice written, then the tensor assigned anew) still writes
-      # its bytes.  Recorded only from the live-out, that store's buffer was
-      # live nowhere, and the allocator laid it over a buffer still read after
-      # it -- the staged operand of the very assignment that killed it.
+      # its bytes.  Recorded only from the live-out, that store's buffer would
+      # be live nowhere, and the allocator could lay it over a buffer still
+      # read after it -- the staged operand of the very assignment that kills
+      # it.
       # Only for an instruction of its own: a construct with a region reports
       # every buffer its body writes, and its body records them where they
       # are written.
@@ -236,8 +235,9 @@ class LivenessAnalysis(AbstractOptStage):
                   live_out_map, records)
 
     live = {index: value for index, value in enumerate(records)}
-    # Preserve the reversed iteration order the previous implementation handed
-    # to MemoryRegionAllocation, so downstream vertex numbering is unchanged.
+    # The values go to MemoryRegionAllocation in reverse program order.  It
+    # numbers its vertices in the order it meets the symbols, and that
+    # numbering breaks ties in the coloring, so the order shapes the layout.
     # NOTE: neither consumer reads the keys -- MemoryRegionAllocation iterates
     # values() and ShrMemOpt never touches the map -- so the key space is free
     # and is simply the depth-first program order.

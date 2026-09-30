@@ -14,9 +14,9 @@ def fmadpp(step):
     """The `fmacdpp{step}` family: `c += broadcast(a) * b`, in place.
 
     Void, and writes `c` through a reference, so it is a `call_stmt` rather
-    than an SSA producer.  The gain over the raw text it replaces is that the
-    operands are values: the def-use edges to the loads that produced `a` and
-    `b` are real, and the write to `c` is a declared register access, so two
+    than an SSA producer.  The gain over raw text is that the operands are
+    values: the def-use edges to the loads that produced `a` and `b` are
+    real, and the write to `c` is a declared register access, so two
     accumulations on different accumulators are provably independent.
     """
     def emit(writer, C, A, B, row):
@@ -28,12 +28,12 @@ def fmadpp(step):
         # instruction's DPP pattern assumes this distribution, so a mismatch
         # is a wrong kernel, not a slow one.
         #
-        # The sparse loader used to be what took this exemption, for 1841 of
-        # these operands.  It now reports the distribution its fill recorded,
-        # and those are checked here like any other.  What is left is the MFMA
-        # accumulator, read back as the next operator's operand: `matmul32`
-        # leaves `acclayout = None` deliberately, because that distribution is
-        # not derivable and a guess would be worse than the gap.
+        # The sparse loader reports the distribution its fill recorded, and
+        # those operands are checked here like any other.  What takes the
+        # exemption is the MFMA accumulator, read back as the next operator's
+        # operand: `matmul32` leaves `acclayout = None` deliberately, because
+        # that distribution is not derivable and a guess would be worse than
+        # the gap.
         if got is not None and got != want:
             raise ValueError(
                 f'fmacdpp{step} needs its broadcast operand at {want!r}, '

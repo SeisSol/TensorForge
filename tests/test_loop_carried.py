@@ -3,20 +3,16 @@
 # SPDX-License-Identifier: MIT
 """A loop that carries something across its back edge.
 
-`Op.FOR` has had `iter_args` since it was written, and the corpus emits 131
-loops per run with zero `yield` between them -- so nothing had ever carried a
-value across a back edge in the IR, and "it is supported" was a claim about
-the code rather than about anything that had run.
-
-It matters because of what comes next.  Making `BatchLoop` an `Op.FOR` is what
-would let a transfer move to the previous iteration, and that loop has to carry
-two things: the completion token of the transfer in flight, and the rolling
-pointer the next iteration reads through.  Both are exercised here, in the
-smallest form that still emits.
+`Op.FOR` carries values through `iter_args` and `yield`, and these tests make
+"it is supported" a claim about something that has run rather than about the
+code.  A batch loop that moves a transfer to the previous iteration has to
+carry two things: the completion token of the transfer in flight, and the
+rolling pointer the next iteration reads through.  Both are exercised here, in
+the smallest form that still emits.
 
 The pipeline in `test_a_loop_carries_an_async_token` is the one `asyncmem`'s
-module docstring has been drawing since before any of this: prologue copy,
-issue for the next iteration, wait for the previous, and a drain afterwards.
+module docstring draws: prologue copy, issue for the next iteration, wait for
+the previous, and a drain afterwards.
 """
 
 from __future__ import annotations
@@ -91,12 +87,12 @@ def test_a_loop_carries_an_async_token():
 
 
 def test_a_loop_carries_a_rolling_pointer():
-    """The second thing the batch loop would carry, and it caught a bug.
+    """The second thing such a batch loop carries.
 
-    A `BufferType` used to render as its element type, which is right for a
-    declaration -- `float r0[36]` -- and wrong for a value.  A carried pointer
-    is a value, and the loop declares it from its type alone, so it came out
-    as `float v4 = p0;`.
+    A carried pointer is a value, and the loop declares it from its type
+    alone, so a `BufferType` has to render as a pointer here.  Its element
+    type is right for a declaration -- `float r0[36]` -- and wrong for a
+    value, which would come out as `float v4 = p0;`.
     """
     b = IRBuilder(fptype=Datatype.F32)
     glb = b.alloc(Datatype.F32, (1024,), MemSpace.GLOBAL, hint='g')
@@ -119,7 +115,7 @@ def test_a_loop_carries_a_rolling_pointer():
     carried = [l.strip() for l in head.splitlines() if l.strip().endswith('= p0;')]
     assert len(carried) == 1, f"expected one carried-value declaration:\n{src}"
     # A star in the declarator, not a spelling: the pointer type comes from
-    # the backend now, and `float *` and `float*` are the same declaration.
+    # the backend, and `float *` and `float*` are the same declaration.
     assert '*' in carried[0].split('=')[0], (
         f"the carried pointer must be declared as a pointer, not as its "
         f"element type: {carried[0]!r}\n{src}")

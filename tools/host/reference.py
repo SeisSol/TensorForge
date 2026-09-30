@@ -34,10 +34,9 @@ def evaluable(d):
     """Whether this row is one this can evaluate.
 
     A product with a contraction is an einsum and is what everything here
-    computes. An elementwise operation or a reduction is recorded too --- it
-    used to be dropped at capture time, as a bare `None` --- but neither is a
-    product, so evaluating one as if it were would be worse than skipping it.
-    A capture that predates the field holds nothing but products.
+    computes. An elementwise operation or a reduction is recorded too, but
+    neither is a product, so evaluating one as if it were would be worse than
+    skipping it. A row without a `kind` is a product.
     """
     return d is not None and d.get("kind", "multilinear") == "multilinear"
 
@@ -132,9 +131,8 @@ def seed_destinations(descrs, arrays, shapes, storage=None, seed=0):
     operation promises (`promised_box`): a missing zero looks like the zero
     it should have written.  A seed makes each of the three checkable -- an
     assignment has to overwrite it, zeros included; a slice has to leave it
-    alone outside its box; and an accumulation has to add to it, which is the
-    dropped bias this was first done for.  It used to be done for that case
-    only, since the reference could not say which cells an assignment clears.
+    alone outside its box; and an accumulation has to add to it, which is
+    what exposes a dropped bias.
 
     The seed goes where the tensor is stored, and nowhere else: the kernel
     sees nothing outside its box or its pack map, and a value there would
@@ -202,8 +200,8 @@ def promised_box(d):
 
     A slice promises its own box: the rest of the tensor belongs to other
     descriptors, and zeroing it would destroy their work.  The capture says
-    which one it is (`sliced`); one that predates the field is taken as a
-    slice exactly where it carries an offset, as `SubTensor` does.
+    which one it is (`sliced`); one without the field is taken as a slice
+    exactly where it carries an offset, as `SubTensor` does.
 
     `+=` promises nothing: it is defined in terms of what is there.
     """
@@ -276,8 +274,9 @@ def apply(d, arrays):
         dest[dsl] += res
         return
     # An assignment defines its whole promise; assigning just the computed
-    # part left the rest of it as whatever an earlier write put there -- the
-    # very defect this is the oracle for, so it could not see it.
+    # part would leave the rest of it as whatever an earlier write put
+    # there -- the very defect this is the oracle for, and one it could then
+    # not see.
     box = promised_box(d)
     if out_rank and box is not None:
         dest[tuple(slice(l, h) for l, h in zip(*box))] = 0.0

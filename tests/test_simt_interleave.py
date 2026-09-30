@@ -84,9 +84,9 @@ def test_nothing_is_prepared_unless_asked(monkeypatch):
 
 def test_a_ragged_last_slot_is_padding(monkeypatch):
     """At 32 lanes 56 rows are two slots, the second 24 rows deep: one pair
-    a lane and column, of which rows 56 and on are padding.  It was not
-    offered at all, since the rows do not fill the lanes; the tail's lanes
-    past the data read the padding, which is zero and stored."""
+    a lane and column, of which rows 56 and on are padding.  The order is
+    offered although the rows do not fill the lanes: the tail's lanes past
+    the data read the padding, which is zero and stored."""
     src, operators = _generate(monkeypatch, "prepare_operands=1")
     assert len(operators) == 4
     for a in operators:
@@ -160,10 +160,10 @@ def test_a_preloaded_operator_is_copied_as_it_is_stored():
     """With `preload_globals` the section prologue copies each operator into
     shared memory as it lies, and the nest reads the copy in the interleave.
     The copy has to hold the whole stored operator: sized for the dense one,
-    the interleaved reads ran into the next operator's copy.  So each image
-    is laid out at least as long as its storage, one after the other.  The
-    derivative's 48-row operators are what tells the two sizes apart: at 32
-    lanes a lane holds two of their rows or one and padding."""
+    the interleaved reads would run into the next operator's copy.  So each
+    image is laid out at least as long as its storage, one after the other.
+    The derivative's 48-row operators are what tells the two sizes apart: at
+    32 lanes a lane holds two of their rows or one and padding."""
     src, operators = _seissol("derivative", options={"prepare_operands": True,
                                                       "preload_globals": True})
     stored = {a.name: int(a.storage_volume()) for a in operators

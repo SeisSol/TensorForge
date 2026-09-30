@@ -7,11 +7,11 @@
     D = abs(N)          <- N has rows 4..8 only, and the view is the tensor
                            itself: rows 4..8 get values, the rest zeros
 
-The pointwise operation wrote its four rows of `D` in place and nothing else,
-so the other eight kept the product.  The window starts past row 0, so the
-zeros go on both sides of it.  A contraction assigning `D` from `N` zero-
-fills them (`StoreRegToGlb`, `zero_fill`); the pointwise result now goes out
-through the same store (`OperationBuilder.pointwise_dest`).
+Writing its four rows of `D` in place and nothing else, the pointwise
+operation would leave the other eight holding the product.  The window starts
+past row 0, so the zeros go on both sides of it.  A contraction assigning `D`
+from `N` zero-fills them (`StoreRegToGlb`, `zero_fill`), and the pointwise
+result goes out through the same store (`OperationBuilder.pointwise_dest`).
 """
 
 import numpy as np

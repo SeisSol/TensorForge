@@ -8,17 +8,16 @@ redeclaration, which is worth doing: an opaque block head makes the async
 scheduler give up its state and nothing reorders across one.  Whether a region
 *can* cause one is decided by `_CDECL`, a regex over the raw text.
 
-It required `=`, `;` or `[` immediately after the declared name, so it did not
-recognize brace initialization (`float x{};`) or a second declarator
-(`uint32_t a, b;`).  Ten percent of the declarations the corpus emits take one
-of those two forms.
+A regex that required `=`, `;` or `[` immediately after the declared name
+would not recognize brace initialization (`float x{};`) or a second declarator
+(`uint32_t a, b;`), and ten percent of the declarations the corpus emits take
+one of those two forms.
 
-Nothing had broken, because the misses were masked.  The NVIDIA accumulator
-was declared as `float v58[4][2]{};`, which matches on the `[`, so the region
-holding it kept its braces and the `float v58_0{};` beside it survived by
-association.  Making the accumulator a structured value removed the match, the
-braces went with it, and six declarations of one name ended up in one block --
-in a kernel that had compiled the day before.
+Such misses can be masked.  A region holding an array declared as
+`float v58[4][2]{};` matches on the `[` and keeps its braces, and a
+`float v58_0{};` beside it survives by association; take the array away and
+the braces go with it, and several declarations of one name end up in one
+block.
 
 That is the shape to guard: not "does the pass work", but "does its predicate
 see every form the generator actually emits".  Over-matching costs a pair of
@@ -110,9 +109,9 @@ def test_two_sibling_regions_declaring_one_name_stay_separate():
 def test_the_masking_that_hid_it():
     """A region declaring an array *and* a brace-initialized name.
 
-    The array matched on `[` and carried the region; the other declaration was
-    never seen.  Removing the array is what exposed the miss, so a region with
-    only the second form has to keep its braces on its own account.
+    The array matches on `[` and carries the region, whether or not the other
+    declaration is seen, so a region with only the second form has to keep its
+    braces on its own account.
     """
     with_array = passes.flatten_scopes(
         _region_with("float v0[4][2]{};", "float v0_c{};"))
@@ -125,17 +124,17 @@ def test_the_masking_that_hid_it():
 def test_a_transfer_opens_no_scope_unless_its_buffer_rotates():
     """The braces exist for one thing, so they are opened for one thing.
 
-    `MemoryInstruction.gen_ir` wrapped every transfer body in `{ }` so that a
-    rotating buffer's write-side alias could not clash with the consumer's
+    `MemoryInstruction.gen_ir` wraps a transfer body in `{ }` so that a
+    rotating buffer's write-side alias cannot clash with the consumer's
     pointer of the same name.  Nothing else it emits can clash -- the
     temporaries are values the shared allocator numbers -- and the brace is not
     free: an opaque block head is a wall the async scheduler gives up its state
     at and nothing reorders across, sitting in exactly the stretch `WrapLoads`
     wants to move a transfer along.
 
-    `flatten_scopes` removed the ones that declared nothing, so this changed no
-    emitted source.  It changed 594 blocking nodes into none, at build time,
-    where the passes that matter run.
+    `flatten_scopes` removes the ones that declare nothing from the emitted
+    source either way; not opening them keeps them out of the IR at build
+    time, where the passes that matter run.
     """
     import inspect
 

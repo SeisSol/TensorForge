@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 """The storage layout, in the form the frontend already takes.
 
-Two problems from the staging work turn out to be one, and it has a socket
-on the yateto side already.
+Two staging problems are one problem, and it has a socket on the yateto side
+already.
 
 A run's alignment has to be worked out per run, because each one starts
 wherever its non-zeros happen to start -- unless the layout guarantees

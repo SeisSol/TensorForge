@@ -344,8 +344,8 @@ def measure_ceiling(device: bench_run.Device, datatype: Datatype,
     cmd = [cc, *compiler.link_flags(device.spec.arch), str(src),
            '-o', str(exe)]
     # Rebuilt whenever the source or the command differs from the last build.
-    # Keyed on the executable alone, a changed microbenchmark kept measuring
-    # the binary built before the change.
+    # Keyed on the executable alone, a changed microbenchmark would keep
+    # measuring the binary built before the change.
     stamp = out / 'ceiling.stamp'
     identity = source + '\n' + ' '.join(cmd)
     stale = (not exe.exists() or not stamp.exists()

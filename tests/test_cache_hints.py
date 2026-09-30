@@ -46,7 +46,7 @@ def _hints(src):
 @pytest.mark.parametrize("kernel", ["volume", "localFluxAll",
                                     "derivativeTaylorExpansion"])
 def test_the_kind_is_the_spelling_and_the_rule_is_unchanged(kernel):
-    """`cs` spells every hinted access `__ldcs`/`__stcs` where `cg` spelled
+    """`cs` spells every hinted access `__ldcs`/`__stcs` where `cg` spells
     `__ldcg`/`__stcg`, and `none` drops them all: the same accesses, told
     differently what to keep."""
     cg = _hints(_kernel(kernel))

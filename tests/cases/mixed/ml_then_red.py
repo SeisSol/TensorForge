@@ -3,21 +3,17 @@
 # SPDX-License-Identifier: MIT
 """``tmp = A @ B`` then ``out[i] = sum_j tmp[i, j]``.
 
-The same residency gap as `ml_then_ew`, reached through the other consumer.
-Worth its own case because a reduction resolves its operand through
-`ReductionInstruction`, not `ElementwiseInstruction`, so a fix that only
-routes one of the two would still pass the other.
+The same residency question as `ml_then_ew`, asked by the other consumer:
+the contraction may leave its result in registers, and the reduction has to
+read the newest copy.  Worth its own case because a reduction resolves its
+operand through `ReductionInstruction`, not `ElementwiseInstruction`, so
+asking the residency in only one of the two would leave the other reading a
+buffer the writeback has not reached.
 
 The contracted axis is not the lead axis, so this lowers to the register-local
 fold and needs no cross-lane traffic of its own.
 
-Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
-vector unit length regardless of the tensors, so nothing is gained by going
-smaller, and 8x8 keeps a snapshot diff readable.
-
-`abs` is the pointwise operation because it is total and exact -- no input
-domain to shape, no tolerance spent on a transcendental, and every backend has
-it.  ESIMD, for one, has no `tanh` intrinsic at all.
+Shapes are 8x8 throughout, which keeps a snapshot diff readable.
 """
 
 import numpy as np

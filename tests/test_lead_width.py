@@ -131,9 +131,9 @@ def test_the_straddling_lane_is_excluded_and_its_element_peeled():
     The bound excludes the straddling lane rather than over-including it, and
     the leftover comes back as a plain element index -- a scalar FMA on the
     machinery that already handles a fixed element of a distributed
-    dimension.  Over-computing it instead was safe for the destination, whose
-    guard is at element granularity, and safe for the *source* only where the
-    operand window happened to be sized past the extent.
+    dimension.  Over-computing it instead would be safe for the destination,
+    whose guard is at element granularity, and safe for the *source* only
+    where the operand window happens to be sized past the extent.
     """
     loop = LeadLoop('n0', 0, 35, 32, 1, width=2)
     assert loop._lane_hi(3) == 1
@@ -156,7 +156,7 @@ def test_the_peel_hands_over_the_elements_the_vectors_missed():
 
 
 def test_at_width_one_the_bounds_are_the_element_offsets():
-    """Every existing call site must see the arithmetic it saw before."""
+    """At width 1 a call site sees the element offsets themselves."""
     loop = LeadLoop('n0', 0, 35, 32, 1)
     for offset in range(6):
         assert loop._lane_lo(offset) == offset
@@ -183,8 +183,8 @@ def test_a_dividing_extent_gets_two():
 def test_a_ragged_extent_that_costs_no_registers_still_gets_two():
     """35 over 32 lanes: two floats per lane either way, so the width is free.
 
-    This is the case the divisibility rule used to refuse, and refusing it
-    was the reason the policy answered 1 for almost the whole corpus.
+    A divisibility rule would refuse it, and refusing it would have the policy
+    answer 1 for almost the whole corpus.
     """
     assert lead_vector_width(0, 35, 32, elem_bytes=4, align_bytes=16) == 2
 
@@ -303,8 +303,8 @@ def test_blocking_reduces_the_lane_count_a_second_time():
 
     The same lever as the width, one level down. What it buys is not loads --
     those are already wide -- but the amortization of everything that is per
-    `b` rather than per element: one load of `b` and one splat of it now feed
-    `R` fused multiply-adds instead of one.
+    `b` rather than per element: one load of `b` and one splat of it feed `R`
+    fused multiply-adds rather than one.
     """
     assert lead_threads_and_width(32, 4, 16) == (16, 2)
     assert lead_threads_and_width(32, 4, 16, blocking=2) == (8, 2)
@@ -346,9 +346,9 @@ def test_a_zero_blocking_is_refused():
 # --------------------------------------------------------------------------- #
 # The cap
 # --------------------------------------------------------------------------- #
-# It was the constant 2, and the constant hid a question rather than answering
-# it: `widths_for` offers 4 for an FP32 base of 16-byte alignment, so `float4`
-# was unreachable, and `double2` was reachable only because 2 happened to be
+# A constant cap would hide a question rather than answer it: `widths_for`
+# offers 4 for an FP32 base of 16-byte alignment, so a constant 2 would leave
+# `float4` unreachable, and `double2` reachable only because 2 happens to be
 # both the cap and the ceiling for FP64.
 
 from tensorforge.backend.instructions.compute.packed import packed_fma_width
@@ -373,7 +373,7 @@ def test_an_unproven_alignment_caps_at_one():
 
 
 def test_float4_is_reachable_and_double4_is_not():
-    """The two the cap used to decide together, now decided apart.
+    """The cap decides FP32 and FP64 apart.
 
     16 bytes is the access ceiling, so FP32 reaches 4 and FP64 stops at 2 --
     not because doubles are special but because two of them are already the
@@ -407,7 +407,7 @@ def test_the_fma_width_is_not_the_cap(vendor, arch):
 
 
 def test_the_address_and_the_validation_agree_and_stay_two_questions():
-    """Both 4 now.  Kept apart because they are still different facts.
+    """Both 4, and kept apart because they are different facts.
 
     `lead_width_cap` is what a 16-byte-aligned FP32 base permits;
     `VALIDATED_LEAD_WIDTH` is what has been shown to compute the right
@@ -423,7 +423,7 @@ def test_the_address_and_the_validation_agree_and_stay_two_questions():
 
 
 @pytest.mark.parametrize('extent,threads,width,expected', [
-    # what the image used to size, against what a wide read needs
+    # a lane's slot count, against the floats a wide read needs
     (12, 4, 4, 4), (16, 4, 4, 4), (20, 8, 4, 4), (32, 8, 4, 4),
     (33, 32, 1, 2), (33, 32, 2, 2), (31, 32, 1, 1),
 ])
@@ -431,11 +431,11 @@ def test_the_slot_count_is_floats_and_not_slots(extent, threads, width,
                                                 expected):
     """`w * (ceil(u/(T*w)) - floor(l/(T*w)))`, stated once.
 
-    The old expression was `ceil(u/T)`, which is a lane's slot count and not
-    its float count; the two differ at 12/4/4, where it gave 3 and a four-wide
-    read needs 4.  It was written out three times -- addressing and both
-    allocation sites -- so the width reached none of them, and the failure was
-    every destination cell wrong on the extents where the two disagree.
+    `ceil(u/T)` is a lane's slot count and not its float count; the two differ
+    at 12/4/4, where it gives 3 and a four-wide read needs 4.  Stated once
+    because addressing and both allocation sites need the same answer: a copy
+    the width did not reach would get every destination cell wrong on the
+    extents where the two disagree.
     """
     from tensorforge.backend.symbol import slots_for
     assert slots_for(0, extent, threads, width) == expected
@@ -502,10 +502,9 @@ def _slot_stride(extent, threads, width):
     return -(-extent // threads), width * -(-extent // (threads * width))
 
 
-#: The extents the old slot count got wrong, kept as the parametrization
-#: rather than replaced by a round set: they are where `ceil(u/T)` and
-#: `w * ceil(u/(T*w))` disagree, and a regression in `slots_for` shows up here
-#: first.
+#: The extents where `ceil(u/T)` and `w * ceil(u/(T*w))` disagree at width 4,
+#: and a set where they agree.  With these as the parametrization rather than
+#: a round set, a regression in `slots_for` shows up here first.
 WIDTH4_WAS_BROKEN = [12, 17, 20, 24, 33, 35, 40, 48]
 WIDTH4_WAS_FINE = [8, 16, 31, 32, 56, 64]
 
@@ -513,21 +512,21 @@ WIDTH4_WAS_FINE = [8, 16, 31, 32, 56, 64]
 @pytest.mark.parametrize('extent', WIDTH4_WAS_BROKEN + WIDTH4_WAS_FINE)
 @pytest.mark.parametrize('columns', [3, 8])
 def test_width_four_computes_the_same_numbers(monkeypatch, extent, columns):
-    """Both halves of the old split, now one answer.
+    """Width 4 computes what width 1 does, on both sets of extents.
 
-    The image sized a lane's share as its slot count where a four-wide read
-    needs its float count, so consecutive non-lead indices addressed
-    overlapping windows -- column 1 starting one register inside column 0 --
-    and every destination cell came out wrong on the extents where the two
-    expressions disagree.  Where they happened to agree, width 4 was already
-    right, which is what said the defect was the stride and not the width.
+    A four-wide read needs a lane's share sized as its float count.  Sized as
+    its slot count, consecutive non-lead indices would address overlapping
+    windows -- column 1 starting one register inside column 0 -- and every
+    destination cell would come out wrong on the extents where the two
+    expressions disagree, and only there: an error in the stride, not in the
+    width.
     """
     assert _wrong_lead_indices(monkeypatch, extent, columns, 4) == []
 
 
 @pytest.mark.parametrize('extent', WIDTH4_WAS_BROKEN + WIDTH4_WAS_FINE)
 def test_width_two_computes_the_same_numbers(monkeypatch, extent):
-    """The width that was already offered, held in place while 4 arrives."""
+    """Width 2, on the same extents."""
     assert _wrong_lead_indices(monkeypatch, extent, 3, 2) == []
 
 
@@ -538,37 +537,36 @@ def test_an_odd_extent_computes_the_peeled_element(monkeypatch, extent,
                                                    dtype_align):
     """The element no whole vector covers, and the lane that owns it.
 
-    `Symbol.store` guards a fixed lead element to the one lane that holds it,
-    and compared the *thread* index against the *element* index to do so --
-    the same number only at width 1.  At width 2 a peeled element 32 asked for
-    `threadIdx.x == 32` in a 32-lane wave, so the accumulator was never
-    written and the store's `readlane` of it read what the guarded main block
-    had left there.  One wrong element per column, always the last, on every
-    odd extent, in FP32 and FP64 alike.
+    `Symbol.store` guards a fixed lead element to the one lane that holds it.
+    The owning lane is `(element // width) % threads`, which is also what
+    `Symbol.load` computes to broadcast the same element; the store takes its
+    answer from the symbol, so the two cannot disagree.
 
-    The owning lane is `(element // width) % threads`, which is what
-    `Symbol.load` already computed to broadcast the same element -- so the
-    defect was the two disagreeing, and taking the store's answer from the
-    symbol is what stops them.
+    Comparing the *thread* index against the *element* index instead gives
+    the same number only at width 1.  At width 2 a peeled element 32 would ask
+    for `threadIdx.x == 32` in a 32-lane wave, so the accumulator would never
+    be written and the store's `readlane` of it would read what the guarded
+    main block had left there: one wrong element per column, always the last,
+    on every odd extent, in FP32 and FP64 alike.
     """
     _, align = dtype_align
     assert _wrong_lead_indices(monkeypatch, extent, 3, 2, align=align) == []
 
 
 def test_the_peeled_write_is_now_exact_too():
-    """Right value and written once -- two properties, fixed in that order.
+    """Right value and written once -- two properties.
 
-    The guard on the *register* accumulator is what made the value right; it
-    could not be reused for the global store, because `readlane` is
+    The guard on the *register* accumulator is what makes the value right; it
+    cannot be reused for the global store, because `readlane` is
     `__shfl_sync` over the full warp mask and a single-lane branch is a
     shuffle the other lanes never reach.  Guarding the load along with the
     store removes the shuffle instead, and with the peeled element written by
     one lane the nest partitions its range at every width.
 
-    So `placement` no longer asks whether the write is exact; what remains
-    deciding an atomic is whether the target has the instruction at that
-    width.  `test_lead_coverage` holds the property, and
-    `test_store_exactness` holds the two ends of the capability question.
+    So `placement` does not ask whether the write is exact; what decides an
+    atomic is whether the target has the instruction at that width.
+    `test_lead_coverage` holds the property, and `test_store_exactness` holds
+    the two ends of the capability question.
     """
     from tensorforge.backend import placement
     assert not hasattr(placement, 'atomic_write_is_exact')

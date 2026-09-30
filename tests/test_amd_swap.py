@@ -8,13 +8,11 @@ primitive a fragment reordering is made of, because a sequence of them is a
 permutation of the lane index bits and a matrix fragment differs from the
 generator's distribution by exactly that.
 
-It carried two different maps until now. Four branches toggled one bit and two
-read the mirror lane, `i ^ (Block - 1)`, which is what the comment in
-`reduction` described as well. Nothing distinguished them: the sole caller is a
-butterfly reduction over groups that are already uniform, so any lane of the
-neighboring group answers and both maps reduce correctly. An exact
-permutation is not so forgiving, which is why the map is now stated and
-checked.
+A branch that read the mirror lane, `i ^ (Block - 1)`, instead of toggling one
+bit would go unnoticed by the sole caller: a butterfly reduction over groups
+that are already uniform, so any lane of the neighboring group answers and both
+maps reduce correctly. An exact permutation is not so forgiving, which is why
+the map is stated and checked.
 """
 
 from __future__ import annotations
@@ -57,12 +55,12 @@ def test_swap_is_its_own_inverse(block):
 
 
 def test_the_two_branches_that_disagreed_now_agree():
-    """`swap<8>` and `swap<32>` were `i ^ (Block - 1)`.
+    """`swap<8>` and `swap<32>` toggle one bit rather than mirror.
 
-    Pinned by value rather than by the general property above, because this
-    is the change: a mirror and a one-bit toggle coincide at Block 1 and 2 and
-    part company at 4. Reading `i ^ 7` where `i ^ 4` was meant lands three
-    lanes away and reduces to the same answer.
+    Pinned by value as well as by the general property above: a mirror and a
+    one-bit toggle coincide at Block 1 and 2 and part company at 4. Reading
+    `i ^ 7` where `i ^ 4` is meant lands three lanes away and reduces to the
+    same answer.
     """
     assert wavesim.swap(list(range(64)), 8)[0] == 4
     assert wavesim.swap(list(range(64)), 32)[0] == 16
@@ -73,12 +71,13 @@ def test_the_two_branches_that_disagreed_now_agree():
 
 @pytest.mark.parametrize("subblock", (1, 2, 4, 8, 16, 32))
 def test_the_reduction_butterfly_still_pairs_neighbors(subblock):
-    """The one caller, under the new map.
+    """The one caller, under the one-bit map.
 
     `reduction` calls `swap<2 * Subblock>` once each group of `Subblock` lanes
     holds a uniform value, and needs the result to come from the neighboring
-    group. Both maps satisfy that, which is why this cannot be the test that
-    pins `swap` -- but it is the test that says the change is safe.
+    group. A mirror would satisfy that too, which is why this cannot be the
+    test that pins `swap` -- but it is the test that says the map serves its
+    caller.
     """
     lanes = wavesim.swap(list(range(64)), subblock * 2)
     for lane, source in enumerate(lanes):
@@ -123,8 +122,8 @@ def test_the_fp64_fragment_is_two_swaps_from_the_generator_layout():
     exchange is `swap<32>` and `swap<64>` -- two instructions per register,
     no shared memory.
 
-    Under the old map neither would have been a single-bit toggle, and
-    `swap<32>` would have scrambled bits 0 through 4 as well.
+    Under a mirror map neither would be a single-bit toggle, and `swap<32>`
+    would scramble bits 0 through 4 as well.
     """
     op = next(o for o in catalog.MATRIX_OPS
               if o.builtin == "mfma_f64_16x16x4f64")

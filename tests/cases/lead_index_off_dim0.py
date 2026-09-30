@@ -4,16 +4,15 @@
 """``C[i,j] = sum_k A[k,i] * B[k,j]`` with the contraction on the lead axis.
 
 The transposition lives in ``target`` and ``permute`` is the identity ---
-the convention yateto emits, and the one :class:`GemmDescr` was corrected to
-in ``fix: fix target/permute mismatch``.  Operand ``A`` therefore carries the
-destination's lead index on its *second* dimension while its first, of extent
-one, carries the contraction index.
+the convention yateto emits, and the one :class:`GemmDescr` follows.  Operand
+``A`` therefore carries the destination's lead index on its *second* dimension
+while its first, of extent one, carries the contraction index.
 
-That is the shape that used to be miscompiled: the register staging spread
-dimension 0 across lanes regardless, so the lane-distributed index ended up in
-the register axis, ``Symbol.load`` saw a loop constant on what it believed was
-the lane axis, and every lane got element ``[0,0]`` broadcast from lane 0 ---
-nineteen of the twenty input values were discarded.
+A register staging that spread dimension 0 across lanes regardless would put
+the lane-distributed index in the register axis; ``Symbol.load`` would see a
+loop constant on what it believes is the lane axis, and every lane would get
+element ``[0,0]`` broadcast from lane 0 --- nineteen of the twenty input values
+discarded.
 """
 
 import numpy as np

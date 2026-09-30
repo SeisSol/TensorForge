@@ -6,14 +6,14 @@
 SLM is a separate address space on this hardware.  The ESIMD accessors for it
 take a byte offset into a chunk `slm_init` reserved; a raw `T*` into a
 `local_accessor` is not an address into it, and `copy_from` on one compiles
-and reads global memory.  So the whole shared path had to stop being pointers
--- the arena, the windows into it, and every read and write through them.
+and reads global memory.  So nothing on the shared path is a pointer -- not
+the arena, not the windows into it, and not a read or write through them.
 
 Two things are worth testing, and neither is "does it look right".  The first
 is that *no* pointer-shaped use of an SLM offset survives anywhere in the
-corpus, because one that does is the silent failure the change exists to
-remove.  The second is the shape of the scalar accesses: a subscript works
-only because `SlmRef` converts to `T` and assigns from one, and a conversion
+corpus, because one that does is the silent failure the offsets exist to rule
+out.  The second is the shape of the scalar accesses: a subscript works only
+because `SlmRef` converts to `T` and assigns from one, and a conversion
 operator does not participate in template argument deduction -- so
 `s0[i] * someSimd` would not compile even though `float x = s0[i]` does.  The
 corpus produces only the two shapes the proxy covers, and that is a fact with
@@ -74,9 +74,10 @@ def test_the_arena_is_a_reserved_chunk_and_not_an_accessor():
 
 def test_a_kernel_of_several_sections_reserves_once():
     """`slm_init` may be called once per kernel, and every section binds its
-    own arena: `fence_two_gemms` declared it twice and IGC refused the kernel
-    ("slm_init is called more than once").  The reservation is the kernel's,
-    at the largest section's size; the binding stays the section's."""
+    own arena: were the arena reserved per section too, `fence_two_gemms`
+    would call it twice, which IGC refuses ("slm_init is called more than
+    once").  The reservation is the kernel's, at the largest section's size;
+    the binding stays the section's."""
     src = _kernel('fence_two_gemms')
     assert src.count('slmReserve<') == 1, src
     assert src.count('SlmPtr<float> totalShrMem = ') == 2, src
@@ -140,7 +141,8 @@ def test_a_vector_access_goes_through_the_slm_instruction():
 
 def test_the_unstructured_prologue_fill_does_too():
     """The preload runs where there is no body, so it never passes the
-    emitter -- and wrote its destination as an assignment for that reason."""
+    emitter -- and left to itself would write its destination as a plain
+    assignment."""
     src = _kernel('addressing_none', preload_globals=True)
     assert re.search(r'tensorforge::slmStore<float, \d+>\(glb_m1 \+ \(', src)
 
@@ -184,14 +186,15 @@ def test_a_subscripted_slm_access_is_only_ever_a_whole_statement(name):
 
 
 # --------------------------------------------------------------------------
-# the other backends are untouched
+# the other backends keep pointers
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize('backend,arch', [('cuda', 'sm_80'), ('hip', 'gfx90a'),
                                           ('oneapi', 'pvc'), ('acpp', 'pvc')])
 def test_a_shared_window_is_still_a_pointer_elsewhere(backend, arch):
-    """The hook is a question, and four of five backends answer it as before
-    -- down to the whitespace, so that no snapshot moves for a refactor."""
+    """The hook is a question, and four of five backends answer it with a
+    pointer -- down to the whitespace, so that no snapshot moves for a
+    refactor."""
     lexic = vm_factory(arch, backend, 'float').get_lexic()
     assert lexic.shared_pointer_type('float') == 'float*'
     assert lexic.shared_pointer_type('float', restrict=True).startswith('float* ')

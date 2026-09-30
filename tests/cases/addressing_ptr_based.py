@@ -5,23 +5,14 @@
 
 Pointer-based addressing means the per-batch operands aren't laid out
 contiguously: each batch element has its own buffer, and the kernel
-receives a ``T**`` (array of base pointers, one per element). See
-``ptr_manip.py:54-66`` — the address becomes
-``&m1[batchId][sub_offset]`` rather than the STRIDED form
-``&m1[batchId * volume + sub_offset]``.
+receives a ``T**`` (array of base pointers, one per element). The
+address becomes ``&m1[batchId][sub_offset]`` rather than the STRIDED
+form ``&m1[batchId * volume + sub_offset]`` (``ptr_manip.py``).
 
-Generation itself works on dev2 (the case constructs and the
-:class:`Generator` emits code). The test driver, however, only knows
-how to populate STRIDED and NONE buffers — see ``driver_emit.py:257``
-where PTR_BASED hits a deliberate :class:`NotImplementedError`. To
-make this case green, the harness needs:
-
-1. Per-batch host allocations (``batch`` separate ``malloc`` calls
-   rather than one large contiguous one).
-2. A device-side ``T**`` array populated with the individual base
-   pointers and passed in place of the current ``T*``.
-3. Symmetric handling for reads and writes (the case below tests both
-   SOURCE and SINK in PTR_BASED).
+The test driver allocates the operand as one block, builds a device-side
+``T**`` of per-element base pointers into it, and passes that in place of
+a ``T*`` (``driver_emit.py``).  Reads and writes both go through it: the
+case has a PTR_BASED source and a PTR_BASED sink.
 """
 
 import numpy as np

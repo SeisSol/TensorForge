@@ -14,17 +14,16 @@ subscript.  The same value in ESIMD is `simd<float, 16> x`, the subscript has
 no lane term at all, and the distribution has moved from the index expression
 into the declaration.
 
-Which is why this file could not be written before ``Value`` carried a total
-distribution.  The information was always there -- ``LeadIndex`` computed it
-and printed it -- but it was spent on an index and not recorded, and a value
-whose distribution is unknown cannot be given a type here.  There is no
-conservative fallback: in SPMD an untracked value is merely one that passes
-cannot optimize, so `None` costs precision; here it is a declaration that
-cannot be written, so `None` costs the kernel.
+Which is why this file needs ``Value`` to carry a total distribution:
+``LeadIndex`` computes one to build an index, but a value that does not record
+it cannot be given a type here.  There is no conservative fallback: in SPMD an
+untracked value is merely one that passes cannot optimize, so `None` costs
+precision; here it is a declaration that cannot be written, so `None` costs
+the kernel.
 
 That is deliberate, and the error message says so.  A silent guess would pick
 `float` for a value that is really a vector, and the result compiles, runs,
-and is wrong -- which is the failure mode the ESIMD stubs already had once.
+and is wrong.
 """
 
 from __future__ import annotations
@@ -49,10 +48,10 @@ class EsimdEmitter(Emitter):
     """Lowering where a value's distribution is part of its C++ type."""
 
     #: Values whose type could not be decided, in encounter order.  Collected
-    #: rather than raised on the first one: during the migration the useful
-    #: question is *how many and which*, and a generator that stops at the
-    #: first tells you nothing about the size of what is left.  `run()` raises
-    #: at the end if any were collected.
+    #: rather than raised on the first one: the useful question is *how many
+    #: and which*, and a generator that stops at the first tells you nothing
+    #: about the size of what is left.  `run()` raises at the end if any were
+    #: collected.
     def __init__(self, writer, context: Any = None, strict: bool = True):
         super().__init__(writer, context)
         self.strict = strict
@@ -117,8 +116,8 @@ class EsimdEmitter(Emitter):
             # `simd<bool, N>` exists as a type but is not what a comparison
             # over a `simd` produces and not what a predicated operation
             # takes; ESIMD keeps masks in their own family precisely because
-            # the hardware does.  Spelling this `simd<bool, N>` compiled the
-            # declaration and then failed at every use, which is the worst
+            # the hardware does.  Spelling this `simd<bool, N>` would compile
+            # the declaration and then fail at every use, which is the worst
             # place to find out.
             return self.mask_type(value.lane_span())
 
@@ -180,10 +179,9 @@ class EsimdEmitter(Emitter):
 
         One ESIMD work-item *is* the vector; `item.get_local_id(0)` is the
         work-item's position in the ND-range, not a lane, and using it as one
-        is how the old `simd_mode` produced kernels that indexed a vector with
-        a work-group coordinate.  Anything that still asks for a lane index
-        here is asking a question this model does not have -- so it is an
-        error and not a substitution.
+        would index a vector with a work-group coordinate.  Anything that asks
+        for a lane index here is asking a question this model does not have --
+        so it is an error and not a substitution.
         """
         if axis == 'x':
             raise IRError(
@@ -352,13 +350,13 @@ class EsimdEmitter(Emitter):
 
     @staticmethod
     def _is_shared(base) -> bool:
-        """Both ways a base names its space, because both still occur.
+        """Both ways a base names its space, because both occur.
 
-        A migrated access has the buffer as a `Value` and reads the space off
-        its type.  One that has not migrated has a `Symbol`, whose `stype`
-        says the same thing in the macro layer's vocabulary -- and 35 of the
-        39 vector reads in a plain GEMM are still of the second kind, so
-        answering only for the first is answering for almost none of them.
+        A structured access has the buffer as a `Value` and reads the space
+        off its type.  Otherwise the base is a `Symbol`, whose `stype` says
+        the same thing in the macro layer's vocabulary -- and 35 of the 39
+        vector reads in a plain GEMM are of the second kind, so answering only
+        for the first is answering for almost none of them.
         """
         t = getattr(base, 'type', None)
         if isinstance(t, BufferType):
@@ -500,7 +498,7 @@ class EsimdEmitter(Emitter):
             # One element of a vector, as the element.  `x[i]` on a `simd` is
             # a `simd_view`, and ESIMD has no operator between a view and a
             # vector: the broadcast operand of every scalar-times-vector FMA
-            # did not compile.  The cast is what the base spelling meant.
+            # would not compile.  The cast is what the base spelling means.
             v = s.target[0]
             self.declare(v, f'static_cast<{self.ctype(v.type, v)}>('
                             f'{self.operand(s.args[0])}[{s.attr("lane")}])', s)
@@ -545,13 +543,13 @@ class EsimdEmitter(Emitter):
         excluded, which in this model is a property of each statement inside
         rather than of the region.
 
-        `passes.if_convert` is exactly that transformation and already exists;
-        it is documented as not being in the default pipeline because nothing
-        yet used the freedom it buys.  This lowering does: for an explicitly
-        vectorized kernel the conversion is not an optimization but the only
-        legal lowering, so reaching here means it did not run or could not
-        convert this guard -- `_convertible` refuses regions containing
-        barriers, nested regions, or raw declarations.
+        `passes.if_convert` is exactly that transformation.  It is not in the
+        default pipeline, being worth it only where something uses the freedom
+        it buys -- and this lowering does: for an explicitly vectorized kernel
+        the conversion is not an optimization but the only legal lowering, so
+        reaching here means it did not run or could not convert this guard --
+        `_convertible` refuses regions containing barriers, nested regions, or
+        raw declarations.
         """
         cond = s.cond
         if isinstance(cond, Value) and cond.layout is not None and cond.distributed:
@@ -675,14 +673,13 @@ class EsimdEmitter(Emitter):
     def _within_budget(self, order, names, allocs) -> set:
         """All of them, and the register file is not the question.
 
-        It was: the arrays were taken smallest first while the live set stayed
-        within `max_reg_per_thread`, and none at all past it -- on the evidence
-        of two kernels where taking *some* of them was worse than taking none
+        Taking the arrays smallest first while the live set stays within
+        `max_reg_per_thread`, and none at all past it, would rest on two
+        kernels where taking *some* of them is worse than taking none
         (`chain_three_matrices` 1984 B of spill against 3392, `chain_five`
-        17536 against 17600).  Taking them *all* was never measured, and it is
-        a different arrangement: an array that does not fit spills in blocks,
-        where an array left as an array is a `copy_from` per access and stays
-        in scratch whole.
+        17536 against 17600).  Taking them *all* is a different arrangement:
+        an array that does not fit spills in blocks, where an array left as an
+        array is a `copy_from` per access and stays in scratch whole.
 
         Measured on pvc, whole promotion against none, ns per element:
 
@@ -694,20 +691,19 @@ class EsimdEmitter(Emitter):
             chain_three_matrices              9.55 ->   9.48   1.01x
 
         and the rest of the 44-case corpus within a tenth either way, worst
-        `accumulate_chain` at 0.90.  The two cases the old rule was built on
-        are a wash under whole promotion; the kernels it was keeping arrays
+        `accumulate_chain` at 0.90.  The two cases that argue for a budget are
+        a wash under whole promotion; the kernels a budget would keep arrays
         for are the ones that gain two orders of magnitude.  `elastic-o6s:
         derivative` drops from 5414 `copy_from` to 306 -- and the 306 that are
         left are the operands, read from global memory, which no promotion can
         remove.
 
-        The correctness corpus is unchanged by it: the same 83 passing and the
-        same 15 failing cases under both, and the run takes 155 s instead of
-        1002.
+        The same correctness cases pass under both, and the correctness run
+        takes 155 s instead of 1002.
 
-        Kept as a method rather than deleted, because the question it asked is
-        a real one -- a `simd` that does not fit is spilled by IGC, and where
-        that becomes the cost again this is where the answer goes.
+        A method of its own, because the question is a real one -- a `simd`
+        that does not fit is spilled by IGC, and where that becomes the cost
+        this is where the answer goes.
         """
         return set(names)
 
@@ -991,8 +987,8 @@ class EsimdEmitter(Emitter):
         `mov null` IGC puts around a send on this part, and a scoreboard wait.
         A lead dimension of 56 on 32 lanes is two reads per column, one of 32
         and a tail -- three messages (32 + 16 + 8) where one of 64 would do.
-        Read as one, `local_flux` on pvc went from 9386 instructions to 6450,
-        with the tail at full width (`Options.full_lane_tails`).
+        Read as one, `local_flux` on pvc takes 6450 instructions instead of
+        9386, with the tail at full width (`Options.full_lane_tails`).
 
         A run is reads of the same buffer at constant, consecutive offsets,
         each one element per lane, taken together only where that is fewer

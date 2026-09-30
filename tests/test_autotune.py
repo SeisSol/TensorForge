@@ -86,10 +86,10 @@ def test_a_probe_the_generator_builds_for_itself_is_not_tuned(monkeypatch):
 
     The merging probe and the prefetch probes are generators this one builds
     to ask something about itself, at a geometry that is already settled.
-    Tuning them opens a walk inside every probe and a probe inside every
+    Tuning them would open a walk inside every probe and a probe inside every
     build of every walk -- hundreds of builds that all keep to
-    `autotune_budget` in *distinct* candidates, so the budget test above does
-    not see them.  Counted here, in total.
+    `autotune_budget` in *distinct* candidates, so the budget test above
+    would not see them.  Counted here, in total.
     """
     built = []
     real = tuning.build
@@ -128,10 +128,11 @@ def test_a_remembered_pick_costs_one_build(monkeypatch, tmp_path):
 def test_an_explicit_geometry_is_kept_and_the_rest_still_turned(monkeypatch):
     """A caller who states the geometry states that, not "do not tune".
 
-    Standing aside for an explicit `lanes` turned tuning off for every caller
-    that passes one, and `tools/bench/build.py` passes one for every build --
-    so nothing measured through it was ever tuned.  What is fixed is pinned
-    into the origin and leaves the space; the other knobs are still walked.
+    Standing aside for an explicit `lanes` would turn tuning off for every
+    caller that passes one, and `tools/bench/build.py` passes one for every
+    build -- so nothing measured through it would be tuned.  What is fixed is
+    pinned into the origin and leaves the space; the other knobs are still
+    walked.
 
     The walk itself is another test's business: this one watches what the
     generator asks for, because asking is the decision.
@@ -183,8 +184,8 @@ def test_the_lane_space_stops_at_the_vector_unit_under_spmd():
 
     Under SPMD there is one work-item per lane and nothing to put in the rest
     of the vector, where a wave holding several multiplications fills itself.
-    Measured on a 16-wide PVC: with the geometry free, both scorers took
-    `elastic-o6s:derivative` to eight lanes and 66.1 ns an element against
+    Measured on a 16-wide PVC: with the geometry free, both scorers would take
+    `elastic-o6s:derivative` to eight lanes, at 66.1 ns an element against
     29.9 at the deduced 32 and 12.7 at sixteen.
     """
     intel = _simple("pvc", "oneapi")
@@ -326,7 +327,7 @@ def test_intel_spmd_shares_one_register_file_over_the_sub_group():
     """The file is a thread's, and under SPMD a thread holds the sub-group.
 
     Compared against the whole file, as every other target is, the guard
-    never fired on Intel: `elastic-o6s:derivative` models 1716 B a lane
+    would never fire on Intel: `elastic-o6s:derivative` models 1716 B a lane
     against 8192 and IGC spills it hard -- 1108 scratch messages in the ISA
     at 32 lanes against 9 at sixteen.  Per thread it is 6.7 times the file
     against 3.9, which is the order the machine agrees with.

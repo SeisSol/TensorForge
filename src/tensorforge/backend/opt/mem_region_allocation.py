@@ -81,15 +81,15 @@ class MemoryRegionAllocation(AbstractOptStage):
 
     The coloring counts colors, not bytes: it needs as many as there are
     buffers live at once, and each color is as large as the largest buffer it
-    was given.  SeisSol's damage step (order 6, double) has 908 buffers, never
+    is given.  SeisSol's damage step (order 6, double) has 908 buffers, never
     more than 22 of them live and never more than 65 KB; colored, the arena
-    was 145 KB per multiplication and no block held one.  Placing the largest
+    is 145 KB per multiplication and no block holds one.  Placing the largest
     first, each at the lowest offset clear of every buffer it is live with,
     gives the 65 KB.
 
     Against the same interference the coloring uses, so what may share memory
-    has not changed -- only where it lands.  Where the coloring is as small,
-    it stays, and so does every kernel it already laid out well.
+    is the same -- only where it lands differs.  Where the coloring is as
+    small, it stays.
     """
     from .shr_mem_analyzer import SHR_ALIGN_BYTES
     symbols = list(self._objects2vertices_map)

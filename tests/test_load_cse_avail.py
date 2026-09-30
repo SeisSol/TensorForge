@@ -1,20 +1,16 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""`_Avail` against the dict scan it replaces.
+"""`_Avail` against a plain dict scan.
 
-`load_cse` used to re-test every live entry against every access of every
-statement.  `_Avail` indexes on `(space, base)` instead, which is the same
-predicate spelled faster --- but only two of its five branches are reachable
-from the corpus.  Nothing generated today carries `Effect.BARRIER` or
-`Effect.ASYNC` into a PIR body, and the only access with `base is None` also
-has `MemSpace.UNKNOWN`, so the barrier/wait kill and the wildcard-base kill
-are covered by neither the snapshots nor the generated-source hashes.
+The scan re-tests every live entry against every access of every statement.
+`_Avail` indexes on `(space, base)` instead, which is the same predicate
+spelled faster --- but not all five of its branches are reachable from the
+corpus.  The only access with `base is None` also has `MemSpace.UNKNOWN`, so
+the wildcard-base kill is covered by neither the snapshots nor the
+generated-source hashes.
 
-So they are covered here, against a verbatim copy of the scan, over random
-traces.  The gates that keep those branches unreachable are `vec == 1` in
-`Symbol.load_linear` and the commented-out vector widths in
-`memory/load.py`; both are on their way out.
+So every branch is covered here, against the scan, over random traces.
 """
 import collections
 import random
@@ -43,7 +39,7 @@ class Base:
 
 
 def reference_kill(available, accesses, effect):
-    """Verbatim copy of the dict-scan `_kill` from dev3, 891c7b2."""
+    """The kill as a plain dict scan, the oracle `_Avail.kill` must match."""
     if effect & (Effect.BARRIER | Effect.ASYNC):
         available = {k: v for k, v in available.items()
                      if all(a.space is MemSpace.REGISTER for a in v[1])}

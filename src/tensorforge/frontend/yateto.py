@@ -397,15 +397,13 @@ class DescriptionReader(Reader):
     if kind == 'multilinear':
       target = [list(t) for t in d['target']]
       permute = [list(p) for p in d['permute']]
-      # A factor other than one becomes one more operand over no axis.  This
-      # used to assume yateto had appended it to `args` already, and dropped
-      # `alpha` as the same value a second time: interface 7 never does -- in
-      # every recorded description the factor is in `alpha` alone -- so
-      # `2.0 * C` computed `C`, and so did the scaled contractions of yateto's
-      # `rings` test.  Asked by name, so a yateto that does append it is not
-      # scaled twice.  Not where the result stores nothing -- `0.0 * C` comes
-      # as a temporary whose box is empty, and a factor over no cells became
-      # a zero-length register array.
+      # A factor other than one becomes one more operand over no axis, taken
+      # from `alpha`: interface 7 never appends it to `args` -- in every
+      # recorded description the factor is in `alpha` alone.  Asked by name,
+      # so a yateto that does append it is not scaled twice.  Not where the
+      # result stores nothing -- `0.0 * C` comes as a temporary whose box is
+      # empty, and a factor over no cells would become a zero-length register
+      # array.
       alpha = linear.get('alpha')
       empty = any(int(size) == 0 for size in result.bbox.sizes())
       if (self._is_named_scalar(alpha) and not empty
@@ -481,11 +479,11 @@ class DescriptionReader(Reader):
     storing three of eight entries has a box of three -- and a pointwise
     operation over the whole destination reads zero outside it: `exp` of it
     is one, `x + 0` is `x`, `0 > 0` is false.  An `ElementwiseDescr` runs one
-    operation over one box, and refused operands of another shape, which
-    stopped three of yateto's `elementwise` kernels.  So the destination is
-    cut at every edge an operand's box has inside it; in each piece an
-    operand either covers it and is read there, or misses it and is the
-    number 0.  One piece, the destination itself, where every box agrees.
+    operation over one box and refuses operands of another shape, which would
+    stop three of yateto's `elementwise` kernels.  So the destination is cut
+    at every edge an operand's box has inside it; in each piece an operand
+    either covers it and is read there, or misses it and is the number 0.
+    One piece, the destination itself, where every box agrees.
     """
     def boxed(arg):
       return (hasattr(arg, 'bbox') and arg.bbox.rank() > 0
@@ -615,7 +613,7 @@ class DescriptionReader(Reader):
     """One occurrence of a tensor, as the operation names it.
 
     Three things belong to the occurrence and not to the tensor, and all
-    three used to be dropped here: the box the equivalent sparsity pattern
+    three are kept here: the box the equivalent sparsity pattern
     marks out -- which is the range the operation runs over, and regularly
     much smaller than the storage -- the shift that a slicing operand
     imposes, and whether it is a slice at all.
@@ -692,8 +690,9 @@ class DescriptionReader(Reader):
       # paths that ask read the residence for the rest.
       addressing = Addressing.NONE
     else:
-      # An unhandled spelling used to leave `addressing` unbound, and the
-      # first read of it blamed a line that had nothing to do with it.
+      # Refused by name: an unhandled spelling would leave `addressing`
+      # unbound, and the first read of it would blame a line that has nothing
+      # to do with it.
       raise NotImplementedError(
         f'tensor {name}: the description states addressing '
         f'{addressingStr!r} with residence {residence}, which this frontend '
@@ -1141,9 +1140,8 @@ class YatetoFrontend:
     `sink(recorded)` gets a `Recorded`: the description yateto sent, the
     descriptors built from it, and what the routine ends up being called.
     A supported way in, so that tooling wanting to see a codegen run does
-    not have to patch a method belonging to another class -- which is what
-    it used to do, and why it only ever saw the one kind of descriptor the
-    patch happened to know about.
+    not have to patch a method belonging to another class -- a patch sees
+    only the kinds of descriptor it happens to know about.
 
     It fires as the kernel arrives, not once it is built, so a kernel that
     fails to build is recorded too. Those are the ones worth having: a
@@ -1232,11 +1230,11 @@ class YatetoFrontend:
     """The arithmetic this kernel's operations contain, per batch element.
 
     yateto asks for it once the kernel is generated and files it as the
-    kernel's hardware flops -- which were zero for every kernel generated
-    here, because nothing answered. Counted by the static cost model
-    (`analysis.cost`): the multiplications and additions of the operations as
-    written, over the boxes they run on, which is what a roofline divides by.
-    Transcendentals and comparisons stay out, as they do there.
+    kernel's hardware flops, which without an answer would be zero. Counted
+    by the static cost model (`analysis.cost`): the multiplications and
+    additions of the operations as written, over the boxes they run on, which
+    is what a roofline divides by. Transcendentals and comparisons stay out,
+    as they do there.
 
     Filed as plain arithmetic, in the operations' own type, which is what the
     FMA paths issue. Where the matrix path multiplies in another precision --

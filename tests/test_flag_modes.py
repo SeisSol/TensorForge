@@ -9,8 +9,8 @@ shape a kernel gets follows from the attributes its frontend passed at
 construction, and the three cases are not symmetric:
 
 * no attributes at all is a frontend that predates the attribute channel,
-  and it has to keep getting the mask it always got -- otherwise updating
-  TensorForge alone silently drops masking from a caller that relies on it;
+  and it gets the mask on every kernel -- otherwise updating TensorForge
+  alone would silently drop masking from a caller that relies on it;
 * attributes without the mask is a frontend that had the chance to ask and
   did not, so naming ``flags`` at the call site should not compile;
 * attributes with the mask is a promise to supply one, so the parameter has
@@ -102,8 +102,8 @@ def test_absent_is_not_the_same_as_no_attributes():
 
 def test_no_attributes_keeps_the_nullable_mask():
     gen = _generate(None)
-    # The spelling of a pointer parameter comes from the backend now; what
-    # this pins is the type and the default, not where the star sits.
+    # The spelling of a pointer parameter comes from the backend; what this
+    # pins is the type and the default, not where the star sits.
     assert re.search(r"unsigned\s*\*\s*flags0 = nullptr", gen.get_header())
     # `1` where the loop carries the flag *word* across its back edge rather
     # than reading the `bool` at the head -- see `BatchLoop._carries_flags`.

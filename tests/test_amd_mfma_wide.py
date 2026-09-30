@@ -27,8 +27,8 @@ def test_a_packed_lead_operand_takes_the_matrix_core_componentwise(arch):
     result stored as pairs.  All columns, the last block padded -- a ninth
     column left to the DPP chain is one it may decline (the 9x9 products'
     contraction ends mid-vector; gfx90a has no 64-bit move), and a declined
-    tail sent the whole product to the nest.  So at least as many MFMAs as at
-    width one, where the ninth column is the chain's."""
+    tail would send the whole product to the nest.  So at least as many MFMAs
+    as at width one, where the ninth column is the chain's."""
     one = _kernel('local_flux', arch)
     two = _kernel('local_flux', arch, width=2)
     assert len(MFMA.findall(two)) >= len(MFMA.findall(one)) > 0

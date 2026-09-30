@@ -3,26 +3,23 @@
 # SPDX-License-Identifier: MIT
 """Where a wide transfer is allowed to go, and how far.
 
-`GlbToRegLoader` carried its widths as `for g in [4, 2, 1]` commented down to
-`[1]` -- a decision written as a disabled list. Re-enabling it would have been
-wrong twice over, and both faults are invisible until a tensor happens not to
-be padded:
+A wide transfer can be wrong twice over, and both faults are invisible until a
+tensor happens not to be padded:
 
-* the widths were not asked of the *bases*. A `float4` read of `&buf[i]` is
-  undefined unless that address is 16-byte aligned, and neither operand
-  promised anything;
-* the hop arithmetic overran and overlapped. `range(start, total, granularity)`
-  emitted a hop per *started* step, and `start = (total // granularity) *
-  granularity` was then recomputed from the granularity just finished with. At
-  `total=96`, 16 threads, width 4 that reads to element 128 and then covers
-  `[64, 96)` a second time at width 2.
+* a width not asked of the *bases*. A `float4` read of `&buf[i]` is undefined
+  unless that address is 16-byte aligned, which only an operand's promise
+  establishes;
+* hop arithmetic that overruns and overlaps. `range(start, total, granularity)`
+  emits a hop per *started* step, and a `start = (total // granularity) *
+  granularity` recomputed from the granularity just finished with goes back
+  over covered ground. At `total=96`, 16 threads, width 4 that reads to
+  element 128 and then covers `[64, 96)` a second time at width 2.
 
-The corpus cannot state either. 19 of the 52 linearized loads it generates are
-ragged (`total=9` over 32 threads is the extreme), so the hop plan is exercised
--- but only at width 1, where the overrun is one partial hop that the loader
-has always emitted and the double-cover cannot arise because there is no second
-width. These are model tests over the planner instead: exhaustive on the sizes
-that actually occur, and stating the properties rather than the output.
+A corpus kernel exercises the plan only at the sizes and widths its case
+reaches, and at width 1 neither fault shows: the overrun is one partial hop
+and the double-cover cannot arise, because there is no second width. These
+are model tests over the planner instead: exhaustive on the sizes that
+actually occur, and stating the properties rather than the output.
 """
 
 from __future__ import annotations
@@ -70,7 +67,7 @@ def test_a_wider_element_reaches_fewer_widths_from_the_same_base():
 
 
 # --------------------------------------------------------------------------- #
-# The plan: the three properties the old arithmetic did not have
+# The plan: the three properties the hop arithmetic has to have
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize('total', TOTALS)
@@ -116,11 +113,12 @@ def test_the_tail_is_smaller_than_one_scalar_hop(total, threads):
 
 
 def test_the_regression_the_old_arithmetic_had():
-    """96 elements, 16 threads: the case that both overran and double-covered.
+    """96 elements, 16 threads: the case per-step arithmetic both overruns and
+    double-covers.
 
-    Old behavior: width 4 emitted hops at 0 and 64 -- the second reading to
-    128, 32 elements past the end -- then `start` came back to 64 and width 2
-    covered `[64, 96)` again.
+    A hop per started step at width 4 puts hops at 0 and 64 -- the second
+    reading to 128, 32 elements past the end -- and a `start` recomputed from
+    that width comes back to 64, so width 2 covers `[64, 96)` again.
     """
     hops, tail = plan_hops(96, 16, [4, 2, 1])
     assert hops == [(0, 4), (64, 2)]

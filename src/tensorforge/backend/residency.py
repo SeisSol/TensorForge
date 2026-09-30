@@ -16,11 +16,10 @@ coordinates -- position `r` holds tensor element `r + shift` -- and covers only
 what its producer happened to stage, so a later consumer asking for a different
 slice has to be told no rather than handed the wrong elements.
 
-`kind` is stated rather than derived.  It used to be read back off `image is
-home`, which is true but reads as an accident at each of the three sites that
-did it, and the neighboring test on `home.stype` -- which looks equivalent and
-is not, since a writeback into a shared-memory temporary has a non-global home
--- is a step away.
+`kind` is stated rather than derived.  Read back off `image is home` it would
+be true but read as an accident at every site that does it, and the neighboring
+test on `home.stype` -- which looks equivalent and is not, since a writeback
+into a shared-memory temporary has a non-global home -- is a step away.
 """
 
 from dataclasses import dataclass, field

@@ -13,34 +13,30 @@ one" is not a detail of the spelling, it is the premise of the decision, and
 it belongs where the decision is made rather than inside the lexic that writes
 the call down.
 
-The question is asked per `(vendor, architecture, datatype)`.  Not per vendor:
-`atomic_accumulation=True` was a row of the vendor table, and the vendor is the
-one thing that does not decide it.  Every AMD target took the AMD row, and the
-row emitted `__builtin_amdgcn_global_atomic_fadd_f32` -- a builtin gated on
-`atomic-fadd-rtn-insts`, which gfx900, gfx906, gfx1010 and gfx1030 do not have
-and gfx908 has only in its non-returning form.  Four of the thirteen
-architectures in `hw_descr_db.yml` could not compile the kernel they were
-handed, and a fifth compiled a different instruction than the one named.
+The question is asked per `(vendor, architecture, datatype)`.  Not per vendor,
+because the vendor is the one thing that does not decide it: one AMD answer
+would hand every AMD target `__builtin_amdgcn_global_atomic_fadd_f32` -- a
+builtin gated on `atomic-fadd-rtn-insts`, which gfx900, gfx906, gfx1010 and
+gfx1030 do not have and gfx908 has only in its non-returning form.
 
 What is *not* modeled here, and why:
 
 * **Shared memory.**  Nothing reaches an atomic on a non-global symbol today,
-  and `Symbol.store` now says so rather than silently writing a plain
-  assignment.  When it does, the AMD gates are `lds-atomic-add-f64` for f64
-  and nothing at all for f32 -- `ds_add_f32` predates every target here.
+  and `Symbol.store` says so rather than silently writing a plain assignment.
+  When it does, the AMD gates are `lds-atomic-add-f64` for f64 and nothing at
+  all for f32 -- `ds_add_f32` predates every target here.
 * **Operations other than add.**  `Symbol.store` passes `op=None` and every
   lexic writes an add.  Min and max exist on both vendors and on different
   targets again (`atomic-fmin-fmax-global-f32` reaches RDNA1, which has no
   add at all), so the parameter is threaded through to keep the question
   askable, and answered only for addition.
 
-**Width** is modeled, and answering it honestly is what lets
-`placement.atomic_write_is_exact` stop standing in for it.  That condition
-refused every widened lead for two reasons at once -- a peeled tail element no
-lane owns, and a wide value handed to a scalar instruction -- and only the
-first is a fact about the nest.  The second is this table's question.
+**Width** is modeled.  There are two ways a widened lead can defeat an atomic
+write -- a peeled tail element no lane owns, and a wide value handed to a
+scalar instruction -- and only the first is a fact about the nest.  The second
+is this table's question.
 
-The answer still refuses everything actually reached, and by its own content
+The answer refuses everything actually reached, and by its own content
 rather than by a switch: AMD is the one vendor whose policy asks for atomics,
 and AMD has a packed add for f16 and bf16 and none for f32 or f64.  There is
 no `global_atomic_pk_add_f32` -- no builtin, and no subtarget feature to gate
@@ -65,11 +61,11 @@ part: they carry `emulated-system-scope-atomics`, which LLVM describes as
 system-scope atomics the PCI-e cannot do being emulated in hardware by a CAS
 loop and remaining functional.  So the failure mode there is slowness rather
 than a wrong answer -- which is a reason to keep asking for agent scope, not a
-reason to stop.  What has *not* changed on those two, re-checked against LLVM
-main: `__builtin_amdgcn_global_atomic_fadd_f64` is still gated on
-`gfx90a-insts`, and `gfx90a-insts` is still gfx90a, gfx942 and gfx950 alone.
-They have the f64 instruction under `flat-buffer-global-fadd-f64-inst` and no
-builtin that reaches it, so the fallback spelling is the only way in.
+reason to stop.  What those two do *not* have, per LLVM main:
+`__builtin_amdgcn_global_atomic_fadd_f64` is gated on `gfx90a-insts`, and
+`gfx90a-insts` is gfx90a, gfx942 and gfx950 alone.  They have the f64
+instruction under `flat-buffer-global-fadd-f64-inst` and no builtin that
+reaches it, so the fallback spelling is the only way in.
 """
 
 from tensorforge.common.basic_types import Datatype
@@ -226,14 +222,13 @@ def native_add(ctx, datatype, length: int = 1) -> bool:
     """Does this target add `length` adjacent elements in one instruction?
 
     A vendor with no entry answers False, which costs a preference and never
-    correctness: the accumulation goes out as an ordinary read-modify-write,
-    which is what every target did before atomics existed here.
+    correctness: the accumulation goes out as an ordinary read-modify-write.
 
-    `length` defaults to 1 so a caller that has no width to offer keeps
-    asking the question it was asking.  It is *not* a hint: a target with a
-    scalar add and no packed one answers False for 2, rather than yes with a
-    silent fallback to two scalar updates.  Splitting a wide value is the
-    store path's decision and it has the information to make it; making it
-    here would hide a doubled instruction count behind a capability query.
+    `length` defaults to 1 so a caller that has no width to offer asks the
+    scalar question.  It is *not* a hint: a target with a scalar add and no
+    packed one answers False for 2, rather than yes with a silent fallback to
+    two scalar updates.  Splitting a wide value is the store path's decision
+    and it has the information to make it; making it here would hide a
+    doubled instruction count behind a capability query.
     """
     return _VENDORS.get(_vendor(ctx), lambda *_: False)(ctx, datatype, length)

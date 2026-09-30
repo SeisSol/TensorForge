@@ -10,9 +10,9 @@
 The accumulation is the case the register residency exists for: both writers
 cover the whole box, so the second one accumulates into the array the first one
 left behind and nothing goes to memory in between.  That makes it the strongest
-form of the gap in `ml_then_ew` -- there are two operations' worth of value in
-registers when the elementwise asks for the tensor -- and the case that says
-whether a fix flushes the newest copy or merely the last one.
+form of what `ml_then_ew` checks -- there are two operations' worth of value in
+registers when the elementwise asks for the tensor -- and a consumer that reads
+anything but the newest copy gets one product without the other.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

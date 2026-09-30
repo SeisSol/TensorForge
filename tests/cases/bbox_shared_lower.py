@@ -12,8 +12,8 @@ both buffers.
 
 This is the counterpart to ``offset_a``, which reaches the same numbers by
 disagreeing on the origin and reconciling it with an offset.  If the two
-concepts ever get conflated again, exactly one of the two cases breaks —
-which one tells you in which direction.
+concepts ever get conflated, exactly one of the two cases breaks — which
+one tells you in which direction.
 """
 
 import numpy as np

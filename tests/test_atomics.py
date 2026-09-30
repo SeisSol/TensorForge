@@ -3,22 +3,23 @@
 # SPDX-License-Identifier: MIT
 """An atomic accumulation is offered where the instruction exists.
 
-`atomic_accumulation` was a field of the vendor table, so every AMD target
-answered as gfx90a does.  Four of the thirteen architectures in
-`hw_descr_db.yml` have no floating-point atomic add of any kind and were
-handed `__builtin_amdgcn_global_atomic_fadd_f32` regardless -- not a slow
-kernel, a kernel that does not compile.  A fifth, gfx908, has the instruction
-in its non-returning form only, which is the form an accumulation wants and
-the one the returning builtin cannot reach.
+Whether the instruction exists is a fact about the target, not a field of the
+vendor table: a field would have every AMD target answer as gfx90a does.  Four
+of the thirteen architectures in `hw_descr_db.yml` have no floating-point
+atomic add of any kind and would be handed
+`__builtin_amdgcn_global_atomic_fadd_f32` regardless -- not a slow kernel, a
+kernel that does not compile.  A fifth, gfx908, has the instruction in its
+non-returning form only, which is the form an accumulation wants and the one
+the returning builtin cannot reach.
 
 The other half of what this checks is that the path exists at all on the other
-two vendors.  It did not: the single call site passes four arguments,
-`CudaLexic.atomic_store` took three and `SyclLexic` had none, so NVIDIA raised
-`TypeError` and Intel `AttributeError` the moment either was asked.  Tests
-that assert a spelling would have passed while that was true -- what catches
-it is going through the interface the builder uses, which is why the lexic
-tests below call `has_atomic_store` first and then `atomic_store`, in that
-order and with the same arguments the builder passes.
+two vendors.  A lexic whose `atomic_store` takes other arguments than the
+single call site passes, or that has none, raises `TypeError` or
+`AttributeError` the moment it is asked.  Tests that assert a spelling would
+pass regardless -- what catches it is going through the interface the builder
+uses, which is why the lexic tests below call `has_atomic_store` first and
+then `atomic_store`, in that order and with the same arguments the builder
+passes.
 """
 
 from __future__ import annotations
@@ -234,7 +235,7 @@ def test_the_hip_fallback_is_agent_scoped_and_relaxed():
 
 def test_hip_targeting_nvidia_does_not_emit_amd_builtins():
     """HIP compiles for CUDA too, where every `__builtin_amdgcn_*` is
-    undeclared.  `glb_store` next door has always had this condition."""
+    undeclared.  `glb_store` next door has the same condition."""
     ctx = _ctx("sm_80", "hip")
     stmt = ctx.get_vm().get_lexic().atomic_store(ctx, "glb[i]", "value", None,
                                                  Datatype.F32)
@@ -259,7 +260,7 @@ def test_explicit_simd_declines_whatever_the_hardware_can_do():
 # --------------------------------------------------------------------------- #
 
 def test_the_width_defaults_to_the_question_it_replaced():
-    """A caller with no width to offer asks what it always asked."""
+    """A caller with no width to offer asks the scalar question, width 1."""
     ctx = _ctx('gfx90a')
     assert (atomics.native_add(ctx, Datatype.F32)
             is atomics.native_add(ctx, Datatype.F32, 1))
@@ -323,7 +324,7 @@ def test_intel_declines_a_width_whatever_the_hardware_has():
 
 
 def test_the_cuda_spelling_casts_to_the_vector_overload():
-    """The value is a GNU vector and `atomicAdd` is declared over `floatN`.
+    """The value is a `VectorT` and `atomicAdd` is declared over `floatN`.
 
     Same size and alignment, no implicit conversion -- so the cast is what
     makes the overload reachable, and its absence would be a compile error

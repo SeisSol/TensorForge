@@ -4,10 +4,11 @@
 """Buffers a section creates for itself, and their names.
 
 Two kinds: a shared-memory symbol for a temporary the kernel produces, and a
-register array to compute a result into before it goes anywhere.  Both used to
-be made inside `MultilinearBuilder`, which is why nothing else could produce a
-temporary -- an elementwise destination that no contraction also wrote had no
-symbol at all, and the `SymbolView` built over it wrapped `None`.
+register array to compute a result into before it goes anywhere.  Both are
+made here rather than inside `MultilinearBuilder`: if only the contraction
+builder could produce a temporary, an elementwise destination that no
+contraction also writes would have no symbol at all, and the `SymbolView` built
+over it would wrap `None`.
 
 The counters live here for the same reason the record does: `s0`, `s1`, `r0`
 have to be unique across a section, and two producers with a counter each would
@@ -94,9 +95,8 @@ class Temporaries:
         """`lead` as an ordered `{dimension: block}`, whichever form it came in.
 
         A bare dimension index means the one-axis image every caller asks for
-        today: the whole wave, cyclic, which is what `lead_dims` alone has
-        always meant and what `Symbol.lead_block` answers when no axes are
-        written down.
+        today: the whole wave, cyclic, which is what `lead_dims` alone means
+        and what `Symbol.lead_block` answers when no axes are written down.
 
         Refuses blocks that do not tile the wave.  They would leave lanes
         holding copies, `RegisterLayout.tiles` would then refuse the layout,
@@ -169,10 +169,10 @@ class Temporaries:
             if block is None or self._num_threads == 0:
                 regsize *= bbox.size(d)
             else:
-                # The same rule addressing uses, called rather than restated.
-                # It was restated, without the width, and a four-wide read of
-                # a three-slot image is how consecutive non-lead indices came
-                # to address overlapping windows.
+                # The same rule addressing uses, called rather than restated:
+                # a restatement without the width would size a three-slot
+                # image for a four-wide read, and consecutive non-lead indices
+                # would address overlapping windows.
                 origin = shift if d == next(iter(axes)) else 0
                 regsize *= slots_for(
                     bbox.lower()[d] + origin, bbox.upper()[d] + origin,

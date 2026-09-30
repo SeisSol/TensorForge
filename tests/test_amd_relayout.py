@@ -4,12 +4,11 @@
 """Every row of the relayout table, re-derived by simulation.
 
 The table says which distribution an instruction produces.  That is a claim
-about hardware, and the two previous claims about hardware in this codebase
-were both wrong in the same way: right numbers, wrong roles.  The `LaneAxis`
-docstring put element `s` in lane `(s // stride) % block` when the generator
-emits `((tid / stride) % block) + slot * block`; the broadcast annotation,
-derived from that docstring, said `LaneAxis(threads // step, step)` where the
-hardware gives `LaneAxis(step, 1)`.  Neither was caught by reading.
+about hardware, and the easy way for such a claim to be wrong is right
+numbers in the wrong roles: element `s` in lane `(s // stride) % block` where
+the generator emits `((tid / stride) % block) + slot * block`, or
+`LaneAxis(threads // step, step)` for a broadcast where the hardware gives
+`LaneAxis(step, 1)`.  Reading catches neither.
 
 So each row is checked by running the instruction: tag every (register, lane)
 slot, execute the definition from `hip.h`, and recover the distribution from
@@ -105,8 +104,8 @@ def test_transpose_row_matches_the_hardware(threads):
     """Both dimensions vary with the lane afterwards, so the row is rank 2.
 
     Output register `r` at lane `l` holds `(register l % 4, lane (l & ~3) + r)`.
-    Reading only the first of those, as this test first did, would have let a
-    rank-1 row stand while half the answer was missing.
+    Reading only the first of those would let a rank-1 row stand while half
+    the answer is missing.
     """
     w = wavesim.transpose4x4b32(wavesim.tagged(threads, regs=4))
     reg_axis = wavesim.lane_axis_of([t[0] for t in w[0]], threads)
@@ -214,10 +213,10 @@ def test_lookup_finds_the_transpose_for_its_rank_two_result():
 def test_lookup_prefers_a_lossless_instruction():
     """Ordering, checked without relying on which rows happen to overlap.
 
-    The rows no longer produce a layout in common -- the transpose went to
-    rank 2 -- so the preference is asserted on the search order itself rather
-    than on a target that two rows can both reach, which would silently stop
-    testing anything the next time the table changes.
+    The rows produce no layout in common -- the transpose's is rank 2 -- so
+    the preference is asserted on the search order itself rather than on a
+    target that two rows can both reach, which would silently stop testing
+    anything the next time the table changes.
     """
     ordered = sorted(relayout.RELAYOUTS, key=lambda e: e.lossy)
     assert not ordered[0].lossy
@@ -229,14 +228,14 @@ def test_the_table_only_holds_rows_the_simulator_can_check():
 
     Its body uses row and wave DPP controls the simulator does not model, so a
     row for it could not be verified -- and an unverified row is exactly the
-    kind of claim that produced the two earlier errors.
+    kind of claim that ends up with right numbers in the wrong roles.
     """
     names = {e.callee for e in relayout.RELAYOUTS}
     assert not any('16x16' in n for n in names)
 
 
 # --------------------------------------------------------------------------- #
-# The checks: layouts used to catch something, not only to describe
+# The checks: layouts that catch something, not only describe it
 # --------------------------------------------------------------------------- #
 
 def _ir():
@@ -268,11 +267,10 @@ def test_fmadpp_rejects_an_operand_in_the_wrong_distribution():
 def test_fmadpp_lets_an_untracked_operand_through():
     """`None` is unknown, not wrong.
 
-    The sparse loader used to be the reason this mattered; it now reports what
-    its fill recorded (`test_sparse_layout.py`).  The MFMA accumulator still
-    does not, deliberately.  Refusing to emit for want of an annotation would
-    turn a description into an obstacle, and the parts that are annotated
-    would stop being worth annotating.
+    The sparse loader reports what its fill recorded (`test_sparse_layout.py`);
+    the MFMA accumulator does not, deliberately.  Refusing to emit for want of
+    an annotation would turn a description into an obstacle, and the parts
+    that are annotated would stop being worth annotating.
     """
     from tensorforge.backend.instructions.compute.primitives import amd
     from tensorforge.backend.pir.core import ScalarType
@@ -285,9 +283,9 @@ def test_fmadpp_lets_an_untracked_operand_through():
 def test_the_requirement_is_stated_once(step):
     """`hfma` searches for it and `fmadpp` checks it -- the same expression.
 
-    Two statements of one requirement is the arrangement that produced the
-    wrong broadcast layout: the callee in one place, the claim about its
-    result in another.
+    Two statements of one requirement is the arrangement that lets a broadcast
+    layout go wrong: the callee in one place, the claim about its result in
+    another.
     """
     want = relayout.fmadpp_operand_layout(step)
     found = relayout.find_relayout(want, 64)

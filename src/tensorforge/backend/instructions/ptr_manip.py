@@ -53,9 +53,9 @@ class GetElementPtr(AbstractInstruction):
   #:
   #: The index has to end up as an operand and the address around it is text,
   #: so the two are spliced somewhere.  Splicing on the *name* -- searching the
-  #: finished address for `batchId0` -- is what this replaces: a search cannot
-  #: tell the index this binding was given from a longer name that happens to
-  #: start alike, and it found nothing at all for the offsets whose name the
+  #: finished address for `batchId0` -- would not do: a search cannot tell the
+  #: index this binding was given from a longer name that happens to start
+  #: alike, and it finds nothing at all for the offsets whose name the
   #: enclosing body does not bind.  A token no address can otherwise contain is
   #: the same splice without the search.
   _INDEX_HOLE = '\x00batchIndex\x00'
@@ -64,16 +64,16 @@ class GetElementPtr(AbstractInstruction):
   #:
   #: Same reason as the index's hole, and a sharper one: with the counter only
   #: in the text, a table access has no operand that varies with the loop, so
-  #: `licm` hoisted it out of the loop that binds the counter -- to a place
+  #: `licm` would hoist it out of the loop that binds the counter -- to a place
   #: where the name is not in scope at all.
   _VARIANT_HOLE = '\x00variantIndex\x00'
 
   def batch_index(self) -> str:
     """The name this binding's element index goes by.
 
-    A key rather than a spelling, since `extern` came off the loop's bindings:
-    what the emitted code calls the index is the IR's business now, and the
-    name survives as what a pass and a loop agree to call the same element.
+    A key rather than a spelling: the loop's bindings carry no `extern`, so
+    what the emitted code calls the index is the IR's business, and the name
+    is what a pass and a loop agree to call the same element.
     """
     if isinstance(self._batch_offset, str):
       return self._batch_offset
@@ -92,8 +92,8 @@ class GetElementPtr(AbstractInstruction):
     another element.  An index the loop does *not* bind is an error here
     rather than a name resolved against whatever is in scope -- `batchId1`
     outside a loop that binds no lookahead is the prologue's binding, a
-    different element, and reading it would have addressed the wrong one and
-    compiled.
+    different element, and reading it would address the wrong one and
+    compile.
 
     Where the loop is elsewhere, the seam: a value standing for a name bound
     outside this body.  No edge -- there is nothing here to have an edge to --
@@ -161,7 +161,7 @@ class GetElementPtr(AbstractInstruction):
 
     `None` where the run's loop is not the one open here, or where it does not
     publish a value -- an unrolled emission, say. The access then keeps the
-    name as text, which is what it did before there was a value to take.
+    name as text.
     """
     if self._variant is None:
       return None
@@ -206,13 +206,13 @@ class GetElementPtr(AbstractInstruction):
   def _pointer_type(self, datatype, const_mod: str) -> str:
     """The type of this binding, as the backend spells a pointer into global.
 
-    One place instead of four near-copies, and the reason is not tidiness: on
-    AMD the address space sits in the pointer's type, so three of the four
-    addressing modes were declaring a generic pointer where the fourth cast to
-    a space-qualified one -- the same binding, two types, decided by nothing
-    but which mode the operand happened to use.  Asking the lexic makes them
-    agree, and makes the space something a pass can reproduce when it declares
-    a copy of the value instead of losing it to `auto`.
+    One place for all four addressing modes, and the reason is not tidiness:
+    on AMD the address space sits in the pointer's type, so four spellings
+    could declare a generic pointer in three modes where the fourth casts to a
+    space-qualified one -- the same binding, two types, decided by nothing but
+    which mode the operand happens to use.  Asking the lexic makes them agree,
+    and makes the space something a pass can reproduce when it declares a copy
+    of the value instead of losing it to `auto`.
 
     `const_mod` is about the pointer and not the pointee: the pipelined form
     advances the binding, so it may not be `*const`.
@@ -226,7 +226,7 @@ class GetElementPtr(AbstractInstruction):
     where the argument is, and that is not always the argument segment: a
     read at an index the compiler cannot resolve takes the struct's address,
     and clang then copies it into private memory first.  Cast into the
-    constant space, that private address faulted on gfx1150; generic, the
+    constant space, that private address faults on gfx1150; generic, the
     compiler infers whichever space it is.
     """
     readonly = self._src.obj.direction == DataFlowDirection.SOURCE
@@ -256,11 +256,11 @@ class GetElementPtr(AbstractInstruction):
     declared type rather than a branch on the vendor: where the backend spells
     no space this is the identity.
 
-    Note for AMD that this now applies to every addressing mode, where the
-    space used to be claimed for `PTR_BASED` alone.  That is the consistent
-    answer -- all of these point into global memory -- but it is a change in
-    what the compiler is told, not only in how it is spelled, and it wants a
-    measurement before it is taken as settled.
+    Note for AMD that this applies to every addressing mode, not to
+    `PTR_BASED` alone.  That is the consistent answer -- all of these point
+    into global memory -- but claiming the space tells the compiler something,
+    beyond how the pointer is spelled, and it wants a measurement before it is
+    taken as settled.
     """
     cast = self._pointer_type(datatype, '')
     if '<' not in cast:
@@ -355,19 +355,18 @@ class GetElementPtr(AbstractInstruction):
                     scalar: bool = False) -> None:
     """The binding, as a definition rather than a statement.
 
-    It was a bare statement, so `Effect.UNKNOWN`, so it conflicted with every
-    access in the body and pinned everything on both sides of it -- the
-    largest blocking site after `allocate.py`.  That matters here rather than
-    in the abstract: `WrapLoads` moves a transfer past the instructions
-    between it and its consumer, and a binding that conflicts with everything
-    is a wall in the middle of exactly that stretch.
+    A bare statement is `Effect.UNKNOWN`, so it conflicts with every access
+    in the body and pins everything on both sides of it.  That matters here
+    rather than in the abstract: `WrapLoads` moves a transfer past the
+    instructions between it and its consumer, and a binding that conflicts
+    with everything is a wall in the middle of exactly that stretch.
 
-    Declaring only its accesses made it reorderable but still nameless, so it
-    had to stay pinned anyway: a consumer reading `glb_m1` did so through text
-    the IR could not see, and letting the binding sink below one would compile
-    to a use before its definition.  Producing a *value* is what removes that
-    reason -- the def-use edge exists, so the scheduler knows the distance it
-    may not close.
+    Declaring only its accesses would make it reorderable but leave it
+    nameless, so it would have to stay pinned anyway: a consumer reading
+    `glb_m1` would do so through text the IR cannot see, and letting the
+    binding sink below one would compile to a use before its definition.
+    Producing a *value* is what removes that reason -- the def-use edge
+    exists, so the scheduler knows the distance it may not close.
 
     The declarator stays text.  `const float *const __restrict__ p` and the
     AMD `auto p` with its type inside a cast are not renderable from a type,
@@ -395,9 +394,9 @@ class GetElementPtr(AbstractInstruction):
       from tensorforge.backend.pir.core import BufferType, ScalarType
       # Name the element index as an operand.  The address is
       # `&m2[batchId0 * 324 + ...]`, and with the element only in the text a
-      # pass that moves this binding to another one has nothing to substitute
-      # -- which is exactly why `wrap_prefetch` could not advance a transfer
-      # that reads through it.
+      # pass that moves this binding to another one would have nothing to
+      # substitute -- `wrap_prefetch` could not advance a transfer that reads
+      # through it.
       text, args = self._splice_index(writer, rhs)
       type_ = (ScalarType(self._dest.get_fptype()) if scalar else
                BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL,
@@ -497,9 +496,9 @@ class DeclareOperandTable(AbstractInstruction):
                writable: bool = False):
     super(DeclareOperandTable, self).__init__(context)
     #: Whether the loop writes through the members: the table then holds
-    #: pointers to mutable data.  It used to be `const` regardless, and a
-    #: written stand-in's binding (`float *const glb_v0`) cannot be
-    #: initialized from a `const float *` -- SeisSol's merged `gpu_derivative`.
+    #: pointers to mutable data.  Not `const` regardless: a written stand-in's
+    #: binding (`float *const glb_v0`) cannot be initialized from a
+    #: `const float *` -- SeisSol's merged `gpu_derivative` has one.
     self._writable = writable
     if not members:
       raise GenerationError('an operand table has at least one member')
@@ -621,13 +620,12 @@ class DeclareOperandTable(AbstractInstruction):
     Where the backend spells the address space in the pointer's type (AMD),
     a member is a space-qualified binding and the table is a plain pointer,
     and the conversion between the two is explicit there.  Elsewhere the
-    cast would be the identity, so it is left out and the text is what it
-    always was.
+    cast would be the identity, so it is left out.
 
     A constant scalar has no name at all: the kernel reads it as a literal,
     and its binding is never declared.  So the table holds its number --
     SeisSol's damage step selects between such constants in its merged
-    loops, and a table naming them did not compile.
+    loops, and a table naming them would not compile.
     """
     if member.stype == SymbolType.Data:
       spelling = member.obj.datatype or datatype
@@ -735,8 +733,9 @@ class VariantLoop(AbstractInstruction):
   def barrier_scope(self):
     """A loop containing a barrier synchronizes, seen from outside -- as
     `BatchLoop` says of its own body, which asks this of its instructions.
-    Silent, a staged member's block barriers (`Generator._stage_member`) were
-    invisible to the block sizing that has to allow them."""
+    Silent, it would leave a staged member's block barriers
+    (`Generator._stage_member`) invisible to the block sizing that has to
+    allow them."""
     inner = [i.barrier_scope() for i in self._region]
     return max((s for s in inner if s is not None), default=None)
 
@@ -811,18 +810,18 @@ class VariantLoop(AbstractInstruction):
       # `extern` because the counter's name is the macro layer's: the select
       # chains and every table access spell it out as text.
       #
-      # Which is where the batch index was and no longer is, and the difference
-      # between the two cases is worth stating.  An index reaches its readers
-      # as an operand because the loop hands the value to them; the counter
-      # reaches its readers through `DeclareOperandTable`, whose chain is a
-      # `RAWSTMT` -- opaque and pinned, so nothing may hoist it past the loop
-      # header, but pinned is all it is.  Publishing a value for the counter is
-      # only worth doing together with the readers that would take it.
+      # The batch index needs no `extern`, and the difference between the two
+      # cases is worth stating.  An index reaches its readers as an operand
+      # because the loop hands the value to them; the counter reaches its
+      # readers through `DeclareOperandTable`, whose chain is a `RAWSTMT` --
+      # opaque and pinned, so nothing may hoist it past the loop header, but
+      # pinned is all it is.  Publishing a value for the counter is only worth
+      # doing together with the readers that would take it.
       with writer.for_(self._start, self._count, 1, extern=self._counter,
                        unroll=self._unroll) as loop:
         # The counter as a value, so that a table access reading it carries an
-        # edge back to the loop. Named in the text alone it read as invariant,
-        # and `licm` moved the access ahead of the header.
+        # edge back to the loop. Named in the text alone it would read as
+        # invariant, and `licm` would move the access ahead of the header.
         with self.counter_bound(writer, self._counter, loop.induction):
           self._emit_region(writer, per_iteration)
       return

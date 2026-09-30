@@ -5,9 +5,9 @@
 
 `tools/host/dump_descriptors.py` writes what yateto handed over next to what
 was built from it.  The point of the description being data is that the first
-half can be read back without yateto: this suite has no way to run it, so
-until now the bridge could only be tested against descriptors written by hand,
-which say what someone thought yateto sends rather than what it does.
+half can be read back without yateto: this suite has no way to run it, and
+without a recording the bridge could only be tested against descriptors written
+by hand, which say what someone thought yateto sends rather than what it does.
 
 `tests/fixtures/kernels/` holds captures as `dump_descriptors.py` writes
 them.  Everything here is parametrized over that directory, so a capture
@@ -149,9 +149,7 @@ def test_replaying_it_twice_gives_the_same_thing(description):
 #: capture stops at the first kernel that cannot be built, so the kernels
 #: before it in the same file are ones that can.
 STOPS_AT: dict = {
-    # Empty since 2026-09-13: `sparse_layouts` (a sparse lead dimension under
-    # a slot loop), `index_permutations`, `rings`, `elementwise`, `guards`
-    # and `plasticity` all build.
+    # Empty: every capture builds.
 }
 
 
@@ -190,10 +188,10 @@ def test_a_capture_builds_or_stops_where_it_is_recorded_as_stopping(path):
 def test_a_sparse_vector_broadcast_fills_its_stored_rows(backend, arch):
     """`C_ab = A_a` over an `A` that stores rows 0 and 3 only.
 
-    It used to stop the build (a sparse lead dimension under a slot loop), and
-    once it built, row 3 read the register image of `A` by the pattern's
-    storage index -- `r0[1]` of a one-entry image, a different number on
-    every target.  The image is dense over its box; only memory is packed."""
+    A sparse lead dimension under a slot loop.  The register image of `A` is
+    dense over its box; only memory is packed.  Read by the pattern's storage
+    index, row 3 would read `r0[1]` of a one-entry image, a different number
+    on every target."""
     import numpy as np
 
     import kernel_eval

@@ -49,8 +49,8 @@ class SyncThreadsOpt(AbstractTransformer):
     # Whether the other direction around the back edge is this pass's too: a
     # read near the tail against a write near the head.  The generator appends
     # a barrier to every batch loop for it; a merged run's `VariantLoop` has
-    # none, and its body reused one shared window for the staged operand at
-    # the head and the product read at the tail.
+    # none, and its body can reuse one shared window for the staged operand
+    # at the head and the product read at the tail.
     self._wraps_reads = wraps_reads
 
   def apply(self) -> None:
@@ -60,12 +60,12 @@ class SyncThreadsOpt(AbstractTransformer):
 
   def _insert_sync_before_use(self):
     # Around the back edge, for a loop body: the writes still unfenced when
-    # the body ends are the ones its head reads next iteration.  Nothing put
-    # them there before `WrapLoads` learned shared memory -- a transfer for
-    # element k + 1 issued after the last read of its buffer, and read at the
-    # top of the next iteration, behind its wait.  Scanning once to find what
-    # is carried and once more starting from it puts the barrier where a
-    # straight-line scan of the unrolled loop would.
+    # the body ends are the ones its head reads next iteration.  `WrapLoads`
+    # puts them there -- a shared transfer for element k + 1 issued after the
+    # last read of its buffer, and read at the top of the next iteration,
+    # behind its wait.  Scanning once to find what is carried and once more
+    # starting from it puts the barrier where a straight-line scan of the
+    # unrolled loop would.
     #
     # One direction only.  The other -- a read at the tail against a write at
     # the head -- is what the barrier the generator appends to every
@@ -84,11 +84,11 @@ class SyncThreadsOpt(AbstractTransformer):
     Two kinds of write are fenced before whatever reads them next: a transfer
     into shared memory, and a value without axes a computation stores in
     memory -- one number, stored by one lane (the owner) and read back by all
-    of them.  The second went unfenced, and with it the guard over a condition
-    the kernel had just reduced (`X1 = all(B >= C)`, then `if (X1)`): the
-    lanes that read before the owner's store took the other branch, and one
-    element mixed both.  A guard reads its condition through `uses`, not as an
-    operand, so it is asked that way.
+    of them.  Were the second left unfenced, so would be the guard over a
+    condition the kernel has just reduced (`X1 = all(B >= C)`, then
+    `if (X1)`): the lanes that read before the owner's store would take the
+    other branch, and one element would mix both.  A guard reads its
+    condition through `uses`, not as an operand, so it is asked that way.
 
     Both lists pair each entry with whether a one-lane store is what it
     fences: the barrier then also owes the compiler a fence where the
@@ -115,9 +115,8 @@ class SyncThreadsOpt(AbstractTransformer):
       # visible to the lane that issued it and no other.  A barrier between
       # issue and wait -- the one some other buffer's consumer needed --
       # fences nothing of it, so the wait arms the write again.  Left to the
-      # issue, every staged operator after the first was read across lanes
-      # with no barrier behind its wait: racecheck on the poroelastic time
-      # derivative, and 8 % off once the merged run shifted the timing.
+      # issue, every staged operator after the first would be read across
+      # lanes with no barrier behind its wait.
       if isinstance(instr, LoadWait):
         awaited = instr.awaited()
         if (isinstance(awaited, AbstractShrMemWrite)

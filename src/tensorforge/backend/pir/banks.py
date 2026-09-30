@@ -3,16 +3,14 @@
 # SPDX-License-Identifier: MIT
 """What a shared access costs in bank cycles, computed from the IR.
 
-`tools/bank_conflicts.py` answers this by parsing the generated C++, and it
-had to: the addresses were `rawexpr` text, so there was nothing in the IR to
-evaluate.  They are operations now, and the only leaf that is not a constant
-is `thread_idx_x` -- which a pass can read as "the lane".
+`tools/bank_conflicts.py` answers this by parsing the generated C++.  In the
+IR the addresses are operations, and the only leaf that is not a constant is
+`thread_idx_x` -- which a pass can read as "the lane".
 
-Two implementations of one question is the arrangement this codebase keeps
-finding underneath its bugs, so this exists to replace the text one, not to
-sit beside it.  It is checked against it first: `tests/test_pir_banks.py`
-compares the two over the corpus, and until they agree everywhere the text
-version is the one that decides.
+Two implementations of one question are a standing source of bugs, so this
+exists to replace the text one, not to sit beside it.  It is checked against
+it first: `tests/test_pir_banks.py` compares the two over the corpus, and
+until they agree everywhere the text version is the one that decides.
 
 Run it on the *optimized* body.  A freshly finished one still holds the loads
 that `dce` and `cse` are about to remove -- twice as many in `chain_three` --
@@ -23,14 +21,14 @@ there, before the emitter that fixes it.
 What the two count differs by about 200 accesses over the corpus, in one
 direction: the text sees every subscript the emitter writes, including those
 inside raw statements, and this sees structured loads and stores.  The gap is
-therefore a measure of what is still raw -- `addressing_none` writes its
-window as text and shows up here as 0 against 65 -- and it closes as that
-does, rather than needing to be explained.
+therefore a measure of what is written as raw text -- `addressing_none` writes
+its window as text and shows up here as 0 against 65 -- and it shrinks with
+that, rather than needing to be explained.
 
 What this buys beyond tidiness is the thing the text version cannot do.  It
 runs before emission, on a body, which is where a decision could still be
 made -- the swizzle width is chosen from the buffer's volume today, three
-times by hand, because the access pattern was not available at that point.
+times by hand, because the access pattern is not available at that point.
 It is available here.
 """
 
@@ -79,11 +77,12 @@ def _definitions(body: Sequence[Stmt]) -> Dict[int, object]:
     loop's induction variable, its lower bound.
 
     A loop variable is a region argument, not a statement result, so it has no
-    producer to find and 159 addresses came back unresolved.  Substituting the
-    bound is sound for this question: these are loops over tensor dimensions,
-    every lane in the wave is on the same iteration, so the value shifts every
-    lane's address equally and the bank pattern is unchanged.  Anything
-    lane-dependent reaches the address through `thread_idx_x`.
+    producer to find, and an address built from one would come back
+    unresolved.  Substituting the bound is sound for this question: these are
+    loops over tensor dimensions, every lane in the wave is on the same
+    iteration, so the value shifts every lane's address equally and the bank
+    pattern is unchanged.  Anything lane-dependent reaches the address through
+    `thread_idx_x`.
     """
     out: Dict[int, object] = {}
     for stmt in walk_stmts(body):
@@ -111,7 +110,7 @@ def evaluate(operand, tid: int, defs: Dict[int, Stmt], depth: int = 0):
     try:
         # `operator.index` and not `isinstance(..., int)`: shapes and offsets
         # arrive as `numpy.int64`, which is an integer everywhere except to
-        # `isinstance`.  Two dozen addresses were unresolved for that alone.
+        # `isinstance`.
         return operator.index(operand)
     except TypeError:
         pass
@@ -214,10 +213,10 @@ def analyze(body: Sequence[Stmt], banks: int = 32) -> Tuple[List[Access], int]:
                 continue
             # The width comes from the value, and which operand that is
             # depends on the direction: a load produces it, a store consumes
-            # it.  Reading `target` for both made every vector *store* look
-            # scalar -- and a scalar model of a `float4` store puts four times
-            # the stride between lanes, which is how 72 conflict-free accesses
-            # in `rectangular` read as 2-way.
+            # it.  Reading `target` for both would make every vector *store*
+            # look scalar -- and a scalar model of a `float4` store puts four
+            # times the stride between lanes, which would make 72
+            # conflict-free accesses in `rectangular` read as 2-way.
             carrier = (stmt.target[0] if stmt.op == Op.LOAD and stmt.target
                        else stmt.args[1] if len(stmt.args) > 1 else None)
             width = getattr(getattr(carrier, 'type', None), 'length', None) or 1

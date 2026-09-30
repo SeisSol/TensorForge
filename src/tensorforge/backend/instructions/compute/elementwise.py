@@ -59,10 +59,9 @@ class ElementwiseInstruction(ComputeInstruction):
         self._lead_dims = [self.shared_lead_dim(
             [self._dest] + self._tensor_srcs(), 'elementwise')]
 
-        # The iteration space is the destination's, not something unified over
-        # a list of assignments: elementwise means the operands share its shape,
-        # which ElementwiseDescr checks at construction.  SymbolView carries
-        # exactly the (symbol, bbox) pair that optree's TensorVar duplicated.
+        # The iteration space is the destination's: elementwise means the
+        # operands share its shape, which ElementwiseDescr checks at
+        # construction.
         bbox = self._dest.bbox
         self._ks = [(0, bbox.size(i)) for i in range(bbox.rank())]
 
@@ -87,9 +86,8 @@ class ElementwiseInstruction(ComputeInstruction):
         return tuple(v.symbol for v in self._tensor_srcs())
 
     def get_operands(self):
-        # Previously this returned [] with a "TODO: for now", which made every
-        # elementwise operand invisible to liveness and to barrier insertion.
-        # It now agrees with uses().
+        # Agrees with uses(): an empty list would make every elementwise
+        # operand invisible to liveness and to barrier insertion.
         return [v.symbol for v in self._tensor_srcs()]
 
     # -- emission -------------------------------------------------------- #
@@ -111,10 +109,10 @@ class ElementwiseInstruction(ComputeInstruction):
 
         The box's lower corner *plus* the slicing offset: a view states its
         box in its own index space, and the offset maps that space onto the
-        tensor (`SubTensor.storage_box`).  The lower corner alone addressed a
-        slice `I[:, 17:19]` at columns 0 and 1 -- SeisSol's damage
-        `accumulateIntegrals` took the maximum of two columns its sums had
-        just overwritten, while the multilinear store back applied the 17.
+        tensor (`SubTensor.storage_box`).  The lower corner alone would address
+        a slice `I[:, 17:19]` at columns 0 and 1 while the multilinear store
+        back applies the 17 -- SeisSol's damage `accumulateIntegrals` would
+        take the maximum of two columns its sums have just overwritten.
         """
         lower = view.bbox.lower()
         offset = view.offset or [0] * len(lower)
@@ -122,14 +120,14 @@ class ElementwiseInstruction(ComputeInstruction):
 
     @staticmethod
     def _index(view: SymbolView, varlist) -> List:
-        # optree emitted `(n{k} + bbox.lower()[k])` as text, which forced a
-        # named `n{k}` variable and left the address arithmetic opaque.  A
-        # `VarOffset` carries the loop value itself, so the offset folds and
-        # the whole address becomes IR.  `add_offset` rather than the wrapper
-        # itself: on the lead dimension the loop value is a `LeadIndex`, which
-        # takes the offset into itself -- a box starting past the lead's
-        # origin (yateto's `elementwise` cut at a stored table's edge) was
-        # refused by `VarOffset`.
+        # The loop value itself plus the offset, not `(n{k} + bbox.lower()[k])`
+        # as text, which would force a named `n{k}` variable and leave the
+        # address arithmetic opaque: the offset folds and the whole address
+        # becomes IR.  `add_offset` rather than the `VarOffset` wrapper itself:
+        # on the lead dimension the loop value is a `LeadIndex`, which takes
+        # the offset into itself and which `VarOffset` refuses -- and a box may
+        # start past the lead's origin (yateto's `elementwise` cut at a stored
+        # table's edge).
         return [add_offset(varlist[i], o)
                 for i, o in enumerate(ElementwiseInstruction._origin(view))]
 

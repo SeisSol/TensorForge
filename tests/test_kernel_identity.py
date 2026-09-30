@@ -11,11 +11,12 @@ difference in the body separates two names, and -- the one that does not need
 to know what to look for -- that across the whole corpus no two different
 sources share a name.
 
-That last one is the point of the file.  Sparsity was the third property to
-be missing from a name derived from a list of properties, after the flag mask
-and the resolved options, and each was found by a link error rather than by a
-test.  A test that compares sources instead of enumerating properties finds
-the fourth without being told what it is.
+That last one is the point of the file.  A name derived from a list of
+properties is only as complete as the list: leave one off -- the flag mask,
+the resolved options, the sparsity -- and two programs share a symbol, which
+surfaces as a link error rather than as a failing test.  A test that compares
+sources instead of enumerating properties finds the missing property without
+being told what it is.
 """
 from __future__ import annotations
 
@@ -85,9 +86,9 @@ class _Case:
 def _generated_or_skip(case, backend: str = BACKEND, arch: str = ARCH):
     """The generator for ``case``, or a skip.
 
-    Two cases in the corpus do not generate at all, and that is a statement
-    the snapshots already make -- ``test_generated_source_matches_snapshot``
-    records the exception and fails when a case stops or starts raising.
+    Whether a case generates is a statement the snapshots already make --
+    ``test_generated_source_matches_snapshot`` records the exception and
+    fails when a case stops or starts raising.
     Repeating it here would report one fault twice; a name has nothing to be
     said about it either way.
     """
@@ -194,9 +195,8 @@ def test_identical_descriptions_share_one_name():
 def test_no_two_corpus_kernels_share_a_name():
     """Across the corpus, a shared name has to mean a shared source.
 
-    This is the test the three name collisions to date would each have failed
-    on the commit that introduced them, without anyone having to think of the
-    property that was missing.  It says nothing about *which* property: it
+    A name collision fails this test without anyone having to think of the
+    property the name is missing.  It says nothing about *which* property: it
     generates everything, groups by symbol, and reports any group whose
     members are not the same program.
     """

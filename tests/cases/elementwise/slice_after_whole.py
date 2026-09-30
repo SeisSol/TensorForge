@@ -9,9 +9,9 @@
     tmp[0:4,:] = abs(K)             <- written in place, rows 0..4 only
     D         += A @ tmp            <- reads rows 4..12 of the first write
 
-The pointwise instruction writes the buffer where it is and reported no
-`partial_defs`, so it killed `tmp` like a whole write and the allocator laid
-`x`'s operands over rows 4..12.
+The pointwise instruction writes the buffer where it is, so it reports the
+slice in `partial_defs`.  Reporting none, it would kill `tmp` like a whole
+write, and the allocator would lay `x`'s operands over rows 4..12.
 """
 
 import numpy as np

@@ -81,9 +81,7 @@ class Tensor:
         #: A slot naming `-1` has no source cell.  That is the one thing a
         #: pure permutation cannot express and the reason this is not just a
         #: reordering: a fragment image is tiled, and a tile that runs off the
-        #: end of the matrix has slots no element belongs in.  They read zero,
-        #: which is what the emitter's own padding registers did before the
-        #: order moved into memory.
+        #: end of the matrix has slots no element belongs in.  They read zero.
         self.storage_order = None
         #: `(threads, group, ld)` when `storage_order` is the SIMT interleave
         #: `multilinear._offer_simt_order` states: per column `k`, the `group`
@@ -127,15 +125,15 @@ class Tensor:
             assert all(d == 1 for d in self.shape)
 
         # `value()` indexes this by coordinate tuple, which a list answers with
-        # a TypeError.  That went unnoticed for as long as `value()` asked
-        # `realindex in self.data` first: on a list that tests the *elements*,
-        # which a coordinate tuple never matches, so every lookup fell through
-        # to `None` and the ill-typed access was never reached.  Asking the
-        # sparsity pattern instead -- the right question -- reaches it.
+        # a TypeError.  It asks the sparsity pattern first -- the right
+        # question -- so the access is reached; `realindex in self.data` would
+        # on a list test the *elements*, which a coordinate tuple never
+        # matches, and every lookup would fall through to `None` with the
+        # ill-typed access never reached.
         #
-        # Checked rather than coerced.  A `np.asarray` here would accept the
-        # callers that still hand over a list and leave them unfixed, which is
-        # how the requirement got two homes in the first place.
+        # Checked rather than coerced.  A `np.asarray` here would accept a
+        # caller that hands over a list and leave it as it is, which would
+        # give the requirement two homes.
         if self.data is not None:
             if isinstance(self.data, dict):
                 # TODO: proper dtype
@@ -283,11 +281,11 @@ class Tensor:
     def storage_volume(self):
         """Scalars one batch element of this tensor occupies in memory.
 
-        The one place the storage convention is decided, because it was
-        previously decided twice and differently: the batch stride came from
-        the bounding box while the staging loop copied ``count_nz`` cells, so
-        a masked tensor was written densely by the host and read compressed by
-        the kernel.
+        The one place the storage convention is decided.  Deciding it twice
+        invites deciding it differently: a batch stride taken from the
+        bounding box while the staging loop copies ``count_nz`` cells would
+        have the host write a masked tensor densely and the kernel read it
+        compressed.
 
         Two factors answering two questions: which elements are stored, and
         how much room one takes.  Everything sizing or striding a buffer wants

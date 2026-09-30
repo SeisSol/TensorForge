@@ -3,12 +3,12 @@
 # SPDX-License-Identifier: MIT
 """The host oracle states yateto's `=`, not "write where it was computed".
 
-`tools/host/reference.py` assigned an operation's result over the box it
-computed and kept whatever the destination held elsewhere.  That is exactly
-what a kernel does that forgets the zeros an assignment owes, so the oracle
-agreed with it: SeisSol's free-surface-gravity kernel re-assigned a temporary
-from a product one row supports, kept the previous step's other rows, and the
-host check passed where the GPU unit test failed.
+An oracle that assigned an operation's result over the box it computed and
+kept whatever the destination held elsewhere would do exactly what a kernel
+does that forgets the zeros an assignment owes, and agree with it: a kernel
+like SeisSol's free-surface-gravity step, re-assigning a temporary from a
+product one row supports and keeping the previous step's other rows, would
+pass the host check and fail the GPU unit test.
 
 Three rules, the ones `MultilinearBuilder._promised_box` makes the stores
 keep: an assignment onto the tensor itself defines the whole tensor (zeros
@@ -119,8 +119,8 @@ def _reassigned(read_between):
 
 @pytest.mark.parametrize("read_between", [False, True])
 def test_a_temporary_reassigned_from_a_narrower_product(read_between):
-    # generated, run on every lane, and held to the reference: the kernel
-    # that kept M's earlier cells agreed with the reference that kept them
+    # generated, run on every lane, and held to the reference: a kernel that
+    # kept M's earlier cells would agree with a reference that kept them
     bisect = _load("prefix_bisect")
     rows = _reassigned(read_between)
     assert bisect.evaluate(rows, len(rows)) < 1e-6

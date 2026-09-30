@@ -4,10 +4,8 @@
 """Matrix paths with no call site yet.
 
 Unreachable from `matmul()`, and deliberately not deleted: they are
-matrix code, worth repairing rather than rewriting.  Two of them used to
-hang off `if False:` branches in `matmul32` -- statically reachable,
-never executed.  None of the four is correct as it stands; see the note
-on each.
+matrix code, worth repairing rather than rewriting.  None of the four is
+correct as it stands; see the note on each.
 """
 
 from tensorforge.backend.writer import Writer
@@ -48,7 +46,6 @@ def mfma_emu_int8(writer: Writer, C, B, A, c, a, b):
     # TODO: scale back
 
 def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
-    # Was reached only from an `if False:` branch in `write_matmul`.
     writer(f'const auto [{A[0]}_p0, {A[0]}_p1, {A[0]}_p2] = tensorforge::splitFloatx4BF16({A[0]}, {A[1]}, {A[2]}, {A[3]});')
     writer(f'const auto [{B[0]}_p0, {B[0]}_p1, {B[0]}_p2] = tensorforge::splitFloatx4BF16({B[0]}, {B[1]}, {B[2]}, {B[3]});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k({A[0]}_p0, {B[0]}_p0, {C}, {c}, {a}, {b});')
@@ -60,7 +57,6 @@ def mfma_emu_bf16_f32(writer: Writer, C, B, A, c, a, b):
 
 
 def mfma_emu_f16_f32(writer: Writer, C, B, A, c, a, b):
-    # Was reached only from an `if False:` branch in `write_matmul`.
     writer(f'const auto [{A[0]}_p0, {A[0]}_p1] = tensorforge::splitFloatx4F16({A[0]}, {A[1]}, {A[2]}, {A[3]});')
     writer(f'const auto [{B[0]}_p0, {B[0]}_p1] = tensorforge::splitFloatx4F16({B[0]}, {B[1]}, {B[2]}, {B[3]});')
     writer(f'{C} = __builtin_amdgcn_mfma_f32_4x4x4f16({A[0]}_p0, {B[0]}_p0, {C}, {c}, {a}, {b});')

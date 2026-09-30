@@ -7,16 +7,17 @@
 // the whole contract is checkable at compile time by a host compiler that is
 // already installed for `test_syntax.py`.
 //
-// Nothing checked it, and three of the seven specializations were wrong:
+// Without the check, mistakes like these would go unnoticed:
 //
-//   - `Max::neutral()` was `numeric_limits<T>::min()`. For an integer type
+//   - `Max::neutral()` as `numeric_limits<T>::min()`. For an integer type
 //     that is the lower bound and correct; for floating point it is the
 //     smallest positive *normal* value, about 1e-38 for float. A max over
-//     data that happened to be entirely negative therefore returned 1e-38.
-//   - `And::neutral()` was `numeric_limits<T>::max()`, which on a signed type
-//     is `0x7fff...`: the sign bit came back cleared whatever the data held.
-//   - the `Or` specialization tagged itself `Op = Operation::And`, so every
-//     `Op::Op == Operation::Or` dispatch in `cuda.h` and `hip.h` was false.
+//     data that happens to be entirely negative would return 1e-38.
+//   - `And::neutral()` as `numeric_limits<T>::max()`, which on a signed type
+//     is `0x7fff...`: the sign bit would come back cleared whatever the data
+//     holds.
+//   - an `Or` specialization tagged `Op = Operation::And`, which would make
+//     every `Op::Op == Operation::Or` dispatch in `cuda.h` and `hip.h` false.
 //
 // The identity law is the useful thing to assert rather than the literal
 // values, because it is what the reduction actually relies on and it holds
@@ -85,7 +86,7 @@ static_assert(bitwiseIdentities<std::int64_t>(), "int64 bitwise identities");
 static_assert(bitwiseIdentities<std::uint8_t>(), "uint8 bitwise identities");
 static_assert(bitwiseIdentities<std::uint32_t>(), "uint32 bitwise identities");
 
-// The sign bit is the one `numeric_limits<T>::max()` dropped, so it gets its
+// The sign bit is the one `numeric_limits<T>::max()` drops, so it gets its
 // own assertion rather than relying on a value that happens to set it.
 static_assert(RO<std::int32_t, Operation::And>::neutral() ==
                   static_cast<std::int32_t>(-1),
@@ -120,7 +121,7 @@ static_assert(minNeutralIsAnUpperBound<std::int8_t>(), "int8 min seed");
 static_assert(minNeutralIsAnUpperBound<std::int32_t>(), "int32 min seed");
 static_assert(minNeutralIsAnUpperBound<std::uint32_t>(), "uint32 min seed");
 
-// The concrete regression: a max-reduction over negative data.
+// What a `min()` seed gets wrong: a max-reduction over negative data.
 constexpr float foldMax(const float *v, int n) {
   float acc = RO<float, Operation::Max>::neutral();
   for (int i = 0; i < n; ++i) {

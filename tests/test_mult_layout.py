@@ -5,9 +5,10 @@
 
 The arrangement these tests hold is the one that makes every wave of a group
 look alike: units of `gcd(threads, wave)` lanes, dealt out to the
-multiplications of a group in turn.  A width that divides the wave keeps the
-layout it always had, and the interesting widths are the ones that do not --
-48 lanes on a 32-wide wave is three waves holding two multiplications, 16 lanes
+multiplications of a group in turn.  A width that divides the wave puts each
+multiplication in one run of lanes, `threadIdx.x` the lane and `threadIdx.y`
+the multiplication; the interesting widths are the ones that do not -- 48
+lanes on a 32-wide wave is three waves holding two multiplications, 16 lanes
 of each per wave.
 """
 

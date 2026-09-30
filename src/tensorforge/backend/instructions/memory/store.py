@@ -87,11 +87,11 @@ def _padded_row(sizes, context) -> List[int]:
 
   A `DataView` already separates the two -- `shape` is the extent the strides
   are built from and `bbox` the live range inside it -- because a staged
-  operand has been padded against bank conflicts since long before this.  A
-  temporary written out of registers never was, and it is the one the damage
-  step reads widest: five buffers of `(125, 6)` carrying a third of all its
-  shared traffic, every pack refused because 125 is odd and so every row above
-  the first starts at an odd element.
+  operand is padded against bank conflicts.  A temporary written out of
+  registers is padded only by this, and it is the one the damage step reads
+  widest: five buffers of `(125, 6)` carrying a third of all its shared
+  traffic, where unpadded every pack is refused because 125 is odd and so
+  every row above the first starts at an odd element.
 
   Only the leading dimension, because it is the one a wide access runs along
   *and* the stride of every dimension above it.  The pad itself is never read:
@@ -161,7 +161,8 @@ class StoreRegToShr(AbstractShrMemWrite):
     # Whether this store writes the whole buffer or one slice of it -- see
     # `partial_defs`.  Decided here, from the two boxes the constructor is
     # given, and biased towards "part": calling a whole write partial costs a
-    # longer live range, calling a slice whole is the bug that motivated this.
+    # longer live range, calling a slice whole lets the allocator hand an
+    # earlier slice's cells to another buffer.
     self._partial = (list(src.data_view.get_bbox().sizes())
                      != list(buffer_bbox.sizes())
                      or any(o != 0 for o in self._dest_offset))
@@ -204,11 +205,10 @@ class StoreRegToShr(AbstractShrMemWrite):
     """The buffer, when this store is one of several that assemble it.
 
     `mixed/ml_slices_then_ew` writes `tmp[:, 0:4]` and `tmp[:, 4:8]` in two
-    stores.  Taken as a whole definition, the second killed the first, so the
-    first half was dead until then; the allocator gave that stretch to a
-    buffer read in between, and the first store overwrote it.  It stayed
-    hidden in the default build only because the coloring happened to put
-    the temporary elsewhere.
+    stores.  Taken as a whole definition, the second would kill the first, so
+    the first half would be dead until then; the allocator could give that
+    stretch to a buffer read in between, which the first store then
+    overwrites.
     """
     return (self._dest,) if self._partial else ()
 
@@ -361,7 +361,8 @@ class StoreRegToGlb(AbstractInstruction):
 
     # With `Options.hint_outputs`, also a destination that nothing reads but
     # transfers -- a `+=` destination's own preload: an accumulated register
-    # image always has other users, so no output store took the hint before.
+    # image always has other users, so without the option no output store
+    # takes the hint.
     allowed = len(self._src.get_user_list()) == 1  # self._src.get_last_user() is self
     if not allowed and self._context.get_user_options().hint_outputs:
       allowed = all(getattr(r, '_src', None) is self._dest
@@ -434,13 +435,12 @@ class StoreRegToGlb(AbstractInstruction):
         # broadcast exists so every lane has an element only one of them
         # holds; with the write guarded to that lane it is reading its own
         # register, and `readlane` is `__shfl_sync` over the full warp mask,
-        # so leaving it outside would have been a shuffle whose partners are
-        # in a branch they do not take.
+        # so leaving it outside would be a shuffle whose partners are in a
+        # branch they do not take.
         #
-        # Without the guard every lane stored the element.  Under `=` that is
-        # the same value written `threads` times and the result is right;
-        # under `+=` it is the contribution counted `threads` times, which is
-        # why `atomic_write_is_exact` refused a widened lead at all.
+        # Without the guard every lane would store the element.  Under `=`
+        # that is the same value written `threads` times and the result is
+        # right; under `+=` it is the contribution counted `threads` times.
         owner = self._src.owning_lane(indices) if needsLoad else None
         if owner is None:
           emit()
@@ -464,8 +464,8 @@ class StoreRegToGlb(AbstractInstruction):
     is larger than what the multiplication defines -- `64 x 9` with 56 rows
     computed -- is promised zeros beyond (`_fill_lead_remainder`), and a
     full-width tail whose padding lanes are zeroed (`Symbol.store`) writes
-    exactly those zeros, in the same write as the data: one message where it
-    was two (16 + 8) and a separate nest under ESIMD, one select where it was
+    exactly those zeros, in the same write as the data: one message rather
+    than two (16 + 8) and a separate nest under ESIMD, one select rather than
     a branch under SPMD.  The remainder fill then starts after the slot.
 
     An accumulation promises nothing -- it adds to what is there -- and a
@@ -547,9 +547,6 @@ class StoreShrMemToGlb(AbstractInstruction):
     src.add_user(self)
     dest.add_user(self)
 
-  # NOTE: LivenessAnalysis._check_store already called get_src() on this
-  # class, which never had it -- latent AttributeError, dormant only because
-  # nothing constructs StoreShrMemToGlb today.
   def get_src(self) -> Symbol:
     return self._src
 

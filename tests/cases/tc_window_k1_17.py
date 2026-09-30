@@ -6,7 +6,7 @@ derivative (`kDivMT(k) x dQ(k)`), batch-constant A, through the matrix path.
 
 The window starts at depth 1 and is 17 deep, and ends on a ragged k-tile,
 as SeisSol's `derivative` does.  See `tc_window_k1_16` for the read before
-the window that the start at depth 1 used to make.
+the window that a start at depth 1 risks.
 """
 
 import numpy as np

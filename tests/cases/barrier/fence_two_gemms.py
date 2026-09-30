@@ -10,15 +10,14 @@ section 0, and that is the point of the case rather than an omission.
 A fence is not an ordering.  ``GridFenceDescr.trueBarrier()`` returns
 ``False``, so ``generator.py`` never sets ``section.barrier`` and never
 switches to a cooperative launch -- the two sections may be in flight
-across the grid at the same time.  ``_section_traversal`` says so
-outright and then acts on it (``generator.py:501-522``): a section that
+across the grid at the same time.  ``Generator._section_traversal``
+says so outright and then acts on it: a section that
 follows another *without* a barrier starts at
 ``(blockId + numElements0) % stride`` rather than at ``blockId``,
 deliberately, "so that consecutive sections do not all hammer the same
 elements".  A case that made section 1 read what section 0 wrote would
 therefore be reading another block's output with no synchronization
-between the two -- racy by construction, and green only by luck.  This
-case used to be exactly that, and carried a ``TODO`` saying so.
+between the two -- racy by construction, and green only by luck.
 
 What the fence does provide, and what this case pins down:
 

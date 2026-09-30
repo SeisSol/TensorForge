@@ -5,11 +5,11 @@
 
 On RDNA the broadcast of a reused `A` value can be one DPP move read by
 several plain FMAs, which VOPD may pair, or a DPP modifier on each FMA.  The
-move keeps every moved value in a register until its last product, and on
-`local_flux` at 16 lanes on gfx1150 that was 5.6 KB of scratch and 46 times
-the runtime; the fused form was 8 % faster than the default.  So the body is
-built, measured against the target's register budget, and built again fused
-if the materialized form does not fit.
+move keeps every moved value in a register until its last product: on
+`local_flux` at 16 lanes on gfx1150 the materialized form costs 5.6 KB of
+scratch and 46 times the runtime, where the fused form is 8 % faster than the
+default.  So the body is built, measured against the target's register
+budget, and built again fused if the materialized form does not fit.
 """
 
 from __future__ import annotations

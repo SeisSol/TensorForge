@@ -11,9 +11,9 @@ one block over a shared memory image, which is exactly the guarantee an
 atomic add needs modeled -- summing the arrivals is what the hardware does,
 and the ordering an atomic also promises does not change a sum.
 
-Before this the atomic path had no numerical coverage at all on the host.
-`kernel_eval` aborted on the statement, so every case that emitted one was
-skipped, and the skip looked like a pass.
+Without this the atomic path would have no numerical coverage on the host: a
+`kernel_eval` that aborted on the statement would skip every case that
+emitted one, and the skip would look like a pass.
 
 The lane count is read off the kernel rather than assumed.  It is
 `blockDim.x`, which the launcher sizes as the section's `num_threads`, and
@@ -63,11 +63,11 @@ def _t(shape, alias, dtype):
 def _descrs(kind, m, n, dtype):
     """One accumulating shape, by the way its writers overlap.
 
-    The three that are not `single` are where the interesting failures have
-    been: `chain` is two writers covering the same box, `slices` two covering
+    The three that are not `single` are where the interesting failures lie:
+    `chain` is two writers covering the same box, `slices` two covering
     disjoint parts of it, and `mixed` an assignment followed by an
-    accumulation -- the arrangement in which a deferred atomic used to
-    displace the store before it.
+    accumulation -- the arrangement in which a deferred atomic would displace
+    the store before it.
     """
     d = _t([m, n], 'D', dtype)
     if kind == 'single':
@@ -150,10 +150,10 @@ def test_the_atomic_path_computes_what_the_plain_one_does(kind, m):
 def test_the_interpreter_actually_performs_the_atomic():
     """Otherwise every assertion above passes by doing nothing.
 
-    `kernel_eval` used to abort on an `atomicAdd` statement, so a differential
-    like the one above would have failed loudly -- but a version that skipped
-    it instead would have compared two runs of the same non-atomic prefix and
-    agreed every time.  This pins the arithmetic: two lanes adding into one
+    A `kernel_eval` that aborted on an `atomicAdd` statement would make a
+    differential like the one above fail loudly -- but one that skipped it
+    instead would compare two runs of the same non-atomic prefix and agree
+    every time.  This pins the arithmetic: two lanes adding into one
     slot leave the sum, which is also the only place the lockstep driver's
     shared memory image is asserted on directly.
     """

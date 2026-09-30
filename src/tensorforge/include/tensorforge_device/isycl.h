@@ -260,8 +260,8 @@ ESIMD_INLINE void fillRuns(intel_esimd::simd<std::uint64_t, Lanes> &offsets,
 /// Several runs asked for in one gather: `Bytes[i]` from `ptrs[i]`, a lane per
 /// line of each, as `prefetchHinted` does for one run.  Hints for different
 /// operands are different addresses, which a block message cannot take and a
-/// gather can -- so a body's hints for the next element are one message where
-/// they were one per operand.  The lanes left over ask for the first run's
+/// gather can -- so a body's hints for the next element are one message rather
+/// than one per operand.  The lanes left over ask for the first run's
 /// first line again.
 template <intel_esimd::cache_hint L1H, intel_esimd::cache_hint L2H,
           int... Bytes, typename... P>
@@ -514,7 +514,7 @@ inline constexpr auto slmAligned =
 /// floats are 16 + 8, 504 are four of 128 and then 64 + 32 + 16 + 8.  A
 /// gather of the same run is one address per element, and a wide one is a
 /// register of offsets on top -- which is what every staging tail and every
-/// run past 512 bytes used to be.
+/// run past 512 bytes would otherwise be.
 template <typename T, int N> constexpr int slmChunk() {
   // `slmBlockable`'s rule, spelled on values: a template argument cannot be
   // the loop variable.

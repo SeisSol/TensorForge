@@ -16,13 +16,11 @@ from tensorforge.backend.writer import Writer
 
 #: The two halves an FP32 value splits into for `mma.sync ... .tf32`.
 #:
-#: `Datatype.TF32` now, not `U32`.  The old spelling said "four bytes of
-#: something" and was chosen because `splitFloatTF32` took `uint32_t &` -- it
-#: still does, since `tensorforge::tf32` is a typedef on CUDA and has to be
-#: (the halves go into PTX under `"r"`, which binds a register and not a class
-#: type).  What changes is what the *generator* knows: a value of this type is
-#: a converted operand of a matrix instruction, not an integer that happens to
-#: be four bytes wide.
+#: `Datatype.TF32`, not `U32`, although `splitFloatTF32` takes `uint32_t &`
+#: -- `tensorforge::tf32` is a typedef on CUDA and has to be (the halves go
+#: into PTX under `"r"`, which binds a register and not a class type).  The
+#: type is what the *generator* knows: a value of it is a converted operand of
+#: a matrix instruction, not an integer that happens to be four bytes wide.
 #:
 #: The same member serves the Intel path, where the C++ type is
 #: `esimd::tfloat32` and the distinction is enforced by the compiler.
@@ -48,27 +46,13 @@ def _as_tf32(writer: Writer, value):
 
 
 def tfconvert(writer: Writer, variables):
-    """Split each operand into the two TF32 halves the MMA multiplies.
-
-    The halves used to be a raw declaration and a raw call --- two statements
-    per operand, 4584 across the corpus, and the largest opaque site here after
-    `matmul` itself.  Nothing followed from that opacity being cheap to remove:
-    the declaration has a value, the call writes through references to it, and
-    the IR has had verbs for both since the AMD conversion.
-
-    What does *not* become structured yet is the input.  `generate` is handed
-    A and B as C++ identifiers built from `varalloc` names, not as values, so
-    the operand goes in as text and there is no def-use edge into the split.
-    Closing that is the `matmul` patch; until then this is a boundary, and
-    writing it as one is better than writing it as an intrinsic that happens
-    to take a string.
-    """
+    """Split each operand into the two TF32 halves the MMA multiplies."""
     # A pure operation with two results, not a call writing through
     # references.  The reference-out spelling is the vendor's signature and
     # belongs in the emitter; here the split is what it is, and CSE can
-    # hash-cons it.  The corpus split the same value twice in 15% of cases --
-    # no store and no reload in between, just a second `kk` block asking for
-    # the same fragment.
+    # hash-cons it.  In the corpus 15% of the splits are of a value already
+    # split -- no store and no reload in between, just a second `kk` block
+    # asking for the same fragment.
     out = []
     for variable in variables:
         out.append(writer.split_op('tensorforge::splitFloatTF32',
@@ -92,10 +76,9 @@ class MMAInstr:
         self.name = name
         self.mode = mode
         #: Compute capability the instruction first appears at, times ten.
-        #: Promoted from the comment each row already carried, and unchecked
-        #: in the way a comment was: nothing here reads the PTX ISA.  It is a
-        #: field so that a selection can refuse an entry the target does not
-        #: have, which a comment cannot do.
+        #: Unchecked, like the comment each row carries: nothing here reads
+        #: the PTX ISA.  It is a field so that a selection can refuse an entry
+        #: the target does not have, which a comment cannot do.
         self.sm = sm
 
     def headers(self):
@@ -197,18 +180,14 @@ INSTRS = [
 
 #: The compute capability to select against when the caller has no target.
 #:
-#: It used to be 80 because nothing plumbed the target's: `shmsize` was asked
-#: for a size before a context existed and `matmul` was handed one it did not
-#: pass on, so every arch from sm_60 to sm_120 got the same sm_80 table.  Both
-#: now take an `sm`, derived from the context by `sm_of`, and this is what is
-#: left: the floor for a caller that genuinely has no target to name.
+#: `shmsize` and `matmul` take an `sm`, derived from the context by `sm_of`;
+#: this is the floor for a caller that genuinely has no target to name.
 #:
 #: 75 rather than 80 because that is where `mma.sync` first exists at all, and
 #: because being the *floor* it should exclude rather than include.  Every F32
-#: entry here is sm_80, so a caller with no context now selects nothing for
-#: F32 and falls through to the generic nest -- which is the safe direction.
-#: At 80 it would instead have emitted sm_80 PTX for a target that may not run
-#: it.
+#: entry here is sm_80, so a caller with no context selects nothing for F32
+#: and falls through to the generic nest -- which is the safe direction.  At
+#: 80 it would instead emit sm_80 PTX for a target that may not run it.
 BASELINE_SM = 75
 
 
@@ -231,8 +210,10 @@ def sm_of(ctx) -> int:
     return int(digits) if digits else BASELINE_SM
 
 #: Modes the emitter actually emits.  `generate` converts and issues three
-#: products for TF32 and issues once for DIRECT; its I8 branch is a `pass`, so
-#: those entries would be selected and then emit nothing.
+#: products for TF32 and issues once for DIRECT.  An I8 entry would be issued
+#: like DIRECT, with the `double` operands its `Datatype.F64` row implies,
+#: where the instruction takes `s8` packed in 32-bit registers and
+#: accumulates in `s32`.
 EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)
 
 
@@ -247,14 +228,14 @@ def accumulator_slots(atom):
     is the constant offset per slot, and `slot` is `2 * g + e` because that is
     the order the PTX operand list is in.
 
-    Extracted from the epilogue rather than left inline because inline it was
-    three constants -- `nregs * 2`, `mregs` and a literal 64 -- that happen to
-    describe `m16n8k8` and nothing else in the table.  `m8n8k4.f64` has
-    `mregs == 1`, so the loop dropped `e == 1` and wrote the other slot 64
-    elements past the end of a 64-element tile.  That returned NaN, silently,
-    and nothing could see it: the emitter was the only statement of the layout,
-    so there was nothing to check it against.  `tests/test_nvidia_gate.py` now
-    checks it against the read-back that follows it.
+    A function of its own rather than inline in the epilogue, where it would
+    be three constants -- `nregs * 2`, `mregs` and a literal 64 -- that happen
+    to describe `m16n8k8` and nothing else in the table: `m8n8k4.f64` has
+    `mregs == 1`, so such a loop would drop `e == 1` and write the other slot
+    64 elements past the end of a 64-element tile, silently returning NaN.
+    Inline, the emitter would be the only statement of the layout, with
+    nothing to check it against; `tests/test_nvidia_gate.py` checks this one
+    against the read-back that follows it.
 
     Read off `d_fragment_bits` rather than written as a closed form.  The
     offsets and the bits are the same map twice over, and the closed form is
@@ -279,7 +260,7 @@ def d_fragment_bits(atom, threads: int = 32) -> BitLayout:
     the operand, and it exists for the sharper reason: an accumulator can be
     handed to the next instruction instead of written out, and whether that is
     legal is a question about the two distributions.  Answered by comparing
-    them, once both are said in the same words; before that it could only be
+    them, once both are said in the same words; otherwise it could only be
     asserted, and an assertion about a register layout is the kind that
     computes a different matrix exactly rather than approximately.
 
@@ -333,8 +314,8 @@ def a_fragment_bits(atom, threads: int = 32) -> BitLayout:
     The counterpart to AMD's `FRAGMENT_BITS`, and it exists for the same
     reason: a distribution stated as arithmetic can be executed and compared
     to nothing, while one stated as bits can be held against what an operand
-    actually holds.  Until this was written the packed-operand refusal here
-    had to be a literal -- there was no second side to ask about.
+    actually holds.  Without it the packed-operand refusal here would have to
+    be a literal -- there would be no second side to ask about.
 
     Both axes factor exactly, which is not an accident of these entries but
     of the map: lane `t` holds row ``t / ktile + iii * mtile`` and column
@@ -404,10 +385,10 @@ def fragment_order(shape, atom, threads=32):
     its tile.  With the parts planar (`Tensor.storage_planar`) each part is
     such an image of its own.
 
-    Lane by lane rather than fragment by fragment, which is what this was: with
-    the 32 lanes contiguous per fragment, a lane read its fragments one scalar
-    each, and with the parts adjacent those came in as hi/lo pairs that ptxas
-    had to regroup into the instruction's register quads -- about 1230 moves
+    Lane by lane rather than fragment by fragment: with the 32 lanes
+    contiguous per fragment, a lane would read its fragments one scalar each,
+    and with the parts adjacent those would come in as hi/lo pairs that ptxas
+    has to regroup into the instruction's register quads -- about 1230 moves
     per element of `local_flux`, measured on sm_100.
 
     The tile's own map is the PTX A layout, and it is the one thing here that
@@ -420,8 +401,8 @@ def fragment_order(shape, atom, threads=32):
 
     A slot naming `-1` is padding: the tiling covers `len(tile_starts) * atom`
     along each axis, which is at least the extent and usually more, and a slot
-    past the end belongs to no cell.  It reads zero, which is what the
-    emitter's own padding registers said before the order moved into memory.
+    past the end belongs to no cell.  It reads zero, as a padding register
+    does.
 
     Returned as `Tensor.storage_order` wants it -- F-order cell per slot -- so
     the host packer and the kernel take the layout from one statement.
@@ -497,7 +478,7 @@ def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
 
     What that costs if it is skipped is not a wrong column but an out-of-range
     read: the lanes above the end address past the operand, and on the corpus
-    case that returned NaN rather than anything harmless.  The columns
+    case that read returns NaN rather than anything harmless.  The columns
     themselves are independent --- column `c` of the product comes from column
     `c` of `B` --- so the values the guarded-off lanes would hold are never
     read; it is the access that has to not happen.
@@ -635,14 +616,15 @@ def _as_float(writer: Writer, value):
 #: them (GB200, package 3: `mmaos` long scoreboard, 54 % of its HMMA stalls,
 #: the loads a median 13 instructions ahead).  Not what the registers follow:
 #: on sm_100a `mmao` has 190 with one step and 190 without -- and 141 without
-#: the remainder on the fragments (`TAIL_MAX`), which is where they went.
+#: the remainder on the fragments (`TAIL_MAX`), which is where they go.
 #:
 #: Counted over the whole contraction, not per block of rows: the fragments
 #: do not depend on the block, the column tile or `B`, so the first steps of
 #: the next block load during the last of this one.  Per block, every block
-#: started cold -- and one step was not enough either: GB200, package 4,
-#: `mmaos` b56, HMMA waiting for these loads was 27 % of all samples (b120:
-#: 33 %), 6 % of them at a block start and 17 % one step behind the load.
+#: would start cold, and one step would not be enough either: counted that
+#: way (GB200, package 4, `mmaos` b56), HMMA waiting for these loads is 27 %
+#: of all samples (b120: 33 %), 6 % of them at a block start and 17 % one
+#: step behind the load.
 #:
 #: One step, because the second is paid in occupancy.  Counted in the SASS
 #: of `mmaos` b56 (sm_120; ptxas decides the same way for sm_100): per block,
@@ -675,9 +657,8 @@ def convergence(strategy, shape):
 def supports(threads, dtype, sparse, depth=0) -> bool:
     """Whether `matmul` can emit for this shape, asked *before* it is called.
 
-    This was an `assert` inside the emitter, which was safe only for as long
-    as nothing reached it.  Turning the path on makes the difference matter:
-    an assertion aborts generation for a case the generic path handles
+    A question and not an `assert` inside the emitter: with the path on, an
+    assertion would abort generation for a case the generic path handles
     perfectly well, so the preconditions have to be a question the caller can
     ask, not a crash the caller cannot avoid.
 
@@ -718,10 +699,8 @@ def shmsize(stages, dtype, sm=None, a_parts=1, lanes=None):
     threads = 32
 
     def size(atom):
-        # `a_parts` tiles for A and not one: an operand stored prepared is
-        # staged a part at a time, each through its own tile, because the
-        # fragment read indexes by slot times the wave and a tile holding two
-        # parts per slot would change that arithmetic for both.
+        # `a_parts` times the A tile: an operand stored prepared is staged
+        # with its parts adjacent, `a_parts` scalars per slot (`matmul`).
         aregs = a_parts * ((atom.m * atom.k) // threads)
         bregs = (atom.n * atom.k) // threads
         cregs = (atom.m * atom.n) // threads
@@ -799,8 +778,7 @@ def strategies(shape, ctx):
     memory or not at all.  `takes` then says no, because the emitter writes
     the staged fragments it stages itself and not a relayout it was handed.
 
-    That is a refusal with a price attached rather than a literal, which is
-    what it was until `reach` stopped living in `primitives/amd`.  It also
+    That is a refusal with a price attached rather than a literal.  It also
     means this lifts the way AMD's will: by an emitter learning a route, not
     by a condition being edited.
     """
@@ -842,16 +820,16 @@ def _index(writer, *, sub=0, mod=None, div=None, scale=1, add=0, lane=None):
     """A lane-derived index, built as operations rather than spelled out.
 
     Every address this file computes has the same shape --- the thread index,
-    an optional shift, an optional wrap, a stride and an offset --- and it was
-    written as text six times.  Text is where the address stops being
-    analysable: `cse` cannot merge two identical `rawexpr` nodes (they are not
-    pure), the bank census has to parse the generated source to answer a
-    question the IR could answer directly, and a pass that wanted to reason
-    about the access pattern had nothing to reason over.
+    an optional shift, an optional wrap, a stride and an offset --- and text
+    is where an address stops being analysable: `cse` cannot merge two
+    identical `rawexpr` nodes (they are not pure), the bank census would have
+    to parse the generated source to answer a question the IR can answer
+    directly, and a pass that wants to reason about the access pattern would
+    have nothing to reason over.
 
-    Order is `((tid - sub) % mod / div) * scale + add`, which is the order the
-    six call sites already used.  `lane` replaces `tid` where the index is the
-    warp's rather than the multiplication's (`_warp_group`).
+    Order is `((tid - sub) % mod / div) * scale + add`, the order every call
+    site reads.  `lane` replaces `tid` where the index is the warp's rather
+    than the multiplication's (`_warp_group`).
     """
     v = writer.thread_id('x') if lane is None else lane
     if sub:
@@ -873,7 +851,7 @@ def _warp_group(writer, ops, threads, mults):
 
     At one multiplication per warp the lane is `threadIdx.x` and there is no
     other copy, so this answers `None` and no distance -- and that path emits
-    what it always did.  Narrower, the multiplications of a warp are
+    no warp arithmetic at all.  Narrower, the multiplications of a warp are
     consecutive in `y`: the lane is `threadIdx.x + threads * (threadIdx.y %
     mults)`, and multiplication `p`'s tile is `p - threadIdx.y % mults`
     regions from this one's, since every multiplication owns the same layout
@@ -926,13 +904,13 @@ def matmul(writer, ops, ctx, span):
     N, K, kx = span.stop, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
     # The warp the fragments are spread over, and how many multiplications
-    # share it.  One is the warp-per-multiplication path this always was.
-    # More, and the warp runs one round of MMAs per multiplication: each one
-    # stages its own `A` and `B` in its own shared region, round `p` reads
-    # its fragments out of multiplication `p`'s, and `D` goes back through
-    # that region to the lanes that own the rows.  The staging stores and the
-    # epilogue reads are the multiplication's (`threadIdx.x`); the fragment
-    # reads and the `D` stores are the warp's (`lane`).
+    # share it.  One is the warp-per-multiplication path.  More, and the warp
+    # runs one round of MMAs per multiplication: each one stages its own `A`
+    # and `B` in its own shared region, round `p` reads its fragments out of
+    # multiplication `p`'s, and `D` goes back through that region to the
+    # lanes that own the rows.  The staging stores and the epilogue reads are
+    # the multiplication's (`threadIdx.x`); the fragment reads and the `D`
+    # stores are the warp's (`lane`).
     wave = WAVE
     mults = wave // threads
     # Lead slots per lane.  A wave of rows spans `mults` of them, and one past
@@ -943,11 +921,11 @@ def matmul(writer, ops, ctx, span):
         """The lanes that take part in one staging step.
 
         A structured `if_` rather than `writer.If`, which takes a string and
-        emits a raw block.  The text spelled the same guard, and the emitted
-        C++ is identical -- what changes is that the condition is a value, so
-        a pass walking the body can tell which lanes reach an access inside.
-        Without that, `pir/banks.py` counted all 32 into every bank and read
-        72 conflict-free accesses in `rectangular` as 2-way.
+        emits a raw block.  Both spell the same guard and emit identical C++
+        -- what differs is that here the condition is a value, so a pass
+        walking the body can tell which lanes reach an access inside.  Without
+        that, `pir/banks.py` would count all 32 into every bank and read 72
+        conflict-free accesses in `rectangular` as 2-way.
         """
         cond = None
         tid = writer.thread_id('x')
@@ -977,7 +955,7 @@ def matmul(writer, ops, ctx, span):
 
 
     # Staged fragments, by slot.  Dicts because the B index is a pair and the
-    # extents are loop-derived; what matters is that these hold values now, not
+    # extents are loop-derived; what matters is that these hold values, not
     # C++ identifiers built out of a `varalloc` name.
     Areg = {}
     AregParts = None            # per part, allocated once the atom is known
@@ -1013,16 +991,15 @@ def matmul(writer, ops, ctx, span):
     # The three staging windows, taken from the scratch tail this instruction
     # declared to ShrMemOpt rather than placed by hand.
     #
-    # `aoffs = 0`, `boffs = aregs * 32`, `coffs = 0` was not three constants
-    # but one packing: C deliberately overlaps A and B, which is why the size
-    # is `32 * max(aregs + bregs, cregs)` and not their sum -- 192 elements
-    # rather than 320 for m16n8k8.  It is legal because A and B are live only
-    # inside the k/kk/ii nest and C only in the epilogue after it closes.
+    # They are one packing: C deliberately overlaps A and B, which is why the
+    # size is `32 * max(aregs + bregs, cregs)` and not their sum -- 192
+    # elements rather than 320 for m16n8k8.  It is legal because A and B are
+    # live only inside the k/kk/ii nest and C only in the epilogue after it
+    # closes.
     #
-    # That is a lifetime argument, and it was being carried by three integers
-    # and an `assert` restating the total.  It belongs to a liveness analysis;
+    # That is a lifetime argument, and it belongs to a liveness analysis;
     # until the body is structured enough for one to see it, the windows are
-    # requested and the overlap is stated in one place instead of three.
+    # requested and the overlap is stated in one place.
     # Fragment slots, filled by the loads and read by the MMA.  Generously
     # sized: the index is `iii + kk * mregs` and `kkk + jj * kregs`, so the
     # bound is a product of loop extents rather than the register count.
@@ -1031,14 +1008,9 @@ def matmul(writer, ops, ctx, span):
     Bfrag = [[None] * (bregs * nregs * kregs * 8) for _ in range(mults)]
     BfragLo = [[None] * (bregs * nregs * kregs * 8) for _ in range(mults)]
     # One staging chain per part.  `a_parts == 1` is the ordinary operand and
-    # every list below is one long, which is the shape this code had before
-    # there was a second part -- so the prepared case is the general one and
-    # the ordinary case is its `n = 1`, rather than the two being branches.
-    #
-    # A part gets its own tile rather than a wider shared one: the fragment
-    # read indexes by slot times the wave, and a tile holding several parts
-    # per slot would change that arithmetic for all of them to save one
-    # allocation.
+    # every list below is one long -- so the prepared case is the general one
+    # and the ordinary case is its `n = 1`, rather than the two being
+    # branches.
     aparts = ops.a_parts
     # Whether `A` is stored in the order this reads it.  Where it is, the
     # staging tile below is not an optimization that was skipped -- it is a
@@ -1072,8 +1044,8 @@ def matmul(writer, ops, ctx, span):
     # of four only breaks the merge (measured: twice the stores, 3-way).  The
     # fragment reads and the `D` stores see one region per instruction, and a
     # shift common to all lanes does not change their banks.  Measured on
-    # `local_flux` at eight lanes: unstaggered, the `B` stores were 3-way and
-    # the epilogue reads 4-way.
+    # `local_flux` at eight lanes, unstaggered: `B` stores 3-way, epilogue
+    # reads 4-way.
     def stagger(target):
         if alone or mults > 8:
             return 0
@@ -1118,7 +1090,8 @@ def matmul(writer, ops, ctx, span):
         # read 32 distinct elements spread over 60, and 240 bytes do not fit
         # in 128 of bank width.  Padding moves the collision, transposing
         # moves it to the store; permuting each row costs nothing and clears
-        # both.  Measured over the emitted addresses: 2-way -> 1-way.
+        # both.  Measured over the emitted addresses: 1-way, against 2-way
+        # unpermuted.
         Bshm = writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
                                      + (mults - 1) * bpad,), MemSpace.SHARED,
                             hint='btile', swizzle=XorSwizzle(atom.k))
@@ -1130,13 +1103,12 @@ def matmul(writer, ops, ctx, span):
                   if bsplit else None)
         # One tile with the parts *adjacent*, not one tile per part.
         #
-        # The first arrangement gave each part its own tile, on the grounds
-        # that the fragment read indexes by slot times the wave and a shared
-        # tile holding several parts per slot would change that arithmetic.
-        # True, and the wrong thing to optimize: it saved one allocation and
-        # paid one access per fragment per part.  Measured, two parts cost
-        # +896 LDS and +904 global loads against the single-part kernel, and
-        # the kernel is bound by exactly that traffic.
+        # A tile per part would keep the fragment read's arithmetic -- slot
+        # times the wave -- unchanged, and that is the wrong thing to
+        # optimize: it saves one allocation and pays one access per fragment
+        # per part.  Measured, two parts in tiles of their own cost +896 LDS
+        # and +904 global loads against the single-part kernel, and the
+        # kernel is bound by exactly that traffic.
         #
         # Adjacent, the two halves of one fragment are one 8-byte access, and
         # the same holds in global memory, where `DataView._elem_parts` already
@@ -1191,8 +1163,8 @@ def matmul(writer, ops, ctx, span):
         return out
 
     # `PREFETCH` steps ahead where the fragments come straight from memory:
-    # nothing else stands between such a load and its instruction -- the
-    # split that used to is gone when the operand is stored split.  One
+    # nothing else stands between such a load and its instruction -- stored
+    # split, the operand needs no split in between either.  One
     # sequence over every column tile and block of rows, so a block does not
     # start cold; the loads of the next one are issued in this one, and the
     # scopes around both become plain statements to keep them visible there
@@ -1204,8 +1176,7 @@ def matmul(writer, ops, ctx, span):
     at_step = 0
     # Within one block of rows only, where the caller asked for that
     # (`Options.mma_prefetch_across`): the loads stop at the block's last
-    # step, and the next block starts cold, as it did before the sequence
-    # spanned blocks.
+    # step, and the next block starts cold.
     across = ctx is None or ctx.get_user_options().mma_prefetch_across
 
     def fetch(upto):
@@ -1226,11 +1197,8 @@ def matmul(writer, ops, ctx, span):
         with scope():
             for k in range(0, K + kx, threads):
                 # `var is None` asks the accessor for the value rather than a
-                # name to write into -- the protocol has said so since the
-                # sparse loader took it, and the MMA path simply never used it.
-                # The padding slots are a `declare` for the same reason they
-                # were a raw declaration: nothing loads them, and the MMA reads
-                # a zero.
+                # name to write into.  The padding slots are a `declare`:
+                # nothing loads them, and the MMA reads a zero.
                 for jj in range(0, min(ncols, N - j)):
                     Breg[k // threads, jj] = B(writer, None, j + jj, k // threads)
                 for jj in range(min(ncols, N - j), ncols):
@@ -1244,11 +1212,10 @@ def matmul(writer, ops, ctx, span):
             for i in range(0, M, wave):
                 with scope():
                     # One value per accumulator slot rather than a `[cregs][n]`
-                    # array named by `varalloc`.  The array was a C++
-                    # identifier the IR knew nothing about, so `mma.sync`'s
-                    # read-write operand could not be a value and the asm had
-                    # to stay raw text.  Same registers, same initialization;
-                    # the difference is that each slot now has a definition
+                    # array named by `varalloc`: such an array is a C++
+                    # identifier the IR knows nothing about, so `mma.sync`'s
+                    # read-write operand could not be a value and the asm
+                    # would have to stay raw text.  Each slot has a definition
                     # point and a use chain.  One set per round: round `p`
                     # accumulates multiplication `p`'s rows.
                     tiles = list(range(0, min(wave, M - i), atom.m))
@@ -1314,10 +1281,10 @@ def matmul(writer, ops, ctx, span):
                                 # The loaded value *is* the
                                 # fragment.  Copying it into a
                                 # `varalloc` name and handing the
-                                # name to the MMA was pure
+                                # name to the MMA would be pure
                                 # indirection: a declaration and an
                                 # assignment per fragment, and a
-                                # C++ identifier where the IR had a
+                                # C++ identifier where the IR has a
                                 # value all along.
                                 # The fragment layout: the lane's
                                 # column within the tile, plus its
@@ -1418,9 +1385,9 @@ def matmul(writer, ops, ctx, span):
                                         # and the tile still needs its zero
                                         # -- in every part, as a padding slot
                                         # below.  Handed on as it came, it
-                                        # was a store of nothing: SeisSol's
-                                        # damage `derivative` and
-                                        # `damageCellIntegral` did not
+                                        # would be a store of nothing:
+                                        # SeisSol's damage `derivative` and
+                                        # `damageCellIntegral` would not
                                         # generate under tensor cores.
                                         AregParts[pt][q, kkk] = (
                                             got[pt] if got[pt] is not None
@@ -1451,43 +1418,19 @@ def matmul(writer, ops, ctx, span):
                                             # elements, written one at a
                                             # time rather than packed.
                                             #
-                                            # This was a `pack` into
+                                            # A `pack` into
                                             # `ScalarType(atom.d, 4)`
-                                            # and one wide store, which
-                                            # is what the addresses
-                                            # deserve -- and which nvcc
-                                            # refuses.  `CudaLexic`
-                                            # renders a packed value as
-                                            # `tensorforge::VectorT<T,
-                                            # 4>`, a GNU `vector_size`
-                                            # typedef, and the device
-                                            # front end declines a
-                                            # *value* of that type: "is
-                                            # a vector, which is not
-                                            # supported in device code",
-                                            # 101 times over a corpus
-                                            # case.  `cuda.h` predicted
-                                            # exactly this.
-                                            #
-                                            # The spelling is not fixed
-                                            # in the lexic because the
-                                            # lexic is right for its own
-                                            # reasons: `float4` has no
-                                            # arithmetic operators and
-                                            # cannot be assigned through
-                                            # a `VectorRelaxedT`
-                                            # pointer, which the staging
-                                            # transfers need.  Neither
-                                            # applies here -- this value
-                                            # is only ever stored -- so
-                                            # the narrower spelling is
-                                            # local to the one site that
-                                            # cannot have the wider one.
-                                            #
-                                            # It costs a wide store.
-                                            # Reinstating one needs a
-                                            # device-legal vector value,
-                                            # not a different lexic.
+                                            # and one wide store would
+                                            # cover them: `CudaLexic`
+                                            # renders the packed value
+                                            # as `tensorforge::VectorT<T,
+                                            # 4>`, which `cuda.h`
+                                            # defines as a struct that
+                                            # device code takes as a
+                                            # value.  The store would
+                                            # need the address aligned
+                                            # to the full width, as the
+                                            # natural `VectorT` is.
                                             base = _index(
                                                 writer, sub=sub, mod=atom.m,
                                                 scale=ktile, add=kkk * atom.m)

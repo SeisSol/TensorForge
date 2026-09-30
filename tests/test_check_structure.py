@@ -9,11 +9,11 @@ the end and still produces an answer. On a GPU the same access lands on a
 neighboring register or spill slot. That makes this a check nothing else in
 the suite can make, which is reason enough to pin what it covers.
 
-The case that motivated the pinning is a base offset of -1 on a carry-in: the
-array is filled at 0..5 and read at -1..4, so the accumulation picks up an
-uninitialized slot and drops the last element. Both halves of it are easy to
-miss -- the index is composed rather than a bare name, and it is negative
-rather than too large.
+The case pinned here is a base offset of -1 on a carry-in: the array is filled
+at 0..5 and read at -1..4, so the accumulation would pick up an uninitialized
+slot and drop the last element. Both halves of it are easy to miss -- the
+index is composed rather than a bare name, and it is negative rather than too
+large.
 """
 
 from __future__ import annotations

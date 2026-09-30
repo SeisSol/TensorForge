@@ -9,8 +9,9 @@ Design:
 * Outputs are binary files the driver ``fwrite``\\ s after a D->H copy.
 * All buffer sizes and argument order are resolved from the
   :class:`Generator`'s symbol table — we don't re-parse the emitted C++.
-* Only STRIDED addressing is handled in the MVP. The driver emits a
-  clear ``#error`` otherwise.
+* STRIDED, NONE and pointer-based addressing are handled; any other
+  addressing is refused with ``NotImplementedError`` when the driver is
+  emitted.
 
 The same template covers CUDA and HIP because their runtime APIs agree
 on ``*Malloc`` / ``*Memcpy`` / ``*Stream`` up to the prefix. A tiny
@@ -32,7 +33,7 @@ from .layout import ctype, volume
 class DriverOperand:
     """One launcher operand, as seen from the host side.
 
-    A launcher exposes two kinds of operands today:
+    A launcher exposes two kinds of operands:
 
     * **Batched tensors** — pointer + per-call extraOffset; allocated and
       copied per case.
@@ -379,20 +380,20 @@ def emit(generator, backend: str, default_batch: int) -> str:
         }[op.ctype]
 
         # Batch-constant (Addressing.NONE) operands share one storage
-        # block across all batch elements — see ptr_manip.py:67-71 where
-        # the kernel-side pointer skips the ``batchId * volume`` term.
+        # block across all batch elements — see ptr_manip.py, where the
+        # kernel-side pointer skips the ``batchId * volume`` term.
         # The driver therefore allocates a single element's worth of bytes,
         # independent of the batch size.
         #
         # `storage_volume` and not `volume`, which is the same distinction
-        # `driver_bench.py` already draws and for the same reason: the batch
-        # stride the kernel indexes with is `Tensor.storage_volume()`, the
+        # `driver_bench.py` draws and for the same reason: the batch stride
+        # the kernel indexes with is `Tensor.storage_volume()`, the
         # *compressed* count for a masked tensor, while `volume` is the dense
         # one.  `runner.py` writes the input file compressed too (it packs
-        # through `pack_index`), so sizing the read at the dense volume asks
-        # `read_bin` for more bytes than the file holds and the driver dies
-        # with exit(2) before the kernel is ever launched.  That is why every
-        # sparse case failed here while its generated code was correct.
+        # through `pack_index`), so sizing the read at the dense volume would
+        # ask `read_bin` for more bytes than the file holds, and the driver
+        # would die with exit(2) before the kernel is ever launched -- every
+        # sparse case failing here while its generated code is correct.
         per_element = op.storage_volume or op.volume
         if op.addressing == "none":
             total_expr = f"(size_t){per_element}u * {elem_bytes}"
@@ -429,11 +430,11 @@ def emit(generator, backend: str, default_batch: int) -> str:
             #
             # `i * per_element` and not `i`: `d_X` is a `{ctype}*`, so `+ i`
             # advances by one *element* where the kernel indexes by one *batch
-            # element*.  Every batch then aliased the same storage shifted by
-            # one scalar, which is why a PTR_BASED case could read plausible
-            # numbers and still be wrong everywhere but batch 0.  The stride
-            # has to be the one the allocation above used, so it is written
-            # from the same expression rather than restated.
+            # element*.  Every batch would alias the same storage shifted by
+            # one scalar, and a PTR_BASED case could read plausible numbers
+            # and still be wrong everywhere but batch 0.  The stride has to be
+            # the one the allocation above used, so it is written from the
+            # same expression rather than restated.
             h2d.append(
                 f"    for (size_t i = 0; i < batch; ++i)"
                 f" h_p_{op.kernel_name}[i] = d_{op.kernel_name}"

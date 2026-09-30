@@ -126,8 +126,8 @@ def test_the_numbers_are_the_right_ones(code_first):
     """Against numpy, through the host oracle.
 
     As the first operand the numbers run along the lead index, which is the
-    lane's: reading them as the other indices are read gave every lane row
-    0's numbers, and `C` came out as `0.5 B[0, :]` in every row.
+    lane's: reading them as the other indices are read would give every lane
+    row 0's numbers, and `C` would come out as `0.5 B[0, :]` in every row.
     """
     generator, (b, c) = product(code_first)
     lanes, mults = kernel_eval.launch_geometry(generator.get_launcher())
@@ -147,9 +147,9 @@ def test_the_numbers_are_the_right_ones(code_first):
                                           ('oneapi', 'pvc')])
 @pytest.mark.parametrize('code_first', [True, False], ids=['A', 'B'])
 def test_nothing_reads_it_by_a_name(code_first, backend, arch):
-    """The AMD broadcast path loaded a second operand in the code by the
-    parameter name it does not have (`m15[threadIdx.x]`), and hipcc stopped
-    at the undeclared name."""
+    """A broadcast path that loaded a second operand in the code by the
+    parameter name it does not have (`m15[threadIdx.x]`) would stop hipcc at
+    the undeclared name."""
     generator, _ = product(code_first, backend, arch)
     meta = generator.get_kernel().split('tensorforge-meta: ')[1].split('\n')[0]
     name = next(o['name'] for o in json.loads(meta)['operands']

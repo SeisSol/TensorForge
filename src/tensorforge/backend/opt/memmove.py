@@ -20,25 +20,23 @@ class MoveLoads(AbstractTransformer):
   reads --- otherwise the transfer picks the value up from *before* that write
   and the consumer silently gets a stale one.
 
-  The pass used to move every load as far as it could go, stopping only at
-  another load or a `GetElementPtr`.  In a chain that accumulates into a
-  tensor and then reads it back --- `d += ...` several times, then
-  `out += d * c`, which is the shape of every ADER derivative kernel --- it
-  hoisted the read of `d` above the last accumulation's store, so the final
-  term was missing from the result and nothing else about the kernel looked
-  wrong.
+  Moving every load as far as it can go, stopping only at another load or a
+  `GetElementPtr`, is not enough.  In a chain that accumulates into a tensor
+  and then reads it back --- `d += ...` several times, then `out += d * c`,
+  which is the shape of every ADER derivative kernel --- that would hoist the
+  read of `d` above the last accumulation's store, so the final term would be
+  missing from the result and nothing else about the kernel would look wrong.
 
   `defs()`/`uses()` already say what each instruction touches, so the test is
   the ordinary dependence one; a load stops at the first instruction it
   conflicts with.
 
   How far a load may travel past other loads is `distance`.  At 1 it stops at
-  the one before it -- each transfer is issued one load ahead of where it was,
-  which is what the pass always did.  At 2 it goes on past that one and stops
-  at the next, so two transfers are ahead of every consumer; and so on.  A
-  conflict still stops it at once, whatever the distance: it is a bound on
-  how far, never a license to cross a dependence.  `WrapLoads` reads the same
-  number across the back edge.
+  the one before it -- each transfer is issued one load ahead of where it
+  was.  At 2 it goes on past that one and stops at the next, so two transfers
+  are ahead of every consumer; and so on.  A conflict still stops it at once,
+  whatever the distance: it is a bound on how far, never a license to cross a
+  dependence.  `WrapLoads` reads the same number across the back edge.
   """
 
   def __init__(self,
@@ -70,10 +68,10 @@ class MoveLoads(AbstractTransformer):
 
     A construct -- a merged run's loop, a guard -- is judged by what it
     contains.  `VariantLoop` states no definitions of its own and counts as a
-    barrier once its body holds one, so the barrier rule below let a global
-    read cross the whole loop: in `accumulate_then_read` merged, the final
-    product read `D` above the loop that accumulates into it, and every row
-    of `O` came out wrong.
+    barrier once its body holds one; judged by itself, it would fall to the
+    barrier rule below, which lets a global read cross the whole loop: in
+    `accumulate_then_read` merged, the final product would read `D` above the
+    loop that accumulates into it, and every row of `O` would come out wrong.
     """
     body = [inner for region in instr.regions() for inner in region]
     if body:

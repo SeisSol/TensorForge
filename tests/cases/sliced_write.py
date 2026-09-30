@@ -7,14 +7,14 @@ The shape the poroelastic space-time predictor produces: a descriptor whose
 destination is a sub-box of the tensor, with the transposition carried in
 ``target`` and an identity ``permute`` (the yateto convention).
 
-Two things went wrong here and neither leaves a trace in the source beyond
-wrong numbers.  The accumulator adopted its data view from ``next``, which for
-a plain global destination is the *whole tensor* rather than an image with a
-layout worth adopting; the store then believed the seven-column accumulator
-spanned thirteen columns, read past the end of the register array, and wrote
-the slice at column 0 instead of column 6.  And the store treated the tensor's
-box as what it had to cover, so the columns outside the slice were zero-filled
---- overwriting whatever else had been written there.
+Two things can go wrong here and neither leaves a trace in the source beyond
+wrong numbers.  An accumulator that adopted its data view from ``next``, which
+for a plain global destination is the *whole tensor* rather than an image with
+a layout worth adopting, would have the store believe the seven-column
+accumulator spans thirteen columns, read past the end of the register array,
+and write the slice at column 0 instead of column 6.  And a store that treated
+the tensor's box as what it has to cover would zero-fill the columns outside
+the slice --- overwriting whatever else is there.
 
 ``D`` is a pure output here, so the reference defines the untouched columns as
 zero; what must not happen is the *slice* landing anywhere else.

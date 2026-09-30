@@ -123,8 +123,9 @@ def test_the_hole_covers_every_slot_that_names_it():
 
 def test_each_slot_of_a_hole_keeps_its_own_window():
     """SeisSol's time derivative reads `dQ(k)` through a window per operator
-    (rows 1..18, 1..20): one hole, two windows.  Putting the binding back gave
-    both slots the first one's, and the second reduction lost its last rows."""
+    (rows 1..18, 1..20): one hole, two windows.  Putting the binding back with
+    the first slot's window in both would make the second reduction lose its
+    last rows."""
     def derivative(alias):
         q = Tensor([24, 9], Addressing.STRIDED, BoundingBox([0, 0], [24, 9]),
                    alias=alias, datatype=DTYPE)

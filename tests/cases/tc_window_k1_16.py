@@ -6,8 +6,9 @@ derivative (`kDivMT(k) x dQ(k)`), batch-constant A, through the matrix path.
 
 The window starts at depth 1 and is 16 deep, with no ragged k-tile.  The
 matrix paths read `B` a block of lanes at a time, and the first block's lane
-0 is the element before the window: `B` staged in shared memory, that read
-was `s[-1]`, which stopped the kernel on an A100 and left `C` unwritten.
+0 is the element before the window: `B` staged in shared memory, that read,
+unguarded, would be `s[-1]`, which stops the kernel on an A100 and leaves `C`
+unwritten.
 """
 
 import numpy as np

@@ -4,11 +4,11 @@
 
 """Observability for the macro instruction stream: ``dump`` and ``verify``.
 
-The macro level had neither.  The only check was ``is_ready()``, consulted
-by the emitter one instruction at a time, so the first unprepared
-instruction aborted code generation and hid every other problem behind it.
-``verify`` collects *all* diagnostics instead, and ``dump`` prints the
-stream in a form that survives a diff (no heap addresses, stable ordering).
+``is_ready()`` alone, consulted by the emitter one instruction at a time,
+would let the first unprepared instruction abort code generation and hide
+every other problem behind it.  ``verify`` collects *all* diagnostics
+instead, and ``dump`` prints the stream in a form that survives a diff (no
+heap addresses, stable ordering).
 
 Both work purely through ``AbstractInstruction.defs/uses/accesses/
 barrier_scope``, so neither knows any concrete instruction class.
@@ -166,10 +166,9 @@ def verify(instrs: Sequence[AbstractInstruction],
                        for the arena size.  So this is an emit-time check,
                        not a between-passes one.
 
-    ``max_barrier_scope`` is the strongest barrier legal at this level.  It
-    used to be a boolean ``inside_batch_loop`` that callers had to set by hand;
-    now the loop is an instruction with a region, so recursion derives it from
-    ``uniform_scope`` and no caller has to know.
+    ``max_barrier_scope`` is the strongest barrier legal at this level.  The
+    loop is an instruction with a region, so recursion derives it from
+    ``uniform_scope`` and no caller has to set it by hand.
 
     ``predefined`` are symbols already live on entry (kernel parameters,
     the shared-memory arena, anything defined by ``Section.global_ir``).
@@ -277,7 +276,7 @@ def _check_guarded_prefetch(instr: AbstractInstruction,
     guard and ``mark_unguarded_tail`` a *suffix* -- the guard is one
     contiguous block, so those are the two shapes it can leave.  ``WrapLoads``
     puts every transfer it moves at the tail and marks it, so this should not
-    fire for anything it produced.  It stays as the check that a transfer for
+    fire for anything it produced.  It is the check that a transfer for
     another element is never left under this element's mask, whichever pass
     put it there.
     """
@@ -310,9 +309,9 @@ def _check_shared_aliasing(instrs: Sequence[AbstractInstruction]
                            ) -> List[Diagnostic]:
     """Two simultaneously-live shared-memory buffers must not overlap.
 
-    This is the check that would have caught a mis-coloring: the region
-    allocator assigns byte offsets, and nothing downstream ever validated
-    that co-live buffers landed in disjoint ranges.
+    This is the check that catches a mis-coloring: the region allocator
+    assigns byte offsets, and nothing else downstream validates that co-live
+    buffers land in disjoint ranges.
     """
     diags: List[Diagnostic] = []
     # (symbol -> (offset, size, global_arena)) as far as it is observable
@@ -357,13 +356,12 @@ def _live_shared(instrs: Sequence[AbstractInstruction]
                  ) -> Dict[int, OrderedSet]:
     """Live shared-memory symbols per program point.
 
-    Delegates to ``LivenessAnalysis`` rather than approximating.  An earlier
-    version of this function held a symbol live from its first definition to
-    its last appearance, i.e. without a kill -- the same over-approximation
-    that ``LivenessAnalysis`` used to make.  Once the analysis learned to
-    split ranges, the two disagreed and this check reported overlaps at
-    program points where the real liveness had a hole.  A verifier that
-    reimplements the analysis it is checking will always drift from it.
+    Delegates to ``LivenessAnalysis`` rather than approximating.  Holding a
+    symbol live from its first definition to its last appearance, i.e.
+    without a kill, would disagree with the analysis, which splits ranges,
+    and report overlaps at program points where the real liveness has a hole.
+    A verifier that reimplements the analysis it is checking will always
+    drift from it.
     """
     # local import: liveness imports .abstract, which does not import this
     # module, so there is no cycle
@@ -371,11 +369,11 @@ def _live_shared(instrs: Sequence[AbstractInstruction]
 
     # The nest as it is, not flattened: the analysis walks regions itself
     # and appends its records depth first, which is `_flatten`'s numbering.
-    # Flattened, a region-bearing instruction stood ahead of its own body in
-    # one block, and its `defs()` -- the body's -- counted as an earlier
-    # write of every buffer the body assembles (`_assembling`): each first
-    # slice was spared, and the buffer looked live where the allocator,
-    # which is handed the nest, had rightly reused its memory.
+    # Flattened, a region-bearing instruction would stand ahead of its own
+    # body in one block, and its `defs()` -- the body's -- would count as an
+    # earlier write of every buffer the body assembles (`_assembling`): each
+    # first slice would be spared, and the buffer would look live where the
+    # allocator, which is handed the nest, rightly reuses its memory.
     analysis = LivenessAnalysis(None, list(instrs))
     analysis.apply()
     return dict(analysis.get_live_map())
