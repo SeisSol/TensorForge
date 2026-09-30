@@ -1,5 +1,5 @@
 // === base name ===
-kernel_b22ae15f1eca937d
+kernel_5559dac62764690b
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_b22ae15f1eca937d = {{32, 8, 1}, 32, 64, 1, 8, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_b22ae15f1eca937d(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_b22ae15f1eca937d(const double * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_5559dac62764690b = {{32, 8, 1}, 32, 64, 1, 8, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_5559dac62764690b(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_5559dac62764690b(const double * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_b22ae15f1eca937d(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_5559dac62764690b(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 8, 1);
@@ -67,14 +67,14 @@ tensorforge::LaunchConfig launch_config_kernel_b22ae15f1eca937d(size_t numElemen
         int device, smCount, blocksPerSM;
         CHECK_RES(hipGetDevice(&device));
         CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
-        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_b22ae15f1eca937d, block.x * block.y * block.z, 0 * sizeof(double)));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_5559dac62764690b, block.x * block.y * block.z, 0 * sizeof(double)));
         CHECK_ERR;
         int gfxMajor = 0;
         CHECK_RES(hipDeviceGetAttribute(&gfxMajor, hipDeviceAttributeComputeCapabilityMajor, device));
         if (gfxMajor >= 10 && (0 * sizeof(double)) > 0) {
           int ldsPerMP = 0, blocksNoLds = 0;
           CHECK_RES(hipDeviceGetAttribute(&ldsPerMP, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device));
-          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_b22ae15f1eca937d, block.x * block.y * block.z, 0));
+          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_5559dac62764690b, block.x * block.y * block.z, 0));
           const int blocksByLds = static_cast<int>((2 * static_cast<std::size_t>(ldsPerMP)) / (0 * sizeof(double)));
           blocksPerSM = std::max(blocksPerSM, std::min(blocksNoLds, blocksByLds));
         }
@@ -97,13 +97,13 @@ tensorforge::LaunchConfig launch_config_kernel_b22ae15f1eca937d(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_b22ae15f1eca937d(const double * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_b22ae15f1eca937d(numElements0, streamPtr);
+void launcher_kernel_5559dac62764690b(const double * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_5559dac62764690b(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_b22ae15f1eca937d), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
+        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_5559dac62764690b), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
         CHECK_ERR;
         shmemsizeset = true;
       }
@@ -112,7 +112,7 @@ void launcher_kernel_b22ae15f1eca937d(const double * m0, size_t m0_extraOffset, 
   tensorforge::SpacePtr<const double, tensorforge::GlobalMemspace> m0Arg = (tensorforge::SpacePtr<const double, tensorforge::GlobalMemspace>)m0;
   tensorforge::SpacePtr<double, tensorforge::GlobalMemspace> m1Arg = (tensorforge::SpacePtr<double, tensorforge::GlobalMemspace>)m1;
   tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0Arg = (tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace>)flags0;
-  hipLaunchKernelGGL(kernel_kernel_b22ae15f1eca937d, grid, block, config.sharedMemBytes, stream, m0Arg, m0_extraOffset, m1Arg, m1_extraOffset, numElements0, flags0Arg);
+  hipLaunchKernelGGL(kernel_kernel_5559dac62764690b, grid, block, config.sharedMemBytes, stream, m0Arg, m0_extraOffset, m1Arg, m1_extraOffset, numElements0, flags0Arg);
   CHECK_ERR;
 }
 
@@ -120,7 +120,7 @@ void launcher_kernel_b22ae15f1eca937d(const double * m0, size_t m0_extraOffset, 
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_b22ae15f1eca937d(tensorforge::SpacePtr<const double, tensorforge::GlobalMemspace> m0, size_t m0_extraOffset, tensorforge::SpacePtr<double, tensorforge::GlobalMemspace> m1, size_t m1_extraOffset, size_t numElements0, tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0) {
+ kernel_kernel_5559dac62764690b(tensorforge::SpacePtr<const double, tensorforge::GlobalMemspace> m0, size_t m0_extraOffset, tensorforge::SpacePtr<double, tensorforge::GlobalMemspace> m1, size_t m1_extraOffset, size_t numElements0, tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
@@ -131,7 +131,7 @@ __launch_bounds__(256)
     //   m1 16×16(16×16) {0..16}×{0..16} strided
     // operations:
     //   B = tanh(A)
-    // tensorforge-meta: {"fp":"double","launch":{"active_threads":64,"block":[32,8,1],"cooperative":false,"lead_width":1,"mults_per_block":8,"persistent":true,"sections":[{"barrier":false,"mults_per_block":8,"shared_elements":0}],"shared_bytes":0,"shared_elements":0,"threads_per_mult":32},"loops":[],"operands":[{"addressing":"strided","alias":"A","bbox":[[0,0],[16,16]],"name":"m0","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"strided","alias":"B","bbox":[[0,0],[16,16]],"name":"m1","ordered":false,"parts":1,"shape":[16,16],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[16,16]},"kind":"elementwise","op":"TANH","ops":[{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[16,16]}],"permute":[[0,1]],"scalars":[],"target":[[0,1]]}],"version":"0.0.1\n"}
+    // tensorforge-meta: {"fp":"double","launch":{"active_threads":64,"block":[32,8,1],"cooperative":false,"lead_width":1,"mults_per_block":8,"persistent":true,"sections":[{"barrier":false,"mults_per_block":8,"shared_elements":0}],"shared_bytes":0,"shared_elements":0,"threads_per_mult":32},"loops":[],"operands":[{"addressing":"strided","alias":"A","bbox":[[0,0],[16,16]],"name":"m0","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"strided","alias":"B","bbox":[[0,0],[16,16]],"name":"m1","ordered":false,"parts":1,"shape":[16,16],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[16,16]},"kind":"elementwise","op":"TANH","ops":[{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[16,16]}],"permute":[[0,1]],"scalars":[],"target":[[0,1]]}],"version":"0.0.1"}
     {
       const auto batchId_start = (threadIdx.y + blockDim.y * (blockIdx.x));
       const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;

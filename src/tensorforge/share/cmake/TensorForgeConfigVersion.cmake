@@ -2,8 +2,10 @@
 #
 # SPDX-License-Identifier: MIT
 
-execute_process(COMMAND python3 -c "import tensorforge; tensorforge.get_version()"
-                OUTPUT_VARIABLE PACKAGE_VERSION)
+# The version of the package this file belongs to: read next to it, rather
+# than asked of whichever `tensorforge` the Python on the path imports.
+file(READ "${CMAKE_CURRENT_LIST_DIR}/../../VERSION" PACKAGE_VERSION)
+string(STRIP "${PACKAGE_VERSION}" PACKAGE_VERSION)
 
 # Check whether the requested PACKAGE_FIND_VERSION is compatible
 if("${PACKAGE_VERSION}" VERSION_EQUAL "${PACKAGE_FIND_VERSION}")

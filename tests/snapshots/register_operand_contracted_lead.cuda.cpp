@@ -1,5 +1,5 @@
 // === base name ===
-kernel_79bdaa76417463cc
+kernel_0556a5fa6aaecd46
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_79bdaa76417463cc = {{32, 4, 1}, 32, 64, 1, 4, 6144, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_79bdaa76417463cc(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_79bdaa76417463cc(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_0556a5fa6aaecd46 = {{32, 4, 1}, 32, 64, 1, 4, 6144, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_0556a5fa6aaecd46(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_0556a5fa6aaecd46(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_79bdaa76417463cc(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_0556a5fa6aaecd46(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 4, 1);
@@ -69,7 +69,7 @@ tensorforge::LaunchConfig launch_config_kernel_79bdaa76417463cc(size_t numElemen
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_79bdaa76417463cc, block.x * block.y * block.z, 1536 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_0556a5fa6aaecd46, block.x * block.y * block.z, 1536 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -90,19 +90,19 @@ tensorforge::LaunchConfig launch_config_kernel_79bdaa76417463cc(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_79bdaa76417463cc(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_79bdaa76417463cc(numElements0, streamPtr);
+void launcher_kernel_0556a5fa6aaecd46(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_0556a5fa6aaecd46(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_79bdaa76417463cc, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
+        cudaFuncSetAttribute(kernel_kernel_0556a5fa6aaecd46, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_79bdaa76417463cc<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0);
+  kernel_kernel_0556a5fa6aaecd46<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
@@ -110,7 +110,7 @@ void launcher_kernel_79bdaa76417463cc(const float * m0, size_t m0_extraOffset, c
 // === kernel ===
 __global__ void 
 __launch_bounds__(128, 1)
- kernel_kernel_79bdaa76417463cc(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0) {
+ kernel_kernel_0556a5fa6aaecd46(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     // generated with TensorForge. Version: 0.0.1
@@ -126,7 +126,7 @@ __launch_bounds__(128, 1)
     //   t0[i,j] = m0[i,k] × m1[k,j]
     //   t1[i,j] = t0[i,k]@{35..54}×{0..13} × m2[k,j]
     //   m3[i,j] = m4[i,k]@{0..64}×{35..54} × t1[k,j]
-    // tensorforge-meta: {"fp":"float","launch":{"active_threads":64,"block":[32,4,1],"cooperative":false,"lead_width":1,"mults_per_block":4,"persistent":true,"sections":[{"barrier":false,"mults_per_block":4,"shared_elements":1536}],"shared_bytes":6144,"shared_elements":1536,"threads_per_mult":32},"loops":[],"operands":[{"addressing":"strided","alias":"A","bbox":[[0,0],[64,13]],"name":"m0","ordered":false,"parts":1,"shape":[64,13],"variant":false},{"addressing":"strided","alias":"B0","bbox":[[0,0],[13,13]],"name":"m1","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"B","bbox":[[0,0],[13,13]],"name":"m2","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"D","bbox":[[0,0],[64,13]],"name":"m3","ordered":false,"parts":1,"shape":[64,13],"variant":false},{"addressing":"strided","alias":"K","bbox":[[0,0],[64,56]],"name":"m4","ordered":false,"parts":1,"shape":[64,56],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[64,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[64,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[64,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[64,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[19,13]],"is_tmp":true,"name":"t1","offset":[0,0],"shape":[19,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[19,13]],"is_tmp":true,"name":"t0","offset":[35,0],"shape":[64,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[64,13]],"is_tmp":false,"name":"m3","offset":[0,0],"shape":[64,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[64,19]],"is_tmp":false,"name":"m4","offset":[0,35],"shape":[64,56]},{"addressing":"strided","bbox":[[0,0],[19,13]],"is_tmp":true,"name":"t1","offset":[0,0],"shape":[19,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"version":"0.0.1\n"}
+    // tensorforge-meta: {"fp":"float","launch":{"active_threads":64,"block":[32,4,1],"cooperative":false,"lead_width":1,"mults_per_block":4,"persistent":true,"sections":[{"barrier":false,"mults_per_block":4,"shared_elements":1536}],"shared_bytes":6144,"shared_elements":1536,"threads_per_mult":32},"loops":[],"operands":[{"addressing":"strided","alias":"A","bbox":[[0,0],[64,13]],"name":"m0","ordered":false,"parts":1,"shape":[64,13],"variant":false},{"addressing":"strided","alias":"B0","bbox":[[0,0],[13,13]],"name":"m1","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"B","bbox":[[0,0],[13,13]],"name":"m2","ordered":false,"parts":1,"shape":[13,13],"variant":false},{"addressing":"strided","alias":"D","bbox":[[0,0],[64,13]],"name":"m3","ordered":false,"parts":1,"shape":[64,13],"variant":false},{"addressing":"strided","alias":"K","bbox":[[0,0],[64,56]],"name":"m4","ordered":false,"parts":1,"shape":[64,56],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[64,13]],"is_tmp":true,"name":"t0","offset":[0,0],"shape":[64,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[64,13]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[64,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[19,13]],"is_tmp":true,"name":"t1","offset":[0,0],"shape":[19,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[19,13]],"is_tmp":true,"name":"t0","offset":[35,0],"shape":[64,13]},{"addressing":"strided","bbox":[[0,0],[13,13]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[13,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[64,13]],"is_tmp":false,"name":"m3","offset":[0,0],"shape":[64,13]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[64,19]],"is_tmp":false,"name":"m4","offset":[0,35],"shape":[64,56]},{"addressing":"strided","bbox":[[0,0],[19,13]],"is_tmp":true,"name":"t1","offset":[0,0],"shape":[19,13]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"version":"0.0.1"}
     {
       const auto batchId_start = (threadIdx.y + blockDim.y * (blockIdx.x));
       const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;

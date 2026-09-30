@@ -17,7 +17,7 @@ def get_version():
     import os
     mydir = os.path.dirname(os.path.realpath(__file__))
     with open(os.path.join(mydir, 'VERSION')) as file:
-        return file.read()
+        return file.read().strip()
 
 def print_version():
     print(get_version(), end='')
