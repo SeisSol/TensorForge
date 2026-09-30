@@ -11,6 +11,13 @@
 #include <limits>
 #include <type_traits>
 
+namespace tensorforge {
+
+// The suffixes the generator spells integer constants with.  Inline, so
+// code inside `tensorforge` sees them as they are; a generated kernel
+// opens with `using namespace tensorforge::literals;`.
+inline namespace literals {
+
 constexpr std::int8_t operator""_i8(unsigned long long value) {
   return static_cast<std::int8_t>(value);
 }
@@ -43,7 +50,7 @@ constexpr std::uint64_t operator""_u64(unsigned long long value) {
   return static_cast<std::uint64_t>(value);
 }
 
-namespace tensorforge {
+} // namespace literals
 
 enum class Operation { Add, Mul, And, Or, Xor, Min, Max };
 

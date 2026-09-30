@@ -518,6 +518,8 @@ class Interp:
             return
         if re.match(r'^(__syncthreads|__syncwarp|__threadfence)\s*\(', stmt):
             return
+        if stmt.startswith('using namespace '):
+            return
         am = _ATOMIC_ADD.match(stmt)
         if am:
             # `dest[i] += value`, and every lane that reaches this statement

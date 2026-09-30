@@ -1292,6 +1292,9 @@ class Generator:
     if self._param_tables:
       writer.new_line()
     with self._generate_kernel_proto(writer):
+      # Integer constants carry the suffixes of `base.h`, which live in
+      # `tensorforge::literals` rather than in the global namespace.
+      writer('using namespace tensorforge::literals;')
       self._write_kernel_meta_data(writer)
 
       for i,section in enumerate(self._sections):

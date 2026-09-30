@@ -33,12 +33,16 @@ inline void __threadfence_block() {}
 inline void __syncwarp(unsigned = 0xffffffffu) {}
 
 // from include/tensorforge_device/base.h
-constexpr std::int32_t operator"" _i32(unsigned long long value) {
+namespace tensorforge {
+inline namespace literals {
+constexpr std::int32_t operator""_i32(unsigned long long value) {
   return static_cast<std::int32_t>(value);
 }
-constexpr std::int64_t operator"" _i64(unsigned long long value) {
+constexpr std::int64_t operator""_i64(unsigned long long value) {
   return static_cast<std::int64_t>(value);
 }
+} // namespace literals
+} // namespace tensorforge
 
 // --------------------------------------------------------------------------
 // Vector types.
