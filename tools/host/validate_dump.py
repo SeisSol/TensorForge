@@ -6,25 +6,21 @@
     python3 validate_dump.py gen/gpulike_subroutine.cpp descriptors.json
     python3 validate_dump.py gen/gpulike_subroutine.cpp descriptors.json kernel_0bf208a83b
 
-A kernel is executed for one batch element, all lanes, in lock-step at its
-barriers, against the same inputs the reference sees.  `worst rel` is the
-largest relative deviation over every tensor the kernel writes; anything above
-1e-6 is a real disagreement, since both sides do the same arithmetic in double
-precision on the host.
+A kernel is executed for one batch element, all lanes together, against the
+same inputs the reference sees.  `worst rel` is the largest relative deviation
+over every tensor the kernel writes; anything above 1e-6 is a real
+disagreement, since both sides do the same arithmetic in double precision on
+the host.
 
-Kernels that use vectorized loads (`*(float4*)&...`) abort: `kernel_eval` does
-not model them.  That is a gap in the interpreter, not a finding.
+A kernel that uses a construct `kernel_eval` does not model reports an ERROR:
+that is a gap in the interpreter, not a finding.
 """
 import sys
 
 import numpy as np
 
-from tfpaths import add_tests_to_path
-
-add_tests_to_path()
-
-import lockstep                                                # noqa: E402
-import reference                                               # noqa: E402
+import lockstep
+from tensorforge.reference import descriptors as reference
 
 
 def check(dump, descriptors, kernel, seed=1, nonzero_dest=True):

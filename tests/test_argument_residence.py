@@ -20,7 +20,6 @@ import re
 import numpy as np
 import pytest
 
-import kernel_eval
 from tensorforge.common.basic_types import Addressing, Datatype, Residence
 from tensorforge.common.context import Context, Options
 from tensorforge.common.exceptions import GenerationError
@@ -29,6 +28,7 @@ from tensorforge.common.matrix.spp import ListSPP
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 N = 8
 TARGETS = [('cuda', 'sm_86'), ('hip', 'gfx942'), ('hip', 'gfx1150'),

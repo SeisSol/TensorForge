@@ -29,9 +29,9 @@ import re
 import numpy as np
 import pytest
 
-import kernel_eval
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 CASES = pathlib.Path(__file__).parent / 'cases'
 

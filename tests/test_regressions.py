@@ -20,11 +20,11 @@ from pathlib import Path
 
 import pytest
 
-import kernel_eval
 from tensorforge.backend.instructions.memory.load import GlbToRegLoader
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 CASES = Path(__file__).parent / "cases"
 

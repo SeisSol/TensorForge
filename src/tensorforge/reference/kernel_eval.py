@@ -3,24 +3,25 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileContributor: David Schneller
 
-"""Numeric equivalence of two generated kernels.
+"""A generated CUDA kernel, executed on the host.
 
-A transform that moves nothing between regions can be checked structurally ---
-byte-identical, canonically identical, or the same statement sequence.
-If-conversion does move statements between regions, and then only one question
-matters: does the kernel still compute the same thing?
-
-This interprets the generated CUDA directly for a small subset (declarations,
+An interpreter for the subset of CUDA the generator emits: declarations,
 assignments, `if`/`else`, counted `for`, ternaries, array and pointer
-indexing) and compares the resulting memory state.  Reads of never-written
-slots yield a deterministic pseudo-random value derived from the slot's
-identity, so both versions see the same inputs without anyone having to supply
-them.
+indexing, short vectors (`Vec`), the `cp.async` transfer, atomic accumulation
+and the cross-lane reads.  `evaluate_wave` runs the lanes of one
+multiplication together over one memory, statement by statement
+(`Lockstep`), which is what a cooperatively staged operand, an atomic and a
+`readlane` need; `evaluate` runs one lane on its own.
 
-Limits, stated rather than hidden: one thread at a time, so `__syncthreads()`
-is a no-op and genuinely racy code would not be caught.  What it does catch is
-a transform that changes a value, drops a store, or reorders two accesses to
-the same location --- which is the failure mode of an if-conversion pass.
+A read of a slot nothing wrote yields a pseudo-random value derived from the
+slot's identity (`Slot`), so two kernels, or a kernel and a NumPy evaluation
+of its descriptors, see the same inputs without anyone supplying them.
+
+Limits, stated rather than hidden: one block runs, for one batch element.  A
+barrier is a no-op -- `evaluate_wave` advances its lanes together anyway, and
+`evaluate` has no other lanes, so what they would have written to shared
+memory reads as seed fill there.  A construct outside the subset raises
+`Abort` rather than being guessed at.
 """
 
 from __future__ import annotations
@@ -768,38 +769,6 @@ def evaluate(src: str, tid: int = 0, seed: int = 0,
     interp.run(parse(body))
     if globals_only:
         return {k: v for k, v in mem.data.items() if k[0].startswith('m')}
-    # scratch arrays are keyed by env identity, which differs between the two
-    # runs; compare them by name and index instead
+    # scratch arrays are keyed by env identity, which no other run shares;
+    # key them by name and index, so that two runs compare
     return {(k[0].split('#')[0], k[1]): v for k, v in mem.data.items()}
-
-
-# Lanes worth probing: the edges of the usual block widths, where a guard
-# flips, plus a few in the interior.
-DEFAULT_TIDS = (0, 1, 3, 7, 8, 9, 15, 16, 17, 23, 31, 32, 33, 47, 63)
-DEFAULT_SEEDS = (7, 101, 4242)
-
-
-def compare(a: str, b: str, tids=DEFAULT_TIDS, seeds=DEFAULT_SEEDS,
-            globals_only: bool = False):
-    """Return ``(equal, message)``.
-
-    Compares *all* of memory by default, not just the global arrays: an
-    intermediate a transform got wrong often never reaches a global store for
-    the lanes being probed, and restricting the comparison to globals would let
-    a changed constant go unnoticed.  Several seeds matter for the same reason
-    as several lanes -- a wrong expression can agree with the right one at one
-    particular input.
-    """
-    for seed in seeds:
-        for tid in tids:
-            try:
-                ma = evaluate(a, tid, seed, globals_only)
-                mb = evaluate(b, tid, seed, globals_only)
-            except Abort as exc:
-                return None, f'not evaluable: {exc}'
-            if ma != mb:
-                diff = [k for k in set(ma) | set(mb) if ma.get(k) != mb.get(k)]
-                k = sorted(diff)[0]
-                return False, (f'tid={tid} seed={seed}: {k} = {ma.get(k)!r} '
-                               f'vs {mb.get(k)!r} ({len(diff)} slots differ)')
-    return True, 'equal'

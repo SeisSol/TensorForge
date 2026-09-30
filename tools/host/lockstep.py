@@ -3,18 +3,18 @@
 # SPDX-License-Identifier: MIT
 """Execute a generated CUDA kernel on the host, all lanes, one batch element.
 
-`kernel_eval` interprets one thread.  Shared memory is where threads meet, so
-a single thread sees whatever the others have not written.  Driving every lane
-through the kernel together, statement by statement (`kernel_eval.Lockstep`),
-gives the same guarantee the hardware does, on the same `Slot`.
+`kernel_eval.evaluate_wave` runs a kernel as the generator returns it, on
+seed fill.  This runs one cut out of a generated file (`extract`), with the
+batch addressing reduced to one element (`flatten_batching`), on the inputs a
+capture gives it (`run`), and reads the tensors back as arrays (`read`).  The
+lanes advance together, statement by statement (`kernel_eval.Lockstep`), on
+one `Slot`: shared memory holds what the other lanes wrote, as it does on the
+hardware.
 """
 import json
 import re
 
-from tfpaths import add_tests_to_path
-
-add_tests_to_path()
-import kernel_eval as ke                                       # noqa: E402
+from tensorforge.reference import kernel_eval as ke
 
 #: The lane count of a kernel that does not state its own.
 THREADS = 32

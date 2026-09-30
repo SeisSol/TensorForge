@@ -10,26 +10,27 @@ Checking a generated kernel by reading it does not scale: the code looks right,
 the numbers are wrong, and the guessing takes a round each time.  These tools
 replace the guessing with an oracle that needs no GPU.
 
-The idea is small.  `tests/kernel_eval.py` already interprets one thread of a
-generated CUDA kernel.  Shared memory is where threads meet, so a single thread
-sees whatever the others have not written --- but driving all of the kernel's
-lanes (as many as its meta line states) through its body together, statement
-by statement, gives the same guarantee the hardware does, on one shared
-`Slot`.  The other half is a NumPy evaluation of the same
-descriptor list the frontend handed the backend.  Agreement to machine
-precision is then a real statement about the kernel.
+The idea is small.  `tensorforge.reference.kernel_eval` interprets a generated
+CUDA kernel on the host.  Shared memory is where threads meet, so a single
+thread would see whatever the others have not written --- but driving all of
+the kernel's lanes (as many as its meta line states) through its body
+together, statement by statement, gives the same guarantee the hardware does,
+on one shared `Slot`.  The other half, `tensorforge.reference.descriptors`, is
+a NumPy evaluation of the same descriptor list the frontend handed the
+backend.  Agreement to machine precision is then a real statement about the
+kernel.
 
 Validated against the poroelastic order-4 set: on a correct backend, every
 kernel that runs matches with a relative deviation below 1e-15.
 
 ## Setup
 
-An editable install, so the tools can find `tests/kernel_eval.py`:
+TensorForge itself, installed or with its `src` on `PYTHONPATH`; the tools
+take the interpreter and the NumPy evaluation from `tensorforge.reference`:
 
     pip install -e /path/to/tensorforge
 
-Otherwise set `TF_TESTS` to the directory holding `kernel_eval.py`.  NumPy is
-the only other requirement.
+NumPy is the only other requirement.
 
 ## The usual sequence
 
@@ -73,8 +74,7 @@ at --- small enough to read the generated code for, and to turn into a test.
 | `prefix_bisect.py` | Rebuild a descriptor list as live objects and bisect to the shortest prefix that is wrong. |
 | `check_structure.py` | Structural checks over a dump, no reference needed: results computed and discarded, a register serving as bias twice, a load overtaken by a store to what it reads, a register array indexed outside its declared range. None of these stops a kernel from compiling. |
 | `read_before_write.py` | Per descriptor, in program order: which regions does a kernel read that nothing wrote first? |
-| `lockstep.py` | The lane-parallel runner. |
-| `reference.py` | The NumPy evaluation of a descriptor list. |
+| `lockstep.py` | The lane-parallel runner for a kernel cut out of a generated file. |
 
 `check_structure.py` is the cheap one --- it takes a dump and nothing else, and
 is worth running on any new generation:
@@ -84,8 +84,8 @@ is worth running on any new generation:
 
 ## Assignments, slices and accumulations
 
-`reference.py` evaluates an operation as yateto means it, which is not always
-"write the result where it was computed":
+`tensorforge.reference.descriptors` evaluates an operation as yateto means
+it, which is not always "write the result where it was computed":
 
 * `=` onto the tensor itself defines the whole tensor.  Where the operands
   support only part of it --- the destination's box narrowed below the
@@ -106,7 +106,7 @@ missing zero, a slice that reaches past its box, a dropped bias.
 ## What it does not cover
 
 Only products are evaluated.  An elementwise operation or a reduction is
-recorded but skipped (`reference.evaluable`): the reference has nothing for
+recorded but skipped (`descriptors.evaluable`): the reference has nothing for
 what one writes, so neither that nor anything computed from it is checked ---
 including whether a pointwise assignment writes the zeros it owes.
 

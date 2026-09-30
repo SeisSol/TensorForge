@@ -12,18 +12,14 @@ import sys
 
 import numpy as np
 
-from tfpaths import add_tests_to_path
-
-add_tests_to_path()
-
-import lockstep as lanes                                       # noqa: E402
-import reference as ref                                        # noqa: E402
-from tensorforge.common.basic_types import Addressing, Datatype  # noqa: E402
-from tensorforge.common.context import Context                 # noqa: E402
-from tensorforge.common.matrix.boundingbox import BoundingBox   # noqa: E402
-from tensorforge.common.matrix.tensor import SubTensor, Tensor  # noqa: E402
-from tensorforge.generators.descriptions import MultilinearDescr  # noqa: E402
-from tensorforge.generators.generator import Generator         # noqa: E402
+import lockstep as lanes
+from tensorforge.common.basic_types import Addressing, Datatype
+from tensorforge.common.context import Context
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import SubTensor, Tensor
+from tensorforge.generators.descriptions import MultilinearDescr
+from tensorforge.generators.generator import Generator
+from tensorforge.reference import descriptors as ref
 
 DT = Datatype.F32
 ADDR = {str(a): a for a in Addressing}

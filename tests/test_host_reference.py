@@ -19,17 +19,17 @@ accumulation defines nothing.
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from tensorforge.reference import descriptors as reference
+
 ROOT = Path(__file__).resolve().parent.parent
 HOST = ROOT / "tools" / "host"
-# `tfpaths` finds `kernel_eval` through the package; say where it is instead
-os.environ.setdefault("TF_TESTS", str(ROOT / "tests"))
+# `prefix_bisect` imports `lockstep` from its own directory
 if str(HOST) not in sys.path:
     sys.path.insert(0, str(HOST))
 
@@ -40,9 +40,6 @@ def _load(name):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
-
-
-reference = _load("reference")
 
 
 def _view(name, bbox, tbbox=((0,), (4,)), offset=(0,), sliced=False,

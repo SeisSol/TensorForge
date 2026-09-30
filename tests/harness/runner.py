@@ -17,9 +17,9 @@ import numpy as np
 from tensorforge.common.basic_types import Addressing, DataFlowDirection
 from tensorforge.common.context import Context
 from tensorforge.generators.generator import Generator
+from tensorforge.reference.descriptors import multilinear_reference
 
 from . import driver_emit, layout
-from .reference import multilinear_reference
 from .toolchain import BuildInputs, Target, build
 
 

@@ -20,9 +20,9 @@ import pathlib
 
 import pytest
 
-import kernel_eval
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 VEC_CASES = ['aligned_operands']
 

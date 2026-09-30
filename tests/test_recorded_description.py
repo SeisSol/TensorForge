@@ -194,7 +194,7 @@ def test_a_sparse_vector_broadcast_fills_its_stored_rows(backend, arch):
     on every target."""
     import numpy as np
 
-    import kernel_eval
+    from tensorforge.reference import kernel_eval
 
     blob = json.loads((KERNELS / "sparse_layouts.json").read_text())
     description = blob["descriptions"]["sparse_layouts_0"]

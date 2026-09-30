@@ -21,7 +21,6 @@ import re
 import numpy as np
 import pytest
 
-import kernel_eval
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -29,6 +28,7 @@ from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.generators.generator import Generator
 from tensorforge.generators.tuning import space
+from tensorforge.reference import kernel_eval
 
 M = 8
 

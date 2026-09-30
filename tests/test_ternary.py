@@ -21,7 +21,6 @@ import re
 import numpy as np
 import pytest
 
-import kernel_eval
 from harness import syntax
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
@@ -30,6 +29,7 @@ from tensorforge.frontend.yateto import DescriptionReader
 from tensorforge.generators.descriptions import (ElementwiseDescr,
                                                  MultilinearDescr)
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 N = 8
 

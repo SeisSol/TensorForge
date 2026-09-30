@@ -23,7 +23,6 @@ import io
 import numpy as np
 import pytest
 
-import kernel_eval
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -32,6 +31,7 @@ from tensorforge.common.operation import Operation
 from tensorforge.generators.descriptions import (ElementwiseDescr,
                                                  MultilinearDescr)
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 # 16 rows: one multiplication per SYCL sub-group.  At 8, two share one, and
 # the grouped batch loop that brings is refused by the verifier on its own

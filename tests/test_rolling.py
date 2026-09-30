@@ -982,7 +982,7 @@ def test_a_merged_accumulation_is_read_back_after_the_loop(arch):
     on its own against numpy, since it names its buffers differently."""
     import numpy as np
 
-    import kernel_eval
+    from tensorforge.reference import kernel_eval
     case = _accumulate_then_read()
     descrs = case.descr_list()
     gen = _with_option(descrs, arch=arch, merge_variants=True)

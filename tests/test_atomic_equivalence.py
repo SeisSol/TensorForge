@@ -44,8 +44,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.generators.generator import Generator
-
-from kernel_eval import evaluate_wave
+from tensorforge.reference.kernel_eval import evaluate_wave
 
 K = 8
 SEED = 7

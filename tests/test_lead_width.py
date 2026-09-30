@@ -452,7 +452,7 @@ def _run_case(monkeypatch, M, N, width, align=16, dtype=None):
     from tensorforge.common.matrix.tensor import SubTensor, Tensor
     from tensorforge.generators.descriptions import GemmDescr
     from tensorforge.generators.generator import Generator
-    from kernel_eval import evaluate_wave
+    from tensorforge.reference.kernel_eval import evaluate_wave
 
     dtype = dtype or Datatype.F32
     monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
@@ -487,7 +487,7 @@ def _wrong_lead_indices(monkeypatch, M, N, width, **kw):
     day it is modeled these cases start running instead of staying quietly
     absent.
     """
-    from kernel_eval import Abort
+    from tensorforge.reference.kernel_eval import Abort
     try:
         _, scalar = _run_case(monkeypatch, M, N, 1, **kw)
         _, wide = _run_case(monkeypatch, M, N, width, **kw)

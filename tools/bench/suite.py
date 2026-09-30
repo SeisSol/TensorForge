@@ -58,9 +58,8 @@ from tensorforge.common.matrix.tensor import SubTensor, Tensor  # noqa: E402
 from tensorforge.generators import lanes  # noqa: E402
 from tensorforge.generators.descriptions import MultilinearDescr  # noqa: E402
 
-#: Where the case corpus lives.  `TF_TESTS` overrides, the way
-#: `tools/host/tfpaths.py` does, so a suite can be run against a checkout that
-#: is not the installed package.
+#: Where the case corpus lives.  `TF_TESTS` overrides, so a suite can be run
+#: against the corpus of another checkout.
 CASES = Path(os.environ.get('TF_TESTS', ROOT / 'tests')) / 'cases'
 
 

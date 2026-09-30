@@ -20,8 +20,8 @@ owns only its part), a destination cut into pieces (`DescriptionReader._cells`),
 a first write read back wider than it wrote, and a reduction.  The generated
 kernel is interpreted on the host (`kernel_eval`), so what is checked is what
 the kernel computes -- the numbers below are written down from the
-statements, not taken from `tools/host/reference.py`, which evaluates
-contractions only.
+statements, not taken from `tensorforge.reference.descriptors`, which
+evaluates contractions only.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ import warnings
 import numpy as np
 import pytest
 
-import kernel_eval
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -45,6 +44,7 @@ from tensorforge.generators import elementwise as ew
 from tensorforge.generators.descriptions import (ElementwiseDescr, GemmDescr,
                                                  MultilinearDescr)
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 FIXTURE = (pathlib.Path(__file__).parent / "fixtures" / "kernels"
            / "pointwise_assignment.json")

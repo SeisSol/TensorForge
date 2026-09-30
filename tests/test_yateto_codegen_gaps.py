@@ -29,12 +29,12 @@ import warnings
 import numpy as np
 import pytest
 
-import kernel_eval
 from tensorforge.common.context import Context
 from tensorforge.common.operation import Operation
 from tensorforge.frontend.yateto import DescriptionReader
 from tensorforge.generators.descriptions import ElementwiseDescr
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 FIXTURE = (pathlib.Path(__file__).parent / "fixtures" / "kernels"
            / "yateto_codegen_gaps.json")
