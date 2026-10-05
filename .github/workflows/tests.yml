@@ -10,17 +10,25 @@ on:
   - push
 
 jobs:
-  host-tests:
+  tests:
     # Everything that needs neither a GPU nor a vendor toolchain: snapshots,
     # the host syntax check, the IR and pass tests, the tools.  The GPU cases
     # skip themselves when no target is found.
-    name: host-tests (python ${{ matrix.python }})
-    runs-on: ubuntu-24.04
+    name: ${{matrix.system.platform}}-tests (python ${{ matrix.python }})
+    runs-on: ${{matrix.system.runner}}
+    container: ${{matrix.system.container}}
     strategy:
       fail-fast: false
       matrix:
         # The floor `requires-python` states, and a current release.
         python: ['3.10', '3.13']
+        system:
+          - platform: host
+            runner: ubuntu-24.04
+            container: ~
+          - platform: sm_86
+            runner: gpu-nv
+            container: { image: "seissol/gha-gpu-nv:davschneller-gpu-image", options: "--runtime=nvidia --gpus=all"}
     steps:
       - uses: actions/checkout@v6
         with:
