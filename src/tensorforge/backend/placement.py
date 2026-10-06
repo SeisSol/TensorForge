@@ -148,7 +148,10 @@ def legal_operand_placements(*,
     between lanes; only a copy can do that, and only a copy through shared
     memory, since a register image fixes its lane axis when it is written.
     The exception is a hardware broadcast: where one is cheap, every lane can
-    read the same element and the missing lane axis stops mattering.
+    read the same element and the missing lane axis stops mattering to the
+    loop nest.  The matrix paths read an operand without the lead index along
+    its contraction, and the staging puts that dimension on the lanes
+    (`MultilinearBuilder._make_load_op`).
 
     `single_element` is that exception at its smallest, and it holds whatever
     the vendor thinks of broadcasts in general.  A window of one element has

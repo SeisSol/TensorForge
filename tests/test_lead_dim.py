@@ -8,7 +8,9 @@
 symbols, `GlbToShrLoader` writes a register image with the lane on it, and
 `multilinear_builder` sets it to something other than 0 whenever a transposed
 operand carries the destination's lead index elsewhere — `lead_index_off_dim0`
-is that case, and `test_regressions.py` pins it.
+is that case, and `test_regressions.py` pins it — and whenever an operand
+without the lead index contracts over another dimension than its first, as
+`B` does in `trans_b`.
 
 A compute instruction that kept its own copy -- `self._lead_dims = [0]` in its
 constructor, or a local `lead_dim = [0]` deciding the destination image's
@@ -210,3 +212,23 @@ def test_a_transposed_operand_still_spreads_dimension_one(backend, arch):
         + repr(sorted({(s.name, tuple(s.lead_dims)) for s in symbols})))
     for s in off_axis:
         assert ComputeInstruction.lead_dim(s) == 1
+
+
+@pytest.mark.parametrize("backend,arch", [("hip", "gfx90a"), ("acpp", "pvc")])
+def test_an_operand_without_the_lead_index_spreads_its_contraction(backend,
+                                                                   arch):
+    """`C = A @ B^T`, on targets that stage `B` in registers.
+
+    `B` is stored `(j, k)`: it carries no lead index, and its contraction is
+    dimension 1.  The matrix paths read `B(k, j)` from lane `k`, so that is
+    the dimension on the lanes.  With dimension 0 there, lane `j` would hold
+    all of column `j`, and a read of `B(k, j)` across the lanes would come
+    back as one broadcast element.
+    """
+    gen = _generate("trans_b.py", backend, arch)
+    images = [ins._dest for ins in _stream(gen)
+              if type(ins).__name__ == "GlbToRegLoader"
+              and getattr(ins._src.obj, "alias", None) == "B"]
+    assert images, "B is not staged in registers on this target any more"
+    assert all(image.lead_dims == [1] for image in images), \
+        [image.lead_dims for image in images]

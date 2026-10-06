@@ -96,18 +96,33 @@ class MultilinearBuilder(OperationBuilder):
     has_lead_dim = 0 in self._descr.target[i]
     transpose = self._descr.permute[i] != [j for j in range(len(self._descr.target[i]))]
 
-    # Which operand dimension carries the destination's lead index --- i.e.
-    # which one has to end up spread across lanes.  Everything downstream of a
-    # register staging already assumes this dimension is the lane axis:
+    # Which operand dimension a register image spreads across lanes: the one
+    # its readers ask for lane by lane.  With another dimension on the lanes,
+    # such a read finds every element it wants in the registers of one lane,
+    # and no broadcast can hand each lane a different one of them.
+    #
+    # Where the operand carries the destination's lead index, that is the
+    # dimension, and everything downstream of the staging assumes it:
     # `_lead_origin_shift` pins the origin on `target[i].index(0)`, and
     # `MultilinearInstruction._check_offsets` checks the slicing remainder
-    # there.  A staging that hardcoded dimension 0 would give an operand whose
-    # lead index sits elsewhere --- a transposed one --- an image whose lane
-    # axis is a *contraction* dimension.  `Symbol.load` would then find a loop
-    # constant on what it believes is the lane axis and emit a cross-lane
-    # broadcast, which hands every lane the same element and drops the
-    # lane-distributed index entirely.
-    lead_pos = self._descr.target[i].index(0) if has_lead_dim else 0
+    # there.  Where it does not, the readers differ.  The loop nest reads
+    # fixed elements and broadcasts each from the lane that holds it, which
+    # works whichever dimension is on the lanes.  The matrix paths read
+    # `B(k, j)` from lane `k`, along the first contraction index (`k0`, target
+    # `-1`), so that one goes on the lanes: an operand stored with it on
+    # another dimension -- `Tinv(j, q)` contracted over `q`, a `B^T` -- is
+    # then read in place by both.  A compressed operand keeps dimension 0,
+    # since its flat fill assigns lanes by storage element and the sparse
+    # accessor reads it that way (`linearize` below).
+    symbol = self._ops[i].symbol
+    dense = symbol.obj is None or symbol.obj.is_dense()
+    target = self._descr.target[i]
+    if has_lead_dim:
+      lead_pos = target.index(0)
+    elif -1 in target and dense:
+      lead_pos = target.index(-1)
+    else:
+      lead_pos = 0
     self._lead_pos[i] = lead_pos
 
     # Whether this operand's lane axis is where a reader expects it.  A
@@ -116,7 +131,6 @@ class MultilinearBuilder(OperationBuilder):
     # hardware can read the operand in place anyway.
     lane_axis_needs_moving = transpose or not has_lead_dim
 
-    symbol = self._ops[i].symbol
     addressable = not (
         symbol.stype in (SymbolType.Scalar, SymbolType.Data)
         or (isinstance(symbol.obj, Tensor) and len(symbol.obj.shape) == 0)
@@ -175,7 +189,6 @@ class MultilinearBuilder(OperationBuilder):
     # map is the right one there and the only one there.  Both sides read the
     # same predicate.  Note this says *which map*, not how wide it is walked
     # -- a vectorized fill stays available under either.
-    dense = symbol.obj is None or symbol.obj.is_dense()
     linearize = lane_axis_needs_moving and lead_pos == 0 and not dense
 
     if name in self._residency and self._resolve_reuse(i, name):

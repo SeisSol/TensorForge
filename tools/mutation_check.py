@@ -564,6 +564,15 @@ GROUPS = {
              '                   for _ in self.lead_dims)')),
     ]),
 
+    # Which dimension of an operand's register image is on the lanes.
+    'laneaxis': ('tests/test_lead_dim.py', [
+        ('an operand without the lead index keeps dimension 0 on the lanes',
+         sub(Path('src/tensorforge/backend/instructions/builders/'
+                  'multilinear_builder.py'),
+             '    elif -1 in target and dense:',
+             '    elif False:')),
+    ]),
+
     'staging': ('tests/test_staging.py', [
         ('a vector bit left where it is',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
