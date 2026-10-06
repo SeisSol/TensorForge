@@ -136,8 +136,11 @@ def standard_pipeline(debug: str = '',
 
     ``fold`` runs first: it turns expressions into constants and removes
     identity operations, which gives ``cse`` more equal keys to merge and
-    ``licm`` fewer statements to consider.  It runs a second time after
-    ``licm``, because hoisting can bring two constants into the same scope.
+    ``licm`` fewer statements to consider.  Once is enough.  Hoisting could
+    bring two constants into one scope for a second run to combine; on the
+    corpus for four targets and on SeisSol at order 4 for two, such a run
+    after ``licm`` changes none of 18,490 bodies, at 3 % of the pipeline's
+    time.
 
     ``if_convert`` runs only under the explicit vector, and there it is not an
     optimization.  A guard over a lane-varying condition is a mask in that
@@ -183,7 +186,7 @@ def standard_pipeline(debug: str = '',
                    preserves=('flat',), when=lambda pc: pc.explicit_simd))
     for name, fn in (('converge', converge_crosslane), ('fold', fold),
                      ('cse', cse), ('loads', load_cse), ('licm', licm),
-                     ('fold2', fold), ('cse2', cse), ('dce', dce)):
+                     ('cse2', cse), ('dce', dce)):
         pm.add(Rewrite(name, fn, preserves=('flat',)))
     if prefetch is not None:
         pm.add(prefetch)
