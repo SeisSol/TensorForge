@@ -369,6 +369,10 @@ class Generator:
   #: this token where it was.
   NAME_PLACEHOLDER = 'TENSORFORGE_UNNAMED_KERNEL'
 
+  #: `merge_within` for a build that merges every run it can: what
+  #: `_auto_merge` probes with.
+  EVERY_RUN = ()
+
   def __init__(self,
                gemm_list: List[OperationDescription],
                context: Context,
@@ -483,9 +487,9 @@ class Generator:
       # and the failure is a table built from `None` several phases later.
       #
       # `merge_within` is `(budget, size)` from `_auto_merge`: as many runs as
-      # it takes to fit, rather than every one.
+      # it takes to fit, rather than every one -- or `EVERY_RUN`, its probe.
       from tensorforge.generators.rolling import roll
-      budget = ({} if merge_within is None
+      budget = ({} if not merge_within
                 else dict(fit_within=merge_within[0], size=merge_within[1]))
       self.descr_list = roll(self.descr_list,
                              min_count=options.merge_min_count,
@@ -793,30 +797,42 @@ class Generator:
     """Merge repeated runs where the kernel written out crowds the
     instruction cache (`merge_variants='auto'`, the default).  True where
     this generator was built here -- it then holds the merged kernel, or the
-    probe's written-out one.
+    written-out one a probe built.
 
     The size that matters is the one the emitter lays down (`code_units`),
-    and that is known only once it has: so the list is built unmerged first,
-    by a probe that announces nothing.  Past `merge_icache_fraction` of the
-    target's instruction cache this generator is rebuilt merged, as many runs
-    as it takes to fit, largest saving first (`rolling.roll`, `fit_within`).
-    A run's share of the measured code is taken to be its share of the
-    arithmetic -- a split of a measured size, not a model of one such as a
-    line count fitted to one SeisSol corpus.
+    and that is known only once it has.  Past `merge_icache_fraction` of the
+    target's instruction cache, runs are merged as many as it takes to fit,
+    largest saving first (`rolling.roll`, `fit_within`), a run's share of the
+    size taken to be its share of the arithmetic -- a split of a measured
+    size, not a model of one such as a line count fitted to one SeisSol
+    corpus.
 
-    Where the written-out kernel fits, the probe is the build, and this
-    generator takes it over rather than building the same list again --
-    unless the build would differ from the probe: where it still has the
-    rotation query to ask, was told to emit loops, or was handed operand
-    tables (`register_param_table`), which name symbols of its own.
+    The list written out is the most expensive build of it, and the one the
+    decision exists to avoid, so the first probe merges every run it can,
+    which is the cheapest build, and the written-out size is bounded from it.
+    From below by what it laid down (`code_units`): merging only shrinks the
+    code.  From above by what it would have laid down with every run written
+    out (`written_code_units`): a merged run's loop counted once per trip and
+    without a counter, where the runs written out share what their copies
+    compute in common.  On SeisSol at orders 4 and 6 in single precision for
+    gfx942 and sm_86, the 656 kernels with a repeated run hold both bounds,
+    the upper one up to 85 % above the size written out.
 
-    Nothing to decide where nothing repeats, where the target states no
-    instruction cache, or where the probe does not build.  And nothing merged
-    where the merged build fails: a default is not entitled to break a kernel
-    that builds without it, so the kernel is built written out, with a
-    warning -- SeisSol's `gpu_derivative`, whose merged chain carries each
-    derivative into the next, needs it.  Asked for with
-    `merge_variants=1`, a failure is a failure.
+    Where the upper bound fits, nothing is merged and this generator builds
+    the list as given.  Where even the lower bound takes every run, every run
+    is merged, since the runs it takes only grow with the size, and the probe
+    is the build.  Between the two only the written-out size says, and the
+    list is built written out to find it (`_merge_by_written_out`) -- 24 % of
+    those kernels, against every one of them otherwise.
+
+    Nothing to decide where nothing repeats or where the target states no
+    instruction cache.  And nothing merged where merging fails: a default is
+    not entitled to break a kernel that builds without it.  Where the probe
+    fails, the decision is made from the list written out; where the runs it
+    takes fail, the kernel is built written out, with a warning -- SeisSol's
+    `gpu_derivative`, whose merged chain carries each derivative into the
+    next, needs it.  Asked for with `merge_variants=1`, a failure is a
+    failure.
     """
     opts = self._context.get_user_options()
     if opts.merge_variants != 'auto' or self._merge_decided:
@@ -829,47 +845,116 @@ class Generator:
     from tensorforge.analysis.cost import list_cost
     from tensorforge.analysis.icache import code_bytes
     from tensorforge.generators.rolling import roll
-    if not any(isinstance(d, ForDescr) for d in roll(
-        list(self._given), min_count=opts.merge_min_count,
-        max_arity=opts.merge_max_arity)):
+    everything = roll(list(self._given), min_count=opts.merge_min_count,
+                      max_arity=opts.merge_max_arity)
+    if not any(isinstance(d, ForDescr) for d in everything):
       return False
 
-    probe = self._sibling()
+    probe = self._sibling(merge_within=Generator.EVERY_RUN)
     try:
       probe.generate()
     except Exception:
-      return False
-    size = code_bytes(probe.code_units, hw)
+      return self._merge_by_written_out()
     budget = opts.merge_icache_fraction * capacity
+    above = code_bytes(probe.written_code_units, hw)
+    below = code_bytes(probe.code_units, hw)
+    if (above is None or below is None or above <= budget
+            or not list_cost(list(self._given)).flops):
+      return self._keep_written_out()
+    # The probe asked no rotation query, which a build that prefetches across
+    # the back edge has to.
+    if (below > budget and not opts.enable_wrap_loads
+            and len(self._runs_to_merge(budget, below)) == len(everything)):
+      return self._take_over(probe)
+    return self._merge_by_written_out(merged=probe)
+
+  def _keep_written_out(self) -> bool:
+    """Leave this generator to build the list as given, after a probe.
+
+    The probes share the caller's tensors, and naming the operands is the
+    one thing a build does to them that depends on the list built: a merged
+    list holds fewer temporaries, so the one a probe named `t2` is `t8`
+    written out.  They are named again, for the list this generator builds.
+    """
+    self._name_operands(self.descr_list)
+    return False
+
+  def _take_over(self, other: 'Generator') -> bool:
+    """Become `other`, built, with the operands named as its build named
+    them (`_keep_written_out`), and register its name."""
+    self._adopt(other)
+    self._name_operands(self.descr_list)
+    self._announce()
+    return True
+
+  def _runs_to_merge(self, budget, size) -> list:
+    """The list with as many runs merged as a written-out `size` takes to fit
+    `budget`, a run's share of it its share of the arithmetic.  A run merged
+    is a strictly shorter list, so two answers of one length are the same
+    runs."""
+    from tensorforge.analysis.cost import list_cost
+    from tensorforge.generators.rolling import roll
+    opts = self._context.get_user_options()
     whole = list_cost(list(self._given)).flops
-    if size is None or size <= budget or not whole:
-      if (self._rotate is not None or opts.enable_wrap_loads
-              or self._emit_loops != probe._emit_loops or self._param_tables):
-        return False
-      self._adopt(probe)
-      self._announce()
-      return True
 
     def share(descrs):
       return size * list_cost(list(descrs)).flops / whole
 
-    # Built as a probe of its own first, so that a failure leaves this
-    # generator as it was; taken over whole where it succeeds, rather than
-    # built a third time.  It asks the rotation query itself, of the list it
-    # builds.
-    merged = self._sibling(rotate=None, merge_within=(budget, share))
+    return roll(list(self._given), min_count=opts.merge_min_count,
+                max_arity=opts.merge_max_arity, fit_within=budget, size=share)
+
+  def _merge_by_written_out(self, merged: Optional['Generator'] = None) -> bool:
+    """The merge decision from the list written out.
+
+    The written-out build is the kernel where it fits: this generator takes
+    it over rather than building the same list again -- unless the build
+    would differ from it: where it still has the rotation query to ask, was
+    told to emit loops, or was handed operand tables (`register_param_table`),
+    which name symbols of its own.  Past the budget, the runs it takes are
+    built; `merged`, a build of every run, is taken over where that is what
+    they are.
+    """
+    from tensorforge.analysis.cost import list_cost
+    from tensorforge.analysis.icache import code_bytes
+    from tensorforge.generators.rolling import roll
+    opts = self._context.get_user_options()
+    hw = self._context.get_vm().get_hw_descr()
+    probe = self._sibling()
     try:
-      merged.generate()
+      probe.generate()
+    except Exception:
+      return self._keep_written_out()
+    size = code_bytes(probe.code_units, hw)
+    budget = opts.merge_icache_fraction * hw.icache_size
+    whole = list_cost(list(self._given)).flops
+    if size is None or size <= budget or not whole:
+      if (self._rotate is not None or opts.enable_wrap_loads
+              or self._emit_loops != probe._emit_loops or self._param_tables):
+        return self._keep_written_out()
+      return self._take_over(probe)
+    if merged is not None and not opts.enable_wrap_loads:
+      everything = roll(list(self._given), min_count=opts.merge_min_count,
+                        max_arity=opts.merge_max_arity)
+      if len(self._runs_to_merge(budget, size)) == len(everything):
+        return self._take_over(merged)
+
+    def share(descrs):
+      return size * list_cost(list(descrs)).flops / whole
+
+    # Built as a sibling first, so that a failure leaves this generator as it
+    # was; taken over whole where it succeeds, rather than built again.  It
+    # asks the rotation query itself, of the list it builds.
+    rebuilt = self._sibling(rotate=None, merge_within=(budget, share))
+    try:
+      rebuilt.generate()
     except Exception as error:
       import warnings
       warnings.warn(
           f'merging the repeated runs failed ({type(error).__name__}: '
           f'{str(error)[:200]}); built written out instead',
-          MergeFallbackWarning, stacklevel=3)
-      return False
-    self._adopt(merged)
-    self._announce()
-    return True
+          MergeFallbackWarning, stacklevel=4)
+      return self._keep_written_out()
+    return self._take_over(rebuilt)
 
   def _announce(self) -> None:
     """Register the name of a build taken over from a sibling, which did
@@ -1386,6 +1471,7 @@ class Generator:
     self.peak_uniform_pressure = self._context.peak_uniform_pressure
     self.emitted_work = self._context.emitted_work
     self.code_units = self._context.code_units
+    self.written_code_units = self._context.written_code_units
     self.issue_mix = self._context.issue_mix
     self.memory_bytes = self._context.memory_bytes
     self._warn_icache()

@@ -219,6 +219,11 @@ class Emitter:
         #: (`_code_copies`).  Not `_work_scale`: a loop rolled by `k_roll` runs
         #: its count and is written once.
         self._code_scale = 1
+        #: The same, had every merged run been written out: a `rolled` loop
+        #: lays its body down once per trip and has no counter of its own.
+        #: What the merge decision weighs (`Generator._auto_merge`), read off
+        #: the build that merged everything it could.
+        self._written_scale = 1
         self._names: Dict[int, str] = {}
         self._consts: Dict[int, str] = {}
         self._async_lex = None
@@ -254,10 +259,13 @@ class Emitter:
         self._record_code_units(2 if op == Op.IF
                                 else _LOOP_OVERHEAD if op == Op.WHILE else 1)
 
-    def _record_code_units(self, units: int) -> None:
+    def _record_code_units(self, units: int, written: bool = True) -> None:
         record = getattr(self.context, 'record_code', None)
         if record is not None:
             record(units * self._code_scale)
+        record = getattr(self.context, 'record_written_code', None)
+        if record is not None and written:
+            record(units * self._written_scale)
 
     def _record_mix(self, s: Stmt) -> None:
         """What a statement occupies, and what it moves (`analysis.pipeline`).
@@ -1362,8 +1370,9 @@ class Emitter:
         trips = len(range(lo, hi, step)) if constant else 1
         scale, self._work_scale = self._work_scale, self._work_scale * trips
         copies = _code_copies(s.attr('unroll'), trips if constant else None)
+        rolled = bool(constant and s.attr('rolled'))
         if not constant or copies < trips:
-            self._record_code_units(_LOOP_OVERHEAD)
+            self._record_code_units(_LOOP_OVERHEAD, written=not rolled)
             # the counter and the test, then the branch, once per iteration
             # that is not unrolled away
             mix = getattr(self.context, 'record_mix', None)
@@ -1372,12 +1381,15 @@ class Emitter:
                 mix('int', 2 * runs, 2 * self._code_scale)
                 mix('branch', runs, self._code_scale)
         code_scale, self._code_scale = self._code_scale, self._code_scale * copies
+        written_scale, self._written_scale = (
+            self._written_scale, self._written_scale * (trips if rolled else copies))
         try:
             with w.For(head, unroll=s.attr('unroll') or False):
                 self._emit_body(s.regions[0].body, tuple(targets))
         finally:
             self._work_scale = scale
             self._code_scale = code_scale
+            self._written_scale = written_scale
 
     def _emit_while(self, s: Stmt) -> None:
         """`Ty i = init; while (true) { ... i = next; }`.

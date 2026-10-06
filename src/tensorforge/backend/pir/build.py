@@ -1501,7 +1501,8 @@ class IRBuilder:
              inits: Sequence[Operand] = (), types: Sequence[Any] = (),
              unroll: bool = False, hint: str = 'i', extern: str = None,
              next_index=None, peel_index=None,
-             uniform=Uniformity.GRID, index_type=None) -> '_ForHandle':
+             uniform=Uniformity.GRID, index_type=None,
+             rolled: bool = False) -> '_ForHandle':
         """A loop.  ``extern`` is for loops the macro layer owns.
 
         An inner loop is the IR's own and picks its induction variable's name.
@@ -1523,10 +1524,15 @@ class IRBuilder:
         different elements.  Entering the body is agreed no further than the
         variable that decides it, so this is what bounds the barriers legal
         inside.
+
+        `rolled` says the loop stands for repeated code that could have been
+        written out instead -- a merged run -- so a count of the code it would
+        take written out (`Emitter`, `written_code`) lays its body down once
+        per trip.
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
                           unroll, hint, extern, next_index, peel_index,
-                          uniform, index_type)
+                          uniform, index_type, rolled)
 
     def while_(self, init: Operand, hint: str = 'i', extern: str = None,
                uniform=Uniformity.GRID,
@@ -2106,10 +2112,11 @@ class _RawBlock:
 class _ForHandle:
     def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
                  extern=None, next_index=None, peel_index=None,
-                 uniform=Uniformity.GRID, index_type=None):
+                 uniform=Uniformity.GRID, index_type=None, rolled=False):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
         self._extern = extern
+        self._rolled = rolled
         # What this loop calls the *next* element.  A clamped successor index
         # is a property of the traversal, which the loop knows and the IR does
         # not, so `wrap_prefetch` reads it here rather than deriving it.
@@ -2181,6 +2188,8 @@ class _ForHandle:
             attrs = attrs + (('next', self._next_index),)
         if self._peel_index is not None:
             attrs = attrs + (('first', self._peel_index),)
+        if self._rolled:
+            attrs = attrs + (('rolled', True),)
         self.builder.emit(Stmt(op=Op.FOR, target=self.results, args=self._args,
                                regions=(region,), pure=False, movable=False,
                                attrs=attrs))

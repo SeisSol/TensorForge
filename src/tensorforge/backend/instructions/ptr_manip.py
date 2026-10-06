@@ -818,7 +818,7 @@ class VariantLoop(AbstractInstruction):
       # pinned is all it is.  Publishing a value for the counter is only worth
       # doing together with the readers that would take it.
       with writer.for_(self._start, self._count, 1, extern=self._counter,
-                       unroll=self._unroll) as loop:
+                       unroll=self._unroll, rolled=True) as loop:
         # The counter as a value, so that a table access reading it carries an
         # edge back to the loop. Named in the text alone it would read as
         # invariant, and `licm` would move the access ahead of the header.

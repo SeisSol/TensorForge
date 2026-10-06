@@ -74,6 +74,9 @@ class Context:
     #: (`record_code`).
     self.code_units: Optional[int] = None
 
+    #: The same, had every merged run been written out (`record_written_code`).
+    self.written_code_units: Optional[int] = None
+
     #: What the instructions occupy, by category (`record_mix`): category ->
     #: [issued per element and lane, copies in the code], or None.
     self.issue_mix: Optional[dict] = None
@@ -114,6 +117,7 @@ class Context:
     self.peak_uniform_pressure = None
     self.emitted_work = None
     self.code_units = None
+    self.written_code_units = None
     self.issue_mix = None
     self.memory_bytes = None
     self.hot_profile = None
@@ -156,6 +160,12 @@ class Context:
     calculation occupies the cache as much as an FMA does.
     """
     self.code_units = (self.code_units or 0) + value
+
+  def record_written_code(self, value: int = 1) -> None:
+    """Count what `record_code` counts, as a build that wrote every merged run
+    out would lay it down: a rolled loop's body once per trip, and no counter
+    for it.  A build that merged nothing counts the same as `record_code`."""
+    self.written_code_units = (self.written_code_units or 0) + value
 
   def record_mix(self, category: str, issued: int, copies: int) -> None:
     """Count one statement by what it occupies (`analysis.pipeline`).

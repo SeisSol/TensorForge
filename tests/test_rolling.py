@@ -962,15 +962,8 @@ def test_auto_merges_nothing_where_the_cache_is_unknown():
                                     merge_icache_fraction=1e-6))
 
 
-def test_a_kernel_that_fits_is_built_once(monkeypatch):
-    """The probe that finds the written-out kernel fits has built it.
-
-    Taken over, the list is built once instead of twice -- and what is taken
-    over is what building it again gives, which a generator that still has
-    the rotation question to ask does."""
-    from tensorforge.common.context import Context
+def _counting_builds(monkeypatch):
     from tensorforge.generators.generator import Generator
-
     builds = []
     real = Generator._generate_bound
 
@@ -979,16 +972,99 @@ def test_a_kernel_that_fits_is_built_once(monkeypatch):
         return real(self)
 
     monkeypatch.setattr(Generator, '_generate_bound', counting)
-    taken = _with_option(_flux())
-    assert not _merged(taken)
+    return builds
+
+
+def _unnamed(gen):
+    """The kernel, without what differs only by how it was asked for: the
+    options line and the name derived from the whole text."""
+    import re
+    return re.sub(r'kernel_[0-9a-f]{16}|// options:.*', '', gen.get_kernel())
+
+
+# On sm_86 the four contributions lay down 6467 B written out, 3790 B merged,
+# and the merged build bounds the written-out size from above at 7251 B --
+# so a fraction of the 128 KB cache puts the budget on either side of each.
+BETWEEN_AND_FITS = 0.052        # 6816 B
+BETWEEN_AND_OVER = 0.040        # 5243 B
+
+
+def test_a_kernel_under_the_upper_bound_is_built_as_given(monkeypatch):
+    """The probe merges everything, and the size it bounds from above fits:
+    the list is built as given, once more."""
+    builds = _counting_builds(monkeypatch)
+    gen = _with_option(_flux())
+    assert not _merged(gen)
+    assert len(builds) == 2
+    assert _unnamed(gen) == _unnamed(_with_option(_flux(),
+                                                  merge_variants=False))
+
+
+def _flux_through_scratch(count=4):
+    """Each contribution through a temporary of its own, read in the same
+    iteration -- scratch, which the merged run holds once -- and a temporary
+    after the run, which the two lists therefore number differently."""
+    out = []
+    for i in range(count):
+        scratch = make(f'scratch{i}', [9, 4], is_tmp=True)
+        out.append(gemm(make(f'fPrT{i}', [9, 9]), make('I', [9, 4]), scratch))
+        out.append(gemm(make('W', [9, 9]), scratch, make('Q', [9, 4]),
+                        add=(i > 0)))
+    after = make('after', [9, 4], is_tmp=True)
+    out.append(gemm(make('C', [9, 9]), make('Q', [9, 4]), after))
+    out.append(gemm(make('D', [9, 9]), after, make('R', [9, 4])))
+    return out
+
+
+def test_the_list_built_after_a_probe_is_named_as_given():
+    """The probes build on the caller's tensors, and a merged probe numbers
+    the temporaries of a shorter list: what is built written out afterwards
+    is named for its own list, as a build without a probe names it."""
+    gen = _with_option(_flux_through_scratch())
+    assert not _merged(gen)
+    plain = _with_option(_flux_through_scratch(), merge_variants=False)
+    assert _unnamed(gen) == _unnamed(plain)
+
+
+def test_a_kernel_over_the_lower_bound_is_the_probe(monkeypatch):
+    """What the merged probe laid down is already over, and every run is
+    needed: the probe is the build."""
+    builds = _counting_builds(monkeypatch)
+    gen = _with_option(_flux(), merge_icache_fraction=1e-6)
+    assert _merged(gen)
     assert len(builds) == 1
 
+
+@pytest.mark.parametrize('fraction,merged', [(BETWEEN_AND_FITS, False),
+                                             (BETWEEN_AND_OVER, True)])
+def test_between_the_bounds_the_written_out_size_decides(fraction, merged,
+                                                         monkeypatch):
+    """Between the bounds only the list written out says, so it is built --
+    and then one of the two probes is the kernel, whichever side it fell."""
+    builds = _counting_builds(monkeypatch)
+    gen = _with_option(_flux(), merge_icache_fraction=fraction)
+    assert _merged(gen) == merged
+    assert len(builds) == 2
+    assert _unnamed(gen) == _unnamed(_with_option(_flux(),
+                                                  merge_variants=merged))
+
+
+def test_a_written_out_probe_is_taken_over_only_where_it_is_the_build(
+        monkeypatch):
+    """What is taken over is what building it again gives, which a generator
+    that still has the rotation question to ask does not get from a probe."""
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+
+    builds = _counting_builds(monkeypatch)
+    taken = _with_option(_flux(), merge_icache_fraction=BETWEEN_AND_FITS)
     builds.clear()
-    again = Generator(_flux(), Context(arch='sm_86', backend='cuda',
-                                       fp_type=DTYPE))
+    again = Generator(_flux(), Context(
+        arch='sm_86', backend='cuda', fp_type=DTYPE,
+        options=Options(merge_icache_fraction=BETWEEN_AND_FITS)))
     again._rotate = set()          # a question left: the probe is not taken
     again.generate()
-    assert len(builds) == 2
+    assert len(builds) == 3
     assert again.get_kernel() == taken.get_kernel()
 
 

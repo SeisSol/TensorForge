@@ -607,6 +607,27 @@ GROUPS = {
              '          if False:\n            raise InternalError(')),
     ]),
 
+    # The merge decision, from the bounds the merged probe puts on the size
+    # written out.
+    'mergebounds': ('tests/test_rolling.py', [
+        ('the lower bound taken for the upper',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             'below is None or above <= budget\n',
+             'below is None or below <= budget\n')),
+        ('the band decided without building the list written out',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '    return self._merge_by_written_out(merged=probe)',
+             '    return False')),
+        ('a merged run counted once for the size written out',
+         sub(EMIT,
+             'self._written_scale * (trips if rolled else copies))',
+             'self._written_scale * copies)')),
+        ('the list built after a probe keeps the probe\'s names',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '    self._name_operands(self.descr_list)\n    return False',
+             '    return False')),
+    ]),
+
     # A section is one body, and its traversal's indices are values of it.
     'sectionbody': ('tests/test_section_body.py', [
         ('the traversal indices left unpublished',
