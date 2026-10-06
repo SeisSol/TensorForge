@@ -29,7 +29,7 @@ from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAl
 from tensorforge.backend.instructions.control.conditional import GuardedRegion
 from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
 from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
-from tensorforge.backend.writer import Writer
+from tensorforge.backend.writer import VarAlloc, Writer
 from tensorforge.common.exceptions import GenerationError, InternalError
 from contextlib import contextmanager
 
@@ -205,6 +205,9 @@ class Section:
     #: The block-wide copies of merged runs' members (`stage_members`), which
     #: take their buffers from the same arena, after the images.
     self.stage_loaders: List[AbstractInstruction] = []
+    #: The section as one PIR body, built and optimized, and not yet written:
+    #: what the launch is decided from and the kernel emitted from.
+    self.body = None
 
 class _GuardGrouping:
   """Collects the instructions of neighboring operations under one guard.
@@ -964,6 +967,10 @@ class Generator:
                           self.descr_list)
 
   def _generate_bound(self):
+    # One allocator for every value name the kernel's bodies hand out, made
+    # before the first body is built: the names are unique per file, and the
+    # bodies are built section by section well before the writer exists.
+    self._names = VarAlloc()
     descrlist = []
     currlist = []
     barrier = []
@@ -1081,6 +1088,8 @@ class Generator:
                 f' B for the whole block), and a block on this device has '
                 f'{cap} B')
           self._set_threadconfig()
+          self._section.body = self._build_section(len(self._sections),
+                                                   self._section)
           break
         # The preloaded operators left no room for one multiplication: the
         # check that admitted them compares against the block's limit before
@@ -1323,6 +1332,25 @@ class Generator:
       else:
         writer(line)
 
+  def _build_section(self, index: int, section):
+    """Section `index` as one optimized body, checked first.
+
+    Everything it depends on is in place by now -- offsets from `ShrMemOpt`,
+    the arena size and the block from the thread-block policy -- so this is
+    where the full check is meaningful.  Testing one instruction at a time and
+    aborting at the first unprepared one would hide every other problem
+    behind it.
+    """
+    self._set_mult_stride(section)
+    self._verify_section(section.stream, index)
+    # The tail ShrMemOpt reserved, for whichever instruction of the section
+    # allocates in it; the members run in sequence and reuse it.
+    scratch = max((instr.temp_shmem() for instr in section.stream), default=0)
+    return AbstractInstruction.optimized_body(
+        self._context, self._names,
+        lambda body: self._emit_section(body, index, section),
+        scratch=scratch)
+
   def _emit_section(self, body, index: int, section) -> None:
     """One section, as one body: the arena and its windows, the operators
     preloaded into it, and the traversal of the elements.
@@ -1434,6 +1462,9 @@ class Generator:
   def _generate_kernel(self):
 
     writer = Writer()
+    # The allocator the bodies were named from, so that what is written is
+    # what was built.
+    writer.alloc = self._names
     # Ahead of the signature that names them, and ahead of the launcher that
     # builds one: both sit in this translation unit, and the kernel comes
     # first in it.
@@ -1447,23 +1478,10 @@ class Generator:
       writer('using namespace tensorforge::literals;')
       self._write_kernel_meta_data(writer)
 
-      for i, section in enumerate(self._sections):
+      for section in self._sections:
         with writer.AnonymousScope():
-          # Everything is in place now (offsets from ShrMemOpt, arena size from
-          # the thread-block policy), so this is the point where the full check
-          # is meaningful.  Testing one instruction at a time and aborting at
-          # the first unprepared one would hide every other problem behind it.
-          self._set_mult_stride(section)
-          self._verify_section(section.stream, i)
-          # The tail ShrMemOpt reserved, for whichever instruction of the
-          # section allocates in it; the members run in sequence and reuse it.
-          scratch = max((instr.temp_shmem() for instr in section.stream),
-                        default=0)
-          AbstractInstruction.build_shared_body(
-              self._context, writer,
-              lambda body, i=i, section=section: self._emit_section(
-                  body, i, section),
-              scratch=scratch)
+          AbstractInstruction._emit_shared_body(self._context, writer,
+                                                section.body)
 
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure

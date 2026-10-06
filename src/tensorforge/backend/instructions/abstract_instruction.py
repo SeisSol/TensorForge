@@ -396,7 +396,8 @@ class AbstractInstruction(ABC):
     assumption is what breaks, and it breaks loudly: the scope's high-water
     mark is checked against the budget.
     """
-    builder = cls._body_builder(context, writer, scratch)
+    builder = cls._body_builder(context, getattr(writer, 'alloc', None),
+                                scratch)
     cls._shared_body.append(builder)
     try:
       yield builder
@@ -415,8 +416,21 @@ class AbstractInstruction(ABC):
     (`_fused_if_over_budget`).  Everything after the build is the same as for
     the context manager.
     """
+    cls._emit_shared_body(context, writer, cls.optimized_body(
+        context, getattr(writer, 'alloc', None), fill, scratch))
+
+  @classmethod
+  def optimized_body(cls, context, names, fill, scratch: int = 0):
+    """`fill(builder)` as one body, through the pipeline, ready to emit.
+
+    The half of `build_shared_body` that needs no writer: `names` is the
+    allocator the values are named from, which has to be the one the body is
+    emitted with, since a name is unique per file and not per body.  Built
+    ahead of the writer, a body is a fact the generator can decide the launch
+    from before anything is written.
+    """
     def attempt():
-      builder = cls._body_builder(context, writer, scratch)
+      builder = cls._body_builder(context, names, scratch)
       cls._shared_body.append(builder)
       try:
         fill(builder)
@@ -426,12 +440,12 @@ class AbstractInstruction(ABC):
     _, body = _fused_if_over_budget(
         context, attempt,
         lambda builder, body: cls._optimize_shared_body(context, builder, body))
-    cls._emit_shared_body(context, writer, body)
+    return body
 
   @staticmethod
-  def _body_builder(context, writer, scratch):
+  def _body_builder(context, names, scratch):
     return pir.IRBuilder(fptype=context.fp_type, context=context,
-                         alloc=getattr(writer, 'alloc', None),
+                         alloc=names,
                          scratch=(('tempShrMem', scratch) if scratch
                                   else None))
 
