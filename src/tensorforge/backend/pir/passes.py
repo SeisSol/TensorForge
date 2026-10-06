@@ -23,7 +23,7 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
                    def_use, walk_stmts, Uniformity)
-from .asyncmem import check_commits, check_tokens, schedule_async
+from .asyncmem import check_commits, check_tokens
 
 
 # --------------------------------------------------------------------------- #
@@ -2136,71 +2136,3 @@ def cluster_loads(body: Tuple[Stmt, ...], max_pressure: int = 32,
     if moved and pressure(tuple(out)) > max_pressure:
         return tuple(original)
     return tuple(out)
-
-
-# --------------------------------------------------------------------------- #
-# Convenience pipeline
-# --------------------------------------------------------------------------- #
-
-def optimize(body: Tuple[Stmt, ...], dump_hook=None,
-             diagnostics: Optional[List[str]] = None,
-             explicit_simd: bool = False) -> Tuple[Stmt, ...]:
-    """The default pipeline.  ``dump_hook(name, body)`` sees every stage.
-
-    ``fold`` runs first: it turns expressions into constants and removes
-    identity operations, which gives ``cse`` more equal keys to merge and
-    ``licm`` fewer statements to consider.  It runs a second time after
-    ``licm``, because hoisting can bring two constants into the same scope.
-
-    ``load_cse`` runs after ``cse`` and before ``licm``: it removes the loads
-    that would otherwise be hoisting candidates, so ``licm`` sees fewer
-    statements.  It wants ``cse`` at its fixed point in front of it, since a
-    load is keyed on the *value* its address is, not on the expression that
-    spells it.  A second run after ``cse2`` finds 32 more loads out of ~2900
-    on ``local_flux`` at order 6, which does not pay for another sweep of the
-    whole body, so it is not in the pipeline.
-
-    `schedule.hoist_issues` and `schedule.sink_waits` are deliberately *not*
-    here.  Both are correct, and on the corpus they move nothing but comments
-    between them, on 15 of 232 outputs, and the mean issue-to-wait distance
-    goes 7.7 to 8.1 statements entirely through comments changing places.
-    The schedule the macro layer produces is already at the fixed point of
-    those two greedy moves --- the wait sits immediately before the read that
-    needs it, and the issue sits immediately after the pointer binding it
-    reads.
-
-    That is worth knowing rather than working around.  The distance that is
-    missing is not reachable by any local swap: more than half the transfers
-    have five statements or fewer of cover, and getting more means moving an
-    issue across the loop back edge, which is a different transformation with
-    a distance parameter and a prologue -- `wrap.wrap_prefetch`, which runs
-    after this pipeline where it is enabled, with `schedule_async` again after
-    it, since the wait counts describe the final issue order.
-
-    ``schedule_async`` runs last on purpose: the wait counts depend on the
-    final issue order, so anything that may still move statements has to have
-    happened already.
-    """
-    stages = (('flatten', flatten_scopes), ('converge', converge_crosslane),
-              ('fold', fold), ('cse', cse),
-              ('loads', load_cse), ('licm', licm),
-              ('fold2', fold), ('cse2', cse), ('dce', dce))
-    if explicit_simd:
-        # Not an optimization here.  A guard over a lane-varying condition is
-        # a mask in this model and there is no branch to lower it to, so the
-        # conversion is the only legal path rather than a trade of one shared
-        # brace for several.  It runs before `fold`, so that the predicates it
-        # attaches take part in the same simplification as everything else.
-        stages = (stages[0],
-                  ('if_convert',
-                   lambda b: if_convert(b, sink_into_loops=True))) + stages[1:]
-    for name, fn in stages:
-        body = fn(body)
-        if dump_hook is not None:
-            dump_hook(name, body)
-    body, diag = schedule_async(body)
-    if diagnostics is not None:
-        diagnostics.extend(diag)
-    if dump_hook is not None:
-        dump_hook('async', body)
-    return body

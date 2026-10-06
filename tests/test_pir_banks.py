@@ -183,7 +183,7 @@ def test_the_analysis_belongs_after_the_passes():
     make.  That is also where a pass acting on this would sit: after the
     passes that change what is there, before the emitter that fixes it.
     """
-    from tensorforge.backend.pir import passes
+    from tensorforge.backend import pir
 
     b = builder()
     tile = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
@@ -194,7 +194,7 @@ def test_the_analysis_belongs_after_the_passes():
     body = b.finish()
 
     before, _ = banks.analyze(body)
-    after, _ = banks.analyze(passes.optimize(body))
+    after, _ = banks.analyze(pir.optimize(body))
     assert len(before) == 2
     assert len(after) == 1, (
         'the dead load is still counted; the analysis has to run on the body '
@@ -222,8 +222,8 @@ def test_a_column_read_wants_the_wave_and_says_so():
     v = b.load(tile, idx, hint='v')
     b(f'use({v});', v, accesses=())
 
-    from tensorforge.backend.pir import passes
-    (current, scores), = banks.recommend(passes.optimize(b.finish())).values()
+    from tensorforge.backend import pir
+    (current, scores), = banks.recommend(pir.optimize(b.finish())).values()
     assert current == 8
     assert scores[8] > scores[32] == 1, scores
 
@@ -236,8 +236,8 @@ def test_a_width_that_is_already_right_is_not_second_guessed():
     v = b.load(tile, idx, hint='v')
     b(f'use({v});', v, accesses=())
 
-    from tensorforge.backend.pir import passes
-    (current, scores), = banks.recommend(passes.optimize(b.finish())).values()
+    from tensorforge.backend import pir
+    (current, scores), = banks.recommend(pir.optimize(b.finish())).values()
     assert current == 32 and scores[32] == min(scores.values()) == 1
 
 
@@ -263,8 +263,7 @@ def test_the_volume_rule_picks_the_width_the_pattern_wants():
     import importlib.util
 
     from tensorforge.backend.pir import banks
-    from tensorforge.backend.pir import passes as pir
-    import tensorforge.backend.instructions.abstract_instruction as absinstr
+    from tensorforge.backend import pir
     from tensorforge.common.basic_types import Datatype
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
@@ -294,7 +293,6 @@ def test_the_volume_rule_picks_the_width_the_pattern_wants():
                 return out
 
             pir.optimize = optimize
-            absinstr.pir.optimize = optimize
             try:
                 gen = Generator(module.descr_list(), Context(
                     arch=arch, backend=backend,
@@ -304,7 +302,6 @@ def test_the_volume_rule_picks_the_width_the_pattern_wants():
                 continue
             finally:
                 pir.optimize = original
-                absinstr.pir.optimize = original
 
             for body in bodies:
                 for buf, (current, scores) in banks.recommend(body).items():

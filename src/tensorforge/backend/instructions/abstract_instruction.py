@@ -97,9 +97,9 @@ def _check_register_budget(body, simd: bool, context, where: str) -> None:
 FIT_FRACTION = 0.85
 
 
-def _fused_if_over_budget(context, attempt):
-  """`attempt()`, and once more with fused broadcasts if the first one does
-  not fit.
+def _fused_if_over_budget(context, attempt, finish):
+  """`attempt()`, finished, and once more with fused broadcasts if the first
+  one does not fit.
 
   A materialized broadcast -- one DPP move whose result several plain FMAs
   read, the arrangement VOPD and packed math want -- keeps every moved value
@@ -111,25 +111,30 @@ def _fused_if_over_budget(context, attempt):
   the question is asked of the body instead: built, measured, and built again
   with the broadcast fused if a materialized one took it over the budget.
 
+  `finish(builder, body)` is what the caller does to a built body before
+  emitting it -- the pipeline -- and the measurement is taken of its result:
+  that is the body emitted where it fits, so nothing is finished twice.
+
   Not under an explicit vector, where `pir.pressure` still counts arrays whole
   and so would push every body back; and nothing happens where the target
   states no budget or no broadcast was materialized.
   """
   context.materialized_broadcast = False
   builder, body = attempt()
+  body = finish(builder, body)
   if not getattr(context, 'materialized_broadcast', False):
     return builder, body
   simd = _explicit_simd(context)
   budget = getattr(context.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
   if simd or budget is None:
     return builder, body
-  used = pir.pressure(pir.optimize(body, explicit_simd=simd), in_bytes=True,
-                      explicit_simd=simd)
+  used = pir.pressure(body, in_bytes=True, explicit_simd=simd)
   if used <= FIT_FRACTION * budget:
     return builder, body
   context.force_fused_broadcast = True
   try:
-    return attempt()
+    builder, body = attempt()
+    return builder, finish(builder, body)
   finally:
     context.force_fused_broadcast = False
     context.materialized_broadcast = False
@@ -397,7 +402,8 @@ class AbstractInstruction(ABC):
       yield builder
     finally:
       cls._shared_body.pop()
-    cls._finish_shared_body(context, writer, builder, builder.finish())
+    cls._emit_shared_body(context, writer, cls._optimize_shared_body(
+        context, builder, builder.finish()))
 
   @classmethod
   def build_shared_body(cls, context, writer, fill, scratch: int = 0) -> None:
@@ -417,8 +423,10 @@ class AbstractInstruction(ABC):
       finally:
         cls._shared_body.pop()
       return builder, builder.finish()
-    builder, body = _fused_if_over_budget(context, attempt)
-    cls._finish_shared_body(context, writer, builder, body)
+    _, body = _fused_if_over_budget(
+        context, attempt,
+        lambda builder, body: cls._optimize_shared_body(context, builder, body))
+    cls._emit_shared_body(context, writer, body)
 
   @staticmethod
   def _body_builder(context, writer, scratch):
@@ -428,34 +436,38 @@ class AbstractInstruction(ABC):
                                   else None))
 
   @staticmethod
-  def _finish_shared_body(context, writer, builder, body) -> None:
-    if context.get_user_options().ir_debug:
-      for d in pir.verify(body, strict=False):
-        print(f'pir: {d}')
-    body = pir.optimize(body, explicit_simd=_explicit_simd(context))
-    _check_register_budget(body, _explicit_simd(context), context,
-                           'shared body')
-    if getattr(context.get_user_options(), 'enable_wrap_loads', False):
-      # After `optimize`, not before.  The transfers sit inside the anonymous
-      # scopes the loaders open, and `flatten_scopes` is what removes them --
-      # run first, the pass would look at a body whose every transfer is
-      # still two rawblocks deep and report that it found none.
-      #
-      # Before `schedule_async`, because moving an issue across the back edge
-      # changes what is outstanding at every wait, and those counts describe
-      # the final order.
+  def _optimize_shared_body(context, builder, body):
+    """A shared body through the pipeline, with the prefetch pass where it
+    is asked for.
+
+    The prefetch pass goes behind the cleanup and ahead of the scheduler
+    (`pir.standard_pipeline`), and the values it mints come from the builder
+    that built this body.  The pass is the context's stand-in where the
+    rotation query has installed one, so that it sees this build and nothing
+    else in the process.
+    """
+    options = context.get_user_options()
+    prefetch = None
+    declined: list = []
+    if getattr(options, 'enable_wrap_loads', False):
       from tensorforge.backend.pir.wrap import wrap_prefetch
-      wrap = getattr(context, 'wrap_pass', None) or wrap_prefetch
-      why: list = []
-      body = wrap(
-          body,
+      prefetch = pir.WrapPrefetch(
+          getattr(context, 'wrap_pass', None) or wrap_prefetch,
           lambda ty, hint, quals=(): builder.value(ty, hint=hint,
                                                    quals=quals),
-          report=why)
-      body, _ = pir.schedule_async(body)
-      if context.get_user_options().ir_debug:
-        for w in why:
-          print(f'wrap: declined -- {w}')
+          report=declined)
+    body = pir.optimize(body, explicit_simd=_explicit_simd(context),
+                        debug=options.ir_debug, prefetch=prefetch,
+                        where='shared body')
+    if options.ir_debug:
+      for why in declined:
+        print(f'wrap: declined -- {why}')
+    return body
+
+  @staticmethod
+  def _emit_shared_body(context, writer, body) -> None:
+    _check_register_budget(body, _explicit_simd(context), context,
+                           'shared body')
     if getattr(context, 'measure_pressure', False):
       _record_pressure(context, body, _explicit_simd(context))
     pir.emit(body, writer, context)
@@ -486,6 +498,8 @@ class AbstractInstruction(ABC):
     # it rather than in an array of its own.  `temp_shmem()` is 0 for almost
     # everything, and 0 correctly means "this body may not allocate".
     budget = self.temp_shmem()
+    simd = _explicit_simd(self._context)
+    debug = self._context.get_user_options().ir_debug
     def attempt():
       builder = pir.IRBuilder(fptype=self._context.fp_type,
                               context=self._context,
@@ -494,17 +508,12 @@ class AbstractInstruction(ABC):
                                        else None))
       build(builder)
       return builder, builder.finish()
-    builder, body = _fused_if_over_budget(self._context, attempt)
+    _, body = _fused_if_over_budget(
+        self._context, attempt,
+        lambda _builder, body: pir.optimize(body, explicit_simd=simd,
+                                            debug=debug,
+                                            where=type(self).__name__))
 
-    if self._context.get_user_options().ir_debug:
-      diag = pir.verify(body, strict=False)
-      if diag:
-        print(f'pir diagnostics in {type(self).__name__}:')
-        for d in diag:
-          print(f'  {d}')
-
-    simd = _explicit_simd(self._context)
-    body = pir.optimize(body, explicit_simd=simd)
     self._check_register_budget(body, simd)
     # Reported here because this is where the body exists: it is discarded
     # after `emit`, so anything wanting a number about it has to take it now.

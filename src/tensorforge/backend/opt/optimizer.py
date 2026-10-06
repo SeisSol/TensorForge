@@ -14,9 +14,10 @@ from tensorforge.common.context import Context
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
 from tensorforge.backend.data_types import ShrMemObject
 
+from tensorforge.backend.passmanager import Pass, PassManager, PassScope
+
 from .liveness import LivenessAnalysis
-from .manager import (Analysis, Pass, PassContext, PassManager, PassScope,
-                      Transform)
+from .manager import Analysis, StreamContext, Transform
 from .mem_region_allocation import MemoryRegionAllocation
 from .memmove import MoveLoads
 from .pipeline import Pipeline
@@ -37,12 +38,12 @@ class OptimizationStage:
     self._context = context
     self._instrs: List[AbstractInstruction] = list(instructions)
     self._user_options = context.get_user_options()
-    self._pc = PassContext(context,
-                           self._instrs,
-                           shr_mem=shr_mem,
-                           num_threads=num_threads,
-                           scopes=scopes,
-                           global_ir=global_ir)
+    self._pc = StreamContext(context,
+                             self._instrs,
+                             shr_mem=shr_mem,
+                             num_threads=num_threads,
+                             scopes=scopes,
+                             global_ir=global_ir)
     self._manager = self._build_pipeline()
 
   # ------------------------------------------------------------------ #
@@ -176,7 +177,7 @@ class _AssignShrMemOffsets(Pass):
   preserves = ('live_map', 'regions')
   is_transform = True
 
-  def run(self, pc: PassContext) -> None:
+  def run(self, pc: StreamContext) -> None:
     fp_size = pc.context.fp_type.size()
     alignment = 16 // fp_size
     overhead = pc.num_threads % pc.context.get_vm().get_hw_descr().shmem_banks
@@ -204,7 +205,7 @@ def _enclosing_loop(pc):
   """`'batch'` or `'variant'` where the block a per-region pass was just
   handed is the body of a batch loop or of a merged run's loop, else None.
 
-  `PassManager._run_per_region` keeps the enclosing constructs in
+  `StreamContext.run_per_region` keeps the enclosing constructs in
   `pc.extra['enclosing']`; the top level has none.  A merged run's body runs
   again after its last instruction like a batch loop's, and unlike one it has
   no barrier appended behind it.

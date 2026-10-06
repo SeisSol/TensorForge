@@ -141,10 +141,10 @@ GROUPS = {
              '                if candidate > 1:',
              '                if False:', 1)),
         ('a dead access counted as one the hardware makes',
-         sub(Path('src/tensorforge/backend/pir/passes.py'),
-             'def optimize(body: Tuple[Stmt, ...], dump_hook=None,',
+         sub(Path('src/tensorforge/backend/pir/pipeline.py'),
+             'def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,',
              'def optimize(body, *_a, **_k):\n    return body\n\n\n'
-             'def _optimize(body: Tuple[Stmt, ...], dump_hook=None,', 1)),
+             'def _optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,', 1)),
         ('guards ignored, so inactive lanes count',
          sub(Path('src/tensorforge/backend/pir/banks.py'),
              '        if parent.op is not Op.IF:\n            continue',
@@ -164,6 +164,35 @@ GROUPS = {
         ('an unreadable address counted rather than refused',
          sub(Path('src/tensorforge/backend/pir/banks.py'), '                unresolved += 1\n                continue',
              '                continue', 1)),
+    ]),
+
+    # The passes over a body, as a pipeline the pass manager runs.
+    'pipeline': ('tests/test_pass_pipeline.py', [
+        ('a requirement nobody provides, registered anyway',
+         sub(Path('src/tensorforge/backend/passmanager.py'),
+             '        missing = [r for r in p.requires if r not in available]\n'
+             '        if missing:',
+             '        missing = [r for r in p.requires if r not in available]\n'
+             '        if False:')),
+        ('a transform that keeps every fact',
+         sub(Path('src/tensorforge/backend/passmanager.py'),
+             '            if p.is_transform:\n',
+             '            if False:\n')),
+        ('a pipeline whose result is not checked for what it delivers',
+         sub(Path('src/tensorforge/backend/passmanager.py'),
+             '        missing = [r for r in self._delivers if not pc.has(r)]',
+             '        missing = []')),
+        ('a finding reported without the pass that introduced it',
+         sub(Path('src/tensorforge/backend/pir/pipeline.py'),
+             "else f'after {stage}: {finding}'",
+             "else finding")),
+        ('a body finished again to be measured',
+         sub(ABSTR,
+             '  used = pir.pressure(body, in_bytes=True, explicit_simd=simd)\n'
+             '  if used <= FIT_FRACTION * budget:',
+             '  used = pir.pressure(finish(builder, body), in_bytes=True,\n'
+             '                      explicit_simd=simd)\n'
+             '  if used <= FIT_FRACTION * budget:')),
     ]),
 
     'dryrun': ('tests/test_tools.py::test_every_mutation_still_applies', [

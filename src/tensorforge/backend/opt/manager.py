@@ -2,45 +2,30 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Pass manager for the macro instruction stream.
+"""The macro instruction stream as something `PassManager` runs passes over.
 
-Three things are explicit here:
-
-*Analyses vs. transforms.*  An analysis derives a fact and stores it under a
-name; a transform rewrites the stream.  A transform invalidates every
-analysis unless it declares otherwise, so a stale ``live_map`` cannot be
-read by accident -- which matters because ``live_map`` is keyed by
-*instruction index*, and any transform that inserts or removes an instruction
-silently reinterprets every key.
-
-*Declared dependencies.*  A pass names the analyses it consumes; the manager
-schedules them, re-running an analysis whose result was invalidated.  A
-missing dependency is an error at registration, not an ``AttributeError``
-halfway through code generation.
-
-*Verification between passes.*  ``verify`` runs after every pass under
-``TF_IR_DEBUG``, so a diagnostic names the pass that introduced it.
+The manager itself is IR-agnostic (`backend.passmanager`).  What is specific
+to this level lives here: the stream and the prologue it may read but not
+rewrite, the shared-memory object the allocation passes fill in, the
+per-region dispatch over instruction regions, the macro verifier between
+passes, and the adapters that turn an optimization stage into a pass.
 """
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
+from tensorforge.backend.passmanager import Pass, PassContext, PassScope
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import GenerationError
 
 from .inspect import dump, format_diagnostics, verify
 
 
-class PassContext:
-    """Everything a pass may read, plus the analysis cache.
-
-    Passes reach for named analyses instead of being handed positional
-    arguments, which would let ``live_map`` and ``regions`` drift apart from
-    the stream they describe.
-    """
+class StreamContext(PassContext):
+    """Everything a pass over the macro stream may read, plus the analysis
+    cache."""
 
     def __init__(self,
                  context: Context,
@@ -51,6 +36,7 @@ class PassContext:
                  scopes=None,
                  global_ir: Optional[Sequence[AbstractInstruction]] = None,
                  extra: Optional[Dict[str, Any]] = None):
+        super().__init__(extra)
         self.context = context
         self.instrs = instrs
         self.shr_mem = shr_mem
@@ -61,29 +47,6 @@ class PassContext:
         # undefined -- a preloaded shared-memory buffer, for one, would never
         # enter LivenessAnalysis.
         self.global_ir: List[AbstractInstruction] = list(global_ir or [])
-        self._analyses: Dict[str, Any] = {}
-        self.extra: Dict[str, Any] = dict(extra or {})
-
-    # -- analysis cache ---------------------------------------------------- #
-
-    def get(self, name: str) -> Any:
-        if name not in self._analyses:
-            raise GenerationError(
-                f'analysis {name!r} requested but not available; the pass '
-                f'should declare it in `requires`')
-        return self._analyses[name]
-
-    def has(self, name: str) -> bool:
-        return name in self._analyses
-
-    def put(self, name: str, value: Any) -> None:
-        self._analyses[name] = value
-
-    def invalidate(self, keep: Iterable[str] = ()) -> None:
-        keep = set(keep)
-        for name in list(self._analyses):
-            if name not in keep:
-                del self._analyses[name]
 
     @property
     def stream(self) -> List[AbstractInstruction]:
@@ -106,106 +69,9 @@ class PassContext:
         """
         return list(self.instrs)
 
-
-class PassScope(Enum):
-    """What an instruction stream means to a pass.
-
-    Since an instruction can carry a region, "the instruction list" is
-    ambiguous and the right reading differs per pass:
-
-    ``WHOLE_NEST``  the pass gets the top-level stream and walks regions itself.
-                    Correct for anything global: liveness needs the back edges,
-                    and shared-memory allocation sizes one arena for the whole
-                    kernel.
-
-    ``PER_REGION``  the manager invokes the pass once per region, innermost
-                    first, and substitutes the result.  Correct for anything
-                    that reasons within a straight-line block: instruction
-                    scheduling, and barrier insertion, where "the previous
-                    write" must not be read across a loop boundary.
-
-    Getting this wrong is not a performance question.  A scheduler handed a
-    whole nest would move a load across a loop boundary; a liveness handed one
-    region at a time cannot see a value carried across the back edge.
-    """
-
-    WHOLE_NEST = 'whole_nest'
-    PER_REGION = 'per_region'
-
-
-class Pass:
-    """Base class.
-
-    ``name``       identifier used in dependency lists and logs
-    ``requires``   analyses this pass reads
-    ``provides``   analyses this pass writes (analyses only)
-    ``preserves``  analyses that survive this pass (transforms only)
-    ``scope``      see :class:`PassScope`
-    """
-
-    name: str = ''
-    requires: Sequence[str] = ()
-    provides: Sequence[str] = ()
-    preserves: Sequence[str] = ()
-    is_transform: bool = False
-    scope: PassScope = PassScope.WHOLE_NEST
-
-    def enabled(self, pc: PassContext) -> bool:
-        return True
-
-    def run(self, pc: PassContext) -> None:
-        """Whole-nest entry point."""
-        raise NotImplementedError
-
-    def run_region(self, instrs: List[AbstractInstruction],
-                   pc: PassContext) -> List[AbstractInstruction]:
-        """Per-region entry point: rewrite one straight-line block."""
-        raise NotImplementedError
-
-
-class PassManager:
-    def __init__(self, debug: str = ''):
-        self._passes: List[Pass] = []
-        #: What the `ir_debug` option said, passed in rather than read here:
-        #: a pipeline is built per generation and the options belong to the
-        #: context that asked for it.
-        self._debug = debug
-
-    def add(self, p: Pass) -> 'PassManager':
-        available: Set[str] = set()
-        for earlier in self._passes:
-            available.update(earlier.provides)
-        missing = [r for r in p.requires if r not in available]
-        if missing:
-            raise GenerationError(
-                f'pass {p.name!r} requires {missing} but no earlier pass '
-                f'provides it; registered so far: '
-                f'{[q.name for q in self._passes]}')
-        self._passes.append(p)
-        return self
-
-    def run(self, pc: PassContext) -> None:
-        self._check(pc, 'build', offsets=False)
-        for p in self._passes:
-            if not p.enabled(pc):
-                continue
-            missing = [r for r in p.requires if not pc.has(r)]
-            if missing:
-                raise GenerationError(
-                    f'pass {p.name!r} needs {missing}, invalidated by an '
-                    f'earlier transform and not recomputed')
-            if p.scope is PassScope.PER_REGION:
-                self._run_per_region(p, pc)
-            else:
-                p.run(pc)
-            if p.is_transform:
-                pc.invalidate(keep=p.preserves)
-            self._check(pc, p.name, offsets=pc.extra.get('offsets_assigned', False))
-
     # -- per-region dispatch ---------------------------------------------- #
 
-    @staticmethod
-    def _run_per_region(p: Pass, pc: PassContext) -> None:
+    def run_per_region(self, p: Pass) -> None:
         """Invoke ``p`` on every region, innermost first, then the top level.
 
         Innermost first so that a pass which inspects an instruction's regions
@@ -221,7 +87,7 @@ class PassManager:
         # of a loop body is read at its head, one iteration later, and a pass
         # that cannot tell a body from the top level cannot put the barrier
         # between the two.
-        enclosing = pc.extra.setdefault('enclosing', [])
+        enclosing = self.extra.setdefault('enclosing', [])
 
         def visit(instrs: List[AbstractInstruction]) -> List[AbstractInstruction]:
             for instr in instrs:
@@ -231,30 +97,30 @@ class PassManager:
                         instr.replace_region(index, visit(list(region)))
                     finally:
                         enclosing.pop()
-            return list(p.run_region(instrs, pc))
+            return list(p.run_region(instrs, self))
 
-        pc.instrs[:] = visit(pc.instrs)
+        self.instrs[:] = visit(self.instrs)
 
     # -- verification ------------------------------------------------------ #
 
-    def _check(self, pc: PassContext, stage: str, offsets: bool) -> None:
-        if not self._debug:
-            return
-        stream = pc.stream
-        if 'dump' in self._debug:
+    def check(self, stage: str, debug: str) -> None:
+        stream = self.stream
+        if 'dump' in debug:
             print(dump(stream, title=f'after {stage}'))
         predefined = []
-        if pc.scopes is not None:
-            predefined += list(pc.scopes.get_global_scope().values())
-        for instr in pc.global_ir:
+        if self.scopes is not None:
+            predefined += list(self.scopes.get_global_scope().values())
+        for instr in self.global_ir:
             predefined += list(instr.defs())
         diags = verify(stream,
                        predefined=predefined,
-                       check_offsets=offsets,
+                       # from `ShrMemOpt` on, every shared-memory writer has
+                       # an offset, so buffer aliasing can be checked
+                       check_offsets=self.extra.get('offsets_assigned', False),
                        # readiness needs the thread-block policy, which runs
                        # after this stage -- checked at emit time instead
                        check_ready=False,
-                       backend=pc.context.get_vm().get_lexic()._backend)
+                       backend=self.context.get_vm().get_lexic()._backend)
         errors = [d for d in diags if d.severity == 'error']
         if errors:
             raise GenerationError(f'macro-ir invalid after {stage}:\n'
@@ -276,9 +142,9 @@ class Transform(Pass):
     is_transform = True
 
     def __init__(self, name: str,
-                 factory: Callable[[PassContext, List[AbstractInstruction]], Any],
+                 factory: Callable[[StreamContext, List[AbstractInstruction]], Any],
                  *, preserves: Sequence[str] = (),
-                 enabled: Optional[Callable[[PassContext], bool]] = None,
+                 enabled: Optional[Callable[[StreamContext], bool]] = None,
                  scope: PassScope = PassScope.WHOLE_NEST):
         self.name = name
         self.preserves = preserves
@@ -286,14 +152,14 @@ class Transform(Pass):
         self._factory = factory
         self._enabled = enabled
 
-    def enabled(self, pc: PassContext) -> bool:
+    def enabled(self, pc: StreamContext) -> bool:
         return True if self._enabled is None else self._enabled(pc)
 
-    def run(self, pc: PassContext) -> None:
+    def run(self, pc: StreamContext) -> None:
         pc.instrs[:] = self.run_region(pc.instrs, pc)
 
     def run_region(self, instrs: List[AbstractInstruction],
-                   pc: PassContext) -> List[AbstractInstruction]:
+                   pc: StreamContext) -> List[AbstractInstruction]:
         opt = self._factory(pc, instrs)
         opt.apply()
         return list(opt.get_instructions())
@@ -309,7 +175,7 @@ class Analysis(Pass):
     is_transform = False
     scope = PassScope.WHOLE_NEST
 
-    def __init__(self, name: str, factory: Callable[[PassContext], Any],
+    def __init__(self, name: str, factory: Callable[[StreamContext], Any],
                  getter: Callable[[Any], Any], provides: str,
                  *, requires: Sequence[str] = ()):
         self.name = name
@@ -319,7 +185,7 @@ class Analysis(Pass):
         self._getter = getter
         self._key = provides
 
-    def run(self, pc: PassContext) -> None:
+    def run(self, pc: StreamContext) -> None:
         opt = self._factory(pc)
         opt.apply()
         pc.put(self._key, self._getter(opt))
