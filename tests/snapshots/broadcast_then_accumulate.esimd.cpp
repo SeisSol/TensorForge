@@ -1,5 +1,5 @@
 // === base name ===
-kernel_baaafedd1c07833b
+kernel_f05ba7480e5d58e9
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_baaafedd1c07833b = {{1, 8, 1}, 32, 32, 1, 8, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_baaafedd1c07833b(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_baaafedd1c07833b(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_f05ba7480e5d58e9 = {{1, 8, 1}, 32, 32, 1, 8, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_f05ba7480e5d58e9(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_f05ba7480e5d58e9(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_baaafedd1c07833b(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_f05ba7480e5d58e9(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (1, 8, 1);
@@ -73,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_baaafedd1c07833b(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_baaafedd1c07833b(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_baaafedd1c07833b(numElements0, streamPtr);
+void launcher_kernel_f05ba7480e5d58e9(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_f05ba7480e5d58e9(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_baaafedd1c07833b(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_f05ba7480e5d58e9(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_baaafedd1c07833b(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_f05ba7480e5d58e9(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]] {
       using namespace tensorforge::literals;
@@ -106,127 +106,124 @@ inline void kernel_kernel_baaafedd1c07833b(sycl::queue *stream, sycl::range<3> g
       //   m2[i,j] = t2[i,j]
       // tensorforge-meta: {"fp":"float","launch":{"active_threads":32,"block":[1,8,1],"cooperative":false,"lead_width":1,"mults_per_block":8,"persistent":true,"sections":[{"barrier":false,"mults_per_block":8,"shared_elements":0}],"shared_bytes":0,"shared_elements":0,"threads_per_mult":32},"loops":[],"operands":[{"addressing":"pointer_based","alias":"A","bbox":[[0],[32]],"name":"m0","ordered":false,"parts":1,"shape":[32],"variant":false},{"addressing":"pointer_based","alias":"B","bbox":[[0,0],[32,3]],"name":"m1","ordered":false,"parts":1,"shape":[32,3],"variant":false},{"addressing":"pointer_based","alias":"O","bbox":[[0,0],[32,3]],"name":"m2","ordered":false,"parts":1,"shape":[32,3],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0],[32]],"is_tmp":true,"name":"t0","offset":[0],"shape":[32]},"kind":"multilinear","ops":[{"addressing":"pointer_based","bbox":[[0],[32]],"is_tmp":false,"name":"m0","offset":[0],"shape":[32]}],"permute":[[0]],"target":[[0]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[32,3]],"is_tmp":true,"name":"t1","offset":[0,0],"shape":[32,3]},"kind":"multilinear","ops":[{"addressing":"pointer_based","bbox":[[0,0],[32,3]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[32,3]}],"permute":[[0,1]],"target":[[0,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[32,3]],"is_tmp":true,"name":"t2","offset":[0,0],"shape":[32,3]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0],[32]],"is_tmp":true,"name":"t0","offset":[0],"shape":[32]}],"permute":[[0]],"target":[[0]]},{"add":true,"dest":{"addressing":"strided","bbox":[[0,0],[32,3]],"is_tmp":true,"name":"t2","offset":[0,0],"shape":[32,3]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,3]],"is_tmp":true,"name":"t1","offset":[0,0],"shape":[32,3]}],"permute":[[0,1]],"target":[[0,1]]},{"add":false,"dest":{"addressing":"pointer_based","bbox":[[0,0],[32,3]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[32,3]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[0,0],[32,3]],"is_tmp":true,"name":"t2","offset":[0,0],"shape":[32,3]}],"permute":[[0,1]],"target":[[0,1]]}],"version":"0.0.1"}
       {
-        const auto batchId_start = (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2)));
-        const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;
-        const auto batchId2 = batchId1 + (item.get_group_range(2) * item.get_group().get_local_range(1)) < numElements0 ? batchId1 + (item.get_group_range(2) * item.get_group().get_local_range(1)) : batchId1;
-        for (size_t v1_batchId0 = (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))); v1_batchId0 < numElements0; v1_batchId0 += (item.get_group_range(2) * item.get_group().get_local_range(1))) {
-          size_t v2_ahead1 = v1_batchId0 + (item.get_group_range(2) * item.get_group().get_local_range(1));
-          size_t v4_batchId1 = (v2_ahead1 < numElements0) ? v2_ahead1 : v1_batchId0;
-          const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v1_batchId0]);
+        for (size_t v7_batchId0 = (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))); v7_batchId0 < numElements0; v7_batchId0 += (item.get_group_range(2) * item.get_group().get_local_range(1))) {
+          size_t v8_ahead1 = v7_batchId0 + (item.get_group_range(2) * item.get_group().get_local_range(1));
+          size_t v10_batchId1 = (v8_ahead1 < numElements0) ? v8_ahead1 : v7_batchId0;
+          const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v7_batchId0]);
           if (allowed) {
-            const float *const __restrict__ glb_m0 = &m0[v1_batchId0][0 + m0_extraOffset];
-            const float *const __restrict__ glb_m1 = &m1[v1_batchId0][0 + m1_extraOffset];
-            float *const __restrict__ glb_m2 = &m2[v1_batchId0][0 + m2_extraOffset];
+            const float *const __restrict__ glb_m0 = &m0[v7_batchId0][0 + m0_extraOffset];
+            const float *const __restrict__ glb_m1 = &m1[v7_batchId0][0 + m1_extraOffset];
+            float *const __restrict__ glb_m2 = &m2[v7_batchId0][0 + m2_extraOffset];
             tensorforge::intel_esimd::simd<float, 32> r0(0.0f);
             // r0 = load{g>r}(glb_m0);
             #pragma unroll
-            for (int32_t v13_i0 = 0; v13_i0 < 1; ++v13_i0) {
-              int32_t v14_lead = v13_i0 * 32;
-              tensorforge::intel_esimd::simd<float, 32> v16_data;
-              v16_data.copy_from(glb_m0 + (v14_lead));
-              r0.template select<32, 1>(v14_lead) = v16_data;
+            for (int32_t v19_i0 = 0; v19_i0 < 1; ++v19_i0) {
+              int32_t v20_lead = v19_i0 * 32;
+              tensorforge::intel_esimd::simd<float, 32> v22_data;
+              v22_data.copy_from(glb_m0 + (v20_lead));
+              r0.template select<32, 1>(v20_lead) = v22_data;
             }
             tensorforge::intel_esimd::simd<float, 96> r2(0.0f);
             // r2 = load{g>r}(glb_m1);
             #pragma unroll
-            for (int32_t v18_i0 = 0; v18_i0 < 1; ++v18_i0) {
-              int32_t v20_lead = v18_i0 * 32;
+            for (int32_t v24_i0 = 0; v24_i0 < 1; ++v24_i0) {
+              int32_t v26_lead = v24_i0 * 32;
               #pragma unroll
-              for (int32_t v19_i1 = 0; v19_i1 < 3; ++v19_i1) {
-                int32_t v23_a = v20_lead + (v19_i1 * 32);
-                tensorforge::intel_esimd::simd<float, 32> v24_data;
-                v24_data.copy_from(glb_m1 + (v23_a));
-                r2.template select<32, 1>(v23_a) = v24_data;
+              for (int32_t v25_i1 = 0; v25_i1 < 3; ++v25_i1) {
+                int32_t v29_a = v26_lead + (v25_i1 * 32);
+                tensorforge::intel_esimd::simd<float, 32> v30_data;
+                v30_data.copy_from(glb_m1 + (v29_a));
+                r2.template select<32, 1>(v29_a) = v30_data;
               }
             }
             // wait(r0 = load{g>r}(glb_m0););
             tensorforge::intel_esimd::simd<float, 32> r1(0.0f);
             // r1 = +(r0) + None
             // [(0, 32)] []
-            tensorforge::intel_esimd::simd<float, 32> v27_data(r0.template select<32, 1>(0));
-            tensorforge::intel_esimd::simd<float, 32> v28_data(r1.template select<32, 1>(0));
-            r1.template select<32, 1>(0) = (v28_data + v27_data);
+            tensorforge::intel_esimd::simd<float, 32> v33_data(r0.template select<32, 1>(0));
+            tensorforge::intel_esimd::simd<float, 32> v34_data(r1.template select<32, 1>(0));
+            r1.template select<32, 1>(0) = (v34_data + v33_data);
             // wait(r2 = load{g>r}(glb_m1););
             tensorforge::intel_esimd::simd<float, 96> r3(0.0f);
             // r3 = +(r2) + None
             // [(0, 32), (0, 3)] []
-            tensorforge::intel_esimd::simd<float, 32> v31_data(r2.template select<32, 1>(0));
-            tensorforge::intel_esimd::simd<float, 32> v32_data(r3.template select<32, 1>(0));
-            r3.template select<32, 1>(0) = (v32_data + v31_data);
-            tensorforge::intel_esimd::simd<float, 32> v34_data(r2.template select<32, 1>(32));
-            tensorforge::intel_esimd::simd<float, 32> v35_data(r3.template select<32, 1>(32));
-            r3.template select<32, 1>(32) = (v35_data + v34_data);
-            tensorforge::intel_esimd::simd<float, 32> v37_data(r2.template select<32, 1>(64));
-            tensorforge::intel_esimd::simd<float, 32> v38_data(r3.template select<32, 1>(64));
-            r3.template select<32, 1>(64) = (v38_data + v37_data);
+            tensorforge::intel_esimd::simd<float, 32> v37_data(r2.template select<32, 1>(0));
+            tensorforge::intel_esimd::simd<float, 32> v38_data(r3.template select<32, 1>(0));
+            r3.template select<32, 1>(0) = (v38_data + v37_data);
+            tensorforge::intel_esimd::simd<float, 32> v40_data(r2.template select<32, 1>(32));
+            tensorforge::intel_esimd::simd<float, 32> v41_data(r3.template select<32, 1>(32));
+            r3.template select<32, 1>(32) = (v41_data + v40_data);
+            tensorforge::intel_esimd::simd<float, 32> v43_data(r2.template select<32, 1>(64));
+            tensorforge::intel_esimd::simd<float, 32> v44_data(r3.template select<32, 1>(64));
+            r3.template select<32, 1>(64) = (v44_data + v43_data);
             tensorforge::intel_esimd::simd<float, 96> r4(0.0f);
             // r4 = +(r1) + None
             // [(0, 32), (0, 3)] []
-            tensorforge::intel_esimd::simd<float, 32> v41_data(r1.template select<32, 1>(0));
-            tensorforge::intel_esimd::simd<float, 32> v42_data(r4.template select<32, 1>(0));
-            r4.template select<32, 1>(0) = (v42_data + v41_data);
-            tensorforge::intel_esimd::simd<float, 32> v45_data(r4.template select<32, 1>(32));
-            r4.template select<32, 1>(32) = (v45_data + v41_data);
-            tensorforge::intel_esimd::simd<float, 32> v48_data(r4.template select<32, 1>(64));
-            r4.template select<32, 1>(64) = (v48_data + v41_data);
+            tensorforge::intel_esimd::simd<float, 32> v47_data(r1.template select<32, 1>(0));
+            tensorforge::intel_esimd::simd<float, 32> v48_data(r4.template select<32, 1>(0));
+            r4.template select<32, 1>(0) = (v48_data + v47_data);
+            tensorforge::intel_esimd::simd<float, 32> v51_data(r4.template select<32, 1>(32));
+            r4.template select<32, 1>(32) = (v51_data + v47_data);
+            tensorforge::intel_esimd::simd<float, 32> v54_data(r4.template select<32, 1>(64));
+            r4.template select<32, 1>(64) = (v54_data + v47_data);
             tensorforge::intel_esimd::simd<float, 96> r5(0.0f);
             // ir5 = +(r3)
             // [(0, 32), (0, 3)] []
             tensorforge::intel_esimd::simd<float, 96> ir5(0.0f);
-            tensorforge::intel_esimd::simd<float, 32> v52_data(r3.template select<32, 1>(0));
-            tensorforge::intel_esimd::simd<float, 32> v53_data(ir5.template select<32, 1>(0));
-            ir5.template select<32, 1>(0) = (v53_data + v52_data);
-            tensorforge::intel_esimd::simd<float, 32> v55_data(r3.template select<32, 1>(32));
-            tensorforge::intel_esimd::simd<float, 32> v56_data(ir5.template select<32, 1>(32));
-            ir5.template select<32, 1>(32) = (v56_data + v55_data);
-            tensorforge::intel_esimd::simd<float, 32> v58_data(r3.template select<32, 1>(64));
-            tensorforge::intel_esimd::simd<float, 32> v59_data(ir5.template select<32, 1>(64));
-            ir5.template select<32, 1>(64) = (v59_data + v58_data);
+            tensorforge::intel_esimd::simd<float, 32> v58_data(r3.template select<32, 1>(0));
+            tensorforge::intel_esimd::simd<float, 32> v59_data(ir5.template select<32, 1>(0));
+            ir5.template select<32, 1>(0) = (v59_data + v58_data);
+            tensorforge::intel_esimd::simd<float, 32> v61_data(r3.template select<32, 1>(32));
+            tensorforge::intel_esimd::simd<float, 32> v62_data(ir5.template select<32, 1>(32));
+            ir5.template select<32, 1>(32) = (v62_data + v61_data);
+            tensorforge::intel_esimd::simd<float, 32> v64_data(r3.template select<32, 1>(64));
+            tensorforge::intel_esimd::simd<float, 32> v65_data(ir5.template select<32, 1>(64));
+            ir5.template select<32, 1>(64) = (v65_data + v64_data);
             // r5 = ir5 + r4
             #pragma unroll
-            for (int32_t v61_n0 = 0; v61_n0 < 1; ++v61_n0) {
-              int32_t v63_a = v61_n0 * 32;
+            for (int32_t v67_n0 = 0; v67_n0 < 1; ++v67_n0) {
+              int32_t v69_a = v67_n0 * 32;
               #pragma unroll
-              for (int32_t v62_n1 = 0; v62_n1 < 3; ++v62_n1) {
-                int32_t v65_a = v63_a + (v62_n1 * 32);
-                tensorforge::intel_esimd::simd<float, 32> v66_data(ir5.template select<32, 1>(v65_a));
-                tensorforge::intel_esimd::simd<float, 32> v67_data(r4.template select<32, 1>(v65_a));
-                r5.template select<32, 1>(v65_a) = (v67_data + v66_data);
+              for (int32_t v68_n1 = 0; v68_n1 < 3; ++v68_n1) {
+                int32_t v71_a = v69_a + (v68_n1 * 32);
+                tensorforge::intel_esimd::simd<float, 32> v72_data(ir5.template select<32, 1>(v71_a));
+                tensorforge::intel_esimd::simd<float, 32> v73_data(r4.template select<32, 1>(v71_a));
+                r5.template select<32, 1>(v71_a) = (v73_data + v72_data);
               }
             }
             tensorforge::intel_esimd::simd<float, 96> r6(0.0f);
             // ir6 = +(r5)
             // [(0, 32), (0, 3)] []
             tensorforge::intel_esimd::simd<float, 96> ir6(0.0f);
-            tensorforge::intel_esimd::simd<float, 32> v71_data(r5.template select<32, 1>(0));
-            tensorforge::intel_esimd::simd<float, 32> v72_data(ir6.template select<32, 1>(0));
-            ir6.template select<32, 1>(0) = (v72_data + v71_data);
-            tensorforge::intel_esimd::simd<float, 32> v74_data(r5.template select<32, 1>(32));
-            tensorforge::intel_esimd::simd<float, 32> v75_data(ir6.template select<32, 1>(32));
-            ir6.template select<32, 1>(32) = (v75_data + v74_data);
-            tensorforge::intel_esimd::simd<float, 32> v77_data(r5.template select<32, 1>(64));
-            tensorforge::intel_esimd::simd<float, 32> v78_data(ir6.template select<32, 1>(64));
-            ir6.template select<32, 1>(64) = (v78_data + v77_data);
+            tensorforge::intel_esimd::simd<float, 32> v77_data(r5.template select<32, 1>(0));
+            tensorforge::intel_esimd::simd<float, 32> v78_data(ir6.template select<32, 1>(0));
+            ir6.template select<32, 1>(0) = (v78_data + v77_data);
+            tensorforge::intel_esimd::simd<float, 32> v80_data(r5.template select<32, 1>(32));
+            tensorforge::intel_esimd::simd<float, 32> v81_data(ir6.template select<32, 1>(32));
+            ir6.template select<32, 1>(32) = (v81_data + v80_data);
+            tensorforge::intel_esimd::simd<float, 32> v83_data(r5.template select<32, 1>(64));
+            tensorforge::intel_esimd::simd<float, 32> v84_data(ir6.template select<32, 1>(64));
+            ir6.template select<32, 1>(64) = (v84_data + v83_data);
             // r6 = ir6
             #pragma unroll
-            for (int32_t v80_n0 = 0; v80_n0 < 1; ++v80_n0) {
-              int32_t v82_a = v80_n0 * 32;
+            for (int32_t v86_n0 = 0; v86_n0 < 1; ++v86_n0) {
+              int32_t v88_a = v86_n0 * 32;
               #pragma unroll
-              for (int32_t v81_n1 = 0; v81_n1 < 3; ++v81_n1) {
-                int32_t v84_a = v82_a + (v81_n1 * 32);
-                tensorforge::intel_esimd::simd<float, 32> v85_data(ir6.template select<32, 1>(v84_a));
-                r6.template select<32, 1>(v84_a) = v85_data;
+              for (int32_t v87_n1 = 0; v87_n1 < 3; ++v87_n1) {
+                int32_t v90_a = v88_a + (v87_n1 * 32);
+                tensorforge::intel_esimd::simd<float, 32> v91_data(ir6.template select<32, 1>(v90_a));
+                r6.template select<32, 1>(v90_a) = v91_data;
               }
             }
             // glb_m2 = store{r>g}(r6);
             #pragma unroll
-            for (int32_t v86_i0 = 0; v86_i0 < 1; ++v86_i0) {
-              int32_t v88_a = v86_i0 * 32;
+            for (int32_t v92_i0 = 0; v92_i0 < 1; ++v92_i0) {
+              int32_t v94_a = v92_i0 * 32;
               #pragma unroll
-              for (int32_t v87_i1 = 0; v87_i1 < 3; ++v87_i1) {
-                int32_t v90_a = v88_a + (v87_i1 * 32);
-                tensorforge::intel_esimd::simd<float, 32> v91_data(r6.template select<32, 1>(v90_a));
-                v91_data.copy_to(glb_m2 + (v90_a));
+              for (int32_t v93_i1 = 0; v93_i1 < 3; ++v93_i1) {
+                int32_t v96_a = v94_a + (v93_i1 * 32);
+                tensorforge::intel_esimd::simd<float, 32> v97_data(r6.template select<32, 1>(v96_a));
+                v97_data.copy_to(glb_m2 + (v96_a));
               }
             }
           }

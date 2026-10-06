@@ -170,6 +170,9 @@ def _py(expr: str) -> str:
     e = expr
     e = re.sub(r'\b(\d+)_i32\b', r'\1', e)
     e = re.sub(r'(\d)[fF]\b', r'\1', e)
+    # An integer suffix says which type the literal has, which Python's
+    # integers do not care about: `0u` is the `0` a `size_t` select holds.
+    e = re.sub(r'\b(\d+)(?:[uU][lL]{0,2}|[lL]{1,2}[uU]?)\b', r'\1', e)
     e = re.sub(r'\b(?:static_cast|reinterpret_cast|const_cast)\s*<[^>]*>\s*', '', e)
     # the C-style cast to a memory-space pointer a global window is bound
     # through: `(tensorforge::SpacePtrRestrict<double, ...>)&m0[...]`

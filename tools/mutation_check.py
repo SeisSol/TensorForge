@@ -607,6 +607,21 @@ GROUPS = {
              '          if False:\n            raise InternalError(')),
     ]),
 
+    # A section is one body, and its traversal's indices are values of it.
+    'sectionbody': ('tests/test_section_body.py', [
+        ('the traversal indices left unpublished',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '      bound.update(self._traversal_indices(body, index))',
+             '      pass')),
+    ]),
+
+    'sectionbody_text': ('tests/test_mult_groups.py', [
+        ('a traversal spelled as text publishes nothing',
+         sub(Path('src/tensorforge/backend/instructions/batch_loop.py'),
+             "        if not hasattr(writer, 'batch_id'):\n            yield",
+             "        if True:\n            yield")),
+    ]),
+
     'staging': ('tests/test_staging.py', [
         ('a vector bit left where it is',
          sub(Path('src/tensorforge/backend/instructions/compute/bitlayout.py'),
@@ -916,8 +931,9 @@ GROUPS = {
                r'tensorforge::VectorT<float, 2> \1 =')),
         ('a store past the end of a shared-memory declaration',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             'const auto batchId_start',
-             'const auto batchId_start = undeclared_symbol; const auto _unused',
+             'float* tempShrMem = &localShrMem0[0];',
+             'float* tempShrMem = &localShrMem0[0]; '
+             'const auto _unused = undeclared_symbol;',
              1)),
     ]),
 

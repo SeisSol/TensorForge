@@ -1737,7 +1737,7 @@ class IRBuilder:
     def rawexpr(self, text: str, *args: Operand, type_=None, hint: str = '',
                 pure: bool = False, movable: bool = False,
                 layout: Optional[RegisterLayout] = None,
-                crosslane: bool = False) -> Value:
+                crosslane: bool = False, uniform=None) -> Value:
         """One escape hatch with a *single* convention: ``{0}`` is ``args[0]``.
 
         The result is declared by the emitter; the text is an expression, never
@@ -1747,9 +1747,14 @@ class IRBuilder:
         broadcast -- so it has to run where those lanes run too; the text is
         opaque, so the IR cannot find that out.  `passes.converge_crosslane`
         takes such a read out of a guard that splits the lanes.
+
+        ``uniform`` narrows the join where the text reads something its
+        operands do not carry -- a thread index spelled in it.  With no
+        operands the join answers `GRID`, which is true of a kernel parameter
+        and false of `threadIdx.y + blockDim.y * blockIdx.x`.
         """
         type_ = type_ or ScalarType(self._fptype)
-        uniform = _join(args)
+        uniform = _stated(uniform, _join(args), 'rawexpr')
         # Same join as `op()`, and for the same reason: an expression over
         # operands that are spread across the lanes produces a value spread the
         # same way.  Left off, every elementwise result would be untracked --

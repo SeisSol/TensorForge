@@ -49,9 +49,17 @@ def _kernel(case_file: str, backend: str, arch: str, **opt_kwargs) -> str:
 
 def _before_the_loop(kernel: str) -> list:
     lines = kernel.splitlines()
-    stop = next((i for i, l in enumerate(lines) if "for (size_t batchId0" in l),
-                len(lines))
+    stop = next((i for i, l in enumerate(lines)
+                 if re.search(r"for \(size_t v\d+_batchId0\b", l)), None)
+    assert stop is not None, "no batch loop found"
     return lines[:stop]
+
+
+def _peel_subscripts(head: list) -> list:
+    """The element index each peeled pointer is computed from."""
+    return [m.group(1) for l in head
+            for m in [re.search(r"peel_glb_\w+ = (?:\([^)]*\))?&\w+\[([^\]]+)\]", l)]
+            if m]
 
 
 @pytest.mark.parametrize("case_file", PEELING_CASES)
@@ -63,11 +71,11 @@ def test_peeled_load_does_not_dereference_the_raw_block_id(case_file, backend,
                      enable_wrap_loads=True, move_distance=distance)
     head = _before_the_loop(kernel)
 
-    # The binding itself is fine and has to stay; what must not appear is a
-    # *subscript* built from it.
-    offenders = [l.strip() for l in head
-                 if re.search(r"\[\s*batchId_start\b", l)
-                 or re.search(r"batchId_start\s*\*", l)]
+    # The start is the launch geometry's spelling, bound where it is read; a
+    # subscript built from it would spell the geometry itself.
+    offenders = [index for index in _peel_subscripts(head)
+                 if re.search(r"threadIdx|blockIdx|get_local_id|get_group_id",
+                              index)]
     assert not offenders, (
         "peeled iteration indexes with the unclamped block id:\n  "
         + "\n  ".join(offenders))
@@ -79,9 +87,15 @@ def test_peeled_load_reads_a_clamped_element(case_file):
     kernel = _kernel(case_file, "hip", "gfx90a",
                      enable_wrap_loads=True, move_distance=2)
     head = _before_the_loop(kernel)
-    peels = [l for l in head if "peel_" in l and "=" in l]
-    assert peels, "expected WrapLoads to peel at least one transfer"
-    indexed = [l for l in peels if "batchId1" in l]
-    assert indexed, (
-        "no peeled pointer uses the clamped index:\n  "
-        + "\n  ".join(l.strip() for l in peels))
+    subscripts = _peel_subscripts(head)
+    assert subscripts, "expected WrapLoads to peel at least one transfer"
+    named = {v for index in subscripts
+             for v in re.findall(r"\bv\d+_batchId1\b", index)}
+    assert named, ("no peeled pointer uses the clamped index:\n  "
+                   + "\n  ".join(subscripts))
+    # ...and the value is the clamp: the start where it is inside the batch,
+    # element 0 where it is not.
+    for value in named:
+        definition = next(l for l in head if re.search(rf"\b{value} = ", l))
+        assert "< numElements0" in definition and re.search(r": 0\w*;", definition), \
+            definition

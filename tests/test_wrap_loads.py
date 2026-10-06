@@ -141,10 +141,14 @@ def test_peeled_and_wrapped_transfers_use_the_right_element(backend, arch):
     # of the loop header.
     assert all('batchId1' in a for a in peeled), peeled
     assert all('batchId1' in a for a in wrapped), wrapped
-    # ...and they are two different tokens: the peel names the prologue's
-    # binding, the loop's is a value whose hint the emitter prefixes.
-    assert all(re.search(r'\bbatchId1\b', a) for a in peeled), peeled
-    assert all(re.search(r'\bv\d+_batchId1\b', a) for a in wrapped), wrapped
+    # ...and they are two different values, both with the hint: the peel's is
+    # the section's binding ahead of the loop, the wrapped transfer's the
+    # loop's own.
+    named = r'\bv\d+_batchId1\b'
+    peel_values = {v for a in peeled for v in re.findall(named, a)}
+    wrap_values = {v for a in wrapped for v in re.findall(named, a)}
+    assert len(peel_values) == 1 and len(wrap_values) == 1, (peeled, wrapped)
+    assert not peel_values & wrap_values, (peeled, wrapped)
 
 
 @pytest.mark.parametrize("d", [1, 2, 4, 8])

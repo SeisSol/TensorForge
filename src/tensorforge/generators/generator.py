@@ -1224,12 +1224,72 @@ class Generator:
     tid_x = getattr(lexic, 'raw_thread_idx_x', lexic.thread_idx_x)
     tid_y = getattr(lexic, 'raw_thread_idx_y', lexic.thread_idx_y)
     upg, mpg, unit = layout.units_per_group, layout.mults_per_group, layout.unit
-    writer(f'const auto {UNIT_NAME} = {tid_y};')
     group = f'({UNIT_NAME} / {upg})' if upg > 1 else '0'
     within = f'({UNIT_NAME} % {upg})' if upg > 1 else UNIT_NAME
-    writer(f'const auto {MULT_NAME} = {group} * {mpg} + {within} % {mpg};'
-           if mpg > 1 else f'const auto {MULT_NAME} = {group};')
-    writer(f'const auto {LANE_NAME} = {within} / {mpg} * {unit} + {tid_x};')
+    lines = (f'const auto {UNIT_NAME} = {tid_y};',
+             f'const auto {MULT_NAME} = {group} * {mpg} + {within} % {mpg};'
+             if mpg > 1 else f'const auto {MULT_NAME} = {group};',
+             f'const auto {LANE_NAME} = {within} / {mpg} * {unit} + {tid_x};')
+    # Declarations of names the lexic now spells, read by text everywhere in
+    # the section; they touch no memory the body models.
+    for line in lines:
+      if hasattr(writer, 'decl_expr'):
+        writer(line, accesses=())
+      else:
+        writer(line)
+
+  def _emit_section(self, body, index: int, section) -> None:
+    """One section, as one body: the arena and its windows, the operators
+    preloaded into it, and the traversal of the elements.
+
+    One body because they share what a pass would want to see across them --
+    a window bound in the prologue is the same buffer the loop reads, a
+    pointer computed once is the same pointer -- and because a transfer, the
+    pointer it reads and the wait that retires it have to be values of one
+    body to be a structured `copy.async`.
+
+    The traversal's indices are values of it too (`_traversal_indices`), and
+    published the way a loop publishes its own (`BatchLoop.batch_indices`):
+    what is emitted ahead of the loop and names an element -- a peeled
+    transfer -- takes it as an operand.  Inside the loop, the loop's own
+    bindings answer instead.
+    """
+    self._declare_lane_mapping(body)
+    with BatchLoop.batch_indices(body) as bound:
+      bound.update(self._traversal_indices(body, index))
+      for instruction in section.stream:
+        instruction.gen_code(body)
+
+  def _traversal_indices(self, body, index: int) -> dict:
+    """Where this thread's traversal of section `index` starts, and the first
+    two elements it visits.
+
+    `batchId_start` is the launch geometry's answer (`_section_traversal`) and
+    is not bounded by the element count: the rows whose start is past the end
+    are the common case at the end of a batch.  `batchId1` is it clamped to
+    element 0, so that a transfer issued ahead of the loop reads an element
+    that exists; `batchId2` is the one after, clamped the way the loop clamps
+    its lookahead.
+
+    Values named by their hints only.  Nothing in the default configuration
+    reads any of them, and `dce` takes them away there.
+    """
+    from tensorforge.backend.pir.core import BOOL, SIZE, Uniformity
+    name = GeneralLexicon.BATCH_ID_NAME
+    start_text, stride = self._section_traversal(index)
+    count = body.extern_value(f'{GeneralLexicon.NUM_ELEMENTS}{index}', SIZE,
+                              uniform=Uniformity.GRID)
+    # The launch geometry's spelling, bound where it is read and declared
+    # nowhere.  `threadIdx.y` is in it: every thread of one multiplication
+    # starts at the same element, and the multiplications of a block do not.
+    start = body.extern_value(start_text, SIZE, uniform=Uniformity.MULT,
+                              hint=f'{name}_start')
+    inside = body.op('lt', BOOL, start, count, hint='startInBatch')
+    first = body.op('select', SIZE, inside, start, 0, hint=f'{name}1')
+    ahead = body.op('add', SIZE, first, stride, hint='firstAhead')
+    inside = body.op('lt', BOOL, ahead, count, hint='firstAheadInBatch')
+    second = body.op('select', SIZE, inside, ahead, first, hint=f'{name}2')
+    return {f'{name}_start': start, f'{name}1': first, f'{name}2': second}
 
   @contextmanager
   def _lane_mapping(self):
@@ -1302,30 +1362,23 @@ class Generator:
       writer('using namespace tensorforge::literals;')
       self._write_kernel_meta_data(writer)
 
-      for i,section in enumerate(self._sections):
+      for i, section in enumerate(self._sections):
         with writer.AnonymousScope():
-          self._declare_lane_mapping(writer)
-          start, stride = self._section_traversal(i)
-
-          writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}_start = {start};')
-          writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}1 = {GeneralLexicon.BATCH_ID_NAME}_start < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}_start : 0;')
-          writer(f'const auto {GeneralLexicon.BATCH_ID_NAME}2 = {GeneralLexicon.BATCH_ID_NAME}1 + {stride} < {GeneralLexicon.NUM_ELEMENTS}{i} ? {GeneralLexicon.BATCH_ID_NAME}1 + {stride} : {GeneralLexicon.BATCH_ID_NAME}1;')
-
           # Everything is in place now (offsets from ShrMemOpt, arena size from
           # the thread-block policy), so this is the point where the full check
           # is meaningful.  Testing one instruction at a time and aborting at
           # the first unprepared one would hide every other problem behind it.
           self._set_mult_stride(section)
           self._verify_section(section.stream, i)
-
-          preload = {id(instr) for instr in section.preload}
-          for instruction in section.stream:
-            if id(instruction) not in preload:
-              instruction.gen_code(writer)
-            elif instruction is section.preload[0]:
-              with AbstractInstruction.shared_body(self._context, writer):
-                for member in section.preload:
-                  member.gen_code(writer)
+          # The tail ShrMemOpt reserved, for whichever instruction of the
+          # section allocates in it; the members run in sequence and reuse it.
+          scratch = max((instr.temp_shmem() for instr in section.stream),
+                        default=0)
+          AbstractInstruction.build_shared_body(
+              self._context, writer,
+              lambda body, i=i, section=section: self._emit_section(
+                  body, i, section),
+              scratch=scratch)
 
     self._kernel = writer.get_src()
     self.peak_pressure = self._context.peak_pressure

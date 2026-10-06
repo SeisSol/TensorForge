@@ -1009,10 +1009,32 @@ class BatchLoop(AbstractInstruction):
         return self._batch(1)
 
     def _prologue_element(self, writer):
-        """The element the peel fetches: `prologue_index`, bound before the loop."""
+        """The element the peel fetches: `prologue_index`, bound before the loop.
+
+        The section's binding where the body holds one
+        (`Generator._traversal_indices`), and the seam otherwise.
+        """
+        bound = BatchLoop.indices_in(writer)
+        if bound is not None and self.prologue_index() in bound:
+            return bound[self.prologue_index()]
         if hasattr(writer, 'batch_id'):
             return writer.batch_id(1)
         return self.prologue_index()
+
+    def _peel_index(self, writer):
+        """What the loop tells `wrap_prefetch` its peel should fetch.
+
+        An attribute and not an operand, so the use chain does not see it: the
+        value is marked as escaping, or `dce` would take its definition away
+        before the pass that reads it has run.  Only where that pass runs --
+        everywhere else nothing reads it, and the definition may go.
+        """
+        if not self._context.get_user_options().enable_wrap_loads:
+            return None
+        element = self._prologue_element(writer)
+        if hasattr(writer, 'pin'):
+            writer.pin(element)
+        return element
 
     def _emit_guarded(self, writer, guarded) -> None:
         """The part of the region that a mask, if there is one, may skip."""
@@ -1159,7 +1181,7 @@ class BatchLoop(AbstractInstruction):
                     with writer.for_(self._start, self._count(writer),
                                      self._stride, hint=self._batch(0),
                                      index_type=SIZE,
-                                     peel_index=self.prologue_index(),
+                                     peel_index=self._peel_index(writer),
                                      uniform=Uniformity.MULT,
                                      inits=tuple(inits),
                                      types=tuple(types)) as loop:
@@ -1266,6 +1288,23 @@ class BatchLoop(AbstractInstruction):
                     writer('break;')
                 writer(f'{self._batch(0)} = '
                        f'{self._block_id(f"nextBlock{self._section_index}")};')
+        elif hasattr(writer, 'if_'):
+            # One element: the index is a value, and the size guard an `Op.IF`
+            # over it, as inside a loop.
+            from tensorforge.backend.pir.core import BOOL, SIZE, Uniformity
+            index = writer.rawexpr(self._block_id(), type_=SIZE,
+                                   hint=self._batch(0), pure=True,
+                                   movable=True, uniform=Uniformity.MULT)
+            inside = writer.op('lt', BOOL, index, self._count(writer),
+                               hint='inbatch0')
+            with BatchLoop.batch_indices(writer) as bound:
+                bound[self._batch(0)] = index
+                self._induction = index
+                try:
+                    with writer.if_(inside):
+                        self._emit_body(writer)
+                finally:
+                    self._induction = None
         else:
             writer(f'const size_t {self._batch(0)} = {self._block_id()};')
             with writer.If(self._size_guard()):
@@ -1383,15 +1422,34 @@ class BatchLoop(AbstractInstruction):
                             f'{self._group_batch()} += {self._stride}'):
                 mask = self._declare_row_element(writer)
                 self._lookahead_bindings(writer)
-                with elementmask.element_mask(None, mask):
+                with self._spelled_indices(writer), \
+                        elementmask.element_mask(None, mask):
                     self._emit_guarded(writer, list(self._region))
                 self._advance_stage_counter(writer)
             return
         writer(f'const size_t {self._group_batch()} = {self._group_start()};')
         with writer.If(f'{self._group_batch()} < {self._num_elements()}'):
             mask = self._declare_row_element(writer)
-            with elementmask.element_mask(None, mask):
+            with self._spelled_indices(writer), \
+                    elementmask.element_mask(None, mask):
                 self._emit_guarded(writer, list(self._region))
+
+    @contextmanager
+    def _spelled_indices(self, writer):
+        """Publish the indices a traversal spelled as text declares.
+
+        Through the seam, as values bound to the names the text declares: a
+        body built inside then takes the element this traversal is on, not the
+        section's bindings ahead of it, which the innermost published frame
+        would otherwise answer with.
+        """
+        if not hasattr(writer, 'batch_id'):
+            yield
+            return
+        with BatchLoop.batch_indices(writer) as bound:
+            for n in range(self._lookahead + 1):
+                bound[self._batch(n)] = writer.batch_id(n)
+            yield
 
     def _gen_grouped_ir(self, writer) -> None:
         """`_gen_grouped`'s persistent traversal, as IR.

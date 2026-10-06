@@ -1,5 +1,5 @@
 // === base name ===
-kernel_03884121defc50b7
+kernel_fe41114fcf624459
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_03884121defc50b7 = {{16, 8, 1}, 16, 12, 1, 8, 4608, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_03884121defc50b7(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_03884121defc50b7(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_fe41114fcf624459 = {{16, 8, 1}, 16, 12, 1, 8, 4608, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_fe41114fcf624459(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_fe41114fcf624459(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_03884121defc50b7(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_fe41114fcf624459(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (16, 8, 1);
@@ -69,7 +69,7 @@ tensorforge::LaunchConfig launch_config_kernel_03884121defc50b7(size_t numElemen
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_03884121defc50b7, block.x * block.y * block.z, 1152 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_fe41114fcf624459, block.x * block.y * block.z, 1152 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -90,19 +90,19 @@ tensorforge::LaunchConfig launch_config_kernel_03884121defc50b7(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_03884121defc50b7(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_03884121defc50b7(numElements0, streamPtr);
+void launcher_kernel_fe41114fcf624459(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_fe41114fcf624459(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_03884121defc50b7, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
+        cudaFuncSetAttribute(kernel_kernel_fe41114fcf624459, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_03884121defc50b7<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_fe41114fcf624459<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
@@ -110,7 +110,7 @@ void launcher_kernel_03884121defc50b7(float * m0, size_t m0_extraOffset, const f
 // === kernel ===
 __global__ void 
 __launch_bounds__(128, 1)
- kernel_kernel_03884121defc50b7(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+ kernel_kernel_fe41114fcf624459(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     using namespace tensorforge::literals;
@@ -125,31 +125,28 @@ __launch_bounds__(128, 1)
     //   m0[i,j] = m1[i,k] × m2[k,j]
     // tensorforge-meta: {"fp":"float","launch":{"active_threads":12,"block":[16,8,1],"cooperative":false,"lead_width":1,"mults_per_block":8,"persistent":true,"sections":[{"barrier":false,"mults_per_block":8,"shared_elements":1152}],"shared_bytes":4608,"shared_elements":1152,"threads_per_mult":16},"loops":[],"operands":[{"addressing":"strided","alias":"C","bbox":[[4,0],[16,8]],"name":"m0","ordered":false,"parts":1,"shape":[16,8],"variant":false},{"addressing":"strided","alias":"A","bbox":[[4,0],[16,16]],"name":"m1","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"strided","alias":"B","bbox":[[0,0],[16,8]],"name":"m2","ordered":false,"parts":1,"shape":[16,8],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[4,0],[16,8]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[16,8]},"kind":"multilinear","ops":[{"addressing":"strided","bbox":[[4,0],[16,16]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[16,16]},{"addressing":"strided","bbox":[[0,0],[16,8]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[16,8]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"version":"0.0.1"}
     {
-      const auto batchId_start = (threadIdx.y + blockDim.y * (blockIdx.x));
-      const auto batchId1 = batchId_start < numElements0 ? batchId_start : 0;
-      const auto batchId2 = batchId1 + (gridDim.x * blockDim.y) < numElements0 ? batchId1 + (gridDim.x * blockDim.y) : batchId1;
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[144 * threadIdx.y + 0];
       float* tempShrMem = &localShrMem0[128];
       float * __restrict__ s0 = &localShrMem0[0];
-      for (size_t v5_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v5_batchId0 < numElements0; v5_batchId0 += (gridDim.x * blockDim.y)) {
-        size_t v6_ahead1 = v5_batchId0 + (gridDim.x * blockDim.y);
-        size_t v8_batchId1 = (v6_ahead1 < numElements0) ? v6_ahead1 : v5_batchId0;
-        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v5_batchId0]);
+      for (size_t v11_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v11_batchId0 < numElements0; v11_batchId0 += (gridDim.x * blockDim.y)) {
+        size_t v12_ahead1 = v11_batchId0 + (gridDim.x * blockDim.y);
+        size_t v14_batchId1 = (v12_ahead1 < numElements0) ? v12_ahead1 : v11_batchId0;
+        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v11_batchId0]);
         if (allowed) {
-          float *const __restrict__ glb_m0 = &m0[v5_batchId0 * 96 + 0 + m0_extraOffset];
-          const float *const __restrict__ glb_m1 = &m1[v5_batchId0 * 192 + 0 + m1_extraOffset];
-          const float *const __restrict__ glb_m2 = &m2[v5_batchId0 * 128 + 0 + m2_extraOffset];
+          float *const __restrict__ glb_m0 = &m0[v11_batchId0 * 96 + 0 + m0_extraOffset];
+          const float *const __restrict__ glb_m1 = &m1[v11_batchId0 * 192 + 0 + m1_extraOffset];
+          const float *const __restrict__ glb_m2 = &m2[v11_batchId0 * 128 + 0 + m2_extraOffset];
           float r0[16]{};
           // r0 = load{g>r}(glb_m1);
-          int32_t v19_lead = threadIdx.x % 16;
-          bool v20_g = v19_lead < 12;
-          if (v20_g) {
-            int32_t v25_a = (v19_lead + 4) - 4;
+          int32_t v25_lead = threadIdx.x % 16;
+          bool v26_g = v25_lead < 12;
+          if (v26_g) {
+            int32_t v31_a = (v25_lead + 4) - 4;
             #pragma unroll
-            for (int32_t v21_i1 = 0; v21_i1 < 16; ++v21_i1) {
-              float v28_data = __ldcg(&glb_m1[(v25_a + (v21_i1 * 12))]);
-              r0[v21_i1] = v28_data;
+            for (int32_t v27_i1 = 0; v27_i1 < 16; ++v27_i1) {
+              float v34_data = __ldcg(&glb_m1[(v31_a + (v27_i1 * 12))]);
+              r0[v27_i1] = v34_data;
             }
           }
           // s0 = load{g>s}(glb_m2[0, 1])
@@ -166,453 +163,453 @@ __launch_bounds__(128, 1)
           // ir1 = +(r0 * s0)
           // [(16, 28), (0, 8)] [(0, 16)]
           float ir1[8]{};
-          if (v20_g) {
-            float v33_data = r0[0];
-            float v34_data = s0[0];
-            float v36_data = ir1[0];
-            ir1[0] = (v36_data + (v33_data * v34_data));
-            float v39_data = s0[16];
-            float v41_data = ir1[1];
-            ir1[1] = (v41_data + (v33_data * v39_data));
-            float v44_data = s0[32];
-            float v46_data = ir1[2];
-            ir1[2] = (v46_data + (v33_data * v44_data));
-            float v49_data = s0[48];
-            float v51_data = ir1[3];
-            ir1[3] = (v51_data + (v33_data * v49_data));
-            float v54_data = s0[64];
-            float v56_data = ir1[4];
-            ir1[4] = (v56_data + (v33_data * v54_data));
-            float v59_data = s0[80];
-            float v61_data = ir1[5];
-            ir1[5] = (v61_data + (v33_data * v59_data));
-            float v64_data = s0[96];
-            float v66_data = ir1[6];
-            ir1[6] = (v66_data + (v33_data * v64_data));
-            float v69_data = s0[112];
-            float v71_data = ir1[7];
-            ir1[7] = (v71_data + (v33_data * v69_data));
+          if (v26_g) {
+            float v39_data = r0[0];
+            float v40_data = s0[0];
+            float v42_data = ir1[0];
+            ir1[0] = (v42_data + (v39_data * v40_data));
+            float v45_data = s0[16];
+            float v47_data = ir1[1];
+            ir1[1] = (v47_data + (v39_data * v45_data));
+            float v50_data = s0[32];
+            float v52_data = ir1[2];
+            ir1[2] = (v52_data + (v39_data * v50_data));
+            float v55_data = s0[48];
+            float v57_data = ir1[3];
+            ir1[3] = (v57_data + (v39_data * v55_data));
+            float v60_data = s0[64];
+            float v62_data = ir1[4];
+            ir1[4] = (v62_data + (v39_data * v60_data));
+            float v65_data = s0[80];
+            float v67_data = ir1[5];
+            ir1[5] = (v67_data + (v39_data * v65_data));
+            float v70_data = s0[96];
+            float v72_data = ir1[6];
+            ir1[6] = (v72_data + (v39_data * v70_data));
+            float v75_data = s0[112];
+            float v77_data = ir1[7];
+            ir1[7] = (v77_data + (v39_data * v75_data));
           }
-          if (v20_g) {
-            float v73_data = r0[1];
-            float v74_data = s0[1];
-            float v76_data = ir1[0];
-            ir1[0] = (v76_data + (v73_data * v74_data));
-            float v79_data = s0[17];
-            float v81_data = ir1[1];
-            ir1[1] = (v81_data + (v73_data * v79_data));
-            float v84_data = s0[33];
-            float v86_data = ir1[2];
-            ir1[2] = (v86_data + (v73_data * v84_data));
-            float v89_data = s0[49];
-            float v91_data = ir1[3];
-            ir1[3] = (v91_data + (v73_data * v89_data));
-            float v94_data = s0[65];
-            float v96_data = ir1[4];
-            ir1[4] = (v96_data + (v73_data * v94_data));
-            float v99_data = s0[81];
-            float v101_data = ir1[5];
-            ir1[5] = (v101_data + (v73_data * v99_data));
-            float v104_data = s0[97];
-            float v106_data = ir1[6];
-            ir1[6] = (v106_data + (v73_data * v104_data));
-            float v109_data = s0[113];
-            float v111_data = ir1[7];
-            ir1[7] = (v111_data + (v73_data * v109_data));
+          if (v26_g) {
+            float v79_data = r0[1];
+            float v80_data = s0[1];
+            float v82_data = ir1[0];
+            ir1[0] = (v82_data + (v79_data * v80_data));
+            float v85_data = s0[17];
+            float v87_data = ir1[1];
+            ir1[1] = (v87_data + (v79_data * v85_data));
+            float v90_data = s0[33];
+            float v92_data = ir1[2];
+            ir1[2] = (v92_data + (v79_data * v90_data));
+            float v95_data = s0[49];
+            float v97_data = ir1[3];
+            ir1[3] = (v97_data + (v79_data * v95_data));
+            float v100_data = s0[65];
+            float v102_data = ir1[4];
+            ir1[4] = (v102_data + (v79_data * v100_data));
+            float v105_data = s0[81];
+            float v107_data = ir1[5];
+            ir1[5] = (v107_data + (v79_data * v105_data));
+            float v110_data = s0[97];
+            float v112_data = ir1[6];
+            ir1[6] = (v112_data + (v79_data * v110_data));
+            float v115_data = s0[113];
+            float v117_data = ir1[7];
+            ir1[7] = (v117_data + (v79_data * v115_data));
           }
-          if (v20_g) {
-            float v113_data = r0[2];
-            float v114_data = s0[2];
-            float v116_data = ir1[0];
-            ir1[0] = (v116_data + (v113_data * v114_data));
-            float v119_data = s0[18];
-            float v121_data = ir1[1];
-            ir1[1] = (v121_data + (v113_data * v119_data));
-            float v124_data = s0[34];
-            float v126_data = ir1[2];
-            ir1[2] = (v126_data + (v113_data * v124_data));
-            float v129_data = s0[50];
-            float v131_data = ir1[3];
-            ir1[3] = (v131_data + (v113_data * v129_data));
-            float v134_data = s0[66];
-            float v136_data = ir1[4];
-            ir1[4] = (v136_data + (v113_data * v134_data));
-            float v139_data = s0[82];
-            float v141_data = ir1[5];
-            ir1[5] = (v141_data + (v113_data * v139_data));
-            float v144_data = s0[98];
-            float v146_data = ir1[6];
-            ir1[6] = (v146_data + (v113_data * v144_data));
-            float v149_data = s0[114];
-            float v151_data = ir1[7];
-            ir1[7] = (v151_data + (v113_data * v149_data));
+          if (v26_g) {
+            float v119_data = r0[2];
+            float v120_data = s0[2];
+            float v122_data = ir1[0];
+            ir1[0] = (v122_data + (v119_data * v120_data));
+            float v125_data = s0[18];
+            float v127_data = ir1[1];
+            ir1[1] = (v127_data + (v119_data * v125_data));
+            float v130_data = s0[34];
+            float v132_data = ir1[2];
+            ir1[2] = (v132_data + (v119_data * v130_data));
+            float v135_data = s0[50];
+            float v137_data = ir1[3];
+            ir1[3] = (v137_data + (v119_data * v135_data));
+            float v140_data = s0[66];
+            float v142_data = ir1[4];
+            ir1[4] = (v142_data + (v119_data * v140_data));
+            float v145_data = s0[82];
+            float v147_data = ir1[5];
+            ir1[5] = (v147_data + (v119_data * v145_data));
+            float v150_data = s0[98];
+            float v152_data = ir1[6];
+            ir1[6] = (v152_data + (v119_data * v150_data));
+            float v155_data = s0[114];
+            float v157_data = ir1[7];
+            ir1[7] = (v157_data + (v119_data * v155_data));
           }
-          if (v20_g) {
-            float v153_data = r0[3];
-            float v154_data = s0[3];
-            float v156_data = ir1[0];
-            ir1[0] = (v156_data + (v153_data * v154_data));
-            float v159_data = s0[19];
-            float v161_data = ir1[1];
-            ir1[1] = (v161_data + (v153_data * v159_data));
-            float v164_data = s0[35];
-            float v166_data = ir1[2];
-            ir1[2] = (v166_data + (v153_data * v164_data));
-            float v169_data = s0[51];
-            float v171_data = ir1[3];
-            ir1[3] = (v171_data + (v153_data * v169_data));
-            float v174_data = s0[67];
-            float v176_data = ir1[4];
-            ir1[4] = (v176_data + (v153_data * v174_data));
-            float v179_data = s0[83];
-            float v181_data = ir1[5];
-            ir1[5] = (v181_data + (v153_data * v179_data));
-            float v184_data = s0[99];
-            float v186_data = ir1[6];
-            ir1[6] = (v186_data + (v153_data * v184_data));
-            float v189_data = s0[115];
-            float v191_data = ir1[7];
-            ir1[7] = (v191_data + (v153_data * v189_data));
+          if (v26_g) {
+            float v159_data = r0[3];
+            float v160_data = s0[3];
+            float v162_data = ir1[0];
+            ir1[0] = (v162_data + (v159_data * v160_data));
+            float v165_data = s0[19];
+            float v167_data = ir1[1];
+            ir1[1] = (v167_data + (v159_data * v165_data));
+            float v170_data = s0[35];
+            float v172_data = ir1[2];
+            ir1[2] = (v172_data + (v159_data * v170_data));
+            float v175_data = s0[51];
+            float v177_data = ir1[3];
+            ir1[3] = (v177_data + (v159_data * v175_data));
+            float v180_data = s0[67];
+            float v182_data = ir1[4];
+            ir1[4] = (v182_data + (v159_data * v180_data));
+            float v185_data = s0[83];
+            float v187_data = ir1[5];
+            ir1[5] = (v187_data + (v159_data * v185_data));
+            float v190_data = s0[99];
+            float v192_data = ir1[6];
+            ir1[6] = (v192_data + (v159_data * v190_data));
+            float v195_data = s0[115];
+            float v197_data = ir1[7];
+            ir1[7] = (v197_data + (v159_data * v195_data));
           }
-          if (v20_g) {
-            float v193_data = r0[4];
-            float v194_data = s0[4];
-            float v196_data = ir1[0];
-            ir1[0] = (v196_data + (v193_data * v194_data));
-            float v199_data = s0[20];
-            float v201_data = ir1[1];
-            ir1[1] = (v201_data + (v193_data * v199_data));
-            float v204_data = s0[36];
-            float v206_data = ir1[2];
-            ir1[2] = (v206_data + (v193_data * v204_data));
-            float v209_data = s0[52];
-            float v211_data = ir1[3];
-            ir1[3] = (v211_data + (v193_data * v209_data));
-            float v214_data = s0[68];
-            float v216_data = ir1[4];
-            ir1[4] = (v216_data + (v193_data * v214_data));
-            float v219_data = s0[84];
-            float v221_data = ir1[5];
-            ir1[5] = (v221_data + (v193_data * v219_data));
-            float v224_data = s0[100];
-            float v226_data = ir1[6];
-            ir1[6] = (v226_data + (v193_data * v224_data));
-            float v229_data = s0[116];
-            float v231_data = ir1[7];
-            ir1[7] = (v231_data + (v193_data * v229_data));
+          if (v26_g) {
+            float v199_data = r0[4];
+            float v200_data = s0[4];
+            float v202_data = ir1[0];
+            ir1[0] = (v202_data + (v199_data * v200_data));
+            float v205_data = s0[20];
+            float v207_data = ir1[1];
+            ir1[1] = (v207_data + (v199_data * v205_data));
+            float v210_data = s0[36];
+            float v212_data = ir1[2];
+            ir1[2] = (v212_data + (v199_data * v210_data));
+            float v215_data = s0[52];
+            float v217_data = ir1[3];
+            ir1[3] = (v217_data + (v199_data * v215_data));
+            float v220_data = s0[68];
+            float v222_data = ir1[4];
+            ir1[4] = (v222_data + (v199_data * v220_data));
+            float v225_data = s0[84];
+            float v227_data = ir1[5];
+            ir1[5] = (v227_data + (v199_data * v225_data));
+            float v230_data = s0[100];
+            float v232_data = ir1[6];
+            ir1[6] = (v232_data + (v199_data * v230_data));
+            float v235_data = s0[116];
+            float v237_data = ir1[7];
+            ir1[7] = (v237_data + (v199_data * v235_data));
           }
-          if (v20_g) {
-            float v233_data = r0[5];
-            float v234_data = s0[5];
-            float v236_data = ir1[0];
-            ir1[0] = (v236_data + (v233_data * v234_data));
-            float v239_data = s0[21];
-            float v241_data = ir1[1];
-            ir1[1] = (v241_data + (v233_data * v239_data));
-            float v244_data = s0[37];
-            float v246_data = ir1[2];
-            ir1[2] = (v246_data + (v233_data * v244_data));
-            float v249_data = s0[53];
-            float v251_data = ir1[3];
-            ir1[3] = (v251_data + (v233_data * v249_data));
-            float v254_data = s0[69];
-            float v256_data = ir1[4];
-            ir1[4] = (v256_data + (v233_data * v254_data));
-            float v259_data = s0[85];
-            float v261_data = ir1[5];
-            ir1[5] = (v261_data + (v233_data * v259_data));
-            float v264_data = s0[101];
-            float v266_data = ir1[6];
-            ir1[6] = (v266_data + (v233_data * v264_data));
-            float v269_data = s0[117];
-            float v271_data = ir1[7];
-            ir1[7] = (v271_data + (v233_data * v269_data));
+          if (v26_g) {
+            float v239_data = r0[5];
+            float v240_data = s0[5];
+            float v242_data = ir1[0];
+            ir1[0] = (v242_data + (v239_data * v240_data));
+            float v245_data = s0[21];
+            float v247_data = ir1[1];
+            ir1[1] = (v247_data + (v239_data * v245_data));
+            float v250_data = s0[37];
+            float v252_data = ir1[2];
+            ir1[2] = (v252_data + (v239_data * v250_data));
+            float v255_data = s0[53];
+            float v257_data = ir1[3];
+            ir1[3] = (v257_data + (v239_data * v255_data));
+            float v260_data = s0[69];
+            float v262_data = ir1[4];
+            ir1[4] = (v262_data + (v239_data * v260_data));
+            float v265_data = s0[85];
+            float v267_data = ir1[5];
+            ir1[5] = (v267_data + (v239_data * v265_data));
+            float v270_data = s0[101];
+            float v272_data = ir1[6];
+            ir1[6] = (v272_data + (v239_data * v270_data));
+            float v275_data = s0[117];
+            float v277_data = ir1[7];
+            ir1[7] = (v277_data + (v239_data * v275_data));
           }
-          if (v20_g) {
-            float v273_data = r0[6];
-            float v274_data = s0[6];
-            float v276_data = ir1[0];
-            ir1[0] = (v276_data + (v273_data * v274_data));
-            float v279_data = s0[22];
-            float v281_data = ir1[1];
-            ir1[1] = (v281_data + (v273_data * v279_data));
-            float v284_data = s0[38];
-            float v286_data = ir1[2];
-            ir1[2] = (v286_data + (v273_data * v284_data));
-            float v289_data = s0[54];
-            float v291_data = ir1[3];
-            ir1[3] = (v291_data + (v273_data * v289_data));
-            float v294_data = s0[70];
-            float v296_data = ir1[4];
-            ir1[4] = (v296_data + (v273_data * v294_data));
-            float v299_data = s0[86];
-            float v301_data = ir1[5];
-            ir1[5] = (v301_data + (v273_data * v299_data));
-            float v304_data = s0[102];
-            float v306_data = ir1[6];
-            ir1[6] = (v306_data + (v273_data * v304_data));
-            float v309_data = s0[118];
-            float v311_data = ir1[7];
-            ir1[7] = (v311_data + (v273_data * v309_data));
+          if (v26_g) {
+            float v279_data = r0[6];
+            float v280_data = s0[6];
+            float v282_data = ir1[0];
+            ir1[0] = (v282_data + (v279_data * v280_data));
+            float v285_data = s0[22];
+            float v287_data = ir1[1];
+            ir1[1] = (v287_data + (v279_data * v285_data));
+            float v290_data = s0[38];
+            float v292_data = ir1[2];
+            ir1[2] = (v292_data + (v279_data * v290_data));
+            float v295_data = s0[54];
+            float v297_data = ir1[3];
+            ir1[3] = (v297_data + (v279_data * v295_data));
+            float v300_data = s0[70];
+            float v302_data = ir1[4];
+            ir1[4] = (v302_data + (v279_data * v300_data));
+            float v305_data = s0[86];
+            float v307_data = ir1[5];
+            ir1[5] = (v307_data + (v279_data * v305_data));
+            float v310_data = s0[102];
+            float v312_data = ir1[6];
+            ir1[6] = (v312_data + (v279_data * v310_data));
+            float v315_data = s0[118];
+            float v317_data = ir1[7];
+            ir1[7] = (v317_data + (v279_data * v315_data));
           }
-          if (v20_g) {
-            float v313_data = r0[7];
-            float v314_data = s0[7];
-            float v316_data = ir1[0];
-            ir1[0] = (v316_data + (v313_data * v314_data));
-            float v319_data = s0[23];
-            float v321_data = ir1[1];
-            ir1[1] = (v321_data + (v313_data * v319_data));
-            float v324_data = s0[39];
-            float v326_data = ir1[2];
-            ir1[2] = (v326_data + (v313_data * v324_data));
-            float v329_data = s0[55];
-            float v331_data = ir1[3];
-            ir1[3] = (v331_data + (v313_data * v329_data));
-            float v334_data = s0[71];
-            float v336_data = ir1[4];
-            ir1[4] = (v336_data + (v313_data * v334_data));
-            float v339_data = s0[87];
-            float v341_data = ir1[5];
-            ir1[5] = (v341_data + (v313_data * v339_data));
-            float v344_data = s0[103];
-            float v346_data = ir1[6];
-            ir1[6] = (v346_data + (v313_data * v344_data));
-            float v349_data = s0[119];
-            float v351_data = ir1[7];
-            ir1[7] = (v351_data + (v313_data * v349_data));
+          if (v26_g) {
+            float v319_data = r0[7];
+            float v320_data = s0[7];
+            float v322_data = ir1[0];
+            ir1[0] = (v322_data + (v319_data * v320_data));
+            float v325_data = s0[23];
+            float v327_data = ir1[1];
+            ir1[1] = (v327_data + (v319_data * v325_data));
+            float v330_data = s0[39];
+            float v332_data = ir1[2];
+            ir1[2] = (v332_data + (v319_data * v330_data));
+            float v335_data = s0[55];
+            float v337_data = ir1[3];
+            ir1[3] = (v337_data + (v319_data * v335_data));
+            float v340_data = s0[71];
+            float v342_data = ir1[4];
+            ir1[4] = (v342_data + (v319_data * v340_data));
+            float v345_data = s0[87];
+            float v347_data = ir1[5];
+            ir1[5] = (v347_data + (v319_data * v345_data));
+            float v350_data = s0[103];
+            float v352_data = ir1[6];
+            ir1[6] = (v352_data + (v319_data * v350_data));
+            float v355_data = s0[119];
+            float v357_data = ir1[7];
+            ir1[7] = (v357_data + (v319_data * v355_data));
           }
-          if (v20_g) {
-            float v353_data = r0[8];
-            float v354_data = s0[8];
-            float v356_data = ir1[0];
-            ir1[0] = (v356_data + (v353_data * v354_data));
-            float v359_data = s0[24];
-            float v361_data = ir1[1];
-            ir1[1] = (v361_data + (v353_data * v359_data));
-            float v364_data = s0[40];
-            float v366_data = ir1[2];
-            ir1[2] = (v366_data + (v353_data * v364_data));
-            float v369_data = s0[56];
-            float v371_data = ir1[3];
-            ir1[3] = (v371_data + (v353_data * v369_data));
-            float v374_data = s0[72];
-            float v376_data = ir1[4];
-            ir1[4] = (v376_data + (v353_data * v374_data));
-            float v379_data = s0[88];
-            float v381_data = ir1[5];
-            ir1[5] = (v381_data + (v353_data * v379_data));
-            float v384_data = s0[104];
-            float v386_data = ir1[6];
-            ir1[6] = (v386_data + (v353_data * v384_data));
-            float v389_data = s0[120];
-            float v391_data = ir1[7];
-            ir1[7] = (v391_data + (v353_data * v389_data));
+          if (v26_g) {
+            float v359_data = r0[8];
+            float v360_data = s0[8];
+            float v362_data = ir1[0];
+            ir1[0] = (v362_data + (v359_data * v360_data));
+            float v365_data = s0[24];
+            float v367_data = ir1[1];
+            ir1[1] = (v367_data + (v359_data * v365_data));
+            float v370_data = s0[40];
+            float v372_data = ir1[2];
+            ir1[2] = (v372_data + (v359_data * v370_data));
+            float v375_data = s0[56];
+            float v377_data = ir1[3];
+            ir1[3] = (v377_data + (v359_data * v375_data));
+            float v380_data = s0[72];
+            float v382_data = ir1[4];
+            ir1[4] = (v382_data + (v359_data * v380_data));
+            float v385_data = s0[88];
+            float v387_data = ir1[5];
+            ir1[5] = (v387_data + (v359_data * v385_data));
+            float v390_data = s0[104];
+            float v392_data = ir1[6];
+            ir1[6] = (v392_data + (v359_data * v390_data));
+            float v395_data = s0[120];
+            float v397_data = ir1[7];
+            ir1[7] = (v397_data + (v359_data * v395_data));
           }
-          if (v20_g) {
-            float v393_data = r0[9];
-            float v394_data = s0[9];
-            float v396_data = ir1[0];
-            ir1[0] = (v396_data + (v393_data * v394_data));
-            float v399_data = s0[25];
-            float v401_data = ir1[1];
-            ir1[1] = (v401_data + (v393_data * v399_data));
-            float v404_data = s0[41];
-            float v406_data = ir1[2];
-            ir1[2] = (v406_data + (v393_data * v404_data));
-            float v409_data = s0[57];
-            float v411_data = ir1[3];
-            ir1[3] = (v411_data + (v393_data * v409_data));
-            float v414_data = s0[73];
-            float v416_data = ir1[4];
-            ir1[4] = (v416_data + (v393_data * v414_data));
-            float v419_data = s0[89];
-            float v421_data = ir1[5];
-            ir1[5] = (v421_data + (v393_data * v419_data));
-            float v424_data = s0[105];
-            float v426_data = ir1[6];
-            ir1[6] = (v426_data + (v393_data * v424_data));
-            float v429_data = s0[121];
-            float v431_data = ir1[7];
-            ir1[7] = (v431_data + (v393_data * v429_data));
+          if (v26_g) {
+            float v399_data = r0[9];
+            float v400_data = s0[9];
+            float v402_data = ir1[0];
+            ir1[0] = (v402_data + (v399_data * v400_data));
+            float v405_data = s0[25];
+            float v407_data = ir1[1];
+            ir1[1] = (v407_data + (v399_data * v405_data));
+            float v410_data = s0[41];
+            float v412_data = ir1[2];
+            ir1[2] = (v412_data + (v399_data * v410_data));
+            float v415_data = s0[57];
+            float v417_data = ir1[3];
+            ir1[3] = (v417_data + (v399_data * v415_data));
+            float v420_data = s0[73];
+            float v422_data = ir1[4];
+            ir1[4] = (v422_data + (v399_data * v420_data));
+            float v425_data = s0[89];
+            float v427_data = ir1[5];
+            ir1[5] = (v427_data + (v399_data * v425_data));
+            float v430_data = s0[105];
+            float v432_data = ir1[6];
+            ir1[6] = (v432_data + (v399_data * v430_data));
+            float v435_data = s0[121];
+            float v437_data = ir1[7];
+            ir1[7] = (v437_data + (v399_data * v435_data));
           }
-          if (v20_g) {
-            float v433_data = r0[10];
-            float v434_data = s0[10];
-            float v436_data = ir1[0];
-            ir1[0] = (v436_data + (v433_data * v434_data));
-            float v439_data = s0[26];
-            float v441_data = ir1[1];
-            ir1[1] = (v441_data + (v433_data * v439_data));
-            float v444_data = s0[42];
-            float v446_data = ir1[2];
-            ir1[2] = (v446_data + (v433_data * v444_data));
-            float v449_data = s0[58];
-            float v451_data = ir1[3];
-            ir1[3] = (v451_data + (v433_data * v449_data));
-            float v454_data = s0[74];
-            float v456_data = ir1[4];
-            ir1[4] = (v456_data + (v433_data * v454_data));
-            float v459_data = s0[90];
-            float v461_data = ir1[5];
-            ir1[5] = (v461_data + (v433_data * v459_data));
-            float v464_data = s0[106];
-            float v466_data = ir1[6];
-            ir1[6] = (v466_data + (v433_data * v464_data));
-            float v469_data = s0[122];
-            float v471_data = ir1[7];
-            ir1[7] = (v471_data + (v433_data * v469_data));
+          if (v26_g) {
+            float v439_data = r0[10];
+            float v440_data = s0[10];
+            float v442_data = ir1[0];
+            ir1[0] = (v442_data + (v439_data * v440_data));
+            float v445_data = s0[26];
+            float v447_data = ir1[1];
+            ir1[1] = (v447_data + (v439_data * v445_data));
+            float v450_data = s0[42];
+            float v452_data = ir1[2];
+            ir1[2] = (v452_data + (v439_data * v450_data));
+            float v455_data = s0[58];
+            float v457_data = ir1[3];
+            ir1[3] = (v457_data + (v439_data * v455_data));
+            float v460_data = s0[74];
+            float v462_data = ir1[4];
+            ir1[4] = (v462_data + (v439_data * v460_data));
+            float v465_data = s0[90];
+            float v467_data = ir1[5];
+            ir1[5] = (v467_data + (v439_data * v465_data));
+            float v470_data = s0[106];
+            float v472_data = ir1[6];
+            ir1[6] = (v472_data + (v439_data * v470_data));
+            float v475_data = s0[122];
+            float v477_data = ir1[7];
+            ir1[7] = (v477_data + (v439_data * v475_data));
           }
-          if (v20_g) {
-            float v473_data = r0[11];
-            float v474_data = s0[11];
-            float v476_data = ir1[0];
-            ir1[0] = (v476_data + (v473_data * v474_data));
-            float v479_data = s0[27];
-            float v481_data = ir1[1];
-            ir1[1] = (v481_data + (v473_data * v479_data));
-            float v484_data = s0[43];
-            float v486_data = ir1[2];
-            ir1[2] = (v486_data + (v473_data * v484_data));
-            float v489_data = s0[59];
-            float v491_data = ir1[3];
-            ir1[3] = (v491_data + (v473_data * v489_data));
-            float v494_data = s0[75];
-            float v496_data = ir1[4];
-            ir1[4] = (v496_data + (v473_data * v494_data));
-            float v499_data = s0[91];
-            float v501_data = ir1[5];
-            ir1[5] = (v501_data + (v473_data * v499_data));
-            float v504_data = s0[107];
-            float v506_data = ir1[6];
-            ir1[6] = (v506_data + (v473_data * v504_data));
-            float v509_data = s0[123];
-            float v511_data = ir1[7];
-            ir1[7] = (v511_data + (v473_data * v509_data));
+          if (v26_g) {
+            float v479_data = r0[11];
+            float v480_data = s0[11];
+            float v482_data = ir1[0];
+            ir1[0] = (v482_data + (v479_data * v480_data));
+            float v485_data = s0[27];
+            float v487_data = ir1[1];
+            ir1[1] = (v487_data + (v479_data * v485_data));
+            float v490_data = s0[43];
+            float v492_data = ir1[2];
+            ir1[2] = (v492_data + (v479_data * v490_data));
+            float v495_data = s0[59];
+            float v497_data = ir1[3];
+            ir1[3] = (v497_data + (v479_data * v495_data));
+            float v500_data = s0[75];
+            float v502_data = ir1[4];
+            ir1[4] = (v502_data + (v479_data * v500_data));
+            float v505_data = s0[91];
+            float v507_data = ir1[5];
+            ir1[5] = (v507_data + (v479_data * v505_data));
+            float v510_data = s0[107];
+            float v512_data = ir1[6];
+            ir1[6] = (v512_data + (v479_data * v510_data));
+            float v515_data = s0[123];
+            float v517_data = ir1[7];
+            ir1[7] = (v517_data + (v479_data * v515_data));
           }
-          if (v20_g) {
-            float v513_data = r0[12];
-            float v514_data = s0[12];
-            float v516_data = ir1[0];
-            ir1[0] = (v516_data + (v513_data * v514_data));
-            float v519_data = s0[28];
-            float v521_data = ir1[1];
-            ir1[1] = (v521_data + (v513_data * v519_data));
-            float v524_data = s0[44];
-            float v526_data = ir1[2];
-            ir1[2] = (v526_data + (v513_data * v524_data));
-            float v529_data = s0[60];
-            float v531_data = ir1[3];
-            ir1[3] = (v531_data + (v513_data * v529_data));
-            float v534_data = s0[76];
-            float v536_data = ir1[4];
-            ir1[4] = (v536_data + (v513_data * v534_data));
-            float v539_data = s0[92];
-            float v541_data = ir1[5];
-            ir1[5] = (v541_data + (v513_data * v539_data));
-            float v544_data = s0[108];
-            float v546_data = ir1[6];
-            ir1[6] = (v546_data + (v513_data * v544_data));
-            float v549_data = s0[124];
-            float v551_data = ir1[7];
-            ir1[7] = (v551_data + (v513_data * v549_data));
+          if (v26_g) {
+            float v519_data = r0[12];
+            float v520_data = s0[12];
+            float v522_data = ir1[0];
+            ir1[0] = (v522_data + (v519_data * v520_data));
+            float v525_data = s0[28];
+            float v527_data = ir1[1];
+            ir1[1] = (v527_data + (v519_data * v525_data));
+            float v530_data = s0[44];
+            float v532_data = ir1[2];
+            ir1[2] = (v532_data + (v519_data * v530_data));
+            float v535_data = s0[60];
+            float v537_data = ir1[3];
+            ir1[3] = (v537_data + (v519_data * v535_data));
+            float v540_data = s0[76];
+            float v542_data = ir1[4];
+            ir1[4] = (v542_data + (v519_data * v540_data));
+            float v545_data = s0[92];
+            float v547_data = ir1[5];
+            ir1[5] = (v547_data + (v519_data * v545_data));
+            float v550_data = s0[108];
+            float v552_data = ir1[6];
+            ir1[6] = (v552_data + (v519_data * v550_data));
+            float v555_data = s0[124];
+            float v557_data = ir1[7];
+            ir1[7] = (v557_data + (v519_data * v555_data));
           }
-          if (v20_g) {
-            float v553_data = r0[13];
-            float v554_data = s0[13];
-            float v556_data = ir1[0];
-            ir1[0] = (v556_data + (v553_data * v554_data));
-            float v559_data = s0[29];
-            float v561_data = ir1[1];
-            ir1[1] = (v561_data + (v553_data * v559_data));
-            float v564_data = s0[45];
-            float v566_data = ir1[2];
-            ir1[2] = (v566_data + (v553_data * v564_data));
-            float v569_data = s0[61];
-            float v571_data = ir1[3];
-            ir1[3] = (v571_data + (v553_data * v569_data));
-            float v574_data = s0[77];
-            float v576_data = ir1[4];
-            ir1[4] = (v576_data + (v553_data * v574_data));
-            float v579_data = s0[93];
-            float v581_data = ir1[5];
-            ir1[5] = (v581_data + (v553_data * v579_data));
-            float v584_data = s0[109];
-            float v586_data = ir1[6];
-            ir1[6] = (v586_data + (v553_data * v584_data));
-            float v589_data = s0[125];
-            float v591_data = ir1[7];
-            ir1[7] = (v591_data + (v553_data * v589_data));
+          if (v26_g) {
+            float v559_data = r0[13];
+            float v560_data = s0[13];
+            float v562_data = ir1[0];
+            ir1[0] = (v562_data + (v559_data * v560_data));
+            float v565_data = s0[29];
+            float v567_data = ir1[1];
+            ir1[1] = (v567_data + (v559_data * v565_data));
+            float v570_data = s0[45];
+            float v572_data = ir1[2];
+            ir1[2] = (v572_data + (v559_data * v570_data));
+            float v575_data = s0[61];
+            float v577_data = ir1[3];
+            ir1[3] = (v577_data + (v559_data * v575_data));
+            float v580_data = s0[77];
+            float v582_data = ir1[4];
+            ir1[4] = (v582_data + (v559_data * v580_data));
+            float v585_data = s0[93];
+            float v587_data = ir1[5];
+            ir1[5] = (v587_data + (v559_data * v585_data));
+            float v590_data = s0[109];
+            float v592_data = ir1[6];
+            ir1[6] = (v592_data + (v559_data * v590_data));
+            float v595_data = s0[125];
+            float v597_data = ir1[7];
+            ir1[7] = (v597_data + (v559_data * v595_data));
           }
-          if (v20_g) {
-            float v593_data = r0[14];
-            float v594_data = s0[14];
-            float v596_data = ir1[0];
-            ir1[0] = (v596_data + (v593_data * v594_data));
-            float v599_data = s0[30];
-            float v601_data = ir1[1];
-            ir1[1] = (v601_data + (v593_data * v599_data));
-            float v604_data = s0[46];
-            float v606_data = ir1[2];
-            ir1[2] = (v606_data + (v593_data * v604_data));
-            float v609_data = s0[62];
-            float v611_data = ir1[3];
-            ir1[3] = (v611_data + (v593_data * v609_data));
-            float v614_data = s0[78];
-            float v616_data = ir1[4];
-            ir1[4] = (v616_data + (v593_data * v614_data));
-            float v619_data = s0[94];
-            float v621_data = ir1[5];
-            ir1[5] = (v621_data + (v593_data * v619_data));
-            float v624_data = s0[110];
-            float v626_data = ir1[6];
-            ir1[6] = (v626_data + (v593_data * v624_data));
-            float v629_data = s0[126];
-            float v631_data = ir1[7];
-            ir1[7] = (v631_data + (v593_data * v629_data));
+          if (v26_g) {
+            float v599_data = r0[14];
+            float v600_data = s0[14];
+            float v602_data = ir1[0];
+            ir1[0] = (v602_data + (v599_data * v600_data));
+            float v605_data = s0[30];
+            float v607_data = ir1[1];
+            ir1[1] = (v607_data + (v599_data * v605_data));
+            float v610_data = s0[46];
+            float v612_data = ir1[2];
+            ir1[2] = (v612_data + (v599_data * v610_data));
+            float v615_data = s0[62];
+            float v617_data = ir1[3];
+            ir1[3] = (v617_data + (v599_data * v615_data));
+            float v620_data = s0[78];
+            float v622_data = ir1[4];
+            ir1[4] = (v622_data + (v599_data * v620_data));
+            float v625_data = s0[94];
+            float v627_data = ir1[5];
+            ir1[5] = (v627_data + (v599_data * v625_data));
+            float v630_data = s0[110];
+            float v632_data = ir1[6];
+            ir1[6] = (v632_data + (v599_data * v630_data));
+            float v635_data = s0[126];
+            float v637_data = ir1[7];
+            ir1[7] = (v637_data + (v599_data * v635_data));
           }
-          if (v20_g) {
-            float v633_data = r0[15];
-            float v634_data = s0[15];
-            float v636_data = ir1[0];
-            ir1[0] = (v636_data + (v633_data * v634_data));
-            float v639_data = s0[31];
-            float v641_data = ir1[1];
-            ir1[1] = (v641_data + (v633_data * v639_data));
-            float v644_data = s0[47];
-            float v646_data = ir1[2];
-            ir1[2] = (v646_data + (v633_data * v644_data));
-            float v649_data = s0[63];
-            float v651_data = ir1[3];
-            ir1[3] = (v651_data + (v633_data * v649_data));
-            float v654_data = s0[79];
-            float v656_data = ir1[4];
-            ir1[4] = (v656_data + (v633_data * v654_data));
-            float v659_data = s0[95];
-            float v661_data = ir1[5];
-            ir1[5] = (v661_data + (v633_data * v659_data));
-            float v664_data = s0[111];
-            float v666_data = ir1[6];
-            ir1[6] = (v666_data + (v633_data * v664_data));
-            float v669_data = s0[127];
-            float v671_data = ir1[7];
-            ir1[7] = (v671_data + (v633_data * v669_data));
+          if (v26_g) {
+            float v639_data = r0[15];
+            float v640_data = s0[15];
+            float v642_data = ir1[0];
+            ir1[0] = (v642_data + (v639_data * v640_data));
+            float v645_data = s0[31];
+            float v647_data = ir1[1];
+            ir1[1] = (v647_data + (v639_data * v645_data));
+            float v650_data = s0[47];
+            float v652_data = ir1[2];
+            ir1[2] = (v652_data + (v639_data * v650_data));
+            float v655_data = s0[63];
+            float v657_data = ir1[3];
+            ir1[3] = (v657_data + (v639_data * v655_data));
+            float v660_data = s0[79];
+            float v662_data = ir1[4];
+            ir1[4] = (v662_data + (v639_data * v660_data));
+            float v665_data = s0[95];
+            float v667_data = ir1[5];
+            ir1[5] = (v667_data + (v639_data * v665_data));
+            float v670_data = s0[111];
+            float v672_data = ir1[6];
+            ir1[6] = (v672_data + (v639_data * v670_data));
+            float v675_data = s0[127];
+            float v677_data = ir1[7];
+            ir1[7] = (v677_data + (v639_data * v675_data));
           }
           // r1 = ir1
-          if (v20_g) {
+          if (v26_g) {
             #pragma unroll
-            for (int32_t v673_n1 = 0; v673_n1 < 8; ++v673_n1) {
-              float v675_data = ir1[v673_n1];
-              r1[v673_n1] = v675_data;
+            for (int32_t v679_n1 = 0; v679_n1 < 8; ++v679_n1) {
+              float v681_data = ir1[v679_n1];
+              r1[v679_n1] = v681_data;
             }
           }
           // glb_m0 = store{r>g}(r1);
-          if (v20_g) {
-            int32_t v682_a = ((v19_lead + 16_i32) + -12) - 4;
+          if (v26_g) {
+            int32_t v688_a = ((v25_lead + 16_i32) + -12) - 4;
             #pragma unroll
-            for (int32_t v676_i1 = 0; v676_i1 < 8; ++v676_i1) {
-              float v678_data = r1[v676_i1];
-              glb_m0[(v682_a + (v676_i1 * 12))] = v678_data;
+            for (int32_t v682_i1 = 0; v682_i1 < 8; ++v682_i1) {
+              float v684_data = r1[v682_i1];
+              glb_m0[(v688_a + (v682_i1 * 12))] = v684_data;
             }
           }
           __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
