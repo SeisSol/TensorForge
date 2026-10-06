@@ -808,6 +808,13 @@ def unwrap_lead(index):
     return index.with_offset(0), shift + index.offset()
   return None
 
+
+def _spreads(index) -> bool:
+  """Whether `index` spreads its dimension over the lanes: a lead index with
+  more than one distinct element per run of lanes, shifted or not."""
+  lead = unwrap_lead(index)
+  return lead is not None and lead[0].layout().is_distributed
+
 class LeadLoop:
   """Loop over a thread-distributed dimension, with guards for the ragged ends.
 
@@ -2770,6 +2777,20 @@ class Symbol:
           # still distributed, one that resolves to no number, and a
           # distribution the symbol cannot state.
           bc_lane = self.reading_lane(index)
+          # One lane holds the element, and a broadcast hands it to every
+          # lane.  A read that also spreads another dimension over the lanes
+          # wants a different element in each -- all of them in the owner's
+          # registers, out of reach of one broadcast, which would deliver the
+          # same number everywhere.  The image has that dimension in the wrong
+          # place; it is the staging's to put it on the lanes.
+          spread = ([dim for dim, value in enumerate(index)
+                     if dim not in self.lead_dims and _spreads(value)]
+                    if bc_lane is not None else [])
+          if spread:
+            raise InternalError(
+                f'{self.name}: the element is held by lane {bc_lane}, and the '
+                f'read spreads dimension {spread[0]} over the lanes, which '
+                f'the image holds within each lane')
           if bc_lane is not None:
             # The register float, resolved here rather than carried as a
             # width: this access reads *one* element, so it has to stay

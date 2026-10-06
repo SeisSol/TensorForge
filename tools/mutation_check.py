@@ -564,13 +564,18 @@ GROUPS = {
              '                   for _ in self.lead_dims)')),
     ]),
 
-    # Which dimension of an operand's register image is on the lanes.
+    # Which dimension of an operand's register image is on the lanes, and the
+    # read that gives a wrong choice away.
     'laneaxis': ('tests/test_lead_dim.py', [
         ('an operand without the lead index keeps dimension 0 on the lanes',
          sub(Path('src/tensorforge/backend/instructions/builders/'
                   'multilinear_builder.py'),
              '    elif -1 in target and dense:',
              '    elif False:')),
+        ('a read one broadcast cannot serve, broadcast anyway',
+         sub(Path('src/tensorforge/backend/symbol.py'),
+             '          if spread:\n            raise InternalError(',
+             '          if False:\n            raise InternalError(')),
     ]),
 
     'staging': ('tests/test_staging.py', [

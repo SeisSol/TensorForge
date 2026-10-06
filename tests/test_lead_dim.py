@@ -186,6 +186,36 @@ def test_a_register_array_states_its_lane_axis(lead, size):
         "given")
 
 
+# --- a read the image cannot serve --------------------------------------- #
+
+def test_a_read_one_broadcast_cannot_serve_is_refused():
+    """Row 3 of the image is held by lane 3, all of it.
+
+    Read along the lanes, every lane takes its own row; read as one element,
+    the lane that holds it broadcasts it.  Read as row 3 spread over the lanes
+    -- `B(k, j)` from lane `k`, out of an image with `j` on the lanes -- every
+    lane wants a different element of lane 3's registers, and one broadcast
+    would hand them all the same one.
+    """
+    from tensorforge.backend import pir
+    from tensorforge.backend.scopes import Scopes
+    from tensorforge.backend.symbol import DataView, LeadIndex
+    from tensorforge.backend.temporaries import Temporaries
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+
+    context = Context(arch="gfx90a", backend="hip", fp_type=Datatype.F32)
+    box = BoundingBox([0, 0], [16, 16])
+    image, _ = Temporaries(context, Scopes(), 16).register_array(box, 0)
+    image.data_view = DataView(shape=[16, 16], permute=None, bbox=box)
+    builder = pir.IRBuilder(fptype=context.fp_type, context=context)
+
+    assert image.load(builder, context, None, [LeadIndex(0, 16, 1), 3], False)
+    assert image.load(builder, context, None, [3, 5], False)
+    with pytest.raises(InternalError, match="held by lane 3"):
+        image.load(builder, context, None, [3, LeadIndex(0, 16, 1)], False)
+
+
 # --- end to end ---------------------------------------------------------- #
 
 @pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
@@ -222,8 +252,7 @@ def test_an_operand_without_the_lead_index_spreads_its_contraction(backend,
     `B` is stored `(j, k)`: it carries no lead index, and its contraction is
     dimension 1.  The matrix paths read `B(k, j)` from lane `k`, so that is
     the dimension on the lanes.  With dimension 0 there, lane `j` would hold
-    all of column `j`, and a read of `B(k, j)` across the lanes would come
-    back as one broadcast element.
+    all of column `j`, and the read would be the one the test above refuses.
     """
     gen = _generate("trans_b.py", backend, arch)
     images = [ins._dest for ins in _stream(gen)

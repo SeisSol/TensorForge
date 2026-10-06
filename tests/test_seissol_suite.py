@@ -100,6 +100,23 @@ def test_a_sample_builds(system, config):
         _build(_read(system, config, kernel), 'cuda', 'sm_86')
 
 
+@pytest.mark.parametrize('kernel', [
+    'gpu_rotateFaceDisplacement',
+    'gpu_projectDerivativeToNodalBoundaryRotated[10]',
+])
+def test_a_rotation_builds_on_amd(kernel):
+    """The rotation matrix is contracted over its second index, `T(j, q)`.
+
+    On gfx942 it is staged in registers and read by the matrix paths, which
+    take `T(j, q)` from lane `q`; `Symbol.load` refuses a read of an image
+    that has `j` on the lanes instead, so a build is the check.  The first
+    kernel goes through the matrix core alone, the second through the DPP
+    chain as well.
+    """
+    _build(_read('anisotropic-linearck', 'anisotropic-linearck-o4-s', kernel),
+           'hip', 'gfx942')
+
+
 def test_a_merged_derivative_stores_its_members_before_the_loop():
     """The anelastic time derivative merges its levels into one loop, which
     reads `dQ(k)` through a table -- memory, not the registers.  Three things
