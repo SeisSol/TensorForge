@@ -165,6 +165,8 @@ def hw_descr_factory(arch, backend):
   nvidia_map = retrieve_arch(arch_table=known_arch, vendor='nvidia')
   amd_map = retrieve_arch(arch_table=known_arch, vendor='amd')
   intel_map = retrieve_arch(arch_table=known_arch, vendor='intel')
+  # a device chosen when the kernels run; only AdaptiveCpp compiles for one
+  generic_map = retrieve_arch(arch_table=known_arch, vendor='generic')
 
   if backend == 'cuda':
     if arch in nvidia_map.keys():
@@ -177,7 +179,8 @@ def hw_descr_factory(arch, backend):
     else:
       report_error(backend, arch)
   elif backend == 'oneapi' or backend == 'acpp':
-    if arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys():
+    if (arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys()
+        or (backend == 'acpp' and arch in generic_map.keys())):
       return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)

@@ -218,6 +218,11 @@ def deduce(descr_list: List[OperationDescription],
         num_threads = wave
 
     cap = wave if ceiling is None else ceiling
+    if wave == 1:
+        # A wave of one lane is a target whose sub-group size is not known when
+        # the code is generated (`generic`): a lane cannot read another's values
+        # there, so one lane holds a whole multiplication, whatever the ceiling.
+        cap = 1
     num_threads = min(cap, num_threads)
 
     return LaneConfig(num_threads=num_threads,

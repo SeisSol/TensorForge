@@ -227,3 +227,21 @@
   base: bdw
 - arch: Gen12LP
   base: bdw
+- arch: generic
+  # Any device a SYCL implementation compiles the kernels for when it runs them
+  # (AdaptiveCpp's generic target), the host included.  Nothing about that
+  # device is known while the code is generated, so every limit is one a SYCL
+  # device can be expected to meet, and the wave is one lane: the size of a
+  # sub-group is the device's (one on the host), so no lane may read another's
+  # values, and a multiplication is held by one work-item (`lanes.deduce`).
+  max_argument_size: 1kB
+  vec_unit_length: 1
+  max_local_mem_size_per_block: 32kB
+  max_num_threads: 256
+  max_reg_per_block: 64kB
+  max_threads_per_sm: 1024
+  max_block_per_sm: 16
+  hw_fp_word_size: 4
+  mem_access_align_size: 32
+  shmem_banks: 32
+  name: 'generic'

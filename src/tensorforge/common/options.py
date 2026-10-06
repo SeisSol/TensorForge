@@ -726,6 +726,7 @@ declare('merge_max_arity',
 declare('k_roll',
         default=0,
         env='TF_K_ROLL',
+        rule=lambda target: 1 if target.hw.vendor == 'generic' else 0,
         doc='Roll the reduction of a multilinear product into a real loop over '
             'groups of `k_width` steps, with `#pragma unroll <k_roll>` on it.  '
             '0 unrolls it completely in the generator.  Only where '
@@ -733,7 +734,10 @@ declare('k_roll',
             'batch or shared) -- a register image indexed at runtime would go '
             'to local memory -- the reduction is dense, and its extent divides '
             'into whole groups.  For kernels whose fully unrolled body no '
-            'longer fits the instruction cache.')
+            'longer fits the instruction cache.  1 on the target `generic`, '
+            'whose one lane per multiplication would otherwise unroll every '
+            'product of a kernel whole (a hundred times the code of a GPU '
+            'target for SeisSol).')
 
 declare('k_unroll_max',
         default=64,
