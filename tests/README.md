@@ -178,8 +178,8 @@ bytes shipped to the GPU are the post-transform values.
 Most cases in this group apply one operation, which keeps each a focused
 contract: if it fails, that operation is the suspect.  They cover `abs`,
 `exp`, `expm1`, `log`, `log1p`, `rcp`, `sin`, `sqrt` and `tanh`, and the
-general power in `pow_int` (an exponent `ew.pow` does not rewrite into
-another operation).  `slice_after_whole` and `sliced_max` combine
+general power in `pow_int` (an exponent no identity rewrites into another
+operation).  `slice_after_whole` and `sliced_max` combine
 elementwise writes with slices of a shared tensor.
 
 ### Slicing cases

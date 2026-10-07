@@ -26,7 +26,10 @@ Per descriptor, in list order:
 * where operand boxes cut the destination, it is cut with them, and an
   operand is read in a piece it covers and is 0 in one it does not
   (`_cells`);
-* a factor is a multilinear over what was written (`_scale`).
+* a factor is a multilinear over what was written (`_scale`);
+
+and an operation with a number for an operand drops it where an identity
+makes it the same function of the others (`_simplify`).
 
 A scratch tensor is named for what it holds -- `_conform`, `_accum`,
 `_pieces` -- and numbered across the list, so the names, and with them the
@@ -87,6 +90,8 @@ class _Legalizer:
   def run(self, descr_list):
     out = []
     for descr in descr_list:
+      if isinstance(descr, ElementwiseDescr):
+        descr = _simplify(descr)
       if isinstance(descr, ElementwiseDescr) and self._hoistable(descr):
         out += self._hoist(descr)
       elif isinstance(descr, ElementwiseDescr) and not descr.legal():
@@ -367,3 +372,66 @@ def _cells(dest, args):
         cell_args.append(0)
     cells.append((cell, cell_args))
   return cells
+
+
+# --------------------------------------------------------------------------- #
+# Identities
+# --------------------------------------------------------------------------- #
+
+def _simplify(d):
+  """`d` with a numeric operand dropped where an identity makes the
+  operation the same function of every other operand -- signed zeros,
+  infinities and NaN included.
+
+  `x * 1` and `x / 1` are `x`, `x * -1` and `x / -1` are `-x`, and `1 / x`
+  is the reciprocal.  `x ** 2` is `x * x`, a single instruction with a
+  repeated operand; `x ** 1` is `x`, `x ** -1` is `1 / x`, and `1 ** y` is 1.
+  Not the roots: `sqrt(-0.0)` is -0 and `sqrt` of -inf a NaN where `pow`
+  gives +0 and +inf for the exponent 0.5, and `cbrt` is real for a negative
+  `x` where `pow` with the double nearest 1/3 is a NaN.  A kernel that means
+  a root asks for it.
+  """
+  if len(d.srcs) != 2:
+    return d
+  x, y = d.srcs
+
+  def one(value):
+    return _is_num(value) and value == 1
+
+  def minus_one(value):
+    return _is_num(value) and value == -1
+
+  if d.op == Operation.MUL:
+    for keep, other in ((1, 0), (0, 1)):
+      if one(d.srcs[other]):
+        return _rewritten(d, Operation.COPY, [keep])
+      if minus_one(d.srcs[other]):
+        return _rewritten(d, Operation.NEG, [keep])
+  elif d.op == Operation.DIV:
+    if one(x):
+      return _rewritten(d, Operation.RCP, [1])
+    if one(y):
+      return _rewritten(d, Operation.COPY, [0])
+    if minus_one(y):
+      return _rewritten(d, Operation.NEG, [0])
+  elif d.op == Operation.POW:
+    if _is_num(y) and y == 2:
+      return _rewritten(d, Operation.MUL, [0, 0])
+    if minus_one(y):
+      return _rewritten(d, Operation.RCP, [0])
+    if one(y):
+      return _rewritten(d, Operation.COPY, [0])
+    if one(x):
+      return _rewritten(d, Operation.COPY, [0])
+  return d
+
+
+def _rewritten(d, op, keep):
+  """`d` as `op` over the operands at positions `keep`, all else kept."""
+  target = None if d.target is None else [d.target[i] for i in keep]
+  out = ElementwiseDescr(op, d.dest, [d.srcs[i] for i in keep],
+                         strict_match=d.strict_match,
+                         prefer_align=d.prefer_align, target=target,
+                         add=d.add_mask(), alpha=d.alpha)
+  out.condition = d.condition
+  return out

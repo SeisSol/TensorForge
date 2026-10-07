@@ -61,7 +61,6 @@ TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 TARGET = Path('src/tensorforge/common/target.py')
 LEXIC = Path('src/tensorforge/common/vm/lexic/lexic.py')
 SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
-ELEMENTWISE = Path('src/tensorforge/generators/elementwise.py')
 LEGALIZE = Path('src/tensorforge/generators/legalize.py')
 
 
@@ -967,6 +966,19 @@ GROUPS = {
          sub(LEGALIZE, '    version = -self._hoisted', '    version = -1', 1)),
         ('a ternary hoisted over the condition it writes',
          sub(LEGALIZE, ' or cond.tensor is d.dest.tensor:', ':', 1)),
+        ('a root standing in for a power',
+         sub(LEGALIZE, '    if minus_one(y):\n      return _rewritten(d, Operation.RCP, [0])',
+             '    if _is_num(y) and y == 0.5:\n'
+             '      return _rewritten(d, Operation.SQRT, [0])\n'
+             '    if minus_one(y):\n      return _rewritten(d, Operation.RCP, [0])', 1)),
+        ('a square left to the power',
+         sub(LEGALIZE, '    if _is_num(y) and y == 2:', '    if False:', 1)),
+        ('a product by one kept',
+         sub(LEGALIZE, '      if one(d.srcs[other]):\n        return _rewritten(d, Operation.COPY',
+             '      if False:\n        return _rewritten(d, Operation.COPY', 1)),
+        ('an identity that drops the accumulation',
+         sub(LEGALIZE, '                         add=d.add_mask(), alpha=d.alpha)',
+             '                         alpha=d.alpha)', 1)),
     ]),
 
     # An elementwise operation as one typed statement, spelled per target.
@@ -991,13 +1003,6 @@ GROUPS = {
         ('two operations on one operand taken for one value',
          sub(BUILD, 'key = _cons_key(Op.MATH, type_, args, fn)',
              'key = _cons_key(Op.MATH, type_, args)', 1)),
-        ('a root standing in for a power',
-         sub(ELEMENTWISE, '        if y in (-1, -1.0):\n',
-             '        if y == 0.5:\n'
-             '            return sqrt(dest, x, **kw)\n'
-             '        if y in (-1, -1.0):\n', 1)),
-        ('a square left to the power',
-         sub(ELEMENTWISE, '        if y in (2, 2.0):\n', '        if False:\n', 1)),
     ]),
 
     # The transfer for the next element, issued across the back edge.

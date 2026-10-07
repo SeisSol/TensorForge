@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import math
 import warnings
 
 import numpy as np
@@ -27,6 +28,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.common.operation import AddOperator, Operation
+from tensorforge.generators import elementwise as ew
 from tensorforge.generators.descriptions import (ElementwiseDescr,
                                                  MultilinearDescr,
                                                  ReductionDescr)
@@ -192,6 +194,66 @@ def test_the_scratch_names_count_across_the_list():
         out = legalize(stated())
         assert [x.dest.tensor.alias for x in out[0::2]] == ['_accum0',
                                                              '_accum1']
+
+
+# --------------------------------------------------------------------------- #
+# Identities
+# --------------------------------------------------------------------------- #
+
+def _legalized(d):
+    out, = legalize([d])
+    return out
+
+
+@pytest.mark.parametrize('exponent', [0.5, -0.5, 1 / 3, -1 / 3, 3.0])
+def test_a_power_is_the_power_where_a_root_is_another_function(exponent):
+    """`sqrt(-0.0)` is -0 where `pow(-0.0, 0.5)` is +0, and `cbrt(-8.0)` is
+    -2 where `pow(-8.0, 1/3)` is a NaN: a kernel that means the root asks for
+    it by name."""
+    d = ew.pow(_view('B', [16]), _view('A', [16]), exponent)
+    assert _legalized(d).op == Operation.POW
+
+
+def test_a_base_of_e_is_the_power():
+    """`math.e` is not e, and `pow` with it is not `exp`."""
+    d = ew.pow(_view('B', [16]), math.e, _view('A', [16]))
+    assert _legalized(d).op == Operation.POW
+
+
+@pytest.mark.parametrize('build,x,y,op,srcs', [
+    (ew.pow, 'A', 2, Operation.MUL, ('A', 'A')),
+    (ew.pow, 'A', 2.0, Operation.MUL, ('A', 'A')),
+    (ew.pow, 'A', 1, Operation.COPY, ('A',)),
+    (ew.pow, 'A', -1.0, Operation.RCP, ('A',)),
+    (ew.pow, 1.0, 'A', Operation.COPY, (1.0,)),
+    (ew.mul, 1, 'A', Operation.COPY, ('A',)),
+    (ew.mul, 'A', -1.0, Operation.NEG, ('A',)),
+    (ew.div, 1.0, 'A', Operation.RCP, ('A',)),
+    (ew.div, 'A', 1, Operation.COPY, ('A',)),
+    (ew.div, 'A', -1, Operation.NEG, ('A',)),
+])
+def test_an_operation_that_is_the_same_function_stands_in(build, x, y, op,
+                                                          srcs):
+    """Signed zeros, infinities and NaN included."""
+    tensors = {'A': _view('A', [16])}
+    d = _legalized(build(_view('B', [16]), tensors.get(x, x),
+                         tensors.get(y, y)))
+    assert d.op == op
+    assert [s.tensor.alias if hasattr(s, 'tensor') else s
+            for s in d.srcs] == list(srcs)
+
+
+def test_an_identity_keeps_the_rest_of_the_statement():
+    """The guard, the accumulation and the axes the operand is stated on."""
+    c, a = _view('C', [8, 4]), _view('A', [4, 8])
+    d = ElementwiseDescr(Operation.MUL, c, [a, 1.0], target=[[1, 0], None],
+                         add=True)
+    d.condition = []
+    copy, computed, put = legalize([d])
+    assert copy.ops == [a] and copy.target == [[1, 0]]
+    assert computed.op == Operation.COPY and computed.srcs == [copy.dest]
+    assert put.add and put.dest.tensor is c.tensor
+    assert all(x.condition is d.condition for x in (copy, computed, put))
 
 
 # --------------------------------------------------------------------------- #

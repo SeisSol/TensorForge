@@ -7,8 +7,8 @@ Domain: ``rcp`` blows up near zero. ``INPUT_TRANSFORM`` shifts ``|x|``
 by 0.5 to keep magnitudes safely above the singularity (the kernel
 sees ``|x| + 0.5`` so reciprocals stay in ``(0, 2]``).
 
-The op is ``ew.rcp``, not ``ew.div(b, 1.0, a)`` — though the latter folds
-to the same RCP (``div`` in ``generators/elementwise.py``).
+The op is ``ew.rcp``, not ``ew.div(b, 1.0, a)`` — though the latter becomes
+the same RCP (``_simplify`` in ``generators/legalize.py``).
 """
 
 import numpy as np

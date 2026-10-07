@@ -16,7 +16,6 @@ one place per language for a misspelt name to hide.
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import replace
 
@@ -196,41 +195,6 @@ def test_a_reciprocal_root_is_spelled_where_the_library_has_one(
                             fp_type=Datatype.F32))
     gen.generate()
     assert call in gen.get_kernel()
-
-
-# --------------------------------------------------------------------------- #
-# What `ew.pow` writes
-# --------------------------------------------------------------------------- #
-
-@pytest.mark.parametrize('exponent', [0.5, -0.5, 1 / 3, -1 / 3, 3.0])
-def test_a_power_is_the_power_where_a_root_is_another_function(exponent):
-    """`sqrt(-0.0)` is -0 where `pow(-0.0, 0.5)` is +0, and `cbrt(-8.0)` is
-    -2 where `pow(-8.0, 1/3)` is a NaN: a kernel that means the root asks for
-    it by name."""
-    assert ew.pow(_tensor('B'), _tensor('A'), exponent).op == Operation.POW
-
-
-def test_a_base_of_e_is_the_power():
-    """`math.e` is not e, and `pow` with it is not `exp`."""
-    assert ew.pow(_tensor('B'), math.e, _tensor('A')).op == Operation.POW
-
-
-@pytest.mark.parametrize('base,exponent,op,srcs', [
-    ('A', 2, Operation.MUL, ('A', 'A')),
-    ('A', 2.0, Operation.MUL, ('A', 'A')),
-    ('A', 1, Operation.COPY, ('A',)),
-    ('A', -1.0, Operation.RCP, ('A',)),
-    (1.0, 'A', Operation.COPY, (1.0,)),
-])
-def test_an_operation_that_is_the_same_function_stands_in(
-        base, exponent, op, srcs):
-    """Signed zeros, infinities and NaN included."""
-    tensors = {'A': _tensor('A')}
-    d = ew.pow(_tensor('B'), tensors.get(base, base),
-               tensors.get(exponent, exponent))
-    assert d.op == op
-    assert [s if isinstance(s, float) else s.tensor.alias
-            for s in d.srcs] == list(srcs)
 
 
 # --------------------------------------------------------------------------- #

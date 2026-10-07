@@ -4,10 +4,10 @@
 """``B[i, j] = A[i, j] ** 3`` — single-(constant-folded)-op ElementwiseDescr.
 
 This case exercises a binary elementwise op with a scalar operand:
-``ew.pow(b, a, 3.0)``.  ``ew.pow`` rewrites the exponents 2, 1 and -1,
-where a product, a copy and a reciprocal are the same function; 3.0 is
-none of them, so it lowers to ``Operation.POW`` and reaches the library's
-``pow``.
+``ew.pow(b, a, 3.0)``.  The exponents 2, 1 and -1 are rewritten, where a
+product, a copy and a reciprocal are the same function
+(``generators.legalize``); 3.0 is none of them, so it lowers to
+``Operation.POW`` and reaches the library's ``pow``.
 
 Two reasons to include it:
 
