@@ -4,7 +4,6 @@
 import numpy as np
 
 from tensorforge.common.exceptions import GenerationError, InternalError
-from tensorforge.common.context import Context
 from tensorforge.common.basic_types import DataFlowDirection
 from tensorforge.common.operation import Operation, ReductionOperator
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -218,93 +217,8 @@ class MultilinearDescr(OperationDescription):
     for op in self.ops:
       op.tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
 
-  def _lead_dim(self):
-    # A destination without axes has nothing to spread over the lanes; the
-    # scalar branch computes it on every lane, which asks for none.
-    # `int`, because a bounding box measures itself in numpy counts, and this
-    # one travels through `get_num_threads` into `LaneConfig` and on into
-    # `LaunchConfig.active_threads`, where `json.dumps` in the kernel metadata
-    # refuses it (as it does the shared memory size, see `MemRegion`).
-    return int(self.dest.bbox.sizes()[0]) if self.dest.bbox.rank() else 1
-
   def _analyze(self):
     pass
-
-  def _lead_matrices(self):
-    """The matrices one lead-dimension vector is read and written through.
-
-    The destination, and an operand whose *axis 0* carries the destination's
-    lead index.  An operand indexed only by the other axes -- `B` in
-    `C[m,n] += A[m,k] B[k,n]` -- is splatted, not loaded wide, so it proves
-    nothing about the vector's address, as `lead_width` says.  Minimizing over
-    every matrix would hold `local_flux` at width one: its 9x9 flux solver
-    claims no alignment.
-    """
-    out = [self.dest]
-    for op, target in zip(self.ops, list(self.target or [])):
-      if target and target[0] == 0:
-        out.append(op)
-    return out
-
-  def _lead_alignment(self, context: Context) -> int:
-    """What the lead matrices prove about a wide access's base, in bytes.
-
-    A temporary is the generator's own shared buffer, which the allocator
-    starts on `SHARED_ALIGN_BYTES`, so it states that rather than the zero of
-    an absent claim.  The column stride is not this function's question: an odd lead
-    keeps the wide path and has its remainder peeled and guarded
-    (`test_store_exactness`), so it is not a reason to narrow the width.
-    """
-    from tensorforge.backend.pir.allocate import SHARED_ALIGN_BYTES
-    out = []
-    for m in self._lead_matrices():
-      tensor = m.tensor
-      out.append(max(getattr(tensor, 'alignment', 0) or 0, SHARED_ALIGN_BYTES)
-                 if getattr(tensor, 'is_tmp', False)
-                 else (getattr(tensor, 'alignment', 0) or 0))
-    return min(out) if out else 0
-
-  def lead_width(self, context: Context) -> int:
-    """How many adjacent lead-dimension elements one lane holds.
-
-    Legal only where *every* matrix indexed by the lead dimension proves the
-    alignment: the destination and any operand whose axis 0 is the lead
-    dimension are all read and written through the same wide cast, so the
-    weakest of them decides.  An operand that is not indexed by the lead
-    dimension -- `B` in `C[m,n] += A[m,k] B[k,n]` -- is a broadcast and is
-    splatted rather than loaded wide, so it does not constrain anything.
-    """
-    from tensorforge.backend.instructions.memory import vectorize
-    if not vectorize.lead_vectorize_supported(context):
-      return 1
-    align = self._lead_alignment(context)
-    fp = context.fp_type.size()
-    # The same call `get_num_threads` makes, so the lane count and the width
-    # cannot come from two different answers.
-    return vectorize.lead_pair(self._lead_dim(), fp, align,
-                               blocking=context.get_user_options().lead_blocking)[1]
-
-  def _thread_ladder(self, context: Context) -> int:
-    num_threads = context.align(num=self._lead_dim())
-    for cap in (32, 16, 8, 4, 2, 1):
-      if self._lead_dim() <= cap:
-        num_threads = cap
-    return num_threads
-
-  def get_num_threads(self, context: Context):
-    from tensorforge.backend.instructions.memory import vectorize
-    if vectorize.lead_vectorize_supported(context):
-      fp = context.fp_type.size()
-      align = self._lead_alignment(context)
-      threads, width = vectorize.lead_pair(
-          self._lead_dim(), fp, align,
-          blocking=context.get_user_options().lead_blocking)
-      if width > 1:
-        # The extent still has to be covered: the loop bound is in elements
-        # and the lane count is what it is divided by, so this returns the
-        # *lane* count and the width travels separately.
-        return threads, self._lead_dim()
-    return self._thread_ladder(context), self._lead_dim()
 
   def matrix_list(self):
     return [self.dest] + [op for op in self.ops]
@@ -473,13 +387,6 @@ class ElementwiseDescr(OperationDescription):
     return [s for s in self.srcs if isinstance(s, (int, float, np.integer,
                                                   np.floating))]
 
-  def get_num_threads(self, context: Context):
-    if not self.dest.bbox.rank():
-      # one value, computed on every lane: it asks the section for nothing
-      return 1, 1
-    vul = context.target.hw.vec_unit_length
-    return vul, vul
-
   def reads(self):
     return self.tensor_srcs()
 
@@ -553,10 +460,6 @@ class ReductionDescr(OperationDescription):
 
     var.tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
     dest.tensor.set_data_flow_direction(DataFlowDirection.SINK)
-
-  def get_num_threads(self, context: Context):
-    vul = context.target.hw.vec_unit_length
-    return vul, vul
 
   def reads(self):
     return [self.var]
@@ -827,9 +730,6 @@ class BarrierDescription(OperationDescription):
   def matrix_list(self):
     return []
 
-  def get_num_threads(self, ctx):
-    return 32, 32
-
 class GridFenceDescr(BarrierDescription):
   def __str__(self):
     return 'fence'
@@ -850,9 +750,6 @@ class RegionDescription(OperationDescription):
 
   def matrix_list(self):
     return []
-
-  def get_num_threads(self, ctx):
-    return 32, 32
 
   def __str__(self):
     return f'region "{self.name}"'

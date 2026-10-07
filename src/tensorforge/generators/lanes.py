@@ -23,12 +23,19 @@ from a constant.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+from tensorforge.backend.instructions.memory import vectorize
+from tensorforge.backend.pir.allocate import SHARED_ALIGN_BYTES
 from tensorforge.common.context import Context
+from tensorforge.common.exceptions import InternalError
 from tensorforge.common.threads import MultLayout
-from tensorforge.generators.descriptions import (ElementwiseDescr,
-                                                 OperationDescription)
+from tensorforge.generators.descriptions import (BarrierDescription,
+                                                 ElementwiseDescr,
+                                                 MultilinearDescr,
+                                                 OperationDescription,
+                                                 ReductionDescr,
+                                                 RegionDescription)
 
 #: The default ceiling on lanes per multiplication, and *not* a hardware fact:
 #: it bites only where the wave is wider, which today is AMD alone (NVIDIA and
@@ -52,6 +59,106 @@ class LaneConfig:
     #: Lead-dimension elements one lane covers, where an unvectorized lane
     #: covers one.
     lead_width: int
+
+
+def asked(descr: OperationDescription,
+          context: Context) -> Tuple[int, int, int]:
+    """What one descriptor asks of its section: lanes, how many of them do
+    useful work, and lead-dimension elements per lane.
+
+    A contraction spreads its destination's lead axis over the lanes.  An
+    elementwise operation and a reduction run at the vector unit's width --
+    the first strides by whatever count it is given (`deduce`), the second
+    exchanges across it.  A barrier or a region holds no data and asks for
+    32, which every target's vector unit covers.
+    """
+    if isinstance(descr, MultilinearDescr):
+        return _contraction(descr, context)
+    vul = context.target.hw.vec_unit_length
+    if isinstance(descr, ElementwiseDescr):
+        if not descr.dest.bbox.rank():
+            # one value, computed on every lane: it asks the section for
+            # nothing
+            return 1, 1, 1
+        return vul, vul, 1
+    if isinstance(descr, ReductionDescr):
+        return vul, vul, 1
+    if isinstance(descr, (BarrierDescription, RegionDescription)):
+        return 32, 32, 1
+    raise InternalError(f'{type(descr)} asks for no lane geometry.')
+
+
+def _lead_extent(descr: MultilinearDescr) -> int:
+    """The destination's lead extent, which the lanes cover.
+
+    A destination without axes has nothing to spread over the lanes; the
+    scalar branch computes it on every lane, which asks for none.  `int`,
+    because a bounding box measures itself in numpy counts, and this one
+    travels through `LaneConfig` into `LaunchConfig.active_threads`, where
+    `json.dumps` in the kernel metadata refuses it (as it does the shared
+    memory size, see `MemRegion`).
+    """
+    return int(descr.dest.bbox.sizes()[0]) if descr.dest.bbox.rank() else 1
+
+
+def _lead_matrices(descr: MultilinearDescr) -> list:
+    """The matrices one lead-dimension vector is read and written through.
+
+    The destination, and an operand whose *axis 0* carries the destination's
+    lead index.  An operand indexed only by the other axes -- `B` in
+    `C[m,n] += A[m,k] B[k,n]` -- is splatted, not loaded wide, so it proves
+    nothing about the vector's address.  Minimizing over every matrix would
+    hold `local_flux` at width one: its 9x9 flux solver claims no alignment.
+    """
+    out = [descr.dest]
+    for op, target in zip(descr.ops, list(descr.target or [])):
+        if target and target[0] == 0:
+            out.append(op)
+    return out
+
+
+def _lead_alignment(descr: MultilinearDescr) -> int:
+    """What the lead matrices prove about a wide access's base, in bytes.
+
+    Legal only where *every* matrix indexed by the lead dimension proves the
+    alignment: they are all read and written through the same wide cast, so
+    the weakest of them decides.  A temporary is the generator's own shared
+    buffer, which the allocator starts on `SHARED_ALIGN_BYTES`, so it states
+    that rather than the zero of an absent claim.  The column stride is not
+    this function's question: an odd lead keeps the wide path and has its
+    remainder peeled and guarded (`test_store_exactness`), so it is not a
+    reason to narrow the width.
+    """
+    out = []
+    for m in _lead_matrices(descr):
+        tensor = m.tensor
+        out.append(max(getattr(tensor, 'alignment', 0) or 0, SHARED_ALIGN_BYTES)
+                   if getattr(tensor, 'is_tmp', False)
+                   else (getattr(tensor, 'alignment', 0) or 0))
+    return min(out) if out else 0
+
+
+def _contraction(descr: MultilinearDescr,
+                 context: Context) -> Tuple[int, int, int]:
+    """A contraction's lanes and width, from one `vectorize.lead_pair`.
+
+    Wide where the target vectorizes the lead dimension and the lead matrices
+    prove the alignment; the extent still has to be covered, since the loop
+    bound is in elements and the lane count is what it is divided by.
+    Otherwise the extent rounded up to a power of two, capped at 32.
+    """
+    extent = _lead_extent(descr)
+    if vectorize.lead_vectorize_supported(context):
+        threads, width = vectorize.lead_pair(
+            extent, context.fp_type.size(), _lead_alignment(descr),
+            blocking=context.get_user_options().lead_blocking)
+        if width > 1:
+            return threads, extent, width
+    threads = context.align(num=extent)
+    for cap in (32, 16, 8, 4, 2, 1):
+        if extent <= cap:
+            threads = cap
+    return threads, extent, 1
 
 
 def deduce(descr_list: List[OperationDescription],
@@ -80,8 +187,8 @@ def deduce(descr_list: List[OperationDescription],
     pointwise = (0, 0)
     widths = []
     for descr in descr_list:
-        threads, active = descr.get_num_threads(context)
-        widths.append(getattr(descr, 'lead_width', lambda _c: 1)(context))
+        threads, active, width = asked(descr, context)
+        widths.append(width)
         if isinstance(descr, ElementwiseDescr):
             pointwise = (max(threads, pointwise[0]), max(active, pointwise[1]))
             continue

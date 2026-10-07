@@ -145,7 +145,8 @@ def lead_vector_width(start: int, end: int, threads: int,
 
 
 def _round_up_pow2(n: int, cap: int) -> int:
-    """The thread count `MultilinearDescr.get_num_threads` would pick for `n`."""
+    """The lane count a contraction of lead extent `n` gets at width one
+    (`lanes.asked`)."""
     t = 1
     while t < n and t < cap:
         t *= 2
@@ -217,8 +218,8 @@ def lead_threads_and_width(extent: int, elem_bytes: int, align_bytes: int,
     corpus that is why it answers 1: 403 of 446 lead loops have an extent no
     larger than the thread count, so a lane already holds one element and a
     width of 2 can only mean half the wave runs empty.  The thread count is
-    not a constant of the problem, though -- `get_num_threads` derives it from
-    the extent -- so the two are one decision.
+    not a constant of the problem, though -- `lanes.asked` derives it from the
+    extent -- so the two are one decision.
 
     At width `w` the lane count needed is `ceil(extent / w)`, rounded up to a
     power of two as at width 1.  A 32-element dimension becomes 16 lanes each
@@ -294,9 +295,9 @@ def lead_pair(extent: int, elem_bytes: int, align_bytes: int,
     `lead_threads_and_width` returns a pair because the two are one choice --
     at width `w` the lane count needed is `ceil(extent / w)`, so picking
     either without the other is picking neither.  Two callers each taking one
-    component from a call of its own -- `get_num_threads` the lane count and
-    `lead_width` the width -- would have nothing making the two calls pass the
-    same arguments.  One passing the cap and one taking the default gives, for
+    component from a call of its own -- one the lane count, the other the
+    width -- would have nothing making the two calls pass the same
+    arguments.  One passing the cap and one taking the default gives, for
     a 16-element FP32 extent at 16-byte alignment, `(8, 2)` against `(4, 4)`
     -- a nest at 8 lanes and width 4, which is 32 slots for 16 elements and a
     register image blocked for a pair nobody computed.

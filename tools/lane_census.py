@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
+from tensorforge.generators import lanes
 
 CAP = 32  # Generator._deduce_num_threads caps here when no ElementwiseDescr
 
@@ -70,7 +71,7 @@ def survey(arch: str = 'pvc', backend: str = 'acpp'):
             ctx = Context(arch=arch, backend=backend,
                           fp_type=getattr(case, 'DTYPE', Datatype.F32))
             descrs = case.descr_list()
-            want = [d.get_num_threads(ctx) for d in descrs]
+            want = [lanes.asked(d, ctx)[:2] for d in descrs]
         except Exception:
             continue
         if not want:
@@ -126,7 +127,7 @@ def main():
 
 
 def _pow2(lead: int) -> int:
-    """`AbstractDescr.get_num_threads`, without needing a Context."""
+    """`lanes.asked` for a contraction, without needing a Context."""
     for t in (1, 2, 4, 8, 16, 32):
         if lead <= t:
             return t

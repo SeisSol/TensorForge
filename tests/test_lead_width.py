@@ -269,7 +269,7 @@ def test_the_lanes_still_cover_the_extent(extent):
 
 
 def test_an_unproven_base_reproduces_todays_choice():
-    """`get_num_threads` rounds the extent up to a power of two, capped at 32."""
+    """`lanes.asked` rounds the extent up to a power of two, capped at 32."""
     for extent, threads in [(9, 16), (12, 16), (20, 32), (32, 32), (120, 32)]:
         assert lead_threads_and_width(extent, 4, 0) == (threads, 1)
 

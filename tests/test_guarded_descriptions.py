@@ -34,6 +34,7 @@ from tensorforge.generators.descriptions import (ElementwiseDescr,
                                                  OperationDescription)
 from tensorforge.common.operation import Operation
 from tensorforge.generators.generator import Generator
+from tensorforge.generators.lanes import LaneConfig
 
 DTYPE = Datatype.F32
 
@@ -53,9 +54,9 @@ def _sqrt(dest="A", src="B"):
     return ElementwiseDescr(Operation.SQRT, _mat(dest), [_mat(src)])
 
 
-def _generate(descrs):
+def _generate(descrs, lanes=None):
     ctx = Context(arch="sm_86", backend="cuda", fp_type=DTYPE)
-    gen = Generator(descrs, ctx, attrs={})
+    gen = Generator(descrs, ctx, attrs={}, lanes=lanes)
     gen.generate()
     return gen
 
@@ -203,19 +204,26 @@ def test_the_section_sees_the_tensors_a_guard_reads():
 
 def test_a_descriptor_nobody_builds_stops_the_generator():
     """Falling out of the dispatch and being dropped would turn a missing
-    builder into a wrong kernel rather than an error."""
+    builder into a wrong kernel rather than an error.  The lanes are given,
+    as `lanes.asked` would refuse the descriptor first."""
 
     class Unknown(OperationDescription):
         def matrix_list(self):
             return [_mat("A")]
 
-        def get_num_threads(self, context):
-            return 32, 32
-
         def __str__(self):
             return "an operation nothing builds"
 
     with pytest.raises(InternalError, match="no registered builder"):
+        _generate([Unknown()], lanes=LaneConfig(32, 32, 1))
+
+
+def test_a_descriptor_without_a_lane_geometry_stops_the_generator():
+    class Unknown(OperationDescription):
+        def matrix_list(self):
+            return [_mat("A")]
+
+    with pytest.raises(InternalError, match="asks for no lane geometry"):
         _generate([Unknown()])
 
 
