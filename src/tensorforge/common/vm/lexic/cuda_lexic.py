@@ -184,8 +184,9 @@ class CudaLexic(Lexic):
     # contracted expression everywhere else.
     return f'tensorforge::fma({a}, {b}, {c})'
 
-  #: The C math library, as CUDA declares it for device code (`sinf`,
-  #: `sin`).  HIP declares the same names.
+  #: The math library CUDA declares for device code: C's functions (`sinf`,
+  #: `sin`) and its own reciprocal roots (`rsqrtf`, `rcbrtf`).  HIP declares
+  #: the same names.
   MATH = {
     Operation.MIN: 'fmin{f}({0}, {1})',
     Operation.MAX: 'fmax{f}({0}, {1})',
@@ -196,6 +197,7 @@ class CudaLexic(Lexic):
       (Operation.ERF, 'erf'), (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
       (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
       (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
+      (Operation.RSQRT, 'rsqrt'), (Operation.RCBRT, 'rcbrt'),
       (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
       (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
       (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),

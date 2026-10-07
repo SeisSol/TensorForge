@@ -154,18 +154,37 @@ def test_the_elementwise_instruction_writes_the_operation(monkeypatch):
         return real(self, fn, type_, *args, **kw)
 
     monkeypatch.setattr(IRBuilder, 'math', math)
-
-    def tensor(alias):
-        return SubTensor(Tensor([16, 16], Addressing.STRIDED,
-                                BoundingBox([0, 0], [16, 16]), alias=alias,
-                                datatype=Datatype.F32))
-    gen = Generator([ew.pow(tensor('B'), tensor('A'), 3.0)],
+    gen = Generator([ew.pow(_tensor('B'), _tensor('A'), 3.0)],
                     Context(arch='sm_86', backend='cuda',
                             fp_type=Datatype.F32))
     gen.generate()
     assert built and all(fn == Operation.POW and args[1] == 3.0
                          for fn, args in built)
     assert 'powf(' in gen.get_kernel()
+
+
+def _tensor(alias):
+    return SubTensor(Tensor([16, 16], Addressing.STRIDED,
+                            BoundingBox([0, 0], [16, 16]), alias=alias,
+                            datatype=Datatype.F32))
+
+
+@pytest.mark.parametrize('where,exponent,call', [
+    (CUDA, -0.5, 'rsqrtf('), (HIP, -0.5, 'rsqrtf('),
+    (SYCL, -0.5, 'sycl::rsqrt('), (ESIMD, -0.5, '::rsqrt('),
+    (CUDA, -1 / 3, 'rcbrtf('), (HIP, -1 / 3, 'rcbrtf(')])
+def test_a_reciprocal_root_is_spelled_where_the_library_has_one(
+        where, exponent, call):
+    """`ew.pow` takes these two exponents to the reciprocal roots, so a
+    library that has one is asked for it."""
+    from tensorforge.generators import elementwise as ew
+    from tensorforge.generators.generator import Generator
+
+    gen = Generator([ew.pow(_tensor('B'), _tensor('A'), exponent)],
+                    Context(arch=where[0], backend=where[1],
+                            fp_type=Datatype.F32))
+    gen.generate()
+    assert call in gen.get_kernel()
 
 
 # --------------------------------------------------------------------------- #

@@ -587,6 +587,7 @@ class SyclLexic(Lexic):
       (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
       (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
       (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
+      (Operation.RSQRT, 'rsqrt'),
       (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
       (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
       (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),
