@@ -70,13 +70,11 @@ _INFIX = {
     'and': '&&', 'or': '||',
 }
 
-# Ops with no infix form that the lexic already spells correctly.  Without
-# this they would fall through to the generic `f'{op}({args})'`, i.e.
-# unqualified `min(a, b)` -- which happens to resolve in CUDA and HIP device
-# code through the vendor headers' global-namespace overloads, and so would
-# work by accident while silently depending on which headers a translation
-# unit has pulled in.  `get_operation` gives `fminf`/`fmin` by dtype, which is
-# what the elementwise path emits for the same operator.
+# Ops with no infix form, spelled by the lexic for the value's type as the
+# elementwise path spells the same operation: `std::fmin` for a
+# floating-point value, the library's integer `min` for an integer.  The
+# generic `f'{op}({args})'` would be an unqualified `min(a, b)`, resolved
+# against whichever overloads the headers of a translation unit declare.
 _LEXIC_BINOP = {'min': Operation.MIN, 'max': Operation.MAX}
 
 
@@ -409,7 +407,7 @@ class Emitter:
             # answers with nothing and the consumer uses the answer anyway --
             # `Symbol.load` answering None for a structured load under
             # an explicit vector, say, with the value flowing into an arithmetic op,
-            # which would come out as `sycl::max(float(acc), float(None))`.
+            # which would come out as `sycl::fmax(float(acc), float(None))`.
             # Loud here, because the alternative is a compiler error pointing
             # at the arithmetic rather than at the load that had no value.
             raise IRError(

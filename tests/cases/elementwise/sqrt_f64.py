@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: MIT
 """F64 variant of ``elementwise/sqrt.py``.
 
-The CUDA lexic dispatches ``sqrt`` → ``sqrtf`` for F32 and ``sqrt``
-for F64 (no ``f`` suffix). A regression that emits ``sqrtf`` for both
-dtypes silently narrows to F32 and ruins F64 accuracy; the looser-
-than-F32-but-stricter-than-F32-allows tolerance below catches it.
+The square root is one name for both types (``std::sqrt``,
+``sycl::sqrt``), and the overload decides.  A regression that narrows the
+F64 one to float -- ``sqrtf``, a ``float`` literal, a cast -- ruins F64
+accuracy silently; the tolerance below, which F32 cannot meet, catches it.
 """
 
 import numpy as np

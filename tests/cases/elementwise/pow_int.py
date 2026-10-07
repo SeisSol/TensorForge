@@ -30,7 +30,7 @@ from tensorforge.generators import elementwise as ew
 NAME = "elementwise_pow3_16x16"
 DTYPE = Datatype.F32
 BATCH = 4
-TOL = (1e-4, 1e-4)         # powf is the loosest of the unary calls
+TOL = (1e-4, 1e-4)         # pow is the loosest of the library calls
 
 
 def descr_list():

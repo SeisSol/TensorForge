@@ -5,12 +5,13 @@
 
 `IRBuilder.math` records which `common.operation.Operation` a value is and
 what it reads; at emission the lexic spells it -- its library's functions
-from `Lexic.MATH`, the operators every C-like language shares from
-`lexic.INFIX`.  What is pinned here: the statement is built and checked like
-the arithmetic, it comes out as the target's call with a number in it spelled
-in the kernel's type, the elementwise instruction writes nothing else for its
-operation, and the tables agree on which function an operation is -- one
-table per language is one place per language for a misspelt name to hide.
+from `Lexic.MATH`, or `Lexic.INTEGER_MATH` for an integer, the operators
+every C-like language shares from `lexic.INFIX`.  What is pinned here: the
+statement is built and checked like the arithmetic, it comes out as the
+target's call with a number in it spelled in the kernel's type, the
+elementwise instruction writes nothing else for its operation, and the
+tables agree on which function an operation is -- one table per language is
+one place per language for a misspelt name to hide.
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ from tensorforge.generators.generator import Generator
 
 F32 = ScalarType(Datatype.F32)
 F64 = ScalarType(Datatype.F64)
+I32 = ScalarType(Datatype.I32)
+I64 = ScalarType(Datatype.I64)
 
 #: One target per lexic.
 CUDA = ('sm_86', 'cuda')
@@ -98,24 +101,36 @@ def test_a_statement_without_its_operation_is_refused():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize('where,op,type_,operands,expected', [
-    (CUDA, Operation.EXP, F32, (None,), 'expf(x)'),
-    (CUDA, Operation.EXP, F64, (None,), 'exp(x)'),
-    (HIP, Operation.LOG1P, F32, (None,), 'log1pf(x)'),
-    (CUDA, Operation.POW, F32, (None, 3.0), 'powf(x, 3.0f)'),
-    (CUDA, Operation.POW, F64, (None, 3.0), 'pow(x, 3.0)'),
+    (CUDA, Operation.EXP, F32, (None,), 'std::exp(x)'),
+    (CUDA, Operation.EXP, F64, (None,), 'std::exp(x)'),
+    (HIP, Operation.LOG1P, F32, (None,), 'std::log1p(x)'),
+    (CUDA, Operation.POW, F32, (None, 3.0), 'std::pow(x, 3.0f)'),
+    (CUDA, Operation.POW, F64, (None, 3.0), 'std::pow(x, 3.0)'),
+    (CUDA, Operation.MIN, F32, (None, 0.0), 'std::fmin(x, 0.0f)'),
+    (CUDA, Operation.RSQRT, F32, (None,), 'rsqrtf(x)'),
+    (CUDA, Operation.RSQRT, F64, (None,), 'rsqrt(x)'),
     (CUDA, Operation.MUL, F32, (2, None), '(2.0f * x)'),
     (CUDA, Operation.RCP, F32, (None,), '(1 / x)'),
     (SYCL, Operation.EXP, F32, (None,), 'sycl::exp(x)'),
-    (SYCL, Operation.MAX, F32, (None, 0.0), 'sycl::max(float(x), float(0.0f))'),
+    (SYCL, Operation.MAX, F32, (None, 0.0),
+     'sycl::fmax(float(x), float(0.0f))'),
     (ESIMD, Operation.EXP, F32, (None,), 'tensorforge::intel_esimd::exp(x)'),
     (ESIMD, Operation.TANH, F64, (None,), 'tensorforge::tanhF64(x)'),
     (OPENMP, Operation.SQRT, F32, (None,), 'std::sqrt(x)'),
-    (OPENMP, Operation.ABS, F32, (None,), 'std::fabsf(x)'),
+    (OPENMP, Operation.ABS, F32, (None,), 'std::fabs(x)'),
+    (CUDA, Operation.MIN, I64, (None, 0), 'min(x, 0_i64)'),
+    (HIP, Operation.ABS, I32, (None,), 'abs(x)'),
+    (SYCL, Operation.MAX, I32, (None, 0),
+     'sycl::max(int32_t(x), int32_t(0_i32))'),
+    (OPENMP, Operation.MIN, I64, (None, 0),
+     'std::min(int64_t(x), int64_t(0_i64))'),
 ])
 def test_the_target_spells_it(where, op, type_, operands, expected):
     """Its library's function, a number in the kernel's type -- `3.0f`, not
     a `double` the call would convert -- and an operator where every C-like
-    language has the same one."""
+    language has the same one.  An integer's own function where it has one:
+    `std::fmin` of two `int64_t` compares two `double`s, and above 2**53 the
+    smaller of two integers is no longer one of them."""
     line = _emitted(Target(*where), op, type_, *operands)
     assert line.endswith(f' = {expected};'), line
 
@@ -160,7 +175,7 @@ def test_the_elementwise_instruction_writes_the_operation(monkeypatch):
     gen.generate()
     assert built and all(fn == Operation.POW and args[1] == 3.0
                          for fn, args in built)
-    assert 'powf(' in gen.get_kernel()
+    assert 'std::pow(' in gen.get_kernel()
 
 
 def _tensor(alias):
@@ -236,25 +251,48 @@ def _function(template: str) -> str:
     return re.match(r'(?:\w+::)*(\w+?)(?:\{f\})?\(', template).group(1)
 
 
-#: Where the libraries differ in the function and not in its name: C's
-#: `fmin` returns the other operand where one is a NaN, the C++ `min` the
-#: SYCL and OpenMP spellings call returns whichever it compares first.
-NAMED_APART = {Operation.MIN, Operation.MAX}
+#: Where the floating-point function is not named after its operation: `abs`
+#: is C's integer function, and C++'s `min` of floating-point numbers another
+#: answer for a NaN than `fmin`.
+FLOATING_POINT = {Operation.ABS: 'fabs', Operation.MIN: 'fmin',
+                  Operation.MAX: 'fmax'}
 
 
-def test_a_function_is_the_same_function_in_every_library():
+@pytest.mark.parametrize('tables,names', [
+    ('MATH', FLOATING_POINT), ('INTEGER_MATH', {})])
+def test_a_function_is_the_same_function_in_every_library(tables, names):
     """An operation every library has is the same function in each: a typo
-    in one table -- `logp1` for `log1p` -- is a name no other table has."""
-    shared = set(CudaLexic.MATH) & set(SyclLexic.MATH) & set(TargetLexic.MATH)
+    in one table -- `logp1` for `log1p` -- is a name no other table has, and
+    an `fmin` in one where another has `min` is another answer for a NaN."""
+    libraries = [getattr(lexic, tables)
+                 for lexic in (CudaLexic, SyclLexic, TargetLexic)]
+    shared = set.intersection(*map(set, libraries))
     assert shared, 'the libraries share no function'
-    for op in sorted(shared - NAMED_APART, key=lambda o: o.value):
-        names = {_function(table[op])
-                 for table in (CudaLexic.MATH, SyclLexic.MATH,
-                               TargetLexic.MATH)}
-        assert len(names) == 1, f'{op}: {sorted(names)}'
-        # `fabs` is the floating-point one; `abs` takes an integer.
-        expected = 'fabs' if op == Operation.ABS else op.name.lower()
-        assert names == {expected}, f'{op}: {sorted(names)}'
+    for op in sorted(shared, key=lambda o: o.value):
+        spelled = {_function(table[op]) for table in libraries}
+        expected = names.get(op, op.name.lower())
+        assert spelled == {expected}, f'{op}: {sorted(spelled)}'
+
+
+@pytest.mark.parametrize('where', [CUDA, HIP, SYCL, OPENMP])
+@pytest.mark.parametrize('type_', [Datatype.U32, Datatype.SIZE], ids=str)
+def test_an_unsigned_integer_is_its_own_absolute_value(where, type_):
+    """`abs` of one is ambiguous between the overloads for the signed
+    types."""
+    lexic = Target(*where).lexic
+    assert lexic.get_operation(Operation.ABS, type_, 'x', '') == 'x'
+
+
+def test_an_integer_minimum_is_the_integer_function():
+    """The reduction's combine asks the same table as the elementwise
+    operation."""
+    b = IRBuilder(fptype=Datatype.I64)
+    x = b.extern_value('x', I64, hint='x')
+    y = b.extern_value('y', I64, hint='y')
+    b.op('min', I64, x, y, hint='m')
+    lines = []
+    Emitter(lines.append, Target(*CUDA)).run(b.finish())
+    assert lines[-1].endswith(' = min(x, y);'), lines[-1]
 
 
 @pytest.mark.parametrize('where', [CUDA, SYCL, OPENMP])

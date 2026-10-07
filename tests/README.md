@@ -296,8 +296,9 @@ lanes.
 Feature axes get an F64 sibling: `add_true_f64`,
 `addressing_none_f64`, `slicing/inner_region_f64`,
 `elementwise/{exp,sqrt,tanh}_f64`, `sparsity_band_f64`. They exist because
-several emit paths split on dtype — `sqrtf` vs `sqrt`, `0.0f` vs `0.0`
-in the sparsity unrolled sequences, dtype-dependent literals in the
+several emit paths split on dtype — the F64 `exp` and `tanh` ESIMD
+composes (`tensorforge::expF64`), `0.0f` vs `0.0` in the sparsity unrolled
+sequences, dtype-dependent literals in the
 `NONE`/`PTR_BASED` offset arithmetic — and a regression that only
 breaks F64 is invisible to the F32 cases.
 

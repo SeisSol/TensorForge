@@ -343,6 +343,9 @@ def _py(expr: str) -> str:
     # `tensorforge::fma(a, b, c)`, the vector FMA CUDA's lexic names so that
     # sm_100 can pair it.  The same `a * b + c` the infix spelling computes.
     e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
+    # The standard library's functions, which the environment holds by their
+    # own names.
+    e = re.sub(r'\bstd::(?=\w+\s*\()', '', e)
     e = e.replace('&&', ' and ').replace('||', ' or ')
     e = re.sub(r'(?<![=!<>&|])!(?!=)', ' not ', e)
     # `*(SomeVecType*)&p[i]` -> `VLOAD(ADDR(p, i), N)`.  Done before the
@@ -466,17 +469,18 @@ class Interp:
         for fn in ('min', 'max', 'abs'):
             self.env[fn] = __builtins__[fn] if isinstance(__builtins__, dict) \
                 else getattr(__builtins__, fn)
-        self.env['fabsf'] = self.env['fabs'] = abs
-        # CUDA and HIP spell an elementwise `max`/`min` this way.
-        self.env['fmaxf'] = self.env['fmax'] = self.env['max']
-        self.env['fminf'] = self.env['fmin'] = self.env['min']
+        self.env['fabs'] = abs
+        # The libraries spell an elementwise `max`/`min` of floating-point
+        # numbers this way.
+        self.env['fmax'] = self.env['max']
+        self.env['fmin'] = self.env['min']
         import math
         for name, fn in (('sqrt', lambda x: abs(x) ** 0.5), ('exp', math.exp),
                          ('log', lambda x: math.log(abs(x) + 1e-9)),
                          ('pow', lambda a, b: abs(a) ** b),
                          ('tanh', math.tanh), ('sin', math.sin),
                          ('cos', math.cos), ('erf', math.erf)):
-            self.env[name] = self.env[name + 'f'] = fn
+            self.env[name] = fn
 
     def _readlane(self, name: str, lane):
         """Lane `lane`'s copy of `name`.
@@ -648,12 +652,14 @@ class Interp:
             # nothing produces plausible numbers, as above.
             raise Abort(f'async copy not modeled: {stmt!r}')
         if (('pipeline' in stmt or '::' in stmt)
-                and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt):
+                and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt
+                and 'std::' not in stmt):
             # The commit and the wait of the pipeline primitives, the grid
             # barrier: statements with no effect on the values compared here.
             # A declaration whose *type* is namespaced is not one of those --
             # swallowing `tensorforge::VectorT<float,2> v = ...` would leave
-            # the name unbound -- and neither is a call into `tensorforge::`.
+            # the name unbound -- and neither is a call into `tensorforge::`
+            # or the standard library.
             return
         if m and m.group('name') not in ('return',):
             name = m.group('name')

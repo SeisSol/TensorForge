@@ -15,6 +15,33 @@ INFIX = {
   Operation.GE: '>=', Operation.EQ: '==', Operation.NEQ: '!=',
 }
 
+#: The C++ standard library's mathematical functions, one name for every
+#: floating-point type.  CUDA and HIP declare them for device code as well.
+#: `fmin` and `fmax` are the IEEE minimum and maximum, which return the other
+#: operand where one is a NaN.
+STD_MATH = {
+  Operation.ABS: 'std::fabs({0})',
+  Operation.MIN: 'std::fmin({0}, {1})',
+  Operation.MAX: 'std::fmax({0}, {1})',
+  Operation.POW: 'std::pow({0}, {1})',
+  Operation.GAMMA: 'std::tgamma({0})',
+  **{op: f'std::{name}({{0}})' for op, name in (
+    (Operation.ERF, 'erf'), (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
+    (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
+    (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
+    (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
+    (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
+    (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),
+    (Operation.COSH, 'cosh'), (Operation.TANH, 'tanh'),
+    (Operation.ASINH, 'asinh'), (Operation.ACOSH, 'acosh'),
+    (Operation.ATANH, 'atanh'))},
+}
+
+#: The types `Lexic.INTEGER_MATH` is asked for.
+_INTEGERS = frozenset({Datatype.BOOL, Datatype.I8, Datatype.I16, Datatype.I32,
+                       Datatype.I64, Datatype.U32, Datatype.SIZE})
+_UNSIGNED = frozenset({Datatype.U32, Datatype.SIZE})
+
 class Lexic(ABC):
   """How a statement the generator has decided on is written in one language.
 
@@ -245,13 +272,17 @@ class Lexic(ABC):
   #: (`get_operation`), and not substituted: a function that exists under one
   #: library's name and not another's is a numerics question, not a spelling.
   MATH: Dict[Operation, str] = {}
+  #: Where an integer takes another function than a floating-point number.
+  #: `fmin`, `fmax` and `fabs` take an integer converted to `double`, which a
+  #: 64-bit one does not survive.
+  INTEGER_MATH: Dict[Operation, str] = {}
 
   def get_operation(self, op: Operation, fptype, value1, value2):
     """`op` over `value1` and `value2` as an expression in `fptype`.
 
     `value2` is `''` for a unary operation.  The operators are the same in
     every C-like spelling and are written here once; the functions differ by
-    library and come from `MATH`.
+    library and come from `MATH`, or from `INTEGER_MATH` for an integer.
     """
     if op == Operation.COPY:
       return value1
@@ -259,7 +290,15 @@ class Lexic(ABC):
       return f'(-{value1})'
     if op == Operation.RCP:
       return f'(1 / {value1})'
-    template = self.MATH.get(op)
+    if op == Operation.ABS and fptype in _UNSIGNED:
+      # Its own absolute value, where `abs` is ambiguous between the
+      # overloads for the signed types.
+      return value1
+    template = None
+    if fptype in _INTEGERS:
+      template = self.INTEGER_MATH.get(op)
+    if template is None:
+      template = self.MATH.get(op)
     if template is not None:
       return template.format(value1, value2,
                              f='f' if fptype == Datatype.F32 else '',

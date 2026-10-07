@@ -239,6 +239,8 @@ template <typename T> T atanh(T x) { return x; }
 template <typename T> T pow(T x, T) { return x; }
 template <typename T> T min(T x, T y) { return x < y ? x : y; }
 template <typename T> T max(T x, T y) { return x < y ? y : x; }
+template <typename T> T fmin(T x, T y) { return y < x ? y : x; }
+template <typename T> T fmax(T x, T y) { return x < y ? y : x; }
 
 } // namespace sycl
 

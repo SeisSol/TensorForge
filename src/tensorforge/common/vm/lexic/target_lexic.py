@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import GeneralLexicon, Addressing, DataFlowDirection
-from .lexic import Lexic, Operation
+from .lexic import STD_MATH, Lexic, Operation
 
 class TargetLexic(Lexic):
   def __init__(self, backend, underlying_hardware):
@@ -156,20 +156,11 @@ class TargetLexic(Lexic):
     return (f'__attribute__ ((vector_size (sizeof({fptype}) * {length})'
             f'{align})) {fptype}')
 
-  #: The C++ standard library's `<cmath>`.
-  MATH = {
-    Operation.ABS: 'std::fabs{f}({0})',
+  #: The C++ standard library's `<cmath>`, and for an integer the `min` and
+  #: `max` of `<algorithm>`, which take two of one type.
+  MATH = STD_MATH
+  INTEGER_MATH = {
     Operation.MIN: 'std::min({t}({0}), {t}({1}))',
     Operation.MAX: 'std::max({t}({0}), {t}({1}))',
-    Operation.POW: 'std::pow({0}, {1})',
-    **{op: f'std::{name}({{0}})' for op, name in (
-      (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
-      (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
-      (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
-      (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
-      (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
-      (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),
-      (Operation.COSH, 'cosh'), (Operation.TANH, 'tanh'),
-      (Operation.ASINH, 'asinh'), (Operation.ACOSH, 'acosh'),
-      (Operation.ATANH, 'atanh'))},
+    Operation.ABS: 'std::abs({0})',
   }

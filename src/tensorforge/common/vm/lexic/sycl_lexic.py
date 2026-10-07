@@ -577,11 +577,14 @@ class SyclLexic(Lexic):
     """
     return f'tensorforge::intel_esimd::simd_mask<{size}>'
 
-  #: SYCL's math functions, under SPMD (`get_operation`).
+  #: SYCL's math functions, under SPMD (`get_operation`).  The two operands
+  #: of a binary one are of one type.  `sycl::min` of floating-point numbers
+  #: requires both to be finite, and a minimum reduction starts from +inf;
+  #: `sycl::fmin` is the IEEE minimum, of any two.
   MATH = {
     Operation.ABS: 'sycl::fabs({0})',
-    Operation.MIN: 'sycl::min({t}({0}), {t}({1}))',
-    Operation.MAX: 'sycl::max({t}({0}), {t}({1}))',
+    Operation.MIN: 'sycl::fmin({t}({0}), {t}({1}))',
+    Operation.MAX: 'sycl::fmax({t}({0}), {t}({1}))',
     Operation.POW: 'sycl::pow({0}, {1})',
     **{op: f'sycl::{name}({{0}})' for op, name in (
       (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
@@ -594,6 +597,11 @@ class SyclLexic(Lexic):
       (Operation.COSH, 'cosh'), (Operation.TANH, 'tanh'),
       (Operation.ASINH, 'asinh'), (Operation.ACOSH, 'acosh'),
       (Operation.ATANH, 'atanh'))},
+  }
+  INTEGER_MATH = {
+    Operation.MIN: 'sycl::min({t}({0}), {t}({1}))',
+    Operation.MAX: 'sycl::max({t}({0}), {t}({1}))',
+    Operation.ABS: 'sycl::abs({0})',
   }
 
   def get_operation(self, op: Operation, fptype, value1, value2):

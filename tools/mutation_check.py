@@ -59,7 +59,8 @@ PREFETCH = Path('src/tensorforge/backend/pir/prefetch.py')
 MOVE = Path('src/tensorforge/backend/pir/move.py')
 TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 TARGET = Path('src/tensorforge/common/target.py')
-CUDA_LEXIC = Path('src/tensorforge/common/vm/lexic/cuda_lexic.py')
+LEXIC = Path('src/tensorforge/common/vm/lexic/lexic.py')
+SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
 ELEMENTWISE = Path('src/tensorforge/generators/elementwise.py')
 
 
@@ -946,8 +947,16 @@ GROUPS = {
     # An elementwise operation as one typed statement, spelled per target.
     'math': ('tests/test_math_op.py', [
         ('a misspelt function in one library',
-         sub(CUDA_LEXIC, "(Operation.LOG1P, 'log1p')",
+         sub(LEXIC, "(Operation.LOG1P, 'log1p')",
              "(Operation.LOG1P, 'logp1')", 1)),
+        ('a minimum that is another function of a NaN in one library',
+         sub(SYCL_LEXIC, "Operation.MIN: 'sycl::fmin(",
+             "Operation.MIN: 'sycl::min(", 1)),
+        ('an integer through the floating-point function',
+         sub(LEXIC, '    if fptype in _INTEGERS:\n', '    if False:\n', 1)),
+        ('the absolute value of an unsigned integer asked of `abs`',
+         sub(LEXIC, '    if op == Operation.ABS and fptype in _UNSIGNED:\n',
+             '    if False:\n', 1)),
         ('spelled for another type than the result',
          sub(EMIT, 'return lex.get_operation(fn, s.target[0].type.base, *args,',
              'return lex.get_operation(fn, Datatype.F64, *args,', 1)),

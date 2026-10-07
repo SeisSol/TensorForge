@@ -9,7 +9,7 @@ The case also guards the operator values in ``common/operation.py``. An
 ``Operation.TANH`` sharing its value with ``Operation.TAN`` would be
 collapsed into it by Python's :class:`enum.Enum`, so ``ew.tanh`` would
 lower to an ``Operation.TAN`` node, which the CUDA lexic table emits as
-``tan``: the kernel would compute ``tan`` while the reference computes
+``std::tan``: the kernel would compute ``tan`` while the reference computes
 ``tanh``. ``sinh``/``sin``, ``cosh``/``cos``, ``asinh``/``asin``,
 ``acosh``/``acos`` and ``atanh``/``atan`` pair up the same way, and the
 tanh cases are the only ones that run a hyperbolic function.

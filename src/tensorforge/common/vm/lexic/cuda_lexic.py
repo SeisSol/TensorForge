@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from .lexic import Lexic, Operation
+from .lexic import STD_MATH, Lexic, Operation
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.writer import MultiBlock
@@ -184,26 +184,21 @@ class CudaLexic(Lexic):
     # contracted expression everywhere else.
     return f'tensorforge::fma({a}, {b}, {c})'
 
-  #: The math library CUDA declares for device code: C's functions (`sinf`,
-  #: `sin`) and its own reciprocal roots (`rsqrtf`, `rcbrtf`).  HIP declares
-  #: the same names.
+  #: The C++ standard library's functions, which CUDA declares for device
+  #: code, and CUDA's own reciprocal roots (`rsqrtf`, `rcbrtf`), which it has
+  #: no `std::` name for.  HIP declares the same.
   MATH = {
-    Operation.MIN: 'fmin{f}({0}, {1})',
-    Operation.MAX: 'fmax{f}({0}, {1})',
-    Operation.POW: 'pow{f}({0}, {1})',
-    Operation.ABS: 'fabs{f}({0})',
-    Operation.GAMMA: 'tgamma{f}({0})',
-    **{op: name + '{f}({0})' for op, name in (
-      (Operation.ERF, 'erf'), (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
-      (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
-      (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
-      (Operation.RSQRT, 'rsqrt'), (Operation.RCBRT, 'rcbrt'),
-      (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
-      (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
-      (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),
-      (Operation.COSH, 'cosh'), (Operation.TANH, 'tanh'),
-      (Operation.ASINH, 'asinh'), (Operation.ACOSH, 'acosh'),
-      (Operation.ATANH, 'atanh'))},
+    **STD_MATH,
+    Operation.RSQRT: 'rsqrt{f}({0})',
+    Operation.RCBRT: 'rcbrt{f}({0})',
+  }
+  #: CUDA's integer functions, overloaded on the integer types.  Not
+  #: `std::min`, a host function nvcc lets device code call only under
+  #: `--expt-relaxed-constexpr`.
+  INTEGER_MATH = {
+    Operation.MIN: 'min({0}, {1})',
+    Operation.MAX: 'max({0}, {1})',
+    Operation.ABS: 'abs({0})',
   }
 
   #: C++ `tensorforge::Operation` members, by the `Operation` they lower from.
