@@ -88,7 +88,8 @@ class ShrMemAlloc(AbstractInstruction):
     dest.add_user(self)
 
   def gen_ir(self, writer: Writer):
-    """Bind the kernel's one shared arena, and the two windows into it.
+    """Bind the kernel's one shared arena, and the multiplication's window
+    into it.
 
     Not an allocation, despite the name.  `declare_shared_memory` reinterprets
     a pointer the launch configuration supplies -- dynamic shared memory on
@@ -135,8 +136,6 @@ class ShrMemAlloc(AbstractInstruction):
         writer(f'{shr_mem_decl};')
       writer(f'{declarator(shrmem_obj.name)} = '
              f'{lexic.shared_window_expr(common_shrmem, address)};')
-      writer(f'{declarator("tempShrMem")} = '
-             f'{lexic.shared_window_expr(shrmem_obj.name, shrmem_obj.get_temp_offset())};')
       return
 
     def window(name, decl, text, size):
@@ -155,17 +154,11 @@ class ShrMemAlloc(AbstractInstruction):
     window(shrmem_obj.name, declarator(shrmem_obj.name),
            lexic.shared_window_expr(common_shrmem, address),
            shrmem_obj.get_size_per_mult())
-    window('tempShrMem', declarator('tempShrMem'),
-           lexic.shared_window_expr(shrmem_obj.name,
-                                    shrmem_obj.get_temp_offset()),
-           common_shrmem_size - shrmem_obj.get_temp_offset())
 
   def is_ready(self):
-    shrmem_obj = self._dest.obj
-    if shrmem_obj.get_total_size() is not None:
-      return True
-    else:
-      return False
+    # Declared once the launch is decided, which is after the body is built
+    # and checked (`Generator._with_arena`).
+    return True
 
   def __str__(self):
     return f'{self._dest.name} = alloc_shr [{self._dest.obj.get_total_size_as_str()}];'

@@ -14,8 +14,8 @@ thread-distributed one:
 
 * **lead** -- a contracted axis *is* the thread-distributed one, so the fold
   crosses lanes.  Within one wave that is a shuffle butterfly; across waves the
-  waves' partials meet in a scratch tile in shared memory, with a rendezvous of
-  the multiplication around it (`_fold_across_waves`).  A width that is not a
+  waves' partials meet in a buffer in shared memory, with a rendezvous of the
+  multiplication around it (`_fold_across_waves`).  A width that is not a
   whole number of waves is still refused: its lanes are interleaved with other
   multiplications' and are not the contiguous run the second stage indexes.
 """
@@ -165,9 +165,8 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         The exchange in `tensorforge_device` is a shuffle, and a shuffle
         reaches one wave (`_reach`).  Above that the waves' partials meet in
         shared memory -- one slot per wave, a rendezvous, a fold over the
-        slots -- which `_fold_across_waves` emits and `temp_shmem` reserves
-        for.  Both index the waves of one multiplication as a contiguous run
-        of lanes.
+        slots -- which `_fold_across_waves` emits.  It indexes the waves of
+        one multiplication as a contiguous run of lanes.
 
         That run is what a width between two multiples of the wave does not
         have: `MultLayout` interleaves such widths with the other
@@ -186,18 +185,6 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
                 f'shared memory, which needs their lanes contiguous -- a '
                 f'width that leaves a partial wave is interleaved with the '
                 f'other multiplications of that wave instead.')
-
-    def temp_shmem(self) -> int:
-        """One slot per wave, per multiplication, for the super-wave fold.
-
-        The budget is read before any body is built, and the figure is a
-        property of the thread count alone, so stating it here keeps the
-        reservation and the use in one place.  `tempShrMem` is already striped
-        by `threadIdx.y`, so this is per multiple and not per block.
-        """
-        if not self._contracts_lead():
-            return 0
-        return self._wave_slots()
 
     def _contracts_lead(self) -> bool:
         return self.lead_dim(self._op) in self._dims

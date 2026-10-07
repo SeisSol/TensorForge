@@ -27,11 +27,12 @@ from tensorforge.backend.pir.core import (TOKEN, BufferType, Effect, IRError,
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.vm.vm import vm_factory
+from harness.placement import placed
 
 
 def _emit(body, arch='sm_86', backend='cuda'):
     w = Writer()
-    emit(body, w, vm_factory(arch, backend, 'float'))
+    emit(placed(body), w, vm_factory(arch, backend, 'float'))
     return w.get_src()
 
 
@@ -54,7 +55,7 @@ def test_a_loop_carries_a_scalar():
 
 
 def test_a_loop_carries_an_async_token():
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 128))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     lds = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
     glb = b.alloc(Datatype.F32, (1024,), MemSpace.GLOBAL, hint='g')
     lane = b.thread_id('x')

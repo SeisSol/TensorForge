@@ -364,7 +364,7 @@ def test_a_kernel_that_builds_at_no_width_still_raises():
 def test_the_resident_block_count_uses_only_what_is_known():
     """Shared memory per block and threads per block, against their budgets.
 
-    Neither is an estimate: the first is what `ShrMemOpt` allocated and the
+    Neither is an estimate: the first is what the allocator laid out and the
     second is the launch geometry.  The register limit is left out even though
     the budget for it exists, because applying it would need the register
     count -- which is the one thing that is not known.

@@ -82,8 +82,8 @@ class SyclLexic(Lexic):
     way.  So the arena becomes the chunk, and its base is offset zero.
 
     `slm_init` wants the size as a template argument, which is why this takes
-    one.  The generator has it: `ShrMemOpt` fixes the arena before any body is
-    built.
+    one.  The generator has it: the arena's declaration is built once the
+    body's layout has fixed the launch (`Generator._with_arena`).
     """
     if not self.simd_mode:
       return ""

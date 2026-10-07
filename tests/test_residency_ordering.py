@@ -36,10 +36,8 @@ from pathlib import Path
 import pytest
 
 from harness import UNSUPPORTED
-from tensorforge.backend.instructions.compute.elementwise import (
-    ElementwiseInstruction)
 from tensorforge.backend.instructions.memory.store import StoreRegToShr
-from tensorforge.backend.instructions.sync_block import SyncThreads
+from tensorforge.backend.pir.core import Effect, Op
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
@@ -269,17 +267,17 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     operation hands the same elements back to the same lanes, so the store has
     to be published before the read.
 
-    No barrier is emitted next to the flush, deliberately: `SyncThreadsOpt`
-    discards every sync in the section and reinserts them from the
-    shared-memory write/use pairs.  One placed by hand would be removed again.
-    This is the assertion that the pair is recognized.
+    No barrier is emitted next to the flush, deliberately: the barrier
+    placement reads the section's body in its final order and puts one where
+    a write of shared memory meets a read of it (`pir.barriers`).  This is
+    the assertion that the pair is recognized.
 
-    Asked of the instruction stream rather than of the source, because a
-    SIMD-scope barrier lowers to nothing on the targets where a wave runs in
-    lockstep -- `HipLexic.sync_simd` returns None, and so does `SyclLexic` in
-    SIMD mode.  Only CUDA emits text (`__syncwarp`, for the independent thread
-    scheduling), so a textual assertion would test the architecture rather than
-    the pass.
+    Asked of the body rather than of the source, because a SIMD-scope barrier
+    lowers to nothing on the targets where a wave runs in lockstep --
+    `HipLexic.sync_simd` returns None, and so does `SyclLexic` in SIMD mode.
+    Only CUDA emits text (`__syncwarp`, for the independent thread
+    scheduling), so a textual assertion would test the architecture rather
+    than the pass.
     """
     # Asked for explicitly, because the default produces no settle here:
     # `register_temporaries=all` lets the pointwise read take the
@@ -290,22 +288,30 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     gen, _ = _generate("mixed/ml_then_ew", backend, arch,
                        register_temporaries='scalars')
     stream = _flatten(gen._sections[0].stream)
+    stores = [i for i in stream if isinstance(i, StoreRegToShr)]
+    assert len(stores) == 1, f"expected exactly one shared store, got {stores}"
+    dest = stores[0].get_dest()
 
-    def index_of(predicate, what):
-        found = [i for i, instr in enumerate(stream) if predicate(instr)]
-        assert len(found) == 1, f"expected exactly one {what}, found {found}"
-        return found[0]
+    def stmts(body):
+        for s in body:
+            yield s
+            for r in s.regions:
+                yield from stmts(r.body)
+    body = list(stmts(gen._sections[0].body))
+    windows = {s.target[0].id for s in body
+               if s.op == Op.ALLOC and s.attr('identity') is dest}
+    assert windows, f"no window of {dest.name} in the body"
 
-    store = index_of(lambda i: isinstance(i, StoreRegToShr), "shared store")
-    read = index_of(lambda i: isinstance(i, ElementwiseInstruction),
-                    "pointwise operation")
-    assert store < read
-
-    assert any(isinstance(instr, SyncThreads)
-               for instr in stream[store + 1:read]), (
+    def touches(s, kind):
+        return s.op not in (Op.ALLOC, Op.MARK) and any(
+            a.kind & kind and getattr(a.base, 'id', None) in windows
+            for a in s.accesses)
+    read = next(k for k, s in enumerate(body) if touches(s, Effect.READ))
+    write = max(k for k, s in enumerate(body[:read]) if touches(s, Effect.WRITE))
+    assert any(s.op == Op.BARRIER for s in body[write + 1:read]), (
         "nothing publishes the temporary between the store and the read:\n"
-        + "\n".join(f"  {i}: {type(instr).__name__}"
-                    for i, instr in enumerate(stream[store:read + 1], store)))
+        + "\n".join(f"  {k}: {s.op}" for k, s in
+                    enumerate(body[write:read + 1], write)))
 
 
 @pytest.mark.parametrize("case_stem,expect_shared", [

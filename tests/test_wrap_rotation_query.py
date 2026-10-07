@@ -4,7 +4,7 @@
 """Would rotation help this loop?
 
 The decision to allocate a second copy of a buffer has to be made before the
-body exists -- `ShrMemOpt` sizes the arena long before any PIR pass runs.  So
+body exists -- a transfer's stages are set on it before its body is built.  So
 something has to predict what `wrap_prefetch` will say, and the tempting thing
 is a second predicate written to match it.
 
@@ -28,7 +28,7 @@ from tensorforge.common.basic_types import Datatype
 
 
 def _loop(*, single_buffer, barrier=False):
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 256))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     fill = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
     read = fill if single_buffer else b.alloc(Datatype.F32, (128,),
                                               MemSpace.SHARED, hint='t')

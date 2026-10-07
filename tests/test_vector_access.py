@@ -27,6 +27,7 @@ from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import MemSpace, Op, ScalarType
 from tensorforge.backend.pir.emit import Emitter
 from tensorforge.common.basic_types import Datatype
+from harness.placement import placed
 
 F32 = ScalarType(Datatype.F32)
 F32X2 = ScalarType(Datatype.F32, 2)
@@ -34,12 +35,12 @@ F32X4 = ScalarType(Datatype.F32, 4)
 
 
 def builder():
-    return IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 512))
+    return IRBuilder(fptype=Datatype.F32, arena='shrMem')
 
 
 def emitted(body):
     lines = []
-    Emitter(lines.append).run(body)
+    Emitter(lines.append).run(placed(body))
     return '\n'.join(lines)
 
 

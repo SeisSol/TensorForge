@@ -119,10 +119,12 @@ class Writer:
   def Scope(self):
     return Block(self, '')
 
-  def If(self, expression):
+  def If(self, expression, uniform=None):
+    # `uniform` is what the IR builder records for a raw head; text has no
+    # use for it.
     return Block(self, 'if ({})'.format(expression))
 
-  def For(self, argument, unroll=False):
+  def For(self, argument, unroll=False, uniform=None):
     # `unroll` is `True` for the bare pragma or a count for `#pragma unroll N`;
     # see `pir.build._unroll_pragma`, which both writers share.
     from tensorforge.backend.pir.build import _unroll_pragma

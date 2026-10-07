@@ -23,6 +23,7 @@ from tensorforge.backend.pir import (BOOL, IRBuilder, MemSpace, ScalarType,
                                      emit)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
+from harness.placement import placed
 
 F32 = ScalarType(Datatype.F32)
 
@@ -36,7 +37,7 @@ def _masked_load(builder, array, index, guard):
 
 def _emit(builder) -> str:
     writer = Writer()
-    emit(builder.finish(), writer)
+    emit(placed(builder.finish()), writer)
     return writer.get_src()
 
 
@@ -100,7 +101,7 @@ def test_a_predicated_wide_load_falls_back_to_a_vector_and_not_a_scalar():
     `chain_five` and the three `slicing/register_operand` cases would not
     build.
     """
-    builder = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 512))
+    builder = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     tile = builder.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0')
     lane = builder.thread_id('x')
     guard = builder.op('lt', BOOL, lane, 16, hint='g')

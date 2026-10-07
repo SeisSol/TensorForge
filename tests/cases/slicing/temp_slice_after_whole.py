@@ -12,8 +12,9 @@
 
 Taken as a fresh start, the slice would kill `tmp`, so between the two writes
 it would be dead and the allocator would lay `x`'s operands over it; rows 4..12
-would come back as whatever those held.  `LivenessAnalysis._assembling` keeps
-the slice from killing it.
+would come back as whatever those held.  The slice defines nothing whole and
+does not say it does (`Generator._declare_buffers`), which keeps it from
+killing `tmp`.
 """
 
 import numpy as np

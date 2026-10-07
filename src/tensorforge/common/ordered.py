@@ -4,23 +4,17 @@
 
 """Insertion-ordered set.
 
-Why this exists: several IR analyses accumulate sets of ``Symbol`` /
-``Vertex`` objects and then *iterate* them to derive code -- register
-allocation, memory-region coloring, barrier placement.  Neither class
-overrides ``__hash__``, so a builtin ``set`` orders them by ``id()``,
-i.e. by heap address.  Iteration order then varies between runs and the
-emitted source is not reproducible.
+Why this exists: ``Symbol`` does not override ``__hash__``, so a builtin
+``set`` of symbols orders them by ``id()``, i.e. by heap address, and
+whatever is read off its iteration follows the heap.  A diagnostic listed in
+a different order from one run to the next is a nuisance; a decision taken
+in that order -- which buffer goes first, which write a barrier is put in
+front of -- is a kernel that is not reproducible, and where the decision is
+a synchronization one, a race that appears and disappears between builds.
 
-With a builtin ``set``, two consecutive generations of
-``tests/cases/chain_five.py`` in one process could assign the two live
-shared-memory buffers *swapped* offsets **and** place the ``__syncwarp()``
-at different points, because barrier insertion keys on region membership.
-A synchronization decision that depends on heap addresses is a race that
-appears and disappears between builds.
-
-Ordering by first insertion makes every such decision a function of
-program order alone.  ``dict`` already provides that, so this is a thin
-facade over ``dict`` keys rather than a real data structure.
+Ordering by first insertion makes every such answer a function of program
+order alone.  ``dict`` already provides that, so this is a thin facade over
+``dict`` keys rather than a real data structure.
 """
 
 from __future__ import annotations

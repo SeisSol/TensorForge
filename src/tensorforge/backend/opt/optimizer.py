@@ -14,17 +14,13 @@ from tensorforge.common.context import Context
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
 from tensorforge.backend.data_types import ShrMemObject
 
-from tensorforge.backend.passmanager import Pass, PassManager, PassScope
+from tensorforge.backend.passmanager import PassManager, PassScope
 
-from .liveness import LivenessAnalysis
-from .manager import Analysis, StreamContext, Transform
-from .mem_region_allocation import MemoryRegionAllocation
+from .manager import StreamContext, Transform
 from .memmove import MoveLoads
 from .pipeline import Pipeline
 from .prefetch import PrefetchBatch, PrefetchData
-from .shr_mem_analyzer import ShrMemOpt
 from .wrap import WrapLoads
-from .sync_block import SyncThreadsOpt
 
 
 class OptimizationStage:
@@ -52,10 +48,8 @@ class OptimizationStage:
     opts = self._user_options
     pm = PassManager(debug=opts.ir_debug)
 
-    # Hoist loads away from their uses.  Must run before liveness, since it
-    # changes the distance between a definition and its consumers.
-    # Scheduling within a straight-line block: per region, or it would hoist a
-    # load across a loop boundary.
+    # Hoist loads away from their uses.  Scheduling within a straight-line
+    # block: per region, or it would hoist a load across a loop boundary.
     pm.add(Transform(
         'MoveLoads',
         lambda pc, instrs: MoveLoads(pc.context, instrs,
@@ -116,43 +110,6 @@ class OptimizationStage:
             level=opts.prefetch_level),
         enabled=lambda pc: opts.prefetch_data))
 
-    # Whole nest: a value carried across the loop's back edge is only visible
-    # to a fixed point over the region structure.
-    #
-    # NOTE on the preloaded globals: the shared-memory symbols defined by the
-    # section prologue are allocated by ShrMemObject.alloc_global -- a separate
-    # bump allocator in a separate arena -- so they are deliberately *not* fed
-    # to the region allocator, which would give them a second offset.  Unifying
-    # the two allocators is its own change.
-    pm.add(Analysis(
-        'LivenessAnalysis',
-        lambda pc: LivenessAnalysis(pc.context, pc.local_stream),
-        lambda opt: opt.get_live_map(),
-        provides='live_map'))
-
-    pm.add(Analysis(
-        'MemoryRegionAllocation',
-        lambda pc: MemoryRegionAllocation(pc.context, pc.get('live_map')),
-        lambda opt: opt.get_regions(),
-        provides='regions',
-        requires=('live_map',)))
-
-    pm.add(_AssignShrMemOffsets())
-
-    # Barrier insertion keys on region membership, so it must follow the
-    # allocation it depends on.  Per region: "the previous write to this buffer"
-    # must not be read across a loop boundary, where the previous write is the
-    # previous *iteration*.
-    pm.add(Transform(
-        'SyncThreadsOpt',
-        lambda pc, instrs: SyncThreadsOpt(
-            pc.context, instrs, pc.get('regions'), pc.num_threads,
-            loop_body=_enclosing_loop(pc) is not None,
-            wraps_reads=_enclosing_loop(pc) == 'variant'),
-        preserves=('live_map', 'regions'),
-        scope=PassScope.PER_REGION,
-        enabled=lambda pc: opts.enable_sync_block_opt))
-
     return pm
 
   # ------------------------------------------------------------------ #
@@ -162,61 +119,3 @@ class OptimizationStage:
 
   def get_instructions(self):
     return self._pc.instrs
-
-
-class _AssignShrMemOffsets(Pass):
-  """ShrMemOpt: turn regions into byte offsets and size the arena.
-
-  A transform rather than an analysis -- it mutates the instructions' offsets
-  and flips `is_ready` -- but it neither adds nor removes instructions, so the
-  index-keyed `live_map` and the `regions` survive it.
-  """
-
-  name = 'ShrMemOpt'
-  requires = ('live_map', 'regions')
-  preserves = ('live_map', 'regions')
-  is_transform = True
-
-  def run(self, pc: StreamContext) -> None:
-    fp_size = pc.context.fp_type.size()
-    alignment = 16 // fp_size
-    overhead = pc.num_threads % pc.context.get_vm().get_hw_descr().shmem_banks
-    overhead //= alignment
-    overhead *= alignment
-
-    # whole nest: temp_shmem() of a BatchLoop is the max over its body
-    tmp_overhead = 0
-    for instr in pc.stream:
-      tmp_overhead = max(tmp_overhead, instr.temp_shmem())
-
-    opt = ShrMemOpt(context=pc.context,
-                    shr_mem_obj=pc.shr_mem,
-                    regions=pc.get('regions'),
-                    live_map=pc.get('live_map'),
-                    thread_overhead=overhead,
-                    tmp_overhead=tmp_overhead)
-    opt.apply()
-    # from here on every shared-memory writer has an offset, so verify() can
-    # check buffer aliasing (readiness still needs the thread-block policy)
-    pc.extra['offsets_assigned'] = True
-
-
-def _enclosing_loop(pc):
-  """`'batch'` or `'variant'` where the block a per-region pass was just
-  handed is the body of a batch loop or of a merged run's loop, else None.
-
-  `StreamContext.run_per_region` keeps the enclosing constructs in
-  `pc.extra['enclosing']`; the top level has none.  A merged run's body runs
-  again after its last instruction like a batch loop's, and unlike one it has
-  no barrier appended behind it.
-  """
-  from tensorforge.backend.instructions.batch_loop import BatchLoop
-  from tensorforge.backend.instructions.ptr_manip import VariantLoop
-  enclosing = pc.extra.get('enclosing') or []
-  if not enclosing:
-    return None
-  if isinstance(enclosing[-1], BatchLoop):
-    return 'batch'
-  if isinstance(enclosing[-1], VariantLoop):
-    return 'variant'
-  return None

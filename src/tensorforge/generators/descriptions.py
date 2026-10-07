@@ -249,17 +249,17 @@ class MultilinearDescr(OperationDescription):
   def _lead_alignment(self, context: Context) -> int:
     """What the lead matrices prove about a wide access's base, in bytes.
 
-    A temporary is the generator's own shared buffer, which `ShrMemOpt` starts
-    at `SHR_ALIGN_BYTES`, so it states that rather than the zero of an absent
-    claim.  The column stride is not this function's question: an odd lead
+    A temporary is the generator's own shared buffer, which the allocator
+    starts on `SHARED_ALIGN_BYTES`, so it states that rather than the zero of
+    an absent claim.  The column stride is not this function's question: an odd lead
     keeps the wide path and has its remainder peeled and guarded
     (`test_store_exactness`), so it is not a reason to narrow the width.
     """
-    from tensorforge.backend.opt.shr_mem_analyzer import SHR_ALIGN_BYTES
+    from tensorforge.backend.pir.allocate import SHARED_ALIGN_BYTES
     out = []
     for m in self._lead_matrices():
       tensor = m.tensor
-      out.append(max(getattr(tensor, 'alignment', 0) or 0, SHR_ALIGN_BYTES)
+      out.append(max(getattr(tensor, 'alignment', 0) or 0, SHARED_ALIGN_BYTES)
                  if getattr(tensor, 'is_tmp', False)
                  else (getattr(tensor, 'alignment', 0) or 0))
     return min(out) if out else 0

@@ -118,7 +118,7 @@ def _counts_as_work(op: str, value) -> bool:
 #: immediate of whatever reads it, a declaration or an extraction names a
 #: register, a yield is the variable the loop already shares.
 _NO_CODE = frozenset({Op.CONST, Op.YIELD, Op.DECLARE, Op.ALLOC, Op.EXTRACT,
-                      Op.SPLIT, Op.PACK})
+                      Op.SPLIT, Op.PACK, Op.MARK})
 
 #: A rolled loop's own instructions per copy of its body: the counter, the
 #: test and the branch.
@@ -914,6 +914,8 @@ class Emitter:
     def _emit_stmt(self, s: Stmt, yield_to: Tuple[Optional[str], ...]) -> None:
         w = self.writer
         op = s.op
+        if op == Op.MARK:
+            return
         self._record_code(op)
         self._record_mix(s)
 
@@ -985,12 +987,15 @@ class Emitter:
             arena = s.attr('arena')
             if arena is not None:
                 # A shared buffer is a window into the kernel's one arena, at
-                # the offset the builder bumped out of this instruction's
-                # declared scratch tail.  Declaring `__shared__` here instead
-                # would allocate outside the size ShrMemOpt computed, which is
-                # what the occupancy calculation and the barrier placement both
-                # read.
-                off = s.attr('offset', 0)
+                # the offset the allocator gave it (`allocate`).  Declaring
+                # `__shared__` here instead would allocate outside the arena
+                # the launch is sized for, which is what the occupancy
+                # calculation and the barrier placement both read.
+                off = s.attr('offset')
+                if off is None:
+                    raise IRError(
+                        f'{self.name(v)}: a window into {arena} that nothing '
+                        f'placed; the body did not go through the allocator')
                 extern = s.attr('extern')
                 if extern is not None:
                     self.bind(v, extern)

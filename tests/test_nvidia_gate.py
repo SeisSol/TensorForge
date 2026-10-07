@@ -67,9 +67,8 @@ def test_a_different_operand_type_is_turned_away():
 
 def test_a_sparse_operand_is_turned_away():
     """`matmul` already declines these by returning `False`.  The gate has to
-    agree, because `temp_shmem` reserves shared memory off the same
-    predicate -- disagreement means a reservation for a kernel that never
-    uses it."""
+    agree, so that a sparse operand never reaches a plan naming a matrix
+    arrangement it would only decline."""
     assert not nvidia.supports(32, ATOM_TYPE, sparse=lambda k, j: True)
 
 
@@ -328,33 +327,12 @@ def test_the_i8_entries_are_not_candidates():
             assert op.mode in nvidia.EMITTED_MODES
 
 
-@pytest.mark.parametrize("sm", [80, 90, 120])
-def test_the_reservation_covers_whichever_entry_is_issued(sm):
-    """`shmsize` is asked without the shape the ranking reads, so it cannot
-    reproduce the choice -- it bounds it instead.
-
-    Asked per capability, because the capability is what makes the bound
-    load-bearing: the sm_90 F64 entries are wider than the sm_80 one, so a
-    reservation sized against one table and an issue out of another is the
-    overrun this bounds -- reached through the arch rather than through the
-    shape.  `scratch` passes the context's, which is why it takes one.
-    """
-    from tensorforge.backend.instructions.compute.primitives import nvidia as n
-    for dtype in (Datatype.F32, Datatype.F64):
-        budget = n.shmsize(1, dtype, sm=sm)
-        for op in n.instrs_for(dtype, sm=sm):
-            aregs = (op.m * op.k) // 32
-            bregs = (op.n * op.k) // 32
-            cregs = (op.m * op.n) // 32
-            assert budget >= 32 * max(aregs + bregs, cregs), op.name
-
-
 def test_the_baseline_excludes_rather_than_guesses():
     """The floor for a caller with no target, and it is set to exclude.
 
     `sm_of` reads the target's compute capability off the context, and
-    `matmul`, `strategies` and `scratch` all pass it, so what is left for the
-    baseline is the case where there is no context at all.
+    `matmul`, `strategies` and `prepared_order` all pass it, so what is left
+    for the baseline is the case where there is no context at all.
 
     75 rather than 80 for that case, because a floor should refuse.  Every F32
     entry in the table is sm_80, so a caller with no target selects nothing

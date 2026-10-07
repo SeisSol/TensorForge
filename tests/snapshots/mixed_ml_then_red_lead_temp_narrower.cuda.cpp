@@ -1,5 +1,5 @@
 // === base name ===
-kernel_321cfac6f6f5bb98
+kernel_65989981ed49fd58
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_321cfac6f6f5bb98 = {{32, 4, 1}, 32, 32, 1, 4, 512, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_321cfac6f6f5bb98(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_321cfac6f6f5bb98(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_65989981ed49fd58 = {{32, 4, 1}, 32, 32, 1, 4, 512, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_65989981ed49fd58(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_65989981ed49fd58(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_321cfac6f6f5bb98(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_65989981ed49fd58(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 4, 1);
@@ -69,7 +69,7 @@ tensorforge::LaunchConfig launch_config_kernel_321cfac6f6f5bb98(size_t numElemen
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_321cfac6f6f5bb98, block.x * block.y * block.z, 128 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_65989981ed49fd58, block.x * block.y * block.z, 128 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -90,19 +90,19 @@ tensorforge::LaunchConfig launch_config_kernel_321cfac6f6f5bb98(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_321cfac6f6f5bb98(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_321cfac6f6f5bb98(numElements0, streamPtr);
+void launcher_kernel_65989981ed49fd58(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_65989981ed49fd58(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_321cfac6f6f5bb98, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
+        cudaFuncSetAttribute(kernel_kernel_65989981ed49fd58, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_321cfac6f6f5bb98<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_65989981ed49fd58<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
@@ -110,7 +110,7 @@ void launcher_kernel_321cfac6f6f5bb98(const float * m0, size_t m0_extraOffset, c
 // === kernel ===
 __global__ void 
 __launch_bounds__(128, 1)
- kernel_kernel_321cfac6f6f5bb98(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+ kernel_kernel_65989981ed49fd58(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     using namespace tensorforge::literals;
@@ -129,136 +129,136 @@ __launch_bounds__(128, 1)
     {
       auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
       float* localShrMem0 = &totalShrMem[32 * threadIdx.y + 0];
-      float* tempShrMem = &localShrMem0[32];
       float * __restrict__ s0 = &localShrMem0[0];
-      for (size_t v11_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v11_batchId0 < numElements0; v11_batchId0 += (gridDim.x * blockDim.y)) {
-        size_t v12_ahead1 = v11_batchId0 + (gridDim.x * blockDim.y);
-        size_t v14_batchId1 = (v12_ahead1 < numElements0) ? v12_ahead1 : v11_batchId0;
-        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v11_batchId0]);
+      for (size_t v8_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v8_batchId0 < numElements0; v8_batchId0 += (gridDim.x * blockDim.y)) {
+        size_t v9_ahead1 = v8_batchId0 + (gridDim.x * blockDim.y);
+        size_t v11_batchId1 = (v9_ahead1 < numElements0) ? v9_ahead1 : v8_batchId0;
+        const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v8_batchId0]);
         if (allowed) {
-          const float *const __restrict__ glb_m0 = &m0[v11_batchId0 * 16 + 0 + m0_extraOffset];
-          const float *const __restrict__ glb_m1 = &m1[v11_batchId0 * 144 + 0 + m1_extraOffset];
-          float *const __restrict__ glb_m2 = &m2[v11_batchId0 * 16 + 0 + m2_extraOffset];
+          const float *const __restrict__ glb_m0 = &m0[v8_batchId0 * 16 + 0 + m0_extraOffset];
+          const float *const __restrict__ glb_m1 = &m1[v8_batchId0 * 144 + 0 + m1_extraOffset];
+          float *const __restrict__ glb_m2 = &m2[v8_batchId0 * 16 + 0 + m2_extraOffset];
           float r0[1]{};
           // r0 = load{g>r}(glb_m0);
-          int32_t v25_lead = threadIdx.x % 32;
-          bool v26_g = v25_lead < 16;
-          if (v26_g) {
-            float v29_data = __ldcg(&glb_m0[v25_lead]);
-            r0[0] = v29_data;
+          int32_t v22_lead = threadIdx.x % 32;
+          bool v23_g = v22_lead < 16;
+          if (v23_g) {
+            float v26_data = __ldcg(&glb_m0[v22_lead]);
+            r0[0] = v26_data;
           }
           // wait(r0 = load{g>r}(glb_m0););
           float r1[1]{};
           // r1 = +(r0) + None
           // [(0, 16)] []
-          float v31_data = r0[0];
-          float v32_data = r1[0];
-          r1[0] = (v32_data + v31_data);
+          float v28_data = r0[0];
+          float v29_data = r1[0];
+          r1[0] = (v29_data + v28_data);
           // s0 = store{r>s}(localShrMem0, r1);
-          if (v26_g) {
-            float v34_data = r1[0];
-            s0[v25_lead] = v34_data;
+          if (v23_g) {
+            float v31_data = r1[0];
+            s0[v22_lead] = v31_data;
           }
           float r2[1]{};
           // r2 = +(glb_m1, dims=[0])
-          bool v38_own = v25_lead < 24;
-          float v44_sel0;
-          if (v38_own) {
-            float v42_data = glb_m1[v25_lead];
-            v44_sel0 = v42_data;
+          bool v35_own = v22_lead < 24;
+          float v41_sel0;
+          if (v35_own) {
+            float v39_data = glb_m1[v22_lead];
+            v41_sel0 = v39_data;
           }
           else {
-            v44_sel0 = 0.0f;
+            v41_sel0 = 0.0f;
           }
-          float v45_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v44_sel0);
+          float v42_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v41_sel0);
           if (threadIdx.x == 0) {
-            r2[0] = v45_red;
+            r2[0] = v42_red;
           }
-          float v51_sel0;
-          if (v38_own) {
-            float v49_data = glb_m1[(v25_lead + 24)];
-            v51_sel0 = v49_data;
+          float v48_sel0;
+          if (v35_own) {
+            float v46_data = glb_m1[(v22_lead + 24)];
+            v48_sel0 = v46_data;
           }
           else {
-            v51_sel0 = 0.0f;
+            v48_sel0 = 0.0f;
           }
-          float v52_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v51_sel0);
+          float v49_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v48_sel0);
           if (threadIdx.x == 1) {
-            r2[0] = v52_red;
+            r2[0] = v49_red;
           }
-          float v58_sel0;
-          if (v38_own) {
-            float v56_data = glb_m1[(v25_lead + 48)];
-            v58_sel0 = v56_data;
+          float v55_sel0;
+          if (v35_own) {
+            float v53_data = glb_m1[(v22_lead + 48)];
+            v55_sel0 = v53_data;
           }
           else {
-            v58_sel0 = 0.0f;
+            v55_sel0 = 0.0f;
           }
-          float v59_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v58_sel0);
+          float v56_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v55_sel0);
           if (threadIdx.x == 2) {
-            r2[0] = v59_red;
+            r2[0] = v56_red;
           }
-          float v65_sel0;
-          if (v38_own) {
-            float v63_data = glb_m1[(v25_lead + 72)];
-            v65_sel0 = v63_data;
+          float v62_sel0;
+          if (v35_own) {
+            float v60_data = glb_m1[(v22_lead + 72)];
+            v62_sel0 = v60_data;
           }
           else {
-            v65_sel0 = 0.0f;
+            v62_sel0 = 0.0f;
           }
-          float v66_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v65_sel0);
+          float v63_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v62_sel0);
           if (threadIdx.x == 3) {
-            r2[0] = v66_red;
+            r2[0] = v63_red;
           }
-          float v72_sel0;
-          if (v38_own) {
-            float v70_data = glb_m1[(v25_lead + 96)];
-            v72_sel0 = v70_data;
+          float v69_sel0;
+          if (v35_own) {
+            float v67_data = glb_m1[(v22_lead + 96)];
+            v69_sel0 = v67_data;
           }
           else {
-            v72_sel0 = 0.0f;
+            v69_sel0 = 0.0f;
           }
-          float v73_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v72_sel0);
+          float v70_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v69_sel0);
           if (threadIdx.x == 4) {
-            r2[0] = v73_red;
+            r2[0] = v70_red;
           }
-          float v79_sel0;
-          if (v38_own) {
-            float v77_data = glb_m1[(v25_lead + 120)];
-            v79_sel0 = v77_data;
+          float v76_sel0;
+          if (v35_own) {
+            float v74_data = glb_m1[(v22_lead + 120)];
+            v76_sel0 = v74_data;
           }
           else {
-            v79_sel0 = 0.0f;
+            v76_sel0 = 0.0f;
           }
-          float v80_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v79_sel0);
+          float v77_red = tensorforge::reduction<tensorforge::ReductionOperation<float, tensorforge::Operation::Add>, 32, 1, float>(v76_sel0);
           if (threadIdx.x == 5) {
-            r2[0] = v80_red;
+            r2[0] = v77_red;
           }
           // s0 = store{r>s, clear}(localShrMem0, r2);
-          if ((v25_lead >= 6) && v26_g) {
-            s0[v25_lead] = 0.0f;
+          __syncwarp();
+          if ((v22_lead >= 6) && v23_g) {
+            s0[v22_lead] = 0.0f;
           }
-          if (v25_lead < 6) {
-            float v87_data = r2[0];
-            s0[v25_lead] = v87_data;
+          if (v22_lead < 6) {
+            float v84_data = r2[0];
+            s0[v22_lead] = v84_data;
           }
           float r3[1]{};
-          __syncwarp();
           // ir3 = +(s0)
           // [(0, 16)] []
           float ir3[1]{};
-          float v94_data = v26_g ? (s0[v25_lead]) : (0.0f);
-          float v95_data = ir3[0];
-          ir3[0] = (v95_data + v94_data);
+          __syncwarp();
+          float v91_data = v23_g ? (s0[v22_lead]) : (0.0f);
+          float v92_data = ir3[0];
+          ir3[0] = (v92_data + v91_data);
           // r3 = ir3
-          if (v26_g) {
-            float v97_data = ir3[0];
-            r3[0] = v97_data;
+          if (v23_g) {
+            float v94_data = ir3[0];
+            r3[0] = v94_data;
           }
           // glb_m2 = store{r>g}(r3);
-          if (v26_g) {
-            float v98_data = r3[0];
-            glb_m2[v25_lead] = v98_data;
+          if (v23_g) {
+            float v95_data = r3[0];
+            glb_m2[v22_lead] = v95_data;
           }
           __syncwarp();
         }

@@ -35,17 +35,18 @@ from tensorforge.backend.pir.core import (INDEX, IRError, MemSpace, XorSwizzle,
                                           BufferType)
 from tensorforge.backend.pir.emit import Emitter
 from tensorforge.common.basic_types import Datatype
+from harness.placement import placed
 
 BANKS = 32
 
 
 def builder(budget=512):
-    return IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', budget))
+    return IRBuilder(fptype=Datatype.F32, arena='shrMem')
 
 
 def emitted(body):
     lines = []
-    Emitter(lines.append).run(body)
+    Emitter(lines.append).run(placed(body))
     return "\n".join(lines)
 
 
@@ -56,7 +57,7 @@ def _emit_with_writer(b):
     from tensorforge.backend.pir import emit as _emit
     from tensorforge.backend.writer import Writer
     writer = Writer()
-    _emit(b.finish(), writer)
+    _emit(placed(b.finish()), writer)
     return writer.get_src()
 
 
@@ -117,7 +118,7 @@ def test_both_a_load_and_a_store_apply_it():
     named = {line.split('=', 1)[0].split()[-1]
              for line in text.splitlines() if '^' in line and '=' in line}
     accesses = [line for line in text.splitlines()
-                if '_btile[' in line and 'tempShrMem' not in line]
+                if '_btile[' in line and '&shrMem' not in line]
     assert len(accesses) == 2, f"expected a read and a write:\n{text}"
     for line in accesses:
         subscript = line.split('_btile[', 1)[1].rsplit(']', 1)[0].strip()

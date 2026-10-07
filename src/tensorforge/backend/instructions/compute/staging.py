@@ -74,18 +74,6 @@ def staged(have: BitLayout, want: BitLayout, indices: Sequence,
     return tuple(out)
 
 
-def buffer_elements(plan: Iterable[Transfer]) -> int:
-    """Elements the buffer has to hold.
-
-    One per address, and the addresses are dense, so this is the element count
-    -- the number a reservation has to be made for.  A reservation smaller
-    than this is an overrun and one larger is shared memory nobody writes, so
-    it is read from the plan rather than computed a second time beside it.
-    """
-    addresses = {transfer.address for transfer in plan}
-    return len(addresses)
-
-
 def accesses(plan: Iterable[Transfer]) -> Tuple[int, int]:
     """Stores and loads the trip issues, as `(stores, loads)`.
 

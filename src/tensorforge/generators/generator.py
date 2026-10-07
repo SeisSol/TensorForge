@@ -199,9 +199,6 @@ class Section:
     #: The operators preloaded into shared memory, with their waits and the
     #: barrier after them: a run of `global_ir` that is emitted as one body.
     self.preload: List[AbstractInstruction] = []
-    #: Where the preloaded images start in the prologue's arena, so that they
-    #: can be laid out again once their operands' storage is settled.
-    self.preload_mark: int = 0
     #: The block-wide copies of merged runs' members (`stage_members`), which
     #: take their buffers from the same arena, after the images.
     self.stage_loaders: List[AbstractInstruction] = []
@@ -342,6 +339,42 @@ def _supports_launch_control(context) -> bool:
 class MergeFallbackWarning(UserWarning):
   """`merge_variants=auto` would have merged, and the merged build failed;
   the kernel was built written out."""
+
+
+def _one_lane_stores(stream) -> tuple:
+  """The buffers a computation of `stream` stores from one lane.
+
+  A destination without axes has no lane axis to spread over: every lane
+  holds the value and the owner alone writes it to memory, from where every
+  lane reads it back -- the one write to memory a barrier orders that is not
+  to shared memory.  In a register there is no store at all.
+
+  By the buffer its accesses name: a binding into global memory is a view of
+  its tensor's parameter, and a store through it is recorded against the
+  parameter (`GetElementPtr._emit_binding`).
+  """
+  from tensorforge.backend.instructions.compute import ComputeInstruction
+  from tensorforge.backend.instructions.ptr_manip import GetElementPtr
+  out, seen, roots = [], set(), {}
+
+  def walk(instrs):
+    for instr in instrs:
+      if isinstance(instr, GetElementPtr):
+        for sym in instr.defs():
+          roots[id(sym)] = instr._src
+      if isinstance(instr, ComputeInstruction):
+        for sym in instr.defs():
+          obj = getattr(sym, 'obj', None)
+          rank = len(getattr(obj, 'shape', ()) or ())
+          if (rank == 0 and id(sym) not in seen
+                  and sym.stype in (SymbolType.Global, SymbolType.Batch,
+                                    SymbolType.SharedMem)):
+            seen.add(id(sym))
+            out.append(sym)
+      for region in instr.regions():
+        walk(region)
+  walk(stream)
+  return tuple(roots.get(id(sym), sym) for sym in out)
 
 
 def _carried_transfers(body) -> set:
@@ -600,10 +633,10 @@ class Generator:
   def _rotation_targets(self) -> set:
     """Which transfers should get a second buffer, asked of the pass itself.
 
-    `ShrMemOpt` sizes the arena before a body exists, so the decision has to
-    be made in advance -- and the only exact answer comes from
-    `wrap_prefetch`, which needs the body.  So the section is built once to
-    ask and once to use the answer.
+    A transfer's stages are set on it before its body is built
+    (`set_stages`), so the decision has to be made in advance -- and the only
+    exact answer comes from `wrap_prefetch`, which needs the body.  So the
+    section is built once to ask and once to use the answer.
 
     `tools/rotation_cost.py` is why it is this way round rather than giving
     every async transfer two stages: that costs 9% of arena on average and
@@ -1021,16 +1054,10 @@ class Generator:
                          narrow_group=self._num_threads
                          < self._context.get_vm().get_hw_descr().vec_unit_length)
 
-        # The prologue stays *out* of the rewritable stream.  Its shared-memory
-        # symbols are allocated by ShrMemObject.alloc_global, a separate bump
-        # allocator in a separate arena, so letting them reach the region
-        # allocator gives them a second, conflicting offset -- observable as the
-        # preloaded operators moving from totalShrMem into localShrMem0.  The
-        # optimizer reads the prologue (for symbols live on entry) but never
-        # rewrites it.
-        #
-        # A peeled prologue from a pipelining pass belongs *here*, ahead of the
-        # loop in `instructions`, not in the section prologue.
+        # The prologue stays *out* of the rewritable stream: what the passes
+        # here move is the per-element body.  A peeled prologue from a
+        # pipelining pass belongs *here*, ahead of the loop in
+        # `instructions`, not in the section prologue.
         self._apply_rotation(loop)
         opt = OptimizationStage(context=self._context,
                                 shr_mem=self._section.shr_mem_obj,
@@ -1041,11 +1068,10 @@ class Generator:
         opt.optimize()
         self._section.stream = list(self._section.global_ir) + opt.get_instructions()
 
-        # Final sync for persistent threads, appended *after* optimization on
-        # purpose: SyncThreadsOpt drops barriers it considers redundant, and this
-        # one guards the next iteration's writes against the previous
-        # iteration's reads -- a dependency across the back edge that the pass
-        # does not model.  Adding it before optimization removes it again.
+        # Final sync for persistent threads: it guards the next iteration's
+        # writes against the previous iteration's reads, which the barrier
+        # placement (`pir.barriers`) would otherwise meet at the head of the
+        # body -- here it is one barrier per element whatever the body does.
         #
         # `LAUNCHCTRL` is excluded, and not because it needs the separation less.
         # It gets it from the hand-off, which carries a block barrier outside the
@@ -1055,42 +1081,12 @@ class Generator:
         if self._persistent_threading:
           loop.append(SyncThreads(self._context, self._num_threads))
 
+        self._declare_buffers(self._section)
         settled = self._settle_storage()
-        fits = self._deduce_mults_per_block() and settled
-        if fits or not self._section.preload:
-          # With nothing preloaded left to drop, a block that holds no
-          # multiplication is not a smaller launch but no launch: block
-          # height 0 and a shared window never declared.  SeisSol's damage
-          # step at order 6 in double precision would go that far, in silence.
-          obj = self._section.shr_mem_obj
-          if not obj.get_mults_per_block():
-            per_mult = obj.get_size_per_mult() or 0
-            size = self._context.fp_type.size()
-            cap = self._context.get_vm().get_hw_descr() \
-                .max_local_mem_size_per_block
-            # Which of the two bounds bit, because they ask for different
-            # answers: shared memory for a narrower multiplication or fewer
-            # preloaded operators, the thread count for a narrower one only.
-            # `RegmaxBlockPolicy` caps a block at 128 threads on NVIDIA and
-            # 256 elsewhere, so a multiplication 512 lanes wide gets no block,
-            # and one message for both would refuse it as though its 11 KB of
-            # shared memory were the problem.
-            asked = per_mult * size + obj.get_global_size() * size
-            if asked <= cap:
-              raise GenerationError(
-                  f'one multiplication is {self._num_threads} threads wide '
-                  f'and no block holds one: the block is capped below that, '
-                  f'while its {asked} B of shared memory would fit the '
-                  f'{cap} B a block has')
-            raise GenerationError(
-                f'one multiplication needs {per_mult * size} B of shared '
-                f'memory ({per_mult} elements, plus {obj.get_global_size() * size}'
-                f' B for the whole block), and a block on this device has '
-                f'{cap} B')
-          self._set_threadconfig()
-          self._section.body = self._build_section(len(self._sections),
-                                                   self._section)
+        if self._place_section(index) and settled:
           break
+        if not self._section.preload:
+          self._refuse_unplaced()
         # The preloaded operators left no room for one multiplication: the
         # check that admitted them compares against the block's limit before
         # anything per multiplication is known.  So the section is built again
@@ -1237,14 +1233,15 @@ class Generator:
     return walk(self._section.stream or self._section.ir)
 
   def _settle_storage(self) -> bool:
-    """Settle how every operand is stored, and size the preloaded copies by it.
+    """Settle how every operand is stored, and whether the block's copies of
+    them still fit.
 
     An operand's storage order is offered where the matrix path is emitted,
     and the section prologue's copies of it were sized when they were built,
     before any body existed.  An order with padding slots -- a fragment image
     is tiled, 3584 slots for a 56x56 -- then outgrows its copy.  So the orders
-    are settled here, on the final stream, and the images laid out again from
-    the start of the prologue's arena in the order they were built.
+    are settled here, on the final stream, and the copies sized again; where
+    they go is the allocator's to decide, once the body exists.
 
     Whether the images still fit the block, against the same limit the
     prologue checked them against when they were smaller.
@@ -1258,30 +1255,102 @@ class Generator:
     walk(self._section.stream)
     images = [instr for instr in self._section.preload
               if getattr(instr, '_verbatim', False)]
+    for loader in images + list(self._section.stage_loaders):
+      loader._get_bounding_box_dense()
+    # What the block's arena comes to: its buffers back to back, which is how
+    # the allocator lays them out (`pir.allocate`).  Known before the body is,
+    # and the launch is guessed from it.
+    obj = self._section.shr_mem_obj
+    end = 0
+    for loader in images + list(self._section.stage_loaders):
+      align = max(self._shared_align(), loader._place_align or 1)
+      end = -(-end // align) * align + loader.compute_shared_mem_size()
+    obj.set_global_size(end)
     if not images:
       return True
-    obj = self._section.shr_mem_obj
-    obj.release_global(self._section.preload_mark)
-    for image in images:
-      image._get_bounding_box_dense()
-      image.set_shr_mem_offset(obj.alloc_global(image.compute_shared_mem_size()),
-                               True, True)
-    # The staged members' buffers came after the images, and go after them
-    # again rather than under an image that grew.
-    for loader in self._section.stage_loaders:
-      loader._get_bounding_box_dense()
-      loader.set_shr_mem_offset(
-          obj.alloc_global(loader.compute_shared_mem_size()), True, True)
     cap = self._context.get_vm().get_hw_descr().max_local_mem_size_per_block
-    return obj.get_global_size() * self._context.fp_type.size() < cap
+    return end * self._context.fp_type.size() < cap
+
+  def _declare_buffers(self, section) -> None:
+    """Who declares each shared buffer's window, and where each one's value
+    starts.
+
+    The first user of a buffer declares its window, every later one writes
+    through it.  An instruction that defines a buffer whole says so in front
+    of its first write (`AbstractInstruction._kills`, `mark defines`): the
+    buffer holds nothing anybody wants up to there, which is what the
+    allocator needs to give the stretch before it to another buffer
+    (`pir.allocate`).  A slice written after an earlier write of the same
+    buffer in the same block defines nothing of the kind -- the rest of the
+    buffer is still wanted -- and neither does one a block around it already
+    wrote.
+    """
+    from tensorforge.backend.instructions.memory import AbstractShrMemWrite
+    from tensorforge.backend.instructions.memory.load import LoadWait
+
+    def tracked(sym) -> bool:
+      return (getattr(sym, 'stype', None) is SymbolType.SharedMem
+              and not isinstance(getattr(sym, 'obj', None), ShrMemObject))
+
+    def block_wide(sym) -> bool:
+      first = sym.get_first_user()
+      return bool(getattr(sym, 'block_shared', False)
+                  or getattr(first, '_global_offset', False))
+
+    declared = set()
+
+    def windows(instrs):
+      for instr in instrs:
+        for sym in tuple(instr.defs()) + tuple(instr.uses()):
+          if not tracked(sym) or id(sym) in declared or block_wide(sym):
+            continue
+          declared.add(id(sym))
+          users = sym.get_user_list()
+          users[0].set_window(True, False)
+          for user in users[1:]:
+            if isinstance(user, AbstractShrMemWrite):
+              user.set_window(False, False)
+        for extra in (getattr(instr, '_wrap_prologue', []) or []):
+          windows([extra])
+        for region in instr.regions():
+          windows(region)
+
+    def lifetimes(instrs, written=frozenset()):
+      seen = set(written)
+      for instr in instrs:
+        prologue = getattr(instr, '_wrap_prologue', None) or []
+        if prologue:
+          lifetimes(prologue, frozenset(seen))
+          for p in prologue:
+            seen.update(id(d) for d in p.defs())
+        if instr.regions():
+          entering = frozenset(seen)
+          for region in instr.regions():
+            lifetimes(region, entering)
+          seen.update(id(d) for d in instr.defs())
+          continue
+        kills = []
+        partial = {id(d) for d in instr.partial_defs()}
+        for sym in instr.defs():
+          if not tracked(sym) or block_wide(sym):
+            continue
+          if not isinstance(instr, LoadWait) and not (
+              id(sym) in partial and id(sym) in seen):
+            kills.append(sym)
+          seen.add(id(sym))
+        instr._kills = tuple(kills)
+
+    windows(section.stream)
+    lifetimes(section.stream)
 
   @staticmethod
   def _set_mult_stride(section) -> None:
-    """Tell every instruction how much shared memory one multiplication owns.
+    """Tell every instruction how much shared memory one multiplication owns,
+    as far as it is known for the build about to start.
 
-    Known only now: `ShrMemOpt` has sized the arena.  A matrix path whose warp
-    holds several multiplications reads its neighbors' tiles at that
-    distance (`nvidia._warp_group`).
+    A matrix path whose warp holds several multiplications reads its
+    neighbors' tiles at that distance (`nvidia._warp_group`), and says it
+    did (`_launch_read`).
     """
     obj = section.shr_mem_obj
     if obj is None or obj.get_size_per_mult() is None:
@@ -1295,6 +1364,18 @@ class Generator:
         for region in instr.regions():
           walk(region)
     walk(section.stream)
+
+  @staticmethod
+  def _asked_mult_stride(section) -> bool:
+    def walk(instrs):
+      for instr in instrs:
+        asked = getattr(instr, 'asked_mult_stride', None)
+        if asked is not None and asked():
+          return True
+        if any(walk(region) for region in instr.regions()):
+          return True
+      return False
+    return walk(section.stream)
 
   def _batch_loop_mode(self) -> LoopMode:
     if self._persistent_threading:
@@ -1332,24 +1413,202 @@ class Generator:
       else:
         writer(line)
 
-  def _build_section(self, index: int, section):
-    """Section `index` as one optimized body, checked first.
+  def _place_section(self, index: int) -> bool:
+    """Build section `index` as one body, lay its shared memory out, and size
+    the block from that; whether a multiplication fits.
 
-    Everything it depends on is in place by now -- offsets from `ShrMemOpt`,
-    the arena size and the block from the thread-block policy -- so this is
-    where the full check is meaningful.  Testing one instruction at a time and
-    aborting at the first unprepared one would hide every other problem
-    behind it.
+    The body comes before the block, because what a multiplication needs of
+    shared memory is decided in it: a buffer's lifetime is the order its
+    accesses end up in, and a pass may still move them.  But a body may read
+    the launch (`_launch_read`), so it is built for a guess first: the block
+    as wide as the threads and the block's own buffers let it be, which is
+    what it is wherever the multiplications' memory does not bind.  Where the
+    launch its layout leads to is not the one it read, it is built again for
+    that one.  Nothing a body reads of the launch decides how large its
+    buffers are, so the second build lays out as the first did.
     """
+    obj = self._section.shr_mem_obj
+    obj.set_size_per_mult(self._size_per_mult(0))
+    if not self._deduce_mults_per_block():
+      return False
+    for _ in range(3):
+      self._set_threadconfig()
+      body, layout = self._build_section(index, self._section)
+      read = self._launch_read(self._section)
+      obj.set_global_size(layout.block)
+      obj.set_size_per_mult(self._size_per_mult(layout.per_mult))
+      if not self._deduce_mults_per_block():
+        return False
+      if self._launch_read(self._section) == read:
+        break
+    else:
+      raise InternalError(
+          f'section {index}: the body read a launch its own layout does not '
+          f'lead to, three builds in a row')
+    self._check_layout(body, index)
+    self._section.body = self._with_arena(self._section, body)
+    return True
+
+  @staticmethod
+  def _check_layout(body, index: int) -> None:
+    """Refuse a layout that has a buffer read after another one wrote over
+    its bytes (`pir.layout_check`): the allocator's claim, checked against
+    the accesses alone."""
+    from tensorforge.backend.pir.layout_check import check_layout
+    violations, _ = check_layout(body)
+    if violations:
+      raise InternalError(
+          f'section {index}: the shared-memory layout overlaps buffers that '
+          f'are occupied together:\n'
+          + '\n'.join(f'  {v}' for v in violations[:8]))
+
+  def _launch_read(self, section) -> tuple:
+    """What the body built for `section` read of the launch, as far as the
+    answer would change it: how many multiplications share the block, where
+    a block-wide copy divides its elements among them or the traversal is
+    driven a group of rows at a time; how uniform each traversal is, which
+    decides where a barrier may sit; and the distance between the
+    multiplications' arenas, where a matrix path addresses its neighbors'
+    tiles (`set_mult_stride`)."""
+    obj = section.shr_mem_obj
+    loops = []
+
+    def walk(instrs):
+      for instr in instrs:
+        if isinstance(instr, BatchLoop):
+          loops.append(instr)
+        for region in instr.regions():
+          walk(region)
+    walk(section.stream)
+    return (obj.get_mults_per_block() if self._depends_on_mults(section)
+            else None,
+            tuple(loop.uniform_scope() for loop in loops),
+            obj.get_size_per_mult() if self._asked_mult_stride(section)
+            else None)
+
+  def _shared_align(self) -> int:
+    """What every shared buffer starts on, in elements
+    (`pir.allocate.SHARED_ALIGN_BYTES`)."""
+    from tensorforge.backend.pir.allocate import SHARED_ALIGN_BYTES
+    return max(1, SHARED_ALIGN_BYTES // self._context.fp_type.size())
+
+  def _size_per_mult(self, end: int) -> int:
+    """What one multiplication's arena takes, for buffers that end at `end`:
+    padded by the threads' share of a bank row, so that the multiplications of
+    a block start on different banks, and aligned."""
+    alignment = self._shared_align()
+    banks = self._context.get_vm().get_hw_descr().shmem_banks
+    overhead = (self._num_threads % banks) // alignment * alignment
+    return -(-(end + overhead) // alignment) * alignment
+
+  @staticmethod
+  def _depends_on_mults(section) -> bool:
+    """Whether the body read how many multiplications share the block: a
+    block-wide copy divides its elements among them, and a group of rows
+    is the block where the traversal is driven a group at a time."""
+    def walk(instrs):
+      for instr in instrs:
+        if getattr(instr, '_blockwide', False):
+          return True
+        if isinstance(instr, BatchLoop) and instr._group_size > 1:
+          return True
+        if any(walk(region) for region in instr.regions()):
+          return True
+      return False
+    return walk(section.stream)
+
+  def _refuse_unplaced(self) -> None:
+    """With nothing preloaded left to drop, a block that holds no
+    multiplication is not a smaller launch but no launch: block height 0 and a
+    shared window never declared.  SeisSol's damage step at order 6 in double
+    precision would go that far, in silence."""
+    obj = self._section.shr_mem_obj
+    per_mult = obj.get_size_per_mult() or 0
+    size = self._context.fp_type.size()
+    cap = self._context.get_vm().get_hw_descr().max_local_mem_size_per_block
+    # Which of the two bounds bit, because they ask for different answers:
+    # shared memory for a narrower multiplication or fewer preloaded
+    # operators, the thread count for a narrower one only.  `RegmaxBlockPolicy`
+    # caps a block at 128 threads on NVIDIA and 256 elsewhere, so a
+    # multiplication 512 lanes wide gets no block, and one message for both
+    # would refuse it as though its 11 KB of shared memory were the problem.
+    asked = per_mult * size + obj.get_global_size() * size
+    if asked <= cap:
+      raise GenerationError(
+          f'one multiplication is {self._num_threads} threads wide and no '
+          f'block holds one: the block is capped below that, while its '
+          f'{asked} B of shared memory would fit the {cap} B a block has')
+    raise GenerationError(
+        f'one multiplication needs {per_mult * size} B of shared memory '
+        f'({per_mult} elements, plus {obj.get_global_size() * size} B for '
+        f'the whole block), and a block on this device has {cap} B')
+
+  def _build_section(self, index: int, section):
+    """Section `index` as one optimized body, checked first, and the layout
+    its shared memory got.
+
+    Everything the check depends on is in place by now -- who declares each
+    window, the block the body is built for -- and testing one instruction
+    at a time and aborting at the first unprepared one would hide every other
+    problem behind it.
+    """
+    from tensorforge.backend.pir import allocate
     self._set_mult_stride(section)
     self._verify_section(section.stream, index)
-    # The tail ShrMemOpt reserved, for whichever instruction of the section
-    # allocates in it; the members run in sequence and reuse it.
-    scratch = max((instr.temp_shmem() for instr in section.stream), default=0)
-    return AbstractInstruction.optimized_body(
+    obj = section.shr_mem_obj
+    place = pir.PlaceBuffers(
+        arenas={obj.name: allocate.MULT,
+                GeneralLexicon.TOTAL_SHR_MEM: allocate.BLOCK},
+        align=self._shared_align(), block_align=self._shared_align())
+    body = AbstractInstruction.optimized_body(
         self._context, self._names,
         lambda body: self._emit_section(body, index, section),
-        scratch=scratch)
+        arena=obj.name, place=place, barriers=self._barriers(section))
+    return body, place.layout
+
+  def _with_arena(self, section, body):
+    """`body` behind the declarations of the arena it addresses, which are
+    the one thing in it that depends on the launch: the block's arena is as
+    large as the block, and a multiplication's starts where the
+    multiplications before it end."""
+    from tensorforge.backend.instructions.allocate import ShrMemAlloc
+    builder = pir.IRBuilder(fptype=self._context.fp_type,
+                            context=self._context, alloc=self._names)
+    for instr in section.stream:
+      if isinstance(instr, ShrMemAlloc):
+        instr.gen_ir(builder)
+    return tuple(builder.finish()) + tuple(body)
+
+  def _barriers(self, section) -> 'pir.PlaceBarriers':
+    """Where the multiplication's threads meet in `section` (`pir.barriers`).
+
+    The section is one body, so the pass sees every access a barrier has to
+    order and the order they ended up in.  What it needs from here is what a
+    body does not say: which arena is the multiplication's and which the
+    block's, which barrier a multiplication has (`SyncThreads.participants`),
+    and which buffers a computation stores from one lane.
+    """
+    from tensorforge.backend.pir import barriers
+    from tensorforge.backend.pir.build import barrier_stmt
+    from tensorforge.backend.pir.core import Participants
+    if not self._context.get_user_options().enable_sync_block_opt:
+      # The builders placed their barriers themselves, where they stand.
+      return None
+    obj = section.shr_mem_obj
+    arena = pir.Arena({
+        obj.name: (barriers.MULT, 0),
+        GeneralLexicon.TOTAL_SHR_MEM: (barriers.BLOCK, 0)})
+    sync = SyncThreads(self._context, self._num_threads)
+    who = sync.participants()
+    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+
+    def make(handoff, block):
+      if block:
+        return barrier_stmt(Participants.BLOCK, wave, handoff=handoff)
+      return barrier_stmt(who, wave, self._num_threads, handoff)
+
+    return pir.PlaceBarriers(arena, make, sync.barrier_scope(),
+                             _one_lane_stores(section.stream))
 
   def _emit_section(self, body, index: int, section) -> None:
     """One section, as one body: the arena and its windows, the operators
@@ -1367,11 +1626,14 @@ class Generator:
     transfer -- takes it as an operand.  Inside the loop, the loop's own
     bindings answer instead.
     """
+    from tensorforge.backend.instructions.allocate import ShrMemAlloc
     self._declare_lane_mapping(body)
     with BatchLoop.batch_indices(body) as bound:
       bound.update(self._traversal_indices(body, index))
       for instruction in section.stream:
-        instruction.gen_code(body)
+        # Declared once the launch is decided (`_with_arena`).
+        if not isinstance(instruction, ShrMemAlloc):
+          instruction.gen_code(body)
 
   def _traversal_indices(self, body, index: int) -> dict:
     """Where this thread's traversal of section `index` starts, and the first
@@ -1449,7 +1711,7 @@ class Generator:
     lexic.thread_idx_x, lexic.thread_idx_y = LANE_NAME, MULT_NAME
     # Multiplications per block, which is what the batch traversal steps by.
     # As an expression over the `y` extent rather than the number itself:
-    # `mults_per_block` is decided by `ShrMemOpt`, long after the loop that
+    # `mults_per_block` is decided from the body's layout, after the loop that
     # reads this was built, and a name declared in the kernel would not reach
     # the launcher.
     lexic.block_dim_y = (f'({lexic.block_dim_y} / {layout.units_per_mult})'
@@ -1524,7 +1786,7 @@ class Generator:
     """How many of these blocks fit on one SM, counting what is known exactly.
 
     Shared memory per block and threads per block are not estimates: the first
-    is what `ShrMemOpt` allocated and the second is the launch geometry, and
+    is what the allocator laid out and the second is the launch geometry, and
     both budgets are in the hardware description.  So this half of occupancy
     can be computed rather than modeled -- unlike the register half, where
     the figure is bytes of live values and the hardware counts registers after
@@ -1960,8 +2222,6 @@ class Generator:
 
       self._scopes.add_scope()
 
-      mark = self._section.shr_mem_obj.get_global_size()
-      self._section.preload_mark = mark
       builder = GlobalLoaderBuilder(self._context, self._scopes, self._section.shr_mem_obj, self._num_threads)
       # A stand-in of a merged run is not an argument: which member it is
       # changes per iteration, through a table over the members.  Preloading
@@ -2031,12 +2291,8 @@ class Generator:
         self._section.preload = load_ir
         return True
       else:
-        # make sure to clean up all new symbols that didn't get added -- and
-        # the shared memory their loaders reserved while being built, which
-        # otherwise stays in the launch's request (225 KB at b = 120 on a
-        # 64 KB gfx942, with nothing preloaded)
+        # make sure to clean up all new symbols that didn't get added
         self._scopes.remove_scope()
-        self._section.shr_mem_obj.release_global(mark)
         self._preload_globals = False
         self._preloaded = set()
         self._preload_left = set()
@@ -2302,7 +2558,7 @@ class Generator:
           form=(TableForm.SELECT
                 if len(members) <= DeclareOperandTable.SELECT_LIMIT
                 else TableForm.ARRAY),
-          variant=counter)
+          variant=counter, first=0 if resident else 1)
       tables.append(table)
       if self._stages(stand_in, written):
         region.extend(self._stage_member(stand_in, table, counter))
@@ -2513,15 +2769,12 @@ class Generator:
                                 self._section.shr_mem_obj),
                             num_threads=self._num_threads, permute=None,
                             blockwide=True, max_load_offset=0, verbatim=True)
-    obj = self._section.shr_mem_obj
     # on 16 bytes where an order may be offered, as `GlobalLoaderBuilder`
     align = 1
     dtype = getattr(stand_in.obj, 'datatype', None)
     if self._context.get_user_options().prepare_operands and dtype is not None:
       align = max(1, 16 // dtype.size())
-    loader.set_shr_mem_offset(obj.alloc_global(loader.compute_shared_mem_size(),
-                                               align=align),
-                              True, True)
+    loader.set_window(True, True, align)
     self._section.stage_loaders.append(loader)
     # The wait goes where `MoveLoads` puts every load's: at the loader's place,
     # in front of the second barrier, with the transfer hoisted up to the
@@ -2550,8 +2803,7 @@ class Generator:
                                             self._num_threads,
                                             self._lead_width
                                             * self._context.get_user_options().lead_blocking)
-    policy.set_has_barrier(
-        any(instr.barrier_scope() is not None for instr in self._section.stream))
+    policy.set_has_barrier(self._has_barrier(self._section.stream))
     if self._section.stage_loaders:
       policy.set_barrier_group(self._stage_group())
     num_mults_per_block = policy.get_num_mults_per_block()
@@ -2573,6 +2825,25 @@ class Generator:
       if isinstance(instr, BatchLoop):
         instr.set_mults_per_block(num_mults_per_block)
     return fits
+
+  @staticmethod
+  def _has_barrier(stream) -> bool:
+    """Whether the section will hold a barrier: one in the stream already,
+    or a write to shared memory or a one-lane store, which is what the body's
+    barrier placement (`pir.barriers`) meets with one.  Asked before the body
+    exists, so it answers for every write rather than for the ones that turn
+    out to be read across lanes."""
+    from tensorforge.backend.instructions.memory import AbstractShrMemWrite
+
+    def walk(instrs):
+      for instr in instrs:
+        if (instr.barrier_scope() is not None
+                or isinstance(instr, AbstractShrMemWrite)):
+          return True
+        if any(walk(region) for region in instr.regions()):
+          return True
+      return False
+    return walk(stream) or bool(_one_lane_stores(stream))
 
   def get_kernel(self):
     return self._kernel

@@ -38,8 +38,8 @@ it here would let a caller name an arithmetic the hardware does not have.
 mean the generic nest should run instead.  The nest calls it inside
 :meth:`Writer.speculative` and discards on a decline, so a path may give up
 after it has emitted -- but only what went through the writer comes back.  A
-reservation made before generation does not; :func:`scratch` is where a path
-states what it needs, and the same function answers ``temp_shmem``.
+buffer it staged through does: shared memory is placed from the body that
+was kept (`pir.allocate`), so a declined path holds none.
 """
 
 from dataclasses import dataclass
@@ -148,10 +148,13 @@ class MatmulOperands:
     #: a path that cannot take more declines.
     lead_width: int = 1
 
-    #: Shared memory one multiplication owns, in elements: the distance from
-    #: its copy of a scratch tile to its neighbor's.  Read only where a warp
-    #: holds several multiplications and reads their tiles.
-    mult_stride: Optional[int] = None
+    #: ``mult_stride() -> int``: shared memory one multiplication owns, in
+    #: elements -- the distance from its copy of a staging tile to its
+    #: neighbor's.  Asked only where a warp holds several multiplications and
+    #: reads their tiles, and asking is what tells the generator the body
+    #: depends on it: the arena is laid out after the body, so a body that
+    #: asked is built again once the answer is known.
+    mult_stride: Optional[Callable[[], int]] = None
 
     #: ``A_slot(writer, slot, parts) -> value | tuple``, or ``None`` where `A`
     #: is stored in the order the frontend described it.
@@ -195,14 +198,3 @@ class MatmulOperands:
     #: the instruction of a tile that is all zero.  `False` means unknown as
     #: well as nonzero, so a path that never asks leaves every tile in.
     A_zero: Optional[Callable] = None
-
-
-def scratch(dtype: Datatype) -> int:
-    """Shared-memory elements a path needs, asked before anything is emitted.
-
-    Every vendor module answers this, and the routing table asks the module it
-    would dispatch to -- so the reservation and the emission are one decision
-    rather than two that have to be kept in step.  A path that stages nothing
-    answers 0, which is the default here.
-    """
-    return 0

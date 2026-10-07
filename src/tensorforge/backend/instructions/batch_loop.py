@@ -309,9 +309,6 @@ class BatchLoop(AbstractInstruction):
         inner = [i.barrier_scope() for i in self._region]
         return max((s for s in inner if s is not None), default=None)
 
-    def temp_shmem(self) -> int:
-        return max((i.temp_shmem() for i in self._emitted()), default=0)
-
     # -- emission -------------------------------------------------------- #
 
     def _batch(self, n: int = 0) -> str:
@@ -515,9 +512,10 @@ class BatchLoop(AbstractInstruction):
         a body of its own, names a window that body never bound, and renders
         as text through a pipeline object nothing declares.
 
-        Not part of the region, so no analysis walks it: the buffer is live
-        into the loop through the wait at its head anyway, and `ShrMemOpt`
-        reaches the peel through the buffer's user list.
+        Not part of the region, so no analysis of the stream walks it: the
+        buffer is live into the loop through the wait at its head anyway, the
+        windows are declared through the buffer's user list, and the body the
+        peel is emitted into is what the allocator reads.
         """
         self._wrap_prologue.extend(instrs)
 
@@ -535,8 +533,7 @@ class BatchLoop(AbstractInstruction):
         """``(unguarded prefix, guarded middle, unguarded suffix)``.
 
         The suffix is a trailing run of marked instructions, and barriers may
-        sit inside and after it.  Two land there without being marked: the one
-        `SyncThreadsOpt` puts in front of a wrapped shared transfer, and the
+        sit inside and after it.  One lands there without being marked: the
         one the generator appends to every persistent loop after optimization
         -- which would otherwise break the run it is appended to.  A barrier
         outside the guard is reached by every lane of the multiplication, a
@@ -572,8 +569,8 @@ class BatchLoop(AbstractInstruction):
         """Declare the shared windows ahead of the flag guard.
 
         `s0 = &localShrMem0[512]` is where a transfer writes, and the offset
-        comes from `ShrMemOpt` rather than from `batchId0` -- the window is the
-        same for every element.  Declared by whichever instruction fills it,
+        comes from the allocator rather than from `batchId0` -- the window is
+        the same for every element.  Declared by whichever instruction fills it,
         it would land inside the guard, and a transfer cannot be issued
         outside a guard that defines the buffer it fills.
 
@@ -589,7 +586,7 @@ class BatchLoop(AbstractInstruction):
         guard the name would be scoped to the guard -- and every later reader
         of the same window would refer to something never declared where it
         stands.  Nothing about the hoist depends on prefetching: the offset
-        comes from `ShrMemOpt` and is the same for every element.
+        comes from the allocator and is the same for every element.
         """
         for instr in guarded:
             declare = getattr(instr, 'gen_code_declare', None)
@@ -782,7 +779,18 @@ class BatchLoop(AbstractInstruction):
     def _declare_stage_counter(self, writer) -> None:
         if self._stage_depth is None:
             return
-        writer(f'uint32_t {self.stage_counter_name()} = 0;')
+        self._counter_stmt(writer, f'uint32_t {self.stage_counter_name()} = 0;')
+
+    @staticmethod
+    def _counter_stmt(writer, line: str) -> None:
+        """A statement over the stage counter, which is a register: it
+        touches no memory the body models, and says so -- left unsaid, the
+        allocator and the barrier placement would both have to assume it
+        touches every buffer."""
+        if hasattr(writer, 'decl_expr'):
+            writer(line, accesses=())
+        else:
+            writer(line)
 
     def _advance_stage_counter(self, writer) -> None:
         """Advance the counter *outside* the flag guard.
@@ -798,9 +806,9 @@ class BatchLoop(AbstractInstruction):
         d = self._stage_depth
         name = self.stage_counter_name()
         if d & (d - 1) == 0:
-            writer(f'{name} = ({name} + 1) & {d - 1};')
+            self._counter_stmt(writer, f'{name} = ({name} + 1) & {d - 1};')
         else:
-            writer(f'{name} = ({name} + 1) % {d};')
+            self._counter_stmt(writer, f'{name} = ({name} + 1) % {d};')
 
     def _emit_body(self, writer) -> None:
         head, guarded, tail = self._split_guard()
@@ -1044,11 +1052,9 @@ class BatchLoop(AbstractInstruction):
                 instr.gen_code(writer)
         else:
             # one body for every instruction of the region
-            budget = max((i.temp_shmem() for i in guarded), default=0)
             AbstractInstruction.build_shared_body(
                 self._context, writer,
-                lambda _builder: [instr.gen_code(writer) for instr in guarded],
-                scratch=budget)
+                lambda _builder: [instr.gen_code(writer) for instr in guarded])
 
     def gen_code(self, writer) -> None:
         # Deliberately no writer.Scope() and no comment: adding either would
@@ -1061,9 +1067,8 @@ class BatchLoop(AbstractInstruction):
             # and a transfer could not be moved to the previous iteration:
             # `can_reorder` licenses swaps inside a body, and nothing licenses
             # a move across a back edge made of Writer text.
-            budget = self.temp_shmem()
             AbstractInstruction.build_shared_body(
-                self._context, writer, self.gen_code_inner, scratch=budget)
+                self._context, writer, self.gen_code_inner)
             return
         self.gen_code_inner(writer)
 
@@ -1415,11 +1420,15 @@ class BatchLoop(AbstractInstruction):
         self._declare_lane(writer)
         self._declare_stage_counter(writer)
         self._declare_windows_early(writer, list(self._region))
+        # The group takes every trip together, which is the point of driving
+        # it from the leader; the head is text, so the IR is told.
+        uniform = self.uniform_scope()
         if self._mode is LoopMode.PERSISTENT:
             with writer.For(f'size_t {self._group_batch()} = '
                             f'{self._group_start()}; '
                             f'{self._group_batch()} < {self._num_elements()}; '
-                            f'{self._group_batch()} += {self._stride}'):
+                            f'{self._group_batch()} += {self._stride}',
+                            uniform=uniform):
                 mask = self._declare_row_element(writer)
                 self._lookahead_bindings(writer)
                 with self._spelled_indices(writer), \
@@ -1428,7 +1437,8 @@ class BatchLoop(AbstractInstruction):
                 self._advance_stage_counter(writer)
             return
         writer(f'const size_t {self._group_batch()} = {self._group_start()};')
-        with writer.If(f'{self._group_batch()} < {self._num_elements()}'):
+        with writer.If(f'{self._group_batch()} < {self._num_elements()}',
+                       uniform=uniform):
             mask = self._declare_row_element(writer)
             with self._spelled_indices(writer), \
                     elementmask.element_mask(None, mask):
@@ -1456,8 +1466,8 @@ class BatchLoop(AbstractInstruction):
 
         Spelled as text, the lane, the mask, the element and the lookahead
         clamps would be statements that declare no accesses, so every pass
-        reasoning about the body -- the scratch check among them -- would have
-        to assume each touches everything.  As values they are arithmetic and
+        reasoning about the body -- the allocator and the barrier placement
+        among them -- would have to assume each touches everything.  As values they are arithmetic and
         one declared read of the flags, and the loop is one the IR can see.
 
         The start stays text, as it does for the per-row loop: a bound carries

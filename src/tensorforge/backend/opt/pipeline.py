@@ -301,9 +301,9 @@ class Pipeline(AbstractTransformer):
             replacement.set_stages(d, read, write)
             body[body.index(load)] = replacement
             # clone() registered the replacement as a *new* user; the symbol
-            # must forget the object that is no longer in the stream, or
-            # ShrMemOpt sizes the region from it and the extra stages are never
-            # reserved.  Order matters: drop the appended duplicate first, then
+            # must forget the object that is no longer in the stream, or the
+            # window is declared and sized from it and the extra stages are
+            # never reserved.  Order matters: drop the appended duplicate first, then
             # substitute, because list.remove() takes the earliest match and
             # would otherwise delete the entry at the replaced position.
             for sym in (replacement.get_dest(), replacement.get_src()):
@@ -341,7 +341,7 @@ class Pipeline(AbstractTransformer):
                 # It must *not* declare the buffer: the declaration addresses
                 # `k % d` and so mentions the loop variable, which does not
                 # exist in the prologue.  Cloning registers the copy as a later
-                # user of the symbol, so ShrMemOpt leaves declaring to the body
+                # user of the symbol, so declaring is left to the body
                 # transfer, which is still the first user.
                 fill.set_stages(d, read, str(stage))
                 peeled.append(fill)

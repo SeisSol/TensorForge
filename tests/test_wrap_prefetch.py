@@ -22,12 +22,13 @@ from tensorforge.backend.pir.wrap import wrap_prefetch
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.vm.vm import vm_factory
+from harness.placement import placed
 
 
 def _loop(*, double_buffer=True, read_before_wait=False, barrier=False,
           extra_issue=False):
     """A loop that fills a buffer and reads it in the same iteration."""
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 256))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     fill = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
     read = (b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='t')
             if double_buffer else fill)
@@ -84,7 +85,7 @@ def test_the_prefetch_moves_a_whole_iteration():
         "issued for the next; the drain afterwards waits for it")
 
     w = Writer()
-    emit(scheduled, w, vm_factory('sm_86', 'cuda', 'float'))
+    emit(placed(scheduled), w, vm_factory('sm_86', 'cuda', 'float'))
     src = w.get_src()
     head, _, tail = src.partition('for (')
     assert '__pipeline_memcpy_async' in head, (
@@ -128,7 +129,7 @@ def test_it_moves_the_hops_of_one_transfer_together():
     """A macro copy is hops of 4, 2 and 1 elements plus a predicated tail,
     each its own `copy.async` and all retired by one wait.  That is one
     transfer in pieces, and the group is what the wait consumes."""
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 256))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     fill = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
     read = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='t')
     glb = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='g')

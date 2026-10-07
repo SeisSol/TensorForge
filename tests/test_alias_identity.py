@@ -22,7 +22,7 @@ F32 = ScalarType(Datatype.F32)
 
 
 def _body(text_base_is_symbol: bool):
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     buf = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='A')
 
     sym = Symbol('A', SymbolType.SharedMem, None)
@@ -50,7 +50,7 @@ def test_a_store_kills_a_raw_read_of_the_same_buffer():
 
 
 def test_symbol_and_its_value_resolve_to_one_base():
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     buf = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='A')
     sym = Symbol('A', SymbolType.SharedMem, None)
     sym.set_pir_buffer(b, buf)
@@ -60,10 +60,10 @@ def test_symbol_and_its_value_resolve_to_one_base():
 def test_a_value_from_another_body_leaves_the_symbol_alone():
     """`pir_buffer` is body-scoped, and that is the wanted answer: in a body
     the value does not belong to, the symbol is the only identity there is."""
-    b1 = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64))
+    b1 = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     buf = b1.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='A')
     sym = Symbol('A', SymbolType.SharedMem, None)
     sym.set_pir_buffer(b1, buf)
 
-    b2 = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64))
+    b2 = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     assert b2.alias_root(sym) is sym

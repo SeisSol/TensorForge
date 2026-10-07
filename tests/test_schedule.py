@@ -19,7 +19,7 @@ from tensorforge.common.basic_types import Datatype
 
 
 def _builder():
-    return IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64))
+    return IRBuilder(fptype=Datatype.F32, arena='shrMem')
 
 
 def _ops(body):

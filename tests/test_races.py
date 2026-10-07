@@ -54,7 +54,8 @@ def _races(src, lanes, elements=2):
 
 
 @pytest.mark.parametrize('name', ['chain_three', 'accumulate_then_read',
-                                  'temp_slice_after_whole'])
+                                  'temp_slice_after_whole',
+                                  'temp_dead_slice_reassign'])
 def test_a_generated_kernel_is_ordered(name):
     src, (lanes, _) = _kernel(name)
     assert _races(src, lanes) == []

@@ -318,8 +318,8 @@ def _fold(threads: int, rows: int = 64) -> str:
 def test_a_fold_wider_than_a_wave_meets_in_shared_memory():
     """A shuffle reaches one wave, so a wider multiplication folds in two
     stages: each wave folds its own lanes, its first lane writes that partial
-    into the scratch tail `ReductionInstruction.temp_shmem` reserves, and a
-    rendezvous of the multiplication separates the stores from the reads.
+    into a buffer in the multiplication's shared memory, and a rendezvous of
+    the multiplication separates the stores from the reads.
     Measured on sm_120: `reduction_sum_axis0` gives the same checksum at 32,
     64 and 128 lanes, and SeisSol's damage step agrees with itself at 32 and
     64."""

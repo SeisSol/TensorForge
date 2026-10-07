@@ -21,9 +21,9 @@ Design decisions (see the region-vs-CFG discussion):
   * Memory effects are *localized*: an :class:`Access` carries (kind, space,
     base).  Two accesses to distinct bases never conflict, which is what makes
     reordering possible at all in a codegen where every buffer is known
-    statically.  Allocation (offsets, lifetime, reuse) stays one layer up in
-    ``opt.mem_region_allocation`` / ``opt.shr_mem_analyzer``; this layer only
-    ever names a buffer, never places it.
+    statically.  A pass names a buffer and never assumes where it is: the
+    allocator places it last, once nothing moves an access any more
+    (``allocate``).
 """
 
 from __future__ import annotations
@@ -874,6 +874,12 @@ class Op:
     PACK = 'pack'           # `VecTy v{a, b};`  -- aggregate initialization
     EXTRACT = 'extract'     # `v[i]`            -- element of a packed vector
     SPLIT = 'split'         # one argument, several results; `callee` names it
+    # Emits nothing, and tells a later pass something about the buffers it
+    # names: `mark` says what (`'cleared'`: a clearing store wrote them, and a
+    # store from other lanes must wait for a barrier -- `barriers`).  Ordered
+    # against the buffers' own accesses by declaring a write of them, and by
+    # nothing else, so it is no wall for anything that touches other memory.
+    MARK = 'mark'
     # escape hatches into raw text
     RAWEXPR = 'rawexpr'     # exactly one target; `text` is an *expression*
     RAWSTMT = 'rawstmt'     # no target;          `text` is a *statement*

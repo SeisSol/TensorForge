@@ -31,6 +31,8 @@ from typing import Callable, List, Optional, Sequence, Tuple
 from tensorforge.backend.passmanager import Pass, PassContext, PassManager
 
 from .asyncmem import schedule_async
+from .allocate import allocate
+from .barriers import place_barriers
 from .core import Stmt, dump
 from .passes import (converge_crosslane, cse, dce, flatten_scopes, fold,
                      if_convert, licm, load_cse, verify)
@@ -107,6 +109,60 @@ class ScheduleAsync(Pass):
         pc.put('scheduled', True)
 
 
+class PlaceBuffers(Pass):
+    """Give every shared buffer its offset (`allocate`).
+
+    Behind everything that moves a statement, since where a buffer may go
+    depends on when it is occupied, and ahead of the barriers, which ask what
+    shares memory with what.  What it arrived at is kept in `layout`.
+    """
+
+    name = 'place'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, arenas, align: int = 1, block_align: int = 1):
+        self._arenas = dict(arenas)
+        self._align = align
+        self._block_align = block_align
+        self.layout = None
+
+    def run(self, pc: BodyContext) -> None:
+        pc.body, self.layout = allocate(pc.body, arenas=self._arenas,
+                                        align=self._align,
+                                        block_align=self._block_align)
+
+
+class PlaceBarriers(Pass):
+    """Put a barrier wherever the lanes have to meet (`barriers`).
+
+    Behind everything that moves a statement, since where a barrier is
+    needed depends on the order the accesses end up in, and ahead of the
+    scheduler, which counts outstanding copies and does not care where the
+    lanes meet.
+    """
+
+    name = 'barriers'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, arena, make_barrier, arrival, handoff=frozenset(),
+                 report: Optional[List[str]] = None):
+        self._arena = arena
+        self._make_barrier = make_barrier
+        self._arrival = arrival
+        self._handoff = handoff
+        self._report = report
+
+    def run(self, pc: BodyContext) -> None:
+        pc.body = place_barriers(pc.body, arena=self._arena,
+                                 make_barrier=self._make_barrier,
+                                 arrival=self._arrival, handoff=self._handoff,
+                                 report=self._report)
+
+
 class WrapPrefetch(Pass):
     """Move each loop's transfer one iteration earlier (`wrap.wrap_prefetch`).
 
@@ -131,7 +187,9 @@ class WrapPrefetch(Pass):
 
 
 def standard_pipeline(debug: str = '',
-                      prefetch: Optional[WrapPrefetch] = None) -> PassManager:
+                      prefetch: Optional[WrapPrefetch] = None,
+                      place: Optional[PlaceBuffers] = None,
+                      barriers: Optional[PlaceBarriers] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -190,6 +248,10 @@ def standard_pipeline(debug: str = '',
         pm.add(Rewrite(name, fn, preserves=('flat',)))
     if prefetch is not None:
         pm.add(prefetch)
+    if place is not None:
+        pm.add(place)
+    if barriers is not None:
+        pm.add(barriers)
     pm.add(ScheduleAsync())
     return pm
 
@@ -197,15 +259,18 @@ def standard_pipeline(debug: str = '',
 def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              debug: str = '', diagnostics: Optional[List[str]] = None,
              prefetch: Optional[WrapPrefetch] = None,
+             place: Optional[PlaceBuffers] = None,
+             barriers: Optional[PlaceBarriers] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
     ``diagnostics`` collects what the scheduler could not determine;
-    ``prefetch`` adds the prefetch pass ahead of the scheduler; ``where``
-    names what built the body in the findings `debug` reports.
+    ``prefetch`` adds the prefetch pass ahead of the scheduler, ``place``
+    the placement of shared memory and ``barriers`` the barriers behind it;
+    ``where`` names what built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
-    standard_pipeline(debug, prefetch).run(pc)
+    standard_pipeline(debug, prefetch, place, barriers).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

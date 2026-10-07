@@ -42,7 +42,7 @@ def _waits(body):
 
 
 def _scratch(size=4096):
-    return IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', size))
+    return IRBuilder(fptype=Datatype.F32, arena='shrMem')
 
 
 # --------------------------------------------------------------------------- #

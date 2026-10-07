@@ -135,9 +135,11 @@ class MultilinearInstruction(ComputeInstruction):
         self._prev_offset = prev_offset
         self._next = next
         self._dest_obj = dest_obj
-        # Shared memory one multiplication owns, set by the generator once
-        # the arena is sized; see `set_mult_stride`.
+        # Shared memory one multiplication owns, set by the generator for
+        # each build of the body, and whether the build asked for it; see
+        # `set_mult_stride`.
         self._mult_stride = None
+        self._mult_stride_asked = False
 
         assert num_threads % blockcount == 0
 
@@ -940,7 +942,7 @@ class MultilinearInstruction(ComputeInstruction):
         """Columns the second index spans, flattened.
 
         Needed before emission as well as during it: a plan is laid out over
-        this, and `temp_shmem` asks for the plan.
+        this, and `convergence_scope` asks for the plan.
         """
         n = 1
         for mi, mx in self._ns[1:]:
@@ -1285,13 +1287,24 @@ class MultilinearInstruction(ComputeInstruction):
                 and getattr(a_obj, 'addressing', None) is Addressing.NONE)
 
     def set_mult_stride(self, stride) -> None:
-        """The shared memory one multiplication owns, in elements.
+        """The shared memory one multiplication owns, in elements, as far as
+        the generator knows it when it builds the body.
 
         Read by a matrix path whose warp holds several multiplications and
-        reads its neighbors' tiles (`nvidia._warp_group`).  Known only once
-        `ShrMemOpt` has sized the arena, which is after the plan is made.
+        reads its neighbors' tiles (`nvidia._warp_group`).  The arena is laid
+        out after the body, so the first build is told a guess, and a body
+        that asked (`asked_mult_stride`) is built again with the answer.
         """
         self._mult_stride = stride
+        self._mult_stride_asked = False
+
+    def asked_mult_stride(self) -> bool:
+        """Whether the body built since `set_mult_stride` read the stride."""
+        return self._mult_stride_asked
+
+    def _ask_mult_stride(self) -> int:
+        self._mult_stride_asked = True
+        return self._mult_stride
 
     def convergence_scope(self):
         """How far the threads have to run in step for the plan to be legal.
@@ -1317,12 +1330,12 @@ class MultilinearInstruction(ComputeInstruction):
         """Which arrangements compute this operation, over which columns.
 
         Derived on each call rather than stored.  Two callers ask -- the
-        emission below, and `temp_shmem` before any body exists -- and the
-        answer has to be the same for both: a reservation made for one
-        arrangement and an emission of another is either a buffer nobody
-        writes or an overrun.  Everything it reads is fixed by `_analyze`, so
-        deriving it twice cannot disagree with itself the way two stored
-        copies can.
+        emission below, and `convergence_scope` before any body exists -- and
+        the answer has to be the same for both: a traversal driven for one
+        arrangement and an emission of another is a matrix instruction some
+        lanes of the warp do not reach.  Everything it reads is fixed by
+        `_analyze`, so deriving it twice cannot disagree with itself the way
+        two stored copies can.
         """
         n = self._output_extent()
         module = _vendor_module(self._context)
@@ -1687,7 +1700,7 @@ class MultilinearInstruction(ComputeInstruction):
                 a_shared=self._ops[0].symbol.stype is SymbolType.SharedMem,
                 a_resident=self._ops[0].symbol.stype in (SymbolType.Register,
                                                          SymbolType.Scratch),
-                mult_stride=self._mult_stride,
+                mult_stride=self._ask_mult_stride,
                 A_slot=(A_slot if a_obj is not None
                         and getattr(a_obj, 'storage_order', None) is not None
                         # An interleaved operand is ordered for the nest's
@@ -1756,23 +1769,3 @@ class MultilinearInstruction(ComputeInstruction):
         # the `None` standing for the absent previous value: the comment is
         # part of every kernel's source, and so of its name.
         return f'{self._dest.name} = {self._sumOperation}({product}) {self._sumOperation} {self._prev}' # TODO: dimensions
-
-    def temp_shmem(self):
-        """What the path this operation will take needs staged.
-
-        Asked before any body is built, so it has to reach the same conclusion
-        as the dispatch does later from the same two questions: whether a
-        matrix path is taken at all, and which module owns it.  Naming the
-        vendor here a second time is what lets the two answers drift, and a
-        reservation that disagrees with the emission is either a buffer nobody
-        writes or an overrun.
-        """
-        plan = self._plan()
-        if plan[0].strategy is Strategy.GENERIC:
-            return 0
-        module = _vendor_module(self._context)
-        # The most any one span needs, not the sum: the spans run in sequence
-        # and nothing an arrangement stages outlives the columns it computed.
-        return max(module.scratch(span.strategy, self._shape(),
-                                  self._context)
-                   for span in plan)

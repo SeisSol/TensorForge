@@ -9,11 +9,11 @@ touches* defaults to the same answer, `Access(READ|WRITE, UNKNOWN, None)`,
 which conflicts with every buffer in every space.
 
 That default has a specific cost.  One raw statement between two shared-memory
-accesses keeps every buffer live, so a body that is nine tenths converted has
-the same interference graph as one that is not converted at all, and a
-coloring over it reuses nothing.  The conversion would be all-or-nothing, and
-an all-or-nothing conversion does not get done.  `accesses=` is the way out;
-omitting it keeps the conservative default.
+accesses keeps every buffer live, so a body that is nine tenths converted lays
+out like one that is not converted at all: the allocator gives no buffer the
+bytes of another across it (`pir.allocate`).  The conversion would be
+all-or-nothing, and an all-or-nothing conversion does not get done.
+`accesses=` is the way out; omitting it keeps the conservative default.
 
 The operand requirement is here because declaring an access is not declaring a
 use.  Take a `float4` staging store that names its tile only inside the text:
@@ -34,16 +34,16 @@ from tensorforge.backend.pir.core import (INDEX, Access, Effect, IRError,
 from tensorforge.backend.pir.emit import Emitter
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
+from harness.placement import placed
 
 
-def builder(budget=512):
-    return IRBuilder(fptype=Datatype.F32,
-                     scratch=('tempShrMem', budget) if budget else None)
+def builder(arena=True):
+    return IRBuilder(fptype=Datatype.F32, arena='shrMem' if arena else None)
 
 
 def emitted(body):
     lines = []
-    Emitter(lines.append).run(body)
+    Emitter(lines.append).run(placed(body))
     return lines
 
 
@@ -174,54 +174,16 @@ def test_an_operand_keeps_the_allocation_alive_through_dce():
     body = passes.dce(b.finish())
     assert any(s.op == Op.ALLOC for s, _ in walk(body)), (
         "the allocation was removed despite being used")
-    assert any('_tile = &tempShrMem' in line for line in emitted(body))
+    assert any('_tile = &shrMem' in line for line in emitted(body))
 
 
 # --------------------------------------------------------------------------- #
-# Scratch scopes
+# Where a shared buffer goes
 # --------------------------------------------------------------------------- #
 
-def test_siblings_reuse_the_same_offset():
-    """Sibling scopes pack their buffers without constants written by hand."""
-    b = builder(192)
-    with b.scratch_scope():
-        a = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='atile')
-        bb = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='btile')
-    with b.scratch_scope():
-        c = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='ctile')
-    lines = emitted(b.finish())
-    offsets = {}
-    for line in lines:
-        for v in (a, bb, c):
-            if f'{v} = &tempShrMem[' in line:
-                offsets[v.hint] = int(line.split('[')[1].split(']')[0])
-    assert offsets == {'atile': 0, 'btile': 128, 'ctile': 0}
-    assert b.scratch_peak == 192
-
-
-def test_nested_scopes_do_not_overlap():
-    """A scope is a lifetime, and an inner buffer outlives nothing."""
-    b = builder(512)
-    with b.scratch_scope():
-        b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='outer')
-        with b.scratch_scope():
-            inner = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='inner')
-    line = next(l for l in emitted(b.finish()) if f'{inner} =' in l)
-    assert '[64]' in line
-
-
-def test_the_budget_is_checked_against_the_peak_not_the_current_mark():
-    """`_scratch_used` falls back at the end of every scope, so a check
-    against it would pass a body that overflows in an earlier scope."""
-    b = builder(128)
-    with b.scratch_scope():
-        b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='big')
-    with pytest.raises(GenerationError, match="scratch overflow"):
-        with b.scratch_scope():
-            b.alloc(Datatype.F32, (129,), MemSpace.SHARED, hint='bigger')
-
-
-def test_a_body_with_no_budget_cannot_allocate_shared():
-    b = builder(budget=None)
-    with pytest.raises(GenerationError, match="no scratch budget"):
+def test_a_body_with_no_arena_cannot_allocate_shared():
+    """A shared buffer is a window into an arena the allocator lays out,
+    and a body without one has nowhere to put it."""
+    b = builder(arena=False)
+    with pytest.raises(GenerationError, match="no arena"):
         b.alloc(Datatype.F32, (4,), MemSpace.SHARED, hint='nope')

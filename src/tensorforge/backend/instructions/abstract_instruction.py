@@ -378,26 +378,14 @@ class AbstractInstruction(ABC):
 
   @classmethod
   @contextmanager
-  def shared_body(cls, context, writer: Writer, scratch: int = 0):
+  def shared_body(cls, context, writer: Writer):
     """Open one PIR body that several instructions build into.
 
-    ``scratch`` is the tail ShrMemOpt reserved, and it has to be passed in
-    rather than derived: a body has no idea which instructions will join it,
-    and an instruction that joins one loses its own ``through_pir`` call and
-    with it the budget that call would have set up.  Without this a merged
-    body rejects every shared allocation inside it, which is `nvidia.matmul`
-    and so most of the tensor-core path.
-
-    The reservation is the *max* over the members, matching
-    ``BatchLoop.temp_shmem()``, because the members run in sequence and reuse
-    the tail.  ``through_pir`` keeps that true by giving each member its own
-    ``scratch_scope``, so one member's buffers are dead before the next
-    member's are placed.  If a future scheduler interleaves members, that
-    assumption is what breaks, and it breaks loudly: the scope's high-water
-    mark is checked against the budget.
+    A body opened here has no arena: shared memory is placed by the section's
+    allocator (`pir.allocate`), so a shared buffer is allocated in a section
+    body (`optimized_body`) and nowhere else.
     """
-    builder = cls._body_builder(context, getattr(writer, 'alloc', None),
-                                scratch)
+    builder = cls._body_builder(context, getattr(writer, 'alloc', None))
     cls._shared_body.append(builder)
     try:
       yield builder
@@ -407,7 +395,7 @@ class AbstractInstruction(ABC):
         context, builder, builder.finish()))
 
   @classmethod
-  def build_shared_body(cls, context, writer, fill, scratch: int = 0) -> None:
+  def build_shared_body(cls, context, writer, fill) -> None:
     """`shared_body` for a caller that states its contents as `fill(builder)`.
 
     The one thing a `with` block cannot do is run twice, and that is what this
@@ -417,10 +405,11 @@ class AbstractInstruction(ABC):
     the context manager.
     """
     cls._emit_shared_body(context, writer, cls.optimized_body(
-        context, getattr(writer, 'alloc', None), fill, scratch))
+        context, getattr(writer, 'alloc', None), fill))
 
   @classmethod
-  def optimized_body(cls, context, names, fill, scratch: int = 0):
+  def optimized_body(cls, context, names, fill, arena=None, place=None,
+                     barriers=None):
     """`fill(builder)` as one body, through the pipeline, ready to emit.
 
     The half of `build_shared_body` that needs no writer: `names` is the
@@ -428,9 +417,15 @@ class AbstractInstruction(ABC):
     emitted with, since a name is unique per file and not per body.  Built
     ahead of the writer, a body is a fact the generator can decide the launch
     from before anything is written.
+
+    For a body that holds a whole section and so everything its shared
+    memory and its barriers depend on: `arena` is the multiplication's arena,
+    where a shared buffer that names no other one goes; `place` lays the
+    buffers out (`pir.PlaceBuffers`) and `barriers` places the barriers
+    (`pir.PlaceBarriers`), both behind everything that moves a statement.
     """
     def attempt():
-      builder = cls._body_builder(context, names, scratch)
+      builder = cls._body_builder(context, names, arena)
       cls._shared_body.append(builder)
       try:
         fill(builder)
@@ -439,18 +434,17 @@ class AbstractInstruction(ABC):
       return builder, builder.finish()
     _, body = _fused_if_over_budget(
         context, attempt,
-        lambda builder, body: cls._optimize_shared_body(context, builder, body))
+        lambda builder, body: cls._optimize_shared_body(context, builder, body,
+                                                        place, barriers))
     return body
 
   @staticmethod
-  def _body_builder(context, names, scratch):
+  def _body_builder(context, names, arena=None):
     return pir.IRBuilder(fptype=context.fp_type, context=context,
-                         alloc=names,
-                         scratch=(('tempShrMem', scratch) if scratch
-                                  else None))
+                         alloc=names, arena=arena)
 
   @staticmethod
-  def _optimize_shared_body(context, builder, body):
+  def _optimize_shared_body(context, builder, body, place=None, barriers=None):
     """A shared body through the pipeline, with the prefetch pass where it
     is asked for.
 
@@ -472,7 +466,7 @@ class AbstractInstruction(ABC):
           report=declined)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         debug=options.ir_debug, prefetch=prefetch,
-                        where='shared body')
+                        place=place, barriers=barriers, where='shared body')
     if options.ir_debug:
       for why in declined:
         print(f'wrap: declined -- {why}')
@@ -497,29 +491,24 @@ class AbstractInstruction(ABC):
       return
 
     if self._shared_body:
-      # Join the enclosing body, but in a scratch scope of this instruction's
-      # own: the shared budget is the max over the members, not the sum, so a
-      # member's buffers have to be dead before the next member places its
-      # own.  Without the scope they accumulate and the second matmul in a
-      # body overflows a tail sized for one.
+      # Join the enclosing body.  Where this instruction defines a buffer
+      # whole, it says so ahead of its first write (`_kills`): the buffer
+      # holds nothing anybody wants up to there.  A window this instruction
+      # declares itself has no value yet, and its `alloc` says the same.
       builder = self._shared_body[-1]
-      with builder.scratch_scope():
-        build(builder)
+      for sym in getattr(self, '_kills', ()):
+        buf = sym.pir_buffer(builder)
+        if buf is not None:
+          builder.mark('defines', buf)
+      build(builder)
       return
 
-    # The scratch tail this instruction declared to ShrMemOpt, so that a
-    # shared alloc inside the body lands in the space that was reserved for
-    # it rather than in an array of its own.  `temp_shmem()` is 0 for almost
-    # everything, and 0 correctly means "this body may not allocate".
-    budget = self.temp_shmem()
     simd = _explicit_simd(self._context)
     debug = self._context.get_user_options().ir_debug
     def attempt():
       builder = pir.IRBuilder(fptype=self._context.fp_type,
                               context=self._context,
-                              alloc=getattr(writer, 'alloc', None),
-                              scratch=(('tempShrMem', budget) if budget
-                                       else None))
+                              alloc=getattr(writer, 'alloc', None))
       build(builder)
       return builder, builder.finish()
     _, body = _fused_if_over_budget(
@@ -560,9 +549,6 @@ class AbstractInstruction(ABC):
 
   def set_threadconfig_pre(self, num_threads, mults):
     pass
-
-  def temp_shmem(self):
-    return 0
 
 
 def _renamed(view, symbol):

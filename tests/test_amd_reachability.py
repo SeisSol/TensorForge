@@ -39,11 +39,10 @@ MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
 #: What the dispatch calls into this package, every one an entry point in the
 #: same sense: `matmul` emits, and the others are asked before it -- what the
 #: target can emit for a shape, how the arrangement is laid out over the
-#: output, what has to be staged, how far the threads run in step, which order
-#: the A operand is read in.  Computing reachability from the emitter alone
-#: would count them as dead.
-ENTRIES = ["matmul", "scratch", "strategies", "plan", "convergence",
-           "prepared_order"]
+#: output, how far the threads run in step, which order the A operand is read
+#: in.  Computing reachability from the emitter alone would count them as
+#: dead.
+ENTRIES = ["matmul", "strategies", "plan", "convergence", "prepared_order"]
 
 # Unreachable on purpose.  Each entry needs a reason that says why deleting it
 # would be worse than keeping it.

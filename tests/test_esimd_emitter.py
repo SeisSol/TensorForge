@@ -18,6 +18,7 @@ from tensorforge.backend.pir.core import (SCALAR_LAYOUT, IRError, LaneAxis,
 from tensorforge.backend.pir.emit_esimd import EsimdEmitter
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
+from harness.placement import placed
 
 F32 = ScalarType(Datatype.F32)
 F64 = ScalarType(Datatype.F64)
@@ -944,13 +945,13 @@ def _esimd_src(build):
     from tensorforge.backend.pir import IRBuilder
     from tensorforge.backend.writer import Writer
 
-    builder = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 1 << 16))
-    with builder.scratch_scope():
-        build(builder)
+    builder = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    build(builder)
     ctx = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32)
     ctx.get_vm().get_lexic().simd_mode = True
     writer = Writer()
-    EsimdEmitter(writer=writer, context=ctx, strict=False).run(builder.finish())
+    EsimdEmitter(writer=writer, context=ctx, strict=False).run(
+        placed(builder.finish()))
     return writer.get_src()
 
 

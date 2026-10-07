@@ -42,7 +42,7 @@ def test_it_serves_the_gap_the_transpose_declines():
     assert relayout.transposes_between(packed, want, 4) is None
     plan = staging.staged(packed, want, _indices(4, 64))
     assert plan is not None
-    assert staging.buffer_elements(plan) == 4 * 64
+    assert {transfer.address for transfer in plan} == set(range(4 * 64))
 
 
 def test_it_serves_the_gap_the_swap_family_declines():
@@ -81,15 +81,6 @@ def test_each_element_is_written_once_and_read_once(name):
     assert plan is not None
     addresses = [transfer.address for transfer in plan]
     assert len(addresses) == len(set(addresses)) == len(indices)
-
-
-def test_the_buffer_is_read_from_the_plan():
-    """A reservation smaller than the plan is an overrun and one larger is
-    shared memory nobody writes, so the two are one number."""
-    indices = _indices(4, 16)
-    plan = staging.staged(relayout.nest_shared(4, 16),
-                          relayout.transposed(4, 16), indices)
-    assert staging.buffer_elements(plan) == len(indices)
 
 
 # -- and it is the expensive one ------------------------------------------- #
@@ -316,8 +307,6 @@ def test_what_refuses_a_packed_operand_is_the_route_and_not_a_literal():
     assert amd.componentwise(_shape(width=4), ctx)
     assert Strategy.MATRIX in amd.strategies(_shape(width=4), ctx)
     assert Strategy.DPP in amd.strategies(_shape(width=4), ctx)
-    assert amd.scratch(Strategy.MATRIX, _shape(width=4), ctx) == 0
-    assert amd.scratch(Strategy.DPP, _shape(width=4), ctx) == 0
 
 
 def _amd_context():
@@ -383,7 +372,7 @@ def test_an_unpacked_lead_operand_needs_nothing():
                           _indices(64), wave=64) == 0
 
 
-# -- the reservation ------------------------------------------------------- #
+# -- the shape asked of the target ----------------------------------------- #
 
 def _shape(width=1, threads=64):
     from tensorforge.backend.instructions.compute.strategy import (
@@ -394,54 +383,9 @@ def _shape(width=1, threads=64):
                         lead_layout=lead_layout(threads, width))
 
 
-def test_an_unpacked_operand_reserves_nothing():
-    """Every arrangement keeps its operands in registers while they arrive
-    unpacked, and the relayouts between register layouts are swaps and
-    merges."""
-    from tensorforge.backend.instructions.compute.primitives import amd
-    from tensorforge.backend.instructions.compute.strategy import Strategy
-    assert amd.scratch(Strategy.MATRIX, _shape(width=1), None) == 0
-    assert amd.scratch(Strategy.GENERIC, _shape(width=4), None) == 0
-
-
-@pytest.mark.parametrize('width', [2, 4])
-@pytest.mark.parametrize('threads', [32, 64])
-def test_a_packed_operand_reserves_one_wave(width, threads, monkeypatch):
-    """The buffer carries one operand register at a time, so it does not grow
-    with the problem -- which is what lets a reservation be made before any
-    body exists.
-
-    For a scheme that takes the trip: the lane-batched one takes the packed
-    operand as it is (`amd.componentwise`), so that is switched off here."""
-    from tensorforge.backend.instructions.compute.primitives import amd
-    from tensorforge.backend.instructions.compute.strategy import Strategy
-    monkeypatch.setattr(amd, 'componentwise', lambda shape, ctx: False)
-    assert amd.scratch(Strategy.MATRIX, _shape(width, threads),
-                       None) == threads
-
-
-@pytest.mark.parametrize('width', [2, 4])
-def test_the_reservation_is_the_plan_s_own_size(width, monkeypatch):
-    """Not a number computed beside it: smaller is an overrun and larger is
-    memory nobody writes.
-
-    The plan is built from this file's own statement of the two layouts, not
-    from the module's, so the check is on the derivation and not a comparison
-    of the implementation with itself.  For a scheme that takes the trip, as
-    in the test above.
-    """
-    from tensorforge.backend.instructions.compute.primitives import amd
-    from tensorforge.backend.instructions.compute.strategy import Strategy
-    monkeypatch.setattr(amd, 'componentwise', lambda shape, ctx: False)
-    plan = staging.staged(_packed_lead(width, 64), _flat_lead(64),
-                          _indices(64))
-    assert amd.scratch(Strategy.MATRIX, _shape(width), None) == \
-        staging.buffer_elements(plan)
-
-
 def test_the_shape_is_built_in_one_place():
-    """The plan and the reservation read the same one, or a buffer sized for
-    one arrangement meets an emission of another."""
+    """The plan, the traversal and the emission read the same one, or a loop
+    driven for one arrangement meets an emission of another."""
     import inspect
     from tensorforge.backend.instructions.compute import multilinear
     source = inspect.getsource(multilinear.MultilinearInstruction)

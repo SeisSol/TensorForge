@@ -20,8 +20,8 @@ previous wait and itself.  Barriers and def-use edges show up here.
 *Space.*  Whether the two destinations occupy the same arena bytes.  They
 usually do, and this is the trap: the two are distinct `alloc` values, so
 `may_alias` says they never alias and the IR-level check passes.  The
-identity is made downstream, by `MemoryRegionAllocation`, out of a liveness
-computed from the schedule the hoist is about to change.  Hoisting on the
+identity is made downstream, by the allocator (`pir.allocate`), out of a
+liveness computed from the schedule the hoist is about to change.  Hoisting on the
 strength of the IR answer alone writes the next operand into the buffer the
 current one is still being read from -- values that are wrong without being
 absent, on some launches.
@@ -160,10 +160,10 @@ def _name(blocker):
     """What stops the hoist, in one word.
 
     "no" is not a finding.  The barrier that shows up here is not an
-    independent obstacle: `SyncThreadsOpt` puts it there because the next
-    write lands in the bytes the previous reads are still taking from, which
-    is the same fact the space column reports.  Separating the two removes
-    the reason for the barrier along with the aliasing.
+    independent obstacle: the barrier placement puts it there because the
+    next write lands in the bytes the previous reads are still taking from,
+    which is the same fact the space column reports.  Separating the two
+    removes the reason for the barrier along with the aliasing.
     """
     if blocker is None:
         return 'free'

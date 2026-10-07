@@ -18,7 +18,7 @@ are defects this code can actually have, not invented ones:
 * the broadcast layout with the right numbers in the wrong roles
 * `0.0f` handed to a `T &` parameter of `transpose4x4b32`
 * a shared buffer declared inside a body, outside the sized arena
-* two scratch windows handed out at the same offset
+* two buffers occupied together placed on the same bytes
 
 Source files are edited in place and restored in a `finally`.  Run it on a
 clean tree.
@@ -50,6 +50,9 @@ HIP = Path('src/tensorforge/include/tensorforge_device/hip.h')
 EMIT = Path('src/tensorforge/backend/pir/emit.py')
 ABSTR = Path('src/tensorforge/backend/instructions/abstract_instruction.py')
 EQUIV = Path('tools/access_equiv.py')
+ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
+LAYOUT = Path('src/tensorforge/backend/pir/layout_check.py')
+BARRIERS = Path('src/tensorforge/backend/pir/barriers.py')
 
 
 def _run_tests(target):
@@ -270,11 +273,12 @@ GROUPS = {
              '        m = None', 1)),
         ('the C tile loses its swizzle',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "hint='ctile', swizzle=XorSwizzle(wave))", "hint='ctile')", 1)),
+             "hint='ctile',\n                        swizzle=XorSwizzle(wave))",
+             "hint='ctile')", 1)),
         ('the C tile takes the B tile\'s width',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "hint='ctile', swizzle=XorSwizzle(wave))",
-             "hint='ctile', swizzle=XorSwizzle(atom.k))", 1)),
+             "hint='ctile',\n                        swizzle=XorSwizzle(wave))",
+             "hint='ctile',\n                        swizzle=XorSwizzle(atom.k))", 1)),
         ('a named load falls back to text',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              "            attrs += [('extern', extern)]",
@@ -326,7 +330,7 @@ GROUPS = {
              "        bits = swz.width.bit_length()", 1)),
         ('the B tile loses its swizzle',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "hint='btile', swizzle=XorSwizzle(atom.k))",
+             "hint='btile',\n                        swizzle=XorSwizzle(atom.k))",
              "hint='btile')", 1)),
     ]),
 
@@ -679,11 +683,6 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/staging.py'),
              '    for address, index in enumerate(indices):',
              '    for address, index in [(0, i) for i in indices]:')),
-        ('the buffer sized by something other than the plan',
-         sub(Path('src/tensorforge/backend/instructions/compute/staging.py'),
-             '    addresses = {transfer.address for transfer in plan}\n'
-             '    return len(addresses)',
-             '    return 0')),
         ('the nothing-to-do answer skipped',
          sub(Path('src/tensorforge/backend/instructions/compute/routes.py'),
              '    if gap == ():\n        return 0',
@@ -838,24 +837,38 @@ GROUPS = {
              '        return list(vals)\n        raise NotImplementedError(')),
     ]),
 
-    'scratch': ('tests/test_pir_scratch.py', [
+    # Where each shared buffer goes, from the lifetimes in the final body.
+    'allocate': ('tests/test_pir_allocate.py tests/test_shared_clobber.py', [
         ('a shared alloc declares its own array again',
          sub(EMIT,
              "                w(f'{self.ctype(t, v)} {self.name(v)} = {window};')",
              "                w(f'__shared__ {t.elem.ctype()} {self.name(v)}[{t.volume}];')")),
-        ('the budget check dropped',
-         sub(BUILD, '        if max(end, self._scratch_peak) > budget:',
-             '        if False:')),
-        ('windows overlap: the cursor never advances',
-         sub(BUILD, '        self._scratch_used = end', '        pass')),
+        ('a window nobody placed emitted at offset zero',
+         sub(EMIT, "                if off is None:\n                    raise IRError(",
+             "                if off is None and False:\n                    raise IRError(", 1)),
+        ('every buffer on the same bytes: occupancy ignored',
+         sub(ALLOC, '        taken = sorted((placed[n], placed[n] + by_bit[n].size)',
+             '        taken = sorted((placed[n], placed[n]) ', 1)),
+        ('a mark no longer ends a value',
+         sub(ALLOC, "            if s.attr('mark') == 'defines':",
+             "            if False:", 1)),
+        ('every write ends a value, the slices of one buffer included',
+         sub(ALLOC, '        return uses, defs, 0\n',
+             '        return uses, defs, defs & ~uses\n', 1)),
+        ('a back edge not followed',
+         sub(ALLOC, '            if entry == head:\n                break',
+             '            if True:\n                break', 1)),
+        ('a statement that says nothing read as touching nothing',
+         sub(ALLOC, '                uses |= self.everything\n',
+             '                pass\n', 1)),
+        ('the stages of a rotating buffer not reserved',
+         sub(ALLOC, '        b.size = max(b.size, v.type.volume * stages)',
+             '        b.size = max(b.size, v.type.volume)', 1)),
         ('alignment ignored',
-         sub(BUILD, '        align = max(1, 16 // elem.size())', '        align = 1')),
-        ('no budget read as unlimited',
-         sub(BUILD, '        if self._scratch is None:', '        if False:')),
-        ('the instruction hands over a budget it did not declare',
-         sub(ABSTR, "scratch=(('tempShrMem', budget) if budget\n"
-                    "                                       else None))",
-             "scratch=('tempShrMem', 1 << 20))")),
+         sub(ALLOC, '            at = max(at, _aligned(hi, b.align))',
+             '            at = max(at, hi)', 1)),
+        ('the block\'s buffers laid over each other',
+         sub(ALLOC, '        end_block = at + b.size', '        end_block = at', 1)),
     ]),
 
     'equiv': ('tests/test_access_equiv.py', [
@@ -952,8 +965,8 @@ GROUPS = {
                r'tensorforge::VectorT<float, 2> \1 =')),
         ('a store past the end of a shared-memory declaration',
          sub(Path('tests/snapshots/gemm_square_16.hip.cpp'),
-             'float* tempShrMem = &localShrMem0[0];',
-             'float* tempShrMem = &localShrMem0[0]; '
+             'float* localShrMem0 = &totalShrMem[16 * threadIdx.y + 0];',
+             'float* localShrMem0 = &totalShrMem[16 * threadIdx.y + 0]; '
              'const auto _unused = undeclared_symbol;',
              1)),
     ]),
@@ -1096,11 +1109,6 @@ GROUPS = {
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
-        ('the reservation sized for one candidate instead of all of them',
-         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             '    return max((size(atom) for atom in instrs_for(dtype, sm)), '
-             'default=0)',
-             '    return size(instrs_for(dtype, sm)[0])', 1)),
         ('the i8 entries let into the candidates',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)',
@@ -1175,9 +1183,12 @@ GROUPS = {
     ]),
 
     # A raw statement may narrow what it touches, and must then be complete
-    # about what it uses.  Both halves, plus the scope that carries the
-    # lifetime a liveness analysis cannot yet see.
+    # about what it uses.  Both halves, plus the arena a shared buffer needs.
     'rawaccess': ('tests/test_pir_raw_accesses.py', [
+        ('a body with no arena allocates shared memory anyway',
+         sub(Path('src/tensorforge/backend/pir/build.py'),
+             "            if arena is None:\n                raise GenerationError(",
+             "            if False:\n                raise GenerationError(", 1)),
         ('a narrowed access set not checked at all',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              '            self._check_declared_accesses(code, accesses, args, defines)',
@@ -1200,10 +1211,6 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/pir/build.py'),
              '                             pure=False, movable=False,',
              '                             pure=False, movable=(accesses == ()),', 1)),
-        ('the scope no longer releases',
-         sub(Path('src/tensorforge/backend/pir/build.py'),
-             '            self._scratch_used = mark',
-             '            pass', 1)),
         ('a varalloc name asked to claim a use it cannot have',
          sub(Path('src/tensorforge/backend/pir/build.py'),
              '        self._by_name.pop(str(v), None)\n', '', 1)),
@@ -1211,33 +1218,64 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/pir/build.py'),
              'return self._emit_op(Op.RAWSTMT, tuple(defines), tuple(args),',
              'return self._emit_op(Op.RAWSTMT, (), tuple(args),', 1)),
-        ('the budget checked against the mark, not the peak',
-         sub(Path('src/tensorforge/backend/pir/build.py'),
-             'if max(end, self._scratch_peak) > budget:',
-             'if end > budget:', 1)),
     ]),
 
-    # `scratch_scope` declares a packing; this is the check that it holds.
-    'scratchcheck': ('tests/test_scratch_check.py', [
-        ('a read across a reused window no longer reported',
-         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
-             '                if t.reads and last_write[other] is not None:',
+    # Where the threads meet, from the order of the final body.
+    'barriers': ('tests/test_pir_barriers.py tests/test_ternary.py', [
+        ('a read of what another lane wrote not met',
+         sub(BARRIERS, '            for hit in hits:\n                needed = True',
+             '            for hit in ():\n                needed = True', 1)),
+        ('a write over bytes read since the last barrier not met',
+         sub(BARRIERS, '                if _overlap(ext, rext):\n                    needed = True',
+             '                if False:\n                    needed = True', 1)),
+        ('extents of other buffers taken for disjoint',
+         sub(BARRIERS, '    return la < hb and lb < ha', '    return False', 1)),
+        ('a store after a clearing store not met',
+         sub(BARRIERS, '            for where in cleared:\n                needed = True',
+             '            for where in ():\n                needed = True', 1)),
+        ('a clearing store after a store not met',
+         sub(BARRIERS, "        if s.attr('mark') == 'clears':",
+             "        if False:", 1)),
+        ('a one-lane store not handed off',
+         sub(BARRIERS, '            out.writes[key] = (key in self.handoff, root)',
+             '            out.writes[key] = (False, root)', 1)),
+        ('a one-lane store into global memory not recognized',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '  return tuple(roots.get(id(sym), sym) for sym in out)',
+             '  return tuple(out)', 1)),
+        ('the back edge not followed',
+         sub(BARRIERS, '            for _ in range(8):', '            for _ in range(1):', 1)),
+        ('a barrier already there not counted',
+         sub(BARRIERS, '        if s.effect & Effect.BARRIER:\n            return state.fence(_scope_of(s))',
+             '        if s.effect & Effect.BARRIER:\n            return state', 1)),
+        ('a barrier put inside a block some lanes skip',
+         sub(BARRIERS, '            if inner < self.arrival:\n                if needed:',
+             '            if False:\n                if needed:', 1)),
+        ('a statement that says nothing taken to touch nothing',
+         sub(BARRIERS, "                reads.append((_OPAQUE, _ANYWHERE, MULT))\n"
+                       "                writes.append((_OPAQUE, _ANYWHERE, MULT))\n",
+             "", 1)),
+    ]),
+
+    # The allocator derives a layout; this is the check that it holds.
+    'layoutcheck': ('tests/test_layout_check.py', [
+        ('a read across another buffer\'s write no longer reported',
+         sub(LAYOUT, '                if t.reads and last_write[other] is not None:',
              '                if False:', 1)),
         ('a rewrite between the clobber and the read not noticed',
-         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
-             '                    if mine is None or mine < last_write[other]:',
+         sub(LAYOUT, '                    if mine is None or mine < last_write[other]:',
              '                    if True:', 1)),
         ('windows compared without checking that they overlap',
-         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
-             '            if not win[a].overlaps(win[b]):\n                continue',
+         sub(LAYOUT, '            if not win[a].overlaps(win[b]):\n                continue',
              '            if False:\n                continue', 1)),
         ('an undeclared statement passed over in silence',
-         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
-             '                opaque.append(here)', '                pass', 1)),
-        ('the allocation counted as a use of its own buffer',
-         sub(Path('src/tensorforge/backend/pir/scratch_check.py'),
-             '        if stmt.op == Op.ALLOC:\n            continue',
-             '        if False:\n            continue', 1)),
+         sub(LAYOUT, '                opaque.append(here)', '                pass', 1)),
+        ('a mark counted as a rewrite',
+         sub(LAYOUT, '        if stmt.op in (Op.ALLOC, Op.MARK):\n            continue\n        for a in stmt.accesses:',
+             '        if stmt.op == Op.ALLOC:\n            continue\n        for a in stmt.accesses:', 1)),
+        ('two windows of one buffer taken for two buffers',
+         sub(LAYOUT, "    return ('o', id(identity)) if identity is not None \\\n        else ('v', stmt.target[0].id)",
+             "    return ('v', stmt.target[0].id)", 1)),
     ]),
 
     'operands': ('tests/test_snapshots.py', [

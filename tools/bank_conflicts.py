@@ -256,7 +256,7 @@ def accesses(source: str):
             ctype, name, arena = m.groups()
             # The arena a window is cut from is itself declared this way, and
             # subscripting it is how a window is *made*, not a data access.
-            # Counting those would put `localShrMem0` and `tempShrMem` in the
+            # Counting those would put `totalShrMem` and `localShrMem0` in the
             # population beside the tiles, a different denominator from the
             # one the IR analysis uses, and the two would disagree on totals
             # while agreeing on conflicts.

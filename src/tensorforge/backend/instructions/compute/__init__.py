@@ -67,7 +67,8 @@ class ComputeInstruction(AbstractInstruction):
     A pointwise or reduction destination that already has a shared buffer is
     written where it is, over the box the descriptor states; the rest of the
     buffer keeps what an earlier write put there, so the write must not end
-    that buffer's live range (`LivenessAnalysis._assembling`).
+    that buffer's live range: it defines nothing whole, and says nothing of
+    the kind (`Generator._declare_buffers`).
     """
     symbol = view.symbol
     if symbol.stype != SymbolType.SharedMem or symbol.data_view is None:

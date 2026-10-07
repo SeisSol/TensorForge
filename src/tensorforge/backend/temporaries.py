@@ -15,12 +15,12 @@ have to be unique across a section, and two producers with a counter each would
 collide the moment a second one appeared.
 
 A shared symbol is created and registered but nothing is emitted for it.  That
-is not an omission.  `ShrMemOpt` sizes each buffer from its *first user*, which
-it requires to be a memory instruction that can report a size, so a shared
-buffer has to be introduced by a store or a load.  A result computed into
-registers and settled later gets exactly that -- the flush emits the store --
-while a compute instruction writing shared memory directly would be a first
-user that cannot answer the question the pass asks it.
+is not an omission.  Each buffer's window is declared by its *first user*
+(`Generator._declare_buffers`), which has to be a memory instruction that knows
+the buffer's size, so a shared buffer has to be introduced by a store or a
+load.  A result computed into registers and settled later gets exactly that --
+the flush emits the store -- while a compute instruction writing shared memory
+directly would be a first user that cannot declare it.
 """
 
 from typing import Tuple

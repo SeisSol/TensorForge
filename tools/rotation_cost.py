@@ -6,9 +6,9 @@
 `wrap_prefetch` can only move a transfer across the back edge if its
 destination has two copies -- `ceil((d + 1) / n)` with `d = n` is two.  Asking
 the pass whether a given loop would benefit is exact (`assume_rotated`), but
-the answer arrives too late: `ShrMemOpt` sizes the arena before any body
-exists.  So the second copy has to be committed to in advance, and there are
-two ways to do that.
+the answer arrives too late: a transfer's stages are set on it before its
+body is built.  So the second copy has to be committed to in advance, and
+there are two ways to do that.
 
 **Generate twice.**  Build the section once to ask the pass, then again with
 the answer.  Exact, and it costs build time.

@@ -39,16 +39,15 @@ CASES = Path(__file__).resolve().parent / "cases"
 def _offsets_then_loads(offset):
     """A hundred addresses computed up front, as `licm` leaves them, each
     read once afterwards into a running sum."""
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 1 << 16))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     lane = b.rawexpr('threadIdx.x', type_=INDEX, hint='lane')
-    with b.scratch_scope():
-        tile = b.alloc(Datatype.F32, (1 << 15,), MemSpace.SHARED, hint='t')
-        addrs = [offset(b, lane, i) for i in range(100)]
-        total = b.load(tile, addrs[0], hint='d')
-        for a in addrs[1:]:
-            total = b.op('add', total.type, total, b.load(tile, a, hint='d'),
-                         hint='s')
-        b.store(tile, total, lane)
+    tile = b.alloc(Datatype.F32, (1 << 15,), MemSpace.SHARED, hint='t')
+    addrs = [offset(b, lane, i) for i in range(100)]
+    total = b.load(tile, addrs[0], hint='d')
+    for a in addrs[1:]:
+        total = b.op('add', total.type, total, b.load(tile, a, hint='d'),
+                     hint='s')
+    b.store(tile, total, lane)
     return b.finish()
 
 
@@ -118,21 +117,20 @@ def test_a_peeled_element_is_one_slot_and_not_the_whole_array():
 def _mixed(uniform: int, lane: int):
     """`uniform` values read from one address and `lane` values read from a
     lane-dependent one, all live at once and summed at the end."""
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 1 << 16))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     # `lane_index`, not the raw text the helper above uses: a raw expression
     # takes the uniformity of its arguments and has none here, so it would
     # claim to be the same on every lane.
     here = b.lane_index(32, 1, hint='lead')
-    with b.scratch_scope():
-        tile = b.alloc(Datatype.F32, (1 << 15,), MemSpace.SHARED, hint='t')
-        held = [b.load(tile, b.const(7 * i, INDEX), hint='u')
-                for i in range(uniform)]
-        held += [b.load(tile, b.op('add', INDEX, here, 4096 * i, hint='a'),
-                        hint='l') for i in range(lane)]
-        total = held[0]
-        for v in held[1:]:
-            total = b.op('add', total.type, total, v, hint='s')
-        b.store(tile, total, here)
+    tile = b.alloc(Datatype.F32, (1 << 15,), MemSpace.SHARED, hint='t')
+    held = [b.load(tile, b.const(7 * i, INDEX), hint='u')
+            for i in range(uniform)]
+    held += [b.load(tile, b.op('add', INDEX, here, 4096 * i, hint='a'),
+                    hint='l') for i in range(lane)]
+    total = held[0]
+    for v in held[1:]:
+        total = b.op('add', total.type, total, v, hint='s')
+    b.store(tile, total, here)
     return b.finish()
 
 

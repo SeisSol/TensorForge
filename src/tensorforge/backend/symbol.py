@@ -1593,9 +1593,10 @@ class Symbol:
       moves by the batch stride, so a promise about element 0 of matrix 0 is
       only a promise about every matrix if the stride carries it, which is
       exactly what `alignedStride()` reports.
-    * **SharedMem/Scratch**: 16, and not by assumption -- `_suballocate`
-      rounds every window start up to `16 // elem.size()` elements for this
-      reason, so the property holds however the windows were requested.
+    * **SharedMem/Scratch**: 16, and not by assumption -- the allocator
+      starts every buffer in either arena on 16 bytes for this reason
+      (`pir.allocate.SHARED_ALIGN_BYTES`), so the property holds however the
+      windows were requested.
     * **Register**: the element size, and that is not a limitation to work
       around.  A register array is in the private address space, which
       AMDGPU interleaves per lane at dword granularity, so no alignment of a
@@ -3278,11 +3279,11 @@ class Symbol:
   def replace_user(self, old, new) -> bool:
     """Swap a user in place, keeping its position in the list.
 
-    Position matters: ShrMemOpt sizes a region from get_first_user() and lets
-    that instruction emit the declaration.  A pass that rewrites an instruction
-    by appending its replacement leaves the *replaced* one first, so the region
-    is sized from a stale object -- observably, a rotating buffer sized for one
-    stage and then overlapping its neighbor.
+    Position matters: the first user declares the buffer's window and sizes it
+    (`Generator._declare_buffers`).  A pass that rewrites an instruction by
+    appending its replacement leaves the *replaced* one first, so the window
+    is sized from a stale object -- observably, a rotating buffer sized for
+    one stage and then overlapping its neighbor.
     """
     for i, user in enumerate(self._users):
       if user is old:

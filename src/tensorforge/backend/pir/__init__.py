@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileContributor: David Schneller
 
-"""TensorForge pseudo-IR --- the micro-IR inside a single instruction.
+"""TensorForge pseudo-IR --- the IR a section of a kernel is built in.
 
     from tensorforge.backend import pir
 
@@ -14,12 +14,12 @@
     body = pir.optimize(body)
     pir.emit(body, writer, ctx)
 
-Layering, for the shared-memory question: this layer *names* buffers and
-reasons about aliasing on them (``Access``/``MemSpace``); it never assigns an
-offset.  Placement, lifetime and reuse of shared memory stay in
-``backend.opt.mem_region_allocation`` / ``backend.opt.shr_mem_analyzer``, which
-have the whole-kernel view that those decisions need.  ``Op.ALLOC`` is the
-seam between the two.
+For the shared-memory question: a body *names* its buffers and reasons about
+aliasing on them (``Access``/``MemSpace``), and decides at the end of its
+pipeline where each one goes (``allocate``) and where the threads meet around
+them (``barriers``) -- once the order of the accesses is final, which is what
+both decisions depend on.  ``Op.ALLOC`` carries the answer: a shared buffer
+has no offset until the allocator gives it one.
 """
 
 from .core import (ANY_EFFECT, BOOL, INDEX, SIZE, TOKEN, Access, BufferType, Effect,
@@ -31,17 +31,19 @@ from .asyncmem import (check_tokens, place_commits, schedule_async,
                        strip_commits)
 from .build import IRBuilder, access_of
 from .passes import cluster_loads, flatten_scopes, if_convert, pressure, cse, dce, fold, licm, load_cse, substitute, verify
-from .pipeline import BodyContext, WrapPrefetch, optimize, standard_pipeline
+from .barriers import Arena
+from .pipeline import (BodyContext, PlaceBarriers, PlaceBuffers,
+                       WrapPrefetch, optimize, standard_pipeline)
 from .emit import Emitter, emit
 
 __all__ = [
-    'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'BodyContext', 'BufferType', 'Effect',
+    'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'Arena', 'BodyContext', 'BufferType', 'Effect',
     'Emitter', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region',
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
     'accesses_conflict', 'check_tokens', 'collect_accesses', 'collect_effect',
     'cse', 'dce', 'cluster_loads', 'flatten_scopes', 'if_convert', 'pressure', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
     'free_values', 'licm', 'load_cse', 'may_alias', 'optimize', 'place_commits',
     'schedule_async', 'standard_pipeline', 'strip_commits',
-    'substitute', 'verify', 'WrapPrefetch',
+    'substitute', 'verify', 'PlaceBarriers', 'PlaceBuffers', 'WrapPrefetch',
     'walk',
 ]

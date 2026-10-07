@@ -1045,22 +1045,19 @@ class MultilinearBuilder(OperationBuilder):
   def _insert_sync_block(self):
     """A barrier around the shared traffic, where nothing later will derive one.
 
-    `SyncThreadsOpt` begins by deleting *every* `SyncThreads` and re-deriving
-    the set from the region coloring, so with that pass on, everything
-    appended here is provisional -- and provisional barriers are not free.
-    They stand in the stream for the whole optimization pipeline, and
-    `MoveLoads` treats a barrier as a wall for any transfer that touches
-    shared memory.  On `local_flux` that would pin all five global-to-shared
-    transfers where they are built: not one would move, so every
-    `__pipeline_commit` would end up next to its `__pipeline_wait_prior(0)`
-    and the asynchronous copies would be issued and awaited in the same
-    breath.
+    With `enable_sync_block_opt`, `pir.barriers` reads the final order of the
+    section's statements and puts barriers where that order needs them, which
+    is strictly better information than this builder has.  It keeps the ones
+    it finds, so a barrier appended here would stand in the stream for the
+    whole optimization pipeline -- and `MoveLoads` treats a barrier as a wall
+    for any transfer that touches shared memory.  On `local_flux` that would
+    pin all five global-to-shared transfers where they are built: not one
+    would move, so every `__pipeline_commit` would end up next to its
+    `__pipeline_wait_prior(0)` and the asynchronous copies would be issued and
+    awaited in the same breath.
 
-    So they are inserted only where they are the final word.  With the pass
-    off, nothing else derives a barrier and these are the kernel's own; with
-    it on, `SyncThreadsOpt` reads the final instruction order and puts them
-    where that order needs them, which is strictly better information than
-    this builder has.
+    So they are inserted only where they are the final word: with the option
+    off, nothing else derives a barrier and these are the kernel's own.
     """
     if self._context.get_user_options().enable_sync_block_opt:
       return

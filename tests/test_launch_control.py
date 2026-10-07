@@ -164,8 +164,8 @@ def test_the_grid_stride_loop_still_gets_its_loop_carried_barrier():
 
     The grid-stride loop has no hand-off to carry one, so its separation
     between this iteration's reads and the next one's writes is exactly this
-    appended barrier -- and it is appended after optimization because the
-    dependency crosses the back edge, which `SyncThreadsOpt` does not model.
+    appended barrier -- one per element whatever the body does, appended
+    after optimization so that it closes the body it is appended to.
     """
     from tensorforge.backend.instructions.batch_loop import BatchLoop
     from tensorforge.backend.instructions.sync_block import SyncThreads

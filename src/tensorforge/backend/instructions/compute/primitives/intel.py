@@ -721,15 +721,6 @@ def strategies(shape, ctx):
     return frozenset(offered)
 
 
-def scratch(strategy, shape, ctx):
-    """Nothing: both arrangements here hold their fragments in registers.
-
-    `ctx` is unused and is part of the signature anyway: the NVIDIA answer
-    depends on the target, so the interface has to be able to carry one.
-    """
-    return 0
-
-
 def plan(strategy, shape, n, ctx):
     """One arrangement over the whole output.
 

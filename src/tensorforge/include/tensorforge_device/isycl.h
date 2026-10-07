@@ -497,9 +497,9 @@ template <typename T, int N> constexpr bool slmBlockable() {
 
 /// The alignment an SLM access may assume, stated once.
 ///
-/// The tiles this addresses start wherever `ShrMemOpt` placed them --
-/// `272 * threadIdx.y` is a real offset out of the allocator -- so the only
-/// promise that holds is the element's own. The default an ESIMD block access
+/// The tiles this addresses start wherever the allocator placed them --
+/// `272 * threadIdx.y` is a real offset out of it -- so the promise stated
+/// here is the element's own. The default an ESIMD block access
 /// takes is the *vector's* alignment, which those offsets do not meet, and
 /// the violation is a runtime one because the offset is a runtime value.
 template <typename T>
@@ -663,8 +663,8 @@ ESIMD_INLINE void slmStore(SlmPtr<T> at, intel_esimd::simd<T, N> value) {
 /// size, which is what made this the arena of choice over a `local_accessor`:
 /// the accessor would have to be threaded to every access site as a second
 /// operand, while a reserved chunk is addressed by offset alone.  The size is
-/// a constant in the generated kernel -- `ShrMemOpt` fixes it before any body
-/// is built -- so the requirement costs nothing here.
+/// a constant in the generated kernel -- the generator knows it once the
+/// body's layout is decided -- so the requirement costs nothing here.
 /// Reserve the work-group's SLM chunk, once per kernel.  `slm_init` may not
 /// be called twice, and a kernel of several sections binds its arena once per
 /// section -- so the reservation is the kernel's and the binding the

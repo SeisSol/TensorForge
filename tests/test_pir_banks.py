@@ -32,7 +32,7 @@ from tensorforge.common.basic_types import Datatype
 
 
 def builder(budget=4096):
-    return IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', budget))
+    return IRBuilder(fptype=Datatype.F32, arena='shrMem')
 
 
 def _one(b, tile, index):

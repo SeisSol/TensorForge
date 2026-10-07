@@ -210,20 +210,19 @@ def test_a_multiplication_that_does_not_fit_is_refused():
     multiplication at all -- height 0, the window never declared -- and the
     source would go out as if nothing had happened.
 
-    Three things have to be off for the damage step to reach that size at all,
-    and each of them is why it does not by default: `shared_packing` (without
-    it the coloring makes every color its largest buffer), `merge_variants`,
-    and `register_temporaries` (a temporary read out of its producer's image
-    never reaches a buffer).  With them on, the whole family fits, so what the
-    test pins is the guard, not the order."""
+    Two things have to be off for the damage step to reach that size, and each
+    of them is why it does not by default: `merge_variants`, and
+    `register_temporaries` (a temporary read out of its producer's image never
+    reaches a buffer).  Then order 8 in double needs 134 KB per
+    multiplication, against 99 KB a block has; with them on, the whole family
+    fits, so what the test pins is the guard, not the order."""
     from tensorforge.common.context import Options
     from tensorforge.common.exceptions import GenerationError
 
     system = 'damage-nonlinearck'
-    gen = Generator(_read(system, f'{system}-o7-d', 'gpu_damageStep'),
+    gen = Generator(_read(system, f'{system}-o8-d', 'gpu_damageStep'),
                     Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64,
                             options=Options(merge_variants=False,
-                                            shared_packing=False,
                                             register_temporaries='none')))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
@@ -253,12 +252,11 @@ def test_a_multiplication_wider_than_a_block_says_so():
 
 
 def test_packed_buffers_take_what_is_live_and_no_more():
-    """The same damage step has 908 shared buffers, never more than 22 of
-    them live at once and never more than 65 KB.  Colored, they would take 22
-    colors, each as large as its largest buffer: 145 KB per multiplication,
-    and no block would hold one.  Packed, the arena is what is live, and no
-    two buffers live at the same time share a byte of it."""
-    from tensorforge.backend.opt.inspect import _check_shared_aliasing
+    """The damage step at order 6 in double has 132 shared buffers, 201 KB laid
+    side by side.  Laid out by their lifetimes the arena is what is occupied
+    at once -- about 41 KB, two multiplications to a block -- and no two
+    buffers occupied together share a byte of it (`pir.layout_check`)."""
+    from tensorforge.backend.pir.layout_check import check_layout
 
     system = 'damage-nonlinearck'
     gen = Generator(_read(system, f'{system}-o6-d', 'gpu_damageStep'),
@@ -267,12 +265,10 @@ def test_packed_buffers_take_what_is_live_and_no_more():
         warnings.simplefilter('ignore')
         gen.generate()
     for section in gen._sections:
-        assert section.shr_mem_obj.get_mults_per_block() >= 1
-        assert section.shr_mem_obj.get_size_per_mult() * 8 < 70_000
-        prologue = {id(i) for i in section.global_ir}
-        stream = [i for i in section.stream if id(i) not in prologue]
-        assert not [d for d in _check_shared_aliasing(stream)
-                    if d.severity == 'error']
+        assert section.shr_mem_obj.get_mults_per_block() >= 2
+        assert section.shr_mem_obj.get_size_per_mult() * 8 < 50_000
+        violations, opaque = check_layout(section.body)
+        assert not violations and not opaque
 
 
 def test_a_result_is_stored_once_nothing_reads_it_again():

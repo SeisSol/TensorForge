@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import List, Union
+from typing import List
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -130,7 +130,6 @@ class StoreRegToShr(AbstractShrMemWrite):
     self._num_threads: int = num_threads
     #: See `gen_code_inner`: the register image is blocked by this.
     self._lead_width: int = lead_width
-    self._shr_mem_offset: Union[int, None] = None
     view: DataView = self._dest.data_view
     self._shm_volume: int = view.get_volume()
 
@@ -146,6 +145,23 @@ class StoreRegToShr(AbstractShrMemWrite):
     return (self._dest,) if self._partial else ()
 
   def gen_code_inner(self, writer: Writer) -> None:
+    # The zeros go out on the clearing nest's lanes, which are not the lanes
+    # that wrote or will write the other cells: a store into this buffer
+    # before the zeros, or after them, writes some of the same cells from
+    # other lanes.  Both wait for a barrier (`pir.barriers`), which two
+    # stores into a buffer nobody clears do not -- the zeros are what the
+    # buffer holds where nothing else is computed, and the order of the
+    # writes is the only thing that says so.
+    buf = (self._dest.pir_buffer(writer)
+           if getattr(self, '_clear', False) and hasattr(writer, 'mark')
+           else None)
+    if buf is not None:
+      writer.mark('clears', buf)
+    self._store(writer)
+    if buf is not None:
+      writer.mark('cleared', buf)
+
+  def _store(self, writer: Writer) -> None:
     src_bbox = self._src.data_view.get_bbox()
     if getattr(self, '_clear', False):
       self._clear_rest(writer, src_bbox)

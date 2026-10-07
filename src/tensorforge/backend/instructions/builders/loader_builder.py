@@ -62,8 +62,6 @@ class GlobalLoaderBuilder(AbstractBuilder):
     if self._context.get_user_options().prepare_operands:
       align = max(1, 16 // src.obj.datatype.size()) if getattr(
           src.obj, 'datatype', None) is not None else 1
-    offset = self.shrmem_obj.alloc_global(loader.compute_shared_mem_size(),
-                                          align=align)
-    loader.set_shr_mem_offset(offset, True, True)
+    loader.set_window(True, True, align)
 
     return loader.compute_shared_mem_size()

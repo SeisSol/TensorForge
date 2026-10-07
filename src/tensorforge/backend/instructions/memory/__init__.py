@@ -65,9 +65,13 @@ class AbstractShrMemWrite(MemoryInstruction):
   def __init__(self, context: Context):
     super().__init__(context)
     self._shm_volume: int = 0
-    self._shr_mem_offset: Union[int, None] = 0
     self._declare = False
+    #: Whether the buffer is the block's rather than the multiplication's --
+    #: an operator preloaded once per block, a staged member of a merged run.
     self._global_offset = False
+    #: What the buffer's start has to be a multiple of, in elements, beyond
+    #: what every buffer of its arena starts on.
+    self._place_align: Union[int, None] = None
     # Multi-stage (rotating) buffer.  `_stages` copies are reserved back to
     # back and `_stage_expr` picks one at run time, so that iteration k can
     # write the stage iteration k+1 will read.
@@ -113,11 +117,19 @@ class AbstractShrMemWrite(MemoryInstruction):
     self._stage_expr = stage_expr
     self._write_stage_expr = write_stage_expr
 
-  def _stage_offset(self, expr: Union[str, None] = None) -> str:
-    expr = expr if expr is not None else self._stage_expr
-    if self._stages == 1 or not expr:
-      return f'{self._shr_mem_offset}'
-    return f'{self._shr_mem_offset} + ({expr}) * {self.stage_size()}'
+  def _window(self, writer, name: str, stage: Union[str, None]):
+    """A window into this transfer's buffer, as a value: the whole of it, or
+    the stage `stage` selects of a rotating one.  Placed by the allocator
+    (`pir.allocate`), which is where the buffer's offset is decided."""
+    rotating = self._stages > 1 and stage
+    return writer.alloc(self._dest.get_fptype(), (self.stage_size(),),
+                        MemSpace.SHARED, hint=name, extern=name,
+                        arena=self._arena(),
+                        quals=(Qual.RESTRICT,),
+                        swizzle=self._swizzle(writer), identity=self._dest,
+                        stages=self._stages if rotating else 1,
+                        stage=stage if rotating else None,
+                        place_align=self._place_align)
 
   def _arena(self) -> str:
     return (GeneralLexicon.TOTAL_SHR_MEM if self._global_offset
@@ -146,23 +158,14 @@ class AbstractShrMemWrite(MemoryInstruction):
     """
     if not self.rotates():
       return
-    offset = self._stage_offset(self._write_stage_expr)
-    if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
-      # The write side is a value too, which is what lets `_structured_copy`
-      # take a rotating buffer.  A rotating buffer writes a different stage
-      # than its declaration names, so the transfer cannot use the symbol's
-      # `pir_buffer` -- that one addresses the half the consumers read.  It
-      # gets its own.
-      self._write_buffer = writer.alloc(
-          self._dest.get_fptype(), (self.stage_size(),), MemSpace.SHARED,
-          hint=self.write_base(), extern=self.write_base(),
-          arena=self._arena(),
-          offset=int(offset) if offset.isdigit() else offset,
-          quals=(Qual.RESTRICT,),
-          swizzle=self._swizzle(writer))
-      self._write_owner = getattr(writer, 'uid', None)
-      return
-    writer(f'{self._shared_window(self.write_base(), offset)};')
+    # The write side is a value too, which is what lets `_structured_copy`
+    # take a rotating buffer.  A rotating buffer writes a different stage
+    # than its declaration names, so the transfer cannot use the symbol's
+    # `pir_buffer` -- that one addresses the half the consumers read.  It gets
+    # its own.
+    self._write_buffer = self._window(writer, self.write_base(),
+                                      self._write_stage_expr)
+    self._write_owner = getattr(writer, 'uid', None)
 
   def write_buffer(self, writer):
     """The value this transfer writes through, if it belongs to this body.
@@ -177,39 +180,12 @@ class AbstractShrMemWrite(MemoryInstruction):
 
   def gen_code_declare(self, writer: Writer) -> None:
     if self._declare:
-      offset = self._stage_offset()
-      if hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
-        # The window is a value, so a read through it declares what it
-        # touches instead of naming it.  `extern` because the consumers still
-        # spell `s0` out, same as the register tiles.
-        #
-        # Rotating buffers included.  Their offset carries the stage
-        # expression, which `scratch_check` reports as unplaced -- it cannot
-        # order a symbolic start, so it declines to judge that window rather
-        # than judging it wrongly.
-        value = writer.alloc(self._dest.get_fptype(), (self.stage_size(),),
-                             MemSpace.SHARED, hint=self._dest.name,
-                             extern=self._dest.name,
-                             arena=self._arena(),
-                             offset=int(offset) if offset.isdigit()
-                             else offset,
-                             quals=(Qual.RESTRICT,),
-                             swizzle=self._swizzle(writer))
-        self._dest.set_pir_buffer(writer, value)
-      else:
-        writer(f'{self._shared_window(self._dest.name, offset)};')
-
-  def _shared_window(self, name: str, offset) -> str:
-    """`name` bound to `offset` elements into this transfer's arena.
-
-    Both spellings come from the backend, and together, because on a target
-    where a shared address is not a pointer neither half of a hand-written
-    string is right -- and half of it being right is how a declaration ends up
-    naming a type its initializer does not produce.
-    """
-    lexic = self._vm.get_lexic()
-    ptr = lexic.shared_pointer_type(self._fp_as_str, restrict=True)
-    return f'{ptr} {name} = {lexic.shared_window_expr(self._arena(), offset)}'
+      # The window is a value, so a read through it declares what it touches
+      # instead of naming it.  `extern` because the consumers still spell
+      # `s0` out, same as the register tiles.  Rotating buffers included:
+      # the stage it addresses is part of where the allocator puts it.
+      self._dest.set_pir_buffer(
+          writer, self._window(writer, self._dest.name, self._stage_expr))
 
   #: Shared memory is 32 banks wide on both vendors, so there is nothing to
   #: gain from permuting over a longer period than that.
@@ -348,19 +324,25 @@ class AbstractShrMemWrite(MemoryInstruction):
     return XorSwizzle(width, granule)
 
   def compute_shared_mem_size(self) -> int:
-    # What the region allocator must reserve: every stage at once.  Returning
-    # the per-stage size here would silently overlap the stages.
+    # Every stage at once, which is what a block-wide buffer takes of the
+    # block's arena (`Generator._settle_storage`).  Returning the per-stage
+    # size here would silently overlap the stages.
     # `int`, because a sparse operand's stage size is a numpy count, and it
     # rides through every offset into `LaunchConfig.shared_elements`, where
     # `json.dumps` in the kernel metadata refuses it -- unless
     # `align_shr_mem` happens to round it back into an `int` on the way.
     return int(self._stages * self.stage_size())
 
-  def set_shr_mem_offset(self, offset: int, first: bool, global_offset: bool) -> None:
-    self._shr_mem_offset = offset
+  def set_window(self, first: bool, block: bool,
+                 align: Union[int, None] = None) -> None:
+    """Whether this transfer declares its buffer's window -- the first of
+    its users does -- and whether the buffer is the block's.  Where it sits
+    is the allocator's to decide."""
     self._is_ready = True
     self._declare = first
-    self._global_offset = global_offset
+    self._global_offset = block
+    if align:
+      self._place_align = align
 
   @abstractmethod
   def get_dest(self):

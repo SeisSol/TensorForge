@@ -30,11 +30,12 @@ from tensorforge.backend.pir.core import MemSpace, Op
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.vm.vm import vm_factory
+from harness.placement import placed
 
 
 def _macro_copy(num_threads: int = 64, length: int = 100):
     """One hop of 1 element per lane, then a tail of `length % num_threads`."""
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', length))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     dst = b.alloc(Datatype.F32, (length,), MemSpace.SHARED, hint='s')
     src = b.alloc(Datatype.F32, (length,), MemSpace.GLOBAL, hint='g')
     lane = b.thread_id('x')
@@ -72,7 +73,7 @@ def test_the_guard_is_a_branch_not_a_select():
     body, _ = _macro_copy()
     w = Writer()
     from tensorforge.backend.pir import emit
-    emit(optimize(body), w, vm_factory('gfx942', 'hip', 'float'))
+    emit(placed(optimize(body)), w, vm_factory('gfx942', 'hip', 'float'))
     src = w.get_src()
     assert '?' not in src.split('\n')[-3:][0] or 'if (' in src, src
     assert 'if (' in src, (

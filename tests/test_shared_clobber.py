@@ -3,26 +3,26 @@
 # SPDX-License-Identifier: MIT
 """Shared memory is not overwritten under a value still to be read.
 
-An independent check of what `LivenessAnalysis` and the region allocator
-decide together.  It walks the emitted stream in program order -- a merged
-run's body twice, for its back edge -- and keeps, per buffer, whether another
-buffer placed on overlapping memory has been written since the buffer was last
-written in full; a read of a buffer in that state is a clobber.  Coverage is
-judged from the boxes each write names, not from `partial_defs`, so the check
-does not reuse the reasoning it checks: a flaw there would leave the verifier
-green while a slice written into a buffer a whole write defined
-(`temp_slice_after_whole`), a pointwise write into a slice
+An independent check of what the allocator decides (`pir.allocate`): the same
+kernel built twice, once with its buffers laid out by their lifetimes and once
+with every buffer on bytes of its own, has to compute the same numbers on the
+host oracle.  Nothing in the comparison reuses the allocator's reasoning --
+not the liveness, not what an instruction says it defines whole -- so a flaw
+there shows up as a difference: a slice written into a buffer a whole write
+defined (`temp_slice_after_whole`), a pointwise write into a slice
 (`elementwise_slice_after_whole`) or a slice written first inside a merged run
-(below) comes out clobbered.
+(below) that comes out clobbered.
 
 A merged run whose body reads the image it carries after re-computing it is
 the other thing pinned here: closing the chain renames the image register,
 and a reader holding it as a view that kept the old name would read a
 register nothing writes.
 
-And a store into a buffer a clearing store wrote waits for a barrier: the
-zeros go out on the clearing nest's lanes, the later store writes some of the
-same cells from others, and two lanes writing one cell unordered is a race.
+And a store into a buffer a clearing store wrote waits for a barrier, as does
+the clearing store for a store before it: the zeros go out on the clearing
+nest's lanes, the other store writes some of the same cells from others, and
+two lanes writing one cell unordered is a race -- which the oracle's race
+check sees whichever order the lanes happened to take.
 """
 
 from __future__ import annotations
@@ -30,19 +30,15 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
-import itertools
 import warnings
 from pathlib import Path
 
 import pytest
 
 from tensorforge.backend.instructions.allocate import RegisterAlloc
-from tensorforge.backend.instructions.memory import AbstractShrMemWrite
-from tensorforge.backend.instructions.memory.load import (GlbToShrLoader,
-                                                          LoadWait)
-from tensorforge.backend.instructions.memory.store import StoreRegToShr
-from tensorforge.backend.instructions.sync_block import SyncThreads
 from tensorforge.backend.instructions.ptr_manip import VariantLoop
+from tensorforge.backend.pir import allocate
+from tensorforge.backend.pir.core import Effect, MemSpace, Op
 from tensorforge.backend.symbol import SymbolType
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context, Options
@@ -51,12 +47,16 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 
 CASES = Path(__file__).parent / "cases"
 TARGETS = [("cuda", "sm_86"), ("hip", "gfx90a")]
+#: What the host oracle can run: AMD's matrix paths call intrinsics it does
+#: not model.
+ORACLE = [("cuda", "sm_86")]
 
 
-# -- the check ----------------------------------------------------------- #
+# -- the checks ---------------------------------------------------------- #
 
 def _flat(instrs, out):
     for instr in instrs:
@@ -69,80 +69,41 @@ def _flat(instrs, out):
     return out
 
 
-def _cells(lo, hi):
-    return set(itertools.product(*[range(a, b) for a, b in zip(lo, hi)]))
+@contextlib.contextmanager
+def _no_sharing():
+    """Every buffer on bytes of its own: as though each one were occupied
+    together with every other."""
+    original = allocate._Liveness.record
+
+    def record(self, occupied):
+        original(self, occupied)
+        if self.recording and occupied:
+            self.neighbors = [self.everything] * len(self.neighbors)
+    allocate._Liveness.record = record
+    try:
+        yield
+    finally:
+        allocate._Liveness.record = original
 
 
-def _written(instr, sym):
-    """The cells of `sym`'s buffer `instr` writes, or None for all of them."""
-    if isinstance(instr, (GlbToShrLoader, LoadWait)):
-        return None
-    if isinstance(instr, StoreRegToShr):
-        src = instr._src.data_view.get_bbox()
-        cells = _cells([l + o for l, o in zip(src.lower(), instr._dest_offset)],
-                       [u + o for u, o in zip(src.upper(), instr._dest_offset)])
-        if getattr(instr, '_clear', False):
-            within = getattr(instr, '_clear_within', None)
-            if within is None:
-                return None
-            cells |= _cells(within.lower(), within.upper())
-        return cells
-    view = getattr(instr, '_dest', None)
-    if getattr(view, 'symbol', None) is sym and hasattr(view, 'bbox'):
-        offset = view.offset or [0] * view.bbox.rank()
-        return _cells([l + o for l, o in zip(view.bbox.lower(), offset)],
-                      [u + o for u, o in zip(view.bbox.upper(), offset)])
-    return set()
+def _numbers(gen, seed=11):
+    lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
+    return kernel_eval.evaluate_wave(gen.get_kernel(), lanes, seed=seed,
+                                     globals_only=True, mults=mults)
 
 
-def _extents(flat):
-    out = {}
-    for instr in flat:
-        offset = getattr(instr, '_shr_mem_offset', None)
-        size = getattr(instr, 'compute_shared_mem_size', None)
-        if (not isinstance(offset, int) or not callable(size)
-                or getattr(instr, '_global_offset', False)):
-            continue
-        for sym in instr.defs():
-            if (getattr(sym, 'stype', None) is SymbolType.SharedMem
-                    and not getattr(sym, 'block_shared', False)):
-                lo, hi = out.get(id(sym), (offset, offset))
-                out[id(sym)] = (offset, max(hi, offset + int(size())))
-    return out
-
-
-def clobbers(gen):
-    """`(buffer read, buffer written over it)` for every clobbered read."""
-    found = []
-    for section in gen._sections:
-        flat = _flat(list(section.stream), [])
-        extents = _extents(flat)
-        held, over, covered = set(), {}, {}
-        for instr in flat:
-            if instr.regions():
-                continue
-            for sym in instr.uses():
-                if over.get(id(sym)):
-                    found.append((sym.name, over[id(sym)]))
-                    over[id(sym)] = None
-            for sym in instr.defs():
-                if id(sym) not in extents:
-                    continue
-                lo, hi = extents[id(sym)]
-                for other in held - {id(sym)}:
-                    olo, ohi = extents[other]
-                    if lo < ohi and olo < hi and not over.get(other):
-                        over[other], covered[other] = sym.name, set()
-                held.add(id(sym))
-                if over.get(id(sym)):
-                    cells = _written(instr, sym)
-                    buf = sym.data_view.get_bbox()
-                    if cells is None or _cells(buf.lower(), buf.upper()) <= (
-                            covered[id(sym)] | cells):
-                        over[id(sym)] = None
-                    else:
-                        covered[id(sym)] |= cells
-    return found
+def clobbers(descrs, backend, arch, fp=Datatype.F32, **options):
+    """The outputs a lifetime layout gets wrong, against a layout that shares
+    no bytes at all."""
+    packed = _generate(descrs(), backend, arch, fp, **options)
+    with _no_sharing():
+        apart = _generate(descrs(), backend, arch, fp, **options)
+    shared = lambda g: sum(s.shr_mem_obj.get_size_per_mult() or 0
+                           for s in g._sections)
+    assert shared(apart) >= shared(packed)
+    want, got = _numbers(apart), _numbers(packed)
+    return sorted(k for k in set(want) | set(got)
+                  if abs(want.get(k, 0.0) - got.get(k, 0.0)) > 1e-4)
 
 
 def unwritten_registers(gen):
@@ -164,20 +125,47 @@ def unwritten_registers(gen):
     return found
 
 
-def unfenced_rewrites(gen):
-    """Shared writes into a buffer a clearing store wrote, no barrier between."""
+def _stmts(body):
+    for s in body:
+        yield s
+        for r in s.regions:
+            yield from _stmts(r.body)
+
+
+def unfenced_clears(gen):
+    """Stores into a buffer a clearing store wrote, and clearing stores into a
+    buffer something wrote, with no barrier between -- in the body as it is
+    emitted."""
     found = []
     for section in gen._sections:
-        cleared = set()
-        for instr in _flat(list(section.stream), []):
-            if isinstance(instr, SyncThreads):
-                cleared = set()
-            elif isinstance(instr, AbstractShrMemWrite):
-                dest = instr.get_dest()
-                if id(dest) in cleared:
-                    found.append((str(instr), dest.name))
-                if getattr(instr, '_clear', False):
-                    cleared.add(id(dest))
+        cleared, written = set(), set()
+        for s in _stmts(section.body):
+            if s.op == Op.BARRIER:
+                cleared, written = set(), set()
+                continue
+            if s.op == Op.MARK:
+                keys = {a.id for a in s.args}
+                if s.attr('mark') == 'clears' and keys & written:
+                    found.append(('clears', s.args[0].hint))
+                if s.attr('mark') == 'cleared':
+                    cleared |= keys
+                continue
+            if s.op == Op.ALLOC:
+                continue
+            for a in s.accesses:
+                if (a.space == MemSpace.SHARED and a.kind & Effect.WRITE
+                        and getattr(a.base, 'id', None) is not None):
+                    if a.base.id in cleared:
+                        found.append(('store', a.base.hint))
+                    written.add(a.base.id)
+    return found
+
+
+def races(gen):
+    lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
+    found = []
+    kernel_eval.evaluate_wave(gen.get_kernel(), lanes, seed=3, races=found,
+                              elements=2)
     return found
 
 
@@ -212,6 +200,23 @@ def slice_first_in_run(count=3):
                           b=SubTensor(_t(12, f"E{k}")), c=d,
                           alpha=1.0, beta=1.0)]
     return out
+
+
+def slice_after_gap():
+    """`tmp` written whole, then a slice of it after another temporary has
+    come and gone: rows 4..12 of `tmp` are still the first write's, and `y`,
+    occupied only in between, must not be laid over them.  The slice defines
+    nothing whole, so it does not say it does."""
+    b, c, f, g, h, e = (SubTensor(_t(12, n)) for n in "BCFGHE")
+    d = SubTensor(_t(12, "D"))
+    tmp, y = generate_tmp_matrix(b, c), generate_tmp_matrix(b, c)
+    return [GemmDescr(False, False, a=b, b=c, c=SubTensor(tmp)),
+            GemmDescr(False, False, a=f, b=g, c=SubTensor(y)),
+            GemmDescr(False, False, a=SubTensor(y), b=h, c=d),
+            GemmDescr(False, False, a=SubTensor(_t(4, "N")),
+                      b=SubTensor(_t(12, "C2")), c=_rows(tmp, 0, 4)),
+            GemmDescr(False, False, a=SubTensor(tmp), b=e, c=d,
+                      alpha=1.0, beta=1.0)]
 
 
 def carried_reader(count=4):
@@ -261,20 +266,32 @@ def _case(stem):
                                   "slicing/temp_two_writers",
                                   "elementwise/slice_after_whole",
                                   "mixed/ml_slices_then_ew"])
-@pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
+@pytest.mark.parametrize("backend,arch", ORACLE, ids=[b for b, _ in ORACLE])
 def test_a_slice_keeps_what_it_does_not_write(stem, backend, arch):
     mod = _case(stem)
-    gen = _generate(mod.descr_list(), backend, arch, fp=mod.DTYPE)
-    assert clobbers(gen) == []
+    assert clobbers(mod.descr_list, backend, arch, fp=mod.DTYPE) == []
 
 
-@pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
+@pytest.mark.parametrize("backend,arch", ORACLE, ids=[b for b, _ in ORACLE])
+def test_a_slice_after_another_temporary_keeps_the_rest(backend, arch):
+    """The layout has to share bytes for this to say anything, and it does:
+    `tmp` and `y` are each laid over a staged operand."""
+    gen = _generate(slice_after_gap(), backend, arch)
+    sizes = [s.shr_mem_obj.get_size_per_mult() for s in gen._sections]
+    with _no_sharing():
+        apart = _generate(slice_after_gap(), backend, arch)
+    assert sizes != [s.shr_mem_obj.get_size_per_mult() for s in apart._sections]
+    assert clobbers(slice_after_gap, backend, arch) == []
+
+
+@pytest.mark.parametrize("backend,arch", ORACLE, ids=[b for b, _ in ORACLE])
 def test_a_slice_first_in_a_merged_run_keeps_what_came_before(backend, arch):
     gen = _generate(slice_first_in_run(), backend, arch, merge_variants=True)
     assert any(isinstance(i, VariantLoop)
                for s in gen._sections for i in _flat(list(s.stream), [])), \
         "the repetition was not merged; the test no longer tests a loop"
-    assert clobbers(gen) == []
+    assert clobbers(slice_first_in_run, backend, arch,
+                    merge_variants=True) == []
 
 
 @pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
@@ -288,10 +305,14 @@ def test_a_merged_run_reads_the_image_it_carries(backend, arch):
 
 @pytest.mark.parametrize("stem", ["slicing/temp_dead_slice_reassign",
                                   "slicing/temp_reassign_narrower_slice",
-                                  "slicing/temp_two_writers",
                                   "mixed/ml_then_ew_temp_narrower"])
 @pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
-def test_a_store_after_a_clear_waits_for_it(stem, backend, arch):
+def test_a_store_and_a_clear_wait_for_each_other(stem, backend, arch):
     mod = _case(stem)
     gen = _generate(mod.descr_list(), backend, arch, fp=mod.DTYPE)
-    assert unfenced_rewrites(gen) == []
+    assert any(s.op == Op.MARK and s.attr('mark') == 'cleared'
+               for section in gen._sections for s in _stmts(section.body)), \
+        "nothing is cleared; the test no longer tests a clear"
+    assert unfenced_clears(gen) == []
+    if (backend, arch) in ORACLE:
+        assert races(gen) == []

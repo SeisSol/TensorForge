@@ -4,8 +4,8 @@
 """AMD code generation for the multilinear kernel.
 
 `multilinear.py` enters through what its dispatch asks of every vendor
-module -- `strategies`, `plan`, `scratch`, `convergence`, `prepared_order`
-and `matmul` -- and nothing else.  The modules below are layered in
+module -- `strategies`, `plan`, `convergence`, `prepared_order` and
+`matmul` -- and nothing else.  The modules below are layered in
 dependency order:
 
 * `arch`     -- which family a target is
@@ -34,7 +34,7 @@ from dataclasses import replace
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import InternalError
 
-from ... import bitlayout, broadcast, packing, staging
+from ... import bitlayout, broadcast, packing
 from ...routes import lead_route as routes_lead_route
 from ...strategy import Span, Strategy, whole
 
@@ -156,41 +156,11 @@ def strategies(shape, ctx):
     return frozenset(offered)
 
 
-def scratch(strategy, shape, ctx):
-    """Elements the operands need staged before any body exists.
-
-    Nothing while the operands arrive unpacked: every arrangement here keeps
-    them in registers, and the relayouts between register layouts are swaps
-    and merges.
-
-    A packed lead operand is the exception, and it is why this reads the shape
-    rather than the type alone.  `lead_width` puts its low bits inside a
-    register and the fragment wants the leading dimension across the lanes;
-    unpacking moves them the wrong way and what remains is a permutation
-    between lane weights, which no relayout performs.  The trip through memory
-    answers it, and one wave of elements is what that trip holds -- the buffer
-    carries one operand register at a time, so it does not grow with the
-    problem.
-
-    Sized from the same plan the emission will walk, so the two cannot differ:
-    a reservation smaller than the plan is an overrun and a larger one is
-    memory nobody writes.
-    """
-    route = lead_route(shape)
-    # The trip is the matrix core's: the DPP chain takes a packed operand in
-    # its registers and stages nothing, and so does the lane-batched matrix
-    # scheme (`componentwise`).
-    if (strategy is not Strategy.MATRIX or not isinstance(route, tuple)
-            or componentwise(shape, ctx)):
-        return 0
-    return staging.buffer_elements(route)
-
-
 def lead_route(shape):
     """`routes.lead_route` with this target's rungs.
 
-    Kept as a name here for the same reason `reach` is: `strategies` and
-    `scratch` are this target's, and the rungs are not theirs to pass.
+    Kept as a name here for the same reason `reach` is: `strategies` is
+    this target's, and the rungs are not theirs to pass.
     """
     return routes_lead_route(shape, RUNGS)
 

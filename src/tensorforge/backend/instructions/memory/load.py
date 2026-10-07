@@ -150,8 +150,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     are the same number and opposite facts, so the element size means width 1,
     and the whole transfer drops to it rather than only its tail.
 
-    The destination is 16-byte aligned by construction (`_suballocate` rounds
-    every window start up), so it constrains nothing here.  Its *permutation*
+    The destination is 16-byte aligned by construction (the allocator starts
+    every buffer in either arena on 16 bytes, `pir.allocate`), so it
+    constrains nothing here.  Its *permutation*
     does, and that is asked at the access -- see `_swizzle_cap`.
     """
     elem = self._dest.get_fptype().size()
@@ -321,16 +322,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
     self._loop_indices = loop_indices
     self._loadsize = loadsize
-
-  def lands_at_wait(self) -> bool:
-    """Whether the copy may still be in flight after its issue.
-
-    The structured route issues it asynchronously and it lands at the wait,
-    visible then to the issuing lane only; the reordering path stores as it
-    goes.  Whether the route is taken is settled when it is emitted, after
-    `SyncThreadsOpt` ran, so this answers for the route that may be.
-    """
-    return bool(self._use_cuda_memcpy) and not self._needs_reorder
 
   def gen_code_inner(self, writer: Writer) -> None:
     allow_nontemporal = cache_hint(self._context, _hint_allowed(self))
@@ -938,13 +929,13 @@ class LoadWait(MemoryInstruction, LoadInstruction):
 
   def uses(self):
     # ...but the destination buffer is occupied from the moment the copy is
-    # *issued*: the DMA writes into it while it is in flight.  Reporting the
-    # def alone makes this instruction kill the issuing loader's live range,
-    # leaving a hole over [issue, wait) in which the region allocator happily
-    # hands the very same offset to another buffer --- which then overwrites
-    # the transfer as it lands.  Naming it here as well re-establishes
-    # liveness backwards past the wait, so the range runs from the issue to
-    # the last consumer, while `defs` keeps ordering consumers after us.
+    # *issued*: the DMA writes into it while it is in flight.  Reported as a
+    # def alone, the wait would read as the start of the buffer's value, and
+    # whatever follows the issue would see nothing holding the buffer until
+    # it.  Naming it here as well keeps the buffer used from the issue on,
+    # while `defs` keeps ordering consumers after us.  It is also why the
+    # wait defines nothing whole (`Generator._declare_buffers`): the value
+    # starts at the issue.
     return self._instr.defs()
 
   def gen_code_inner(self, writer: Writer) -> None:

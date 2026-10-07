@@ -33,6 +33,22 @@ from .core import (INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    base_space, Uniformity, SIZE)
 
 
+def barrier_stmt(participants: Union[str, Participants], wave: int,
+                 threads: Optional[int] = None,
+                 handoff: bool = False) -> Stmt:
+    """The statement `IRBuilder.barrier` emits, for a pass that inserts one
+    into a body it did not build."""
+    who = _as_participants(participants)
+    level = who.arrival(threads if threads is not None else wave, wave)
+    attrs = (('scope', level), ('participants', who), ('wave', wave))
+    if threads is not None:
+        attrs += (('threads', int(threads)),)
+    if handoff:
+        attrs += (('handoff', True),)
+    return Stmt(op=Op.BARRIER, pure=False, movable=False,
+                effect=Effect.BARRIER, attrs=attrs)
+
+
 def access_of(symbol: Any, kind: Effect) -> Access:
     """Build an :class:`Access` from a ``backend.symbol.Symbol``."""
     space = MemSpace.from_symbol_type(getattr(symbol, 'stype', None))
@@ -177,7 +193,7 @@ class IRBuilder:
     _next_uid = 0
 
     def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None,
-                 alloc: Any = None, scratch: Optional[Tuple[str, int]] = None):
+                 alloc: Any = None, arena: Optional[str] = None):
         IRBuilder._next_uid += 1
         self.uid = IRBuilder._next_uid
         #: value id -> the buffer its accesses belong to (see `decl_expr`)
@@ -191,14 +207,13 @@ class IRBuilder:
         # would otherwise both start at v0.  That uniqueness is file-scoped
         # state, and it lives on the Writer.
         self._alloc = alloc
-        # The scratch arena this body may suballocate from: (pointer name,
-        # budget in elements).  `None` means the instruction declared no
-        # budget, and a shared alloc from it is a defect rather than a
-        # request to make room -- see `alloc`.
-        self._scratch = scratch
-        self._scratch_used = 0
-        self._scratch_peak = 0
-        # Buffers this body allocated, for `_check_declared_accesses`.
+        # The arena a shared buffer of this body goes into when it names
+        # none: the multiplication's, which the allocator lays out once the
+        # body is in its final order (`allocate`).  `None` means the body has
+        # no arena, and a shared alloc from it is a defect -- see `alloc`.
+        self._arena = arena
+        # The shared buffers this body allocated in its own arena, for
+        # `_check_declared_accesses`.
         self._shared_buffers: List[Value] = []
         # Every value this body has named, keyed by the identifier it emits
         # as.  A raw statement that narrows its accesses is checked against
@@ -852,57 +867,57 @@ class IRBuilder:
 
     def alloc(self, elem: Datatype, shape: Sequence[int], space: MemSpace,
               hint: str = 'buf', extern: str = None,
-              init: str = '', arena: str = None, offset=0,
+              init: str = '', arena: str = None, offset=None,
               align: Optional[int] = None,
               quals: Tuple = (),
-              swizzle: Optional[XorSwizzle] = None) -> Value:
+              swizzle: Optional[XorSwizzle] = None,
+              identity: Any = None, stages: int = 1,
+              stage: Optional[str] = None,
+              place_align: Optional[int] = None) -> Value:
         """Request a buffer *symbolically*.
 
-        For registers and scratch: no offset, no address --- the whole-kernel
-        allocator upstairs assigns those.  This is the bridge between the two
-        layers: the micro-IR sees the tile as a value and can reason about
-        aliasing on it; the macro-IR owns the resource and can still decide to
-        place it in registers.
+        No offset and no address: for registers the compiler assigns those,
+        and for :attr:`MemSpace.SHARED` the allocator does, behind every pass
+        that moves an access (`allocate`) -- `offset` stays None until then.
+        This is the bridge between the layers: the micro-IR sees the tile as
+        a value and can reason about aliasing on it, and a buffer's place is
+        decided where its lifetime is known.
 
-        For :attr:`MemSpace.SHARED` the answer cannot be deferred that far.
-        Shared memory is one arena per kernel, sized by ``ShrMemOpt`` from
-        ``temp_shmem()`` *before* any instruction body is built, so by the time
-        this runs the budget is already fixed and an independent
-        ``__shared__`` array would sit outside it --- uncounted against the
-        occupancy limit and invisible to the barrier placement that keys on
-        region membership.  So a shared alloc is a suballocation of the tail
-        this instruction declared, handed out here by bump.
-
-        The declared budget stays the contract, and it is checked here.  The
-        size in ``temp_shmem()`` and hand-written offsets in a body are two
-        statements of one fact, and kept in agreement by hand they need an
-        ``assert`` restating the formula at the use site.  Every caller that
-        allocates through here gets that check for free, against what it
-        actually asked for.
+        A shared buffer goes into `arena`, or into the multiplication's arena
+        where it names none.  `stages` copies of it are reserved, of which
+        this window addresses the one `stage` selects; `place_align` is what
+        its start has to be a multiple of, in elements, beyond what every
+        buffer of its arena starts on.  `identity` is the buffer a window is
+        one of the windows of, which is what tells two windows of one
+        rotating buffer apart from two buffers.
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
         attrs: Tuple = ()
-        if arena is not None:
-            # A window the *region* allocator placed, not the scratch bump
-            # allocator.  `_suballocate` hands out offsets inside this
-            # instruction's `tempShrMem` tail; `ShrMemOpt` places the shared
-            # tiles in `localShrMem0` and hands the offset in from outside.
-            # Two allocators, one arena, and only one of them may pick an
-            # offset for any given buffer -- so an externally placed window
-            # says so rather than asking for one it would then have to ignore.
+        if space == MemSpace.SHARED:
+            if arena is None:
+                arena = self._arena
+                self._shared_buffers.append(v)
+            if arena is None:
+                raise GenerationError(
+                    f'shared alloc of {v.type} in a body with no arena: only '
+                    f'a section body has one, and its allocator places the '
+                    f'buffer')
             attrs = (('arena', arena), ('offset', offset))
-        elif space == MemSpace.SHARED:
-            attrs = self._suballocate(v, elem)
-            self._shared_buffers.append(v)
+            if stages > 1:
+                attrs = attrs + (('stages', stages), ('stage', stage))
+            if place_align:
+                attrs = attrs + (('place_align', place_align),)
+        elif arena is not None:
+            attrs = (('arena', arena), ('offset', offset))
         if extern is not None:
             # A name the macro layer owns and other instructions spell out as
             # text.  With one PIR body per loop body, 89.8% of buffers have
             # their definition and all their uses inside one body and need no
             # name at all once the consumers take the value
-            # (tools/buffer_spans.py).  What needs one is the shared arena,
-            # its scratch tail, and the tiles of the two cases that have two
-            # batch loops -- things that genuinely outlive a body.
+            # (tools/buffer_spans.py).  What needs one is the shared arena and
+            # the tiles of the two cases that have two batch loops -- things
+            # that genuinely outlive a body.
             #
             # `escapes` is not decoration here.  A structured allocation is
             # also deletable, and where the reads that justify it are raw text
@@ -920,72 +935,28 @@ class IRBuilder:
             # the other half of `Symbol.linear_align_bytes`, which reports the
             # same number back to whoever picks a width.
             attrs = attrs + (('align', align),)
+        if identity is not None:
+            # The buffer this window is one of the windows of.  A rotating
+            # buffer has two, one for the stage its consumers read and one for
+            # the stage its transfer fills; a pass asking whether a read sees
+            # a write asks it of the buffer, not of the window
+            # (`barriers.place_barriers`).
+            attrs = attrs + (('identity', identity),)
         self._emit_op(Op.ALLOC, (v,), (), pure=False, movable=False,
                       attrs=attrs)
         return v
 
-    @contextmanager
-    def scratch_scope(self):
-        """Buffers allocated inside are dead at the end of it.
+    def mark(self, kind: str, *buffers: Value) -> Stmt:
+        """A statement that emits nothing and says `kind` about `buffers`.
 
-        The hand form of what a liveness analysis over this body would derive,
-        and it is here because that analysis cannot run on raw text: a raw
-        statement that does not declare its accesses conflicts with every
-        buffer in every space, so a body made mostly of raw text has an
-        interference graph in which everything interferes and a coloring that
-        reuses nothing.
-
-        `nvidia.matmul` is the case.  Its A and B windows live only inside the
-        k/kk/ii nest and its C window only in the epilogue after it closes, so
-        C may sit on top of A and B --- 192 elements rather than 320 for
-        m16n8k8.  That is a lifetime argument, stated here once by nesting
-        instead of three times as offset constants plus an `assert` restating
-        the total.
-
-        Written to be replaceable rather than to last.  What it computes is a
-        peak, which is exactly what a coloring computes, so when the body is
-        structured enough for liveness the two are comparable and this can go.
+        Ordered against their accesses by declaring a write of each, so that it
+        stays between the accesses it describes, and against nothing else.
         """
-        mark = self._scratch_used
-        try:
-            yield
-        finally:
-            self._scratch_peak = max(self._scratch_peak, self._scratch_used)
-            self._scratch_used = mark
-
-    @property
-    def scratch_peak(self) -> int:
-        """High-water mark, which is what the budget has to cover.
-
-        Not `_scratch_used`: that falls back at the end of every scope, so on
-        a body that uses scopes it under-reports, and a check against it would
-        pass a body that overflows.
-        """
-        return max(self._scratch_peak, self._scratch_used)
-
-    def _suballocate(self, v: Value, elem: Datatype) -> Tuple:
-        """Place a shared buffer in this instruction's scratch tail."""
-        if self._scratch is None:
-            raise GenerationError(
-                f'shared alloc of {v.type} with no scratch budget: the '
-                f'instruction building this body returns 0 from temp_shmem(), '
-                f'so ShrMemOpt reserved nothing for it to sit in')
-        name, budget = self._scratch
-        # 16 bytes is what the vectorized paths need -- `nvidia.matmul` stores
-        # through `float4` -- and matches the alignment ShrMemOpt already pads
-        # the arena to.  Aligning every suballocation keeps that property
-        # independent of the order they are requested in.
-        align = max(1, 16 // elem.size())
-        start = ((self._scratch_used + align - 1) // align) * align
-        end = start + v.type.volume
-        if max(end, self._scratch_peak) > budget:
-            raise GenerationError(
-                f'scratch overflow: {v.type} at offset {start} needs '
-                f'{end} elements, budget is {budget}. Either temp_shmem() '
-                f'under-reports what this instruction allocates, or the body '
-                f'allocates more than it declared')
-        self._scratch_used = end
-        return (('arena', name), ('offset', start))
+        return self._emit_op(Op.MARK, (), tuple(buffers), pure=False,
+                             movable=True, effect=Effect.WRITE,
+                             accesses=tuple(Access(Effect.WRITE, b.type.space, b)
+                                            for b in buffers),
+                             attrs=(('mark', kind),))
 
     def _shifted(self, indices: Tuple[Operand, ...],
                  shift: Optional[Operand]) -> Tuple[Operand, ...]:
@@ -1467,19 +1438,11 @@ class IRBuilder:
         nothing, the emitter then still owes the compiler a fence
         (`Lexic.handoff_fence`).
         """
-        who = _as_participants(participants)
         wave = 1
         vm = getattr(self.context, 'get_vm', None)
         if vm is not None:
             wave = vm().get_hw_descr().vec_unit_length
-        level = who.arrival(threads if threads is not None else wave, wave)
-        attrs = (('scope', level), ('participants', who), ('wave', wave))
-        if threads is not None:
-            attrs += (('threads', int(threads)),)
-        if handoff:
-            attrs += (('handoff', True),)
-        return self._emit_op(Op.BARRIER, (), (), pure=False, movable=False,
-                             effect=Effect.BARRIER, attrs=attrs)
+        return self.emit(barrier_stmt(participants, wave, threads, handoff))
 
     def yield_(self, *values: Operand) -> Stmt:
         return self._emit_op(Op.YIELD, (), values, pure=False, movable=False)
@@ -1999,11 +1962,13 @@ class IRBuilder:
     def AnonymousScope(self) -> '_RawBlock':
         return _RawBlock(self, '')
 
-    def If(self, expression) -> '_RawBlock':
-        return _RawBlock(self, f'if ({expression})')
+    def If(self, expression, uniform: Optional[Uniformity] = None) -> '_RawBlock':
+        return _RawBlock(self, f'if ({expression})', uniform=uniform)
 
-    def For(self, argument, unroll=False) -> '_RawBlock':
-        return _RawBlock(self, f'{_unroll_pragma(unroll)}for ({argument})')
+    def For(self, argument, unroll=False,
+            uniform: Optional[Uniformity] = None) -> '_RawBlock':
+        return _RawBlock(self, f'{_unroll_pragma(unroll)}for ({argument})',
+                         uniform=uniform)
 
     def While(self, argument) -> '_RawBlock':
         return _RawBlock(self, f'while ({argument})')
@@ -2084,12 +2049,21 @@ class _Speculation:
 
 
 class _RawBlock:
-    """The ``Writer.Block`` equivalent: an opaque head plus a region."""
+    """The ``Writer.Block`` equivalent: an opaque head plus a region.
 
-    def __init__(self, builder: IRBuilder, text: str, pragma: Optional[str] = None):
+    ``uniform`` is how far entering the region is agreed across threads, for
+    a head the IR cannot read and the caller can: a traversal spelled as text
+    says so, and a barrier inside it is then as legal as inside the same loop
+    built as IR (`passes._entry_uniformity`).  Unsaid, a raw block is entered
+    per lane.
+    """
+
+    def __init__(self, builder: IRBuilder, text: str, pragma: Optional[str] = None,
+                 uniform: Optional[Uniformity] = None):
         self.builder = builder
         self.text = text
         self.pragma = pragma
+        self.uniform = uniform
 
     def __enter__(self):
         self.builder.push(kind='rawblock')
@@ -2100,6 +2074,8 @@ class _RawBlock:
         if exc_type is not None:
             return False
         attrs = (('pragma', self.pragma),) if self.pragma else ()
+        if self.uniform is not None:
+            attrs = attrs + (('uniform', self.uniform),)
         self.builder.emit(Stmt(op=Op.RAWBLOCK, regions=(region,), text=self.text,
                                pure=False, movable=False, effect=Effect.NONE,
                                attrs=attrs))

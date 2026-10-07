@@ -8,11 +8,10 @@ badly, and is needed exactly when the definition and the uses are built into
 *different* IRBuilder instances: there is no value to pass, so the only thing
 they can share is text.
 
-With one body per loop body, what still needs a name is what outlives one:
-the shared arena and its scratch tail, and the tiles of the cases with two
-batch loops (`barrier_two_gemms`, `fence_two_gemms`).  This counts them over
-the corpus, so that moving the kernel skeleton into the IR has a number to
-bring down.
+What still needs a name is what outlives one body: the shared arena, and
+the tiles of the cases with several sections (`barrier_two_gemms`,
+`fence_two_gemms`).  This counts them over the corpus, so that moving more of
+the kernel into the IR has a number to bring down.
 
     python3 tools/buffer_spans.py
 """
@@ -31,9 +30,9 @@ from tensorforge.generators.generator import Generator
 from tensorforge.backend.pir import build as pirbuild
 
 # names the macro layer owns: register tiles r0.., shared tiles s0.., the
-# arena and its scratch tail, and the rolling/peeled pointers
+# arena, and the rolling/peeled pointers
 OWNED = re.compile(r'\b((?:r|s)\d+(?:_w)?|localShrMem\d+|totalShrMem|'
-                   r'tempShrMem|pipe_\w+|peel_\w+)\b')
+                   r'pipe_\w+|peel_\w+)\b')
 
 # builder id -> set of owned names it mentions
 per_body = defaultdict(set)
@@ -115,8 +114,8 @@ if worst:
 print('\nnames that still span, by kind:')
 kind = Counter()
 for count, case, backend, name in worst:
-    if name.startswith(('localShrMem', 'totalShrMem', 'tempShrMem')):
-        kind['kernel-scope arena / scratch tail'] += 1
+    if name.startswith(('localShrMem', 'totalShrMem')):
+        kind['kernel-scope arena'] += 1
     elif name.startswith(('pipe_', 'peel_')):
         kind['pipeline pointer (crosses the loop by design)'] += 1
     elif name.startswith('r'):

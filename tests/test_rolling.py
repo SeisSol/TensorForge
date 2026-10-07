@@ -982,10 +982,10 @@ def _unnamed(gen):
     return re.sub(r'kernel_[0-9a-f]{16}|// options:.*', '', gen.get_kernel())
 
 
-# On sm_86 the four contributions lay down 6467 B written out, 3790 B merged,
-# and the merged build bounds the written-out size from above at 7251 B --
+# On sm_86 the four contributions lay down 6460 B written out, 3536 B merged,
+# and the merged build bounds the written-out size from above at 6501 B --
 # so a fraction of the 128 KB cache puts the budget on either side of each.
-BETWEEN_AND_FITS = 0.052        # 6816 B
+BETWEEN_AND_FITS = 0.0495       # 6488 B
 BETWEEN_AND_OVER = 0.040        # 5243 B
 
 
@@ -1144,17 +1144,27 @@ def test_a_merged_accumulation_is_read_back_after_the_loop(arch):
 def test_a_merged_loop_fences_its_head_against_its_tail():
     """The staged operand at the head reuses the window the product at the
     tail read the iteration before, and nothing appends a barrier to this
-    loop the way the generator does to a batch loop."""
-    from tensorforge.backend.instructions.memory import AbstractShrMemWrite
-    from tensorforge.backend.instructions.sync_block import SyncThreads
+    loop the way the generator does to a batch loop: the barrier placement
+    has to see the back edge (`pir.barriers`)."""
+    from tensorforge.backend.pir.core import Effect, MemSpace, Op
     gen = _with_option(_accumulate_then_read().descr_list(), arch='sm_70',
                        merge_variants=True)
     loop, = [i for i in gen._sections[0].ir
              if type(i).__name__ == 'VariantLoop']
-    body = list(loop.region)
-    first_write = next(k for k, i in enumerate(body)
-                       if isinstance(i, AbstractShrMemWrite))
-    assert any(isinstance(i, SyncThreads) for i in body[:first_write])
+
+    def stmts(body):
+        for st in body:
+            yield st
+            for r in st.regions:
+                yield from stmts(r.body)
+    run = next(st for st in stmts(gen._sections[0].body)
+               if st.op == Op.FOR and st.attr('extern') == loop.counter)
+    body = list(stmts(run.regions[0].body))
+    first_write = next(k for k, st in enumerate(body)
+                       if st.op not in (Op.ALLOC, Op.MARK) and any(
+                           a.space == MemSpace.SHARED and a.kind & Effect.WRITE
+                           for a in st.accesses))
+    assert any(st.op == Op.BARRIER for st in body[:first_write])
 
 
 def test_the_probe_leaves_nothing_behind():

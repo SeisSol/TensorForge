@@ -46,12 +46,12 @@ object every iteration -- which goes into the loop's prologue with the peel.
 A shared destination needs more, and gets it:
 
 * the barriers -- between the last read and the wrapped write, and between
-  the wait at the head and the first read.  ``SyncThreadsOpt`` places both,
+  the wait at the head and the first read.  ``pir.barriers`` places both,
   the second because it treats a write still unfenced at the end of a loop
   body as carried into the next iteration;
 * the buffer kept live across the back edge while the copy is in flight --
-  ``LivenessAnalysis`` iterates to a fixed point over the loop, so the region
-  allocator gives nobody else its offset in between;
+  ``pir.allocate`` iterates its liveness to a fixed point over the loop, so
+  nobody else gets its bytes in between;
 * a wait that does not depend on the issue having been emitted first --
   ``LoadWait`` drains for a wrapped transfer, because in program order the
   wait now precedes the issue;

@@ -105,11 +105,9 @@ class ComputeShape:
     #: more where the generator decided to keep it *prepared* in memory, and
     #: then the staging is per part.
     #:
-    #: On the shape rather than passed beside it because the reservation and
-    #: the emission have to agree about it, and the shape is already what they
-    #: both answer from -- a size computed without it is a size for a
-    #: different body, which `_suballocate` reports as an overflow at
-    #: generation and not before.
+    #: On the shape rather than passed beside it because the plan and the
+    #: emission have to agree about it, and the shape is already what they
+    #: both answer from.
     a_parts: int = 1
     #: How the lead operand holds the elements a fragment covers, or `None`
     #: where the caller has not derived it.  A *layout*, not the width it is

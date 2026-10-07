@@ -16,7 +16,7 @@ barrier_scope``, so neither knows any concrete instruction class.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, List, Optional, Sequence
 
 from tensorforge.backend.instructions.abstract_instruction import (
     AbstractInstruction, Uniformity)
@@ -150,21 +150,15 @@ def verify(instrs: Sequence[AbstractInstruction],
            max_barrier_scope: Uniformity = Uniformity.GRID,
            predefined: Iterable[Any] = (),
            backend: Optional[str] = None,
-           check_offsets: bool = True,
            check_ready: bool = True) -> List[Diagnostic]:
     """Structural checks over one instruction stream.
 
-    Two checks are phase-gated, because "ready to emit" is reached in two
-    steps and reporting either one early describes the *absence* of a later
-    pass rather than a defect:
-
-    ``check_offsets``  needs ``ShrMemOpt``: before it, every offset is still
-                       the constructor default 0 and every pair of buffers
-                       looks like it overlaps.
-    ``check_ready``    needs the thread-block policy, which runs *after* the
-                       optimization stage -- ``ShrMemAlloc.is_ready()`` asks
-                       for the arena size.  So this is an emit-time check,
-                       not a between-passes one.
+    ``check_ready`` is phase-gated: it needs the windows declared, which
+    happens once the optimization stage is done (`Generator._declare_buffers`),
+    so it is an emit-time check, not a between-passes one -- reported early,
+    it would describe the absence of a later step rather than a defect.  Where
+    a buffer sits is not asked here: the allocator decides it in the body
+    (`pir.allocate`), and `pir.layout_check` checks it there.
 
     ``max_barrier_scope`` is the strongest barrier legal at this level.  The
     loop is an instruction with a region, so recursion derives it from
@@ -250,14 +244,11 @@ def verify(instrs: Sequence[AbstractInstruction],
                                 max_barrier_scope=inner_limit,
                                 predefined=list(defined) + entry,
                                 backend=backend,
-                                check_offsets=False,
                                 check_ready=check_ready))
 
         for sym in instr.defs():
             defined.add(sym)
 
-    if check_offsets:
-        diags.extend(_check_shared_aliasing(instrs))
     return diags
 
 
@@ -303,96 +294,6 @@ def _check_guarded_prefetch(instr: AbstractInstruction,
                 f'inside the per-element flag guard; a masked element skips '
                 f'it and the next iteration reads a stale buffer'))
     return diags
-
-
-def _check_shared_aliasing(instrs: Sequence[AbstractInstruction]
-                           ) -> List[Diagnostic]:
-    """Two simultaneously-live shared-memory buffers must not overlap.
-
-    This is the check that catches a mis-coloring: the region allocator
-    assigns byte offsets, and nothing else downstream validates that co-live
-    buffers land in disjoint ranges.
-    """
-    diags: List[Diagnostic] = []
-    # (symbol -> (offset, size, global_arena)) as far as it is observable
-    extents: Dict[int, Tuple[Any, int, int, bool]] = {}
-    for instr in _flatten(instrs):
-        offset = getattr(instr, '_shr_mem_offset', None)
-        size_fn = getattr(instr, 'compute_shared_mem_size', None)
-        if offset is None or not callable(size_fn):
-            continue
-        for sym in instr.defs():
-            if getattr(sym, 'stype', None) is not SymbolType.SharedMem:
-                continue
-            try:
-                size = size_fn()
-            except Exception:
-                continue
-            extents[id(sym)] = (sym, offset, size,
-                                bool(getattr(instr, '_global_offset', False)))
-
-    live = _live_shared(instrs)
-    for index, live_set in live.items():
-        seen: List[Tuple[Any, int, int, bool]] = []
-        for sym in live_set:
-            rec = extents.get(id(sym))
-            if rec is None:
-                continue
-            _, off, size, arena = rec
-            for other, ooff, osize, oarena in seen:
-                if arena != oarena:
-                    continue        # different arenas cannot overlap
-                if off < ooff + osize and ooff < off + size:
-                    diags.append(Diagnostic(
-                        'error', index,
-                        f'shared-memory buffers {_sym(sym)} '
-                        f'[{off}, {off + size}) and {_sym(other)} '
-                        f'[{ooff}, {ooff + osize}) overlap while both live'))
-            seen.append((sym, off, size, arena))
-    return diags
-
-
-def _live_shared(instrs: Sequence[AbstractInstruction]
-                 ) -> Dict[int, OrderedSet]:
-    """Live shared-memory symbols per program point.
-
-    Delegates to ``LivenessAnalysis`` rather than approximating.  Holding a
-    symbol live from its first definition to its last appearance, i.e.
-    without a kill, would disagree with the analysis, which splits ranges,
-    and report overlaps at program points where the real liveness has a hole.
-    A verifier that reimplements the analysis it is checking will always
-    drift from it.
-    """
-    # local import: liveness imports .abstract, which does not import this
-    # module, so there is no cycle
-    from .liveness import LivenessAnalysis
-
-    # The nest as it is, not flattened: the analysis walks regions itself
-    # and appends its records depth first, which is `_flatten`'s numbering.
-    # Flattened, a region-bearing instruction would stand ahead of its own
-    # body in one block, and its `defs()` -- the body's -- would count as an
-    # earlier write of every buffer the body assembles (`_assembling`): each
-    # first slice would be spared, and the buffer would look live where the
-    # allocator, which is handed the nest, rightly reuses its memory.
-    analysis = LivenessAnalysis(None, list(instrs))
-    analysis.apply()
-    return dict(analysis.get_live_map())
-
-
-def _flatten(instrs: Sequence[AbstractInstruction]
-             ) -> List[AbstractInstruction]:
-    """Depth-first linearization, for checks that only need an ordering.
-
-    Correct for the shared-memory aliasing check because a region executes
-    where it sits; it is *not* a substitute for a real analysis over the
-    region structure, which loop-carried live ranges will need.
-    """
-    out: List[AbstractInstruction] = []
-    for instr in instrs:
-        out.append(instr)
-        for region in instr.regions():
-            out.extend(_flatten(region))
-    return out
 
 
 def format_diagnostics(diags: Sequence[Diagnostic]) -> str:

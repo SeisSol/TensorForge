@@ -179,8 +179,8 @@ INSTRS = [
 
 #: The compute capability to select against when the caller has no target.
 #:
-#: `shmsize` and `matmul` take an `sm`, derived from the context by `sm_of`;
-#: this is the floor for a caller that genuinely has no target to name.
+#: `matmul` takes an `sm`, derived from the context by `sm_of`; this is the
+#: floor for a caller that genuinely has no target to name.
 #:
 #: 75 rather than 80 because that is where `mma.sync` first exists at all, and
 #: because being the *floor* it should exclude rather than include.  Every F32
@@ -450,9 +450,9 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     """
     if threads > WAVE or WAVE % threads or len(shape) != 2:
         return None
-    # The same `sm` the emission will select with, for the reason `scratch`
-    # takes a context: an order laid out against one table and read by an
-    # entry from another is a permutation nothing shares.
+    # The same `sm` the emission will select with: an order laid out against
+    # one table and read by an entry from another is a permutation nothing
+    # shares.
     atom = instr_for(dtype, columns=columns, lead=lead, depth=depth,
                      sm=sm_of(ctx))
     if atom is None:
@@ -510,10 +510,10 @@ def instrs_for(dtype, sm=None):
 def instr_for(dtype, columns=0, lead=0, depth=0, sm=None):
     """The entry that serves this shape with the fewest issues, or `None`.
 
-    One function, asked twice: once by `shmsize` sizing the staging and once
-    by `matmul` issuing.  A size computed for one entry and an issue of
-    another is a buffer nobody fills or an overrun, and two dicts indexing the
-    same list by hand is how the two come to differ.
+    One function, asked by `matmul` issuing and by `prepared_order` laying
+    an operand out for it.  An order laid out for one entry and an issue of
+    another is a permutation nothing shares, and two dicts indexing the same
+    list by hand is how the two come to differ.
     """
     def extent(op):
         # The warp holds `m` of the leading dimension and the accumulator `n`
@@ -557,8 +557,7 @@ MIN_DEPTH = 16
 #: tile rather than padded into a tile of their own (`matmul`).  A padded tile
 #: costs its three HMMAs whatever it holds, and one column of it -- the ninth
 #: of `local_flux` -- holds an eighth of that; carried, it costs a lane four
-#: FFMA per step and a shared-memory reduction at the end.  Two at most, which
-#: is also the room `shmsize` keeps for it.
+#: FFMA per step and a shared-memory reduction at the end.  Two at most.
 TAIL_MAX = 2
 
 #: The modes whose A fragments are the operand's values, row `g + 8 * i` and
@@ -666,63 +665,18 @@ def supports(threads, dtype, sparse, depth=0) -> bool:
       and `matmul` runs one round of fragments per multiplication, wiring
       each one's `B` in and its `D` out through its own shared region.
       Wider ones are a different instruction, which does not exist here yet.
-    * ``not sparse``.  `matmul` already declines these by returning `False`,
-      but `temp_shmem` reserves shared memory off the same predicate; if the
-      two disagree the reservation is made for a kernel that never uses it.
+    * ``not sparse``.  `matmul` declines these by returning `False` as well;
+      asked here, a sparse operand never reaches a plan that names a matrix
+      arrangement it would only decline.
     * ``depth >= MIN_DEPTH``.  A shallow contraction reaches this path and then
       spends most of its issues on padding; see `MIN_DEPTH`.  `depth == 0` is
       "the caller does not know", which is not the same as "shallow" and is
-      admitted -- `shmsize` asks without a shape and must keep its upper bound.
+      admitted.
     """
     return (threads <= WAVE and WAVE % threads == 0
             and dtype in (Datatype.F32, Datatype.F64)
             and not sparse and (depth == 0 or depth >= MIN_DEPTH))
 
-
-def shmsize(stages, dtype, sm=None, a_parts=1, lanes=None):
-    """Staging elements to reserve, sized before the entry is chosen.
-
-    Over every candidate rather than over the one `instr_for` would return,
-    because this is asked without the shape that ranking reads: a reservation
-    made for a narrower entry than the one issued is an overrun, and the two
-    cannot be made to agree by ranking twice on different information.  The
-    largest is an upper bound, and the difference between the candidates is
-    one staging tile.
-
-    `sm` has to be the same one `matmul` will select with.  It is the reason
-    `scratch` takes a context: sizing over the sm_75 table and then issuing
-    from the sm_120 one reserves a buffer for the narrowest entry and writes
-    the widest into it, which is the overrun this docstring already warned
-    about -- reached through the arch rather than through the shape.
-    """
-    threads = 32
-
-    def size(atom):
-        # `a_parts` times the A tile: an operand stored prepared is staged
-        # with its parts adjacent, `a_parts` scalars per slot (`matmul`).
-        aregs = a_parts * ((atom.m * atom.k) // threads)
-        bregs = (atom.n * atom.k) // threads
-        cregs = (atom.m * atom.n) // threads
-        # Room for a remainder carried on the fragments: its columns of `B`
-        # beside the tile, and its partials -- one per row and lane position
-        # -- beside the epilogue's (`TAIL_MAX`).
-        tail = atom.mode in TAIL_MODES
-        # `B` staged split takes a second tile of the same size (`BSPLIT_STAGED`).
-        halves = 2 if atom.mode == MMAMode.TF32 else 1
-        return max(32 * (aregs + halves * bregs) + halves * tail * TAIL_MAX * atom.k,
-                   32 * cregs + tail * TAIL_MAX * atom.m * 4)
-
-    # A warp shared by several multiplications staggers each one's copy of a
-    # tile by up to 31 elements (`matmul`, `stagger`), the `A` and `B` tiles
-    # side by side and the epilogue tile over them.  Rounded to the 16 bytes
-    # every region is aligned to: the reservation is part of what one
-    # multiplication owns, and a stride that is not a whole number of vectors
-    # misaligns every other multiplication's wide accesses.
-    mults = WAVE // lanes if lanes and lanes < WAVE else 1
-    pad = 2 * 31 * (mults - 1) if mults <= 8 else 0
-    align = max(1, 16 // dtype.size())
-    pad = -(-pad // align) * align
-    return max((size(atom) for atom in instrs_for(dtype, sm)), default=0) + pad
 
 def lead_route(shape):
     """`routes.lead_route` with this target's rungs, and it has none.
@@ -791,20 +745,6 @@ def strategies(shape, ctx):
     return frozenset()
 
 
-def scratch(strategy, shape, ctx):
-    """One set of staging tiles, sized off the same atom the emitter picks.
-
-    Asked before generation, so it cannot depend on anything the body decides
-    -- but it may depend on the target, and it has to: the entry `matmul`
-    issues is selected against the context's compute capability, so a size
-    computed without it is a size for a different instruction.
-    """
-    if strategy is not Strategy.MATRIX:
-        return 0
-    return shmsize(1, shape.accumulator, sm_of(ctx), shape.a_parts,
-                   lanes=shape.threads)
-
-
 def plan(strategy, shape, n, ctx):
     """One arrangement over the whole output: nothing here splits a tail.
 
@@ -863,7 +803,7 @@ def _warp_group(writer, ops, threads, mults):
     """
     if mults == 1:
         return None, None, (lambda p: None)
-    stride = ops.mult_stride
+    stride = ops.mult_stride() if ops.mult_stride is not None else None
     if stride is None:
         raise InternalError(
             'the MMA path shares a warp between multiplications and addresses '
@@ -978,18 +918,6 @@ def matmul(writer, ops, ctx, span):
     bregs = (atom.n * atom.k) // wave
     cregs = (atom.m * atom.n) // wave
 
-    # The three staging windows, taken from the scratch tail this instruction
-    # declared to ShrMemOpt rather than placed by hand.
-    #
-    # They are one packing: C deliberately overlaps A and B, which is why the
-    # size is `32 * max(aregs + bregs, cregs)` and not their sum -- 192
-    # elements rather than 320 for m16n8k8.  It is legal because A and B are
-    # live only inside the k/kk/ii nest and C only in the epilogue after it
-    # closes.
-    #
-    # That is a lifetime argument, and it belongs to a liveness analysis;
-    # until the body is structured enough for one to see it, the windows are
-    # requested and the overlap is stated in one place.
     # Fragment slots of `B`, filled by the loads and read by the MMA.
     # Generously sized: the index is `kkk + jj * kregs`, so the bound is a
     # product of loop extents rather than the register count.
@@ -1035,11 +963,19 @@ def matmul(writer, ops, ctx, span):
     # shift common to all lanes does not change their banks.  Measured on
     # `local_flux` at eight lanes, unstaggered: `B` stores 3-way, epilogue
     # reads 4-way.
+    #
+    # The distance is the multiplication's arena, which is laid out after the
+    # body (`pir.allocate`), so a tile keeps room for any stagger and a body
+    # built before the distance was known has the same buffers as the one
+    # built after (`Generator._place_section`).
+    staggered = not alone and mults <= 8
+
     def stagger(target):
-        if alone or mults > 8:
+        if not staggered:
             return 0
-        return (target - ops.mult_stride) % 32
+        return (target - ops.mult_stride()) % 32
     apad, bpad, cpad = 0, stagger(atom.k), stagger(8 // mults)
+    room = (mults - 1) * 31 if staggered else 0
 
     def at(p, pad):
         """The shift to multiplication `p`'s copy of a tile staggered by
@@ -1069,58 +1005,68 @@ def matmul(writer, ops, ctx, span):
     tailbase = cregs * wave
     tailcol = atom.m * ktile
 
-    with writer.scratch_scope():
-        # `aparts` scalars per slot, adjacent, so a fragment's parts are one
-        # access rather than one each -- see the note below the B tile.
-        Ashm = writer.alloc(atom.d, (aparts * aregs * wave + (mults - 1) * apad,),
-                            MemSpace.SHARED, hint='atile')
-        # The B tile is written a row at a time and read a column at a time,
-        # which no linear stride can serve without bank conflicts: 32 lanes
-        # read 32 distinct elements spread over 60, and 240 bytes do not fit
-        # in 128 of bank width.  Padding moves the collision, transposing
-        # moves it to the store; permuting each row costs nothing and clears
-        # both.  Measured over the emitted addresses: 1-way, against 2-way
-        # unpermuted.
-        Bshm = writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
-                                     + (mults - 1) * bpad,), MemSpace.SHARED,
-                            hint='btile', swizzle=XorSwizzle(atom.k))
-        # The lower TF32 halves, where `B` is staged split (`BSPLIT_STAGED`):
-        # the same layout, so one address reads both.
-        BshmLo = (writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
-                                        + (mults - 1) * bpad,), MemSpace.SHARED,
-                               hint='btilelo', swizzle=XorSwizzle(atom.k))
-                  if bsplit else None)
-        # One tile with the parts *adjacent*, not one tile per part.
-        #
-        # A tile per part would keep the fragment read's arithmetic -- slot
-        # times the wave -- unchanged, and that is the wrong thing to
-        # optimize: it saves one allocation and pays one access per fragment
-        # per part.  Measured, two parts in tiles of their own cost +896 LDS
-        # and +904 global loads against the single-part kernel, and the
-        # kernel is bound by exactly that traffic.
-        #
-        # Adjacent, the two halves of one fragment are one 8-byte access, and
-        # the same holds in global memory, where `DataView._elem_parts` already
-        # interleaves them.  The address gains a factor and an addend; ptxas
-        # merges the neighboring scalar accesses, as it already does for the
-        # four consecutive stores below.
-
-    with writer.scratch_scope():
-        # Written lane-strided across the whole warp and read row-strided by
-        # `atom.n`, so it collides both ways: 4-way on the read, 2-way on the
-        # write.  The width is the wave, not the row -- and it has to be
-        # chosen per tile rather than fixed, because no single value serves
-        # every access here.  Measured over the four patterns this path emits:
-        #
-        #             none   xor8  xor16  xor32
-        #   B load     2-w    1-w    2-w    2-w
-        #   C load     4-w    2-w    1-w    1-w
-        #   C store    2-w    2-w    2-w    1-w
-        #
-        # `tools/bank_conflicts.py` is what keeps those honest.
-        Cshm = writer.alloc(atom.d, (tailbase + tailed * ntail * tailcol
-                                     + (mults - 1) * cpad,), MemSpace.SHARED,
-                            hint='ctile', swizzle=XorSwizzle(wave))
+    # The staging tiles, in the multiplication's arena.  Each one is written
+    # whole in bursts -- `B` once a step, `A` once a tile of rows, `C` once a
+    # block of the epilogue -- and read only inside the burst that wrote it,
+    # so a burst says so in front of its first store (`mark defines`) and
+    # the allocator puts the tiles over each other, and over any buffer of
+    # the multiplication, wherever the two are never occupied together: `C`
+    # over `A` and `B`, for one, which are dead once the steps are done.
+    #
+    # Every burst starts behind a barrier of the warp, and the last one ends
+    # in one.  That is what makes such an overlap safe here: a neighbor's
+    # lanes read this multiplication's tiles and store into its epilogue
+    # tile, and a barrier of one multiplication does not meet them.
+    #
+    # `aparts` scalars per slot, adjacent, so a fragment's parts are one
+    # access rather than one each -- see the note below the B tile.
+    Ashm = writer.alloc(atom.d, (aparts * aregs * wave,), MemSpace.SHARED,
+                        hint='atile')
+    # The B tile is written a row at a time and read a column at a time, which
+    # no linear stride can serve without bank conflicts: 32 lanes read 32
+    # distinct elements spread over 60, and 240 bytes do not fit in 128 of
+    # bank width.  Padding moves the collision, transposing moves it to the
+    # store; permuting each row costs nothing and clears both.  Measured over
+    # the emitted addresses: 1-way, against 2-way unpermuted.
+    Bshm = writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k + room,),
+                        MemSpace.SHARED, hint='btile',
+                        swizzle=XorSwizzle(atom.k))
+    # The lower TF32 halves, where `B` is staged split (`BSPLIT_STAGED`): the
+    # same layout, so one address reads both.
+    BshmLo = (writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
+                                    + room,), MemSpace.SHARED, hint='btilelo',
+                           swizzle=XorSwizzle(atom.k))
+              if bsplit else None)
+    # One tile with the parts *adjacent*, not one tile per part.
+    #
+    # A tile per part would keep the fragment read's arithmetic -- slot times
+    # the wave -- unchanged, and that is the wrong thing to optimize: it saves
+    # one allocation and pays one access per fragment per part.  Measured, two
+    # parts in tiles of their own cost +896 LDS and +904 global loads against
+    # the single-part kernel, and the kernel is bound by exactly that traffic.
+    #
+    # Adjacent, the two halves of one fragment are one 8-byte access, and the
+    # same holds in global memory, where `DataView._elem_parts` already
+    # interleaves them.  The address gains a factor and an addend; ptxas
+    # merges the neighboring scalar accesses, as it already does for the four
+    # consecutive stores below.
+    #
+    # The epilogue tile is written lane-strided across the whole warp and
+    # read row-strided by `atom.n`, so it collides both ways: 4-way on the
+    # read, 2-way on the write.  The width is the wave, not the row -- and it
+    # has to be chosen per tile rather than fixed, because no single value
+    # serves every access here.  Measured over the four patterns this path
+    # emits:
+    #
+    #             none   xor8  xor16  xor32
+    #   B load     2-w    1-w    2-w    2-w
+    #   C load     4-w    2-w    1-w    1-w
+    #   C store    2-w    2-w    2-w    1-w
+    #
+    # `tools/bank_conflicts.py` is what keeps those honest.
+    Cshm = writer.alloc(atom.d, (tailbase + tailed * ntail * tailcol + room,),
+                        MemSpace.SHARED, hint='ctile',
+                        swizzle=XorSwizzle(wave))
 
     # Every step of the contraction, per block of rows.
     steps = [(k, kk) for k in range(0, K, wave)
@@ -1231,6 +1177,8 @@ def matmul(writer, ops, ctx, span):
                             # slot the step spans -- the remainder's
                             # columns with them.
                             writer.barrier('wave', **sync)
+                            writer.mark('defines', *[t for t in (Bshm, BshmLo)
+                                                     if t is not None])
 
                             def breg(regs, s_, jj):
                                 """`B`'s slot `s_`, or zero past the
@@ -1393,6 +1341,7 @@ def matmul(writer, ops, ctx, span):
                             frags_by_ii = {}
                             for ii in tiles:
                                 writer.barrier('wave', **sync)
+                                writer.mark('defines', Ashm)
                                 for q, lo, cnt, sub in _lanes_of(ii, atom.m, threads):
                                     with threadrange(lo, cnt):
                                         # for kkk in range(0, atom.k):
@@ -1583,8 +1532,13 @@ def matmul(writer, ops, ctx, span):
                     Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c')
                             for q in range(mults) for jj in range(ncols)}
 
+                    # The first block of the epilogue stores where the steps
+                    # read their tiles, wherever the allocator put `C` over
+                    # them; every later block is behind the one before it.
+                    writer.barrier('wave', **sync)
                     for ii in range(0, wave, atom.m):
                         with writer.AnonymousScope():
+                            writer.mark('defines', Cshm)
                             # The lane's own term is `2 * t`; the rest is the
                             # instruction's fragment shape, which
                             # `accumulator_slots` states and a test checks.

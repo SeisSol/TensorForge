@@ -28,7 +28,7 @@ from tensorforge.common.exceptions import GenerationError
 def _loop(scoped: bool = False):
     """A loop that fills one buffer and reads another, the transfer inside an
     anonymous scope where `scoped` -- as a loader opens one."""
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 256))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     fill = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
     read = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='t')
     glb = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='g')

@@ -529,8 +529,10 @@ def _entry_uniformity(s: Stmt) -> Uniformity:
         # `RAWBLOCK` and anything else carrying a region whose head this
         # function cannot read.  `GRID` is the permissive answer and it would
         # be given silently, so a construct added later would license a grid
-        # barrier inside itself by saying nothing.
-        return Uniformity.LANE
+        # barrier inside itself by saying nothing.  A raw block whose builder
+        # knew the answer states it (`IRBuilder.For`, `uniform`).
+        stated = s.attr('uniform') if s.op == Op.RAWBLOCK else None
+        return stated if isinstance(stated, Uniformity) else Uniformity.LANE
     return Uniformity.GRID
 
 

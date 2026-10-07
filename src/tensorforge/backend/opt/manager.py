@@ -44,30 +44,18 @@ class StreamContext(PassContext):
         self.scopes = scopes
         # Built before this stage and never routed through it.  Passes must
         # be able to see its definitions or every symbol it defines looks
-        # undefined -- a preloaded shared-memory buffer, for one, would never
-        # enter LivenessAnalysis.
+        # undefined -- a preloaded shared-memory buffer, for one.
         self.global_ir: List[AbstractInstruction] = list(global_ir or [])
 
     @property
     def stream(self) -> List[AbstractInstruction]:
         """Everything that will be emitted for this section, prologue first.
 
-        Use this for whole-section checks (verify, dump).  Do *not* hand it to
-        an index-keyed analysis whose result is consumed against
-        ``local_stream`` -- the offsets would not line up.
+        For whole-section checks (verify, dump).  What the passes rewrite is
+        `instrs` alone: the prologue is built before this stage and never
+        routed through it.
         """
         return self.global_ir + self.instrs
-
-    @property
-    def local_stream(self) -> List[AbstractInstruction]:
-        """The part this stage owns: what passes rewrite and index into.
-
-        ``Section.global_ir`` is excluded on purpose.  Its shared-memory
-        symbols are allocated by ``ShrMemObject.alloc_global``, a separate bump
-        allocator in a separate arena; letting them into the region allocator
-        would give them a second, conflicting offset.
-        """
-        return list(self.instrs)
 
     # -- per-region dispatch ---------------------------------------------- #
 
@@ -79,24 +67,10 @@ class StreamContext(PassContext):
         on a settled nest.
         """
 
-        # What each region belongs to, innermost last, for a pass that has to
-        # know what kind of block it was handed.  A straight-line block and a
-        # loop body are the same list to `run_region`, and for most passes
-        # that is the point -- a scheduler must not move anything across the
-        # back edge.  Barrier insertion is the exception: a write at the tail
-        # of a loop body is read at its head, one iteration later, and a pass
-        # that cannot tell a body from the top level cannot put the barrier
-        # between the two.
-        enclosing = self.extra.setdefault('enclosing', [])
-
         def visit(instrs: List[AbstractInstruction]) -> List[AbstractInstruction]:
             for instr in instrs:
                 for index, region in enumerate(instr.regions()):
-                    enclosing.append(instr)
-                    try:
-                        instr.replace_region(index, visit(list(region)))
-                    finally:
-                        enclosing.pop()
+                    instr.replace_region(index, visit(list(region)))
             return list(p.run_region(instrs, self))
 
         self.instrs[:] = visit(self.instrs)
@@ -114,10 +88,7 @@ class StreamContext(PassContext):
             predefined += list(instr.defs())
         diags = verify(stream,
                        predefined=predefined,
-                       # from `ShrMemOpt` on, every shared-memory writer has
-                       # an offset, so buffer aliasing can be checked
-                       check_offsets=self.extra.get('offsets_assigned', False),
-                       # readiness needs the thread-block policy, which runs
+                       # readiness needs the windows declared, which happens
                        # after this stage -- checked at emit time instead
                        check_ready=False,
                        backend=self.context.get_vm().get_lexic()._backend)

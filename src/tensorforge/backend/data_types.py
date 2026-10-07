@@ -7,23 +7,11 @@ class ShrMemObject:
     self._size_per_mult = size
     self._mults_per_block = mults_per_block
     self._global_size = 0
-    self._temp_offset = 0
 
-  def alloc_global(self, size, align: int = 1):
-    """`size` elements of the block-wide part, starting on a multiple of
-    `align` elements -- a copy read as wide vectors needs its base on one."""
-    startpoint = -(-self._global_size // align) * align
-    self._global_size = startpoint + size
-    return startpoint
-
-  def release_global(self, mark: int) -> None:
-    """Give back everything allocated since `mark` (a `get_global_size()`).
-
-    For a preload that is built and then abandoned: its loaders reserve as
-    they are built, and dropping the loaders without this would leave the
-    reservation in the total -- the launch would ask for LDS nothing uses.
-    """
-    self._global_size = mark
+  def set_global_size(self, size: int) -> None:
+    """Elements of the block-wide part: what the allocator laid out there
+    (`pir.allocate`)."""
+    self._global_size = size
 
   def set_size_per_mult(self, size):
     self._size_per_mult = size
@@ -54,12 +42,6 @@ class ShrMemObject:
       return self.get_total_size()
     else:
       return 'not yet defined'
-
-  def set_temp_offset(self, offset):
-    self._temp_offset = offset
-
-  def get_temp_offset(self):
-    return self._temp_offset
 
   def is_dense(self):
     return True

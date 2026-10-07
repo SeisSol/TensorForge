@@ -100,10 +100,9 @@ class OperationBuilder(AbstractBuilder):
         store when the new operation does cover everything is a matter for the
         placement decision, not for correctness.
 
-        No barrier is emitted alongside: `SyncThreadsOpt` discards every sync
-        in the section and reinserts them from the shared-memory write/use
-        pairs, so one placed here would be removed and one that is needed
-        appears without being asked for.
+        No barrier is emitted alongside: the barrier placement works on the
+        section's body, in the order its accesses end up in (`pir.barriers`),
+        so one that is needed appears there without being asked for.
         """
         views = list(descr.reads())
         dest = descr.writes()
@@ -255,12 +254,12 @@ class OperationBuilder(AbstractBuilder):
         belongs in.
 
         Writing shared memory straight from the compute would be shorter and is
-        not available.  `ShrMemOpt` sizes each buffer from its first user and
-        requires that user to be a memory instruction able to report a size; a
-        compute instruction there fails the check rather than allocating
-        nothing.  Going through registers gives the buffer the store it needs
-        as its first user, and costs nothing that is not already paid: a
-        consumer able to read the image reads it in place, and the flush
+        not available.  A buffer's window is declared by its first user
+        (`Generator._declare_buffers`), which has to be a memory instruction
+        that knows the buffer's size; a compute instruction there would have no
+        window to declare.  Going through registers gives the buffer the store
+        it needs as its first user, and costs nothing that is not already paid:
+        a consumer able to read the image reads it in place, and the flush
         happens only for one that cannot.
 
         Returns None when the destination already has a symbol and can be
@@ -362,7 +361,8 @@ class OperationBuilder(AbstractBuilder):
 
         Everything the section writes of it, for the store that introduces it
         (`SectionPlan.dest_union`).  A buffer that already has a layout keeps
-        it: its first store sized the allocation (`ShrMemOpt`), and one that
+        it: its first store sized the window (`Generator._declare_buffers`),
+        and one that
         went out as a pending image holds the range its producer computed,
         which can be narrower than the descriptors declare -- a contraction
         whose operands support fewer rows than its destination names.  Laid

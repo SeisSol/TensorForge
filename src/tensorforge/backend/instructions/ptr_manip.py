@@ -493,8 +493,12 @@ class DeclareOperandTable(AbstractInstruction):
 
   def __init__(self, context: Context, name: str, members, addressing,
                datatype=None, form: 'TableForm' = None, variant: str = None,
-               writable: bool = False):
+               writable: bool = False, first: int = 0):
     super(DeclareOperandTable, self).__init__(context)
+    #: The first member the loop selects.  Those before it are the
+    #: iterations that ran before the loop (`VariantLoop.start`): a select
+    #: chain leaves them out, and nothing reaches them through the table.
+    self._first = first
     #: Whether the loop writes through the members: the table then holds
     #: pointers to mutable data.  Not `const` regardless: a written stand-in's
     #: binding (`float *const glb_v0`) cannot be initialized from a
@@ -638,6 +642,30 @@ class DeclareOperandTable(AbstractInstruction):
     return (f'({self._qual()}{datatype} {stars}){member.name}'
             if spaced and stars else member.name)
 
+  def _accesses(self, writer):
+    """What the loop touches through the table, said where it is built.
+
+    Its members: every one is read through the binding the table feeds, and
+    written where the loop writes them -- by accesses that name the binding,
+    so an analysis keyed by buffer would not see the member in them.  Here it
+    does, once an iteration, which is all a buffer occupied throughout the
+    loop needs: the allocator keeps a member staged in shared memory clear of
+    what the loop allocates, and the barrier placement orders it after what
+    wrote it.  A member that is a number touches no memory.
+    """
+    from tensorforge.backend.pir.build import access_of
+    from tensorforge.backend.pir.core import Access
+    kind = Effect.READ | (Effect.WRITE if self._writable else Effect.NONE)
+    out = []
+    for member in self._members[self._first:]:
+      if member.stype == SymbolType.Data:
+        continue
+      window = (member.pir_buffer(writer)
+                if member.stype == SymbolType.SharedMem else None)
+      out.append(Access(kind, MemSpace.SHARED, window) if window is not None
+                 else access_of(member, kind))
+    return tuple(out)
+
   def gen_ir(self, writer):
     if self._form is TableForm.PARAM:
       # Nothing to emit: the caller filled it and the signature names it.
@@ -646,14 +674,22 @@ class DeclareOperandTable(AbstractInstruction):
     stars = Addressing.addr2ptr_type(self._addressing)
     if self._form is TableForm.ARRAY:
       entries = ', '.join(self._member(m, datatype, stars) for m in self._members)
-      writer(f'{self._qual()}{datatype} {self._inner(stars)}{self._name}'
-             f'[{len(self._members)}] = {{{entries}}};')
+      self._declare(writer, f'{self._qual()}{datatype} '
+                            f'{self._inner(stars)}{self._name}'
+                            f'[{len(self._members)}] = {{{entries}}};')
       return
     chain = self._member(self._members[-1], datatype, stars)
-    for index in range(len(self._members) - 2, -1, -1):
+    for index in range(len(self._members) - 2, self._first - 1, -1):
       chain = (f'({self._variant} == {index}) ? '
                f'{self._member(self._members[index], datatype, stars)} : {chain}')
-    writer(f'{self._qual()}{datatype} {self._inner(stars)}{self._name} = {chain};')
+    self._declare(writer, f'{self._qual()}{datatype} '
+                          f'{self._inner(stars)}{self._name} = {chain};')
+
+  def _declare(self, writer, line: str) -> None:
+    if hasattr(writer, 'decl_expr'):
+      writer(line, accesses=self._accesses(writer))
+    else:
+      writer(line)
 
   def get_operands(self):
     return list(self._members)

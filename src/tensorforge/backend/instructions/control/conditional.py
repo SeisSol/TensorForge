@@ -107,9 +107,6 @@ class GuardedRegion(AbstractInstruction):
     inner = [instr.barrier_scope() for instr in self._region]
     return max((s for s in inner if s is not None), default=None)
 
-  def temp_shmem(self) -> int:
-    return max((instr.temp_shmem() for instr in self._region), default=0)
-
   # -- emission ---------------------------------------------------------- #
 
   def _condition(self, builder):
@@ -177,8 +174,7 @@ class GuardedRegion(AbstractInstruction):
     if hasattr(writer, 'if_') and hasattr(writer, 'op'):
       self._emit(writer)
       return
-    AbstractInstruction.build_shared_body(self._context, writer, self._emit,
-                                          scratch=self.temp_shmem())
+    AbstractInstruction.build_shared_body(self._context, writer, self._emit)
 
   def __str__(self) -> str:
     terms = ' && '.join(f'{"!" if negated else ""}{symbol.name}'

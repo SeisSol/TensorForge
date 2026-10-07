@@ -24,7 +24,7 @@ F32 = ScalarType(Datatype.F32)
 
 def _guarded(space):
     """`if (tid < 6) acc += bcast(buf[3]);` with `buf` in `space`."""
-    b = IRBuilder(fptype=Datatype.F32, scratch=('tempShrMem', 64))
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     buf = b.alloc(Datatype.F32, (16,), space, hint='r')
     acc = b.declare(F32, hint='acc')
     cond = b.op('lt', BOOL, b.thread_id('x'), 6, hint='g')

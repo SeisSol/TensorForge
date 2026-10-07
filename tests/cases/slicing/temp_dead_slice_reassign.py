@@ -13,8 +13,8 @@ The assignment clears what it promised and did not compute (`StoreRegToShr`,
 is a store whose value nothing reads.  It still writes its bytes: recorded only
 from the live-out, its buffer would be live nowhere at that store, the
 allocator could lay `tmp` over the staged `C` -- read by the very next
-multiplication -- and the dead slice would overwrite it
-(`LivenessAnalysis._forward`).
+multiplication -- and the dead slice would overwrite it.  A buffer is occupied
+where it is touched as well as where it is live (`pir.allocate`).
 """
 
 import numpy as np

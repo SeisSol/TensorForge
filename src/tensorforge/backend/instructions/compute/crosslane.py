@@ -55,9 +55,7 @@ class CrossLaneFold:
     def _wave_slots(self) -> int:
         """Slots the second stage needs: one per wave, per multiplication.
 
-        Zero where one exchange reaches every lane.  `temp_shmem` states this
-        before any body exists and `_fold_across_waves` uses it while emitting,
-        so the two read it from one place.
+        Zero where one exchange reaches every lane.
         """
         reach = self._reach()
         return max(0, self._num_threads // reach) if self._num_threads > reach \
@@ -102,10 +100,12 @@ class CrossLaneFold:
         """The second stage: the waves' partials meet in shared memory.
 
         Each wave has folded its own lanes by shuffle; its first lane writes
-        that partial into a slot of the scratch tail `temp_shmem` reserved,
-        and after a rendezvous of the multiplication every lane reads every
-        slot and folds them.  Every lane, not one: this is an all-reduce, and
-        a destination in registers keeps a copy per lane.
+        that partial into a slot of a buffer in the multiplication's shared
+        memory, and after a rendezvous of the multiplication every lane reads
+        every slot and folds them.  Every lane, not one: this is an
+        all-reduce, and a destination in registers keeps a copy per lane.
+        The buffer holds nothing past the reads, so the allocator gives its
+        bytes to whatever is occupied elsewhere (`pir.allocate`).
 
         Two barriers rather than one.  The second is what makes the stores
         visible to the reads.  The first is for whatever loop encloses this:
