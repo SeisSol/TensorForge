@@ -637,6 +637,14 @@ PREFETCH = 1
 #: round of the product per multiplication.
 WAVE = 32
 
+#: The matrix path where it is offered, the nest otherwise
+#: (`strategy.MatrixPaths.ORDER`).
+ORDER = (Strategy.MATRIX, Strategy.GENERIC)
+
+#: An order `prepared_order` states is this operation's fragment order, so an
+#: operand with other readers is not offered one.
+ORDERS_EVERY_READER = False
+
 
 def convergence(strategy, shape):
     """How far the threads have to run in step for `strategy` over `shape`.

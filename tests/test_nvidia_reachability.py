@@ -32,16 +32,17 @@ from pathlib import Path
 import pytest
 
 from harness import reachability
+from tensorforge.backend.instructions.compute.strategy import MatrixPaths
 
 PRIMITIVES = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
               "instructions" / "compute" / "primitives")
 
 MODULES = ["nvidia"]
 
-#: What `multilinear.py` reads.  `supports` is an entry point in its own
-#: right, not something `matmul` reaches -- the gate is asked *before* the
-#: emitter -- and `ENABLED` likewise: it is a module-level constant the
-#: caller consults, and without it here the deployment switch reads as dead.
+#: What `multilinear.py` reads: the members of `strategy.MatrixPaths`.
+#: `strategies` is an entry point in its own right, not something `matmul`
+#: reaches -- the gate is asked *before* the emitter -- and the gate's own
+#: parts, `supports` and the deployment switch `ENABLED`, hang off it.
 #: `prepared_order` is asked at a different time from all of them: before the
 #: operand's buffer is sized, because the answer decides how big it is.
 #: `fragment_order` hangs off it and is reached rather than listed.
@@ -49,8 +50,7 @@ MODULES = ["nvidia"]
 #: step, while the batch loop is built -- before any body, and of the target
 #: rather than the plan, since `mma.sync` is `.aligned` and another target's
 #: matrix path is not.
-ENTRIES = ["matmul", "supports", "strategies", "plan", "ENABLED",
-           "prepared_order", "convergence"]
+ENTRIES = reachability.protocol_members(MatrixPaths)
 
 # Unreachable on purpose.  Each entry would need a reason that says why
 # deleting it would be worse than keeping it.  There are none.

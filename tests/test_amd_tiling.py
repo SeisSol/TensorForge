@@ -112,7 +112,7 @@ def _run(M, N, K, threads=32, arch="gfx90a"):
 def _plan(ops, ctx):
     shape = ops_shape(ops)
     chosen = choose_strategy(legal_strategies(amd.strategies(shape, ctx)),
-                             'amd')
+                             amd.ORDER)
     plan = amd.plan(chosen, shape, ops.n, ctx)
     assert covers(plan, ops.n), plan
     return plan

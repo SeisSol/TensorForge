@@ -21,8 +21,7 @@ from tensorforge.backend.instructions.compute import broadcast
 from tensorforge.backend.instructions.compute.matmul import MatmulOperands
 from tensorforge.backend.instructions.compute.primitives import amd, intel
 from tensorforge.backend.instructions.compute.strategy import (
-    PREFERENCES, ComputeShape, Span, Strategy, choose_strategy,
-    legal_strategies)
+    ComputeShape, Span, Strategy, choose_strategy, legal_strategies)
 from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
@@ -65,7 +64,7 @@ def test_neither_target_keeps_its_own_copy(vendor):
     largest-first, which is exactly the disagreement two copies produce."""
     module = {'amd': amd, 'intel': intel}[vendor]
     assert not hasattr(module, 'broadcast_matmul')
-    assert Strategy.BROADCAST in PREFERENCES[vendor]
+    assert Strategy.BROADCAST in module.ORDER
 
 
 # -- what it computes ------------------------------------------------------ #
@@ -135,7 +134,7 @@ def test_amd_prefers_the_fused_broadcast(hip):
                          explicit_simd=False)
     offered = amd.strategies(shape, hip)
     assert {Strategy.DPP, Strategy.BROADCAST} <= offered
-    assert choose_strategy(legal_strategies(offered), 'amd') is Strategy.DPP
+    assert choose_strategy(legal_strategies(offered), amd.ORDER) is Strategy.DPP
 
 
 def test_amd_offers_neither_chain_a_sparse_operand_it_cannot_read(hip):

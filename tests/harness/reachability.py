@@ -38,6 +38,19 @@ def module_defs(tree: ast.Module) -> Dict[str, List[ast.AST]]:
     return defs
 
 
+def protocol_members(protocol) -> List[str]:
+    """The names a `typing.Protocol` declares, its attributes and its methods.
+
+    What a caller reads off any module that satisfies the protocol, and so
+    the entry points of a check over such a module: a member added to the
+    protocol is an entry without anyone having to list it twice.
+    """
+    names = set(getattr(protocol, '__annotations__', {}))
+    names |= {n for n, v in vars(protocol).items()
+              if callable(v) and not n.startswith('_')}
+    return sorted(names)
+
+
 def reachable(defs: Dict[str, List[ast.AST]],
               entries: Sequence[str]) -> Set[str]:
     live = {n: v[-1] for n, v in defs.items()}

@@ -630,6 +630,19 @@ class SlotMajorOrder(tuple):
 #: what lets the derivative's reads of one operator, one per order, share it.
 ORDERS_EVERY_READER = True
 
+#: DPAS first where it is offered, then the register-only chain, which beats
+#: staging operands through shared memory here.  Whether DPAS beats the chain
+#: in turn is a measurement rather than a preference -- the order says what to
+#: try first, not what is known (`strategy.MatrixPaths.ORDER`).
+ORDER = (Strategy.MATRIX, Strategy.BROADCAST, Strategy.GENERIC)
+
+
+def convergence(strategy, shape):
+    """None: DPAS is offered only under the explicit vector, where the
+    multiplication is one work-item's vector with no neighbors to wait for,
+    and the broadcast chain asks nothing of its own."""
+    return None
+
 
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=EXECUTION_SIZE):
@@ -660,8 +673,8 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     if not supports(threads, dtype, False):
         return None
     rows, cols = (int(x) for x in shape)
-    # The question `strategies` answers for MATRIX, which `PREFERENCES` takes
-    # first wherever it is offered.
+    # The question `strategies` answers for MATRIX, which `ORDER` takes first
+    # wherever it is offered.
     dpas = enabled(ctx) and atom_for(dtype, columns=columns, lead=lead,
                                      depth=depth,
                                      budget=register_budget(ctx)) is not None

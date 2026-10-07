@@ -19,8 +19,8 @@ from __future__ import annotations
 import pytest
 
 from tensorforge.backend.instructions.compute.strategy import (
-    DEFAULT_PREFERENCE, PREFERENCES, ComputeShape, Span, Strategy,
-    choose_strategy, is_contraction, lead_layout, legal_strategies)
+    DEFAULT_ORDER, ComputeShape, Span, Strategy, choose_strategy,
+    is_contraction, lead_layout, legal_strategies)
 from tensorforge.backend.instructions.compute import (bitlayout,
                                                       routes,
                                                       staging)
@@ -29,6 +29,9 @@ from tensorforge.backend.symbol import LeadIndex
 from tensorforge.common.context import Context
 from tensorforge.backend.instructions.compute.primitives import amd, intel
 from tensorforge.backend.instructions.compute.primitives import nvidia
+
+#: Each matrix module's order (`MatrixPaths.ORDER`), by vendor.
+ORDERS = {'amd': amd.ORDER, 'nvidia': nvidia.ORDER, 'intel': intel.ORDER}
 from tensorforge.common.basic_types import Datatype
 
 
@@ -269,49 +272,69 @@ def test_intel_offers_nothing_for_a_wave_that_is_not_the_execution_size():
 
 # -- preference ------------------------------------------------------------ #
 
-def test_a_target_with_no_row_runs_the_nest():
-    """Correct and slow, which is the right default: adding a row is the whole
-    of enabling a target, and forgetting to costs performance, not answers."""
-    assert DEFAULT_PREFERENCE == (Strategy.GENERIC,)
+def test_a_target_without_matrix_paths_runs_the_nest():
+    """Correct and slow, which is the right default: adding a module is the
+    whole of enabling a target, and forgetting to costs performance, not
+    answers."""
+    assert DEFAULT_ORDER == (Strategy.GENERIC,)
     assert choose_strategy(frozenset({Strategy.MATRIX, Strategy.GENERIC}),
-                           'moore') is Strategy.GENERIC
+                           DEFAULT_ORDER) is Strategy.GENERIC
+
+
+def test_the_target_hands_out_its_module():
+    assert Context(arch='gfx942', backend='hip',
+                   fp_type=Datatype.F32).target.matrix_paths is amd
+    assert Context(arch='sm_86', backend='hip',
+                   fp_type=Datatype.F32).target.matrix_paths is nvidia
+    assert Context(arch='pvc', backend='esimd',
+                   fp_type=Datatype.F32).target.matrix_paths is intel
+
+
+@pytest.mark.parametrize('module', [amd, nvidia, intel],
+                         ids=['amd', 'nvidia', 'intel'])
+def test_every_module_answers_the_whole_protocol(module):
+    """`MatrixPaths`, member by member: a module missing one would meet the
+    dispatch as an `AttributeError` the first time it is asked."""
+    from tensorforge.backend.instructions.compute.strategy import MatrixPaths
+    members = [name for name in vars(MatrixPaths)
+               if not name.startswith('_')]
+    members += list(MatrixPaths.__annotations__)
+    for name in set(members):
+        assert hasattr(module, name), (module.__name__, name)
 
 
 def test_amd_prefers_the_matrix_core_to_the_dpp_chain():
     legal = legal_strategies({Strategy.MATRIX, Strategy.DPP})
-    assert choose_strategy(legal, 'amd') is Strategy.MATRIX
+    assert choose_strategy(legal, amd.ORDER) is Strategy.MATRIX
 
 
 def test_amd_falls_to_dpp_when_no_tile_fits():
     legal = legal_strategies({Strategy.DPP})
-    assert choose_strategy(legal, 'amd') is Strategy.DPP
+    assert choose_strategy(legal, amd.ORDER) is Strategy.DPP
 
 
 def test_preference_never_invents_an_arrangement():
     """Ranking only chooses among what is already legal.  A row naming an
     arrangement the shape excluded has to be skipped, not taken -- otherwise
     the preference table can overrule a correctness condition."""
-    for vendor, order in PREFERENCES.items():
+    for vendor, order in ORDERS.items():
         for strategy in order:
             legal = legal_strategies(frozenset())
-            chosen = choose_strategy(legal, vendor)
+            chosen = choose_strategy(legal, order)
             assert chosen is Strategy.GENERIC, (vendor, strategy)
 
 
 def test_every_preferred_arrangement_can_be_emitted():
     """A row that names an arrangement no module in that vendor's package
     emits would be chosen and then have nothing to do."""
-    modules = {'amd': amd, 'nvidia': nvidia, 'intel': intel}
-    for vendor, order in PREFERENCES.items():
+    for vendor, order in ORDERS.items():
         assert Strategy.GENERIC in order, vendor
-        assert vendor in modules, vendor
-    assert set(PREFERENCES) == set(modules)
 
 
-@pytest.mark.parametrize('vendor', sorted(PREFERENCES))
+@pytest.mark.parametrize('vendor', sorted(ORDERS))
 def test_the_nest_is_last_in_every_row(vendor):
     """It is legal for every shape, so anything after it is unreachable."""
-    order = PREFERENCES[vendor]
+    order = ORDERS[vendor]
     assert order[-1] is Strategy.GENERIC
     assert order.count(Strategy.GENERIC) == 1
 

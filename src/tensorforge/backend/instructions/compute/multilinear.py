@@ -16,26 +16,14 @@ from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 
 from tensorforge.common.matrix.tensor import Tensor
 
-from .primitives import nvidia as nvidia
-from .primitives import amd as amd
-from .primitives import intel as intel
 from .matmul import MatmulOperands
 from .strategy import (ComputeShape, Span, Strategy, choose_strategy, covers,
                        is_contraction, lead_layout, legal_strategies, whole)
 
-#: Which module owns the matrix paths for a vendor.  One row per target, and
-#: every question the dispatch asks goes to the same row -- so what gets
-#: emitted and what gets reserved for it cannot be answered by two different
-#: tables that then disagree.
-_VENDOR_MODULES = {
-    'amd': amd,
-    'nvidia': nvidia,
-    'intel': intel,
-}
-
 
 def _vendor_module(context):
-    return _VENDOR_MODULES.get(context.target.hw.vendor)
+    """The target's matrix module (`Target.matrix_paths`), or None."""
+    return context.target.matrix_paths
 
 import itertools
 
@@ -1171,12 +1159,9 @@ class MultilinearInstruction(ComputeInstruction):
         readers = [user for user in sym.get_user_list() if user is not self
                    and not (getattr(user, '_verbatim', False)
                             and user.get_dest() is sym)]
-        if readers and not getattr(module, 'ORDERS_EVERY_READER', False):
+        if module is None or (readers and not module.ORDERS_EVERY_READER):
             return
-        offer = getattr(module, 'prepared_order', None)
-        if offer is None:
-            return
-        order = offer(tuple(a_obj.get_actual_shape()),
+        order = module.prepared_order(tuple(a_obj.get_actual_shape()),
                       self._idest.get_fptype(), self._context,
                       columns=self._output_extent(), lead=lead, depth=depth,
                       threads=self._num_threads)
@@ -1317,9 +1302,9 @@ class MultilinearInstruction(ComputeInstruction):
         (`convergence`); a target that says nothing asks nothing.
         """
         module = _vendor_module(self._context)
-        ask = getattr(module, 'convergence', None) if module is not None else None
-        if ask is None or not is_contraction(len(self._ops)):
+        if module is None or not is_contraction(len(self._ops)):
             return None
+        ask = module.convergence
         shape = self._shape()
         levels = [level for level in (ask(span.strategy, shape)
                                       for span in self._plan())
@@ -1357,7 +1342,7 @@ class MultilinearInstruction(ComputeInstruction):
         shape = self._shape()
         chosen = choose_strategy(
             legal_strategies(module.strategies(shape, self._context)),
-            self._context.target.hw.vendor)
+            module.ORDER)
         if chosen is Strategy.GENERIC:
             return whole(Strategy.GENERIC, n)
         plan = module.plan(chosen, shape, n, self._context)

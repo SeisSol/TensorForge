@@ -41,7 +41,7 @@ reads the answer without knowing which of them asked.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import FrozenSet, Iterable, Optional, Tuple
+from typing import Any, FrozenSet, Iterable, Optional, Protocol, Tuple
 
 from tensorforge.backend.symbol import LeadIndex
 from tensorforge.common.basic_types import Datatype
@@ -175,38 +175,62 @@ def legal_strategies(offered: Iterable[Strategy]) -> FrozenSet[Strategy]:
     return frozenset(offered) | {Strategy.GENERIC}
 
 
-#: The order each target takes the legal arrangements in.  Preference only:
-#: every entry is already legal by the time this is read, and a target with no
-#: row runs the nest, which is correct and slow.
-#:
-#: The eventual producer of this order is a cost model with the instruction
-#: throughputs and the register pressure in hand.  Until there is one, a fixed
-#: order per vendor states the same claim in a form that can be replaced
-#: wholesale rather than unpicked from the dispatch.
-PREFERENCES = {
-    # Matrix cores where a tile fits; the DPP chain otherwise, which is why
-    # F64 lands there without the order naming a type.  The plain broadcast
-    # chain sits behind it and is reached only for a shape DPP declines,
-    # because the two differ by whether the replication costs an instruction
-    # -- which is a reason to rank them, not to offer only one.
-    'amd': (Strategy.MATRIX, Strategy.DPP, Strategy.BROADCAST,
-            Strategy.GENERIC),
-    'nvidia': (Strategy.MATRIX, Strategy.GENERIC),
-    # The register-only chain beats staging operands through shared memory
-    # here, and whether DPAS beats it in turn is a measurement rather than a
-    # preference -- the order says what to try first, not what is known.
-    'intel': (Strategy.MATRIX, Strategy.BROADCAST, Strategy.GENERIC),
-}
-
-DEFAULT_PREFERENCE: Tuple[Strategy, ...] = (Strategy.GENERIC,)
+#: The order of a target without matrix paths: the nest, which is correct
+#: and slow.
+DEFAULT_ORDER: Tuple[Strategy, ...] = (Strategy.GENERIC,)
 
 
-def choose_strategy(legal: FrozenSet[Strategy], vendor: str) -> Strategy:
-    """The first legal arrangement this target prefers."""
-    for strategy in PREFERENCES.get(vendor, DEFAULT_PREFERENCE):
+def choose_strategy(legal: FrozenSet[Strategy],
+                    order: Tuple[Strategy, ...]) -> Strategy:
+    """The first legal arrangement in the target's `order`
+    (`MatrixPaths.ORDER`)."""
+    for strategy in order:
         if strategy in legal:
             return strategy
     return Strategy.GENERIC
+
+
+class MatrixPaths(Protocol):
+    """What a target's matrix module answers (`Target.matrix_paths`).
+
+    One module per vendor -- `primitives.nvidia`, `primitives.amd`,
+    `primitives.intel` -- and every question the dispatch in
+    `MultilinearInstruction` asks goes to the same one, so that what gets
+    emitted and what gets reserved for it cannot be answered by two tables
+    that then disagree.
+    """
+
+    #: The order the target takes the legal arrangements in.  Preference
+    #: only: every entry is already legal by the time this is read.  The
+    #: eventual producer of this order is a cost model with the instruction
+    #: throughputs and the register pressure in hand; until there is one, a
+    #: fixed order per target states the same claim in a form that can be
+    #: replaced wholesale rather than unpicked from the dispatch.  The nest
+    #: is last, since it is legal for every shape.
+    ORDER: Tuple[Strategy, ...]
+    #: Whether an order `prepared_order` states holds for every reader of the
+    #: operand, so that one with other readers may be offered one.
+    ORDERS_EVERY_READER: bool
+
+    def strategies(self, shape: ComputeShape, ctx) -> FrozenSet[Strategy]:
+        """The arrangements this target can emit for `shape`."""
+
+    def plan(self, strategy: Strategy, shape: ComputeShape, n: int,
+             ctx) -> Tuple['Span', ...]:
+        """How `strategy` is laid out over the `n` columns of the output."""
+
+    def matmul(self, writer, ops, ctx, span: 'Span') -> bool:
+        """Emit one span of the plan, or decline and leave the body as it
+        was."""
+
+    def convergence(self, strategy: Strategy, shape: ComputeShape) -> Any:
+        """How far the threads have to run in step for `strategy` over
+        `shape`, as a `Uniformity`, or None where it asks nothing."""
+
+    def prepared_order(self, shape, dtype, ctx, columns=0, lead=0, depth=0,
+                       threads=32) -> Any:
+        """The order this target would read a two-dimensional A operand in,
+        or None (`MultilinearInstruction._offer_order`)."""
 
 
 # -- laying the arrangements out over the output --------------------------- #

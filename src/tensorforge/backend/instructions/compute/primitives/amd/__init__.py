@@ -100,6 +100,18 @@ __all__ = [
 ]
 
 
+#: Matrix cores where a tile fits; the DPP chain otherwise, which is why F64
+#: lands there without the order naming a type.  The plain broadcast chain
+#: sits behind it and is reached only for a shape DPP declines, because the
+#: two differ by whether the replication costs an instruction -- which is a
+#: reason to rank them, not to offer only one (`strategy.MatrixPaths.ORDER`).
+ORDER = (Strategy.MATRIX, Strategy.DPP, Strategy.BROADCAST, Strategy.GENERIC)
+
+#: An order `prepared_order` states is this operation's, so an operand with
+#: other readers is not offered one.
+ORDERS_EVERY_READER = False
+
+
 def strategies(shape, ctx):
     """What this target can emit for this shape.
 

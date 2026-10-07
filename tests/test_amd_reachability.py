@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from harness import reachability
+from tensorforge.backend.instructions.compute.strategy import MatrixPaths
 
 AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
        "instructions" / "compute" / "primitives" / "amd")
@@ -36,13 +37,14 @@ MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
            "reorder", "relayout", "select", "emitters", "codegen",
            "exchange_codegen", "tiling", "unused"]
 
-#: What the dispatch calls into this package, every one an entry point in the
-#: same sense: `matmul` emits, and the others are asked before it -- what the
-#: target can emit for a shape, how the arrangement is laid out over the
-#: output, how far the threads run in step, which order the A operand is read
-#: in.  Computing reachability from the emitter alone would count them as
-#: dead.
-ENTRIES = ["matmul", "strategies", "plan", "convergence", "prepared_order"]
+#: What the dispatch reads off this package: the members of
+#: `strategy.MatrixPaths`, every one an entry point in the same sense.
+#: `matmul` emits, and the others are asked before it -- what the target can
+#: emit for a shape and in which order it prefers the arrangements, how one
+#: is laid out over the output, how far the threads run in step, which order
+#: the A operand is read in.  Computing reachability from the emitter alone
+#: would count them as dead.
+ENTRIES = reachability.protocol_members(MatrixPaths)
 
 # Unreachable on purpose.  Each entry needs a reason that says why deleting it
 # would be worse than keeping it.
