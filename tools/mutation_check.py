@@ -53,6 +53,7 @@ EQUIV = Path('tools/access_equiv.py')
 ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
 LAYOUT = Path('src/tensorforge/backend/pir/layout_check.py')
 BARRIERS = Path('src/tensorforge/backend/pir/barriers.py')
+WRAP = Path('src/tensorforge/backend/pir/wrap.py')
 
 
 def _run_tests(target):
@@ -869,6 +870,36 @@ GROUPS = {
              '            at = max(at, hi)', 1)),
         ('the block\'s buffers laid over each other',
          sub(ALLOC, '        end_block = at + b.size', '        end_block = at', 1)),
+    ]),
+
+    # The transfer for the next element, issued across the back edge.
+    'wrap': ('tests/test_pir_wrap.py tests/test_pass_pipeline.py', [
+        ('the tail fetches the element the iteration computes',
+         sub(WRAP, '        tail_copy.given(l.k, l.next)',
+             '        tail_copy.given(l.k, l.k)', 1)),
+        ('the distance ignored',
+         sub(WRAP, '        for t in transfers[:distance]:',
+             '        for t in transfers[:1]:', 1)),
+        ('a buffer another statement writes moved all the same',
+         sub(WRAP, "            if any(_writes(a) and _same(a.base, d) for a in x.accesses):\n"
+                   "                raise Refusal('the buffer is written by more than this '",
+             "            if False:\n"
+             "                raise Refusal('the buffer is written by more than this '", 1)),
+        ('a shared transfer moved across a barrier ahead of it',
+         sub(WRAP, '            if t.shared and (x.op is Op.BARRIER or x.effect & Effect.BARRIER):',
+             '            if False:', 1)),
+        ('a shared tail ahead of the barrier that fences it',
+         sub(WRAP, '            rest[closing + 1:closing + 1] = tails_shared',
+             '            rest[closing:closing] = tails_shared', 1)),
+        ('the masked path leaves the copy it skipped the wait of in flight',
+         sub(WRAP, '            if waits:\n                # A masked element skips',
+             '            if False:\n                # A masked element skips', 1)),
+        ('an element\'s own pointer followed under no flag',
+         sub(WRAP, '            if p.owns_pointer and peel_flag is not None:',
+             '            if False:', 1)),
+        ('a loop rewritten without a cloned dependency handed back unchanged',
+         sub(WRAP, '    if not rewritten:\n        return given',
+             '    if not copied:\n        return given', 1)),
     ]),
 
     'equiv': ('tests/test_access_equiv.py', [

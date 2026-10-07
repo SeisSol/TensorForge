@@ -22,8 +22,6 @@ class GetElementPtr(AbstractInstruction):
                dest,
                include_extra_offset=True,
                batch_offset=0,
-               update_dest=None,
-               pipeline = False,
                table=None,
                variant=None):
     super(GetElementPtr, self).__init__(context)
@@ -39,15 +37,8 @@ class GetElementPtr(AbstractInstruction):
     self._dest = dest
     self._include_extra_offset = include_extra_offset
     self._is_ready = True
-    # int -> `batchId{n}`, the n-th lookahead index bound by the loop.
-    # str -> used verbatim, which is how a peeled iteration names an index that
-    # exists *outside* the loop: `batchId0` is the loop variable and does not
-    # exist in the prologue, and the pre-loop bindings of batchId1/batchId2 mean
-    # something different from the in-loop ones (clamped from batchId_start
-    # rather than from batchId0).
+    # `batchId{n}`, the n-th lookahead index bound by the loop.
     self._batch_offset = batch_offset
-    self._update_dest = update_dest
-    self._pipeline = pipeline
 
   #: Stands in for the element index while an address is being assembled.
   #:
@@ -75,8 +66,6 @@ class GetElementPtr(AbstractInstruction):
     what the emitted code calls the index is the IR's business, and the name
     is what a pass and a loop agree to call the same element.
     """
-    if isinstance(self._batch_offset, str):
-      return self._batch_offset
     return f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
 
   def batch_value(self, writer):
@@ -214,9 +203,6 @@ class GetElementPtr(AbstractInstruction):
     and makes the space something a pass can reproduce when it declares a copy
     of the value instead of losing it to `auto`.
 
-    `const_mod` is about the pointer and not the pointee: the pipelined form
-    advances the binding, so it may not be `*const`.
-
     A batch-constant operand the kernel only reads is spelled in the constant
     space (`KernelParam.of_symbol` says why).  Only the spelling: where a
     backend names no spaces it is the same text, and the IR keeps calling it
@@ -299,7 +285,7 @@ class GetElementPtr(AbstractInstruction):
 
     datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
 
-    const_mod = '' if self._pipeline else 'const'
+    const_mod = 'const'
 
     address = ''
     if isinstance(batch_addressing, StridedAddressing):
@@ -335,21 +321,8 @@ class GetElementPtr(AbstractInstruction):
     else:
       GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
 
-    if self._update_dest:
-      # Still a statement and still opaque -- the destination is a name the
-      # body writes and its readers spell, so there is no value here to
-      # produce.  The index is an operand all the same, which is the half that
-      # can be had without that: `fmt` leaves the emitter to fill it in, so a
-      # pass moving this advance to another element has something to rewrite.
-      text, args = self._splice_index(writer, rhs)
-      writer(f'const auto {self._update_dest.name} = {self._dest.name};')
-      if args and hasattr(writer, 'batch_id'):
-        writer(f'{self._dest.name} = {text};', *args, fmt=True)
-      else:
-        writer(f'{self._dest.name} = {self._as_text(rhs)};')
-    else:
-      self._emit_binding(writer, lhs, rhs,
-                         scalar=batch_addressing == Addressing.SCALAR)
+    self._emit_binding(writer, lhs, rhs,
+                       scalar=batch_addressing == Addressing.SCALAR)
 
   def _emit_binding(self, writer, lhs: str, rhs: str,
                     scalar: bool = False) -> None:
@@ -357,8 +330,8 @@ class GetElementPtr(AbstractInstruction):
 
     A bare statement is `Effect.UNKNOWN`, so it conflicts with every access
     in the body and pins everything on both sides of it.  That matters here
-    rather than in the abstract: `WrapLoads` moves a transfer past the
-    instructions between it and its consumer, and a binding that conflicts
+    rather than in the abstract: a pass moving a transfer moves it past the
+    statements between it and its consumer, and a binding that conflicts
     with everything is a wall in the middle of exactly that stretch.
 
     Declaring only its accesses would make it reorderable but leave it
@@ -395,17 +368,24 @@ class GetElementPtr(AbstractInstruction):
       # Name the element index as an operand.  The address is
       # `&m2[batchId0 * 324 + ...]`, and with the element only in the text a
       # pass that moves this binding to another one would have nothing to
-      # substitute -- `wrap_prefetch` could not advance a transfer that reads
+      # substitute -- `wrap_loads` could not advance a transfer that reads
       # through it.
       text, args = self._splice_index(writer, rhs)
       type_ = (ScalarType(self._dest.get_fptype()) if scalar else
-               BufferType(self._dest.get_fptype(), (1,), MemSpace.GLOBAL,
+               BufferType(self._dest.get_fptype(), (self._extent(),),
+                          MemSpace.GLOBAL,
                           readonly=self._src.obj.direction
                           == DataFlowDirection.SOURCE))
       value = writer.decl_expr(
           lhs, text, type_,
           self._src, args=args, kind=Effect.READ, hint=self._dest.name,
           extern=self._dest.name, alias_root=self._src,
+          # What the declared read cannot say: strided addressing reads
+          # nothing and declares the read all the same, so only this tells a
+          # pass that the address is a pointer of the element's own, valid to
+          # follow for an element the caller did not mask.
+          attrs=(('element_pointer', True),)
+          if self.dereferences_the_batch() else (),
           # Only where nothing is written through it.  `restrict` promises
           # that what this pointer reaches is reached through no other in
           # scope, and a pass may clone this computation for the next element
@@ -423,8 +403,28 @@ class GetElementPtr(AbstractInstruction):
     else:
       writer(f'{lhs} = {self._as_text(rhs)};')
 
+  def _extent(self) -> int:
+    """How many elements the reads through this binding reach: one batch
+    element of the operand, as it is stored.
+
+    The reads name the binding as their buffer (`IRBuilder.load`), so its
+    type is what a lowering asks how far a run of them may go -- the explicit
+    vector merges consecutive reads into one message only inside the buffer.
+    The extent is the one the operand would have answered: its storage where
+    it is stored in an order of its own, its view otherwise.
+    """
+    obj = self._dest.obj
+    if getattr(obj, 'storage_order', None) is not None:
+      return int(obj.storage_volume())
+    view = self._dest.data_view
+    shape = getattr(view, 'shape', None) if view is not None else None
+    extent = 1
+    for dim in shape or ():
+      extent *= int(dim)
+    return extent
+
   def defs(self):
-    return (self._dest,) if self._update_dest is None else (self._dest, self._update_dest)
+    return (self._dest,)
 
   def uses(self):
     return (self._src,)

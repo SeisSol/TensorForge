@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from math import ceil
-from typing import Optional
+from typing import List, Optional
 
 from tensorforge.common.vm.vm import VM, vm_factory
 from tensorforge.common.basic_types import Datatype
@@ -99,11 +99,10 @@ class Context:
     #: to make this number large, and nothing counted whether it does.
     self.load_slack: Optional[dict] = None
 
-    #: The prefetch-wrapping pass the bodies of a build go through, where
-    #: something has to watch it: the rotation query
-    #: (`Generator._rotation_targets`) asks it what it would move.  None for
-    #: `pir.wrap.wrap_prefetch` itself.
-    self.wrap_pass = None
+    #: What `enable_wrap_loads` did with the transfers of the batch loops, one
+    #: line per transfer as `pir.wrap.wrap_loads` reports it (`record_wrap`),
+    #: or None where the pass did not run.
+    self.wrap_report: Optional[List[str]] = None
 
   def begin_build(self) -> None:
     """Forget the figures of the previous build.
@@ -122,6 +121,7 @@ class Context:
     self.memory_bytes = None
     self.hot_profile = None
     self.load_slack = None
+    self.wrap_report = None
 
   def record_pressure(self, value: int, lane: Optional[int] = None,
                       uniform: Optional[int] = None) -> None:
@@ -205,6 +205,12 @@ class Context:
     if self.load_slack is None:
       self.load_slack = {}
     self.load_slack[distance] = self.load_slack.get(distance, 0) + 1
+
+  def record_wrap(self, lines: List[str]) -> None:
+    """What the wrap pass reported for one body."""
+    if self.wrap_report is None:
+      self.wrap_report = []
+    self.wrap_report.extend(lines)
 
   def set_fp_type(self, fp_type: Datatype):
     self.fp_type = fp_type

@@ -256,6 +256,21 @@ class IRBuilder:
         self._by_name[str(v)] = v
         return v
 
+    def next_index(self) -> int:
+        """The next value number of this body, so that a builder numbering
+        from it (`scratch`) hands out numbers this body has not."""
+        if self._alloc is not None:
+            return self._alloc.next_index()
+        self._counter += 1
+        return self._counter
+
+    def scratch(self) -> 'IRBuilder':
+        """A builder for statements a pass splices into this body once it is
+        built.  Its values are numbered from this body's, so they are new in
+        it, and it builds against the same context."""
+        return IRBuilder(fptype=self._fptype, context=self.context, alloc=self,
+                         arena=self._arena)
+
     def varalloc(self, prefix: str = 'v') -> Value:
         """Drop-in for ``Writer.varalloc``.
 
@@ -1092,6 +1107,8 @@ class IRBuilder:
         here leaves the whole chain untracked --- and the vendor emitters
         check operand layouts against what their intrinsics require.
         """
+        if len(indices) == 1:
+            base = self._global_binding(base)
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
@@ -1156,7 +1173,6 @@ class IRBuilder:
               align: Optional[int] = None,
               atomic: bool = False,
               nontemporal: bool = False,
-              pointer: Optional[str] = None,
               shift: Optional[Operand] = None,
               valid: Optional[int] = None) -> Stmt:
         """``nontemporal`` is a cache hint, carried the way ``Op.LOAD`` carries
@@ -1178,15 +1194,6 @@ class IRBuilder:
         attrs = []
         if nontemporal:
             attrs += [('nontemporal', nontemporal)]
-        if pointer is not None:
-            # The pointer written *through*, when it is not the symbol's own
-            # name.  A rotating shared buffer fills a stage other than the one
-            # its consumers read, and `Op.STORE`'s base is the symbol -- so the
-            # override is a spelling the emitter applies, not a different
-            # destination.  It deliberately does not change `alias_root`: the
-            # stages are the same buffer, and a pass that thinks otherwise
-            # would reorder a fill past a read of the stage it fills.
-            attrs += [('pointer', pointer)]
         if align is not None:
             # See `load`: the alignment a wide access needs is proved by the
             # caller and carried, because the address is an expression the IR
@@ -1465,7 +1472,8 @@ class IRBuilder:
              unroll: bool = False, hint: str = 'i', extern: str = None,
              next_index=None, peel_index=None,
              uniform=Uniformity.GRID, index_type=None,
-             rolled: bool = False) -> '_ForHandle':
+             rolled: bool = False,
+             flag_word: Optional[str] = None) -> '_ForHandle':
         """A loop.  ``extern`` is for loops the macro layer owns.
 
         An inner loop is the IR's own and picks its induction variable's name.
@@ -1492,10 +1500,16 @@ class IRBuilder:
         written out instead -- a merged run -- so a count of the code it would
         take written out (`Emitter`, `written_code`) lays its body down once
         per trip.
+
+        `flag_word` is how the traversal reads an element's flag, as text with
+        the element at `{0}`, for a loop whose elements a caller may mask.  A
+        pass that issues work for another element than the body's -- the next
+        one, or the first -- reads that element's flag the same way
+        (`wrap.wrap_loads`).
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
                           unroll, hint, extern, next_index, peel_index,
-                          uniform, index_type, rolled)
+                          uniform, index_type, rolled, flag_word)
 
     def while_(self, init: Operand, hint: str = 'i', extern: str = None,
                uniform=Uniformity.GRID,
@@ -1782,7 +1796,8 @@ class IRBuilder:
                   args: Sequence[Operand] = (), hint: str = 'ptr',
                   extern: str = None, alias_root: Any = None,
                   quals: Tuple = (),
-                  layout: Optional[RegisterLayout] = None) -> Value:
+                  layout: Optional[RegisterLayout] = None,
+                  attrs: Tuple = ()) -> Value:
         """A declaration whose declarator is text too, not only its right side.
 
         `load_expr` renders `{ctype} {name} = {text};`, which is enough while
@@ -1809,6 +1824,10 @@ class IRBuilder:
         identity would let a write through the underlying buffer reorder past
         a read through the window.  The root is what the accesses are recorded
         against, so a window is the buffer it is a window into.
+
+        `attrs` are facts about the declaration a pass may need and the text
+        does not say -- that a pointer binding reads its element's pointer
+        out of an array, say (`ptr_manip.GetElementPtr`).
         """
         # `layout` where the caller knows how the value is spread over the
         # lanes.  A declaration that stays a declaration does not need one,
@@ -1829,7 +1848,7 @@ class IRBuilder:
                           movable=True, effect=Effect.NONE, accesses=(),
                           text=text,
                           attrs=(('decl', decl), ('extern', extern),
-                                 ('escapes', True)))
+                                 ('escapes', True)) + tuple(attrs))
             return v
         if extern is None:
             raise IRError(
@@ -1841,6 +1860,7 @@ class IRBuilder:
                 'happens to have defined the second.')
         root = base if alias_root is None else alias_root
         self._view_root[v.id] = root
+        extra = tuple(attrs)
         attrs = (('decl', decl), ('escapes', True))
         if extern is not None:
             attrs = attrs + (('extern', extern),)
@@ -1849,8 +1869,28 @@ class IRBuilder:
                       accesses=(Access(kind,
                                        self._space_of(base) if space is None
                                        else space, root),),
-                      text=text, attrs=attrs)
+                      text=text, attrs=attrs + extra)
         return v
+
+    def _global_binding(self, base: Any) -> Any:
+        """The pointer this body bound for `base`, where `base` is an operand
+        in global memory and the binding is a value of this body; `base`
+        otherwise.
+
+        A read through the binding names it as an operand, so the read is a
+        use of it: a pass that moves the read to another element substitutes
+        the binding for the other element's, where a read naming the operand
+        would keep the element it was built for.  One index only, because the
+        binding is typed as a run of elements and the operand by its view: an
+        address in several indices is spelled from the view.
+        """
+        if isinstance(base, Value) or not hasattr(base, 'pir_buffer'):
+            return base
+        bound = base.pir_buffer(self)
+        if (isinstance(bound, Value) and isinstance(bound.type, BufferType)
+                and bound.type.space is MemSpace.GLOBAL):
+            return bound
+        return base
 
     def alias_root(self, base: Any) -> Any:
         """The buffer an operand's accesses should be recorded against.
@@ -2088,14 +2128,16 @@ class _RawBlock:
 class _ForHandle:
     def __init__(self, builder, lo, hi, step, inits, types, unroll, hint,
                  extern=None, next_index=None, peel_index=None,
-                 uniform=Uniformity.GRID, index_type=None, rolled=False):
+                 uniform=Uniformity.GRID, index_type=None, rolled=False,
+                 flag_word=None):
         if len(inits) != len(types):
             raise IRError('for_: one result type per init value required')
         self._extern = extern
         self._rolled = rolled
+        self._flag_word = flag_word
         # What this loop calls the *next* element.  A clamped successor index
         # is a property of the traversal, which the loop knows and the IR does
-        # not, so `wrap_prefetch` reads it here rather than deriving it.
+        # not, so `wrap.wrap_loads` reads it here rather than deriving it.
         self._next_index = next_index
         # ... and what it calls the *first* element, for the same reason.  `lo`
         # is where the traversal starts, which is not the same as an element
@@ -2166,6 +2208,8 @@ class _ForHandle:
             attrs = attrs + (('first', self._peel_index),)
         if self._rolled:
             attrs = attrs + (('rolled', True),)
+        if self._flag_word is not None:
+            attrs = attrs + (('flag_word', self._flag_word),)
         self.builder.emit(Stmt(op=Op.FOR, target=self.results, args=self._args,
                                regions=(region,), pure=False, movable=False,
                                attrs=attrs))

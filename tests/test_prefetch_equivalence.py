@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Prefetch must not change the numbers.
+"""Moving a transfer must not change the numbers.
 
-`enable_wrap_loads` moves a register transfer ahead of its consumer, wrapping
-to the previous iteration when that runs off the front of the body. It is a
+`enable_wrap_loads` issues the first transfers of an iteration at the tail of
+the one before it, for the element it is about to compute.  It is a
 scheduling change; the results are supposed to be identical, bit for bit,
 because the same values are read in the same order.
 
 The snapshot tests record one configuration and the syntax tests only ask
 whether it compiles, so this is where the numbers are compared, by running
-both builds on the host oracle. That needs the oracle to read a prefetched
-kernel: `wrap.py` emits `uint32_t pipeStage0` as its bookkeeping, and without
-`uint32_t` in `_DECL` the very first line of the loop would abort the run.
+both builds on the host oracle.  That needs the oracle to read a wrapped
+kernel: the wrap carries the element flags as `uint32_t` words, and without
+`uint32_t` in `_DECL` the first line ahead of the loop would abort the run.
 """
 
 from __future__ import annotations
@@ -36,13 +36,15 @@ def _load(path):
     return mod
 
 
-def _generate(mod, wrap):
+def _generate(mod, wrap, report=None):
     ctx = Context(arch='sm_86', backend='cuda',
                   fp_type=getattr(mod, 'DTYPE', None),
                   options=Options(enable_wrap_loads=wrap))
     gen = Generator(mod.descr_list(), ctx)
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
+    if report is not None:
+        report.extend(ctx.wrap_report or [])
     return gen.get_kernel(), kernel_eval.launch_geometry(gen.get_launcher())
 
 
@@ -60,32 +62,40 @@ def _run(src, geometry):
                                      mults=mults)
 
 
-def _compare(name):
-    """`(plain, prefetched)` destinations, or None when not evaluable."""
-    path = next(p for p in
-                (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
-                if p.stem == name)
-    mod = _load(path)
-    (plain, pg), (wrapped, wg) = _generate(mod, False), _generate(mod, True)
+def _case(name):
+    return _load(next(p for p in
+                      (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
+                      if p.stem == name))
+
+
+def _compare(name, report=None):
+    """`(plain, wrapped)` destinations, or None when not evaluable."""
+    mod = _case(name)
+    plain, pg = _generate(mod, False)
+    wrapped, wg = _generate(mod, True, report)
     if plain == wrapped:
         return None
     return _run(plain, pg), _run(wrapped, wg)
 
 
-def test_the_oracle_can_read_a_prefetched_kernel():
+def _same(both):
+    plain, wrapped = both
+    for key in sorted(set(plain) | set(wrapped)):
+        assert plain.get(key, 0.0) == pytest.approx(wrapped.get(key, 0.0),
+                                                    abs=1e-4), key
+
+
+def test_the_oracle_can_read_a_wrapped_kernel():
     """The gap that would hide everything else.
 
-    Without `uint32_t` in the declaration pattern a rotated kernel aborts on
-    the loop's first statement -- `wrap.py` declares `uint32_t pipeStage0`
-    there -- and every case below silently becomes unevaluable.  Stated
-    against the declaration itself rather than against a generated kernel,
-    because whether any case rotates is a separate question with its own
-    answer below.
+    Without `uint32_t` in the declaration pattern a wrapped kernel aborts
+    ahead of its loop, where the flag words it carries are declared, and
+    every case below silently becomes unevaluable.
     """
-    assert kernel_eval._DECL.match('uint32_t pipeStage0 = 0;')
-    src, geometry = _generate(_load(next(
-        p for p in (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
-        if p.stem == 'square_notrans')), True)
+    assert kernel_eval._DECL.match(
+        'const uint32_t flagWordFirst = flags0 == nullptr ? 1 : flags0[0];')
+    src, geometry = _generate(_case('square_notrans'), True)
+    assert 'flagWordFirst' in src
     assert _run(src, geometry)
 
 
@@ -95,52 +105,18 @@ def test_prefetch_does_not_change_the_numbers(name):
     both = _compare(name)
     if both is None:
         pytest.skip('prefetch changed nothing in this kernel')
-    plain, wrapped = both
-    for key in sorted(set(plain) | set(wrapped)):
-        assert plain.get(key, 0.0) == pytest.approx(wrapped.get(key, 0.0),
-                                                    abs=1e-4), key
+    _same(both)
 
 
-def test_a_rotation_is_only_granted_where_the_wrap_survives_it():
-    """The invariant: rotated if and only if wrapped.
+def test_a_moved_shared_transfer_does_not_change_the_numbers():
+    """A shared window filled at the tail, for the next element.
 
-    The rotation is decided before a body exists, by asking the pass whether
-    it *would* wrap.  Put to an unrotated body, where the windows are static
-    and declared ahead of the loop, that question can get the wrong answer:
-    granting the rotation declares the write window inside the loop, because
-    its offset moves with the stage counter, and that is one of the pass's own
-    refusal conditions.  So a transfer could be accepted while unrotated,
-    rotated on the strength of that, and declined for a reason the rotation
-    created.
-
-    What would come out is not a missed optimization: the compute reads stage
-    `pipeStage % 2` while the transfer fills the other one, so no iteration
-    ever fills the stage it reads and the first element computes from whatever
-    the arena held.  `trans_a` is the case that shows it.
+    What keeps it right is not the pass alone: the barrier placement fences
+    the write against the reads of the iteration it ends, and the allocator
+    keeps the window live across the back edge.  Either one wrong is wrong
+    numbers and not a crash.  `trans_a` moves a shared transfer.
     """
-    plain, wrapped = _compare('trans_a')
-    for key in sorted(set(plain) | set(wrapped)):
-        assert plain.get(key, 0.0) == pytest.approx(wrapped.get(key, 0.0),
-                                                    abs=1e-4), key
-
-
-def test_no_case_in_the_corpus_currently_earns_a_rotation():
-    """Recorded, because the invariant above has a cost and it should be
-    visible.
-
-    Every shared transfer in these cases fails the confirming probe, for one
-    reason: a rotating write window is declared inside the loop and the peeled
-    transfer would name it before it exists.  The pass says so itself.
-    Declaring that window ahead of the loop is the fix -- the address bindings
-    and the static windows already sit outside the guard, and this is the same
-    move one scope further out -- and until it is made, rotation is off rather
-    than wrong.
-
-    This asserts the *current* state.  When the window is hoisted it should
-    fail, and that failure is the signal to delete it.
-    """
-    for name in ['trans_a', 'square_notrans', 'rectangular']:
-        path = next(p for p in
-                    (pathlib.Path(__file__).parent / 'cases').rglob('*.py')
-                    if p.stem == name)
-        assert 'pipeStage' not in _generate(_load(path), True)[0]
+    report = []
+    both = _compare('trans_a', report)
+    assert any(line.endswith('[shr]') for line in report), report
+    _same(both)

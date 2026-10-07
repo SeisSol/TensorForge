@@ -15,30 +15,37 @@ import pytest
 
 from tensorforge.backend.instructions import abstract_instruction
 from tensorforge.backend.passmanager import PassManager
-from tensorforge.backend.pir import BodyContext, WrapPrefetch, optimize, standard_pipeline, walk
+from tensorforge.backend.pir import BodyContext, WrapLoads, optimize, standard_pipeline, walk
 from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import INDEX, MemSpace, Op
+from tensorforge.backend.pir.core import BOOL, INDEX, SIZE, MemSpace, Op, Uniformity
 from tensorforge.backend.pir.passes import flatten_scopes
 from tensorforge.backend.pir.pipeline import Rewrite
-from tensorforge.backend.pir.wrap import wrap_prefetch
+from tensorforge.backend.pir.wrap import wrap_loads
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 
 
 def _loop(scoped: bool = False):
-    """A loop that fills one buffer and reads another, the transfer inside an
+    """A batch loop that fills a buffer and reads it, the transfer inside an
     anonymous scope where `scoped` -- as a loader opens one."""
     b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     fill = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
-    read = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='t')
     glb = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='g')
     out = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='o')
     lane = b.thread_id('x')
-    with b.for_(0, 8, 1) as loop:
+    count = b.extern_value('numElements0', SIZE, hint='count')
+    start = b.extern_value('start', SIZE, uniform=Uniformity.MULT,
+                           hint='start')
+    inside = b.op('lt', BOOL, start, count, hint='inside')
+    first = b.op('select', SIZE, inside, start, 0, hint='batchId1',
+                 escapes=True)
+    with b.for_('start', count, 'stride', hint='batchId0', index_type=SIZE,
+                peel_index=first, uniform=Uniformity.MULT) as loop:
         k = loop.induction
-        # What the loop calls the next element; read by the store as well, so
-        # that the cleanup in front of the prefetch keeps it.
-        loop._next_index = b.op('add', INDEX, k, 1, hint='nk')
+        ahead = b.op('add', SIZE, k, 'stride', hint='ahead1')
+        fits = b.op('lt', BOOL, ahead, count, hint='inbatch1')
+        loop._next_index = b.op('select', SIZE, fits, ahead, k,
+                                hint='batchId1', escapes=True)
         if scoped:
             with b.AnonymousScope():
                 token = b.copy_async(fill, glb, dst_index=(lane,),
@@ -47,14 +54,8 @@ def _loop(scoped: bool = False):
         else:
             token = b.copy_async(fill, glb, dst_index=(lane,), src_index=(k,))
             b.wait(token)
-        b.store(out, b.load(read, lane, hint='u'), loop._next_index)
+        b.store(out, b.load(fill, lane, hint='u'), k)
     return b, b.finish()
-
-
-def _prefetch(b):
-    return WrapPrefetch(wrap_prefetch,
-                        lambda ty, hint, quals=(): b.value(ty, hint=hint,
-                                                           quals=quals))
 
 
 def _moved(body) -> bool:
@@ -65,7 +66,7 @@ def _moved(body) -> bool:
 def test_a_requirement_no_earlier_pass_provides_is_refused_on_registration():
     b, _ = _loop()
     with pytest.raises(GenerationError, match=r"requires \['flat'\]"):
-        PassManager().add(_prefetch(b))
+        PassManager().add(WrapLoads(b.scratch))
 
 
 def test_a_fact_the_transform_in_between_does_not_preserve_is_gone():
@@ -75,7 +76,7 @@ def test_a_fact_the_transform_in_between_does_not_preserve_is_gone():
     pm = PassManager()
     pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))
     pm.add(Rewrite('reorders', lambda body: body))
-    pm.add(_prefetch(b))
+    pm.add(WrapLoads(b.scratch))
     with pytest.raises(GenerationError, match='invalidated by an earlier'):
         pm.run(BodyContext(body))
 
@@ -90,25 +91,26 @@ def test_a_pass_behind_the_scheduler_fails_the_run():
         pm.run(BodyContext(body))
 
 
-def test_the_prefetch_sees_the_transfer_a_loader_scoped():
+def test_the_wrap_sees_the_transfer_a_loader_scoped():
     """Behind the cleanup: a transfer inside an anonymous scope is one the
-    prefetch pass cannot move, and `flatten` is what takes the scope away."""
+    wrap cannot move, and `flatten` is what takes the scope away."""
     b, body = _loop(scoped=True)
-    alone = wrap_prefetch(body, lambda ty, hint, quals=(): b.value(ty, hint=hint))
+    alone = wrap_loads(body, b.scratch)
     assert not _moved(alone)
 
-    piped = optimize(body, prefetch=_prefetch(b))
+    piped = optimize(body, wrap=WrapLoads(b.scratch))
     assert _moved(piped)
 
 
-def test_the_scheduler_counts_the_order_the_prefetch_left():
-    """Ahead of the scheduler: inside the loop one transfer is in flight --
-    the one this iteration issued for the next -- and the drain after the
-    loop waits for it."""
+def test_the_scheduler_counts_the_order_the_wrap_left():
+    """Ahead of the scheduler: the wait in the loop retires the copy the
+    previous iteration issued at its tail, with nothing newer in flight, and
+    the drain behind the loop retires the last iteration's.  Counted where
+    the wrap left them: a count taken before it would know neither wait."""
     b, body = _loop()
-    piped = optimize(body, prefetch=_prefetch(b))
+    piped = optimize(body, wrap=WrapLoads(b.scratch))
     waits = [s for s, _ in walk(piped) if s.op is Op.WAIT]
-    assert [w.attr('prior') for w in waits] == [1, 0]
+    assert [w.attr('prior') for w in waits] == [0, 0]
 
 
 def test_a_finding_names_the_pass_that_introduced_it(capsys):

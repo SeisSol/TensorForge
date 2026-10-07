@@ -1860,12 +1860,8 @@ class Symbol:
       return dimstr if len(dimstr) > 0 else "0"
     raise NotImplementedError('Not supposed to be called')
 
-  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None,
-             base: str = None):
-    # `base` overrides the pointer, not the symbol: a rotating shared-memory
-    # buffer declares its pointer at the stage consumers read and is filled at
-    # a different one.  See AbstractShrMemWrite.write_base().
-    name = base or self.name
+  def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
+    name = self.name
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem or self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       return f'{name}[{self.access_address(context, index, writer, out)}]'
     if self.stype == SymbolType.Scalar:
@@ -2321,12 +2317,8 @@ class Symbol:
     self.layout = layout
 
   def store_linear(self, writer, context: Context, variable, index, vec = 1,
-                   base: str = None, threads=None):
-    # `base` overrides the pointer written through, without changing the
-    # symbol.  A rotating shared-memory buffer declares its pointer at the
-    # stage consumers read and fills a different one -- see
-    # AbstractShrMemWrite.write_base().
-    name = base or self.name
+                   threads=None):
+    name = self.name
     addrs = []
     self._record_linear_layout(index, vec, threads, writer)
     if self.stype == SymbolType.Register:
@@ -2341,13 +2333,7 @@ class Symbol:
       addr = _linear_addr(context, index, vec)
     access = f'{name}[{addr}]'
 
-    # `base` is the symbol's own name for everything except a rotating
-    # shared buffer, and every caller passes it rather than leaving it
-    # None -- so testing for None alone silently never fires.  When it is
-    # a real override the value is the wrong buffer: it addresses the
-    # stage consumers read while this write fills a different one.
-    own_base = base is None or base == self.name
-    buf = self.pir_buffer(writer) if own_base else None
+    buf = self.pir_buffer(writer)
     if buf is not None and hasattr(writer, 'store'):
       # Structured: the buffer is an operand, so the write declares what
       # it touches by construction instead of by a hand-passed alias
@@ -2362,8 +2348,7 @@ class Symbol:
       writer.store(buf, variable, addr,
                    align=self._linear_claim(index, vec))
     elif vec != 1:
-      # Unstructured fallback: a rotating buffer writes through an alias
-      # base, so there is no buffer value to make an operand of.
+      # Unstructured fallback: a buffer this body holds no value of.
       convert = f'*(tensorforge::VectorT<{self.get_fptype()}, {vec}>*)&'
       writer.access_stmt(f'{convert}{access} = {convert}{variable};', self, Effect.WRITE, args=_operands(variable, addrs))
     elif not isinstance(variable, (str, int, float)):
@@ -3082,8 +3067,7 @@ class Symbol:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       return True
 
-  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None,
-            base: str = None):
+  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None):
     addrs = []
     assert self.stype != SymbolType.Data
 
@@ -3093,10 +3077,6 @@ class Symbol:
     # A sliced store qualifies as well: its slicing offset sits in the
     # `LeadIndex` itself (`add_offset` folds it), so its address is an operand
     # here rather than a pinned name on the text path.
-    #
-    # `base` does not disqualify.  It overrides the pointer *name*, which
-    # `Op.STORE` carries as an attribute; the base it attributes accesses to
-    # is the symbol, which is what a rotating buffer's stages are.
     structured = (not atomic and isinstance(variable, _Value)
                   and lead is not None and unwrap_lead(lead) is not None
                   and self.stype in (SymbolType.Register, SymbolType.Scratch,
@@ -3141,7 +3121,7 @@ class Symbol:
           f'{self.name}: a full-lane tail reached a text store, which cannot '
           f'hold itself to the lanes that hold data')
     if not structured and not named:
-      access = self.access(context, index, writer, addrs, base=base)
+      access = self.access(context, index, writer, addrs)
       fmt = not isinstance(variable, (str, int, float))
       var = '{0}' if fmt else variable
       if self.stype == SymbolType.Global:
@@ -3186,8 +3166,7 @@ class Symbol:
       # the emitter's to decide; routing it here would change `0` into `0.0f`
       # or the reverse for reasons unrelated to the store.  And an atomic
       # goes through `atomic_store`, which returns an expression rather than a
-      # statement.  A `base` override does not keep a store off this path
-      # (see above).
+      # statement.
       # The width comes off the *stored value*, as it does in the emitter:
       # the buffer is typed by its element and would narrow every wide write
       # to its first component.  `RELAXED` for the same reason as in `load`.
@@ -3209,7 +3188,7 @@ class Symbol:
                      align=None if wide is None else RELAXED,
                      # the kind of hint, not only whether there is one
                      # (`hints.cache_hint`): `bool` would make every one `cg`
-                     nontemporal=nontemp or False, pointer=base,
+                     nontemporal=nontemp or False,
                      **({} if padded is not None else
                         self._valid_access(writer, index,
                                            self._memory_valid(index))))
@@ -3255,7 +3234,7 @@ class Symbol:
           wide = getattr(getattr(variable, 'type', None), 'length', None)
           writer.store(self, variable,
                        self.address_value(writer, context, index),
-                       align=None if wide is None else RELAXED, pointer=base)
+                       align=None if wide is None else RELAXED)
         else:
           writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
 

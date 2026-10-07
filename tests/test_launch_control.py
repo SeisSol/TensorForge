@@ -195,20 +195,19 @@ def test_an_older_target_is_refused_rather_than_downgraded():
         _kernel(arch=HOPPER, launch_control=True)
 
 
-@pytest.mark.parametrize("switch", ["enable_wrap_loads",
-                                    "enable_pipeline",
-                                    "enable_multibuffer"])
-def test_prefetching_the_stride_is_refused(switch):
+@pytest.mark.parametrize("extra", [{}, {"enable_multibuffer": True}])
+def test_prefetching_the_stride_is_refused(extra):
     """`batchId1 = batchId_start + stride` is not what the queue hands out.
 
-    The prefetch passes read the lookahead index, which the strided loop
-    computes from the stride.  Under the queue the next element is whatever
-    CTA the launcher cancels, so the transfer would fill the buffer the next
+    The wrap reads the lookahead index, which the strided loop computes from
+    the stride.  Under the queue the next element is whatever CTA the
+    launcher cancels, so the transfer would fill the buffer the next
     iteration reads with another element's operands -- no crash, wrong numbers
-    for every element after the first.
+    for every element after the first.  A second stage changes which buffer
+    is filled, not for which element.
     """
     with pytest.raises(GenerationError, match="batchId1"):
-        _kernel(launch_control=True, **{switch: True})
+        _kernel(launch_control=True, enable_wrap_loads=True, **extra)
 
 
 def test_a_grid_barrier_is_refused():

@@ -44,21 +44,14 @@ class LoadInstruction:
 class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def __init__(self, **kwargs):
     super(GlbToShrLoader, self).__init__(kwargs['context'])
-    # Kept so the transfer can be cloned.  Software pipelining peels a copy of
-    # this load into the loop prologue with a different source pointer and
-    # stage; re-invoking the constructor is the only way to get every derived
-    # field (data_view, alignment, lid_dim, the user registrations) right --
-    # copying the object would silently share them.
-    self._ctor_kwargs = dict(kwargs)
     self._dest = kwargs['dest']
     self._src = kwargs['src']
     self._shr_mem = kwargs['shr_mem']
     self._num_threads = kwargs['num_threads']
     #: Set again by `set_threadconfig_pre`, which is where a blockwide
     #: transfer widens `_num_threads` to the block and this one does not
-    #: follow.  Initialized here so that a transfer nobody reconfigures --
-    #: the pipelined clone, which is constructed and used in one step --
-    #: still answers the question.
+    #: follow.  Initialized here so that a transfer nobody reconfigures still
+    #: answers the question.
     self._lanes = kwargs['num_threads']
     #: A shared image is not blocked -- the compute path reads it by element,
     #: not by lane -- so this stays 1 unless a caller says otherwise.
@@ -107,13 +100,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     self._tokens = []
     self._token_owner = None
     self._issued_structured = False
-    # The predicate the structured copies are issued under, where one is set
-    # from outside: `BatchLoop` puts a transfer out of a pointer array under
-    # the flag of the element it fetches.  A predicate and not a block around
-    # the transfer, because a copy in a block is conditionally issued as far
-    # as `asyncmem` can tell, and a loop that carries its token then has no
-    # steady state to count waits against.
-    self._copy_predicate = None
     #: did this transfer actually put something in flight?  `_use_cuda_memcpy`
     #: is a static choice; the reordering path ignores it and moves the data
     #: synchronously, so the flag alone cannot tell a wait what to do.
@@ -349,8 +335,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
       def inner(indices):
         value = self._src.load(writer, self._context, None, indices, allow_nontemporal)
-        self._dest.store(writer, self._context, value, indices, False,
-                         base=self.write_base())
+        self._dest.store(writer, self._context, value, indices, False)
 
       # The reordering path moves the data with ordinary loads and stores.
       # Nothing is in flight when it returns, so nothing may be waited for.
@@ -574,10 +559,10 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         dst_buf = self._destination_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
-                       _p=self._copy_predicate, _z=zfill):
+                       _z=zfill):
           self._tokens.append(writer.copy_async(
               _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n,
-              zfill=_z, predicate=_p))
+              zfill=_z))
       elif structured:
         # No async engine, so the transfer is a load and a store, spelled in
         # a way every pass can read.
@@ -647,7 +632,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
             write_load(f'{dst_offset} + {dest_access_index} + {dst_index}',
                        f'{src_offset} + {src_access_index} + {src_index}')
           else:
-            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {dst_index}]'
+            lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {dst_index}]'
             rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {src_index}]'
             write_load(lhs, rhs)
       else:
@@ -661,7 +646,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
             write_load(f'{dst_offset} + {dest_access_index} + {dst_index}',
                        f'{src_offset} + {src_access_index} + {src_index}')
           else:
-            lhs = f'{typeprefix}{self.write_base()}[{dst_offset} + {dest_access_index} + {dst_index}]'
+            lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {dst_index}]'
             rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {src_index}]'
             write_load(lhs, rhs)
 
@@ -680,10 +665,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   def _structured_copy(self, writer) -> bool:
     """Can this transfer be a `copy.async` rather than a line of text?
 
-    Only where both ends are values in *this* body, and where the write goes
-    through the symbol's own window.  A rotating buffer writes a different
-    stage than the declaration names, so `write_base()` is not `self._dest`
-    and the value would address the wrong half.
+    Only where both ends are values in *this* body.
     """
     if not hasattr(writer, 'copy_async'):
       return False
@@ -708,16 +690,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
   # where it is built; `pir.banks` is written against exactly that point.
 
   def _destination_buffer(self, writer):
-    """The value this transfer fills.
-
-    Not the symbol's for a rotating buffer: that one addresses the stage the
-    consumers read, and writing through it would overwrite the data they are
-    about to use.  The write window is a value of its own, which is what lets
-    a rotating transfer stay on the structured path -- and rotation is what
-    the wrap pass needs.
-    """
-    if self.rotates():
-      return self.write_buffer(writer)
+    """The value this transfer fills."""
     return self._dest.pir_buffer(writer)
 
   def get_src(self) -> Symbol:
@@ -743,19 +716,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     # The structured route lowers to the `__pipeline_*` primitives, whose
     # header carries no architecture floor.
     return ['cuda_pipeline.h'] if self._use_cuda_memcpy else []
-
-  def clone(self, **overrides) -> 'GlbToShrLoader':
-    """A fresh transfer with the same configuration, minus the overrides.
-
-    Software pipelining peels a copy of this load into the loop prologue with a
-    different source pointer and stage.  Re-invoking the constructor is the only
-    way to get every derived field right -- data_view, alignment, lid_dim and
-    the user registrations are all computed there, and copying the object would
-    silently share them.
-    """
-    kwargs = dict(self._ctor_kwargs)
-    kwargs.update(overrides)
-    return type(self)(**kwargs)
 
   def __str__(self):
     return f'{self._dest.name} = load{{g>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'
@@ -855,7 +815,6 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         staged = self._src.load_linear(writer, self._context, None, i, g,
                                        threads=self._num_threads)
         self._dest.store_linear(writer, self._context, staged, i, g,
-                                base=self.write_base(),
                                 threads=self._num_threads)
 
       if tail:
@@ -872,8 +831,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
             self._src.load_linear(writer, self._context, None,
                                   total_size - tail, 1,
                                   threads=self._num_threads),
-            total_size - tail, 1, base=self.write_base(),
-            threads=self._num_threads)
+            total_size - tail, 1, threads=self._num_threads)
 
     else:
       # The lane axis is whichever dimension the destination declares, not
@@ -903,8 +861,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         value = self._src.load(writer, self._context, None,
                        [add_offset(x, self._offset[i])
                         for i, x in enumerate(indices)], allow_nontemporal)
-        self._dest.store(writer, self._context, value, indices, False,
-                         base=self.write_base())
+        self._dest.store(writer, self._context, value, indices, False)
 
       write_loops(self._context, writer, loops, inner)
 
@@ -940,32 +897,6 @@ class LoadWait(MemoryInstruction, LoadInstruction):
 
   def gen_code_inner(self, writer: Writer) -> None:
     if not isinstance(self._instr, GlbToShrLoader):
-      return
-    if getattr(self._instr, '_wrapped', False):
-      # Wrapped across the back edge by `WrapLoads`: the transfer is issued at
-      # the tail of the previous iteration, so in program order this wait
-      # comes *first*.  Every flag below is set by the issue, and here still
-      # reads as "nothing in flight" -- which would drop the wait and let the
-      # consumer read a copy that has not landed.  A drain retires what the
-      # previous iteration issued without having to name it, and on the first
-      # iteration it retires the peeled copy ahead of the loop.
-      if not hasattr(writer, 'wait'):
-        raise InternalError(
-            'a transfer wrapped across the back edge needs a structured wait, '
-            'and this writer has none')
-      from tensorforge.backend.instructions.batch_loop import BatchLoop
-      carried = BatchLoop.carried_tokens(writer, self._instr)
-      if carried:
-        # The loop carries this transfer's tokens: in the body they are the
-        # iteration arguments the previous iteration yielded -- the peel's on
-        # the first -- and after it the loop's results.  Naming them is what
-        # lets `asyncmem` count: each wait retires its own group and leaves
-        # the younger ones in flight, where a drain would retire all of them
-        # -- `local_flux` would wait for all five buffers before its first
-        # product.
-        writer.wait(carried[-1], *carried[:-1])
-        return
-      writer.wait()
       return
     if not self._instr._issued_async:
       # Nothing was put in flight: the transfer took the reordering path and

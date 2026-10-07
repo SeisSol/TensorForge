@@ -28,8 +28,7 @@ from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).parent / "cases"
 
-# every case in the corpus whose body has more than one compute slot, so
-# there is something for WrapLoads to peel
+# cases whose bodies have a transfer for `enable_wrap_loads` to peel
 PEELING_CASES = ["accumulate_chain.py", "accumulate_then_read.py",
                  "chain_five.py", "narrow_write_after_wide_read.py"]
 
@@ -88,7 +87,7 @@ def test_peeled_load_reads_a_clamped_element(case_file):
                      enable_wrap_loads=True, move_distance=2)
     head = _before_the_loop(kernel)
     subscripts = _peel_subscripts(head)
-    assert subscripts, "expected WrapLoads to peel at least one transfer"
+    assert subscripts, "expected the wrap to peel at least one transfer"
     named = {v for index in subscripts
              for v in re.findall(r"\bv\d+_batchId1\b", index)}
     assert named, ("no peeled pointer uses the clamped index:\n  "

@@ -233,16 +233,10 @@ def verify(instrs: Sequence[AbstractInstruction],
 
         # -- 6. recurse into regions, tightening the barrier limit
         inner_limit = min(max_barrier_scope, instr.uniform_scope())
-        # Plus what the instruction itself defines on the way in: a batch
-        # loop's peeled transfers, which it emits inside its body but ahead of
-        # the `for`.  Without them a wrapped buffer's first read has no
-        # definition in sight -- although `entering` would call it carried,
-        # and carried is what it is.
-        entry = list(getattr(instr, 'entry_defs', lambda: ())())
         for region in instr.regions():
             diags.extend(verify(region,
                                 max_barrier_scope=inner_limit,
-                                predefined=list(defined) + entry,
+                                predefined=list(defined),
                                 backend=backend,
                                 check_ready=check_ready))
 
@@ -265,11 +259,11 @@ def _check_guarded_prefetch(instr: AbstractInstruction,
 
     ``BatchLoop.mark_unguarded`` lifts a *prefix* of the region out of the
     guard and ``mark_unguarded_tail`` a *suffix* -- the guard is one
-    contiguous block, so those are the two shapes it can leave.  ``WrapLoads``
-    puts every transfer it moves at the tail and marks it, so this should not
-    fire for anything it produced.  It is the check that a transfer for
-    another element is never left under this element's mask, whichever pass
-    put it there.
+    contiguous block, so those are the two shapes it can leave.  The prefetch
+    hints put what they issue for the next element there and mark it, so
+    this should not fire for anything they produced.  It is the check that an
+    instruction for another element is never left under this element's mask,
+    whichever pass put it there.
     """
     from tensorforge.backend.instructions.batch_loop import BatchLoop
     from tensorforge.backend.instructions.ptr_manip import GetElementPtr

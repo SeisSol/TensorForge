@@ -51,7 +51,7 @@ class _Unset:
 UNSET = _Unset()
 
 #: A comma-separated ``name=value`` list setting any declared option, e.g.
-#: ``TF_OPTIONS=enable_pipeline=1,move_distance=2``.  A bare ``name`` means
+#: ``TF_OPTIONS=enable_wrap_loads=1,move_distance=2``.  A bare ``name`` means
 #: ``name=1``.
 OPTIONS_ENV = 'TF_OPTIONS'
 
@@ -340,22 +340,18 @@ declare('enable_sync_block_opt',
         default=True,
         doc='Drop barriers a data-flow argument shows to be redundant.')
 
-declare('enable_pipeline',
-        default=False,
-        doc='Software pipelining: advance the address computation of a transfer '
-            'ahead of the iteration that consumes it.\n'
-            'Off pending hardware numbers; correctness does not block it.')
-
 declare('enable_multibuffer',
         default=False,
-        doc='Rotate the shared-memory buffers on top of the advanced addresses. '
-            'Needs `enable_pipeline`, since the rotation reads the advanced '
-            'pointer, and is implemented for `pipeline_depth == 2` only -- see '
-            'backend/opt/pipeline.py.')
-
-declare('pipeline_depth',
-        default=2,
-        doc='Stages a rotating buffer holds.')
+        doc='Give a shared transfer `enable_wrap_loads` moves a second stage, '
+            'and issue it at the head of the body instead of at its tail: a '
+            'whole iteration ahead of its first read, into the stage the '
+            'iteration does not read.\n'
+            'For copies the hardware carries out asynchronously only -- a '
+            'transfer written as loads and stores stalls on its loads where '
+            'it is issued, at the head as at the tail.  The second stage '
+            'doubles the buffer, and a launch pays for it in occupancy, so it '
+            'is asked for rather than given: off pending hardware numbers.  '
+            'See backend/pir/wrap.py.')
 
 declare('enable_move_loads',
         default=True,
@@ -376,13 +372,13 @@ declare('enable_wrap_loads',
             'element at the tail of the current iteration, after the last '
             'instruction that touches its buffer -- where MoveLoads would put '
             'it in the loop unrolled once.  One buffer copy, register and '
-            'shared destinations alike; see backend/opt/wrap.py.')
+            'shared destinations alike; see backend/pir/wrap.py.')
 
 declare('move_distance',
         default=1,
         doc='How many loads a transfer is moved ahead by.  `MoveLoads` lets a '
             'load travel past this many earlier loads before it stops (1: the '
-            'one before it); `WrapLoads` wraps the transfers whose '
+            'one before it); `enable_wrap_loads` wraps the transfers whose '
             'move runs across the back edge, which are the first this many of '
             'the body.  A dependence stops a transfer whatever the distance.')
 
@@ -890,7 +886,7 @@ declare('prefetch_data',
         default=False,
         env='TF_PREFETCH_DATA',
         parse=parse_bool,
-        doc='Hint the next element\'s data where `WrapLoads` would issue its '
+        doc='Hint the next element\'s data where `enable_wrap_loads` would issue its '
             'transfer -- the tail of the loop body -- and leave the transfer '
             'where it is.\n'
             'The transfer itself moved costs a register image or a buffer '

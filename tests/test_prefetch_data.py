@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 """`Options.prefetch_data`: the next element's operands, hinted where
-`WrapLoads` would fetch them, with the transfers left where they are.
+`enable_wrap_loads` would fetch them, with the transfers left where they are.
 
 Held here: off unless asked, ESIMD included; under ESIMD the hints of a body
 are gathered a line per lane, elsewhere one line each; the transfers
@@ -95,9 +95,10 @@ def test_the_transfers_stay_where_they_are():
 
 
 def test_pointer_hints_stand_beside_a_wrapped_transfer():
-    """The pointer hints sit outside the flag guard.  Inside it, ahead of the
-    unguarded prefix `WrapLoads` makes, the guard -- one block -- could not be
-    formed, and neither option combination would generate."""
+    """The pointer hints sit outside the flag guard, at the head of the body,
+    and the wrap moves a transfer out of it, to the tail: both are for the
+    successor, which a masked element has as well, and the three options
+    generate together."""
     for backend, arch in (('esimd', 'pvc'), ('cuda', 'sm_100')):
         src = _kernel(backend, arch, enable_prefetch=True,
                       enable_wrap_loads=True, prefetch_data=True)

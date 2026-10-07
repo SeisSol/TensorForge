@@ -34,6 +34,7 @@ from .asyncmem import schedule_async
 from .allocate import allocate
 from .barriers import place_barriers
 from .core import Stmt, dump
+from .wrap import wrap_loads
 from .passes import (converge_crosslane, cse, dce, flatten_scopes, fold,
                      if_convert, licm, load_cse, verify)
 
@@ -163,13 +164,15 @@ class PlaceBarriers(Pass):
                                  report=self._report)
 
 
-class WrapPrefetch(Pass):
-    """Move each loop's transfer one iteration earlier (`wrap.wrap_prefetch`).
+class WrapLoads(Pass):
+    """Issue a batch loop's first transfers one element ahead
+    (`wrap.wrap_loads`).
 
-    `wrap` is the pass itself or a stand-in with its signature -- the rotation
-    query asks its questions through one (`Generator._rotation_targets`).
-    `make_value` mints the values the moved transfer carries, and `report`
-    collects the reasons a loop was left alone.
+    Behind everything that cleans the body up -- the transfers sit in the
+    scopes the loaders open until ``flatten`` has removed them -- and ahead
+    of the allocator and the barriers, which have to see where the moved
+    transfer ended up.  `scratch` makes the builder the added statements are
+    built with, and `report` collects what moved and why the rest did not.
     """
 
     name = 'wrap'
@@ -177,17 +180,19 @@ class WrapPrefetch(Pass):
     preserves = ('flat',)
     is_transform = True
 
-    def __init__(self, wrap, make_value, report: Optional[List[str]] = None):
-        self._wrap = wrap
-        self._make_value = make_value
+    def __init__(self, scratch, distance: int = 1,
+                 report: Optional[List[str]] = None):
+        self._scratch = scratch
+        self._distance = distance
         self._report = report
 
     def run(self, pc: BodyContext) -> None:
-        pc.body = self._wrap(pc.body, self._make_value, report=self._report)
+        pc.body = wrap_loads(pc.body, self._scratch, distance=self._distance,
+                             report=self._report)
 
 
 def standard_pipeline(debug: str = '',
-                      prefetch: Optional[WrapPrefetch] = None,
+                      wrap: Optional[WrapLoads] = None,
                       place: Optional[PlaceBuffers] = None,
                       barriers: Optional[PlaceBarriers] = None) -> PassManager:
     """The passes every body goes through, in their order.
@@ -228,7 +233,7 @@ def standard_pipeline(debug: str = '',
     missing is not reachable by any local swap: more than half the transfers
     have five statements or fewer of cover, and getting more means moving an
     issue across the loop back edge, which is a different transformation with
-    a distance parameter and a prologue -- `prefetch`, where it is asked for,
+    a distance parameter and a prologue -- `wrap`, where it is asked for,
     which goes behind everything that cleans the body up: the transfers sit
     in the anonymous scopes the loaders open until ``flatten`` has removed
     them.
@@ -246,8 +251,15 @@ def standard_pipeline(debug: str = '',
                      ('cse', cse), ('loads', load_cse), ('licm', licm),
                      ('cse2', cse), ('dce', dce)):
         pm.add(Rewrite(name, fn, preserves=('flat',)))
-    if prefetch is not None:
-        pm.add(prefetch)
+    if wrap is not None:
+        pm.add(wrap)
+        # What the moved transfers read is computed again for the elements
+        # they are for, and what of it does not depend on the element is
+        # the same computation twice: hoisted, merged, and the originals
+        # nobody reads any more gone.
+        for name, fn in (('wrap-licm', licm), ('wrap-cse', cse),
+                         ('wrap-dce', dce)):
+            pm.add(Rewrite(name, fn, preserves=('flat',)))
     if place is not None:
         pm.add(place)
     if barriers is not None:
@@ -258,19 +270,19 @@ def standard_pipeline(debug: str = '',
 
 def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              debug: str = '', diagnostics: Optional[List[str]] = None,
-             prefetch: Optional[WrapPrefetch] = None,
+             wrap: Optional[WrapLoads] = None,
              place: Optional[PlaceBuffers] = None,
              barriers: Optional[PlaceBarriers] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
     ``diagnostics`` collects what the scheduler could not determine;
-    ``prefetch`` adds the prefetch pass ahead of the scheduler, ``place``
-    the placement of shared memory and ``barriers`` the barriers behind it;
+    ``wrap`` adds the transfers moved across the back edge, ``place`` the
+    placement of shared memory and ``barriers`` the barriers behind both;
     ``where`` names what built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
-    standard_pipeline(debug, prefetch, place, barriers).run(pc)
+    standard_pipeline(debug, wrap, place, barriers).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

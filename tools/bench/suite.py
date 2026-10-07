@@ -144,12 +144,14 @@ class BuildUnit:
 CONFIGS: Dict[str, Config] = {
     'baseline': Config('baseline'),
     'wave': Config('wave', lane_ceiling=None, wave_wide=True),
-    'pipeline': Config('pipeline', Options(enable_pipeline=True)),
-    'multibuffer': Config('multibuffer',
-                          Options(enable_pipeline=True,
-                                  enable_multibuffer=True)),
     'wrap1': Config('wrap1', Options(enable_wrap_loads=True, move_distance=1)),
     'wrap2': Config('wrap2', Options(enable_wrap_loads=True, move_distance=2)),
+    # One axis away from `wrap1` rather than from `baseline`: the second
+    # stage is something a moved transfer gets, so the question it answers
+    # is what the stage buys over the move alone.
+    'multibuffer': Config('multibuffer',
+                          Options(enable_wrap_loads=True, move_distance=1,
+                                  enable_multibuffer=True)),
     # The two sides of the prologue question.  Named rather than left to the
     # vendor default so a run states which one it measured: `preload` stages
     # every batch-constant operand into shared memory once per block,

@@ -82,9 +82,10 @@ def test_the_switch_is_off_by_default():
 def test_off_leaves_the_kernel_byte_identical():
     """The property that makes the switch purely additive.
 
-    It inserts at the head of a region that `MoveLoads`, `WrapLoads` and
-    `Pipeline` also rewrite, so "does nothing when disabled" is a claim about
-    ordering as much as about the guard on the pass.
+    It inserts at the head of a region that `MoveLoads` rewrites as well,
+    and that the wrap rewrites once it is a body, so "does nothing when
+    disabled" is a claim about ordering as much as about the guard on the
+    pass.
     """
     assert (_kernel(Addressing.PTR_BASED)
             == _kernel(Addressing.PTR_BASED, enable_prefetch=False))

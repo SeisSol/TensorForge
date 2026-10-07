@@ -7,17 +7,14 @@
 the other gap: statements the Writer emits directly, which no body ever
 contained and no pass can therefore see.
 
-The distinction matters for one reason.  A pass may reorder statements inside a
-body; the reorder predicate in `pir/schedule.py` says when.  What no pass can
-do is move a statement across a construct that is not in the IR --- and the
-batch loop is exactly that.  `BatchLoop.gen_code_inner` opens `writer.For(...)`
-and emits the body inside it, so the loop, its back edge, its induction
-variable and its lookahead bindings are all Writer text.  A body sits *inside*
-the loop and has no way to refer to it.
-
-That is the whole reason `WrapLoads` lives at macro level: moving a transfer to
-the previous iteration means peeling a prologue and rewriting an index to
-`batchId1`, and neither is expressible against a loop the IR cannot name.
+The distinction matters because a pass moves a statement only inside a body,
+and only across what the body contains.  The batch loop is part of the
+section's body: its index, the successor and the first element it names and
+the per-element flag guard are statements, which is what lets
+`enable_wrap_loads` move a transfer across the loop's back edge
+(`pir/wrap.py`).  What is left outside is the frame around the bodies -- the
+signature, the launch bounds, the declaration of dynamic shared memory -- and
+a number that grows here is something the passes have stopped seeing.
 
     python3 tools/macro_surface.py
 """
@@ -117,10 +114,10 @@ def main() -> int:
     print(f'\n{len(rows)} kernels, {t} lines of body')
     print(f'  through a PIR body: {p} ({100 * p / max(t, 1):.1f}%)')
     print(f'  emitted directly:   {o} ({100 * o / max(t, 1):.1f}%)')
-    print('\nThe remainder is the section scaffolding: the batch loop and its '
-          'header,\nthe flag guard, the lookahead bindings and the stage '
-          'counter.  A pass can\nreorder inside a body; it cannot move '
-          'anything across a loop it cannot name.')
+    print('\nThe remainder is the frame around the bodies: the signature, the '
+          'launch\nbounds and the declaration of dynamic shared memory.  A '
+          'pass moves statements\ninside a body; what is out here, none of '
+          'them sees.')
     return 0
 
 

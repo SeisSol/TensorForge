@@ -33,7 +33,7 @@ from .build import IRBuilder, access_of
 from .passes import cluster_loads, flatten_scopes, if_convert, pressure, cse, dce, fold, licm, load_cse, substitute, verify
 from .barriers import Arena
 from .pipeline import (BodyContext, PlaceBarriers, PlaceBuffers,
-                       WrapPrefetch, optimize, standard_pipeline)
+                       WrapLoads, optimize, standard_pipeline)
 from .emit import Emitter, emit
 
 __all__ = [
@@ -44,6 +44,6 @@ __all__ = [
     'cse', 'dce', 'cluster_loads', 'flatten_scopes', 'if_convert', 'pressure', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
     'free_values', 'licm', 'load_cse', 'may_alias', 'optimize', 'place_commits',
     'schedule_async', 'standard_pipeline', 'strip_commits',
-    'substitute', 'verify', 'PlaceBarriers', 'PlaceBuffers', 'WrapPrefetch',
+    'substitute', 'verify', 'PlaceBarriers', 'PlaceBuffers', 'WrapLoads',
     'walk',
 ]

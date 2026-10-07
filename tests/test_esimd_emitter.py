@@ -416,7 +416,7 @@ def test_narrowing_refuses_a_straddling_vector():
 
 
 # --------------------------------------------------------------------------
-# sliced and rotating stores on the structured path
+# sliced stores on the structured path
 # --------------------------------------------------------------------------
 
 def test_a_sliced_lead_index_still_takes_the_structured_path():
@@ -434,21 +434,6 @@ def test_a_sliced_lead_index_still_takes_the_structured_path():
     # of the representation; `unwrap_lead` is what both store paths ask.
     idx = LeadIndex(0, 16, 1, offset=32)
     assert unwrap_lead(idx) is not None
-
-
-def test_the_pointer_override_does_not_move_the_alias_root():
-    """A rotating buffer's stages are one buffer.
-
-    `pointer` changes the name written through and nothing else -- telling a
-    pass the stages were separate would let it reorder a fill past a read of
-    the stage being filled.
-    """
-    from tensorforge.backend.pir.core import MemSpace
-    b = _builder('esimd')
-    buf = b.alloc(Datatype.F32, (16,), MemSpace.REGISTER, hint='s')
-    stmt = b.store(buf, b.const(1.0), 0, pointer='stage1')
-    assert stmt.attr('pointer') == 'stage1'
-    assert stmt.accesses[0].base is b.alias_root(buf)
 
 
 # --------------------------------------------------------------------------

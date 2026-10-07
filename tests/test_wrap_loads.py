@@ -31,12 +31,11 @@ import pytest
 
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
-from tensorforge.backend.opt.slots import Transfer
 
 CASES = Path(__file__).parent / "cases"
 
-# n = 4 compute slots on both backends, with register transfers on each; the
-# shape the ADER derivative chain has.
+# Four products in a row with register transfers between them on both
+# backends; the shape the ADER derivative chain has.
 CHAIN = "chain_five.py"
 
 
@@ -67,21 +66,6 @@ def _wrapped_buffers(kernel: str):
                    re.finditer(r'\bwrap_glb_\w+\[', kernel)} |
                   {m.group(1) for m in
                    re.finditer(r'(\br\d+)\[[^\]]*\]\s*=', kernel)})
-
-
-# ---------------------------------------------------------------------- #
-# the accounting
-# ---------------------------------------------------------------------- #
-
-@pytest.mark.parametrize("d,span,n,expected", [
-    (1, 0, 4, 1),      # the plain case: one consumer, distance well inside
-    (3, 0, 4, 1),      # d = n - 1 is still one copy
-    (4, 0, 4, 2),      # d = n needs the second, which is what Pipeline does
-    (2, 2, 4, 2),      # ... and so does a two-slot span at half the distance
-    (1, 2, 4, 1),      # d + span + 1 == n exactly: still one
-])
-def test_copies_counts_the_span_not_just_the_distance(d, span, n, expected):
-    assert Transfer.copies(d, n, span) == expected
 
 
 # ---------------------------------------------------------------------- #

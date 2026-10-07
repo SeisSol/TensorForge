@@ -1,22 +1,17 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Can `Op.FOR` render the loop the macro layer owns?
+"""`Op.FOR` renders the batch loop's header.
 
-Making `BatchLoop` a PIR loop is the step that would let a transfer move to the
-previous iteration -- `tools/macro_surface.py` measures why: the loop, its
-induction variable and its lookahead bindings are the 2% of a kernel that no
-body contains, so no pass can move anything across the back edge.
-
-Before restructuring the generator around that, the cheap half is worth
-checking on its own: does a PIR loop *emit* the header that is there today,
-character for character?  Two things have to give.  The induction variable
-carries the name `batchId0` that the lookahead bindings, the flag guard and
-every `access_address` in the body spell out, so the IR cannot pick one
-unrelated to it -- it names the value from that hint and its own number,
-`v8_batchId0`, which is the one difference between the two sides and the one
-`_same_but_for_the_number` takes out.  And its type is `size_t`, because it is
-compared against `numElements0`, where `INDEX` renders to `int32_t`.
+The batch loop is a loop of the section's body -- which is what lets a pass
+move a transfer across its back edge (`pir/wrap.py`) -- and its header has to
+come out the way the recorded kernels spell it.  Two things have to give.
+The induction variable carries the name `batchId0` the rest of the kernel is
+read by, so the IR cannot pick one unrelated to it -- it names the value from
+that hint and its own number, `v8_batchId0`, which is the one difference
+between the two sides and the one `_same_but_for_the_number` takes out.  And
+its type is `size_t`, because it is compared against `numElements0`, where
+`INDEX` renders to `int32_t`.
 
 The expected string below is copied from a recorded snapshot rather than
 written by hand, so it fails if either side moves.
@@ -36,8 +31,8 @@ from tensorforge.common.vm.vm import vm_factory
 
 SNAPSHOTS = Path(__file__).resolve().parent / "snapshots"
 
-#: The header as the generator emits it today, for the persistent loop mode,
-#: with the value's number taken out of the induction variable's name.
+#: The header the generator emits for the persistent loop mode, with the
+#: value's number taken out of the induction variable's name.
 EXPECTED = ("for (size_t batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); "
             "batchId0 < numElements0; "
             "batchId0 += (gridDim.x * blockDim.y)) {")
@@ -68,8 +63,9 @@ def test_the_expected_header_is_the_one_in_the_corpus():
 def test_a_pir_loop_renders_that_header():
     b = IRBuilder(fptype=Datatype.F32)
     g = b.alloc(Datatype.F32, (16,), MemSpace.GLOBAL, hint="g")
-    # Parenthesised as the macro layer writes it, which is the other half of
-    # emitting the same header: the expression is the caller's text either way.
+    # Parenthesised as the generator writes it, which is the other half of
+    # emitting the same header: the expression is the caller's text, and so
+    # is its precedence.
     with b.for_("(threadIdx.y + blockDim.y * (blockIdx.x))", "numElements0",
                 "(gridDim.x * blockDim.y)",
                 extern="batchId0", index_type=SIZE):
@@ -81,8 +77,7 @@ def test_a_pir_loop_renders_that_header():
     emit(optimize(body), w, vm_factory("sm_86", "cuda", "float"))
     lines = [_same_but_for_the_number(l) for l in w.get_src().splitlines()]
     assert EXPECTED in lines, (
-        "a PIR loop must be able to spell the header the macro layer emits, "
-        "or the migration changes generated code for no reason:\n"
+        "the PIR loop no longer spells the header the snapshots record:\n"
         + "\n".join(lines))
 
 

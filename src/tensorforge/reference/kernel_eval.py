@@ -37,10 +37,10 @@ _DECL = re.compile(
     # onto it, and the oracle has to read past it to find the array.
     r'^(?:alignas\s*\(\s*\d+\s*\)\s+)?'
     r'(?:const\s+)?(?:__restrict__\s+)?'
-    # `uint32_t` is what every kernel built with prefetch needs: `wrap.py`
-    # emits `uint32_t pipeStage0` as its bookkeeping, and without a match the
-    # whole configuration would abort at the first line of the loop -- the one
-    # path that most needs an oracle would have none.
+    # `uint32_t` is how a kernel built with `enable_wrap_loads` holds the flag
+    # words it carries across the loop (`pir/wrap.py`), and without a match
+    # the whole configuration would abort ahead of the loop -- the one path
+    # that most needs an oracle would have none.
     r'(?:tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>|float[234]|double[234]|'
     r'u?int(?:8|16|32|64)_t|float|double|int|unsigned|size_t|bool|auto|'
     r'__float128|char)'

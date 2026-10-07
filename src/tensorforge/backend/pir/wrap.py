@@ -3,525 +3,997 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileContributor: David Schneller
 
-"""Pseudo-IR: moving a prefetch across the back edge.
+"""Pseudo-IR: the transfer for the next element, issued across the back edge.
 
-`schedule.can_reorder` licenses swaps within a body, and the schedule is
-already at their fixed point: the wait sits immediately before the read that
-needs it, the issue immediately after the binding it reads, and more than half
-the transfers have five statements or fewer of cover.  The distance that is
-missing is not reachable by any local move.  It is one iteration away.
+The batch loop computes one element per iteration, and each iteration starts
+by fetching its operands: the load waits at the first statement that reads
+them, with nothing of the iteration left to overlap it with.  What could
+overlap it is the previous iteration.  So this pass moves a transfer one
+element ahead: iteration ``k`` issues the transfer for element ``k + 1`` once
+it is done with the buffer, and the first element's transfer is peeled ahead
+of the loop::
 
-So this pass reaches across the back edge.  A transfer issued for element `k`
-and waited in the same iteration becomes a transfer issued for element `k+1`
-and waited in the *next* iteration::
+    before:   for k { [ l1 c1 l2 c2 ] }
+    after:    l1(first)  for k { [ c1 l2 c2 ]  l1(k + 1) }
 
-    %t0 = copy.async  ...                 # peeled, for element 0
-    %tn = for %k iter(%t = %t0) {
-            %t1 = copy.async ... %next    # for element k+1
-            wait %t                       # what k-1 issued -- prior = 1
-            ... compute on it ...
-            yield %t1
-          }
-    wait %tn                              # drain
+Where the moved transfer goes is decided by dependence and not by a count of
+slots: at the tail of the body, after the per-element flag guard.  Behind
+everything that reads its buffer, so one buffer is enough; and outside the
+guard, so a masked element still fetches its successor -- element ``k`` being
+masked says nothing about ``k + 1``, and a fetch under ``k``'s mask would leave
+``k + 1`` without its operands.
 
-The accounting is the slot census's.  A body of `n` compute slots carrying a
-transfer at distance `d` needs `ceil((d + 1) / n)` copies of its buffer, so
-`d <= n - 1` is free: one copy, no rotation, no stage index.  This pass does
-`d = n`, one whole iteration, which is the first value that needs two -- and
-that is why it takes the destination buffer as something the caller has
-already double-buffered, rather than pretending the copies are free.
+*Which transfers* is ``distance``, the number of loads a transfer is moved
+ahead by.  In the loop unrolled once, the ``j``-th transfer of an iteration
+moves up past ``distance`` loads, and that runs off the top of the body into
+the previous iteration exactly when ``j < distance``.  So the first
+``distance`` transfers of the body wrap, in body order, and the rest stay.
 
-What it refuses, and why each one would be wrong:
+*What a transfer is* is read off the accesses: a statement of the
+per-element body that reads global memory and writes one register array or
+one shared window, and nothing else.  The statements of one transfer follow
+each other -- a hop loop and its predicated tail, the copies and the guard
+around the last of them -- and move together, with the comments and the
+`mark defines` that lead them.
 
-* **A transfer whose token is not waited in the same region.**  Then the pass
-  does not know what it would be moving away from.
-* **A destination read before the wait.**  The read would see the value the
-  *next* element's transfer is landing into.
-* **Anything between the issue and the wait that `can_reorder` will not let
-  the issue cross.**  Crossing the back edge is a stronger move than a swap,
-  so it needs at least the same license.
-* **A loop that already carries the token.**  Applying this twice would build
-  a distance of two iterations behind one buffer.
+*What may move.*  The transfer for ``k + 1`` comes from its place in
+iteration ``k + 1``, so it crosses what stands ahead of it there, and then
+everything of iteration ``k`` behind the buffer's last access -- which is
+nothing it could conflict with, by construction.  So the questions are about
+the stretch ahead of it in its own iteration:
+
+* nothing there touches its buffer, or says nothing about what it touches;
+* nothing there writes the memory it reads -- the element it fetches for
+  ``k + 1`` is written in ``k + 1`` by that store, after the fetch would have
+  read it.  Where the source does not depend on the element at all, any store
+  to it in the body counts, since then every iteration reads the same data;
+* for a shared buffer, no barrier there: it orders what other threads did to
+  shared memory, and the buffer is shared;
+* the buffer is written by this transfer alone, so that it holds one element
+  for the whole iteration;
+* and what the transfer reads can be computed for another element: the
+  statements of the loop it depends on -- the pointer binding, the arithmetic
+  -- are cloned with the next element's index for the tail and the first
+  element's for the peel, so they have to be free of effects.
+
+*What the moved transfer needs* besides its place:
+
+* a register buffer declared outside the loop, since a declaration in the
+  body is a fresh object every iteration;
+* a shared buffer's copies retired where they are read: the loop carries the
+  completion tokens across its back edge -- the peel's start it, the tail's
+  are yielded -- and the wait at the consumer names the carried ones; the
+  last iteration's copy, issued for an element nobody reads, is drained after
+  the loop, since the memory it lands in may be the next section's;
+* where the address is a pointer of the element's own, read out of an array,
+  the transfer follows it only for an element the caller did not mask:
+  under that element's flag, the next element's at the tail and the first's
+  in the peel.  The array entry itself is read unconditionally, at a clamped
+  index that is in range;
+* and where the loop has a mask, the flags ride the loop.  Read at the head,
+  an element's flag is a load its guard waits on at once, and where the
+  counter retires loads in order that wait is for every transfer the previous
+  tail issued as well.  So the flag words of this element and the next come
+  in with the iteration, and the one two ahead is read at its head -- a load
+  with a whole iteration to arrive.  The word and not the condition: a
+  comparison right behind the load is a use right behind it.
+
+Barriers and the buffer's place are not this pass's: the barrier placement
+fences the tail's write against the reads before it and the reads at the head
+of the next iteration against it (`barriers`), and the allocator keeps a
+buffer in flight across the back edge live there (`allocate`).
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Dict, List, Optional, Sequence, Tuple
+import re
+from dataclasses import dataclass, field, replace
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+from tensorforge.common.basic_types import Datatype
 
 from .asyncmem import strip_commits
-from .core import (Effect, Op, Region, Stmt, TokenType, Value,
-                   accesses_conflict, walk_stmts)
-from .passes import substitute
-from .schedule import (_defines, _touches_fixed, _uses, may_cross,
-                       touches)
+from .core import (BOOL, SCALAR_LAYOUT, SIZE, Access, Effect, MemSpace, Op,
+                   Region, ScalarType, Stmt, Value, walk_stmts)
 
-
-def _why_not(group: Sequence[Stmt], fixed: Stmt) -> str:
-    """Name what blocks a crossing, because "a rawblock" is not a reason.
-
-    A `rawblock` may be in the way because it *writes the same shared buffer*
-    the transfer does -- which, said out loud, is not an obstacle at all but
-    a symptom: a macro copy is split into hops, some of them direct
-    statements of the guard and the rest inside an unrolled loop, and a group
-    that collected only the direct ones would refuse to move a transfer past
-    itself.
-    """
-    if not fixed.movable:
-        detail = 'immovable'
-    elif fixed.effect & (Effect.BARRIER | Effect.UNKNOWN):
-        detail = 'barrier or unknown effect'
-    else:
-        detail = 'undescribable subtree'
-    tf = _touches_fixed(fixed)
-    if tf is None:
-        return detail
-    for g in group:
-        tm = touches(g)
-        for x in tm or ():
-            for y in tf:
-                if accesses_conflict(x, y):
-                    base = getattr(y.base, 'name', None) or getattr(
-                        y.base, 'hint', y.base)
-                    return f'both touch {base}'
-    if any(_defines(g) & _uses(fixed) or _defines(fixed) & _uses(g)
-           for g in group):
-        return 'def-use'
-    return detail
+#: The effects a statement the pass computes again for another element may
+#: not have.
+_SIDE = Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN
 
 
 class Refusal(Exception):
-    """Why a loop was left alone.  Carried rather than logged: the caller
-    asked for a transformation and is entitled to the reason it did not
-    happen."""
+    """Why a transfer, or a loop, was left where it is.  Carried rather than
+    logged: the caller asked for a transformation and is entitled to the
+    reason it did not happen."""
 
 
-def _sole_async(region: Region) -> Tuple[int, Stmt, Optional[int]]:
-    """The one async issue, whether it is the loop's or its guard's.
+def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
+               distance: int = 1,
+               report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+    """`body` with the first `distance` transfers of each batch loop issued
+    one element ahead.
 
-    Returns ``(index, statement, guard_index)``, where `guard_index` is the
-    position of the `Op.IF` it was found inside, or None if it was a direct
-    statement of the loop.
+    `scratch` makes a builder for the statements this adds -- the clones,
+    the flag reads, the carried values -- whose values are new in `body`
+    (`IRBuilder.scratch`).  `report` collects one line per transfer: `+` and
+    the buffer where it moved, `-` and the reason where it did not.
 
-    Looking inside one guard is not a convenience.  The batch loop's guard is
-    *per element* -- `flags0[batchId0]` -- so element k being masked says
-    nothing about k+1, and a prefetch for k+1 that sits under k's mask breaks
-    the chain for every element after a masked one.  A transfer moved across
-    the back edge therefore has to leave the guard, which is the same rule
-    `_split_guard` already applies to barriers and for the same reason: what
-    the next iteration depends on cannot be conditional on this one.
+    A batch loop is a `for` that names its successor index and its first
+    element (`next`, `first`).  A traversal that has no first element to
+    name has no peel -- a group of rows driven in lockstep is one -- and is
+    left alone.
     """
-    def _carries_async(st):
-        return any(x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)
-                   for x in walk_stmts((st,)))
-
-    guards = [(i, g) for i, g in enumerate(region.body) if g.op is Op.IF]
-    if len(guards) > 1:
-        raise Refusal('more than one guard in the body; which one a transfer '
-                      'must leave is then a choice rather than a fact')
-    direct = [st for st in region.body
-              if st.op is not Op.IF and _carries_async(st)]
-    inside = ([st for st in guards[0][1].regions[0].body if _carries_async(st)]
-              if guards else [])
-    if direct and inside:
-        raise Refusal('transfers on both sides of the guard; which of them is '
-                      'the transfer is then a choice rather than a fact')
-    group = direct or inside
-    if not group:
-        raise Refusal('no async transfer in the body')
-    guard_at = guards[0][0] if inside else None
-
-    # The unit is a *section*, not a set of statements.
-    #
-    # A macro copy is split into hops of 4, 2 and 1 elements per lane plus a
-    # predicated tail.  Some hops are direct statements; the rest are inside
-    # an unrolled loop.  Collecting only the direct ones would leave the loop
-    # standing between a transfer and its wait, writing the same buffer -- so
-    # the pass would refuse to move a transfer past itself, and say so as
-    # `both touch s0`.
-    #
-    # Widening the group to reach *into* the loop would be wrong: pulling
-    # statements out of a loop changes how many times they run.  What crosses
-    # the back edge is every top-level statement whose subtree issues, the
-    # loop included and whole.
-    scope = (region.body[guard_at].regions[0].body if guard_at is not None
-             else region.body)
-    tokens = {t.id for st in group for x in walk_stmts((st,)) for t in x.target
-              if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)}
-    waits = [w for w in scope if w.op is Op.WAIT
-             and any(isinstance(a, Value) and a.id in tokens for a in w.args)]
-    if len(waits) != 1:
-        raise Refusal(f'{len(tokens)} transfers retired by {len(waits)} '
-                      f'waits; a group is what one wait consumes')
-    if not tokens <= {a.id for a in waits[0].args if isinstance(a, Value)}:
-        raise Refusal('the wait does not name every token of the group')
-    return group, waits[0], guard_at
-
-
-def wrap_prefetch(body: Tuple[Stmt, ...], make_value,
-                  next_index: Optional[Dict[int, Value]] = None,
-                  report: Optional[List[str]] = None,
-                  assume_rotated: bool = False) -> Tuple[Stmt, ...]:
-    """Move each loop's single async issue one iteration earlier.
-
-    ``next_index`` maps an operand id to the value that names the *next*
-    element -- the loop's lookahead binding.  The pass does not invent it: a
-    clamped successor index is a property of how the loop is traversed, which
-    the loop knows and the IR does not.
-
-    ``assume_rotated`` drops the one refusal that is about *space* rather than
-    about legality: with two copies of the destination, the transfer for k+1
-    no longer lands in the buffer k is reading.  It exists so the question
-    "would rotation help here" can be asked of the pass itself rather than of
-    a second predicate written to imitate it -- because the decision to
-    allocate two copies has to be made before the body exists, and a copy of
-    these criteria kept elsewhere is a copy that drifts.
-
-    ``make_value(type, hint, quals)`` mints the carried token, the loop result
-    and the prologue's.  A factory rather than a builder, because the
-    statements this produces go where the pass puts them, not where a builder's
-    cursor happens to be.
-    """
-    # A commit records where a group closed, and this pass is about to change
-    # that: the peel closes one group before the loop and the body closes
-    # another inside it.  So the commits from the earlier `schedule_async` go
-    # first, and the `schedule_async` that follows this pass puts them back --
-    # otherwise the group boundary an issue was moved out of would still be
-    # standing between that issue and its wait.
+    if distance < 1:
+        raise ValueError(f'move distance must be >= 1, got {distance}')
+    given = body
+    # A commit records where a group closed in the schedule it was placed
+    # for; the scheduler places them again behind this pass.
     body = strip_commits(body)
+    allocs = {s.target[0].id: s for s in walk_stmts(body)
+              if s.op is Op.ALLOC and s.target}
     out: List[Stmt] = []
+    copied: List[Stmt] = []
+    rewritten = False
     for s in body:
-        if s.op is not Op.FOR:
-            out.append(s)
-            continue
-        mapping = next_index
-        if mapping is None:
-            nxt = s.attr('next')
-            mapping = ({s.induction.id: nxt} if nxt is not None else None)
-        if mapping is None:
-            if report is not None:
-                report.append('loop does not name its successor index')
+        if (s.op is not Op.FOR or s.attr('next') is None
+                or s.attr('first') is None):
             out.append(s)
             continue
         try:
-            out.extend(_wrap_one(s, make_value, mapping, assume_rotated))
+            rewrite = _Loop(s, allocs, scratch, report).wrap(distance)
+            before, loop, after = rewrite.run()
         except Refusal as why:
             if report is not None:
-                report.append(str(why))
+                report.append(f'- loop: {why}')
             out.append(s)
-    return tuple(out)
-
-
-def _wrap_one(loop: Stmt, make_value,
-              next_index: Dict[int, Value],
-              assume_rotated: bool = False) -> Sequence[Stmt]:
-    region = loop.regions[0]
-    if any(isinstance(a.type, TokenType) for a in region.args):
-        raise Refusal('this loop already carries a token')
-
-    group, wait, guard_at = _sole_async(region)
-    scope = (region.body if guard_at is None
-             else region.body[guard_at].regions[0].body)
-    i_wait = next(i for i, s in enumerate(scope) if s is wait)
-    first = min(i for i, s in enumerate(scope) if s in group)
-    if i_wait < first:
-        raise Refusal('the wait precedes the issue; nothing to stretch')
-
-    if guard_at is not None:
-        # Leaving the guard means the group may no longer use anything the
-        # guard defines -- including its condition, which it must not depend
-        # on: the whole point is that a masked element still prefetches.
-        inner = region.body[guard_at].regions[0]
-        inside_defs = {t.id for s in inner.body if s not in group
-                       for t in s.target}
-        inside_defs |= {a.id for a in inner.args}
-        if any(isinstance(a, Value) and a.id in inside_defs
-               for s in group for a in s.args):
-            raise Refusal('the transfer reads something the guard defines, so '
-                          'it cannot be issued outside it')
-
-    between = [s for s in scope[first:i_wait] if s not in group]
-    for s in between:
-        if not all(may_cross(g, s) for g in group):
-            raise Refusal(f'the issue may not cross a `{s.op}` between it and '
-                          f'its wait ({_why_not(group, s)}), so it may not '
-                          f'cross the back edge either')
-
-    # The destination must not be read anywhere in the body.
-    #
-    # This is the slot census's accounting, enforced rather than assumed.
-    # A transfer at distance `d` in a body of `n` slots needs
-    # `ceil((d + 1) / n)` copies of its buffer; this pass does `d = n`, one
-    # whole iteration, which is the first value that needs two.  With one
-    # copy, the transfer this iteration issues for element k+1 lands in the
-    # buffer iteration k is reading -- a race that the wait does not cover,
-    # because the wait is for the *previous* transfer.
-    #
-    # So a single-buffered destination is refused, not silently accepted.
-    # Rotating the buffer is a separate transformation with its own cost, and
-    # a pass that quietly assumed someone else had done it would be wrong in
-    # exactly the cases where nobody had.
-    # From the subtree on *both* sides.  The reader side below says why; the
-    # same is true of the write, and more quietly: a group member is a
-    # `rawblock` or a hop loop, neither of which carries an access of its own,
-    # so `g.accesses` would be empty and `any(... for w in dst_writes)` would
-    # be `any([])` for every reader in the body -- the refusal could not fire
-    # at all, and every single-buffered destination would be accepted.
-    dst_writes = [a for g in group for x in walk_stmts((g,)) for a in x.accesses
-                  if a.writes]
-    # The whole subtree, not the top level.  The compute reads its operand
-    # inside nested loops, so a one-level scan would find no read of the
-    # destination and accept a transfer that fills the buffer the current
-    # element is still reading -- the exact race this check exists to refuse,
-    # slipping through because the read is two regions down.
-    #
-    # A group's own statements are not readers of it, and since the scan
-    # descends they are in `scan` as well: the `copy.async` inside a member
-    # reads the source and writes the destination, so excluding only the
-    # member itself would leave its subtree to be compared against its own
-    # write.
-    #
-    # By identity, not structurally as `s in group` would compare.  `Stmt` is
-    # a frozen dataclass, so `==` walks the whole subtree: over a set this
-    # size that is quadratic in the body and deep in each comparison.
-    # Identity is also what is meant -- these are the statements `_sole_async`
-    # picked out of this very body, not statements that merely look like
-    # them, and two that happen to render alike are two transfers, only one of
-    # which is the group's.
-    in_group = {id(x) for g in group for x in walk_stmts((g,))}
-    scan = [] if assume_rotated else [st for st in walk_stmts(region.body)]
-    for s in scan:
-        if id(s) in in_group or s.op is Op.WAIT or s.op is Op.IF:
             continue
-        for a in s.accesses:
-            if a.writes:
+        out.extend(before)
+        out.append(loop)
+        out.extend(after)
+        copied.extend(d for p in rewrite.plans for d in p.deps)
+        rewritten = True
+    if not rewritten:
+        return given
+    return _drop_unread(tuple(out), copied)
+
+
+def _drop_unread(body: Tuple[Stmt, ...],
+                 copied: Sequence[Stmt]) -> Tuple[Stmt, ...]:
+    """`body` without the bindings of `copied` nothing names any more.
+
+    A binding declares a name and so escapes: what reads it may be text, or
+    an access that names the operand rather than the value, and neither is a
+    use the graph sees.  So it goes only where none of the three reads it --
+    no operand, no text but comments, no operand named like it.  Where the moved transfers
+    were its only readers, it would otherwise be a declaration of a pointer
+    nothing follows.
+    """
+    from .build import _names_in
+    names = {id(s): str(s.attr('extern')) for s in copied
+             if s.attr('extern') and len(s.target) == 1}
+    if not names:
+        return body
+    by_value = {s.target[0].id: id(s) for s in copied if id(s) in names}
+    read = set()
+    for x in walk_stmts(body):
+        if id(x) in names:
+            continue
+        read.update(by_value[v.id] for v in x.operands() if v.id in by_value)
+        # A comment names what it describes, and reads nothing.
+        texts = [] if (x.text or '').lstrip().startswith('//') else [x.text or '']
+        texts += [a for a in x.args if isinstance(a, str)]
+        texts += [str(getattr(a, 'name', '')) for a in x.args
+                  if not isinstance(a, Value)]
+        texts += [v for k, v in x.attrs if isinstance(v, str)]
+        for sid, name in names.items():
+            if sid not in read and any(_names_in(t, name) for t in texts if t):
+                read.add(sid)
+    gone = set(names) - read
+    if not gone:
+        return body
+
+    def strip(stmts):
+        out = []
+        for s in stmts:
+            if id(s) in gone:
                 continue
-            if any(accesses_conflict(a, w) for w in dst_writes):
-                raise Refusal(
-                    'the destination is read in the same iteration, so one '
-                    'copy of it is not enough for a distance of one '
-                    'iteration: ceil((d+1)/n) with d = n is 2')
+            if s.regions:
+                s = replace(s, regions=tuple(replace(r, body=strip(r.body))
+                                             for r in s.regions))
+            out.append(s)
+        return tuple(out)
+    return strip(body)
 
-    # The destination has to exist before the loop, or the prologue cannot
-    # name it.  `s4 = &localShrMem0[..]` is declared inside the loop body, and
-    # the peeled transfer is emitted before it: the peel then writes through a
-    # value whose `extern` name is bound later, so the generated code uses
-    # `v33_s4` above the line that declares `s4`.  It renders and does not
-    # compile, which is the failure mode `test_syntax` exists for and the
-    # corpus alone would not show.
-    #
-    # Declaring the window ahead of the loop would lift this -- the same move
-    # that puts the address bindings and the windows outside the guard, one
-    # scope further out.  Without it this declines rather than emitting
-    # something that cannot build.
-    defined_in_loop = {t.id for st in region.body for t in st.target}
-    if guard_at is not None:
-        defined_in_loop |= {t.id for st in region.body[guard_at].regions[0].body
-                            for t in st.target}
-    # From the subtree: a section member is a hop loop with no args of its
-    # own, so reading `g.args[:1]` would not find the destination -- and a
-    # rotating write window *is* declared inside the loop, because its offset
-    # moves with the stage counter.  The peel would then name it before it
-    # exists, which renders and does not compile.
-    dests = [x.args[0] for g in group for x in walk_stmts((g,))
-             if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) and x.args]
-    if any(isinstance(a, Value) and a.id in defined_in_loop for a in dests):
-        raise Refusal('the destination is declared inside the loop, so a '
-                      'peeled transfer would name it before it exists')
 
-    # The group moves to the *next* element -- and so does everything it
-    # reads that names the element.
-    #
-    # A transfer reads through `glb_m2`, a pointer already offset by
-    # `batchId0`, so the index does not appear in the transfer's operands at
-    # all: it appears in the binding.  Substituting into the group alone finds
-    # nothing to substitute.  What has to move is the backward slice: every
-    # statement the group transitively reads that mentions the induction, with
-    # the successor index put in its place.  That slice *is* the rolling
-    # pointer the macro-level pipeline builds by hand.
-    # The whole subtree, since a section member may be a hop loop and the
-    # index it reads is an operand of a statement inside it, not of the block.
-    def _names_index(st):
-        return any(isinstance(a, Value) and a.id in next_index
-                   for x in walk_stmts((st,)) for a in x.args)
+# --------------------------------------------------------------------------- #
+# What a transfer is
+# --------------------------------------------------------------------------- #
 
-    slice_ = _index_slice(region, group, next_index)
-    if not slice_ and not any(_names_index(g) for g in group):
-        raise Refusal('the transfer does not name an index this loop knows '
-                      'how to advance')
-    advanced, advance_map = _advance(slice_, next_index, make_value)
-    rewritten = [substitute((g,), {**next_index, **advance_map})[0]
-                 for g in group]
+def _writes(a: Access) -> bool:
+    return bool(a.kind & (Effect.WRITE | Effect.ATOMIC))
 
-    # From the subtree: a section member may be a hop loop, which has no
-    # target of its own -- the tokens belong to the `copy.async` statements
-    # inside it, and reading `g.target[0]` would raise an IndexError.
-    tokens = [t for g in group for x in walk_stmts((g,))
-              if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC) for t in x.target]
-    carried = [make_value(t.type, 'cp') for t in tokens]
-    swap = dict(zip((t.id for t in tokens), carried))
-    new_wait = replace(wait, args=tuple(
-        swap.get(a.id, a) if isinstance(a, Value) else a for a in wait.args))
 
-    if guard_at is None:
-        body = [s for s in region.body if s not in group]
-        body[[i for i, s in enumerate(body) if s is wait][0]] = new_wait
-        at = min(i for i, s in enumerate(body)
-                 if s is new_wait or s is wait)
-        body[at:at] = advanced + rewritten
-    else:
-        guard = region.body[guard_at]
-        inner = [s for s in guard.regions[0].body if s not in group]
-        inner[[i for i, s in enumerate(inner) if s is wait][0]] = new_wait
-        # The group lands in the loop's region, before the guard: outside it,
-        # because the next element's transfer must not be conditional on this
-        # element's mask.
+def _opaque(a: Access) -> bool:
+    return a.space is MemSpace.UNKNOWN or a.base is None
+
+
+def _same(x, y) -> bool:
+    if isinstance(x, Value) and isinstance(y, Value):
+        return x.id == y.id
+    return x is y
+
+
+def _neutral(s: Stmt) -> bool:
+    """Text that touches nothing and defines nothing: a comment, a blank
+    line.  It moves with the transfer it leads."""
+    return (s.op is Op.RAWSTMT and not s.target and not s.args
+            and not s.accesses and s.effect == Effect.NONE)
+
+
+def _glue(s: Stmt) -> bool:
+    """Arithmetic: no memory, no effect, no region."""
+    return (s.pure and not s.regions and not s.accesses
+            and s.effect == Effect.NONE and bool(s.target))
+
+
+def _defines_whole(s: Stmt, dest: Value) -> bool:
+    return (s.op is Op.MARK and s.attr('mark') == 'defines'
+            and all(isinstance(a, Value) and a.id == dest.id for a in s.args))
+
+
+def _fill_target(s: Stmt, fetched=frozenset()) -> Optional[Value]:
+    """The buffer `s` fills, where `s` is a piece of a transfer.
+
+    A piece reads global memory and writes one register array or one shared
+    window, and touches nothing else -- whatever is inside it included.  A
+    statement that reads a register or shared buffer computes rather than
+    transfers, and one that says nothing about what it touches is not
+    something this pass can account for.
+
+    And what it writes is what it read: a copy, or a store of a value a load
+    in the piece produced.  A reduction over global memory reads the same
+    and writes the same, and is a computation all the same -- moving it
+    would move the arithmetic with it, and count it among the transfers the
+    distance is a number of.  `fetched` are values loaded from global memory
+    by statements of their own, ahead of this one.
+    """
+    if s.op in (Op.WAIT, Op.COMMIT_ASYNC, Op.MARK, Op.ALLOC, Op.YIELD):
+        return None
+    dest = None
+    fetches = False
+    loaded = {t.id for x in walk_stmts((s,)) if x.op is Op.LOAD
+              for t in x.target} | set(fetched)
+    if fetched and s.op is Op.STORE:
+        fetches = isinstance(s.args[1], Value) and s.args[1].id in fetched
+    for x in walk_stmts((s,)):
+        if (x.op in (Op.LOAD_ASYNC, Op.WAIT, Op.COMMIT_ASYNC, Op.MARK,
+                     Op.ALLOC) or x.effect & Effect.BARRIER):
+            return None
+        for a in x.accesses:
+            if _opaque(a):
+                return None
+            if _writes(a):
+                if (a.kind & Effect.READ
+                        or a.space not in (MemSpace.REGISTER, MemSpace.SHARED)
+                        or not isinstance(a.base, Value)):
+                    return None
+                moves = x.op is Op.COPY_ASYNC or (
+                    x.op is Op.STORE and isinstance(x.args[1], Value)
+                    and x.args[1].id in loaded)
+                if not moves:
+                    return None
+                if dest is None:
+                    dest = a.base
+                elif dest.id != a.base.id:
+                    return None
+            elif a.space is MemSpace.GLOBAL:
+                fetches = True
+            else:
+                return None
+    return dest if fetches else None
+
+
+@dataclass
+class _Transfer:
+    """One transfer of the per-element body: the buffer it fills and its
+    statements there, in order."""
+    dest: Value
+    stmts: List[Stmt] = field(default_factory=list)
+    #: The statements that move data, without what leads them.
+    pieces: List[Stmt] = field(default_factory=list)
+
+    @property
+    def shared(self) -> bool:
+        return self.dest.type.space is MemSpace.SHARED
+
+    def tokens(self) -> List[Value]:
+        return [t for x in walk_stmts(tuple(self.pieces))
+                if x.op is Op.COPY_ASYNC for t in x.target]
+
+
+def _fetch(s: Stmt) -> bool:
+    """A read of global memory into a value, standing on its own: the first
+    half of a transfer whose second half is a store of it."""
+    return (s.op is Op.LOAD and len(s.target) == 1 and not s.regions
+            and bool(s.accesses) and all(
+                a.space is MemSpace.GLOBAL and not _writes(a)
+                for a in s.accesses))
+
+
+def _transfers(scope: Sequence[Stmt]) -> List[_Transfer]:
+    """The transfers of `scope`, in body order.
+
+    A transfer written out without a loop is a load and a store per hop, each
+    a statement of its own, and the loads belong to it as much as the stores
+    -- as long as nothing else reads what they loaded.
+
+    Arithmetic between two pieces of one transfer does not end it -- what
+    `licm` lifts out of a hop loop lands there -- and stays where it is: a
+    moved piece that reads it gets a copy of it (`_Loop._dependencies`).
+    Anything else between two pieces ends the transfer, and the buffer is
+    then filled by two, which no plan accepts.
+    """
+    uses: Dict[int, int] = {}
+    for x in walk_stmts(tuple(scope)):
+        for v in x.operands():
+            uses[v.id] = uses.get(v.id, 0) + 1
+    out: List[_Transfer] = []
+    current: Optional[_Transfer] = None
+    between: List[Stmt] = []
+    for s in scope:
+        fetched = {x.target[0].id: x for x in between if _fetch(x)}
+        dest = _fill_target(s, frozenset(fetched))
+        if dest is None:
+            if _neutral(s) or _glue(s) or _fetch(s) or s.op is Op.MARK:
+                between.append(s)
+            else:
+                current, between = None, []
+            continue
+        stored = {x.args[1].id for x in walk_stmts((s,))
+                  if x.op is Op.STORE and isinstance(x.args[1], Value)}
+        if any(uses.get(vid, 0) != 1 for vid in stored & set(fetched)):
+            # It stores a value something else reads as well, and the load
+            # cannot leave with it.
+            current, between = None, []
+            continue
+        halves = {id(fetched[vid]) for vid in stored & set(fetched)}
+
+        def joins(x):
+            return id(x) in halves or _neutral(x) or _defines_whole(x, dest)
+        if (current is not None and current.dest.id == dest.id
+                and all(joins(x) or _glue(x) for x in between)):
+            current.stmts.extend(x for x in between if joins(x))
+            current.pieces.extend(x for x in between if id(x) in halves)
+        else:
+            lead: List[Stmt] = []
+            for x in reversed(between):
+                if joins(x):
+                    lead.append(x)
+                elif not _glue(x):
+                    break
+            lead.reverse()
+            if len([x for x in lead if id(x) in halves]) != len(halves):
+                # A half stands behind something that is not the transfer's.
+                current, between = None, []
+                continue
+            current = _Transfer(dest)
+            current.stmts.extend(lead)
+            current.pieces.extend(x for x in lead if id(x) in halves)
+            out.append(current)
+        current.stmts.append(s)
+        current.pieces.append(s)
+        between = []
+    return out
+
+
+def _name(v: Value, alloc: Optional[Stmt]) -> str:
+    extern = alloc.attr('extern') if alloc is not None else None
+    return str(extern or v.hint or v)
+
+
+# --------------------------------------------------------------------------- #
+# One loop
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class _Plan:
+    """A transfer the loop moves, and what moving it takes."""
+    transfer: _Transfer
+    alloc: Stmt
+    #: Whether the allocation stands in the loop and leaves it.
+    alloc_moves: bool
+    #: The wait that retires its copies, where it has any.
+    wait: Optional[Stmt]
+    #: The statements of the loop it reads, to compute again for another
+    #: element, in the order they run.
+    deps: List[Stmt]
+    #: Whether it follows a pointer of the element's own.
+    owns_pointer: bool
+
+
+class _Loop:
+    """A batch loop, taken apart: its body, the element guard in it and the
+    per-element statements the guard holds."""
+
+    def __init__(self, loop: Stmt, allocs: Dict[int, Stmt], scratch, report):
+        self.loop = loop
+        self.allocs = allocs
+        self.scratch = scratch
+        self.report = report
+        region = loop.regions[0]
+        self.region = region
+        self.k = region.args[0]
+        self.next = loop.attr('next')
+        self.first = loop.attr('first')
+        self.flag_word = loop.attr('flag_word')
+        guards = [i for i, s in enumerate(region.body)
+                  if s.op is Op.IF and s.attr('guard') == 'element']
+        if len(guards) > 1:
+            raise Refusal('the loop has more than one element guard')
+        self.guard_at = guards[0] if guards else None
+        self.scope: Tuple[Stmt, ...] = (
+            region.body[self.guard_at].regions[0].body
+            if self.guard_at is not None else region.body)
+
+    def _top(self) -> List[Tuple[Tuple[int, int], Stmt]]:
+        """Every statement at the top of the loop's body or of the guard,
+        keyed by the order it runs in."""
+        out = []
+        for i, s in enumerate(self.region.body):
+            if i == self.guard_at:
+                out.extend(((i, j + 1), x) for j, x in enumerate(self.scope))
+            else:
+                out.append(((i, 0), s))
+        return out
+
+    def _ahead_of(self, first: Stmt) -> List[Stmt]:
+        """What stands ahead of `first` in its own iteration."""
+        out = []
+        for _, s in self._top():
+            if s is first:
+                return out
+            out.append(s)
+        raise AssertionError('the transfer is not at the top of the loop')
+
+    # -- planning ---------------------------------------------------------- #
+
+    def wrap(self, distance: int):
+        transfers = _transfers(self.scope)
+        if not transfers:
+            raise Refusal('no transfer in the body')
+        plans: List[_Plan] = []
+        for t in transfers[:distance]:
+            alloc = self.allocs.get(t.dest.id)
+            try:
+                plans.append(self._plan(t, alloc))
+            except Refusal as why:
+                if self.report is not None:
+                    self.report.append(f'- {_name(t.dest, alloc)}: {why}')
+        if not plans:
+            raise Refusal('nothing to move')
+        if self.report is not None:
+            self.report.extend(
+                f'+ {_name(p.transfer.dest, p.alloc)} '
+                f'[{"shr" if p.transfer.shared else "reg"}]' for p in plans)
+        return _Rewrite(self, plans)
+
+    def _plan(self, t: _Transfer, alloc: Optional[Stmt]) -> _Plan:
+        d = t.dest
+        if alloc is None:
+            raise Refusal('the buffer is not allocated in this body')
+        inside = any(s is alloc for s in walk_stmts(self.region.body))
+        if inside and not any(s is alloc for _, s in self._top()):
+            raise Refusal('the buffer is allocated inside a construct of the '
+                          'body, so its declaration cannot leave the loop')
+        if t.shared:
+            identity = alloc.attr('identity')
+            if alloc.attr('stages') or (identity is not None and any(
+                    s is not alloc and s.attr('identity') is identity
+                    for s in self.allocs.values())):
+                raise Refusal('the buffer has several windows')
+        elif alloc.attr('init') not in (None, '', '{}'):
+            raise Refusal('the buffer is declared with an initializer, which '
+                          'a declaration ahead of the loop would apply once')
+        if any(x.predicate is not None for x in walk_stmts(tuple(t.pieces))
+               if x.op is Op.COPY_ASYNC):
+            raise Refusal('a copy of the transfer is predicated already')
+
+        mine = {id(x) for x in walk_stmts(tuple(t.stmts))}
+        tokens = t.tokens()
+        wait = None
+        if tokens:
+            ids = {v.id for v in tokens}
+            waits = [w for w in walk_stmts(self.region.body)
+                     if w.op is Op.WAIT and any(isinstance(a, Value)
+                                                and a.id in ids for a in w.args)]
+            named = ({a.id for a in waits[0].args if isinstance(a, Value)}
+                     if len(waits) == 1 else set())
+            if (len(waits) != 1 or not ids <= named
+                    or not any(w is waits[0] for w in self.scope)):
+                raise Refusal(f'{len(tokens)} copies retired by {len(waits)} '
+                              f'waits; a transfer is what one wait retires')
+            wait = waits[0]
+
+        for x in walk_stmts(self.region.body):
+            if id(x) in mine or x is wait or x.op in (Op.MARK, Op.ALLOC):
+                continue
+            if any(_writes(a) and _same(a.base, d) for a in x.accesses):
+                raise Refusal('the buffer is written by more than this '
+                              'transfer, so it does not hold one element for '
+                              'the whole iteration')
+
+        deps, owns = self._dependencies(t)
+        reads = [a.base for x in walk_stmts(tuple(t.pieces))
+                 for a in x.accesses if a.space is MemSpace.GLOBAL]
+        varies = any(self._names_index(s) for s in deps) or any(
+            self._names_index(x) for x in walk_stmts(tuple(t.pieces)))
+
+        for x in walk_stmts(tuple(self._ahead_of(t.stmts[0]))):
+            for a in x.accesses:
+                if _opaque(a):
+                    raise Refusal('ahead of the transfer stands a statement '
+                                  'that does not say what it touches')
+                if _same(a.base, d):
+                    raise Refusal('ahead of the transfer stands an access to '
+                                  'its buffer, so it cannot leave its own '
+                                  'iteration')
+                if _writes(a) and any(_same(a.base, r) for r in reads):
+                    raise Refusal('ahead of the transfer stands a write of '
+                                  'what it reads, which it would read before '
+                                  'the write')
+            if t.shared and (x.op is Op.BARRIER or x.effect & Effect.BARRIER):
+                raise Refusal('ahead of the transfer stands a barrier, which '
+                              'orders the shared memory it writes')
+        if not varies:
+            for x in walk_stmts(self.region.body):
+                if id(x) in mine:
+                    continue
+                if any(_writes(a) and any(_same(a.base, r) for r in reads)
+                       for a in x.accesses):
+                    raise Refusal('the body writes what the transfer reads, '
+                                  'which is the same for every element')
+        return _Plan(t, alloc, inside, wait, deps, owns)
+
+    def _names_index(self, s: Stmt) -> bool:
+        return any(v.id == self.k.id for v in s.operands())
+
+    def _dependencies(self, t: _Transfer) -> Tuple[List[Stmt], bool]:
+        """The statements of the loop's body `t` reads, transitively, in the
+        order they run; and whether one of them reads an element's own
+        pointer.
+
+        Only what stands at the top of the body or of the guard: a value
+        defined deeper is not visible to the transfer in the first place.
+        The loop's own arguments are not statements: the index is replaced,
+        and a value the loop carries belongs to the iteration, not to the
+        element a clone is for.
+        """
+        defs: Dict[int, Tuple[Tuple[int, int], Stmt]] = {}
+        for key, s in self._top():
+            for v in s.target:
+                defs[v.id] = (key, s)
+        inner = set()
+        for x in walk_stmts(tuple(t.pieces)):
+            inner.update(v.id for v in x.target)
+            for r in x.regions:
+                inner.update(v.id for v in r.args)
+        # The buffer it fills is not one of them: its declaration leaves the
+        # loop whole, and is not computed again.
+        inner.add(t.dest.id)
+        carried = {v.id for v in self.region.args[1:]}
+        wanted = [v.id for x in walk_stmts(tuple(t.pieces))
+                  for v in x.operands() if v.id not in inner]
+        found: Dict[int, Tuple[Tuple[int, int], Stmt]] = {}
+        while wanted:
+            vid = wanted.pop()
+            if vid in carried:
+                raise Refusal('the transfer reads a value the loop carries')
+            hit = defs.get(vid)
+            if hit is None or id(hit[1]) in found:
+                continue
+            key, s = hit
+            if s.regions or (s.effect & _SIDE) or not s.movable:
+                raise Refusal(f'the transfer reads a `{s.op}` of the body, '
+                              f'which cannot be computed again for another '
+                              f'element')
+            if any(_writes(a) or _opaque(a) or a.space is not MemSpace.GLOBAL
+                   for a in s.accesses):
+                raise Refusal('the transfer reads a value loaded from memory '
+                              'other than global, which another element '
+                              'cannot read again')
+            found[id(s)] = (key, s)
+            wanted.extend(v.id for v in s.operands())
+        deps = [s for _, s in sorted(found.values(), key=lambda e: e[0])]
+        # What the dependencies load must not change under the loop.  A
+        # binding is not such a load, though it declares a read of its
+        # operand: strided addressing is arithmetic, and the array a pointer
+        # is read out of is an argument the kernel never writes -- it writes
+        # through the pointers, which its accesses cannot tell apart from the
+        # array, being recorded against the operand either way.
+        roots = [a.base for s in deps if s.op is Op.LOAD for a in s.accesses]
+        for x in walk_stmts(self.region.body):
+            if any(_writes(a) and any(_same(a.base, r) for r in roots)
+                   for a in x.accesses):
+                raise Refusal('the body writes memory the transfer\'s address '
+                              'is computed from')
+        return deps, any(s.attr('element_pointer') for s in deps)
+
+
+# --------------------------------------------------------------------------- #
+# Rewriting
+# --------------------------------------------------------------------------- #
+
+_IDENTIFIER = re.compile(r'\b[A-Za-z_]\w*\b')
+
+
+class _Copy:
+    """Statements of the loop again, for another element: every value they
+    define new, every operand through what is known of the element, and
+    every name spelled in text that changed spelled anew.
+
+    Text is where a value can be named without being an operand -- a raw
+    statement spelling its loop's index, a copy's address -- and a copy for
+    another element that kept such a name would compute for the old one, or
+    name a value of a scope it is not in.  So the spellings travel with the
+    values: a value's own name, and a binding's, which a copy of it changes
+    to `wrap_glb_m0` for the next element and `peel_glb_m0` for the first.
+    """
+
+    def __init__(self, fresh: Callable[[Value], Value], prefix: str,
+                 taken: set):
+        self._fresh = fresh
+        self._prefix = prefix
+        self._taken = taken
+        self.mapping: Dict[int, Value] = {}
+        self.spell: Dict[str, str] = {}
+
+    def given(self, old: Value, new: Value) -> None:
+        """`old` is `new` in what this copies."""
+        self.mapping[old.id] = new
+        self.spell[str(old)] = str(new)
+
+    def _sub(self, x):
+        if isinstance(x, Value):
+            return self.mapping.get(x.id, x)
+        if isinstance(x, str):
+            return self._respell(x)
+        return x
+
+    def _respell(self, text: str) -> str:
+        if not text or not self.spell:
+            return text
+        return _IDENTIFIER.sub(lambda m: self.spell.get(m.group(0), m.group(0)),
+                               text)
+
+    def stmts(self, stmts: Sequence[Stmt], named: bool = False) -> List[Stmt]:
+        """`stmts` copied.  `named`: a copy of a declaration with a name of
+        its own gets one of its own as well, and is declared the way the
+        original is -- the backend's spelling of its type."""
+        out = []
+        for s in stmts:
+            regions = []
+            for r in s.regions:
+                args = tuple(self._fresh(v) for v in r.args)
+                for o, n in zip(r.args, args):
+                    self.given(o, n)
+                regions.append(Region(args=args, body=tuple(self.stmts(r.body))))
+            target = tuple(self._fresh(v) for v in s.target)
+            clone = replace(
+                s, target=target, args=tuple(self._sub(a) for a in s.args),
+                predicate=(self._sub(s.predicate) if s.predicate is not None
+                           else None),
+                regions=tuple(regions),
+                text=self._respell(s.text) if s.text else s.text,
+                accesses=tuple(replace(a, base=self._sub(a.base))
+                               if isinstance(a.base, Value) else a
+                               for a in s.accesses),
+                attrs=tuple((k, v if k in ('decl', 'extern') else self._sub(v))
+                            for k, v in s.attrs))
+            for o, n in zip(s.target, target):
+                self.given(o, n)
+            if named and clone.attr('extern'):
+                clone = self._name(clone, str(s.attr('extern')))
+            out.append(clone)
+        return out
+
+    def _name(self, s: Stmt, extern: str) -> Stmt:
+        name = base = f'{self._prefix}_{extern}'
+        n = 1
+        while name in self._taken:
+            name = f'{base}_{n}'
+            n += 1
+        self._taken.add(name)
+        self.spell[extern] = name
+        attrs = [(k, v) for k, v in s.attrs if k not in ('extern', 'decl')]
+        attrs.append(('extern', name))
+        decl = s.attr('decl')
+        if isinstance(decl, str) and decl.rstrip().endswith(extern):
+            attrs.append(('decl', decl.rstrip()[:-len(extern)] + name))
+        return replace(s, attrs=tuple(attrs))
+
+
+class _Rewrite:
+    """A loop with its plans carried out: `(before, loop, after)`."""
+
+    def __init__(self, loop: _Loop, plans: List[_Plan]):
+        self.l = loop
+        self.plans = plans
+        self.b = loop.scratch()
+
+    def _fresh(self, v: Value) -> Value:
+        return self.b.value(v.type, hint=v.hint, uniform=v.uniformity,
+                            layout=v.layout, quals=v.quals)
+
+    # -- making statements ------------------------------------------------- #
+
+    def _word(self, index, name: str) -> Tuple[List[Stmt], Value]:
+        """`index`'s flag, read as the word it is stored as."""
+        b = self.l.scratch()
+        v = b.decl_expr(f'const uint32_t {name}', self.l.flag_word,
+                        ScalarType(Datatype.U32), None, args=(index,),
+                        kind=Effect.READ, space=MemSpace.GLOBAL, hint=name,
+                        extern=name, layout=SCALAR_LAYOUT)
+        return list(b.finish()), v
+
+    def _flag(self, word, name: str) -> Tuple[List[Stmt], Value]:
+        """A flag word as the condition it stands for."""
+        b = self.l.scratch()
+        v = b.decl_expr(f'const bool {name}', 'static_cast<bool>({0})', BOOL,
+                        None, args=(word,), hint=name, extern=name)
+        return list(b.finish()), v
+
+    def _successor(self, index, hint: str) -> Tuple[List[Stmt], Value]:
+        """`index` one stride on, clamped the way the loop clamps its own
+        successor: the element a transfer issued there is for."""
+        b = self.l.scratch()
+        _, count, stride = self.l.loop.loop_bounds
+        ahead = b.op('add', SIZE, index, stride, hint=f'{hint}Ahead')
+        inside = b.op('lt', BOOL, ahead, count, hint=f'{hint}In')
+        v = b.op('select', SIZE, inside, ahead, index, hint=hint)
+        return list(b.finish()), v
+
+    def _guarded(self, stmts: List[Stmt], cond: Value) -> List[Stmt]:
+        """`stmts`, done only where `cond` holds.
+
+        A copy takes it as its predicate rather than sitting in a block: a
+        copy in a block is issued on one path only, as far as the count of
+        groups in flight can tell, and the loop carrying its token would lose
+        the steady state its waits are counted against.  The predicate is a
+        branch per copy all the same, so a pointer is still not followed
+        where it may not be.  Everything else goes into one block.
+        """
+        if not any(x.op is Op.COPY_ASYNC for x in walk_stmts(tuple(stmts))):
+            b = self.l.scratch()
+            with b.if_(cond):
+                for s in stmts:
+                    b.emit(s)
+            return list(b.finish())
+
+        def predicate(s: Stmt) -> Stmt:
+            if s.op is Op.COPY_ASYNC:
+                return replace(s, predicate=cond)
+            if s.regions:
+                return replace(s, regions=tuple(
+                    replace(r, body=tuple(predicate(x) for x in r.body))
+                    for r in s.regions))
+            return s
+        return [predicate(s) for s in stmts]
+
+    # -- the loop ---------------------------------------------------------- #
+
+    def run(self):
+        l = self.l
+        carry = l.flag_word is not None and l.guard_at is not None
+        before: List[Stmt] = [p.alloc for p in self.plans if p.alloc_moves]
+
+        # The flag words the loop starts with: the first element's, which
+        # the peel's pointers are followed under, and its successor's.  They
+        # are the carried values `own` and `nxt` in the body.
+        own = nxt = first_word = None
+        if carry:
+            stmts, first_word = self._word(l.first, 'flagWordFirst')
+            before += stmts
+            stmts, second = self._successor(l.first, 'flagSecond')
+            before += stmts
+            stmts, second_word = self._word(second, 'flagWordSecond')
+            before += stmts
+            own = self.b.value(first_word.type, hint='flagWord',
+                               layout=first_word.layout)
+            nxt = self.b.value(second_word.type, hint='flagWordNext',
+                               layout=second_word.layout)
+
+        # The conditions a pointer of the element's own is followed under.
+        peel_flag = tail_flag = None
+        tail_flag_stmts: List[Stmt] = []
+        if l.flag_word is not None and any(p.owns_pointer for p in self.plans):
+            if first_word is None:
+                stmts, first_word = self._word(l.first, 'flagWordFirst')
+                before += stmts
+            stmts, peel_flag = self._flag(first_word, 'allowed_peel')
+            before += stmts
+            if nxt is not None:
+                tail_flag_stmts, tail_flag = self._flag(nxt, 'allowed_next')
+            else:
+                stmts, word = self._word(l.next, 'flagWordNext')
+                flag_stmts, tail_flag = self._flag(word, 'allowed_next')
+                tail_flag_stmts = stmts + flag_stmts
+
+        taken: set = set()
+        peel_copy = _Copy(self._fresh, 'peel', taken)
+        peel_copy.given(l.k, l.first)
+        tail_copy = _Copy(self._fresh, 'wrap', taken)
+        tail_copy.given(l.k, l.next)
+        done_peel: set = set()
+        done_tail: set = set()
+        heads: List[Stmt] = []
+        tails_reg: List[Stmt] = []
+        tails_shared: List[Stmt] = []
+        waits: Dict[int, Stmt] = {}
+        inits: List[Value] = []
+        carried: List[Value] = []
+        yields: List[Value] = []
+        results: List[Value] = []
+        after: List[Stmt] = []
+        for p in self.plans:
+            # The dependencies, once each: two transfers out of one pointer
+            # share its copies.
+            new = [s for s in p.deps if id(s) not in done_peel]
+            before += peel_copy.stmts(new, named=True)
+            done_peel.update(id(s) for s in new)
+            new = [s for s in p.deps if id(s) not in done_tail]
+            heads += tail_copy.stmts(new, named=True)
+            done_tail.update(id(s) for s in new)
+
+            peel = peel_copy.stmts(p.transfer.stmts)
+            tail = tail_copy.stmts(p.transfer.stmts)
+            if p.owns_pointer and peel_flag is not None:
+                peel = self._guarded(peel, peel_flag)
+                tail = self._guarded(tail, tail_flag)
+            before += peel
+            (tails_shared if p.transfer.shared else tails_reg).extend(tail)
+            if p.wait is None:
+                continue
+
+            # The tokens: the peel's are the first iteration's, the tail's
+            # the next one's, and the wait names the iteration's own.
+            originals = p.transfer.tokens()
+            peel_tokens = [t for x in walk_stmts(tuple(peel))
+                           if x.op is Op.COPY_ASYNC for t in x.target]
+            tail_tokens = [t for x in walk_stmts(tuple(tail))
+                           if x.op is Op.COPY_ASYNC for t in x.target]
+            if not (len(originals) == len(peel_tokens) == len(tail_tokens)):
+                raise Refusal('the peel and the tail issue different copies')
+            args = [self._fresh(t) for t in originals]
+            ends = [self._fresh(t) for t in originals]
+            in_loop = {t.id: a for t, a in zip(originals, args)}
+            past = {t.id: e for t, e in zip(originals, ends)}
+            waits[id(p.wait)] = replace(p.wait, args=tuple(
+                in_loop.get(a.id, a) if isinstance(a, Value) else a
+                for a in p.wait.args))
+            after.append(Stmt(op=Op.WAIT, args=tuple(
+                past.get(a.id, a) if isinstance(a, Value) else a
+                for a in p.wait.args), pure=False, movable=True,
+                effect=p.wait.effect, accesses=p.wait.accesses))
+            inits += peel_tokens
+            carried += args
+            yields += tail_tokens
+            results += ends
+
+        if carry:
+            inits += [first_word, second_word]
+            carried += [own, nxt]
+            results += [self._fresh(own), self._fresh(nxt)]
+        loop = self._body(heads, tails_reg, tails_shared, tail_flag_stmts,
+                          waits, carry, own, nxt, yields, carried, inits,
+                          results)
+        return before, loop, after
+
+    def _body(self, heads, tails_reg, tails_shared, tail_flag_stmts, waits,
+              carry, own, nxt, yields, carried, inits, results) -> Stmt:
+        l = self.l
+        region = l.region
+        moved = {id(s) for p in self.plans for s in p.transfer.stmts}
+        moved |= {id(p.alloc) for p in self.plans if p.alloc_moves}
+
+        def keep(stmts):
+            return [waits.get(id(s), s) for s in stmts if id(s) not in moved]
+
         body = list(region.body)
-        body[guard_at] = replace(guard, regions=(
-            replace(guard.regions[0], body=tuple(inner)),))
-        body[guard_at:guard_at] = advanced + rewritten
+        terminator = region.terminator
+        if terminator is not None:
+            body.pop()
 
-    term = region.terminator
-    yielded = (term.args if term is not None else ()) + tuple(tokens)
-    body = [s for s in body if s.op is not Op.YIELD]
-    body.append(Stmt(op=Op.YIELD, args=tuple(yielded)))
+        # The head: the next element's dependencies -- its pointer, before
+        # the whole body that hides its latency -- and the flag word two
+        # elements ahead.
+        flag_ahead: List[Stmt] = []
+        word_ahead = None
+        if carry:
+            stmts, ahead = self._successor(l.next, 'flagAhead')
+            word_stmts, word_ahead = self._word(ahead, 'flagWordAhead')
+            flag_ahead = stmts + word_stmts
 
-    # The prologue: the same transfers, for the element the loop starts on.
-    # Not `induction - 1` and not `0` -- where the first iteration would have
-    # issued from.
-    #
-    # `lo` is that only when every thread has a first iteration.  The batch
-    # loop's is `threadIdx.y + blockDim.y * blockIdx.x`, bounded by the launch
-    # geometry rather than by the element count, and the rows whose start is
-    # past the end are the common case, not the edge: 100 elements over a grid
-    # of 100 blocks with 16 rows puts the last start at 1599.  Those rows skip
-    # the loop, which is why the body need not care; the peel does, because it
-    # runs ahead of the guard and reads that element unconditionally.
-    #
-    # So the loop says which index the peel should use, the same way it says
-    # which one comes next.  Falling back to `lo` keeps a loop that clamps
-    # nothing working: for an ordinary counted loop the two are the same.
-    lo = loop.attr('first', loop.loop_bounds[0])
-    peel_slice, peel_map = _advance(slice_, {loop.induction.id: lo},
-                                    make_value)
-    # The prologue is the section again, for the first element, with fresh
-    # tokens.  A section member keeps its shape -- a loop stays a loop -- so
-    # only the tokens inside it are renamed.
-    peel = list(peel_slice)
-    peel_tokens = []
-    for g in group:
-        clone = substitute((g,), {loop.induction.id: lo, **peel_map})[0]
-        clone, fresh = _fresh_tokens(clone, make_value)
-        peel.append(clone)
-        peel_tokens.extend(fresh)
+        if l.guard_at is None:
+            new = keep(body)
+            at = _behind_defs(new, heads + flag_ahead)
+            new[at:at] = heads + flag_ahead
+            rest = new
+        else:
+            guard = body[l.guard_at]
+            pre = keep(body[:l.guard_at])
+            cond = guard.cond
+            if carry:
+                # The guard reads the word the iteration came in with.  The
+                # read of the element's flag it replaces goes, unless
+                # something else reads it.
+                stmts, allowed = self._flag(own, 'allowed')
+                users = [x for x in walk_stmts(tuple(body)) if x is not guard
+                         and any(v.id == cond.id for v in x.operands())]
+                if not users:
+                    pre = [s for s in pre
+                           if not any(v.id == cond.id for v in s.target)]
+                pre += stmts
+                cond = allowed
+            at = _behind_defs(pre, heads + flag_ahead)
+            pre[at:at] = heads + flag_ahead
+            regions = [replace(guard.regions[0],
+                               body=tuple(keep(guard.regions[0].body)))]
+            if waits:
+                # A masked element skips the waits at its consumers, and what
+                # they would have retired is still in flight into the buffer
+                # the tail fills again -- and the copies of one thread to
+                # one place land in no promised order, so the older one could
+                # land last.  So it is retired on that path as well: a drain,
+                # since a completion token is consumed once.
+                drain = waits[next(iter(waits))]
+                drain = Stmt(op=Op.WAIT, pure=False, movable=False,
+                             effect=drain.effect)
+                rest_else = (guard.regions[1].body if len(guard.regions) > 1
+                             else ())
+                regions.append(Region(args=(), body=tuple(rest_else)
+                                      + (drain,)))
+            guard = replace(guard, args=(cond,) + tuple(guard.args[1:]),
+                            regions=tuple(regions))
+            rest = keep(body[l.guard_at + 1:])
+            new = pre + [guard]
 
-    results = [make_value(t.type, 'cp') for t in tokens]
-    new_loop = replace(
-        loop,
-        target=loop.target + tuple(results),
-        args=loop.args + tuple(peel_tokens),
-        regions=(replace(region, args=region.args + tuple(carried),
-                         body=tuple(body)),))
-    drain = Stmt(op=Op.WAIT, args=tuple(results), pure=False, movable=True,
-                 effect=wait.effect, accesses=wait.accesses)
-    return list(peel) + [new_loop, drain]
+        # The tail: register transfers ahead of the barrier that closes the
+        # iteration, shared ones behind it, where it fences this iteration's
+        # reads against the write.
+        closing = max((i for i, s in enumerate(rest) if s.op is Op.BARRIER),
+                      default=None)
+        if closing is None:
+            rest += tail_flag_stmts + tails_reg + tails_shared
+        else:
+            rest[closing + 1:closing + 1] = tails_shared
+            rest[closing:closing] = tail_flag_stmts + tails_reg
+        if l.guard_at is not None:
+            new += rest
 
-
-def _fresh_tokens(stmt: Stmt, make_value):
-    """Rename the completion tokens inside a statement, keeping its shape.
-
-    A peeled section is the same code for a different element, so its loops
-    stay loops and its predicates stay predicates; what must not be shared
-    with the in-loop copy is the tokens, since both are in flight at once.
-    """
-    fresh: List[Value] = []
-
-    def rewrite(st: Stmt) -> Stmt:
-        if st.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC):
-            new = tuple(make_value(t.type, 'cp') for t in st.target)
-            fresh.extend(new)
-            st = replace(st, target=new)
-        if st.regions:
-            st = replace(st, regions=tuple(
-                replace(r, body=tuple(rewrite(x) for x in r.body))
-                for r in st.regions))
-        return st
-
-    return rewrite(stmt), fresh
-
-
-def _index_slice(region: Region, group: Sequence[Stmt],
-                 next_index: Dict[int, Value]) -> List[Stmt]:
-    """The statements the group reads that lead back to the element index.
-
-    Backwards from the group's operands, through the loop's own region only:
-    anything inside the guard has already been refused, and anything outside
-    the loop does not depend on the iteration.  A statement joins the slice if
-    it defines something the slice reads *and* it, or something it reads,
-    names an index the loop can advance.
-
-    Only pure, movable statements with no writes.  The slice is *duplicated*,
-    not moved -- the current element still needs its own copy -- so a member
-    that wrote anything would write it twice.
-    """
-    want = {a.id for g in group for x in walk_stmts((g,))
-            for a in x.args if isinstance(a, Value)}
-    slice_: List[Stmt] = []
-    seen = set()
-    changed = True
-    while changed:
-        changed = False
-        for s in region.body:
-            if id(s) in seen or not s.target:
-                continue
-            if not any(t.id in want for t in s.target):
-                continue
-            if s.has_side_effects or not s.movable or s.regions:
-                continue
-            if any(a.writes for a in s.accesses):
-                continue
-            seen.add(id(s))
-            slice_.append(s)
-            want |= {a.id for a in s.args if isinstance(a, Value)}
-            changed = True
-    # Keep only what actually leads to the index; a binding that does not
-    # mention it is the same for every element and must not be duplicated.
-    keep = []
-    reaches = set(next_index)
-    for s in reversed(slice_):
-        if any(isinstance(a, Value) and a.id in reaches for a in s.args):
-            keep.append(s)
-            reaches |= {t.id for t in s.target}
-    order = {id(s): i for i, s in enumerate(region.body)}
-    return sorted(keep, key=lambda s: order[id(s)])
+        yielded = list(terminator.args if terminator is not None else ())
+        yielded += yields
+        if carry:
+            yielded += [nxt, word_ahead]
+        if yielded:
+            new.append(replace(terminator, args=tuple(yielded))
+                       if terminator is not None
+                       else Stmt(op=Op.YIELD, args=tuple(yielded), pure=False,
+                                 movable=False))
+        return replace(
+            l.loop,
+            target=l.loop.target + tuple(results),
+            args=l.loop.args + tuple(inits),
+            regions=(Region(args=region.args + tuple(carried),
+                            body=tuple(new)),))
 
 
-def _advance(slice_: Sequence[Stmt], mapping: Dict[int, Value],
-             make_value) -> Tuple[List[Stmt], Dict[int, Value]]:
-    """Clone the slice with the index replaced; return the clones and a map.
-
-    The clones drop `decl` and `extern`.  Those carry a declarator the caller
-    wrote with a name in it, and a second statement declaring `glb_m2` would
-    be a redefinition rather than a second pointer.  Without them the emitter
-    names the value itself and renders the type, which carries what a
-    declarator would spell: `const` and the address space come off the type,
-    and `restrict` off the source value's `quals`.
-
-    Carrying the promise is sound here because of what is being cloned.  The
-    clone reads the *next* element of the same buffer while the original is
-    still live, so the two pointers coexist -- which keeps the promise as long
-    as both only read, and breaks it the moment one writes.  The binding sets
-    the qual on read-only operands alone for that reason, so a destination
-    arrives here with nothing to carry.
-    """
-    out: List[Stmt] = []
-    sub = dict(mapping)
-    for s in slice_:
-        fresh = tuple(make_value(t.type, t.hint or 'adv', t.quals)
-                      for t in s.target)
-        clone = replace(substitute((s,), sub)[0], target=fresh,
-                        attrs=tuple(a for a in s.attrs
-                                    if a[0] not in ('decl', 'extern')))
-        out.append(clone)
-        sub.update({t.id: f for t, f in zip(s.target, fresh)})
-    return out, {k: v for k, v in sub.items() if k not in mapping}
+def _behind_defs(stmts: List[Stmt], clones: Sequence[Stmt]) -> int:
+    """The first position in `stmts` behind every statement that defines a
+    value `clones` read."""
+    wanted = {v.id for s in clones for x in walk_stmts((s,))
+              for v in x.operands()}
+    at = 0
+    for i, s in enumerate(stmts):
+        if any(v.id in wanted for v in s.target):
+            at = i + 1
+    return at

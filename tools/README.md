@@ -87,7 +87,7 @@ the run import the unmutated module.
 | `macro_surface.py` | which statements are written straight to the output and never reach the IR at all? |
 | `buffer_spans.py` | which names still connect definitions and uses across separate IR bodies? |
 | `layout_census.py` | how many distinct register layouts does the generator produce? |
-| `slot_census.py` | how many compute slots does a loop body have, which bounds the prefetch distance a wrap-around schedule gets for free? |
+| `wrap_census.py` | which transfers does `enable_wrap_loads` move across the back edge, and why does it leave the rest? |
 | `overlap_census.py` | how far apart are a transfer, its wait, and the next transfer? |
 | `lane_census.py` | how much of the wave does each descriptor use, given that a kernel's widest descriptor sets the thread count for all? |
 | `staging_census.py` | what does each staged shared image accomplish: a broadcast, a relayout, or a round trip that only spills? |
@@ -114,7 +114,6 @@ total does not move whenever an unrelated defect is fixed.
 | `bank_conflicts.py` | what does every shared-memory access cost in bank cycles? |
 | `register_usage.py` | does the register-pressure model rank two lane configurations the way the vendor compiler does? |
 | `register_tradeoff.py` | would keeping a staged image in registers fit? |
-| `rotation_cost.py` | what does a buffer's second stage cost, found by generating twice or given to every transfer? |
 | `calibrate_icache.py` | fits the instruction-cache estimate to what the compilers emit |
 | `calibrate_mix.py` | fits the machine instructions per emitted statement, by kind of statement |
 

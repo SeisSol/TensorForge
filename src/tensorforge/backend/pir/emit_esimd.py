@@ -609,15 +609,23 @@ class EsimdEmitter(Emitter):
             line.strip().startswith('//') for line in text.splitlines())
 
     def _plan_allocs(self, stmts) -> dict:
-        """name -> the `Value` its `Op.ALLOC` defines."""
+        """name -> the `Value` its `Op.ALLOC` defines.
+
+        A pointer binding into global memory is a buffer the accesses name as
+        well, by the name it binds -- not an allocation, so it is named here
+        and not offered as one."""
         allocs = {}
         self._alloc_names = {}
         for a in stmts:
-            if a.op == Op.ALLOC and a.target and isinstance(a.target[0].type, BufferType):
-                v = a.target[0]
+            if not (a.target and isinstance(a.target[0].type, BufferType)):
+                continue
+            v = a.target[0]
+            if a.op == Op.ALLOC:
                 name = a.attr('extern') or str(v)
                 self._alloc_names[v.id] = name
                 allocs[name] = (a, v)
+            elif a.attr('extern'):
+                self._alloc_names[v.id] = a.attr('extern')
         return allocs
 
     def _plan_register_buffers(self, stmts, allocs, consts=None, order=None) -> set:

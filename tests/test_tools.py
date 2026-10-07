@@ -17,8 +17,9 @@ number is the failure mode worth guarding, because nobody re-derives a
 diagnostic they have no reason to doubt.
 
 Six tools reach into generator internals -- `ir_opacity` patches
-`pir.optimize`, the five censuses wrap builder methods -- and all six can
-break exactly this way when the thing they wrap changes shape.  So the check
+`pir.optimize`, four censuses wrap builder methods and one reads what the
+wrap pass records -- and all six can break exactly this way when the thing
+they reach into changes shape.  So the check
 is the same for all of them: run it, and insist it still saw the corpus.
 These are smoke tests, not assertions about the numbers.  Pinning the counts
 would mean re-recording them on every legitimate change, which is how a test
@@ -121,13 +122,13 @@ def test_no_site_label_is_ambiguous():
 @pytest.mark.parametrize("tool,marker", [
     ("layout_census.py", r"\bvalues\b"),
     ("operand_layouts.py", r"\bmfma\b|\buntracked\b"),
-    ("slot_census.py", r"batch loops over \d+ cases"),
+    ("wrap_census.py", r"transfers and loops over \d+ cases"),
     ("buffer_spans.py", r"\bby kind\b|\bspan\b"),
     ("overlap_census.py", r"\d+ B of \d+ B to separate them"),
 ])
 def test_the_censuses_still_see_something(tool, marker):
-    """Each wraps a builder method and would report an empty corpus if the
-    method it wraps were renamed, without any error to notice."""
+    """Each reaches into the generator and would report an empty corpus if
+    what it reaches into were renamed, without any error to notice."""
     out = _run(tool)
     assert re.search(marker, out), f"{tool} produced nothing recognizable:\n{out[-800:]}"
     numbers = [int(n) for n in re.findall(r"^\s*(\d+)\s", out, re.M)]

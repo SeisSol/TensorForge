@@ -7,11 +7,11 @@
 In the IR rather than as raw text around a body handed in as a closure,
 because two things depend on it:
 
-*A prologue can be expressed.*  A software-pipelining pass needs to peel an
-iteration, and with no loop to peel from it would have to publish the peeled
-copy through a second list that the rest of the pipeline neither indexes nor
-verifies, with definition and use in different streams.  With a region, a
-prologue is a peeled iteration in the same stream and ``def_use`` sees it.
+*A prologue can be expressed.*  A pass that issues a transfer one element
+ahead peels it for the first element, and with no loop to peel from it would
+have to publish the peeled copy through a second list that nothing else
+indexes or verifies.  With the loop a construct of the section's body, the
+peel is a statement of that body ahead of the loop (`pir.wrap`).
 
 *Barrier legality is representable.*  Whether a barrier inside the loop is
 legal depends on the trip count being uniform across the barrier's scope, and
@@ -66,19 +66,11 @@ class BatchLoop(AbstractInstruction):
         # how many elements ahead are bound as batchid1, batchid2, ... for
         # prefetching; only the strided loop rebinds them per iteration
         self._lookahead = lookahead
-        # Set by the pipelining pass; emits a rolling iteration counter.  Not
-        # emitted otherwise, so a disabled pass leaves the text unchanged.
+        # The element index as a value, while the body is being built.
         self._induction = None
         self._first_lookahead = None
-        self._loop_handle = None
-        self._stage_depth: Optional[int] = None
-        # ids of leading region instructions emitted outside the flag guard
+        # ids of region instructions emitted outside the flag guard
         self._unguarded: set = set()
-        # Emitted inside the loop's own body, around the `for`: the peeled
-        # transfers of `WrapLoads` ahead of it and their drains after it.  See
-        # `add_wrap_prologue`.
-        self._wrap_prologue: List[AbstractInstruction] = []
-        self._wrap_epilogue: List[AbstractInstruction] = []
         # `LAUNCHCTRL` only: how many cancel requests are kept in flight.  One
         # is enough to hide the queue's own latency behind the body, because
         # the request for the next element is posted before the current one is
@@ -250,37 +242,10 @@ class BatchLoop(AbstractInstruction):
     # because it does not survive the iteration -- only the region's reads of
     # symbols defined outside are uses of the loop.
 
-    def _emitted(self) -> List[AbstractInstruction]:
-        """Everything this instruction emits, in the order it emits it.
-
-        The region, and around it what `WrapLoads` handed over to be emitted
-        in the loop's own body: the peels ahead of the `for`, the drains after
-        it.  Data flow is read off this and not off the region alone, because
-        the peel is what defines a wrapped buffer before the region reads it.
-        """
-        return self._wrap_prologue + self._region + self._wrap_epilogue
-
-    def entry_defs(self) -> Tuple:
-        """What is defined on the way into the region: the peeled transfers.
-
-        A wrapped buffer is read at the head of the body and written at its
-        tail, so `entering` calls it carried -- initialized ahead of the loop,
-        updated across the back edge.  The initialization is emitted by this
-        instruction, not by one before it, so a check that walks the region
-        with only the stream's definitions in hand has to be told.
-        """
-        out, seen = [], set()
-        for instr in self._wrap_prologue:
-            for sym in instr.defs():
-                if id(sym) not in seen:
-                    seen.add(id(sym))
-                    out.append(sym)
-        return tuple(out)
-
     def uses(self) -> Tuple:
         defined = set()
         out, seen = [], set()
-        for instr in self._emitted():
+        for instr in self._region:
             for sym in instr.uses():
                 if id(sym) not in defined and id(sym) not in seen:
                     seen.add(id(sym))
@@ -291,7 +256,7 @@ class BatchLoop(AbstractInstruction):
 
     def defs(self) -> Tuple:
         out, seen = [], set()
-        for instr in self._emitted():
+        for instr in self._region:
             for sym in instr.defs():
                 if id(sym) not in seen:
                     seen.add(id(sym))
@@ -300,7 +265,7 @@ class BatchLoop(AbstractInstruction):
 
     def accesses(self) -> Tuple:
         out = []
-        for instr in self._emitted():
+        for instr in self._region:
             out.extend(instr.accesses())
         return tuple(out)
 
@@ -319,15 +284,6 @@ class BatchLoop(AbstractInstruction):
     #: One entry per open loop: the builder it is being emitted into, and what
     #: it has bound so far.
     _indices: List[Tuple] = []
-
-    #: One entry per open loop that carries tokens: the builder, and each
-    #: wrapped transfer's carried tokens -- see `carried_tokens`.
-    _carried: List[Tuple] = []
-
-    #: While the body of a loop that carries the mask is being emitted: the
-    #: flag words of this element and the next, as the loop hands them in --
-    #: see `_carries_flags`.
-    _carried_flags: Optional[Tuple] = None
 
     @classmethod
     @contextmanager
@@ -359,36 +315,6 @@ class BatchLoop(AbstractInstruction):
             yield frame[1]
         finally:
             cls._indices.pop()
-
-    @classmethod
-    def carried_tokens(cls, builder, transfer) -> list:
-        """The tokens a loop in `builder`'s body carries for `transfer`.
-
-        The iteration arguments while the body is being built, the loop's
-        results once it is closed -- whichever the loop has published when
-        asked.  Empty where no loop in this body carries the transfer, which
-        is the caller's cue to drain.
-        """
-        for owner, table in reversed(cls._carried):
-            if owner is builder:
-                return list(table.get(id(transfer), ()))
-        return []
-
-    @classmethod
-    def _push_carried(cls, builder) -> dict:
-        table: dict = {}
-        cls._carried.append((builder, table))
-        return table
-
-    @classmethod
-    def _pop_carried(cls) -> None:
-        cls._carried.pop()
-
-    def _carried_transfers(self) -> List[AbstractInstruction]:
-        """The wrapped shared transfers, in the order the tail issues them."""
-        return [i for i in self._region
-                if getattr(i, '_wrapped', False)
-                and getattr(i, '_peel', None) is not None]
 
     @classmethod
     def indices_in(cls, builder) -> Optional[dict]:
@@ -429,59 +355,17 @@ class BatchLoop(AbstractInstruction):
         """
         return self._first_lookahead
 
-    def stage_counter_name(self) -> str:
-        return f'pipeStage{self._section_index}'
-
-    def request_stage_counter(self, depth: int) -> str:
-        """Bind a counter that runs ``0, 1, ... depth-1, 0, ...`` per iteration.
-
-        A rotating buffer has to be indexed by the *iteration*, not by the
-        element.  Those are the same thing only in a unit-stride loop; here the
-        strided loop advances the element index by ``gridDim.x * blockDim.y``
-        per iteration, and the queue-driven loop takes whatever the hardware
-        hands it.  Indexing stages by ``batchId0 % depth`` therefore fails
-        twice over: the stage never alternates when ``depth`` divides the
-        stride -- the common case, since the stride is a product of two block
-        counts -- and the first iteration reads ``batchId0 % depth`` while a
-        peeled prologue can only name a literal, so every thread group with an
-        odd start index reads a stage nobody filled.
-
-        ``SINGLE`` has one iteration and so nothing to rotate; it raises rather
-        than returning a counter that would always read zero.
-        """
-        if self._mode is LoopMode.SINGLE:
-            raise InternalError(
-                'a single-iteration loop has no iteration to pipeline against')
-        if depth < 2:
-            raise InternalError(f'stage counter needs depth >= 2, got {depth}')
-        if self._stage_depth not in (None, depth):
-            raise InternalError(
-                f'loop already pipelined at depth {self._stage_depth}, '
-                f'cannot also serve depth {depth}')
-        self._stage_depth = depth
-        return self.stage_counter_name()
-
     def mark_unguarded(self, instrs) -> None:
         """Emit these region instructions *outside* the per-element flag guard.
 
         The guard is ``if (flags[batchId0])``: a runtime mask that skips
-        individual elements.  Anything the loop carries across the back edge
-        has to sit outside it, or a skipped element desynchronizes it from the
-        element sequence for the rest of the loop.  Two things in a pipelined
-        loop do:
-
-        * the rolling pointer's advance --- skip it once and the pointer
-          trails the loop variable permanently, so every later iteration
-          computes on the wrong element;
-        * the prefetch itself, issued in iteration ``k`` for element
-          ``k + 1`` --- skip it and iteration ``k + 1`` reads a stage nobody
-          filled.
-
-        Neither is specific to rotation: the address-advance half has the same
-        hole.  The marked instructions must form a prefix of the region,
-        because the guard is one contiguous block; the pass moves them there.
-        `mark_unguarded_tail` is the other shape the guard can leave, a
-        suffix, for what is issued once the body is done with it.
+        individual elements.  What is issued for another element than the
+        body's has to sit outside it -- element ``k`` being masked says
+        nothing about ``k + 1`` -- and the prefetch hints for the next
+        element are such instructions.  The marked instructions must form a
+        prefix of the region, because the guard is one contiguous block; the
+        pass that inserts them puts them there.  `mark_unguarded_tail` is
+        the other shape the guard can leave, a suffix.
 
         Adds to what is marked rather than replacing it, so a head and a tail
         marked by different passes both survive.
@@ -491,43 +375,13 @@ class BatchLoop(AbstractInstruction):
     def mark_unguarded_tail(self, instrs) -> None:
         """Emit these region instructions *after* the flag guard, unguarded.
 
-        The other half of what `mark_unguarded` says it cannot do.  A transfer
-        `WrapLoads` moves across the back edge is issued for element k + 1 once
-        iteration k has finished with its buffer, which is the end of the body
-        and not its beginning -- so it can only leave the guard as a suffix.
-        The instructions must end the region, barriers aside: see
+        The other half of what `mark_unguarded` says it cannot do: what is
+        issued for the next element once the body is done is the end of the
+        body and not its beginning, so it can only leave the guard as a
+        suffix.  The instructions must end the region, barriers aside: see
         `_split_guard`.
         """
         self._unguarded = set(self._unguarded) | {id(i) for i in instrs}
-
-    def add_wrap_prologue(self, instrs) -> None:
-        """Emit these ahead of the loop, but inside the body that holds it.
-
-        For the peel of a shared transfer `WrapLoads` moved across the back
-        edge.  The top-level stream is the obvious place for a peel, and the
-        register path puts its own there -- but a shared transfer is only a
-        `copy.async` where its window and pointer are values of the body it is
-        emitted in, and the window is declared by `_declare_windows_early`,
-        in this body, just before the `for`.  A peel ahead of the loop sits in
-        a body of its own, names a window that body never bound, and renders
-        as text through a pipeline object nothing declares.
-
-        Not part of the region, so no analysis of the stream walks it: the
-        buffer is live into the loop through the wait at its head anyway, the
-        windows are declared through the buffer's user list, and the body the
-        peel is emitted into is what the allocator reads.
-        """
-        self._wrap_prologue.extend(instrs)
-
-    def add_wrap_epilogue(self, instrs) -> None:
-        """Emit these after the loop, still inside its body.
-
-        The drain for a wrapped transfer: the last iteration prefetches a
-        clamped element nobody reads, and that copy is in flight into shared
-        memory the next section may reuse.  Inside the body for the same
-        reason as the prologue -- `asyncmem` retires what it can see issued.
-        """
-        self._wrap_epilogue.extend(instrs)
 
     def _split_guard(self):
         """``(unguarded prefix, guarded middle, unguarded suffix)``.
@@ -542,10 +396,9 @@ class BatchLoop(AbstractInstruction):
         body with nothing marked at its end keeps its closing barrier inside
         the guard.
         """
-        unguarded = set(self._unguarded) | self._address_prefix()
+        unguarded = set(self._unguarded)
         if not unguarded:
             return [], list(self._region), []
-        self._unguarded = unguarded
         region = self._region
         cut = 0
         while cut < len(region) and id(region[cut]) in unguarded:
@@ -574,10 +427,8 @@ class BatchLoop(AbstractInstruction):
         it would land inside the guard, and a transfer cannot be issued
         outside a guard that defines the buffer it fills.
 
-        Same rule as for the address bindings (`_address_prefix`), and it
-        holds more easily here: nothing about this declaration depends on the
-        element, so hoisting it cannot observe anything a masked element would
-        not have.
+        Nothing about this declaration depends on the element, so hoisting it
+        cannot observe anything a masked element would not have.
 
         Unconditional, not tied to `enable_wrap_loads`: that switch has no
         business deciding whether the window a *consumer* reads is in scope
@@ -598,38 +449,6 @@ class BatchLoop(AbstractInstruction):
             cleared = getattr(self, '_cleared_declarations', None)
             if cleared is not None:
                 cleared.append(instr)
-
-    def _address_prefix(self) -> set:
-        """The leading address bindings, when a prefetch will need them outside.
-
-        A transfer moved to the previous iteration has to be issued outside the
-        flag guard -- the mask is per element, so element k being skipped says
-        nothing about k+1, and a prefetch under k's mask breaks the chain for
-        everything after a masked element.  But the transfer reads
-        `glb_m0 = &m0[batchId0 * stride]`, which is bound inside the guard, so
-        the binding has to come out with it.
-
-        Only where computing the address does not itself read memory indexed by
-        the element.  `Addressing.PTR_BASED` loads `m0[batchId0]` out of a
-        pointer array before offsetting it, and a masked element is one the
-        caller told us not to process: nothing in the interface promises that
-        its pointer is valid to dereference.  Strided addressing multiplies an
-        index by a stride and promises nothing that could be broken.
-
-        Only the leading run, because the guard is one block and what leaves it
-        has to be a prefix.
-        """
-        from .ptr_manip import GetElementPtr
-        if not self._context.get_user_options().enable_wrap_loads:
-            return set()
-        out = set()
-        for instr in self._region:
-            if not isinstance(instr, GetElementPtr):
-                break
-            if instr.dereferences_the_batch():
-                break
-            out.add(id(instr))
-        return out
 
     def prologue_index(self) -> str:
         """The index a peeled iteration should use.
@@ -704,8 +523,6 @@ class BatchLoop(AbstractInstruction):
         `REQUIRED` has no null to check: the parameter has no default, so the
         caller supplied a pointer.
         """
-        if self._carried_flags is not None:
-            return self._word_flag(writer, self._carried_flags[0], 'allowed')
         flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
         read = f'static_cast<bool>({flags}[{{0}}])'
         if self._flags is FlagMode.OPTIONAL:
@@ -742,7 +559,7 @@ class BatchLoop(AbstractInstruction):
         operands, which is what the frame above is for.
 
         The first one escapes, and only it.  The loop names its successor index
-        in an *attribute* --- `wrap_prefetch` reads it to rewrite a transfer to
+        in an *attribute* --- `wrap_loads` reads it to rewrite a transfer to
         the next element --- and an attribute is not an operand, so the use
         chain does not see it and `dce` would take the definition away from
         under a pass that has not run yet.  That is what `escapes` says: this
@@ -776,61 +593,22 @@ class BatchLoop(AbstractInstruction):
                 first = prev
         self._first_lookahead = first
 
-    def _declare_stage_counter(self, writer) -> None:
-        if self._stage_depth is None:
-            return
-        self._counter_stmt(writer, f'uint32_t {self.stage_counter_name()} = 0;')
-
-    @staticmethod
-    def _counter_stmt(writer, line: str) -> None:
-        """A statement over the stage counter, which is a register: it
-        touches no memory the body models, and says so -- left unsaid, the
-        allocator and the barrier placement would both have to assume it
-        touches every buffer."""
-        if hasattr(writer, 'decl_expr'):
-            writer(line, accesses=())
-        else:
-            writer(line)
-
-    def _advance_stage_counter(self, writer) -> None:
-        """Advance the counter *outside* the flag guard.
-
-        Inside would tie the counter to the compute, and the transfer it indexes
-        is issued for the *next* element -- so a skipped element desynchronizes
-        them either way.  Outside is the placement that stays correct once the
-        pipelined transfer is hoisted out of the guard, which is what closing
-        that hole needs; see the note in opt/pipeline.py.
-        """
-        if self._stage_depth is None:
-            return
-        d = self._stage_depth
-        name = self.stage_counter_name()
-        if d & (d - 1) == 0:
-            self._counter_stmt(writer, f'{name} = ({name} + 1) & {d - 1};')
-        else:
-            self._counter_stmt(writer, f'{name} = ({name} + 1) % {d};')
-
     def _emit_body(self, writer) -> None:
         head, guarded, tail = self._split_guard()
         for instr in head:
             instr.gen_code(writer)
         # The next element's flag, read here and not where the tail first
-        # needs it: there it is a load its user waits on at once, the same
-        # chase as the pointer `WrapLoads` binds at the head for that reason.
+        # needs it: there it is a load its user waits on at once.
         next_flag = None
         if self._flags is not FlagMode.ABSENT and any(
                 getattr(i, '_guard_by_own_flag', False) for i in tail):
-            if self._carried_flags is not None:
-                next_flag = self._word_flag(writer, self._carried_flags[1],
-                                            'allowed_next')
-            else:
-                next_flag = self._element_flag(
-                    writer, self._tail_element(writer), 'allowed_next')
+            next_flag = self._element_flag(
+                writer, self._tail_element(writer), 'allowed_next')
         if self._flags is FlagMode.ABSENT:
             # Nothing to skip against, so no condition and no block.  The
             # split above still holds: `head` is what has to run for every
-            # element, and running it first keeps the order the pipelining
-            # pass arranged whether or not a guard follows it.
+            # element, and running it first keeps the order the pass that
+            # marked it arranged, whether or not a guard follows it.
             #
             # But without the block, nothing keeps the compiler from hoisting
             # the body's invariant loads out of the loop -- see
@@ -851,10 +629,13 @@ class BatchLoop(AbstractInstruction):
         cond = self._flag_guard(writer)
         # A real `Op.IF` where the condition is a value.  A raw block would
         # make the whole body one opaque region as far as any pass is
-        # concerned -- `wrap_prefetch` looks into the loop, finds the guard,
-        # and would report no transfers because none are *its* statements.
-        guard = (writer.if_(cond) if hasattr(writer, 'if_')
-                 and not isinstance(cond, str) else writer.If(cond))
+        # concerned -- `wrap_loads` looks into the loop, finds the guard, and
+        # would find no transfers because none are *its* statements.  The
+        # guard says what it is, since a body holds other guards too: a
+        # transfer's tail lanes are one.
+        guard = (writer.if_(cond, attrs=(('guard', 'element'),))
+                 if hasattr(writer, 'if_') and not isinstance(cond, str)
+                 else writer.If(cond))
         with guard:
             self._emit_guarded(writer, guarded)
         self._emit_own_flagged(writer, tail,
@@ -866,22 +647,18 @@ class BatchLoop(AbstractInstruction):
         """Emit `instrs`; those that follow their element's pointer, under that
         element's flag.
 
-        For the transfers `WrapLoads` issues for another element than the one
-        the body is on -- the peel for the first, the tail for the next -- and
-        only where the address comes out of a pointer array.  Such a transfer
-        is outside the guard on purpose, so a masked element still prefetches
-        its successor; but the successor may itself be masked, and nothing in
-        the interface promises the pointer of an element the caller told us to
-        skip.  Reading the array entry is fine, the index is clamped into
-        range; following it is not.  So the transfer, and nothing else, runs
-        under the flag of the element it fetches.  A barrier between two such
-        transfers stays unconditional, and a skipped transfer still commits:
-        an empty group, the same on every lane of the multiplication, which is
-        what every lane's count has to agree on.
+        For the hints issued for the next element at the tail
+        (`opt.prefetch.PrefetchData`), and only where the address comes out of
+        a pointer array.  Such a hint is outside the guard on purpose, so a
+        masked element still asks for its successor; but the successor may
+        itself be masked, and nothing in the interface promises the pointer of
+        an element the caller told us to skip.  Reading the array entry is
+        fine, the index is clamped into range; following it is not.  So the
+        hint, and nothing else, runs under the flag of the element it is for.
 
-        `element` is called only if something here needs the flag, since in
-        the prologue asking for the index emits a binding.  `cond` is that flag
-        where the caller has read it already.
+        `element` is called only if something here needs the flag, since
+        asking for the index may emit a binding.  `cond` is that flag where
+        the caller has read it already.
         """
         instrs = list(instrs)
         i = 0
@@ -894,29 +671,13 @@ class BatchLoop(AbstractInstruction):
                 continue
             if cond is None:
                 cond = self._element_flag(writer, element(), name)
-            if (hasattr(instr, '_copy_predicate') and hasattr(writer, 'copy_async')
-                    and not isinstance(cond, str)):
-                # A shared transfer: its copies take the flag as a predicate
-                # rather than sit in a block.  A copy in a block is issued on
-                # one path only as far as `asyncmem` can tell, and the loop
-                # carrying its token would lose the steady state its waits are
-                # counted against.  The predicate is a real branch per copy,
-                # so the pointer is still not followed for a masked element.
-                instr._copy_predicate = cond
-                try:
-                    instr.gen_code(writer)
-                finally:
-                    instr._copy_predicate = None
-                continue
             # The instructions after it that sit under the same flag share its
             # block: one branch rather than one per instruction, and the
             # statements side by side where the lowering can take them as one
             # (the prefetch hints, which ESIMD asks for in one gather).
             group = [instr]
             while (i < len(instrs)
-                   and getattr(instrs[i], '_guard_by_own_flag', False)
-                   and not (hasattr(instrs[i], '_copy_predicate')
-                            and hasattr(writer, 'copy_async'))):
+                   and getattr(instrs[i], '_guard_by_own_flag', False)):
                 group.append(instrs[i])
                 i += 1
             guard = (writer.if_(cond) if hasattr(writer, 'if_')
@@ -924,6 +685,25 @@ class BatchLoop(AbstractInstruction):
             with guard:
                 for member in group:
                     member.gen_code(writer)
+
+    def _flag_word(self):
+        """How an element's flag is read, as the word it is stored as, with
+        the element at `{0}`; None where the section has no mask.
+
+        Stated on the loop for a pass that issues work for another element
+        than the body's (`pir.wrap`): it reads that element's flag the way
+        the traversal reads its own.  `1` and not `1u` where the mask may be
+        absent: the conditional converts it to the word's type anyway, and
+        the oracle that reads kernels in the tests parses C literals without
+        suffixes.
+        """
+        if self._flags is FlagMode.ABSENT:
+            return None
+        flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+        read = f'{flags}[{{0}}]'
+        if self._flags is FlagMode.OPTIONAL:
+            read = f'{flags} == nullptr ? 1 : {read}'
+        return read
 
     def _element_flag(self, writer, index, name):
         """`flags[index]`, spelled the way `_flag_guard` spells the current one."""
@@ -939,75 +719,6 @@ class BatchLoop(AbstractInstruction):
                 extern=name)
         writer(f'const bool {name} = {read.format(index)};')
         return name
-
-    def _carries_flags(self, writer) -> bool:
-        """Does the loop hand the mask from one iteration to the next?
-
-        Where it carries prefetches across the back edge, and there is a mask.
-        Read at the head, the element's flag would be a load its guard waits
-        on at once, and on AMD that wait is `vmcnt(0)`: the counter retires in
-        order, so it would also wait for every copy the previous tail issued,
-        and the overlap those copies are there for would be lost -- with a
-        mask passed, `chain_three` would keep one wait per iteration, and it
-        would be that one.  So the words ride the loop instead, like the
-        tokens: this element's and the next one's come in, and the one two
-        ahead is read at the head and handed on.  A word is read one
-        iteration before it is first needed, and whatever waits for it waits
-        for loads long done.
-
-        The word and not the `bool`: a comparison right behind the load is a
-        use right behind the load, and the wait comes back with it.  The
-        conversion is made where the flag is used.
-
-        Only on the structured path, which has iteration arguments, and only
-        with a successor index to count on from.
-        """
-        return (self._flags is not FlagMode.ABSENT and bool(self._wrap_prologue)
-                and self._lookahead >= 1 and hasattr(writer, 'for_'))
-
-    def _element_word(self, writer, index, name):
-        """`flags[index]` as the word it is -- see `_carries_flags`.
-
-        One per element, so laid out like the element index itself: every lane
-        of the multiplication holds the same word.  The loop declares the words
-        it carries from that, and the ESIMD lowering refuses a value it cannot
-        tell the spread of.
-        """
-        from tensorforge.backend.pir.core import (SCALAR_LAYOUT, Effect,
-                                                  MemSpace, ScalarType)
-        from tensorforge.common.basic_types import Datatype
-        flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
-        read = f'{flags}[{{0}}]'
-        if self._flags is FlagMode.OPTIONAL:
-            # `1` and not `1u`: the conditional converts it to the word's
-            # type anyway, and the oracle that reads kernels in the tests
-            # parses C literals without suffixes.
-            read = f'{flags} == nullptr ? 1 : {read}'
-        return writer.decl_expr(
-            f'const uint32_t {name}', read, ScalarType(Datatype.U32), None,
-            args=(index,), kind=Effect.READ, space=MemSpace.GLOBAL, hint=name,
-            extern=name, layout=SCALAR_LAYOUT)
-
-    def _word_flag(self, writer, word, name):
-        """A carried flag word as the condition it stands for."""
-        from tensorforge.backend.pir.core import BOOL
-        return writer.decl_expr(f'const bool {name}', 'static_cast<bool>({0})',
-                                BOOL, None, args=(word,), hint=name,
-                                extern=name)
-
-    def _clamped_successor(self, writer, index, hint):
-        """`index + stride`, clamped the way the lookahead bindings clamp.
-
-        The same clamp and not a simpler one: the word read for an element
-        is the predicate of the copy that follows that element's pointer, so
-        it has to name the element the copy will be issued for -- including
-        at the end of the batch, where the clamp holds the index in place.
-        """
-        from tensorforge.backend.pir.core import BOOL, SIZE
-        ahead = writer.op('add', SIZE, index, self._stride, hint=f'{hint}Ahead')
-        inside = writer.op('lt', BOOL, ahead, self._count(writer),
-                           hint=f'{hint}In')
-        return writer.op('select', SIZE, inside, ahead, index, hint=hint)
 
     def _tail_element(self, writer):
         """The element the tail prefetches: this loop's clamped successor."""
@@ -1030,7 +741,7 @@ class BatchLoop(AbstractInstruction):
         return self.prologue_index()
 
     def _peel_index(self, writer):
-        """What the loop tells `wrap_prefetch` its peel should fetch.
+        """What the loop tells `wrap_loads` its peel should fetch.
 
         An attribute and not an operand, so the use chain does not see it: the
         value is marked as escaping, or `dce` would take its definition away
@@ -1130,30 +841,12 @@ class BatchLoop(AbstractInstruction):
         if self._mode is LoopMode.PERSISTENT:
             # TODO: OMP target
             # TODO: maybe iterate over adjacent elements? (for indirect pointers)
-            self._declare_stage_counter(writer)
             # Before the loop, not merely before the guard.  The window is the
-            # same for every element, and a peeled transfer is emitted outside
-            # the loop -- with the declaration inside it, the prologue names a
-            # value whose `extern` binding happens later and the result renders
-            # but does not compile.
+            # same for every element, and a transfer peeled for the first
+            # element is issued outside the loop (`pir.wrap`) -- with the
+            # declaration inside it, the peel would name a value whose `extern`
+            # binding happens later, which renders and does not compile.
             self._declare_windows_early(writer, list(self._region))
-            # The words the loop starts with: the first element's, which is
-            # also what the peel is predicated on, and its successor's.
-            carry = self._carries_flags(writer)
-            peel_flag = None
-            if carry:
-                first = self._prologue_element(writer)
-                word_first = self._element_word(writer, first, 'flagWordFirst')
-                word_second = self._element_word(
-                    writer, self._clamped_successor(writer, first, 'flagSecond'),
-                    'flagWordSecond')
-                if any(getattr(i, '_guard_by_own_flag', False)
-                       for i in self._wrap_prologue):
-                    peel_flag = self._word_flag(writer, word_first,
-                                                'allowed_peel')
-            self._emit_own_flagged(writer, self._wrap_prologue,
-                                   lambda: self._prologue_element(writer),
-                                   'allowed_peel', cond=peel_flag)
             if hasattr(writer, 'for_'):
                 from tensorforge.backend.pir.core import (SIZE,
                                                           Uniformity)
@@ -1162,99 +855,41 @@ class BatchLoop(AbstractInstruction):
                 # the width is the induction value's own -- an override on the
                 # header would widen the variable and leave everything computed
                 # from it at `int32_t`.
-                # Each wrapped shared transfer's tokens ride the loop: the
-                # peel's are the first iteration's arguments, the tail's are
-                # yielded as the next one's, and the wait at the consumer names
-                # them -- see `carried_tokens`.  A transfer whose peel issued
-                # nothing structured carries nothing, and its wait drains.
-                inits: list = []
-                types: list = []
-                spans: list = []
-                for transfer in self._carried_transfers():
-                    toks = transfer._peel.tokens_for(writer)
-                    if not toks:
-                        continue
-                    spans.append((transfer, len(inits), len(toks)))
-                    inits.extend(toks)
-                    types.extend(t.type for t in toks)
-                flags_at = len(inits)
-                if carry:
-                    inits.extend((word_first, word_second))
-                    types.extend((word_first.type, word_second.type))
-                table = BatchLoop._push_carried(writer)
-                try:
-                    with writer.for_(self._start, self._count(writer),
-                                     self._stride, hint=self._batch(0),
-                                     index_type=SIZE,
-                                     peel_index=self._peel_index(writer),
-                                     uniform=Uniformity.MULT,
-                                     inits=tuple(inits),
-                                     types=tuple(types)) as loop:
-                        self._loop_handle = loop
-                        for transfer, at, n in spans:
-                            table[id(transfer)] = loop.iter_args[at:at + n]
-                        # The induction *value*, not just its name.  Anything
-                        # inside that mentions `batchId0` has to say so as an
-                        # operand, or the IR sees a computation with no inputs and
-                        # hoists it out of the loop that defines the thing it
-                        # reads -- silently, with only the generated text to
-                        # show it.
-                        self._induction = loop.induction
-                        try:
-                            with BatchLoop.batch_indices(writer) as bound:
-                                bound[self._batch(0)] = loop.induction
-                                self._lookahead_bindings(writer, bound)
-                                # The first lookahead binding is what this loop
-                                # calls the next element, and `wrap_prefetch` needs
-                                # exactly that: it moves a transfer one iteration
-                                # earlier and has no way to know how the traversal
-                                # clamps.
-                                loop._next_index = self._first_lookahead
-                                if carry:
-                                    own, nxt = loop.iter_args[flags_at:flags_at + 2]
-                                    word_ahead = self._element_word(
-                                        writer, self._clamped_successor(
-                                            writer, self._tail_element(writer),
-                                            'flagAhead'),
-                                        'flagWordAhead')
-                                    self._carried_flags = (own, nxt)
-                                self._emit_body(writer)
-                                self._carried_flags = None
-                                self._advance_stage_counter(writer)
-                                if spans or carry:
-                                    yielded = []
-                                    for transfer, at, n in spans:
-                                        toks = transfer.tokens_for(writer)
-                                        if len(toks) != n:
-                                            raise InternalError(
-                                                f'{transfer} issued {len(toks)} '
-                                                f'copies in the loop and {n} in '
-                                                f'its peel; the tokens it carries '
-                                                f'cannot line up')
-                                        yielded.extend(toks)
-                                    if carry:
-                                        yielded.extend((nxt, word_ahead))
-                                    loop.yield_(*yielded)
-                        finally:
-                            self._induction = None
-                            self._carried_flags = None
-                    for transfer, at, n in spans:
-                        table[id(transfer)] = loop.results[at:at + n]
-                    for instr in self._wrap_epilogue:
-                        instr.gen_code(writer)
-                finally:
-                    BatchLoop._pop_carried()
+                peel = self._peel_index(writer)
+                with writer.for_(self._start, self._count(writer),
+                                 self._stride, hint=self._batch(0),
+                                 index_type=SIZE, peel_index=peel,
+                                 uniform=Uniformity.MULT,
+                                 flag_word=(self._flag_word()
+                                            if peel is not None
+                                            else None)) as loop:
+                    # The induction *value*, not just its name.  Anything
+                    # inside that mentions `batchId0` has to say so as an
+                    # operand, or the IR sees a computation with no inputs and
+                    # hoists it out of the loop that defines the thing it
+                    # reads -- silently, with only the generated text to show
+                    # it.
+                    self._induction = loop.induction
+                    try:
+                        with BatchLoop.batch_indices(writer) as bound:
+                            bound[self._batch(0)] = loop.induction
+                            self._lookahead_bindings(writer, bound)
+                            # The first lookahead binding is what this loop
+                            # calls the next element, and `wrap_loads` needs
+                            # exactly that: it moves a transfer one element
+                            # ahead and has no way to know how the traversal
+                            # clamps.
+                            loop._next_index = self._first_lookahead
+                            self._emit_body(writer)
+                    finally:
+                        self._induction = None
                 return
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
                             f'{self._batch(0)} < {self._num_elements()}; '
                             f'{self._batch(0)} += {self._stride}'):
                 self._lookahead_bindings(writer)
                 self._emit_body(writer)
-                self._advance_stage_counter(writer)
-            for instr in self._wrap_epilogue:
-                instr.gen_code(writer)
         elif self._mode is LoopMode.LAUNCHCTRL:
-            self._declare_stage_counter(writer)
             self._declare_windows_early(writer, list(self._region))
             depth = self._queue_depth
             writer(f'__shared__ tensorforge::ClusterLaunchQueue<{depth}> '
@@ -1274,7 +909,6 @@ class BatchLoop(AbstractInstruction):
             with writer.While('true'):
                 with writer.If(self._size_guard()):
                     self._emit_body(writer)
-                self._advance_stage_counter(writer)
                 # Outside the size guard, deliberately.  `next` contains the
                 # block barrier that separates one element's shared memory
                 # from the next one's, and the guard is per element: the rows
@@ -1347,7 +981,6 @@ class BatchLoop(AbstractInstruction):
         with builder.while_(self._block_id(), hint=self._batch(0),
                             index_type=SIZE,
                             uniform=Uniformity.MULT) as loop:
-            self._loop_handle = loop
             self._induction = loop.induction
             # Only `batchId0`: this traversal binds no lookahead, because the
             # next element is whatever the queue answers and there is nothing
@@ -1370,7 +1003,6 @@ class BatchLoop(AbstractInstruction):
                            self._count(builder), hint='inrange')
         with builder.if_(guard):
             self._emit_body(builder)
-        self._advance_stage_counter(builder)
         # Outside the size guard, deliberately.  The barrier `next`
         # carries separates one element's shared memory from the next
         # one's, and the guard is per element: the rows of a block
@@ -1418,7 +1050,6 @@ class BatchLoop(AbstractInstruction):
             self._gen_grouped_ir(writer)
             return
         self._declare_lane(writer)
-        self._declare_stage_counter(writer)
         self._declare_windows_early(writer, list(self._region))
         # The group takes every trip together, which is the point of driving
         # it from the leader; the head is text, so the IR is told.
@@ -1434,7 +1065,6 @@ class BatchLoop(AbstractInstruction):
                 with self._spelled_indices(writer), \
                         elementmask.element_mask(None, mask):
                     self._emit_guarded(writer, list(self._region))
-                self._advance_stage_counter(writer)
             return
         writer(f'const size_t {self._group_batch()} = {self._group_start()};')
         with writer.If(f'{self._group_batch()} < {self._num_elements()}',
@@ -1477,7 +1107,6 @@ class BatchLoop(AbstractInstruction):
         from tensorforge.backend.pir.core import (BOOL, SIZE, Effect, MemSpace,
                                                   Uniformity)
         lexic = self._vm.get_lexic()
-        self._declare_stage_counter(writer)
         self._declare_windows_early(writer, list(self._region))
         lane = writer.op('rem', SIZE, writer.thread_id('y'), self._group_size,
                          hint=self._lane())
@@ -1487,7 +1116,6 @@ class BatchLoop(AbstractInstruction):
         with writer.for_(start, self._num_elements(), self._stride,
                          hint=self._group_batch(), index_type=SIZE,
                          uniform=Uniformity.MULTGROUP) as loop:
-            self._loop_handle = loop
             group = loop.induction
             row = writer.op('add', SIZE, group, lane, hint='row')
             # One named declaration, because every global write spells the
@@ -1526,7 +1154,6 @@ class BatchLoop(AbstractInstruction):
                         writer(fence, accesses=())
                     with elementmask.element_mask(active, self._active()):
                         self._emit_guarded(writer, list(self._region))
-                    self._advance_stage_counter(writer)
             finally:
                 self._induction = None
 

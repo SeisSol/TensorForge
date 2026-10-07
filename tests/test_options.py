@@ -76,8 +76,8 @@ def test_an_option_needs_a_default_or_a_rule(scratch_option):
 
 
 def test_an_unknown_option_is_refused_by_name():
-  with pytest.raises(ValueError, match='enable_pipelien'):
-    Options(enable_pipelien=True)
+  with pytest.raises(ValueError, match='enable_wrap_laods'):
+    Options(enable_wrap_laods=True)
 
 
 # -- layers ------------------------------------------------------------------ #
@@ -92,15 +92,15 @@ def test_the_caller_beats_the_default():
 
 
 def test_the_general_variable_reaches_every_option(monkeypatch):
-  monkeypatch.setenv(opt.OPTIONS_ENV, 'enable_pipeline=1,move_distance=2')
+  monkeypatch.setenv(opt.OPTIONS_ENV, 'enable_wrap_loads=1,move_distance=2')
   resolved = _resolved()
-  assert resolved.enable_pipeline is True
+  assert resolved.enable_wrap_loads is True
   assert resolved.move_distance == 2
 
 
 def test_a_bare_name_in_the_general_variable_means_on(monkeypatch):
-  monkeypatch.setenv(opt.OPTIONS_ENV, 'enable_pipeline')
-  assert _resolved().enable_pipeline is True
+  monkeypatch.setenv(opt.OPTIONS_ENV, 'enable_wrap_loads')
+  assert _resolved().enable_wrap_loads is True
 
 
 def test_the_general_variable_is_checked_against_the_registry(monkeypatch):
@@ -156,8 +156,8 @@ def test_two_equal_requests_are_one_key():
 
 
 def test_the_order_of_the_keywords_does_not_change_the_request():
-  assert (Options(move_distance=2, enable_pipeline=True)
-          == Options(enable_pipeline=True, move_distance=2))
+  assert (Options(move_distance=2, enable_wrap_loads=True)
+          == Options(enable_wrap_loads=True, move_distance=2))
 
 
 def test_a_resolved_set_cannot_be_written_to():
@@ -187,8 +187,8 @@ def test_the_two_sides_of_a_question_get_different_digests():
 
 
 def test_the_digest_is_the_same_for_the_same_configuration():
-  first = _resolved(enable_pipeline=True, move_distance=2)
-  second = _resolved(move_distance=2, enable_pipeline=True)
+  first = _resolved(enable_wrap_loads=True, move_distance=2)
+  second = _resolved(move_distance=2, enable_wrap_loads=True)
   assert first.digest() == second.digest()
   assert first == second
 

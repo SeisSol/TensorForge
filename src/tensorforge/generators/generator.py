@@ -377,20 +377,6 @@ def _one_lane_stores(stream) -> tuple:
   return tuple(roots.get(id(sym), sym) for sym in out)
 
 
-def _carried_transfers(body) -> set:
-  """The buffers whose asynchronous transfers sit in a loop that carries
-  values across its back edge -- the loops `wrap_prefetch` produces."""
-  names: set = set()
-  for stmt, _ in pir.walk(body):
-    if stmt.op is pir.Op.FOR and stmt.target:
-      for inner, _ in pir.walk((stmt,)):
-        if inner.op in (pir.Op.COPY_ASYNC, pir.Op.LOAD_ASYNC) and inner.args:
-          base = getattr(inner.args[0], 'hint', None)
-          if base:
-            names.add(base)
-  return names
-
-
 class Generator:
   #: Hex characters of the digest that end up in the symbol.  Sixty-four bits
   #: rather than forty: the digest is the whole of the name's discriminating
@@ -423,10 +409,6 @@ class Generator:
     #: The configuration `Options.autotune` chose, or None where it did not run.
     self.tuned = None
     self._context: Context = context
-    #: Destination names whose transfer should get two stages, or None to
-    #: work that out.  Set to a concrete set on the throwaway generator that
-    #: works it out, which is what stops it recursing.
-    self._rotate: Optional[set] = None
     #: Switches the frontend's caller set on this kernel, or None from a
     #: frontend that has no attribute channel.  Only the flag mask reads
     #: these; the distinction between None and {} is what gives a frontend
@@ -592,14 +574,12 @@ class Generator:
       # element after the first is computed from another element's operands.
       # Refused rather than silently wrong, until the lookahead index comes
       # out of the queue instead of out of the stride.
-      options = context.get_user_options()
-      for name in ('enable_wrap_loads', 'enable_pipeline', 'enable_multibuffer'):
-        if getattr(options, name):
-          raise GenerationError(
-              f'{name} prefetches element `batchId1 = batchId_start + stride`, '
-              f'which under launch_control is not the element the queue hands '
-              f'out next; the two cannot be combined until the lookahead index '
-              f'is read from the queue (needs launch_control_depth >= 2)')
+      if context.get_user_options().enable_wrap_loads:
+        raise GenerationError(
+            'enable_wrap_loads prefetches element `batchId1 = batchId_start + '
+            'stride`, which under launch_control is not the element the queue '
+            'hands out next; the two cannot be combined until the lookahead '
+            'index is read from the queue (needs launch_control_depth >= 2)')
 
   def set_kernel_name(self, name):
     self._base_kernel_name = name
@@ -630,87 +610,7 @@ class Generator:
           walk(region)
     walk(self._section.stream)
 
-  def _rotation_targets(self) -> set:
-    """Which transfers should get a second buffer, asked of the pass itself.
-
-    A transfer's stages are set on it before its body is built
-    (`set_stages`), so the decision has to be made in advance -- and the only
-    exact answer comes from `wrap_prefetch`, which needs the body.  So the
-    section is built once to ask and once to use the answer.
-
-    `tools/rotation_cost.py` is why it is this way round rather than giving
-    every async transfer two stages: that costs 9% of arena on average and
-    25-29% on the kernels with several transfers, which are the ones a
-    pipeline is for, and shared memory is paid per launch where a second
-    build is paid once.
-
-    The cheap part is knowing when not to ask.  A description list with no
-    shared async transfer cannot benefit, and being wrong about *that* costs
-    a needless query rather than a buffer nobody uses.
-    """
-    from tensorforge.backend.pir import wrap as _wrap
-
-    names: set = set()
-
-    def asking(body, make_value, next_index=None, report=None,
-               assume_rotated=False):
-      names.update(_carried_transfers(_wrap.wrap_prefetch(
-          body, make_value, next_index, [], assume_rotated=True)))
-      return _wrap.wrap_prefetch(body, make_value, next_index, report,
-                                 assume_rotated)
-
-    # The list as this generator builds it, merged or not.
-    if not self._build_watching(
-        self._sibling(self.descr_list, emit_loops=self._emit_loops), asking):
-      return set()
-    if not names:
-      return names
-
-    # Ask again, this time of the body the answer *produces*.  The first probe
-    # runs unrotated, so the windows are static and declared ahead of the loop;
-    # granting the rotation then declares the write window *inside* it, because
-    # its offset moves with the stage counter -- and that is one of the pass's
-    # refusal conditions.  So a transfer could be accepted while unrotated,
-    # rotated on the strength of that, and then declined for a reason the
-    # rotation itself created.
-    #
-    # Rotated-and-not-wrapped is not a missed optimization, it is wrong code:
-    # the compute reads stage `pipeStage % 2` and the transfer fills the other
-    # one, so no iteration ever fills the stage it reads and the first element
-    # computes from whatever the arena holds.
-    #
-    # Hence the invariant this restores: rotated if and only if wrapped.
-    confirmed: set = set()
-
-    def confirming(body, make_value, next_index=None, report=None,
-                   assume_rotated=False):
-      # `assume_rotated=True`: the buffers really are rotated in this build, so
-      # the refusal that exists only for a single copy does not apply.
-      after = _wrap.wrap_prefetch(body, make_value, next_index, report, True)
-      confirmed.update(_carried_transfers(after))
-      return after
-
-    if not self._build_watching(
-        self._sibling(self.descr_list, rotate=names,
-                      emit_loops=self._emit_loops), confirming):
-      return set()
-    return names & confirmed
-
-  def _build_watching(self, probe: 'Generator', wrap) -> bool:
-    """Build `probe` with `wrap` standing in for the prefetch-wrapping pass;
-    whether it built.  The stand-in is the context's, so it sees this build
-    and nothing else in the process."""
-    saved = self._context.wrap_pass
-    self._context.wrap_pass = wrap
-    try:
-      probe.generate()
-    except Exception:
-      return False
-    finally:
-      self._context.wrap_pass = saved
-    return True
-
-  def _sibling(self, descrs=None, rotate: Optional[set] = frozenset(),
+  def _sibling(self, descrs=None,
                merge_within: Optional[tuple] = None,
                emit_loops: Optional[bool] = None) -> 'Generator':
     """A generator for this kernel, built to answer a question or to be taken
@@ -719,8 +619,7 @@ class Generator:
     Same context, policy, lanes and attributes, and what was settled after
     construction -- a pinned name, the configuration the tuner picked -- so
     that it builds what this generator would.  It settles nothing again: it
-    does not tune or merge, asks the rotation query only where `rotate` is
-    None, and announces no name.
+    does not tune or merge, and announces no name.
     """
     other = Generator(self._given if descrs is None else descrs,
                       self._context, self._thread_block_policy_type,
@@ -729,7 +628,6 @@ class Generator:
     other._may_tune = False
     other._merge_decided = True
     other._announce_identity = False
-    other._rotate = None if rotate is None else set(rotate)
     other._base_kernel_name = self._base_kernel_name
     other.tuned = self.tuned
     if emit_loops is not None:
@@ -746,38 +644,11 @@ class Generator:
     self.__dict__.update(other.__dict__)
     self._announce_identity = announce
 
-  def _apply_rotation(self, loop) -> None:
-    """Give the chosen transfers two stages, before anything is allocated."""
-    if self._rotate is None:
-      return
-    if not self._rotate:
-      return
-    from tensorforge.backend.instructions.memory.load import GlbToShrLoader
-    if not hasattr(loop, 'request_stage_counter'):
-      return
-    # Request it, not merely name it.  `stage_counter_name()` answers what the
-    # counter is called; `_declare_stage_counter` only emits one when a depth
-    # has been requested.  Naming it without requesting it would produce
-    # kernels that read `pipeStage0` and never declare it -- which renders,
-    # and which nothing in the suite compiles, because the syntax check runs
-    # on snapshots taken with this flag off.
-    stage = loop.request_stage_counter(2)
-    for instr in getattr(loop, 'region', []) or []:
-      if not isinstance(instr, GlbToShrLoader):
-        continue
-      if instr._dest.name not in self._rotate:
-        continue
-      instr.set_stages(2, f'{stage} % 2', f'({stage} + 1) % 2')
-
   def generate(self):
     self._autotune()
     if self._auto_merge():
       # built, by the generator this one has taken over
       return None
-    # After both, so that the rotation is asked of the list that is built.
-    if (self._rotate is None
-        and self._context.get_user_options().enable_wrap_loads):
-      self._rotate = self._rotation_targets()
     # After every probe above, which build against the same context.
     self._context.begin_build()
 
@@ -824,7 +695,6 @@ class Generator:
     tuned = Generator(given, pick.context(self._context),
                       self._thread_block_policy_type, lanes=pick.lanes,
                       attrs=self._attrs)
-    tuned._rotate = self._rotate
     tuned._base_kernel_name = self._base_kernel_name
     tuned.tuned = pick
     self._adopt(tuned)
@@ -897,9 +767,7 @@ class Generator:
     if (above is None or below is None or above <= budget
             or not list_cost(list(self._given)).flops):
       return self._keep_written_out()
-    # The probe asked no rotation query, which a build that prefetches across
-    # the back edge has to.
-    if (below > budget and not opts.enable_wrap_loads
+    if (below > budget
             and len(self._runs_to_merge(budget, below)) == len(everything)):
       return self._take_over(probe)
     return self._merge_by_written_out(merged=probe)
@@ -944,11 +812,10 @@ class Generator:
 
     The written-out build is the kernel where it fits: this generator takes
     it over rather than building the same list again -- unless the build
-    would differ from it: where it still has the rotation query to ask, was
-    told to emit loops, or was handed operand tables (`register_param_table`),
-    which name symbols of its own.  Past the budget, the runs it takes are
-    built; `merged`, a build of every run, is taken over where that is what
-    they are.
+    would differ from it: where it was told to emit loops, or was handed
+    operand tables (`register_param_table`), which name symbols of its own.
+    Past the budget, the runs it takes are built; `merged`, a build of every
+    run, is taken over where that is what they are.
     """
     from tensorforge.analysis.cost import list_cost
     from tensorforge.analysis.icache import code_bytes
@@ -964,11 +831,10 @@ class Generator:
     budget = opts.merge_icache_fraction * hw.icache_size
     whole = list_cost(list(self._given)).flops
     if size is None or size <= budget or not whole:
-      if (self._rotate is not None or opts.enable_wrap_loads
-              or self._emit_loops != probe._emit_loops or self._param_tables):
+      if self._emit_loops != probe._emit_loops or self._param_tables:
         return self._keep_written_out()
       return self._take_over(probe)
-    if merged is not None and not opts.enable_wrap_loads:
+    if merged is not None:
       everything = roll(list(self._given), min_count=opts.merge_min_count,
                         max_arity=opts.merge_max_arity)
       if len(self._runs_to_merge(budget, size)) == len(everything):
@@ -978,9 +844,8 @@ class Generator:
       return size * list_cost(list(descrs)).flops / whole
 
     # Built as a sibling first, so that a failure leaves this generator as it
-    # was; taken over whole where it succeeds, rather than built again.  It
-    # asks the rotation query itself, of the list it builds.
-    rebuilt = self._sibling(rotate=None, merge_within=(budget, share))
+    # was; taken over whole where it succeeds, rather than built again.
+    rebuilt = self._sibling(merge_within=(budget, share))
     try:
       rebuilt.generate()
     except Exception as error:
@@ -1036,10 +901,10 @@ class Generator:
         self._emit_global_ir()
         self._emit_ir(codesection)
 
-        # Build the loop *before* optimizing, so that the passes see one stream
-        # with the body as a region: a pipelining pass that wants a prologue
-        # peels an iteration into this same list, ahead of the loop, rather
-        # than publishing it through a second list nothing else indexes.
+        # Build the loop *before* optimizing, so that the passes see the body
+        # as the loop's region: what one adds goes into the region, and the
+        # loop is what knows which of it stays outside the per-element guard
+        # (`BatchLoop.mark_unguarded`).
         index = len(self._sections)
         start, stride = self._section_traversal(index)
         loop = BatchLoop(context=self._context,
@@ -1055,10 +920,7 @@ class Generator:
                          < self._context.get_vm().get_hw_descr().vec_unit_length)
 
         # The prologue stays *out* of the rewritable stream: what the passes
-        # here move is the per-element body.  A peeled prologue from a
-        # pipelining pass belongs *here*, ahead of the loop in
-        # `instructions`, not in the section prologue.
-        self._apply_rotation(loop)
+        # here move is the per-element body.
         opt = OptimizationStage(context=self._context,
                                 shr_mem=self._section.shr_mem_obj,
                                 instructions=[loop],
@@ -1310,19 +1172,12 @@ class Generator:
           for user in users[1:]:
             if isinstance(user, AbstractShrMemWrite):
               user.set_window(False, False)
-        for extra in (getattr(instr, '_wrap_prologue', []) or []):
-          windows([extra])
         for region in instr.regions():
           windows(region)
 
     def lifetimes(instrs, written=frozenset()):
       seen = set(written)
       for instr in instrs:
-        prologue = getattr(instr, '_wrap_prologue', None) or []
-        if prologue:
-          lifetimes(prologue, frozenset(seen))
-          for p in prologue:
-            seen.update(id(d) for d in p.defs())
         if instr.regions():
           entering = frozenset(seen)
           for region in instr.regions():
@@ -3261,11 +3116,11 @@ class Generator:
     """Where a thread's traversal starts, as text the IR carries as an operand.
 
     Parenthesized, like the stride beside it, because it is a *sum* and the
-    reader decides the precedence.  It reaches the loop as `lo`, and
-    `wrap_prefetch` puts `lo` in the induction's place when it peels an
-    iteration: the peeled address then reads `lo * stride`, which without the
-    parentheses would parse as `threadIdx.y + blockDim.y * blockIdx.x * stride`
-    -- the right element for row 0 and the wrong one for every other row.
+    reader decides the precedence.  It reaches the loop as `lo`, and a pass
+    that puts `lo` in the induction's place, as a peeled iteration's address
+    would, reads `lo * stride`, which without the parentheses would parse as
+    `threadIdx.y + blockDim.y * blockIdx.x * stride` -- the right element for
+    row 0 and the wrong one for every other row.
     """
     lexic = self._context.get_vm().get_lexic()
     if block is None:

@@ -14,15 +14,6 @@ class MemoryInstruction(AbstractInstruction):
     super().__init__(context)
     self._declare = True
 
-  def write_base(self) -> str:
-    """The pointer this instruction writes through.
-
-    The symbol's own name for everything except a rotating shared-memory
-    buffer, where the declared pointer addresses the stage consumers read and
-    the transfer fills a different one.
-    """
-    return self._dest.name
-
   @abstractmethod
   def gen_code_inner(self, writer: Writer):
     pass
@@ -36,30 +27,12 @@ class MemoryInstruction(AbstractInstruction):
     if self._declare:
       self.gen_code_declare(sink)
 
-    # The braces are only for the write-side alias of a rotating buffer, which
-    # has to be scope-local so it cannot clash with the consumer's pointer of
-    # the same name.  Every other transfer names nothing that could clash --
-    # its temporaries are values the shared allocator numbers -- and opening a
-    # scope for them is not free: an opaque block head is a wall the async
-    # scheduler gives up its state at and nothing reorders across, which is
-    # exactly the stretch `WrapLoads` wants to move a transfer along.
-    #
-    # `flatten_scopes` would splice away the ones that declare nothing, so the
-    # emitted source is the same either way; not building them keeps them out
-    # of the way of the passes that run before it.
-    gen_write_base = getattr(self, 'gen_write_base', None)
-    needs_scope = gen_write_base is not None and getattr(
-        self, 'rotates', lambda: False)()
-
-    if not needs_scope:
-      sink.Comment(self.__str__())
-      self.gen_code_inner(sink)
-      return
-
-    with sink.Scope():
-      sink.Comment(self.__str__())
-      gen_write_base(sink)
-      self.gen_code_inner(sink)
+    # No braces around the transfer: it names nothing that could clash -- its
+    # temporaries are values the shared allocator numbers -- and an opaque
+    # block head is a wall the async scheduler gives up its state at and
+    # nothing reorders across.
+    sink.Comment(self.__str__())
+    self.gen_code_inner(sink)
 
 class AbstractShrMemWrite(MemoryInstruction):
   def __init__(self, context: Context):
@@ -72,120 +45,35 @@ class AbstractShrMemWrite(MemoryInstruction):
     #: What the buffer's start has to be a multiple of, in elements, beyond
     #: what every buffer of its arena starts on.
     self._place_align: Union[int, None] = None
-    # Multi-stage (rotating) buffer.  `_stages` copies are reserved back to
-    # back and `_stage_expr` picks one at run time, so that iteration k can
-    # write the stage iteration k+1 will read.
-    #
-    # Rotation is expressed here, as a property of the allocation, rather than
-    # by the pipelining pass cloning the tensor object and renaming it to
-    # `preload_*`: a clone is a second symbol that the allocator sizes
-    # separately and liveness cannot relate to the original, so the data would
-    # have to be copied shared->shared back into the buffer the consumers know
-    # about.
-    self._stages: int = 1
-    self._stage_expr: Union[str, None] = None
-    # When a buffer rotates, the stage the *consumer* reads and the stage this
-    # transfer *writes* are different -- iteration k consumes stage k % d while
-    # the advanced transfer fills stage (k + d - 1) % d.  The declaration
-    # emitted by gen_code_declare names the consumer's view, because that is
-    # the pointer every later instruction refers to by symbol name; the write
-    # needs its own base, which `write_base()` provides.
-    self._write_stage_expr: Union[str, None] = None
 
   def stage_size(self) -> int:
-    """Size of one stage, i.e. what a single iteration needs."""
+    """Size of the buffer, aligned where shared allocations are."""
     user_options = self._context.get_user_options()
     if user_options.align_shr_mem:
       return self._context.align(self._shm_volume)
     return self._shm_volume
 
-  def set_stages(self, stages: int, stage_expr: Union[str, None],
-                 write_stage_expr: Union[str, None] = None) -> None:
-    """``stage_expr`` selects the stage the declared pointer addresses -- the
-    consumer's view.  ``write_stage_expr`` selects the stage this transfer
-    fills; leave it unset when they coincide, which is every case except an
-    advanced transfer."""
-    if stages < 1:
-      raise ValueError(f'a buffer needs at least one stage, got {stages}')
-    if stages > 1 and not stage_expr:
-      raise ValueError('a rotating buffer needs an expression selecting the '
-                       'stage; without one every iteration writes stage 0')
-    if write_stage_expr and stages < 2:
-      raise ValueError('a separate write stage makes no sense on a '
-                       'single-stage buffer')
-    self._stages = stages
-    self._stage_expr = stage_expr
-    self._write_stage_expr = write_stage_expr
-
-  def _window(self, writer, name: str, stage: Union[str, None]):
-    """A window into this transfer's buffer, as a value: the whole of it, or
-    the stage `stage` selects of a rotating one.  Placed by the allocator
-    (`pir.allocate`), which is where the buffer's offset is decided."""
-    rotating = self._stages > 1 and stage
+  def _window(self, writer, name: str):
+    """A window into this transfer's buffer, as a value.  Placed by the
+    allocator (`pir.allocate`), which is where the buffer's offset is
+    decided."""
     return writer.alloc(self._dest.get_fptype(), (self.stage_size(),),
                         MemSpace.SHARED, hint=name, extern=name,
                         arena=self._arena(),
                         quals=(Qual.RESTRICT,),
                         swizzle=self._swizzle(writer), identity=self._dest,
-                        stages=self._stages if rotating else 1,
-                        stage=stage if rotating else None,
                         place_align=self._place_align)
 
   def _arena(self) -> str:
     return (GeneralLexicon.TOTAL_SHR_MEM if self._global_offset
             else self._shr_mem.name)
 
-  def rotates(self) -> bool:
-    """Does this transfer fill a different stage than the declaration names?"""
-    return bool(self._write_stage_expr
-                and self._write_stage_expr != self._stage_expr)
-
-  def write_base(self) -> str:
-    """Base pointer this transfer writes through.
-
-    Normally the symbol's own name.  When the buffer rotates, a scope-local
-    alias, because the symbol's declaration addresses the stage the *consumers*
-    read and writing through it would overwrite the data they are about to use.
-    """
-    return f'{self._dest.name}_w' if self.rotates() else self._dest.name
-
-  def gen_write_base(self, writer: Writer) -> None:
-    """Emit the write-side alias.  Call at the top of ``gen_code_inner``.
-
-    ``MemoryInstruction.gen_ir`` puts the declaration outside a ``Scope()`` and
-    the body inside one, so this alias is scope-local and cannot clash with the
-    consumer's pointer of the same buffer.
-    """
-    if not self.rotates():
-      return
-    # The write side is a value too, which is what lets `_structured_copy`
-    # take a rotating buffer.  A rotating buffer writes a different stage
-    # than its declaration names, so the transfer cannot use the symbol's
-    # `pir_buffer` -- that one addresses the half the consumers read.  It gets
-    # its own.
-    self._write_buffer = self._window(writer, self.write_base(),
-                                      self._write_stage_expr)
-    self._write_owner = getattr(writer, 'uid', None)
-
-  def write_buffer(self, writer):
-    """The value this transfer writes through, if it belongs to this body.
-
-    Same guard as `Symbol.pir_buffer`, and for the same reason: a value
-    belongs to the builder that made it.
-    """
-    owner = getattr(writer, 'uid', None)
-    if owner is None or owner != getattr(self, '_write_owner', None):
-      return None
-    return getattr(self, '_write_buffer', None)
-
   def gen_code_declare(self, writer: Writer) -> None:
     if self._declare:
       # The window is a value, so a read through it declares what it touches
       # instead of naming it.  `extern` because the consumers still spell
-      # `s0` out, same as the register tiles.  Rotating buffers included:
-      # the stage it addresses is part of where the allocator puts it.
-      self._dest.set_pir_buffer(
-          writer, self._window(writer, self._dest.name, self._stage_expr))
+      # `s0` out, same as the register tiles.
+      self._dest.set_pir_buffer(writer, self._window(writer, self._dest.name))
 
   #: Shared memory is 32 banks wide on both vendors, so there is nothing to
   #: gain from permuting over a longer period than that.
@@ -324,14 +212,13 @@ class AbstractShrMemWrite(MemoryInstruction):
     return XorSwizzle(width, granule)
 
   def compute_shared_mem_size(self) -> int:
-    # Every stage at once, which is what a block-wide buffer takes of the
-    # block's arena (`Generator._settle_storage`).  Returning the per-stage
-    # size here would silently overlap the stages.
+    # What a block-wide buffer takes of the block's arena
+    # (`Generator._settle_storage`).
     # `int`, because a sparse operand's stage size is a numpy count, and it
     # rides through every offset into `LaunchConfig.shared_elements`, where
     # `json.dumps` in the kernel metadata refuses it -- unless
     # `align_shr_mem` happens to round it back into an `int` on the way.
-    return int(self._stages * self.stage_size())
+    return int(self.stage_size())
 
   def set_window(self, first: bool, block: bool,
                  align: Union[int, None] = None) -> None:

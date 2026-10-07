@@ -1052,7 +1052,7 @@ def test_between_the_bounds_the_written_out_size_decides(fraction, merged,
 def test_a_written_out_probe_is_taken_over_only_where_it_is_the_build(
         monkeypatch):
     """What is taken over is what building it again gives, which a generator
-    that still has the rotation question to ask does not get from a probe."""
+    told to emit loops does not get from a probe that was not."""
     from tensorforge.common.context import Context, Options
     from tensorforge.generators.generator import Generator
 
@@ -1062,7 +1062,7 @@ def test_a_written_out_probe_is_taken_over_only_where_it_is_the_build(
     again = Generator(_flux(), Context(
         arch='sm_86', backend='cuda', fp_type=DTYPE,
         options=Options(merge_icache_fraction=BETWEEN_AND_FITS)))
-    again._rotate = set()          # a question left: the probe is not taken
+    again._emit_loops = True       # told to emit loops: the probe is not taken
     again.generate()
     assert len(builds) == 3
     assert again.get_kernel() == taken.get_kernel()
@@ -1089,8 +1089,6 @@ def test_a_sibling_builds_what_its_generator_would():
     # and it settles nothing again
     assert not sibling._may_tune and sibling._merge_decided
     assert not sibling._announce_identity
-    assert sibling._rotate == set()
-    assert gen._sibling(rotate=None)._rotate is None
 
 
 def _accumulate_then_read():

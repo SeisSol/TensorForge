@@ -18,9 +18,7 @@ from tensorforge.backend.passmanager import PassManager, PassScope
 
 from .manager import StreamContext, Transform
 from .memmove import MoveLoads
-from .pipeline import Pipeline
 from .prefetch import PrefetchBatch, PrefetchData
-from .wrap import WrapLoads
 
 
 class OptimizationStage:
@@ -57,39 +55,9 @@ class OptimizationStage:
         scope=PassScope.PER_REGION,
         enabled=lambda pc: opts.enable_move_loads))
 
-    # Prefetch across the back edge, placed the way MoveLoads would place a
-    # transfer in the loop unrolled once.  Whole nest, like Pipeline: it
-    # rewrites the loop's body and hands the loop its peel.  Runs after
-    # MoveLoads, which splits the transfer from its wait -- this pass moves
-    # the transfer and leaves the wait where the consumer is -- and before
-    # Pipeline, so a body it has already wrapped is not also rotated.
-    #
-    # Off by default.
-    pm.add(Transform(
-        'WrapLoads',
-        lambda pc, instrs: WrapLoads(pc.context, instrs,
-                                     distance=opts.move_distance),
-        enabled=lambda pc: opts.enable_wrap_loads))
-
-    # Software pipelining: the address of the next element's transfer ahead of
-    # the iteration that consumes it, and with `enable_multibuffer` the
-    # transfer itself into a rotating buffer.  Rotation is implemented for a
-    # depth of two; any other depth raises with the reason (see pipeline.py).
-    # Whole nest: the peeled iteration has to land outside the loop.
-    #
-    # Off by default.
-    pm.add(Transform(
-        'Pipeline',
-        lambda pc, instrs: Pipeline(
-            pc.context, instrs,
-            depth=opts.pipeline_depth,
-            rotate_buffers=opts.enable_multibuffer),
-        enabled=lambda pc: opts.enable_pipeline))
-
-    # The cache hint for the next element's pointer.  After the two passes
-    # above and not before: both rewrite the head of the region, and the head
-    # is where this inserts.  It moves nothing itself, so nothing downstream
-    # has to be told it ran.
+    # The cache hint for the next element's pointer, at the head of the
+    # region.  It moves nothing itself, so nothing downstream has to be told
+    # it ran.
     #
     # Off by default.
     pm.add(Transform(
@@ -99,10 +67,10 @@ class OptimizationStage:
             level=opts.prefetch_level),
         enabled=lambda pc: opts.enable_prefetch))
 
-    # The next element's data, hinted at the tail of the body where
-    # `WrapLoads` would issue its transfer -- the transfer stays.  After
-    # `WrapLoads`, whose wrapped transfers need no hint, and after the pointer
-    # hints, which it shares the head with.  Off by default.
+    # The next element's data, hinted at the tail of the body, where
+    # `enable_wrap_loads` would issue its transfer -- the transfer stays.
+    # After the pointer hints, which it shares the head with.  Off by
+    # default.
     pm.add(Transform(
         'PrefetchData',
         lambda pc, instrs: PrefetchData(

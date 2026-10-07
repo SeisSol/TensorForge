@@ -4,16 +4,14 @@
 """Does the *wrapped* output compile?
 
 `test_syntax` compiles the recorded snapshots, and those are generated with
-`enable_wrap_loads` off.  So everything the wrap pass emits -- the peeled
-prologue, the advanced pointers, the rotating write window, the carried
-tokens -- would otherwise have no compiling test at all, and "the pass
+`enable_wrap_loads` off.  So everything the wrap pass emits -- the peel ahead
+of the loop, the pointers bound for the next element, the carried tokens and
+flag words -- would otherwise have no compiling test at all, and "the pass
 accepted this loop" would be a claim about the IR rather than about the code.
 
-Such a claim can be wrong and still render: a peel that names a shared window
-whose `extern` binding comes later, or a rotating buffer that reads a
-`pipeStage0` nothing declares -- what a generator gets by asking the loop what
-the counter is *called* without asking it for one.  A compile catches either
-in a second.
+Such a claim can be wrong and still render: a peel that names a pointer whose
+binding comes later, or the copy of a declaration that kept the original's
+name.  A compile catches either in a second.
 
 This generates every case with the flag on and runs the same `g++
 -fsyntax-only` the snapshot test uses.  It is slower than reading a diff, which
@@ -44,37 +42,6 @@ pytestmark = pytest.mark.skipif(
 TARGETS = [("cuda", "sm_86"), ("hip", "gfx90a"),
            ("acpp", "pvc"), ("esimd", "pvc")]
 
-#: Defects this test finds, pinned rather than described.
-#:
-#: The clone `_advance` makes of a slice member drops `decl` and `extern`,
-#: because a declarator with a name in it cannot be emitted twice.  The
-#: emitter then renders the type itself, and for a vectorized transfer that is
-#: `tensorforge::VectorT<float, 4>` -- which is what the CUDA and HIP paths
-#: use and is not what the SPMD lowering wants, where the destination is a
-#: `sycl::vec<float, 4>`.  So the clone is correct C++ and the wrong type.
-#:
-#: It compiles with the pass off and not with it on, which is the definition
-#: of a regression the pass causes; it is xfailed rather than fixed here
-#: because the fix is to give the clone a declarator, and that is a change to
-#: `decl_expr` rather than to this test.
-#:
-#: Stated as the class it is, rather than as the cases that reach it: the
-#: SPMD lowering and a rendered `VectorT` in the same kernel.  That is the
-#: defect itself, so nothing has to be kept in step with it -- a list of
-#: cases grows by a line for every case added to the corpus and never says
-#: why.
-#:
-#: Operands that promise an aligned stride are not the condition, though they
-#: sound like it: `aligned_odd_lead` promises one and compiles anyway,
-#: because an odd lead leaves nothing to widen and no vector type is
-#: rendered.  The condition is what comes out, not what goes in.
-KNOWN_BAD_REASON = (
-    "the advanced clone renders VectorT where the SPMD lowering wants "
-    "sycl::vec -- dropping `decl` on a clone drops the backend's spelling")
-
-
-def _known_bad(kernel: str, backend: str) -> bool:
-    return backend == "acpp" and "VectorT" in kernel
 def _generate(mod, backend, arch, *, wrap):
     ctx = Context(arch=arch, backend=backend,
                   fp_type=getattr(mod, "DTYPE", None),
@@ -115,8 +82,8 @@ def test_wrapped_kernel_is_well_formed(name, backend, arch):
         # Only a skip if it fails *both* ways.  A case that generates without
         # the pass and not with it is a regression the pass caused, and
         # skipping on any exception is how this test would hide exactly what
-        # it exists to find: a wrapped kernel nothing compiles can carry an
-        # undeclared `pipeStage0`, and a skip here is the same hole one level
+        # it exists to find: a wrapped kernel nothing compiles can carry a
+        # name nothing declares, and a skip here is the same hole one level
         # in.
         try:
             _generate(mod, backend, arch, wrap=False)
@@ -133,15 +100,6 @@ def test_wrapped_kernel_is_well_formed(name, backend, arch):
     if result.ok is None:
         pytest.skip(result.reason)
 
-    if _known_bad(kernel, backend):
-        # Not `pytest.xfail`, which is unconditional: a repaired emitter would
-        # go on being skipped by it, and an entry that cannot tell you it is
-        # obsolete is how a fixed defect keeps a test switched off.  Asserting
-        # the failure means the fix turns this red and says so.
-        assert not result.ok, (
-            f"{name} [{backend}] now compiles -- `_known_bad` is obsolete "
-            f"and this case, and the predicate, should go")
-        pytest.skip(KNOWN_BAD_REASON)
     assert result.ok, (
         f"{name} [{backend}] does not compile with the wrap pass on:\n"
         f"{result.stderr}")

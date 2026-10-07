@@ -445,31 +445,29 @@ class AbstractInstruction(ABC):
 
   @staticmethod
   def _optimize_shared_body(context, builder, body, place=None, barriers=None):
-    """A shared body through the pipeline, with the prefetch pass where it
-    is asked for.
+    """A shared body through the pipeline, with the transfers moved across
+    the batch loop's back edge where that is asked for.
 
-    The prefetch pass goes behind the cleanup and ahead of the scheduler
-    (`pir.standard_pipeline`), and the values it mints come from the builder
-    that built this body.  The pass is the context's stand-in where the
-    rotation query has installed one, so that it sees this build and nothing
-    else in the process.
+    The pass goes behind the cleanup and ahead of the allocator
+    (`pir.standard_pipeline`), and the statements it adds are built by a
+    builder numbering its values from the one that built this body.
     """
     options = context.get_user_options()
-    prefetch = None
-    declined: list = []
+    wrap = None
+    report: list = []
     if getattr(options, 'enable_wrap_loads', False):
-      from tensorforge.backend.pir.wrap import wrap_prefetch
-      prefetch = pir.WrapPrefetch(
-          getattr(context, 'wrap_pass', None) or wrap_prefetch,
-          lambda ty, hint, quals=(): builder.value(ty, hint=hint,
-                                                   quals=quals),
-          report=declined)
+      wrap = pir.WrapLoads(builder.scratch, distance=options.move_distance,
+                           report=report)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
-                        debug=options.ir_debug, prefetch=prefetch,
+                        debug=options.ir_debug, wrap=wrap,
                         place=place, barriers=barriers, where='shared body')
-    if options.ir_debug:
-      for why in declined:
-        print(f'wrap: declined -- {why}')
+    if wrap is not None:
+      record = getattr(context, 'record_wrap', None)
+      if record is not None:
+        record(report)
+      if options.ir_debug:
+        for line in report:
+          print(f'wrap: {line}')
     return body
 
   @staticmethod

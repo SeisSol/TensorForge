@@ -206,11 +206,13 @@ def test_a_conditional_group_is_left_out_of_the_operation_count():
 
 
 def test_scheduling_twice_changes_nothing():
-    """`wrap_prefetch` runs between two schedules, so this has to hold.
+    """The commits describe one schedule, and scheduling again re-derives
+    them.
 
-    The commits describe one schedule.  Re-deriving them has to start by
-    dropping the ones already there, or the second run would count the first
-    run's groups as statements of its own.
+    Re-deriving has to start by dropping the ones already there, or the
+    second run would count the first run's groups as statements of its own.
+    A pass handed a scheduled body drops them the same way
+    (`wrap.wrap_loads`).
     """
     once, _ = _two_groups()
     twice, _ = schedule_async(once)

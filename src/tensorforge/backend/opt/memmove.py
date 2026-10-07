@@ -33,7 +33,8 @@ class MoveLoads(AbstractTransformer):
   was.  At 2 it goes on past that one and stops at the next, so two transfers
   are ahead of every consumer; and so on.  A conflict still stops it at once,
   whatever the distance: it is a bound on how far, never a license to cross a
-  dependence.  `WrapLoads` reads the same number across the back edge.
+  dependence.  `enable_wrap_loads` reads the same number across the back
+  edge (`pir.wrap`).
   """
 
   def __init__(self,

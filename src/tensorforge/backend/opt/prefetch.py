@@ -4,9 +4,9 @@
 
 """Hint for the next element's pointer, at the top of the body that hides it.
 
-`WrapLoads` and `Pipeline` move the transfer: they buy latency and pay for it
-in registers, in buffer copies, and in what a masked element does to a value
-carried across the back edge. This buys less and pays nothing. Nothing is
+`enable_wrap_loads` moves the transfer: it buys latency and pays for it in
+registers, in buffers that survive the back edge, and in what a masked
+element does to a value carried across it. This buys less and pays nothing. Nothing is
 loaded, no value is produced, no buffer is needed, and a target that cannot
 spell a prefetch drops the statement -- so the failure mode of getting this
 wrong is a wasted memory request, not a wrong number.
@@ -63,9 +63,7 @@ class PrefetchBatch(AbstractTransformer):
                 # Outside the flag guard: the address is arithmetic on a
                 # kernel argument and a clamped index, and nothing here
                 # dereferences the pointer it asks for.  Inside, a masked
-                # element would issue no hint -- and next to `WrapLoads`,
-                # whose unguarded prefix it precedes, the guard could not be
-                # one block and the kernel would not generate.
+                # element would issue no hint for its successor.
                 instr.mark_unguarded(hints)
 
     # ------------------------------------------------------------------ #
@@ -79,9 +77,9 @@ class PrefetchBatch(AbstractTransformer):
             # is `batchId0 + stride`, which is what the strided traversal will
             # reach; the queue hands out whatever CTA the launcher cancels, so
             # the name points at some other block's element. For a transfer
-            # that is wrong numbers, which is why `WrapLoads` refuses it too;
-            # here it is only a request for a line nobody wants, and asking
-            # for one is worse than asking for nothing.
+            # that is wrong numbers, which is why `enable_wrap_loads` is
+            # refused there; here it is only a request for a line nobody
+            # wants, and asking for one is worse than asking for nothing.
             self.rejected.append((loop, 'the queue decides the next element'))
             return []
 
@@ -107,9 +105,10 @@ class PrefetchBatch(AbstractTransformer):
 
 
 class PrefetchData(AbstractTransformer):
-    """Hint the next element's operands where `WrapLoads` would fetch them.
+    """Hint the next element's operands where `enable_wrap_loads` would
+    fetch them.
 
-    `WrapLoads` issues the transfer for element ``k + 1`` at the tail of
+    Moved, the transfer for element ``k + 1`` is issued at the tail of
     iteration ``k`` and pays for it: the destination has to survive the back
     edge -- a register image carried, or a buffer the next iteration reads --
     and a peel and a drain.  This leaves every transfer where it is and puts
@@ -121,9 +120,10 @@ class PrefetchData(AbstractTransformer):
     Which transfers: global-to-shared and global-to-register ones whose
     source is bound per element in this body (`PTR_BASED` or `STRIDED`),
     each source once.  A batch-invariant operand is the same data for every
-    element and already cached; a transfer `WrapLoads` moved already fetches
-    ``k + 1``.  The pointer out of an array is followed only for an element
-    the caller did not mask, as the wrapped transfer is (`_guard_by_own_flag`).
+    element and already cached.  With `enable_wrap_loads` as well, a transfer
+    it moves is hinted all the same: which ones move is decided once the body
+    exists, behind this pass.  The pointer out of an array is followed only
+    for an element the caller did not mask (`_guard_by_own_flag`).
     """
 
     def __init__(self,
@@ -157,8 +157,6 @@ class PrefetchData(AbstractTransformer):
         for instr in body:
             if not isinstance(instr, (GlbToShrLoader, GlbToRegLoader)):
                 continue
-            if getattr(instr, '_wrapped', False):
-                continue
             src = instr._src
             if id(src) in seen:
                 continue
@@ -166,7 +164,7 @@ class PrefetchData(AbstractTransformer):
             if addressing not in (Addressing.PTR_BASED, Addressing.STRIDED):
                 continue
             producer = self._producer(body, src)
-            if producer is None or isinstance(producer._batch_offset, str):
+            if producer is None:
                 self.rejected.append((src.name, 'not bound per element here'))
                 continue
             seen.add(id(src))

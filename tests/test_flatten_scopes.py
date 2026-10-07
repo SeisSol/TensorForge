@@ -120,16 +120,14 @@ def test_the_masking_that_hid_it():
         "the region survived only because of the array beside it")
 
 
-def test_a_transfer_opens_no_scope_unless_its_buffer_rotates():
-    """The braces exist for one thing, so they are opened for one thing.
+def test_a_transfer_opens_no_scope():
+    """Nothing a transfer emits can clash with a name around it.
 
-    `MemoryInstruction.gen_ir` wraps a transfer body in `{ }` so that a
-    rotating buffer's write-side alias cannot clash with the consumer's
-    pointer of the same name.  Nothing else it emits can clash -- the
-    temporaries are values the shared allocator numbers -- and the brace is not
-    free: an opaque block head is a wall the async scheduler gives up its state
-    at and nothing reorders across, sitting in exactly the stretch `WrapLoads`
-    wants to move a transfer along.
+    Its temporaries are values the shared allocator numbers, so
+    `MemoryInstruction.gen_ir` has nothing to put braces around -- and a
+    brace is not free: an opaque block head is a wall the async scheduler
+    gives up its state at and nothing reorders across, sitting in exactly the
+    stretch `enable_wrap_loads` moves a transfer along.
 
     `flatten_scopes` removes the ones that declare nothing from the emitted
     source either way; not opening them keeps them out of the IR at build
@@ -152,12 +150,8 @@ def test_a_transfer_opens_no_scope_unless_its_buffer_rotates():
             yield
 
     class Transfer(memory.MemoryInstruction):
-        def __init__(self, rotating):
+        def __init__(self):
             self._declare = False
-            self._rotating = rotating
-
-        def rotates(self):
-            return self._rotating
 
         def gen_write_base(self, sink):
             pass
@@ -168,12 +162,7 @@ def test_a_transfer_opens_no_scope_unless_its_buffer_rotates():
         def __str__(self):
             return 'transfer'
 
-    def scopes(rotating):
-        sink = Sink()
-        Transfer(rotating).gen_ir(sink)
-        return sink.scopes
-
-    assert scopes(rotating=False) == 0, (
-        'a transfer opened a scope for a buffer that does not rotate; it is a '
-        'wall for every transfer, not only the rotating ones')
-    assert scopes(rotating=True) == 1
+    sink = Sink()
+    Transfer().gen_ir(sink)
+    assert sink.scopes == 0, (
+        'a transfer opened a scope; it is a wall for every transfer behind it')

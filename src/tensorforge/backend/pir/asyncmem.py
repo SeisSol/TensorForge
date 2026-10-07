@@ -220,8 +220,8 @@ def _insert(body: Tuple[Stmt, ...], toks, exact: bool) -> Tuple[Stmt, ...]:
     statement that issued any of them* -- which in this scope is the region
     they rose out of.
 
-    Reached where `WrapLoads` moves a shared transfer, which peels a copy
-    into the prologue and leaves its group to be closed a scope up.  Three
+    Reached where `wrap.wrap_loads` moves a shared transfer, which peels a
+    copy into the prologue and leaves its group to be closed a scope up.  Three
     statements in this module pin what it has to do, and they agree:
 
     * `place_commits`: "behind its last issuing statement, in the scope that
@@ -631,7 +631,7 @@ def check_commits(body: Tuple[Stmt, ...]) -> List[str]:
 
     The test is on the nesting chains: the statements enclosing the commit
     have to be a prefix of those enclosing the wait.  A commit further out
-    than its wait is fine, and after `wrap_prefetch` is the normal case ---
+    than its wait is fine, and after `wrap.wrap_loads` is the normal case ---
     the peel commits before the loop whose body waits.
     """
     diag: List[str] = []

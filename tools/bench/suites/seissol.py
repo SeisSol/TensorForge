@@ -22,7 +22,7 @@ NAME = 'seissol'
 DESCRIPTION = 'kernels from a SeisSol descriptor capture'
 
 BATCHES = (4096, 65536, 262144)
-CONFIGS = ['baseline', 'wave', 'pipeline', 'wrap1', 'wrap2']
+CONFIGS = ['baseline', 'wave', 'wrap1', 'wrap2', 'multibuffer']
 
 DUMP = Path(os.environ.get('TF_BENCH_DUMP', 'descriptors.json'))
 
