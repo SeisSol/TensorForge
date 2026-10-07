@@ -17,13 +17,14 @@ from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.common.matrix.tensor import Tensor
 
 from .matmul import MatmulOperands
+from .paths import matrix_paths
 from .strategy import (ComputeShape, Span, Strategy, choose_strategy, covers,
                        is_contraction, lead_layout, legal_strategies, whole)
 
 
 def _vendor_module(context):
-    """The target's matrix module (`Target.matrix_paths`), or None."""
-    return context.target.matrix_paths
+    """The target's matrix module (`paths.matrix_paths`), or None."""
+    return matrix_paths(context.target)
 
 import itertools
 

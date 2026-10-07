@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: MIT
 from typing import List, Optional, Union, Type
 import hashlib
-from tensorforge.generators.descriptions import ForDescr, OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
+from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
+from tensorforge.generators.rolling import ForDescr, roll
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, Residence
 from tensorforge.common.helper import get_extra_offset_name
@@ -47,7 +48,7 @@ from tensorforge.generators.launch import (LaunchConfig, SectionLaunch,
                                            launch_info_initializer,
                                            launch_types)
 
-import tensorforge.interop as interop
+from tensorforge.version import get_version
 
 class AbstractThreadBlockPolicy:
   def __init__(self, context: Context, global_mem: int, mem_per_mult: int, num_threads: int):
@@ -499,7 +500,6 @@ class Generator:
       #
       # `merge_within` is `(budget, size)` from `_auto_merge`: as many runs as
       # it takes to fit, rather than every one -- or `EVERY_RUN`, its probe.
-      from tensorforge.generators.rolling import roll
       budget = ({} if not merge_within
                 else dict(fit_within=merge_within[0], size=merge_within[1]))
       self.descr_list = roll(self.descr_list,
@@ -744,7 +744,6 @@ class Generator:
       return False
     from tensorforge.analysis.cost import list_cost
     from tensorforge.analysis.icache import code_bytes
-    from tensorforge.generators.rolling import roll
     everything = roll(list(self._given), min_count=opts.merge_min_count,
                       max_arity=opts.merge_max_arity)
     if not any(isinstance(d, ForDescr) for d in everything):
@@ -791,7 +790,6 @@ class Generator:
     is a strictly shorter list, so two answers of one length are the same
     runs."""
     from tensorforge.analysis.cost import list_cost
-    from tensorforge.generators.rolling import roll
     opts = self._context.get_user_options()
     whole = list_cost(list(self._given)).flops
 
@@ -813,7 +811,6 @@ class Generator:
     """
     from tensorforge.analysis.cost import list_cost
     from tensorforge.analysis.icache import code_bytes
-    from tensorforge.generators.rolling import roll
     opts = self._context.get_user_options()
     hw = self._context.target.hw
     probe = self._sibling()
@@ -2815,7 +2812,7 @@ class Generator:
     return [table.struct_definition() for table in self._param_tables]
 
   def _write_kernel_meta_data(self, writer):
-    writer(f'// generated with TensorForge. Version: {interop.get_version()}')
+    writer(f'// generated with TensorForge. Version: {get_version()}')
     # What was asked for, so that a file found on its own says which of several
     # configurations of one workload it is.
     writer(f'// options: {self._context.get_user_options().describe()}')
@@ -2899,7 +2896,7 @@ class Generator:
       for op in descr.operations():
         operations.append(compact(op.to_dict()) if hasattr(op, 'to_dict')
                           else dict(kind=str(op)))
-    return dict(version=interop.get_version(),
+    return dict(version=get_version(),
                 fp=self._context.fp_as_str(),
                 launch=self._launch.to_dict() if self._launch else None,
                 operands=[operand(s)

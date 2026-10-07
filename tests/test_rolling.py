@@ -15,11 +15,11 @@ from tensorforge.analysis.antiunify import skeleton
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
-from tensorforge.generators.descriptions import (ForDescr, GemmDescr,
+from tensorforge.generators.descriptions import (GemmDescr,
                                                  MultilinearDescr,
                                                  GridBarrierDescr,
                                                  GridFenceDescr)
-from tensorforge.generators.rolling import roll, unroll
+from tensorforge.generators.rolling import ForDescr, roll, unroll
 
 DTYPE = Datatype.F32
 

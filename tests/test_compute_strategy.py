@@ -21,6 +21,7 @@ import pytest
 from tensorforge.backend.instructions.compute.strategy import (
     DEFAULT_ORDER, ComputeShape, Span, Strategy, choose_strategy,
     is_contraction, lead_layout, legal_strategies)
+from tensorforge.backend.instructions.compute.paths import matrix_paths
 from tensorforge.backend.instructions.compute import (bitlayout,
                                                       routes,
                                                       staging)
@@ -281,13 +282,13 @@ def test_a_target_without_matrix_paths_runs_the_nest():
                            DEFAULT_ORDER) is Strategy.GENERIC
 
 
-def test_the_target_hands_out_its_module():
-    assert Context(arch='gfx942', backend='hip',
-                   fp_type=Datatype.F32).target.matrix_paths is amd
-    assert Context(arch='sm_86', backend='hip',
-                   fp_type=Datatype.F32).target.matrix_paths is nvidia
-    assert Context(arch='pvc', backend='esimd',
-                   fp_type=Datatype.F32).target.matrix_paths is intel
+def test_each_vendor_has_its_module():
+    def paths(arch, backend):
+        return matrix_paths(Context(arch=arch, backend=backend,
+                                    fp_type=Datatype.F32).target)
+    assert paths('gfx942', 'hip') is amd
+    assert paths('sm_86', 'hip') is nvidia
+    assert paths('pvc', 'esimd') is intel
 
 
 @pytest.mark.parametrize('module', [amd, nvidia, intel],

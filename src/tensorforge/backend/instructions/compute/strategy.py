@@ -191,7 +191,7 @@ def choose_strategy(legal: FrozenSet[Strategy],
 
 
 class MatrixPaths(Protocol):
-    """What a target's matrix module answers (`Target.matrix_paths`).
+    """What a target's matrix module answers (`paths.matrix_paths`).
 
     One module per vendor -- `primitives.nvidia`, `primitives.amd`,
     `primitives.intel` -- and every question the dispatch in

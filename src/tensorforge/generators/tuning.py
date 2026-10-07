@@ -185,7 +185,7 @@ def _roll_values(descrs) -> List[int]:
 
 
 def _mergeable(descrs, context) -> bool:
-    from tensorforge.generators.descriptions import ForDescr
+    from tensorforge.generators.rolling import ForDescr
     from tensorforge.generators.rolling import roll
     options = context.get_user_options()
     try:

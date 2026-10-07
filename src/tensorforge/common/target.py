@@ -245,16 +245,6 @@ class Target:
 
     # -- arithmetic --------------------------------------------------------- #
 
-    @property
-    def matrix_paths(self):
-        """The module that emits this target's contractions
-        (`compute.strategy.MatrixPaths`), or None where only the generic nest
-        does."""
-        from tensorforge.backend.instructions.compute.primitives import (
-            amd, intel, nvidia)
-        return {'amd': amd, 'nvidia': nvidia, 'intel': intel}.get(
-            self.hw.vendor)
-
     def packed_fma_width(self, datatype: Datatype) -> int:
         """Elements one FMA instruction covers: 2 where one instruction does
         two FMAs, so that a lead width of two halves the arithmetic instead of

@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
+from tensorforge.version import get_version
+
+
 def get_cmake_path():
     import os
     mydir = os.path.dirname(os.path.realpath(__file__))
@@ -12,12 +15,6 @@ def print_cmake_path():
 def get_routine_generator(yateto):
     import tensorforge.frontend.yateto as fe
     return fe.YatetoFrontend
-
-def get_version():
-    import os
-    mydir = os.path.dirname(os.path.realpath(__file__))
-    with open(os.path.join(mydir, 'VERSION')) as file:
-        return file.read().strip()
 
 def print_version():
     print(get_version(), end='')
