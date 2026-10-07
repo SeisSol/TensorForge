@@ -666,3 +666,8 @@ class Target:
         blocks (`Options.min_blocks_per_sm`), which `ptxas` sizes the
         registers for."""
         return self.hw.vendor == 'nvidia'
+
+    def grid_barrier(self) -> bool:
+        """Whether a barrier across the whole grid can be spelled: not under
+        SYCL, whose lexic has no `sync_grid`."""
+        return not self.sycl

@@ -149,7 +149,7 @@ def verify(instrs: Sequence[AbstractInstruction],
            *,
            max_barrier_scope: Uniformity = Uniformity.GRID,
            predefined: Iterable[Any] = (),
-           backend: Optional[str] = None,
+           grid_barrier: bool = True,
            check_ready: bool = True) -> List[Diagnostic]:
     """Structural checks over one instruction stream.
 
@@ -166,6 +166,9 @@ def verify(instrs: Sequence[AbstractInstruction],
 
     ``predefined`` are symbols already live on entry (kernel parameters,
     the shared-memory arena, anything defined by ``Section.global_ir``).
+
+    ``grid_barrier`` is whether the target can spell a barrier across the
+    whole grid (`Target.grid_barrier`).
     """
     diags: List[Diagnostic] = []
     defined = OrderedSet(predefined)
@@ -212,12 +215,12 @@ def verify(instrs: Sequence[AbstractInstruction],
                 f'multiplications sharing a wave would take different trips '
                 f'and reach it apart.'))
 
-        # -- 4. backend actually supports the requested scope
-        if scope is Uniformity.GRID and backend == 'sycl':
+        # -- 4. the target can spell the requested scope
+        if scope is Uniformity.GRID and not grid_barrier:
             diags.append(Diagnostic(
                 'error', index,
-                'grid barrier requested but the SYCL lexic raises '
-                'NotImplementedError for sync_grid()'))
+                'a grid barrier was requested, and this target has none '
+                '(`Target.grid_barrier`)'))
 
         # -- 5. opaque instructions: the migration worklist
         if (not instr.describes_dataflow()
@@ -237,7 +240,7 @@ def verify(instrs: Sequence[AbstractInstruction],
             diags.extend(verify(region,
                                 max_barrier_scope=inner_limit,
                                 predefined=list(defined),
-                                backend=backend,
+                                grid_barrier=grid_barrier,
                                 check_ready=check_ready))
 
         for sym in instr.defs():

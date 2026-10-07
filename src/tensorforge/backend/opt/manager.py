@@ -72,7 +72,7 @@ class StreamContext(PassContext):
                        # readiness needs the windows declared, which happens
                        # after this stage -- checked at emit time instead
                        check_ready=False,
-                       backend=self.context.target.backend)
+                       grid_barrier=self.context.target.grid_barrier())
         errors = [d for d in diags if d.severity == 'error']
         if errors:
             raise GenerationError(f'macro-ir invalid after {stage}:\n'

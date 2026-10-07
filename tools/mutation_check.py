@@ -932,6 +932,11 @@ GROUPS = {
         ('the broadcast in place kept under the explicit vector',
          sub(TARGET, 'broadcast_without_staging=False),',
              'broadcast_without_staging=True),', 1)),
+        ('a grid barrier under SYCL',
+         sub(TARGET, "SYCL, whose lexic has no `sync_grid`.\"\"\"\n"
+                     "        return not self.sycl",
+             "SYCL, whose lexic has no `sync_grid`.\"\"\"\n"
+                     "        return True", 1)),
     ]),
 
     # The transfer for the next element, issued across the back edge.

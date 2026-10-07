@@ -987,7 +987,7 @@ class Generator:
     # is the emit-time call the pass manager's comment defers to.
     diags = verify(stream,
                    predefined=list(self._scopes.get_global_scope().values()),
-                   backend=self._context.target.backend,
+                   grid_barrier=self._context.target.grid_barrier(),
                    check_ready=True)
     errors = [d for d in diags if d.severity == 'error']
     if errors:

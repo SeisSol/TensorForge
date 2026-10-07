@@ -14,11 +14,17 @@ ones a vendor string or a backend string alone gets wrong.
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
+from tensorforge.common.exceptions import GenerationError
 from tensorforge.common.target import PREFERENCES, Preferences, Target
+
+CASES = Path(__file__).parent / "cases"
 
 
 # --------------------------------------------------------------------------- #
@@ -179,6 +185,31 @@ def test_intel_spmd_lanes_share_a_thread():
     assert Target('pvc', 'oneapi').lanes_share_register_file()
     assert not Target('pvc', 'esimd').lanes_share_register_file()
     assert not Target('gfx942', 'hip').lanes_share_register_file()
+
+
+# --------------------------------------------------------------------------- #
+# A grid-wide barrier
+# --------------------------------------------------------------------------- #
+
+def test_sycl_has_no_grid_barrier():
+    assert Target('sm_86', 'cuda').grid_barrier()
+    assert not Target('pvc', 'oneapi').grid_barrier()
+    assert not Target('pvc', 'esimd').grid_barrier()
+
+
+@pytest.mark.parametrize('backend', ['acpp', 'esimd'])
+def test_a_kernel_that_needs_one_is_refused_by_name(backend):
+    """Refused by `verify` before emission, with the reason, and not by an
+    unimplemented spelling halfway through it."""
+    spec = importlib.util.spec_from_file_location(
+        'barrier_two_gemms', CASES / 'barrier' / 'barrier_two_gemms.py')
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    from tensorforge.generators.generator import Generator
+    ctx = Context(arch='pvc', backend=backend,
+                  fp_type=getattr(case, 'DTYPE', None))
+    with pytest.raises(GenerationError, match='grid barrier'):
+        Generator(case.descr_list(), ctx).generate()
 
 
 # --------------------------------------------------------------------------- #
