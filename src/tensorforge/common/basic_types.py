@@ -175,7 +175,12 @@ class Datatype(enum.Enum):
     if self == self.F32:
       return f'{float(value):.16}f'
     elif self == self.F64:
-      return f'{float(value):.16}'
+      # Seventeen significant digits where sixteen do not read back as the
+      # same double, which is a quarter of all doubles -- the numbers of an
+      # inlined operator among them.  A float has seven to spare in its
+      # sixteen, and its literal is rounded again to its own width.
+      text = f'{float(value):.16}'
+      return text if float(text) == float(value) else f'{float(value):.17}'
     elif self == self.F16:
       return f'static_cast<__half>({float(value):.16})'
     elif self == self.BF16:

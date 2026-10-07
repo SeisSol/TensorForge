@@ -177,3 +177,35 @@ def test_the_call_yateto_is_given_matches_the_launcher(options):
     prototype = generator.get_header().split(
         f'launcher_{generator.get_base_name()}(')[1].split(')')[0]
     assert len(arguments) == len(prototype.split(', '))
+
+
+def test_a_double_literal_reads_back_as_the_same_double():
+    """Seventeen digits where a double needs them, and `0.5` stays `0.5`."""
+    rng = np.random.default_rng(1)
+    values = rng.standard_normal(2000) * 10.0 ** rng.integers(-30, 30, 2000)
+    assert all(float(Datatype.F64.literal(v)) == v for v in values)
+    assert Datatype.F64.literal(0.1 + 0.2) == '0.30000000000000004'
+    assert Datatype.F64.literal(0.5) == '0.5'
+
+
+def test_an_inlined_double_operator_keeps_its_numbers():
+    """Every entry of `K` is in the kernel as itself -- a unit in the last
+    place off is a different operator, and the result says nothing."""
+    def f64(shape, alias, data=None):
+        return Tensor(list(shape), Addressing.NONE if data is not None
+                      else Addressing.STRIDED,
+                      BoundingBox([0] * len(shape), list(shape)), alias=alias,
+                      datatype=Datatype.F64, data=data)
+    data = np.random.default_rng(0).random((M, M))
+    descr = MultilinearDescr(SubTensor(f64((M, M), 'C')),
+                             [SubTensor(f64((M, M), 'X')),
+                              SubTensor(f64((M, M), 'K', data))],
+                             [[0, -1], [-1, 1]], [[0, 1], [0, 1]])
+    generator = Generator([descr], Context(arch='sm_86', backend='cuda',
+                                           fp_type=Datatype.F64))
+    with contextlib.redirect_stdout(io.StringIO()):
+        generator.generate()
+    assert inlined(generator)
+    numbers_in_code = {float(n) for n in re.findall(
+        r'(?<![\w.])\d\.\d+(?:e-?\d+)?(?![\w.])', generator.get_kernel())}
+    assert set(data.flatten()) <= numbers_in_code
