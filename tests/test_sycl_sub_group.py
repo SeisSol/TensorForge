@@ -26,7 +26,7 @@ SUB_GROUP = re.compile(r'reqd_sub_group_size\((\d+)\)')
 
 def _lexic(backend):
     return Context(arch='pvc', backend=backend,
-                   fp_type=Datatype.F32).get_vm().get_lexic()
+                   fp_type=Datatype.F32).target.lexic
 
 
 @pytest.mark.parametrize('lanes,size', [(32, 32), (16, 16), (8, 16), (4, 16),

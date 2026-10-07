@@ -17,7 +17,7 @@ class SyncThreads(AbstractInstruction):
     self._is_ready = True
 
   def _wave(self) -> int:
-    return self._vm.get_hw_descr().vec_unit_length
+    return self._context.target.hw.vec_unit_length
 
   def participants(self) -> Participants:
     """The narrowest set of threads this barrier can be spelled over.
@@ -35,7 +35,7 @@ class SyncThreads(AbstractInstruction):
     32-thread multiplication is a 32-wide vector held by one work-item,
     executed in order, with no second party to wait for.
     """
-    lex = self._vm.get_lexic()
+    lex = self._context.target.lexic
     if getattr(lex, 'simd_mode', False):
       return Participants.MULT
     n, wave = self._num_threads, self._wave()
@@ -43,7 +43,7 @@ class SyncThreads(AbstractInstruction):
       # The multiplication *is* the wave, so the wave barrier meets exactly
       # the threads that have to meet and nothing narrower exists.
       return Participants.WAVE
-    if lex.has_sync_mult(n, self._vm.get_hw_descr()):
+    if lex.has_sync_mult(n, self._context.target.hw):
       return Participants.MULT
     # No sub-block rendezvous.  What is left is the smallest set of whole
     # waves that holds this multiplication, which is its group -- and the

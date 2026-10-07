@@ -74,7 +74,7 @@ def test_group_size_is_the_waves_a_multiplication_shares():
 def test_double_precision_reaches_the_ragged_case():
     """Stated as a test because the whole group path hangs off it."""
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F64)
-    wave = ctx.get_vm().get_hw_descr().vec_unit_length
+    wave = ctx.target.hw.vec_unit_length
     ragged = [w for w in (ctx.align(n) for n in range(1, 200))
               if w > wave and mults_per_group(w, wave) > 1]
     assert ragged, "no width above the wave is ragged; the group path is dead"
@@ -88,7 +88,7 @@ def test_the_block_holds_exactly_one_group():
     to being a deadlock.
     """
     ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F64)
-    wave = ctx.get_vm().get_hw_descr().vec_unit_length
+    wave = ctx.target.hw.vec_unit_length
     gen = _wide_generator(ctx, 40, Datatype.F64)
     gen.generate()
 

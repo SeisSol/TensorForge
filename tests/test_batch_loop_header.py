@@ -27,7 +27,7 @@ from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import SIZE, MemSpace
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 
 SNAPSHOTS = Path(__file__).resolve().parent / "snapshots"
 
@@ -74,7 +74,7 @@ def test_a_pir_loop_renders_that_header():
     verify(body)
 
     w = Writer()
-    emit(optimize(body), w, vm_factory("sm_86", "cuda", "float"))
+    emit(optimize(body), w, Target("sm_86", "cuda"))
     lines = [_same_but_for_the_number(l) for l in w.get_src().splitlines()]
     assert EXPECTED in lines, (
         "the PIR loop no longer spells the header the snapshots record:\n"
@@ -90,7 +90,7 @@ def test_without_the_overrides_it_cannot():
         b.store(g, 1.0, 0)
     body = b.finish()
     w = Writer()
-    emit(optimize(body), w, vm_factory("sm_86", "cuda", "float"))
+    emit(optimize(body), w, Target("sm_86", "cuda"))
     src = w.get_src()
     assert "batchId0" not in src, src
     assert "size_t" not in src, src

@@ -54,7 +54,7 @@ def generate(path: Path, arch: str):
     generator = Generator(module.descr_list(), context)
     with contextlib.redirect_stdout(io.StringIO()):
         generator.generate()
-    headers = context.get_vm().get_headers() + generator.get_helper_headers()
+    headers = context.target.headers() + generator.get_helper_headers()
     def include(header):
         if header.startswith('#'):
             return header

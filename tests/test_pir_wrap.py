@@ -26,7 +26,7 @@ from tensorforge.backend.pir.core import (BOOL, SIZE, BufferType, Effect,
 from tensorforge.backend.pir.wrap import wrap_loads
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 from harness.placement import placed
 
 F32 = Datatype.F32
@@ -234,7 +234,7 @@ def test_the_binding_nothing_reads_any_more_goes():
 def test_the_moved_body_renders():
     out = Section().wrap()
     w = Writer()
-    emit(placed(out), w, vm_factory('sm_86', 'cuda', 'float'))
+    emit(placed(out), w, Target('sm_86', 'cuda'))
     src = w.get_src()
     assert 'peel_glb_m0' in src.partition('for (')[0]
     assert 'wrap_glb_m0' in src.partition('for (')[2]
@@ -426,7 +426,7 @@ def test_the_windows_are_one_buffer_twice_over():
     assert offsets['peel_s0'] == 0
     assert offsets['s0'] == offsets['wrap_s0'] == '0 + ({0}) * 64'
     w = Writer()
-    emit(laid, w, vm_factory('sm_86', 'cuda', 'float'))
+    emit(laid, w, Target('sm_86', 'cuda'))
     src = w.get_src()
     assert re.search(r'float \* s0 = &shrMem\[0 \+ \(v\d+_stage\) \* 64\];',
                      src), src

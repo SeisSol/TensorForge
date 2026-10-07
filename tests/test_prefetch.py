@@ -32,7 +32,7 @@ from tensorforge.common.vm.lexic.cuda_lexic import CudaLexic
 from tensorforge.common.vm.lexic.hip_lexic import HipLexic
 from tensorforge.common.vm.lexic.ocl_lexic import OpenCLLexic
 from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 
 
 class _Hw:
@@ -64,7 +64,7 @@ def _body(level='l2', elems=1):
 
 def _emit(body, arch='sm_86', backend='cuda'):
     w = Writer()
-    emit(body, w, vm_factory(arch, backend, 'float'))
+    emit(body, w, Target(arch, backend))
     return w.get_src()
 
 

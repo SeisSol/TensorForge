@@ -38,7 +38,7 @@ def _kernel(budget=None):
     ctx = Context(arch="gfx1150", backend="hip", fp_type=mod.DTYPE,
                   options=Options(merge_variants=False))
     if budget is not None:
-        ctx.get_vm().get_hw_descr().max_reg_per_thread = budget
+        ctx.target.hw.max_reg_per_thread = budget
     gen = Generator(mod.descr_list(), ctx, lanes=LaneConfig(16, 56, 1))
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()

@@ -125,7 +125,7 @@ def test_a_scalar_load_gains_no_subscript():
     from tensorforge.backend.writer import Writer
     from tensorforge.common.basic_types import Addressing, Datatype
     from tensorforge.common.matrix.tensor import Tensor
-    from tensorforge.common.vm.vm import vm_factory
+    from tensorforge.common.target import Target
 
     obj = Tensor([1], Addressing.SCALAR, alias="alpha", datatype=Datatype.F32)
     sym = Symbol("alpha", SymbolType.Scalar, obj)
@@ -138,7 +138,7 @@ def test_a_scalar_load_gains_no_subscript():
     assert sym.load(builder, ctx, None, [0], False) is not None
 
     writer = Writer()
-    pir_emit(builder.finish(), writer, vm_factory("sm_86", "cuda", "float"))
+    pir_emit(builder.finish(), writer, Target("sm_86", "cuda"))
     src = writer.get_src()
     assert "alpha" in src, src
     assert "alpha[" not in src, f"a scalar was given a subscript:\n{src}"

@@ -200,7 +200,7 @@ def sm_of(ctx) -> int:
     instead of being credited with them.
     """
     try:
-        model = str(ctx.get_vm().get_hw_descr().model)
+        model = str(ctx.target.hw.model)
     except AttributeError:
         return BASELINE_SM
     if not model.startswith('sm_'):

@@ -148,7 +148,7 @@ def generate(mod, arch: str, ceiling: Optional[int],
             gen.generate()
         # the headers the generator asks for, on top of the backend's own: an
         # instruction can need one the backend does not list
-        wanted = dict.fromkeys(ctx.get_vm().get_headers()
+        wanted = dict.fromkeys(ctx.target.headers()
                                + gen.get_helper_headers())
         src = ''.join(f'#include "{h}"\n' for h in wanted) + gen.get_kernel()
     except Exception as exc:

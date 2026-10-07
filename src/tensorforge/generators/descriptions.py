@@ -477,7 +477,7 @@ class ElementwiseDescr(OperationDescription):
     if not self.dest.bbox.rank():
       # one value, computed on every lane: it asks the section for nothing
       return 1, 1
-    vul = context.get_vm().get_hw_descr().vec_unit_length
+    vul = context.target.hw.vec_unit_length
     return vul, vul
 
   def reads(self):
@@ -555,7 +555,7 @@ class ReductionDescr(OperationDescription):
     dest.tensor.set_data_flow_direction(DataFlowDirection.SINK)
 
   def get_num_threads(self, context: Context):
-    vul = context.get_vm().get_hw_descr().vec_unit_length
+    vul = context.target.hw.vec_unit_length
     return vul, vul
 
   def reads(self):

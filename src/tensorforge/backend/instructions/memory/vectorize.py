@@ -336,7 +336,7 @@ def lead_vectorize_supported(context) -> bool:
     """
     if not context.get_user_options().lead_vectorize:
         return False
-    lex = context.get_vm().get_lexic()
+    lex = context.target.lexic
     return getattr(lex, '_backend', None) in ('cuda', 'hip', 'hipsycl_cuda')
 
 

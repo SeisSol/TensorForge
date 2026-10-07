@@ -133,7 +133,7 @@ def _hw(arch: str, backend: str):
     from tensorforge.common.basic_types import Datatype
     from tensorforge.common.context import Context
     return Context(arch=arch, backend=backend,
-                   fp_type=Datatype.F64).get_vm().get_hw_descr()
+                   fp_type=Datatype.F64).target.hw
 
 
 def _mark_flips(rows: List[Row]) -> None:

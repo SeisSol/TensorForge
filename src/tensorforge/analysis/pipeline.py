@@ -338,7 +338,7 @@ def of(generator, conservative: bool = False,
     figure with the addressing and the schedule in it, and only
     `tuning.CompiledScore` has one.
     """
-    hw = generator._context.get_vm().get_hw_descr()
+    hw = generator._context.target.hw
     stream = (stream_bytes(generator._given) if dram_bytes_per_clock
               else None)
     return bound(generator.issue_mix, generator.memory_bytes, hw,

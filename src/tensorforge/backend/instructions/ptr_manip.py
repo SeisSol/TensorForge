@@ -226,7 +226,7 @@ class GetElementPtr(AbstractInstruction):
       space = MemSpace.CONSTANT
     else:
       space = MemSpace.GLOBAL
-    return self._vm.get_lexic().pointer_type(
+    return self._context.target.lexic.pointer_type(
         f'{datatype}', space, readonly=readonly,
         restrict=True, const=bool(const_mod))
 
@@ -260,7 +260,7 @@ class GetElementPtr(AbstractInstruction):
       # they carry the element offset.  Offsetting again would apply it twice;
       # what varies between iterations is which of them to take, and that is
       # the whole of it.
-      datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
+      datatype = self._fp_as_str if self._src.obj.datatype is None else self._src.obj.datatype
       if self._src.obj.addressing == Addressing.SCALAR:
         # A table over scalars selects a value, and the binding is that value.
         self._emit_binding(writer, f'{datatype} {self._dest.name}',
@@ -283,7 +283,7 @@ class GetElementPtr(AbstractInstruction):
     else:
       extra_offset = ''
 
-    datatype = self._vm._fp_type if self._src.obj.datatype is None else self._src.obj.datatype
+    datatype = self._fp_as_str if self._src.obj.datatype is None else self._src.obj.datatype
 
     const_mod = 'const'
 
@@ -306,7 +306,7 @@ class GetElementPtr(AbstractInstruction):
       main_offset = f'{self._INDEX_HOLE}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
-      src_suffix = '_ptr' if self._vm.get_lexic()._backend == 'targetdart' else ''
+      src_suffix = '_ptr' if self._context.target.lexic._backend == 'targetdart' else ''
       rhs = self._coerce(
           datatype, const_mod,
           f'&{self.source_name()}{src_suffix}[{address}]')
@@ -578,7 +578,7 @@ class DeclareOperandTable(AbstractInstruction):
     annotate.  Wrapping the array in a struct is what keeps it a value.
     """
     self._require_param()
-    datatype = self._datatype or self._vm._fp_type
+    datatype = self._datatype or self._fp_as_str
     stars = Addressing.addr2ptr_type(self._addressing)
     return (f'struct {self.struct_name()} {{ {self._qual()}{datatype} '
             f'{self._inner(stars)}p[{len(self._members)}]; }};')
@@ -608,7 +608,7 @@ class DeclareOperandTable(AbstractInstruction):
     separate fact about the declaration.
     """
     self._require_param()
-    annotation = self._vm.get_lexic().storage_class(MemSpace.PARAM)
+    annotation = self._context.target.lexic.storage_class(MemSpace.PARAM)
     annotation = f'{annotation} ' if annotation else ''
     return f'{annotation}const {self.struct_name()} {self._name}'
 
@@ -637,7 +637,7 @@ class DeclareOperandTable(AbstractInstruction):
       # A scalar's numbers are a zero-dimensional array: the value itself.
       value = values.item() if getattr(values, 'ndim', 1) == 0 else values[0]
       return spelling.literal(value)
-    spaced = '<' in self._vm.get_lexic().pointer_type(
+    spaced = '<' in self._context.target.lexic.pointer_type(
         f'{datatype}', MemSpace.GLOBAL, readonly=True, restrict=True, const=True)
     return (f'({self._qual()}{datatype} {stars}){member.name}'
             if spaced and stars else member.name)
@@ -670,7 +670,7 @@ class DeclareOperandTable(AbstractInstruction):
     if self._form is TableForm.PARAM:
       # Nothing to emit: the caller filled it and the signature names it.
       return
-    datatype = self._datatype or self._vm._fp_type
+    datatype = self._datatype or self._fp_as_str
     stars = Addressing.addr2ptr_type(self._addressing)
     if self._form is TableForm.ARRAY:
       entries = ', '.join(self._member(m, datatype, stars) for m in self._members)

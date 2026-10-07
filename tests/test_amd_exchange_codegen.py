@@ -83,12 +83,12 @@ class Ctx:
         model = "gfx90a"
         vec_unit_length = 64
 
-    class _VM:
-        def get_hw_descr(self):
-            return Ctx._Descr()
+    class _Target:
+        def __init__(self):
+            self.hw = Ctx._Descr()
 
-    def get_vm(self):
-        return Ctx._VM()
+    def __init__(self):
+        self.target = Ctx._Target()
 
 
 def _emit(M=1, N=16, K=64, threads=64, dtype=Datatype.F64, sparse=None):

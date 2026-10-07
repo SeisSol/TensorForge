@@ -35,7 +35,7 @@ _VENDOR_MODULES = {
 
 
 def _vendor_module(context):
-    return _VENDOR_MODULES.get(context.get_vm().get_hw_descr().vendor)
+    return _VENDOR_MODULES.get(context.target.hw.vendor)
 
 import itertools
 
@@ -1357,13 +1357,13 @@ class MultilinearInstruction(ComputeInstruction):
         shape = self._shape()
         chosen = choose_strategy(
             legal_strategies(module.strategies(shape, self._context)),
-            self._context.get_vm().get_hw_descr().vendor)
+            self._context.target.hw.vendor)
         if chosen is Strategy.GENERIC:
             return whole(Strategy.GENERIC, n)
         plan = module.plan(chosen, shape, n, self._context)
         if not covers(plan, n):
             raise InternalError(
-                f'{self._context.get_vm().get_hw_descr().vendor} planned '
+                f'{self._context.target.hw.vendor} planned '
                 f'{plan} for {n} columns, which does not compute each of them '
                 f'exactly once')
         return plan

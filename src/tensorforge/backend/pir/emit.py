@@ -234,7 +234,7 @@ class Emitter:
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
     def _record_work(self) -> None:
-        # The emitter is handed a context or, from some call sites, the VM;
+        # The emitter is handed a context or, from some call sites, a target;
         # only the former counts (`Context.record_work`).
         # Times the trip counts of the loops around it: a loop the compiler
         # unrolls, or one rolled by `k_roll`, is written once and runs its
@@ -474,23 +474,23 @@ class Emitter:
 
     # -- lexic ------------------------------------------------------------- #
 
-    def _vm(self):
-        """Accepts either a ``Context`` or a ``VM`` as ``context``."""
+    def _target(self):
+        """Accepts either a ``Context`` or a ``Target`` as ``context``."""
         if self.context is None:
             return None
-        if hasattr(self.context, 'get_vm'):
-            return self.context.get_vm()
-        if hasattr(self.context, 'get_lexic'):
+        if hasattr(self.context, 'target'):
+            return self.context.target
+        if hasattr(self.context, 'lexic'):
             return self.context
         return None
 
     def _lexic(self):
-        vm = self._vm()
-        return None if vm is None else vm.get_lexic()
+        target = self._target()
+        return None if target is None else target.lexic
 
     def _hw(self):
-        vm = self._vm()
-        return None if vm is None else vm.get_hw_descr()
+        target = self._target()
+        return None if target is None else target.hw
 
     def _split_predicated_load(self) -> bool:
         """Whether a predicated load is read unconditionally and selected after.
@@ -1441,11 +1441,11 @@ def emit(body: Tuple[Stmt, ...], writer, context: Any = None) -> None:
     wave barrier.  Splitting the decision between here and there could put
     an ESIMD kernel attribute on an SPMD body.
     """
-    lex = getattr(context, 'get_vm', None)
+    target = getattr(context, 'target', None)
     simd = False
-    if lex is not None:
+    if target is not None:
         try:
-            simd = bool(getattr(context.get_vm().get_lexic(), 'simd_mode', False))
+            simd = bool(getattr(target.lexic, 'simd_mode', False))
         except Exception:
             simd = False
     if simd:

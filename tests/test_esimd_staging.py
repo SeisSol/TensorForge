@@ -33,7 +33,7 @@ import pytest
 from harness import UNSUPPORTED
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).parent / 'cases'
@@ -125,8 +125,7 @@ def test_a_wave_spanning_multiplication_is_still_one_work_item():
     block = re.search(r'sycl::range<3> block \(([^)]*)\)',
                       gen.get_launcher()).group(1)
     extents = [t.strip() for t in block.split(',')]
-    assert gen._num_threads > vm_factory(
-        'pvc', 'esimd', 'float').get_hw_descr().vec_unit_length, (
+    assert gen._num_threads > Target('pvc', 'esimd').hw.vec_unit_length, (
         'this case no longer spans waves, so it no longer tests the split')
     assert extents[0] == '1'
     assert {int(w) for w in re.findall(r'simd<\w+, (\d+)>', gen.get_kernel())} \

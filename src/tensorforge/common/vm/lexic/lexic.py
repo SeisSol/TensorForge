@@ -349,7 +349,7 @@ class Lexic(ABC):
   # none, reaches this path with a TypeError or an AttributeError.
   #
   # `ctx` is a parameter and not a field because the lexic is constructed with
-  # the vendor alone (`vm.py` passes `descr.vendor`), while the answer here
+  # the vendor alone (`Target` passes `hw.vendor`), while the answer here
   # turns on the architecture; a field would give a per-vendor answer to a
   # per-architecture question.
 

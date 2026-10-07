@@ -359,7 +359,7 @@ def register_budget(ctx):
     """Bytes of register file one work-item gets, or `None` where unstated."""
     if ctx is None:
         return None
-    return getattr(ctx.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
+    return getattr(ctx.target.hw, 'max_reg_per_thread', None)
 
 
 def simd(lexic, elem, count) -> str:
@@ -575,7 +575,7 @@ def _simd_mode(ctx) -> bool:
     one.
     """
     try:
-        return bool(ctx.get_vm().get_lexic().simd_mode)
+        return bool(ctx.target.lexic.simd_mode)
     except AttributeError:
         return False
 

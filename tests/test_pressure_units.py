@@ -149,7 +149,7 @@ def test_which_targets_fold_a_broadcast():
 
     def lexic(arch, backend):
         return Context(arch=arch, backend=backend,
-                       fp_type=Datatype.F32).get_vm().get_lexic()
+                       fp_type=Datatype.F32).target.lexic
 
     assert lexic('pvc', 'oneapi').folds_broadcast()
     assert not lexic('pvc', 'esimd').folds_broadcast()

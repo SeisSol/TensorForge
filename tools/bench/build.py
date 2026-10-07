@@ -194,7 +194,7 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
         gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=asked)
         with contextlib.redirect_stdout(io.StringIO()):
             gen.generate()
-        headers = list(ctx.get_vm().get_headers()) + list(
+        headers = list(ctx.target.headers()) + list(
             gen.get_helper_headers())
         includes = '\n'.join(f'#include "{h}"' for h in headers)
         src = driver_bench.emit_workload_tu(

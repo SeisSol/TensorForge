@@ -63,8 +63,8 @@ def backend_of(context: Context) -> str:
     would be built, compiled and scored as the other lowering.
     """
     from tensorforge.common.vm.lexic import EXPLICIT_SIMD_BACKENDS
-    backend = context.get_vm().get_hw_descr().backend
-    if getattr(context.get_vm().get_lexic(), 'simd_mode', False):
+    backend = context.target.hw.backend
+    if getattr(context.target.lexic, 'simd_mode', False):
         return next(k for k, v in EXPLICIT_SIMD_BACKENDS.items() if v == backend)
     return backend
 
@@ -96,7 +96,7 @@ class Candidate:
     def context(self, base: Context, **override) -> Context:
         """A context for this candidate: the base's target and options, with
         this candidate's on top, and `override` over everything."""
-        hw = base.get_vm().get_hw_descr()
+        hw = base.target.hw
         asked = dict(base._asked_options.asked())
         asked.update(self.options)
         asked.update(override)
@@ -217,7 +217,7 @@ def _geometries(descrs, context) -> List[LaneConfig]:
     lane candidate has it."""
     flat = _flat(descrs)
     out = list(lane_config.candidates(flat, context))
-    backend = getattr(context.get_vm().get_lexic(), '_backend', None)
+    backend = getattr(context.target.lexic, '_backend', None)
     if backend not in ('cuda', 'hip'):
         return out
     base = lane_config.deduce(flat, context)
@@ -240,7 +240,7 @@ def space(descrs, context: Context) -> List[Knob]:
     Each with the values that can change the kernel here and only those, so
     that a strategy does not spend builds on a switch that does nothing.
     """
-    hw = context.get_vm().get_hw_descr()
+    hw = context.target.hw
     geometries = _geometries(descrs, context)
     knobs = [Knob('lanes', lambda c, g=tuple(geometries): g)]
     if _mergeable(descrs, context):
@@ -344,7 +344,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     flat = _flat(descrs)
     if any(isinstance(d, ElementwiseDescr) for d in flat):
         return []
-    hw = context.get_vm().get_hw_descr()
+    hw = context.target.hw
     base = lane_config.deduce(flat, context)
     rows = base.num_active_threads or base.num_threads
     # A multiplication narrower than the vector unit leaves lanes of it idle
@@ -356,7 +356,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # 12.7 at sixteen.  So the floor is the vector unit there, and
     # `MIN_LANES` elsewhere, where a narrow multiplication shares its wave.
     floor = lane_config.MIN_LANES
-    if hw.vendor == 'intel' and not getattr(context.get_vm().get_lexic(),
+    if hw.vendor == 'intel' and not getattr(context.target.lexic,
                                             'simd_mode', False):
         floor = max(floor, getattr(hw, 'vec_unit_length', 1))
     # Under the explicit vector, the deduced width alone.  The scorers do not
@@ -383,7 +383,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # half of it, and four such multiplications side by side in one 32-wide
     # register would be the same work at full occupancy.  Nothing does either
     # today.
-    explicit = getattr(context.get_vm().get_lexic(), 'simd_mode', False)
+    explicit = getattr(context.target.lexic, 'simd_mode', False)
     if explicit and context.get_user_options().autotune != 'compiled':
         # Nothing else can rank these.  The modelled footprint counts the
         # bytes of the tile and those barely move -- half a percent between
@@ -407,7 +407,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
             t //= 2
         if context.get_user_options().autotune == 'compiled':
             geometries += _wider(base, rows, hw)
-    backend = getattr(context.get_vm().get_lexic(), '_backend', None)
+    backend = getattr(context.target.lexic, '_backend', None)
     if (hw.has_packed_fp32_fma() and context.fp_type == Datatype.F32
             and backend in ('cuda', 'hip') and rows % 2 == 0
             and base.lead_width == 1):
@@ -466,7 +466,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # ESIMD build beats its own default, which is a measurement and not an
     # opinion.
     if (hw.vendor == 'intel'
-            and not getattr(context.get_vm().get_lexic(), 'simd_mode', False)
+            and not getattr(context.target.lexic, 'simd_mode', False)
             and any(t.addressing == Addressing.NONE for t in _tensors(descrs))):
         knobs.append(Knob('preload_globals', lambda c: (False, True)))
     # Reading an array temporary out of its producer's register image trades
@@ -563,7 +563,7 @@ def build(descr_factory, base: Context, candidate: Candidate) -> Build:
 def kernel_source(result: Build) -> str:
     """The kernel as a translation unit a compiler can take on its own."""
     gen, ctx = result.generator, result.context
-    headers = ctx.get_vm().get_headers() + gen.get_helper_headers()
+    headers = ctx.target.headers() + gen.get_helper_headers()
     lines = [f'#include {h}' if h.startswith('<') else f'#include "{h}"'
              for h in headers]
     return '\n'.join(lines) + '\n' + gen.get_kernel()
@@ -576,7 +576,7 @@ def kernel_source(result: Build) -> str:
 def _geometry(result: Build) -> Tuple[int, int, int]:
     """`(lanes, wave, resident multiplications per SM from what is exact)`."""
     gen = result.generator
-    hw = result.context.get_vm().get_hw_descr()
+    hw = result.context.target.hw
     mults = gen.launch_config().mults_per_block
     return gen._num_threads, hw.vec_unit_length, (gen.resident_blocks or 0) * mults
 
@@ -644,7 +644,7 @@ def static_score(result: Build):
     over = _over_budget(result)
     issue = _least_cycles(gen, lanes, wave, spill_bytes=float(over),
                           resident=resident,
-                          hw=result.context.get_vm().get_hw_descr())
+                          hw=result.context.target.hw)
     return (over > 0, issue, -resident,
             _icache_over(result), _granule(gen.peak_pressure or 0),
             len(gen.get_kernel() or ''))
@@ -727,7 +727,7 @@ def _icache_over(result: Build) -> int:
     below the capacity whatever the size, and every kilobyte past it counts.
     """
     from tensorforge.analysis.icache import icache_excess
-    hw = result.context.get_vm().get_hw_descr()
+    hw = result.context.target.hw
     return icache_excess(getattr(result.generator, 'code_units', None),
                          hw) // 1024
 
@@ -753,7 +753,7 @@ _REGISTER_FIT = {'nvidia': (51.0, 1.05), 'amd': (0.0, 1.26)}
 
 def register_estimate(result: Build) -> Optional[float]:
     """Registers per lane the target compiler is expected to allocate."""
-    hw = result.context.get_vm().get_hw_descr()
+    hw = result.context.target.hw
     fit = _REGISTER_FIT.get(hw.vendor)
     peak = result.generator.peak_pressure
     if fit is None or not peak:
@@ -772,7 +772,7 @@ def _register_blocks(result: Build) -> Optional[int]:
     intercept that the occupancy would inherit, and the eight lanes that GB200
     ran fastest sit right at the limit.
     """
-    hw = result.context.get_vm().get_hw_descr()
+    hw = result.context.target.hw
     if hw.vendor != 'amd':
         return None
     regs = register_estimate(result)
@@ -806,7 +806,7 @@ def _over_budget(result: Build) -> float:
     and nothing in the model says when.  Where the target states no budget,
     there is no guard.
     """
-    hw = result.context.get_vm().get_hw_descr()
+    hw = result.context.target.hw
     budget = getattr(hw, 'max_reg_per_thread', None)
     peak = result.generator.peak_pressure
     if not (budget and peak):
@@ -824,7 +824,7 @@ def _over_budget(result: Build) -> float:
         return (max(0.0, 4 * register_estimate(result) - budget)
                 + _over_scalar_budget(result))
     if hw.vendor == 'intel' and not getattr(
-            result.context.get_vm().get_lexic(), 'simd_mode', False):
+            result.context.target.lexic, 'simd_mode', False):
         # The file is a *thread's*, and under SPMD one thread holds the whole
         # sub-group: the budget a lane may spend is the file divided by the
         # lanes that share it, or -- the same statement the other way up --
@@ -862,7 +862,7 @@ def _over_scalar_budget(result: Build) -> float:
     """
     if not result.ok:
         return 0.0
-    hw = result.context.get_vm().get_hw_descr()
+    hw = result.context.target.hw
     budget = getattr(hw, 'max_scalar_reg_per_wave', None)
     peak = getattr(result.generator, 'peak_uniform_pressure', None)
     if not (budget and peak):
@@ -909,10 +909,10 @@ class CompiledScore:
         self.reports: Dict[Candidate, Resources] = {}
 
     def available(self, context: Context) -> bool:
-        return self.toolchain.compiler(context.get_vm().get_hw_descr().vendor) is not None
+        return self.toolchain.compiler(context.target.hw.vendor) is not None
 
     def resources(self, result: Build) -> Optional[Resources]:
-        hw = result.context.get_vm().get_hw_descr()
+        hw = result.context.target.hw
         compiler = self.toolchain.compiler(hw.vendor)
         if compiler is None:
             raise RuntimeError(
@@ -974,7 +974,7 @@ class CompiledScore:
         if report is None:
             return None
         lanes, wave, resident = _geometry(result)
-        hw = result.context.get_vm().get_hw_descr()
+        hw = result.context.target.hw
         mults = result.generator.launch_config().mults_per_block
         if report.register_blocks is not None and hw.vendor == 'nvidia':
             blocks = min(result.generator.resident_blocks or 0, report.register_blocks)
@@ -989,7 +989,7 @@ class CompiledScore:
         issue = _least_cycles(result.generator, lanes, wave,
                               spill_bytes=report.spill_bytes,
                               resident=resident, hw=hw)
-        if getattr(result.context.get_vm().get_lexic(), 'simd_mode', False):
+        if getattr(result.context.target.lexic, 'simd_mode', False):
             # Widest unless it spills.  Under the explicit vector the lane
             # count is the vector's width, and a narrower one does strictly
             # less work per instruction; the only thing it buys is a value
@@ -1180,7 +1180,7 @@ def _key(result: Build, mode: str) -> str:
     says everything -- shapes, addressing, the options already asked -- and
     it has been built anyway, as the walk's first point.
     """
-    hw = result.context.get_vm().get_hw_descr()
+    hw = result.context.target.hw
     sha = hashlib.sha256()
     for part in (mode, hw.model, backend_of(result.context), str(result.context.fp_type),
                  kernel_source(result)):
@@ -1312,7 +1312,7 @@ def _bound_cycles(result: Optional['Build']) -> Optional[float]:
         return None
     lanes, wave, resident = _geometry(result)
     return bound.cycles * _shortfall(
-        lanes, wave, resident, result.context.get_vm().get_hw_descr())
+        lanes, wave, resident, result.context.target.hw)
 
 
 def _worth_it(descr_factory, context: Context, best: Candidate,

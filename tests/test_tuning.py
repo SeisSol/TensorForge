@@ -55,7 +55,7 @@ def test_a_candidate_context_keeps_the_target_and_adds_its_options():
     base = Context(arch='sm_100', backend='cuda', fp_type=Datatype.F32,
                    options=Options(prepare_operands=True))
     ctx = tuning.Candidate(options=(('k_roll', 4),)).context(base)
-    hw = ctx.get_vm().get_hw_descr()
+    hw = ctx.target.hw
     assert (hw.model, hw.backend) == ('sm_100', 'cuda')
     opts = ctx.get_user_options()
     assert opts.prepare_operands is True and opts.k_roll == 4

@@ -189,4 +189,4 @@ def wave_size(ctx) -> int:
     always a whole-wave operation, so its fragment layout is stated against
     this number and an entry whose `wave` disagrees is unusable here.
     """
-    return ctx.get_vm().get_hw_descr().vec_unit_length
+    return ctx.target.hw.vec_unit_length

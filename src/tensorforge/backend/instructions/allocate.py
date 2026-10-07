@@ -115,9 +115,9 @@ class ShrMemAlloc(AbstractInstruction):
     if common_shrmem_size <= 0:
       return
 
-    lexic = self._vm.get_lexic()
+    lexic = self._context.target.lexic
     shr_mem_decl = lexic.declare_shared_memory(name=common_shrmem,
-                                               precision=self._vm.fp_as_str(),
+                                               precision=self._fp_as_str,
                                                size=common_shrmem_size)
     address = (f'{shrmem_obj.get_size_per_mult()} * {lexic.thread_idx_y} '
                f'+ {shrmem_obj.get_global_size()}')

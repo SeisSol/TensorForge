@@ -83,7 +83,7 @@ def test_the_bound_names_its_pipe_and_is_the_largest_of_them():
     gen = _built('local_flux', 'sm_120', 'cuda')
     b = pipeline.of(gen)
     assert b.binding in pipeline.resources(
-        gen._context.get_vm().get_hw_descr())
+        gen._context.target.hw)
     assert b.cycles == max(b.per_resource.values())
     assert b.share(b.binding) == 1.0
 
@@ -94,7 +94,7 @@ def test_the_bound_is_per_element_and_falls_with_the_lanes_it_shares():
                   merge_variants=False)
     narrow = _built('local_flux', 'sm_120', 'cuda', lanes_per_mult=16,
                     merge_variants=False)
-    hw = wide._context.get_vm().get_hw_descr()
+    hw = wide._context.target.hw
     per = lambda g: pipeline.instructions_per_element(
         g.issue_mix, hw, g._num_threads)['fp']
     # the same FMAs in total, each warp instruction covering twice the rows
@@ -106,7 +106,7 @@ def test_consumer_fp64_is_a_sixteenth_and_data_center_fp64_is_half():
 
     def hw(arch):
         return Context(arch=arch, backend='cuda',
-                       fp_type=Datatype.F64).get_vm().get_hw_descr()
+                       fp_type=Datatype.F64).target.hw
     consumer = pipeline.resources(hw('sm_120'))
     center = pipeline.resources(hw('sm_90'))
     assert consumer['fp64'].rate == pytest.approx(consumer['fp32'].rate / 64)

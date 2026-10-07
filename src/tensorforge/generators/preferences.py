@@ -117,7 +117,7 @@ def load(context: Context) -> List[Preference]:
 
 def device_names(context: Context) -> List[str]:
     """The names this context's device answers to, most specific first."""
-    hw = context.get_vm().get_hw_descr()
+    hw = context.target.hw
     arch = str(hw.model).lower()
     variant = (context.get_user_options().device or '').lower()
     names = [f'{arch}:{variant}'] if variant else []

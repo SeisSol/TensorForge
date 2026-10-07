@@ -137,17 +137,13 @@ class _Lexic:
     simd_mode = False
 
 
-class _VM:
-    def get_hw_descr(self):
-        return _Hardware()
-
-    def get_lexic(self):
-        return _Lexic()
+class _Target:
+    hw = _Hardware()
+    lexic = _Lexic()
 
 
 class _Context:
-    def get_vm(self):
-        return _VM()
+    target = _Target()
 
 
 @pytest.mark.parametrize('materialized', [False, True])

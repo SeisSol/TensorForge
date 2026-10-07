@@ -153,12 +153,12 @@ class BatchLoop(AbstractInstruction):
 
     def _group_start(self) -> str:
         """The leader's element index: the row rounded down to its group."""
-        lexic = self._vm.get_lexic()
+        lexic = self._context.target.lexic
         row = f'({lexic.thread_idx_y} - {self._lane()})'
         return f'{row} + {lexic.block_dim_y} * ({lexic.block_idx_x})'
 
     def _declare_lane(self, writer) -> None:
-        lexic = self._vm.get_lexic()
+        lexic = self._context.target.lexic
         writer(f'const auto {self._lane()} = '
                f'{lexic.thread_idx_y} % {self._group_size};')
 
@@ -501,7 +501,7 @@ class BatchLoop(AbstractInstruction):
         """The same start expression the generator spells, and parenthesized
         for the same reason: it is a sum handed on as an operand, and whoever
         splices it decides the precedence."""
-        lexic = self._vm.get_lexic()
+        lexic = self._context.target.lexic
         if block is None:
             block = lexic.block_idx_x
         return f'({lexic.thread_idx_y} + {lexic.block_dim_y} * ({block}))'
@@ -614,7 +614,7 @@ class BatchLoop(AbstractInstruction):
             # the body's invariant loads out of the loop -- see
             # `Lexic.loop_body_fence`.  Only where there is a loop to hoist
             # out of.
-            fence = self._vm.get_lexic().loop_body_fence()
+            fence = self._context.target.lexic.loop_body_fence()
             if fence and self._mode is not LoopMode.SINGLE:
                 if hasattr(writer, 'decl_expr'):
                     # It touches nothing the IR models; it only has to stay.
@@ -976,7 +976,7 @@ class BatchLoop(AbstractInstruction):
 
         index = self._section_index
         queue = f'launchQueue{index}'
-        lexic = self._vm.get_lexic()
+        lexic = self._context.target.lexic
 
         with builder.while_(self._block_id(), hint=self._batch(0),
                             index_type=SIZE,
@@ -1106,7 +1106,7 @@ class BatchLoop(AbstractInstruction):
         """
         from tensorforge.backend.pir.core import (BOOL, SIZE, Effect, MemSpace,
                                                   Uniformity)
-        lexic = self._vm.get_lexic()
+        lexic = self._context.target.lexic
         self._declare_windows_early(writer, list(self._region))
         lane = writer.op('rem', SIZE, writer.thread_id('y'), self._group_size,
                          hint=self._lane())

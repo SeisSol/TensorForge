@@ -298,7 +298,7 @@ def check_device_source(kernel: str, headers, backend: str,
                         cc: Optional[str] = None) -> Result:
     """Hand one generated kernel to the device front end.
 
-    `headers` is the generator's own list --- `vm.get_headers()` plus
+    `headers` is the generator's own list --- `target.headers()` plus
     `gen.get_helper_headers()` --- and not a fixed preamble, because which
     helper headers a kernel needs is a property of what it emitted.  A
     barrier case pulls in cooperative groups and a plain GEMM does not.

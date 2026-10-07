@@ -4,7 +4,7 @@
 import copy
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
-from tensorforge.common.context import Context, VM
+from tensorforge.common.context import Context
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
 import warnings
@@ -30,13 +30,13 @@ def _record_pressure(context, body, simd: bool,
   instruction to ask.
   """
   from tensorforge.backend.pir.core import Participants
-  wave = context.get_vm().get_hw_descr().vec_unit_length
+  wave = context.target.hw.vec_unit_length
   threads = num_threads or getattr(context, 'lane_threads', None) or wave
   split: List[int] = []
   total = pir.pressure(body, in_bytes=True, explicit_simd=simd,
                        by_file=split,
                        wave_uniform=Participants.WAVE.arrival(threads, wave),
-                       folded_crosslane=context.get_vm().get_lexic()
+                       folded_crosslane=context.target.lexic
                        .folds_broadcast())
   context.record_pressure(total, *split)
 
@@ -49,7 +49,7 @@ def _explicit_simd(context) -> bool:
   place to decide it is a second place for the two to disagree.
   """
   try:
-    return bool(context.get_vm().get_lexic().simd_mode)
+    return bool(context.target.lexic.simd_mode)
   except AttributeError:
     return False
 
@@ -76,7 +76,7 @@ def _check_register_budget(body, simd: bool, context, where: str) -> None:
   threads against 576 at 16) and leaves `lead x nonlead` alone.  The lever is
   how much of the operator one work-item owns, not how wide its registers are.
   """
-  budget = getattr(context.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
+  budget = getattr(context.target.hw, 'max_reg_per_thread', None)
   if not simd or budget is None:
     return
   used = pir.pressure(body, in_bytes=True, explicit_simd=simd)
@@ -125,7 +125,7 @@ def _fused_if_over_budget(context, attempt, finish):
   if not getattr(context, 'materialized_broadcast', False):
     return builder, body
   simd = _explicit_simd(context)
-  budget = getattr(context.get_vm().get_hw_descr(), 'max_reg_per_thread', None)
+  budget = getattr(context.target.hw, 'max_reg_per_thread', None)
   if simd or budget is None:
     return builder, body
   used = pir.pressure(body, in_bytes=True, explicit_simd=simd)
@@ -158,7 +158,6 @@ class AbstractInstruction(ABC):
       raise RuntimeError(f'received wrong type, expected Context, given {type(context)}')
 
     self._context = context
-    self._vm: VM = context.get_vm()
     self._fp_as_str = context.fp_as_str()
     self._is_ready = False
 

@@ -26,13 +26,13 @@ from tensorforge.backend.pir.core import (TOKEN, BufferType, Effect, IRError,
                                           MemSpace, Op, ScalarType)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 from harness.placement import placed
 
 
 def _emit(body, arch='sm_86', backend='cuda'):
     w = Writer()
-    emit(placed(body), w, vm_factory(arch, backend, 'float'))
+    emit(placed(body), w, Target(arch, backend))
     return w.get_src()
 
 

@@ -34,7 +34,7 @@ import pytest
 from harness import UNSUPPORTED
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).parent / 'cases'
@@ -95,7 +95,7 @@ def test_the_size_has_to_be_passed():
     """`slm_init` takes it as a template argument, so a caller that does not
     know it cannot declare the arena -- and silently declaring a zero-sized
     one would put every access out of bounds."""
-    lexic = vm_factory('pvc', 'esimd', 'float').get_lexic()
+    lexic = Target('pvc', 'esimd').lexic
     with pytest.raises(ValueError, match='size'):
         lexic.declare_shared_memory('totalShrMem', 'float')
 
@@ -196,7 +196,7 @@ def test_a_shared_window_is_still_a_pointer_elsewhere(backend, arch):
     """The hook is a question, and four of five backends answer it with a
     pointer -- down to the whitespace, so that no snapshot moves for a
     refactor."""
-    lexic = vm_factory(arch, backend, 'float').get_lexic()
+    lexic = Target(arch, backend).lexic
     assert lexic.shared_pointer_type('float') == 'float*'
     assert lexic.shared_pointer_type('float', restrict=True).startswith('float* ')
     assert lexic.shared_window_expr('totalShrMem', 256) == '&totalShrMem[256]'

@@ -343,7 +343,7 @@ def _linear_addr(context: Context, index, vec) -> str:
   because the address is text by the time it arrives.
 
   """
-  lexic = context.get_vm().get_lexic()
+  lexic = context.target.lexic
   if getattr(lexic, 'simd_mode', False):
     return f'{index}'
   return f'{index} + {lexic.thread_idx_x} * {vec}'
@@ -493,7 +493,7 @@ class LeadIndex:
 
   def write(self, context: Context):
     if self._block > 1:
-      inner = (f'(({context.get_vm().get_lexic().thread_idx_x} / '
+      inner = (f'(({context.target.lexic.thread_idx_x} / '
                f'{self._stride}) % {self._block}) + '
                f'{self._nonlead} * {self._block}')
       out = inner if self._width == 1 else f'({inner}) * {self._width}'
@@ -2231,7 +2231,7 @@ class Symbol:
       raise InternalError(
           f'{self.name}: entry {p} lies in none of the runs its fill wrote')
     value = writer.load(self, slot, type_=fp, hint='data', layout=self.layout)
-    text = context.get_vm().get_lexic().broadcast('{0}', lane, threads)
+    text = context.target.lexic.broadcast('{0}', lane, threads)
     return writer.rawexpr(text, value, type_=fp, hint='bc', pure=True,
                           movable=True, crosslane=True)
 
@@ -2999,7 +2999,7 @@ class Symbol:
           # accepts.  The same answer the guarded path above gives, for the
           # same reason: the owning lane is this one.
           return value
-        text = context.get_vm().get_lexic().broadcast(
+        text = context.target.lexic.broadcast(
             '{0}', bc_lane, span or self.num_threads)
         return writer.rawexpr(text, value, type_=ltype, hint='bc',
                               pure=True, movable=True, crosslane=True)
@@ -3012,7 +3012,7 @@ class Symbol:
             f'read, which cannot hold itself to the lanes that hold data')
       pre_access = self.access(context, read_index, writer, addrs)
       if bc_lane is not None:
-        access = context.get_vm().get_lexic().broadcast(
+        access = context.target.lexic.broadcast(
             pre_access, bc_lane, self.num_threads)
       else:
         access = pre_access
@@ -3055,7 +3055,7 @@ class Symbol:
         # lane)`, and a cache hint on *that* would be asking for the address
         # of an intrinsic's return value.  `pre_access` is the read the hint
         # is about, and re-wrapping it after keeps the exchange where it was.
-        lex = context.get_vm().get_lexic()
+        lex = context.target.lexic
         loaded = lex.glb_load(pre_access, datatype=self.get_fptype(),
                               length=max(lead_width_of(index),
                                          vec_width_of(index)),
@@ -3126,11 +3126,11 @@ class Symbol:
       var = '{0}' if fmt else variable
       if self.stype == SymbolType.Global:
         if atomic:
-          assign = context.get_vm().get_lexic().atomic_store(
+          assign = context.target.lexic.atomic_store(
               context, access, var, None, self.get_fptype(),
               lead_width_of(index))
         else:
-          assign = context.get_vm().get_lexic().glb_store(
+          assign = context.target.lexic.glb_store(
               access, var, datatype=self.get_fptype(),
               length=lead_width_of(index), nontemporal=nontemp)
       else:
@@ -3225,7 +3225,7 @@ class Symbol:
       # `threadIdx.x == None`.
       conds = []
       if owner is not None:
-        conds.append(f'{context.get_vm().get_lexic().thread_idx_x} == {owner}')
+        conds.append(f'{context.target.lexic.thread_idx_x} == {owner}')
       if mask_name is not None:
         conds.append(mask_name)
 

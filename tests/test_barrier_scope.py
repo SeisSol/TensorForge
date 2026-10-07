@@ -88,7 +88,7 @@ def test_a_multiplication_that_is_the_wave_asks_for_the_wave(context):
     from tensorforge.backend.pir.core import Participants, Uniformity
     from tensorforge.backend.instructions.sync_block import SyncThreads
 
-    wave = context.get_vm().get_hw_descr().vec_unit_length
+    wave = context.target.hw.vec_unit_length
     who, threads = _requested(context, wave)
     assert who is Participants.WAVE, (
         "nothing is narrower than the wave when the multiplication is one")
@@ -101,7 +101,7 @@ def test_a_multiplication_inside_a_wave_asks_for_a_masked_wave(context):
     from tensorforge.backend.pir.core import Participants, Uniformity
     from tensorforge.backend.instructions.sync_block import SyncThreads
 
-    wave = context.get_vm().get_hw_descr().vec_unit_length
+    wave = context.target.hw.vec_unit_length
     half = wave // 2
     who, threads = _requested(context, half)
     assert who is Participants.MULT
@@ -118,7 +118,7 @@ def test_a_multiplication_wider_than_a_wave_asks_for_a_named_barrier(context):
     from tensorforge.backend.pir.core import Participants, Uniformity
     from tensorforge.backend.instructions.sync_block import SyncThreads
 
-    wide = 2 * context.get_vm().get_hw_descr().vec_unit_length
+    wide = 2 * context.target.hw.vec_unit_length
     who, threads = _requested(context, wide)
     assert who is Participants.MULT and threads == wide
     assert SyncThreads(context, wide).barrier_scope() is Uniformity.MULT
@@ -137,7 +137,7 @@ def test_a_ragged_width_falls_back_to_the_group(context):
     from tensorforge.backend.pir.core import Participants, Uniformity
     from tensorforge.backend.instructions.sync_block import SyncThreads
 
-    wave = context.get_vm().get_hw_descr().vec_unit_length
+    wave = context.target.hw.vec_unit_length
     ragged = wave + wave // 2
     who, _ = _requested(context, ragged)
     assert who is Participants.MULTGROUP
@@ -158,8 +158,8 @@ def test_a_target_without_a_sub_block_rendezvous_gets_the_block():
     from tensorforge.backend.pir.core import Participants
 
     ctx = Context(arch="pvc", backend="oneapi", fp_type=Datatype.F32)
-    lexic = ctx.get_vm().get_lexic()
-    assert not lexic.has_sync_mult(64, ctx.get_vm().get_hw_descr())
+    lexic = ctx.target.lexic
+    assert not lexic.has_sync_mult(64, ctx.target.hw)
     assert _sync_text(ctx, Participants.MULTGROUP, 64) == lexic.sync_block()
 
 
@@ -188,8 +188,8 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
     for arch, backend in (("sm_86", "cuda"), ("gfx1100", "hip"),
                           ("pvc", "oneapi"), ("pvc", "esimd")):
         ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
-        vm = ctx.get_vm()
-        wave = vm.get_hw_descr().vec_unit_length
+        target = ctx.target
+        wave = target.hw.vec_unit_length
         assert ctx.align(num=56) > wave, f"56 no longer aligns above {arch}"
 
         gemm = MultilinearDescr(tensor([56, 18], "C"),
@@ -226,7 +226,7 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
         mults = min(s.shr_mem_obj.get_mults_per_block() for s in gen._sections)
         assert threads > wave, f"{arch}: {threads} no longer exceeds the wave"
 
-        separable = vm.get_lexic().has_sync_mult(threads, vm.get_hw_descr())
+        separable = target.lexic.has_sync_mult(threads, target.hw)
         loud = any(any(i.barrier_scope() is not None for i in s.stream)
                    for s in gen._sections)
         if loud and not separable:
@@ -244,7 +244,7 @@ def test_the_cap_is_asked_only_where_a_barrier_needs_it():
     from tensorforge.generators.generator import RegmaxBlockPolicy
 
     ctx = Context(arch="pvc", backend="oneapi", fp_type=Datatype.F32)
-    wave = ctx.get_vm().get_hw_descr().vec_unit_length
+    wave = ctx.target.hw.vec_unit_length
 
     quiet = RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
                               num_threads=2 * wave)

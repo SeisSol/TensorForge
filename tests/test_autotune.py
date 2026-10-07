@@ -324,7 +324,7 @@ def test_a_scalar_register_file_is_stated_where_there_is_one(arch, backend,
     integer and address arithmetic, so a uniform float is a vector register
     there and no second budget applies."""
     hw = Context(arch=arch, backend=backend,
-                 fp_type=_case().DTYPE).get_vm().get_hw_descr()
+                 fp_type=_case().DTYPE).target.hw
     assert hw.max_scalar_reg_per_wave == stated
 
 

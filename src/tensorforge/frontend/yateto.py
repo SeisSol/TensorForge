@@ -1002,7 +1002,7 @@ class KernelEmitter:
     routine_name = tensorforge_generator.get_base_name()
     self.base_name = routine_name
 
-    routineCache.addRoutine(routine_name, TensorForgeWriter(tensorforge_generator, context.get_vm().get_headers()))
+    routineCache.addRoutine(routine_name, TensorForgeWriter(tensorforge_generator, context.target.headers()))
 
   def tensors(self):
     """The operands this kernel was built from, by the name it was given them.

@@ -29,7 +29,7 @@ from tensorforge.backend.pir import BOOL, INDEX
 from tensorforge.backend.pir.core import MemSpace, Op
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 from harness.placement import placed
 
 
@@ -73,7 +73,7 @@ def test_the_guard_is_a_branch_not_a_select():
     body, _ = _macro_copy()
     w = Writer()
     from tensorforge.backend.pir import emit
-    emit(placed(optimize(body)), w, vm_factory('gfx942', 'hip', 'float'))
+    emit(placed(optimize(body)), w, Target('gfx942', 'hip'))
     src = w.get_src()
     assert '?' not in src.split('\n')[-3:][0] or 'if (' in src, src
     assert 'if (' in src, (

@@ -543,13 +543,13 @@ def _read_at(sym, coords):
     from tensorforge.backend.writer import Writer
     from tensorforge.common.basic_types import Datatype
     from tensorforge.common.context import Context
-    from tensorforge.common.vm.vm import vm_factory
+    from tensorforge.common.target import Target
 
     ctx = Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32)
     builder = IRBuilder(fptype=Datatype.F32, context=ctx)
     sym.load(builder, ctx, None, list(coords), False)
     writer = Writer()
-    pir_emit(builder.finish(), writer, vm_factory('sm_86', 'cuda', 'float'))
+    pir_emit(builder.finish(), writer, Target('sm_86', 'cuda'))
     src = writer.get_src()
     slot = re.search(rf'{sym.name}\[(\d+)\]', src)
     lane = re.search(r'readlane\([^,]+, (\d+)\)', src)

@@ -28,7 +28,7 @@ SPREAD16 = RegisterLayout((LaneAxis(16),))
 @pytest.fixture
 def emitter():
     ctx = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32)
-    ctx.get_vm().get_lexic().simd_mode = True
+    ctx.target.lexic.simd_mode = True
     return EsimdEmitter(writer=None, context=ctx, strict=False)
 
 
@@ -103,7 +103,7 @@ def test_untracked_and_replicated_do_not_collapse(emitter):
 
 def test_strict_mode_raises_at_the_end_of_a_body():
     ctx = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32)
-    ctx.get_vm().get_lexic().simd_mode = True
+    ctx.target.lexic.simd_mode = True
     em = EsimdEmitter(writer=None, context=ctx, strict=True)
     em.ctype(F32, val(9))
     with pytest.raises(IRError, match='no tracked distribution'):
@@ -869,7 +869,7 @@ def _select_src(result_type=F32, cond_layout=SPREAD16, other=0.0):
     builder.store(image, picked, 0)
 
     ctx = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32)
-    ctx.get_vm().get_lexic().simd_mode = True
+    ctx.target.lexic.simd_mode = True
     writer = Writer()
     EsimdEmitter(writer=writer, context=ctx, strict=False).run(builder.finish())
     return writer.get_src()
@@ -933,7 +933,7 @@ def _esimd_src(build):
     builder = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     build(builder)
     ctx = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32)
-    ctx.get_vm().get_lexic().simd_mode = True
+    ctx.target.lexic.simd_mode = True
     writer = Writer()
     EsimdEmitter(writer=writer, context=ctx, strict=False).run(
         placed(builder.finish()))

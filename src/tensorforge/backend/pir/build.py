@@ -741,7 +741,7 @@ class IRBuilder:
             layout=RegisterLayout((LaneAxis(block, stride),)))
 
     def _simd_spelling(self, block: int) -> str:
-        lex = self.context.get_vm().get_lexic()
+        lex = self.context.target.lexic
         return lex.get_simd(INDEX.base.ctype(), block)
 
     def lane_broadcast(self, vec: Value, lane: int, block: int,
@@ -772,7 +772,7 @@ class IRBuilder:
             self._emit_op(Op.EXTRACT, (out,), (vec,), pure=True,
                           attrs=(('lane', lane),))
             return out
-        lex = self.context.get_vm().get_lexic()
+        lex = self.context.target.lexic
         text = lex.broadcast('{0}', lane, block)
         return self.rawexpr(text, vec, type_=vec.type, hint=hint,
                             pure=True, movable=False, layout=SCALAR_LAYOUT,
@@ -810,7 +810,7 @@ class IRBuilder:
     def _explicit_simd(self) -> bool:
         """Whether the lowering puts the lane in the type rather than the address."""
         try:
-            return bool(self.context.get_vm().get_lexic().simd_mode)
+            return bool(self.context.target.lexic.simd_mode)
         except AttributeError:
             return False
 
@@ -1448,9 +1448,9 @@ class IRBuilder:
         (`Lexic.handoff_fence`).
         """
         wave = 1
-        vm = getattr(self.context, 'get_vm', None)
-        if vm is not None:
-            wave = vm().get_hw_descr().vec_unit_length
+        target = getattr(self.context, 'target', None)
+        if target is not None:
+            wave = target.hw.vec_unit_length
         return self.emit(barrier_stmt(participants, wave, threads, handoff))
 
     def yield_(self, *values: Operand) -> Stmt:

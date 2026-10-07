@@ -318,7 +318,7 @@ def test_generated_kernel_survives_the_device_front_end(dev_case, backend):
         pytest.skip(f"{dev_case.NAME} does not generate on {backend}: "
                     f"{type(exc).__name__}")
 
-    headers = list(ctx.get_vm().get_headers()) + list(gen.get_helper_headers())
+    headers = list(ctx.target.headers()) + list(gen.get_helper_headers())
     result = syntax.check_device_source(gen.get_kernel(), headers, backend,
                                         arch=arch,
                                         path=Path(f"{dev_case.NAME}.{backend}"))

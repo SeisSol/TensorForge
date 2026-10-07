@@ -71,18 +71,12 @@ class _FakeCtx:
         def __init__(self, model):
             self.model = model
 
-    class _VM:
+    class _Target:
         def __init__(self, model):
-            self._d = _FakeCtx._Descr(model)
-
-        def get_hw_descr(self):
-            return self._d
+            self.hw = _FakeCtx._Descr(model)
 
     def __init__(self, model="gfx90a"):
-        self._vm = _FakeCtx._VM(model)
-
-    def get_vm(self):
-        return self._vm
+        self.target = _FakeCtx._Target(model)
 
 
 def _operand(writer, var, *idx):

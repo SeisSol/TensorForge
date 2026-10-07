@@ -28,7 +28,7 @@ class MultilinearBuilder(OperationBuilder):
     #: What this hardware prefers among the placements that are legal.  Only
     #: preferences: nothing here can make a correct kernel incorrect, and the
     #: legality half is asked separately at each decision.
-    self._policy = policy_for(self._context.get_vm().get_hw_descr(),
+    self._policy = policy_for(self._context.target.hw,
                               explicit_simd=_explicit_simd(self._context))
 
   def _k_width(self, descr) -> int:
@@ -292,7 +292,7 @@ class MultilinearBuilder(OperationBuilder):
     against `Options.preload_register_share` of the lane's file -- and nothing
     is checked where that share is 0.
     """
-    budget = getattr(self._context.get_vm().get_hw_descr(),
+    budget = getattr(self._context.target.hw,
                      'max_reg_per_thread', None)
     if budget is None:
       return None, None
@@ -518,7 +518,7 @@ class MultilinearBuilder(OperationBuilder):
     # too, it would hold the same rows in every sub-group: at 56 rows over 64
     # lanes, rows 0..31 in both sub-groups and rows 32..55 in neither.
     lead = lead_pos
-    width = getattr(self._context.get_vm().get_lexic(), 'sub_group_width', None)
+    width = getattr(self._context.target.lexic, 'sub_group_width', None)
     if width is not None and self._num_threads and not carries_lead:
       group = width(self._num_threads)
       if group < self._num_threads:
@@ -957,7 +957,7 @@ class MultilinearBuilder(OperationBuilder):
             # instruction can still have a lowering that cannot reach it --
             # ESIMD is the case, where the value is a vector and the SPMD
             # `atomic_ref` has no scalar to bind.
-            supported=self._context.get_vm().get_lexic().has_atomic_store(
+            supported=self._context.target.lexic.has_atomic_store(
                 self._context, None, dest_symbol.get_fptype(),
                 self._lead_width),
             policy=self._policy)

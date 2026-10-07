@@ -392,7 +392,7 @@ class StoreRegToGlb(AbstractInstruction):
         if owner is None:
           emit()
         else:
-          with writer.If(f'{self._context.get_vm().get_lexic().thread_idx_x}'
+          with writer.If(f'{self._context.target.lexic.thread_idx_x}'
                          f' == {owner}'):
             emit()
 

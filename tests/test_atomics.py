@@ -198,7 +198,7 @@ LEXIC_CASES = [
 def test_the_offered_spelling_is_the_one_for_this_target(arch, backend, dtype,
                                                          expected):
     ctx = _ctx(arch, backend, dtype)
-    lexic = ctx.get_vm().get_lexic()
+    lexic = ctx.target.lexic
     assert lexic.has_atomic_store(ctx, None, dtype)
     stmt = lexic.atomic_store(ctx, "glb[i]", "value", None, dtype)
     assert expected in stmt
@@ -208,7 +208,7 @@ def test_the_offered_spelling_is_the_one_for_this_target(arch, backend, dtype,
 @pytest.mark.parametrize("arch", ["gfx900", "gfx1030"])
 def test_a_hip_target_without_the_instruction_is_not_offered_one(arch):
     ctx = _ctx(arch)
-    assert not ctx.get_vm().get_lexic().has_atomic_store(ctx, None,
+    assert not ctx.target.lexic.has_atomic_store(ctx, None,
                                                          Datatype.F32)
 
 
@@ -219,7 +219,7 @@ def test_the_result_of_the_cuda_add_is_dropped():
     nothing, so the spelling has to be a statement with no assignment in it.
     """
     ctx = _ctx("sm_90", "cuda")
-    stmt = ctx.get_vm().get_lexic().atomic_store(ctx, "glb[i]", "value", None,
+    stmt = ctx.target.lexic.atomic_store(ctx, "glb[i]", "value", None,
                                                  Datatype.F32)
     assert '=' not in stmt
 
@@ -227,7 +227,7 @@ def test_the_result_of_the_cuda_add_is_dropped():
 def test_the_hip_fallback_is_agent_scoped_and_relaxed():
     """System scope is what makes the backend give up on the instruction."""
     ctx = _ctx("gfx908")
-    stmt = ctx.get_vm().get_lexic().atomic_store(ctx, "glb[i]", "value", None,
+    stmt = ctx.target.lexic.atomic_store(ctx, "glb[i]", "value", None,
                                                  Datatype.F32)
     assert '__HIP_MEMORY_SCOPE_AGENT' in stmt
     assert '__ATOMIC_RELAXED' in stmt
@@ -237,7 +237,7 @@ def test_hip_targeting_nvidia_does_not_emit_amd_builtins():
     """HIP compiles for CUDA too, where every `__builtin_amdgcn_*` is
     undeclared.  `glb_store` next door has the same condition."""
     ctx = _ctx("sm_80", "hip")
-    stmt = ctx.get_vm().get_lexic().atomic_store(ctx, "glb[i]", "value", None,
+    stmt = ctx.target.lexic.atomic_store(ctx, "glb[i]", "value", None,
                                                  Datatype.F32)
     assert 'amdgcn' not in stmt
     assert 'atomicAdd' in stmt
@@ -250,8 +250,8 @@ def test_explicit_simd_declines_whatever_the_hardware_can_do():
     refusing is what keeps the kernel compiling."""
     spmd = _ctx("pvc", "oneapi")
     esimd = _ctx("pvc", "esimd")
-    assert spmd.get_vm().get_lexic().has_atomic_store(spmd, None, Datatype.F32)
-    assert not esimd.get_vm().get_lexic().has_atomic_store(esimd, None,
+    assert spmd.target.lexic.has_atomic_store(spmd, None, Datatype.F32)
+    assert not esimd.target.lexic.has_atomic_store(esimd, None,
                                                            Datatype.F32)
 
 
@@ -331,7 +331,7 @@ def test_the_cuda_spelling_casts_to_the_vector_overload():
     rather than a wrong number.
     """
     ctx = _ctx('sm_90', 'cuda')
-    lexic = ctx.get_vm().get_lexic()
+    lexic = ctx.target.lexic
     assert lexic.has_atomic_store(ctx, None, Datatype.F32, 2)
     stmt = lexic.atomic_store(ctx, 'glb[i]', 'value', None, Datatype.F32, 2)
     assert 'float2' in stmt and 'reinterpret_cast' in stmt

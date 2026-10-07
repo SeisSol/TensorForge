@@ -80,7 +80,7 @@ def test_the_ceiling_is_a_number_and_the_wave_is_another(backend, arch, wave):
     discrepancy rather than closing it.
     """
     ctx = _ctx(arch, backend, Datatype.F64)
-    assert ctx.get_vm().get_hw_descr().vec_unit_length == wave
+    assert ctx.target.hw.vec_unit_length == wave
 
     default = lanes.deduce(_gemm(56, 9, 56, Datatype.F64), ctx)
     at_wave = lanes.deduce(_gemm(56, 9, 56, Datatype.F64), ctx, ceiling=None)
@@ -101,7 +101,7 @@ def test_an_elementwise_descriptor_alone_takes_the_vector_unit_under_the_ceiling
     ctx = _ctx("gfx90a", "hip")
     a, c = _t([64, 64], 'A'), _t([64, 64], 'C')
     assert lanes.deduce([ew.abs(c, a)], ctx).num_threads == min(
-        ctx.get_vm().get_hw_descr().vec_unit_length,
+        ctx.target.hw.vec_unit_length,
         lanes.DEFAULT_LANE_CEILING)
 
 
@@ -370,7 +370,7 @@ def test_the_resident_block_count_uses_only_what_is_known():
     count -- which is the one thing that is not known.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
-    hw = ctx.get_vm().get_hw_descr()
+    hw = ctx.target.hw
 
     g = Generator(_gemm(56, 9, 56, Datatype.F64), ctx)
     g.generate()

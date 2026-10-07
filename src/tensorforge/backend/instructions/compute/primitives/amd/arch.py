@@ -11,7 +11,7 @@ specializations are switched off.
 
 
 def amdarch(ctx):
-    archstr = ctx.get_vm().get_hw_descr().model
+    archstr = ctx.target.hw.model
     return int(archstr[3:], base=16)
 
 

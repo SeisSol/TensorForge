@@ -120,5 +120,5 @@ def test_operators_that_leave_no_room_are_read_from_global():
 def test_an_rdna_work_group_holds_64_kb():
     for arch in ("gfx1100", "gfx1150", "gfx1201"):
         hw = Context(arch=arch, backend="hip",
-                     fp_type=_descrs()[0].DTYPE).get_vm().get_hw_descr()
+                     fp_type=_descrs()[0].DTYPE).target.hw
         assert hw.max_local_mem_size_per_block == 64 * 1024, arch

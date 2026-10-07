@@ -138,7 +138,7 @@ def main():
                 ctx = Context(arch=arch, backend=backend,
                               fp_type=getattr(case, 'DTYPE', Datatype.F32))
                 Generator(case.descr_list(), ctx).generate()
-            budget = getattr(ctx.get_vm().get_hw_descr(),
+            budget = getattr(ctx.target.hw,
                              'max_reg_per_thread', None)
         except Exception:
             continue

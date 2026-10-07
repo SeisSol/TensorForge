@@ -95,11 +95,11 @@ def deduce(descr_list: List[OperationDescription],
     # ceiling of 16 would take the kernels that refuse to generate -- a group
     # barrier inside a simd-uniform loop -- to generating.  That is a lead
     # worth following on its own and not a side effect to take in passing.
-    hw = context.get_vm().get_hw_descr()
+    hw = context.target.hw
     wave = hw.vec_unit_length
     if (0 < num_threads < wave
             and any(getattr(d, 'guarded', lambda: False)() for d in descr_list)
-            and not context.get_vm().get_lexic().has_sync_mult(num_threads, hw)):
+            and not context.target.lexic.has_sync_mult(num_threads, hw)):
         # A guard decides per multiplication, so a barrier inside it may only
         # wait for the threads of one.  Where a multiplication narrower than
         # the wave has no rendezvous of its own -- SYCL under SPMD, whose
@@ -154,7 +154,7 @@ def candidates(descr_list: List[OperationDescription],
         return [seen[k] for k in sorted(seen, reverse=True)]
 
     base = deduce(descr_list, context)
-    hw = context.get_vm().get_hw_descr()
+    hw = context.target.hw
     wave, block = hw.vec_unit_length, hw.max_threads_per_block
     rows = base.num_active_threads or base.num_threads
     widths = {d for d in range(MIN_LANES // 2, 2 * wave + 1) if rows % d == 0}
@@ -244,7 +244,7 @@ def requested(descr_list: List[OperationDescription],
     # fit one (`MultLayout`).  Above that there is no arrangement, and asking
     # for one is not taken rather than forced -- the same answer a wider count
     # gets.
-    hw = context.get_vm().get_hw_descr()
+    hw = context.target.hw
     layout = MultLayout(want, hw.vec_unit_length)
     if layout.group_threads > hw.max_threads_per_block:
         return None

@@ -515,7 +515,7 @@ def _wave_lead(ops, ctx, mults):
     step whose group runs past the contraction reads itself.
     """
     from tensorforge.backend.pir.core import ScalarType
-    lexic = ctx.get_vm().get_lexic()
+    lexic = ctx.target.lexic
     ftype = ScalarType(ops.a)
 
     def A(writer, var, i, k, *rest):

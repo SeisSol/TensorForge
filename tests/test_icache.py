@@ -95,8 +95,7 @@ class TestWeighed:
         hw = self.hw(1024)
         result = SimpleNamespace(
             generator=SimpleNamespace(code_units=1000),
-            context=SimpleNamespace(get_vm=lambda: SimpleNamespace(
-                get_hw_descr=lambda: hw)))
+            context=SimpleNamespace(target=SimpleNamespace(hw=hw)))
         assert _icache_over(result) == icache_excess(1000, hw) // 1024 > 0
 
 
@@ -121,13 +120,13 @@ class TestTargets:
     def test_the_cache_is_stated(self, arch, backend, size):
         from tensorforge.common.basic_types import Datatype
         hw = Context(arch=arch, backend=backend,
-                     fp_type=Datatype.F32).get_vm().get_hw_descr()
+                     fp_type=Datatype.F32).target.hw
         assert hw.icache_size == size
 
     def test_intel_states_none_yet(self):
         from tensorforge.common.basic_types import Datatype
         hw = Context(arch='pvc', backend='oneapi',
-                     fp_type=Datatype.F32).get_vm().get_hw_descr()
+                     fp_type=Datatype.F32).target.hw
         assert hw.icache_size is None
 
     @pytest.mark.parametrize('arch,backend,size', [
@@ -136,7 +135,7 @@ class TestTargets:
     def test_an_instruction_takes_its_encoding(self, arch, backend, size):
         from tensorforge.common.basic_types import Datatype
         hw = Context(arch=arch, backend=backend,
-                     fp_type=Datatype.F32).get_vm().get_hw_descr()
+                     fp_type=Datatype.F32).target.hw
         assert hw.instruction_bytes == size
 
 

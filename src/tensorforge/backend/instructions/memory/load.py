@@ -95,7 +95,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     #: Whether the transfer is a `copy.async` where it can be one.  Where it
     #: cannot -- a source that is not a value of the body it is issued in --
     #: it moves its bytes with ordinary loads.
-    self._use_cuda_memcpy = self._context.get_vm().get_hw_descr().vendor == 'nvidia' and not self._no_memcpy
+    self._use_cuda_memcpy = self._context.target.hw.vendor == 'nvidia' and not self._no_memcpy
     #: tokens issued by this transfer, for the `LoadWait` that retires them
     self._tokens = []
     self._token_owner = None
@@ -172,10 +172,10 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     return max(self._hop_granularities())
 
   def _next_size(self, size):
-    return _find_next_coprime(size, self._context.get_vm().get_hw_descr().shmem_banks)
+    return _find_next_coprime(size, self._context.target.hw.shmem_banks)
 
   def _explicit_simd(self) -> bool:
-    return bool(getattr(self._context.get_vm().get_lexic(), 'simd_mode', False))
+    return bool(getattr(self._context.target.lexic, 'simd_mode', False))
 
   def _lane_span(self) -> int:
     """How many elements of one hop a single work-item carries.
@@ -207,7 +207,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     generated kernel as an ordinary subscript instead -- an address that is
     wrong and compiles.
     """
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
     if self._explicit_simd():
       if self._blockwide:
         return f'({lexic.thread_idx_y} * {self._lanes})'
@@ -404,7 +404,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     width = min(max(self._hop_granularities()), self._swizzle_cap(writer))
     if width * elem != 16 or src_offset % width:
       return 0
-    if length % width and self._vm.get_lexic().copy_async('d', 's', 16, 4) is None:
+    if length % width and self._context.target.lexic.copy_async('d', 's', 16, 4) is None:
       # The last access covers part of an element group, which only the
       # zero-filling form can do, and this target has none.
       #
@@ -500,7 +500,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     chunk appears, and the guard on `y` there is a scalar branch on a scalar
     value, which is the kind this model does have.
     """
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
     lanes = self._lanes
     for j in range((rest + lanes - 1) // lanes):
       width = min(lanes, rest - j * lanes)
@@ -531,7 +531,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     span = self._lane_span() if lanes is None else lanes
     if end > start:
       if increment > 1:
-        vectortype = self._vm.get_lexic().get_fptype(self._dest.get_fptype(), increment)
+        vectortype = self._context.target.lexic.get_fptype(self._dest.get_fptype(), increment)
         typeprefix = f'*({vectortype}*)&'
       else:
         typeprefix = ''
@@ -602,7 +602,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # attach to is a vector and the lexic has to be told which.
         def write_load(lhs, rhs, _t=self._dest.get_fptype(), _n=increment,
                        _nt=nontemporal):
-          writer(f'{lhs} = {self._context.get_vm().get_lexic().glb_load(rhs, datatype=_t, length=_n, nontemporal=_nt)};')
+          writer(f'{lhs} = {self._context.target.lexic.glb_load(rhs, datatype=_t, length=_n, nontemporal=_nt)};')
 
       # The destination's rows are longer than the source's -- padded, so
       # that a row starts where a wide access may start.  A linear transfer

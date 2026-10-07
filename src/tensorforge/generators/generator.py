@@ -61,10 +61,10 @@ class AbstractThreadBlockPolicy:
     #: states it rather than the lane layout implying it (`stage_members`).
     self._barrier_group = None
 
-    vm = self._context.get_vm()
-    self._max_blocks = vm.get_hw_descr().max_block_per_sm
-    self._max_allowed_mem = vm.get_hw_descr().max_local_mem_size_per_block
-    self._max_threads = vm.get_hw_descr().max_threads_per_block
+    hw = self._context.target.hw
+    self._max_blocks = hw.max_block_per_sm
+    self._max_allowed_mem = hw.max_local_mem_size_per_block
+    self._max_threads = hw.max_threads_per_block
 
   def get_num_mults_per_block(self):
     pass
@@ -90,11 +90,11 @@ class AbstractThreadBlockPolicy:
       return None
     if self._barrier_group:
       return self._barrier_group
-    vm = self._context.get_vm()
-    wave = vm.get_hw_descr().vec_unit_length
+    target = self._context.target
+    wave = target.hw.vec_unit_length
     if self._num_threads == wave:
       return None
-    if vm.get_lexic().has_sync_mult(self._num_threads, vm.get_hw_descr()):
+    if target.lexic.has_sync_mult(self._num_threads, target.hw):
       return None
     return mults_per_group(self._num_threads, wave)
 
@@ -107,7 +107,7 @@ class AbstractThreadBlockPolicy:
 
 def _explicit_simd_lowering(context) -> bool:
   """Whether this context lowers to an explicit vector."""
-  return bool(getattr(context.get_vm().get_lexic(), 'simd_mode', False))
+  return bool(getattr(context.target.lexic, 'simd_mode', False))
 
 
 #: Work-items a block holds under the explicit-vector lowering when it
@@ -137,7 +137,7 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     #: arrangement of the kernel at either width.  The same direction as
     #: the halved NVIDIA block in `get_num_mults_per_block`, which lost there
     #: too.
-    vendor = context.get_vm().get_hw_descr().vendor
+    vendor = context.target.hw.vendor
     self._lane_factor = 1 if vendor == 'amd' else max(1, lead_width)
 
   def get_num_mults_per_block(self):
@@ -154,7 +154,7 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     # the block doubles the copies and halves the blocks that fit.  A
     # multiplication wider than 128 threads takes the 256-thread bound.
     lanes = self._num_threads * self._lane_factor
-    vendor = self._context.get_vm().get_hw_descr().vendor
+    vendor = self._context.target.hw.vendor
     threads = 128 if vendor == 'nvidia' and self._global_mem == 0 else 256
     max_thread_mults = threads // lanes or 256 // lanes
     # Under the explicit-vector lowering one work-item *is* a thread and
@@ -174,7 +174,7 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     # 0.36x, 0.36x and 0.38x -- more work-items each staging their own copy
     # buy nothing.
     if self._global_mem and getattr(
-        self._context.get_vm().get_lexic(), 'simd_mode', False):
+        self._context.target.lexic, 'simd_mode', False):
       max_thread_mults = max(max_thread_mults, _ESIMD_WORK_ITEMS)
     if self._mem_per_mult == 0:
       mults = max_thread_mults
@@ -327,7 +327,7 @@ def _supports_launch_control(context) -> bool:
   and `sm_90` no, which is the split the instruction actually has.  Verified on
   an sm_120 part: the plain target assembles it, no `sm_120a` needed.
   """
-  hw = context.get_vm().get_hw_descr()
+  hw = context.target.hw
   if hw.vendor != 'nvidia':
     return False
   model = hw.model
@@ -543,7 +543,7 @@ class Generator:
     # switched the traversal and silently got the other one would attribute
     # the grid-stride loop's numbers to the queue.
     if context.get_user_options().launch_control and not _supports_launch_control(context):
-      hw = context.get_vm().get_hw_descr()
+      hw = context.target.hw
       raise GenerationError(
           f'launch_control needs `clusterlaunchcontrol`, which is sm_100 and '
           f'above; this target is {hw.vendor} {hw.model}')
@@ -767,7 +767,7 @@ class Generator:
     if opts.merge_variants != 'auto' or self._merge_decided:
       return False
     self._merge_decided = True
-    hw = self._context.get_vm().get_hw_descr()
+    hw = self._context.target.hw
     capacity = getattr(hw, 'icache_size', None)
     if not capacity:
       return False
@@ -844,7 +844,7 @@ class Generator:
     from tensorforge.analysis.icache import code_bytes
     from tensorforge.generators.rolling import roll
     opts = self._context.get_user_options()
-    hw = self._context.get_vm().get_hw_descr()
+    hw = self._context.target.hw
     probe = self._sibling()
     try:
       probe.generate()
@@ -941,7 +941,7 @@ class Generator:
                          queue_depth=self._launch_control_depth,
                          group_size=self._group_size(index, start),
                          narrow_group=self._num_threads
-                         < self._context.get_vm().get_hw_descr().vec_unit_length)
+                         < self._context.target.hw.vec_unit_length)
 
         # The prologue stays *out* of the rewritable stream: what the passes
         # here move is the per-element body.
@@ -1020,7 +1020,7 @@ class Generator:
     # is the emit-time call the pass manager's comment defers to.
     diags = verify(stream,
                    predefined=list(self._scopes.get_global_scope().values()),
-                   backend=self._context.get_vm().get_lexic()._backend,
+                   backend=self._context.target.lexic._backend,
                    check_ready=True)
     errors = [d for d in diags if d.severity == 'error']
     if errors:
@@ -1034,7 +1034,7 @@ class Generator:
     without one are offset by the preceding element counts so that consecutive
     sections do not all hammer the same elements.
     """
-    vm = self._context.get_vm()
+    lexic = self._context.target.lexic
     offset = []
     idx = index - 1
     for ssection in reversed(self._sections[:index]):
@@ -1043,7 +1043,7 @@ class Generator:
       offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
       idx -= 1
 
-    stride = f'({vm.get_lexic().grid_dim_x} * {vm.get_lexic().block_dim_y})'
+    stride = f'({lexic.grid_dim_x} * {lexic.block_dim_y})'
     if len(offset) == 0:
       start = self._get_2d_block_id()
     else:
@@ -1062,7 +1062,7 @@ class Generator:
     miss another.  Lifting it needs the rotation to move whole groups, which is
     a change to what the offset means rather than to how it is spelled.
     """
-    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    wave = self._context.target.hw.vec_unit_length
     if self._section.stage_loaders:
       # A staged member is shared by every multiplication of the block and
       # fenced by block barriers, so the block is one group on the same trips.
@@ -1101,8 +1101,8 @@ class Generator:
     Where it cannot, its barriers reach the group, and a group whose rows run
     the body different numbers of times never arrives at them.
     """
-    vm = self._context.get_vm()
-    return vm.get_lexic().has_sync_mult(self._num_threads, vm.get_hw_descr())
+    target = self._context.target
+    return target.lexic.has_sync_mult(self._num_threads, target.hw)
 
   def _needs_wave_group(self) -> bool:
     """Whether the section holds an instruction the whole wave issues together.
@@ -1154,7 +1154,7 @@ class Generator:
     obj.set_global_size(end)
     if not images:
       return True
-    cap = self._context.get_vm().get_hw_descr().max_local_mem_size_per_block
+    cap = self._context.target.hw.max_local_mem_size_per_block
     return end * self._context.fp_type.size() < cap
 
   def _declare_buffers(self, section) -> None:
@@ -1270,8 +1270,8 @@ class Generator:
     section; what must not repeat is the arithmetic, which is the layout's
     (`MultLayout`).
     """
-    lexic = self._context.get_vm().get_lexic()
-    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    lexic = self._context.target.lexic
+    wave = self._context.target.hw.vec_unit_length
     layout = MultLayout(self._num_threads, wave)
     if layout.contiguous or layout.whole_waves:
       return
@@ -1376,7 +1376,7 @@ class Generator:
     padded by the threads' share of a bank row, so that the multiplications of
     a block start on different banks, and aligned."""
     alignment = self._shared_align()
-    banks = self._context.get_vm().get_hw_descr().shmem_banks
+    banks = self._context.target.hw.shmem_banks
     overhead = (self._num_threads % banks) // alignment * alignment
     return -(-(end + overhead) // alignment) * alignment
 
@@ -1404,7 +1404,7 @@ class Generator:
     obj = self._section.shr_mem_obj
     per_mult = obj.get_size_per_mult() or 0
     size = self._context.fp_type.size()
-    cap = self._context.get_vm().get_hw_descr().max_local_mem_size_per_block
+    cap = self._context.target.hw.max_local_mem_size_per_block
     # Which of the two bounds bit, because they ask for different answers:
     # shared memory for a narrower multiplication or fewer preloaded
     # operators, the thread count for a narrower one only.  `RegmaxBlockPolicy`
@@ -1479,7 +1479,7 @@ class Generator:
         GeneralLexicon.TOTAL_SHR_MEM: (barriers.BLOCK, 0)})
     sync = SyncThreads(self._context, self._num_threads)
     who = sync.participants()
-    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    wave = self._context.target.hw.vec_unit_length
 
     def make(handoff, block):
       if block:
@@ -1568,8 +1568,8 @@ class Generator:
     with them -- the batch stride is multiplications per block, which is then
     not the `y` extent.
     """
-    lexic = self._context.get_vm().get_lexic()
-    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    lexic = self._context.target.lexic
+    wave = self._context.target.hw.vec_unit_length
     layout = MultLayout(self._num_threads, wave)
     # The hardware spellings, kept aside for the few places that mean the
     # thread and not the lane: a block-wide loader numbering its threads
@@ -1649,7 +1649,7 @@ class Generator:
     import warnings
     from tensorforge.analysis.icache import (ICacheBudgetWarning, code_bytes,
                                              icache_excess)
-    hw = self._context.get_vm().get_hw_descr()
+    hw = self._context.target.hw
     excess = icache_excess(self.code_units, hw)
     if excess:
       warnings.warn(
@@ -1683,7 +1683,7 @@ class Generator:
     """
     if self._launch is None:
       return None
-    hw = self._context.get_vm().get_hw_descr()
+    hw = self._context.target.hw
     per_block = self._launch.shared_bytes
     threads = self._num_threads * self._launch.mults_per_block
     limits = [hw.max_block_per_sm]
@@ -1716,8 +1716,8 @@ class Generator:
           f'multiplications per block, and one launch serves them all')
     mults_per_block = mults.pop()
     shared = max(s.shared_elements for s in sections)
-    lexic = self._context.get_vm().get_lexic()
-    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    lexic = self._context.target.lexic
+    wave = self._context.target.hw.vec_unit_length
     layout = MultLayout(self._num_threads, wave)
     plain = layout.contiguous or layout.whole_waves
     block_x = self._num_threads if plain else layout.unit
@@ -1838,7 +1838,7 @@ class Generator:
     decides -- so the launch host code can ask about and the launch that
     happens are one computation (`generators.launch`)."""
     writer = Writer()
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
     kernel_name = f'kernel_{self._base_kernel_name}'
     shmemsize = (f'{self._launch.shared_elements} * '
                  f'sizeof({self._context.fp_as_str()})')
@@ -1979,8 +1979,8 @@ class Generator:
       symbol.inlined = False
     context = self._context
     options = context.get_user_options()
-    explicit = getattr(context.get_vm().get_lexic(), 'simd_mode', False)
-    hw = context.get_vm().get_hw_descr()
+    explicit = getattr(context.target.lexic, 'simd_mode', False)
+    hw = context.target.hw
     merged = {id(member) for symbol in scope
               if getattr(symbol.obj, 'is_variant', False)
               for member in getattr(symbol.obj, 'variant_members', ())}
@@ -2047,14 +2047,14 @@ class Generator:
     passed = [p for p in params if isinstance(p, ValueParam)]
     if not passed:
       return
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
     if getattr(lexic, 'simd_mode', False):
       # ESIMD reads a batch-constant operand with block loads, which address
       # device memory; the struct an argument is passed as is not there.
       raise GenerationError(
           f'{", ".join(p.name for p in passed)}: passed by value, which the '
           f'explicit-SIMD backend does not read yet')
-    hw = self._context.get_vm().get_hw_descr()
+    hw = self._context.target.hw
     # Every other parameter is a pointer or a size: eight bytes each.
     total = (sum(p.byte_size() for p in passed)
              + 8 * (len(params) - len(passed)))
@@ -2114,8 +2114,7 @@ class Generator:
       merged = {id(member) for symbol in scope.values()
                 if getattr(symbol.obj, 'is_variant', False)
                 for member in getattr(symbol.obj, 'variant_members', ())}
-      vm = self._context.get_vm()
-      shmem_cap = vm.get_hw_descr().max_local_mem_size_per_block
+      shmem_cap = self._context.target.hw.max_local_mem_size_per_block
       memory = [symbol for symbol in scope.values()
                 if not getattr(symbol.obj, 'is_variant', False)
                 and id(symbol.obj) not in merged
@@ -2663,7 +2662,7 @@ class Generator:
   def _stage_group(self) -> int:
     """Multiplications per block under `stage_members`: `stage_group`,
     rounded up to whole waves."""
-    wave = self._context.get_vm().get_hw_descr().vec_unit_length
+    wave = self._context.target.hw.vec_unit_length
     base = (wave // self._num_threads if self._num_threads < wave
             else mults_per_group(self._num_threads, wave))
     base = max(1, base)
@@ -3017,7 +3016,7 @@ class Generator:
     return params
 
   def _declare(self, params, with_defaults=False, host=False):
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
     # `None` is a parameter this surface does not have (`HostOnlyParam`).
     declared = [p.declaration(lexic, with_default=with_defaults, host=host)
                 for p in params]
@@ -3030,7 +3029,7 @@ class Generator:
     pointer the kernel declares in a space the launcher's does not carry.
     """
     global_symbols = self._scopes.get_global_scope().values()
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
     params = self._base_params(global_symbols, substitute_tables=True)
     if writer is not None:
       for p in params:
@@ -3050,14 +3049,14 @@ class Generator:
 
     total_num_threads_per_block = self._num_threads * mults_per_block
 
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
 
     launch_bounds = (total_num_threads_per_block,)
     # A block the SM can always hold, so that ptxas sizes the registers for
     # that and not for an occupancy it guesses (`min_blocks_per_sm`).
     min_blocks = self._context.get_user_options().min_blocks_per_sm
     if (min_blocks
-        and self._context.get_vm().get_hw_descr().vendor == 'nvidia'):
+        and self._context.target.hw.vendor == 'nvidia'):
       launch_bounds += (min_blocks,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
@@ -3141,7 +3140,7 @@ class Generator:
     `threadIdx.y + blockDim.y * blockIdx.x * stride` -- the right element for
     row 0 and the wrong one for every other row.
     """
-    lexic = self._context.get_vm().get_lexic()
+    lexic = self._context.target.lexic
     if block is None:
       block = lexic.block_idx_x
     return f'({lexic.thread_idx_y} + {lexic.block_dim_y} * ({block}))'

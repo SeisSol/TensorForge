@@ -156,7 +156,7 @@ class ElementwiseInstruction(ComputeInstruction):
                 # the operand order but lets the emitter fill in whatever the
                 # value ends up being called -- or inline it entirely.
                 padded = operands + [''] if len(operands) == 1 else operands
-                lexic = self._context.get_vm().get_lexic()
+                lexic = self._context.target.lexic
                 text = lexic.get_operation(self._op, self._context.fp_type,
                                            *padded)
                 result = writer.rawexpr(text, *args,
@@ -205,7 +205,7 @@ class ElementwiseInstruction(ComputeInstruction):
                              for i, o in enumerate(self._origin(src))], False)
             operands.append(var)
         padded = operands + [''] if len(operands) == 1 else operands
-        lexic = self._context.get_vm().get_lexic()
+        lexic = self._context.target.lexic
         result = f'v{counter}'
         if self._op == Operation.SELECT:
             yes, no, cond = operands

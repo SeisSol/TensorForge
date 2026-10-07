@@ -28,7 +28,7 @@ from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import INDEX, IRError, MemSpace, Op, walk
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 
 ARENA = 'shrMem'
 
@@ -61,7 +61,7 @@ def _burst(b, buf, lane, defines=True):
 
 def _src(body) -> str:
     w = Writer()
-    emit(body, w, vm_factory('sm_86', 'cuda', 'float'))
+    emit(body, w, Target('sm_86', 'cuda'))
     return w.get_src()
 
 
@@ -264,7 +264,7 @@ def test_a_buffer_with_two_stages_takes_both_and_names_its_stage():
     assert offsets['other'] == 32
     assert layout.per_mult == 40
     writer = Writer()
-    emit(out, writer, vm_factory('sm_86', 'cuda', 'float'))
+    emit(out, writer, Target('sm_86', 'cuda'))
     assert '= &shrMem[0 + ((threadIdx.x & 1)) * 16];' in writer.get_src(), (
         writer.get_src())
 

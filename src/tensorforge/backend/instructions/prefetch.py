@@ -89,7 +89,7 @@ class PrefetchData(AbstractInstruction):
       return
     datatype = getattr(self._src.obj, 'datatype', None)
     elem = datatype.size() if datatype is not None else 4
-    per = max(1, self._context.get_vm().get_lexic().prefetch_line_bytes() // elem)
+    per = max(1, self._context.target.lexic.prefetch_line_bytes() // elem)
     end = self._first + self._count
     for start in range(self._first, end, per):
       # The run as it is: a target that needs a message-sized length rounds

@@ -18,8 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from tensorforge.common.basic_types import Datatype
-from tensorforge.common.vm.vm import vm_factory
+from tensorforge.common.target import Target
 
 
 #: (arch, backend) pairs, one per lexic that a target can select.
@@ -38,7 +37,7 @@ INDICES = ('thread_idx_x', 'thread_idx_y', 'block_dim_x', 'block_dim_y',
 @pytest.mark.parametrize('arch,backend', TARGETS)
 @pytest.mark.parametrize('name', INDICES)
 def test_the_index_is_spelled(arch, backend, name):
-    lexic = vm_factory(arch, backend, Datatype.as_str(Datatype.F32)).get_lexic()
+    lexic = Target(arch, backend).lexic
     assert getattr(lexic, name, None), (
         f'{type(lexic).__name__} has no {name}; a caller reading it gets an '
         f'AttributeError rather than a diagnostic')

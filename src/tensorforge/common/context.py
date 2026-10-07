@@ -4,7 +4,7 @@
 from math import ceil
 from typing import List, Optional
 
-from tensorforge.common.vm.vm import VM, vm_factory
+from tensorforge.common.target import Target
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.options import Options, ResolvedOptions
 
@@ -17,15 +17,19 @@ class Context:
                backend: str,
                fp_type: Datatype,
                options: Optional[Options] = None):
-    self._vm: VM = vm_factory(arch, backend, Datatype.as_str(fp_type))
+    #: The device and the lowering (`common.target`).
+    self.target: Target = Target(arch, backend)
+    allowed = ('float', 'double', '__float128')
+    if Datatype.as_str(fp_type) not in allowed:
+      raise RuntimeError(f'unknown fp_type. Allowed {", ".join(allowed)}, '
+                         f'given {Datatype.as_str(fp_type)}')
     self.fp_type = fp_type
     #: What the caller asked for, kept apart from what it resolved to: the two
     #: are the same statement about different things, and a report wants to
     #: name the first while generation reads the second.
     self._asked_options: Options = Options() if options is None else options
     self._options: ResolvedOptions = self._asked_options.resolve(
-        self._vm.get_hw_descr(),
-        getattr(self._vm.get_lexic(), 'simd_mode', False))
+        self.target.hw, getattr(self.target.lexic, 'simd_mode', False))
 
     #: Whether every emitted body should report its peak register footprint.
     #:
@@ -218,9 +222,6 @@ class Context:
   def fp_as_str(self):
     return Datatype.as_str(self.fp_type)
 
-  def get_vm(self):
-    return self._vm
-
   def get_user_options(self) -> ResolvedOptions:
     """The settled options: one value per declared name, for this hardware."""
     return self._options
@@ -231,8 +232,8 @@ class Context:
 
   def align(self, num):
     fp_size = self.fp_type.size()
-    hw_fp_word_size = self._vm.get_hw_descr().hw_fp_word_size
-    vec_unit_length = self._vm.get_hw_descr().vec_unit_length
+    hw_fp_word_size = self.target.hw.hw_fp_word_size
+    vec_unit_length = self.target.hw.vec_unit_length
 
     align_length = (vec_unit_length * hw_fp_word_size) / fp_size
     return int(ceil(num / align_length) * align_length)

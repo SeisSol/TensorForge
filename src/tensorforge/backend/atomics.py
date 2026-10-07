@@ -72,11 +72,11 @@ from tensorforge.common.basic_types import Datatype
 
 
 def _model(ctx) -> str:
-    return ctx.get_vm().get_hw_descr().model
+    return ctx.target.hw.model
 
 
 def _vendor(ctx) -> str:
-    return ctx.get_vm().get_hw_descr().vendor
+    return ctx.target.hw.vendor
 
 
 # --------------------------------------------------------------------------- #

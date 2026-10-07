@@ -35,9 +35,8 @@ class CrossLaneFold:
     def _reach(self) -> int:
         """How far one exchange reaches (`Lexic.exchange_reach`): the wave,
         a sub-group the kernel states, or under ESIMD the whole vector."""
-        vm = self._context.get_vm()
-        return vm.get_lexic().exchange_reach(self._num_threads,
-                                             vm.get_hw_descr())
+        target = self._context.target
+        return target.lexic.exchange_reach(self._num_threads, target.hw)
 
     def _lane(self, writer: Writer):
         """Which element of the distributed dimension this lane is at.
@@ -73,7 +72,7 @@ class CrossLaneFold:
         """
         from tensorforge.backend.pir.core import ScalarType
 
-        lexic = self._context.get_vm().get_lexic()
+        lexic = self._context.target.lexic
         if lexic.exchange_xor('{0}', 1) is not None:
             # No all-reduce to call, only the exchange (SPMD SYCL): the
             # butterfly, one step per bit, combined by the operator's `irop`.

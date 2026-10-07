@@ -89,7 +89,7 @@ def _refuse_multiwave(threads, ctx):
     narrowed to one lane, so it is not the exchange alone.  A wrong kernel is
     worse than none; on a 64-wide wave the same width is one wave and builds.
     """
-    hw = ctx.get_vm().get_hw_descr()
+    hw = ctx.target.hw
     wave = getattr(hw, 'vec_unit_length', None)
     if wave and threads > wave:
         raise GenerationError(

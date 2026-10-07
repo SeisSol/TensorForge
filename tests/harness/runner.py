@@ -123,7 +123,7 @@ def run_case(case, target: Target, cache_root: Path,
     # Build or fetch cached executable.
     driver_src = driver_emit.emit(gen, target.backend, default_batch=batch)
 
-    includes_src = "\n".join(f'#include "{header}"' for header in ctx.get_vm().get_headers()) + "\n"
+    includes_src = "\n".join(f'#include "{header}"' for header in ctx.target.headers()) + "\n"
     includes_src += "\n".join(f'#include "{header}"' for header in gen.get_helper_headers())
 
     bi = BuildInputs(

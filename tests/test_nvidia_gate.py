@@ -374,7 +374,8 @@ def test_an_unreadable_target_falls_to_the_floor():
     assert nvidia.sm_of(None) == nvidia.BASELINE_SM
 
     class _NoModel:
-        def get_vm(self):
+        @property
+        def target(self):
             raise AttributeError
     assert nvidia.sm_of(_NoModel()) == nvidia.BASELINE_SM
 

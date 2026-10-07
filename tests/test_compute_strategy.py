@@ -40,18 +40,12 @@ class _FakeCtx:
             self.model = model
             self.vendor = 'amd'
 
-    class _VM:
+    class _Target:
         def __init__(self, model):
-            self._hw = _FakeCtx._HW(model)
-
-        def get_hw_descr(self):
-            return self._hw
+            self.hw = _FakeCtx._HW(model)
 
     def __init__(self, model='gfx90a'):
-        self._vm = _FakeCtx._VM(model)
-
-    def get_vm(self):
-        return self._vm
+        self.target = _FakeCtx._Target(model)
 
 
 def _shape(threads=32, dtype=Datatype.F32, sparse=False, explicit_simd=False):
