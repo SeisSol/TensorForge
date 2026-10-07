@@ -13,6 +13,8 @@ loop reads and when is only as good as the cases where it declines, and
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tensorforge.backend.pir import emit, verify, walk
@@ -58,7 +60,8 @@ class Section:
 
     def __init__(self, *, flags=True, element_pointer=False, transfers=1,
                  shared=False, ahead=None, init='', second_writer=False,
-                 closing_barrier=True, first=True, reread=False):
+                 closing_barrier=True, first=True, reread=False,
+                 read_after=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         count = b.extern_value('numElements0', SIZE, hint='count')
         start = b.extern_value('start', SIZE, uniform=Uniformity.MULT,
@@ -98,7 +101,18 @@ class Section:
                     b.barrier(Participants.MULT, threads=32)
                 self.bufs = []
                 for j, src in enumerate(srcs):
-                    if shared:
+                    if shared == 'sync':
+                        # Loads and stores, the way a target without
+                        # asynchronous copies moves the bytes.
+                        dest = self.window
+                        b.mark('defines', dest)
+                        lane = b.thread_id('x')
+                        with b.for_(0, 8, 1, unroll=True) as i:
+                            b.store(dest, b.load(src, i.induction, hint='g'),
+                                    i.induction)
+                        self.bufs.append(dest)
+                        b.store(out, b.load(dest, lane, hint='u'), lane)
+                    elif shared:
                         dest = self.window
                         if ahead == 'read':
                             b.store(out, b.load(dest, 0, hint='early'), 0)
@@ -124,13 +138,15 @@ class Section:
                             b.store(out, b.load(dest, 4, hint='v'), j + 8)
             if closing_barrier:
                 b.barrier(Participants.MULT, threads=32)
+        if read_after:
+            b.load(self.window, 0, hint='late')
         self.body = b.finish()
         verify(self.body)
 
-    def wrap(self, distance=1):
+    def wrap(self, distance=1, stages=1):
         self.report = []
         out = wrap_loads(self.body, self.b.scratch, distance=distance,
-                         report=self.report)
+                         stages=stages, report=self.report)
         verify(out)
         return out
 
@@ -334,6 +350,152 @@ def test_a_two_hop_peel_and_tail_issue_the_same_copies():
     peel = [s for s in _ops_before_loop(out) if s.op is Op.COPY_ASYNC]
     tail = [s for s in _loop(out).regions[0].body if s.op is Op.COPY_ASYNC]
     assert len(peel) == len(tail) == 1
+
+
+# --------------------------------------------------------------------------- #
+# a second stage
+# --------------------------------------------------------------------------- #
+
+def _allocs(stmts):
+    return [s for s in stmts if s.op is Op.ALLOC]
+
+
+def _staged(out):
+    """The peel's window, and the loop's two: the one it reads and the one
+    it fills."""
+    loop = _loop(out)
+    region = loop.regions[0].body
+    peel = [s for s in _allocs(_ops_before_loop(out))
+            if s.target[0].type.space is MemSpace.SHARED]
+    read, fill = [s for s in _allocs(region)
+                  if s.target[0].type.space is MemSpace.SHARED]
+    return loop, peel, read, fill
+
+
+def test_a_second_stage_puts_the_copy_at_the_head():
+    sec = Section(shared=True, flags=False)
+    out = sec.wrap(stages=2)
+    assert sec.report == ['+ s0 [shr, 2 stages]']
+    loop, _, read, fill = _staged(out)
+    region = loop.regions[0].body
+    copies = [i for i, s in enumerate(region) if s.op is Op.COPY_ASYNC]
+    waits = [i for i, s in enumerate(region) if s.op is Op.WAIT]
+    assert copies and waits and max(copies) < min(waits), (
+        'the copy for the next element is issued ahead of the wait for this '
+        'one')
+    copy = region[copies[0]]
+    assert copy.args[0] is fill.target[0], 'it fills the stage not read'
+    # The window the iteration reads is the buffer the body names.
+    assert read.target[0] is sec.window
+    scheduled, diag = schedule_async(out)
+    assert not diag, diag
+    prior = [s.attr('prior') for s, _ in walk(_loop(scheduled).regions[0].body)
+             if s.op is Op.WAIT]
+    assert prior == [1], 'the copy just issued stays in flight'
+
+
+def test_the_stage_is_carried_and_not_taken_from_the_element():
+    """One thread's elements are a stride apart: a stage taken from the
+    element would not alternate where two divides the stride, and the peel
+    could fill only one of them for the first."""
+    sec = Section(shared=True, flags=False)
+    out = sec.wrap(stages=2)
+    loop, peel, read, fill = _staged(out)
+    stage = read.args[0]
+    assert stage in loop.regions[0].args[1:], 'the stage rides the loop'
+    defs = _defs(out)
+    following = defs[fill.args[0].id]
+    assert following.op == 'bitxor' and following.args == (stage, 1)
+    init = loop.args[3 + loop.regions[0].args.index(stage) - 1]
+    assert defs[init.id].attr('value') == 0, 'the first iteration reads 0'
+    assert not peel[0].args, 'and the peel fills it'
+    assert loop.regions[0].body[-1].args[-1] is fill.args[0]
+
+
+def test_the_windows_are_one_buffer_twice_over():
+    sec = Section(shared=True, flags=False)
+    out = sec.wrap(stages=2)
+    _, peel, read, fill = _staged(out)
+    windows = peel + [read, fill]
+    assert len({id(s.attr('identity')) for s in windows}) == 1
+    assert {s.attr('stages') for s in windows} == {2}
+    assert [s.attr('extern') for s in windows] == ['peel_s0', 's0', 'wrap_s0']
+    laid = placed(out)
+    offsets = {s.attr('extern'): s.attr('offset') for s, _ in walk(laid)
+               if s.op is Op.ALLOC and s.attr('extern')}
+    assert offsets['peel_s0'] == 0
+    assert offsets['s0'] == offsets['wrap_s0'] == '0 + ({0}) * 64'
+    w = Writer()
+    emit(laid, w, vm_factory('sm_86', 'cuda', 'float'))
+    src = w.get_src()
+    assert re.search(r'float \* s0 = &shrMem\[0 \+ \(v\d+_stage\) \* 64\];',
+                     src), src
+    assert re.search(r'float \* wrap_s0 = &shrMem\[0 \+ \(v\d+_stageNext\) '
+                     r'\* 64\];', src), src
+    assert 'float * peel_s0 = &shrMem[0];' in src
+
+
+def test_the_stage_read_is_not_declared_dead_where_the_other_is_filled():
+    """`mark defines` ends what a buffer holds, and the windows are one
+    buffer to the allocator: at the head of the body the stage the
+    iteration reads is still wanted."""
+    out = Section(shared=True, flags=False).wrap(stages=2)
+    assert not any(s.op is Op.MARK and s.attr('mark') == 'defines'
+                   for s, _ in walk(_loop(out).regions[0].body))
+
+
+def test_with_a_mask_the_wait_goes_ahead_of_the_guard():
+    """A masked element cannot drain behind a copy issued at the head: it
+    would retire that one as well, and leave the next iteration a different
+    count in flight on each path.  Ahead of the guard both paths wait."""
+    sec = Section(shared=True)
+    out = sec.wrap(stages=2)
+    region = _loop(out).regions[0].body
+    guard = next(i for i, s in enumerate(region) if s.op is Op.IF)
+    waits = [i for i, s in enumerate(region) if s.op is Op.WAIT]
+    assert waits and max(waits) < guard
+    assert len(region[guard].regions) == 1, 'no drain on the masked path'
+    scheduled, diag = schedule_async(out)
+    assert not diag, diag
+    prior = [s.attr('prior') for s, _ in walk(_loop(scheduled).regions[0].body)
+             if s.op is Op.WAIT]
+    assert prior == [1]
+
+
+def test_the_next_pointer_is_followed_under_its_flag_at_the_head():
+    sec = Section(shared=True, element_pointer=True)
+    out = sec.wrap(stages=2)
+    region = _loop(out).regions[0].body
+    guard = next(i for i, s in enumerate(region) if s.op is Op.IF
+                 and s.attr('guard') == 'element')
+    copies = [s for s in region[:guard] if s.op is Op.COPY_ASYNC]
+    assert copies and all(c.predicate is not None for c in copies)
+    defs = _defs(out)
+    assert defs[copies[0].predicate.id].attr('extern') == 'allowed_next'
+
+
+@pytest.mark.parametrize('kwargs,why', [
+    (dict(shared='sync'), 'loads and stores'),
+    (dict(shared=True, read_after=True), 'used outside the loop'),
+])
+def test_one_stage_stays_where_two_would_not_help(kwargs, why):
+    sec = Section(flags=False, **kwargs)
+    out = sec.wrap(stages=2)
+    assert len(sec.report) == 1 and sec.report[0].startswith('+ s0 [shr] '
+                                                             'one stage:')
+    assert why in sec.report[0], sec.report
+    assert not any(s.attr('stages') for s, _ in walk(out)
+                   if s.op is Op.ALLOC)
+
+
+def test_a_register_transfer_keeps_its_place_beside_a_second_stage():
+    sec = Section(flags=False)
+    out = sec.wrap(stages=2)
+    assert sec.report == ['+ r0 [reg]']
+    region = _loop(out).regions[0].body
+    barrier = max(i for i, s in enumerate(region) if s.op is Op.BARRIER)
+    tail = [i for i, s in enumerate(region) if s.op is Op.FOR]
+    assert tail and max(tail) < barrier
 
 
 # --------------------------------------------------------------------------- #

@@ -25,7 +25,7 @@ import pytest
 from tensorforge.backend.pir import emit
 from tensorforge.backend.pir.allocate import BLOCK, MULT, allocate
 from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import IRError, MemSpace, Op, walk
+from tensorforge.backend.pir.core import INDEX, IRError, MemSpace, Op, walk
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.vm.vm import vm_factory
@@ -246,20 +246,27 @@ def test_a_window_may_ask_for_more():
 
 
 def test_a_buffer_with_two_stages_takes_both_and_names_its_stage():
+    """Both stages reserved, and the window's offset the stage's: its
+    operand, which the emitter spells."""
     b = _builder()
     lane = b.thread_id('x')
+    stage = b.op('bitand', INDEX, lane, 1, hint='stage')
     owner = object()
     w = b.alloc(Datatype.F32, (16,), MemSpace.SHARED, hint='w',
-                identity=owner, stages=2, stage='k % 2')
+                identity=owner, stages=2, stage=stage)
     other = b.alloc(Datatype.F32, (8,), MemSpace.SHARED, hint='other')
     b.store(w, b.const(1.0), lane)
     b.store(other, b.const(1.0), lane)
     b.load(w, lane, hint='d')
     b.load(other, lane, hint='d')
-    _, layout, offsets = _layout(b.finish())
-    assert offsets['w'] == '0 + (k % 2) * 16'
+    out, layout, offsets = _layout(b.finish())
+    assert offsets['w'] == '0 + ({0}) * 16'
     assert offsets['other'] == 32
     assert layout.per_mult == 40
+    writer = Writer()
+    emit(out, writer, vm_factory('sm_86', 'cuda', 'float'))
+    assert '= &shrMem[0 + ((threadIdx.x & 1)) * 16];' in writer.get_src(), (
+        writer.get_src())
 
 
 def test_the_block_s_buffers_are_back_to_back_in_allocation_order():

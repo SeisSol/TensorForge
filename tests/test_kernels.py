@@ -500,3 +500,93 @@ def test_f64_variant_cases_use_double_precision():
                     f"{path.name}: operand {op.tensor.alias} carries "
                     f"{op.tensor.datatype}, not F64 — kernel will be "
                     "generated at the wrong precision")
+
+
+def _gemm16(**opt_kw):
+    """A 16x16 strided multiplication on sm_90, whose second operand goes
+    through shared memory as asynchronous copies."""
+    from tensorforge.common.basic_types import Addressing, Datatype
+    from tensorforge.common.context import Context, Options
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+    from tensorforge.generators.generator import Generator
+
+    def sub(rows, cols, alias):
+        return SubTensor(Tensor([rows, cols], Addressing.STRIDED,
+                                BoundingBox([0, 0], [rows, cols]),
+                                alias=alias, datatype=Datatype.F32))
+
+    ctx = Context(arch="sm_90", backend="cuda", fp_type=Datatype.F32,
+                  options=Options(**opt_kw))
+    gen = Generator([GemmDescr(False, False, a=sub(16, 16, "A"),
+                               b=sub(16, 16, "B"), c=sub(16, 16, "C"))], ctx)
+    gen.generate()
+    return gen.get_kernel()
+
+
+#: Both transfers of `_gemm16` moved, the shared one with a second stage.
+_STAGED = dict(enable_wrap_loads=True, enable_multibuffer=True,
+               move_distance=2)
+
+
+def test_a_second_stage_is_chosen_by_iteration_not_element():
+    """The stage a buffer with two is read in comes from the loop.
+
+    The batch loop is grid-strided: one thread's consecutive elements are
+    ``gridDim.x * blockDim.y`` apart.  A stage taken as ``batchId0 % 2``
+    breaks twice -- it never alternates where two divides that stride (the
+    usual case), and iteration 0 reads ``batchId0 % 2`` while the peel can
+    only fill a literal stage, so every thread group with an odd start index
+    reads a stage nobody filled.  Neither shows up as a crash, only as wrong
+    numbers, which is why this is pinned here.
+    """
+    import re
+
+    src = _gemm16(**_STAGED)
+    stage = re.search(r"int32_t (v\d+_stage) = 0(?:_i32)?;", src)
+    assert stage, "the stage is declared ahead of the loop, from 0"
+    name = stage.group(1)
+    following = re.search(rf"int32_t (v\d+_stageNext) = {name} \^ 1;", src)
+    assert following, "the stage the iteration fills is the other one"
+    assert re.search(rf"\b{name} = {following.group(1)};", src), (
+        "the stage is never advanced, so every iteration reads one stage")
+    selectors = set(re.findall(r"&localShrMem\d+\[\d+ \+ \(([^)]*)\) \* \d+\]",
+                               src))
+    assert selectors == {name, following.group(1)}, selectors
+    # The peel fills the stage the first iteration reads: its window has no
+    # stage term at all.
+    assert re.search(r"peel_s0 = &localShrMem\d+\[\d+\];", src)
+
+
+def _inside_flag_guard(src, markers):
+    """Lines matching ``markers`` that lie inside an ``if (allowed) { ... }``."""
+    depth, guard_depths, hits = 0, [], []
+    for line in src.splitlines():
+        opened = "if (allowed) {" in line
+        if guard_depths and any(m in line for m in markers):
+            hits.append(line.strip())
+        depth += line.count("{") - line.count("}")
+        if opened:
+            guard_depths.append(depth)
+        while guard_depths and depth < guard_depths[-1]:
+            guard_depths.pop()
+    return hits
+
+
+def test_the_copy_for_the_next_element_sits_outside_the_element_flag_guard():
+    """Iteration k issues the copy for element k + 1 whatever k's flag.
+
+    ``flags`` is a runtime per-element mask, and k being masked says nothing
+    about k + 1, which reads the stage the copy fills: under k's guard a
+    masked element would leave it unfilled.  The wait that retires the copy
+    is outside as well, which is what keeps the count of copies in flight
+    the same on both paths.
+    """
+    src = _gemm16(**_STAGED)
+    fill = ["memcpy_async(&wrap_s0["]
+    assert any(m in src for m in fill), "no copy into the stage being filled"
+    assert not _inside_flag_guard(src, fill), (
+        "the copy is under the flag guard; a skipped element leaves the "
+        "stage it should have filled untouched")
+    assert not _inside_flag_guard(src, ["__pipeline_wait_prior("])

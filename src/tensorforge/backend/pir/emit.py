@@ -992,6 +992,10 @@ class Emitter:
                     raise IRError(
                         f'{self.name(v)}: a window into {arena} that nothing '
                         f'placed; the body did not go through the allocator')
+                if s.args and isinstance(off, str):
+                    # A window into one stage of several, the stage its
+                    # operand (`allocate._offset_of`).
+                    off = off.format(*(self.operand(a) for a in s.args))
                 extern = s.attr('extern')
                 if extern is not None:
                     self.bind(v, extern)

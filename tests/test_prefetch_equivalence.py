@@ -36,10 +36,10 @@ def _load(path):
     return mod
 
 
-def _generate(mod, wrap, report=None):
+def _generate(mod, wrap, report=None, **extra):
     ctx = Context(arch='sm_86', backend='cuda',
                   fp_type=getattr(mod, 'DTYPE', None),
-                  options=Options(enable_wrap_loads=wrap))
+                  options=Options(enable_wrap_loads=wrap, **extra))
     gen = Generator(mod.descr_list(), ctx)
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
@@ -120,3 +120,21 @@ def test_a_moved_shared_transfer_does_not_change_the_numbers():
     both = _compare('trans_a', report)
     assert any(line.endswith('[shr]') for line in report), report
     _same(both)
+
+
+@pytest.mark.parametrize('name', ['addressing_none', 'known_zero_rows',
+                                  'tw_split_load'])
+def test_a_second_stage_does_not_change_the_numbers(name):
+    """The copy for the next element issued at the head of the body, into
+    the stage the iteration does not read.
+
+    What keeps it right is the stage the loop carries, the windows into it,
+    and the barriers between one stage's readers and the copy into it an
+    iteration later -- any of them wrong is wrong numbers, not a crash.
+    """
+    report = []
+    mod = _case(name)
+    plain, pg = _generate(mod, False)
+    staged, sg = _generate(mod, True, report, enable_multibuffer=True)
+    assert any(line.endswith('[shr, 2 stages]') for line in report), report
+    _same((_run(plain, pg), _run(staged, sg)))

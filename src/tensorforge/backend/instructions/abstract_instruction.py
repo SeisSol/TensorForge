@@ -457,6 +457,7 @@ class AbstractInstruction(ABC):
     report: list = []
     if getattr(options, 'enable_wrap_loads', False):
       wrap = pir.WrapLoads(builder.scratch, distance=options.move_distance,
+                           stages=2 if options.enable_multibuffer else 1,
                            report=report)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         debug=options.ir_debug, wrap=wrap,

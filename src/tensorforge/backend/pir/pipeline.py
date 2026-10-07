@@ -172,7 +172,9 @@ class WrapLoads(Pass):
     scopes the loaders open until ``flatten`` has removed them -- and ahead
     of the allocator and the barriers, which have to see where the moved
     transfer ended up.  `scratch` makes the builder the added statements are
-    built with, and `report` collects what moved and why the rest did not.
+    built with, `stages` is how many copies of a shared buffer a moved
+    transfer may have, and `report` collects what moved and why the rest did
+    not.
     """
 
     name = 'wrap'
@@ -180,15 +182,16 @@ class WrapLoads(Pass):
     preserves = ('flat',)
     is_transform = True
 
-    def __init__(self, scratch, distance: int = 1,
+    def __init__(self, scratch, distance: int = 1, stages: int = 1,
                  report: Optional[List[str]] = None):
         self._scratch = scratch
         self._distance = distance
+        self._stages = stages
         self._report = report
 
     def run(self, pc: BodyContext) -> None:
         pc.body = wrap_loads(pc.body, self._scratch, distance=self._distance,
-                             report=self._report)
+                             stages=self._stages, report=self._report)
 
 
 def standard_pipeline(debug: str = '',

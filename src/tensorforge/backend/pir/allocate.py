@@ -304,11 +304,16 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
 
 
 def _offset_of(s: Stmt, base: int, buffer: _Buffer):
-    stage = s.attr('stage')
-    if stage is None:
+    """Where window `s` of `buffer` starts: at the buffer, or one stage
+    further per count of the stage it names.
+
+    The stage is the window's operand -- a value the loop carries -- so the
+    offset is text the emitter completes: ``{0}`` is that operand.
+    """
+    if not s.args:
         return base
     size = s.target[0].type.volume
-    return f'{base} + ({stage}) * {size}'
+    return f'{base} + ({{0}}) * {size}'
 
 
 def _place(body: Tuple[Stmt, ...], value_key, offsets, buffers):

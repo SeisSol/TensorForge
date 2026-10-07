@@ -102,11 +102,12 @@ class Arena:
             if isinstance(offset, int):
                 out[v.id] = (root, base + offset, base + offset + span)
                 continue
-            # A rotating window, `576 + (stage % 2) * 96`: somewhere in its
-            # two stages, from the leading constant on.
+            # A window into one stage of several, `576 + ({0}) * 96`:
+            # somewhere in all of them, from the leading constant on.
             m = re.match(r'\s*(\d+)\s*\+', str(offset))
+            stages = s.attr('stages', 1) or 1
             out[v.id] = ((root, base + int(m.group(1)),
-                          base + int(m.group(1)) + 2 * span)
+                          base + int(m.group(1)) + stages * span)
                          if m else (root, None, None))
         return out
 

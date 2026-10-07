@@ -349,9 +349,11 @@ declare('enable_multibuffer',
             'For copies the hardware carries out asynchronously only -- a '
             'transfer written as loads and stores stalls on its loads where '
             'it is issued, at the head as at the tail.  The second stage '
-            'doubles the buffer, and a launch pays for it in occupancy, so it '
-            'is asked for rather than given: off pending hardware numbers.  '
-            'See backend/pir/wrap.py.')
+            'doubles the buffer, and a launch pays for it in occupancy: over '
+            'the corpus on sm_86, 17% more shared memory at `move_distance` '
+            '1 and 84% at 2 (`tools/wrap_census.py`).  So it is asked for '
+            'rather than given, off pending hardware numbers.  See '
+            'backend/pir/wrap.py.')
 
 declare('enable_move_loads',
         default=True,

@@ -887,7 +887,7 @@ class IRBuilder:
               quals: Tuple = (),
               swizzle: Optional[XorSwizzle] = None,
               identity: Any = None, stages: int = 1,
-              stage: Optional[str] = None,
+              stage: Optional[Operand] = None,
               place_align: Optional[int] = None) -> Value:
         """Request a buffer *symbolically*.
 
@@ -900,11 +900,12 @@ class IRBuilder:
 
         A shared buffer goes into `arena`, or into the multiplication's arena
         where it names none.  `stages` copies of it are reserved, of which
-        this window addresses the one `stage` selects; `place_align` is what
-        its start has to be a multiple of, in elements, beyond what every
-        buffer of its arena starts on.  `identity` is the buffer a window is
-        one of the windows of, which is what tells two windows of one
-        rotating buffer apart from two buffers.
+        this window addresses the one `stage` selects -- an operand, so that
+        the stage can be a value the loop carries; the first where there is
+        none.  `place_align` is what its start has to be a multiple of, in
+        elements, beyond what every buffer of its arena starts on.
+        `identity` is the buffer a window is one of the windows of, which is
+        what tells two windows of one rotating buffer apart from two buffers.
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
@@ -920,7 +921,7 @@ class IRBuilder:
                     f'buffer')
             attrs = (('arena', arena), ('offset', offset))
             if stages > 1:
-                attrs = attrs + (('stages', stages), ('stage', stage))
+                attrs = attrs + (('stages', stages),)
             if place_align:
                 attrs = attrs + (('place_align', place_align),)
         elif arena is not None:
@@ -957,7 +958,8 @@ class IRBuilder:
             # a write asks it of the buffer, not of the window
             # (`barriers.place_barriers`).
             attrs = attrs + (('identity', identity),)
-        self._emit_op(Op.ALLOC, (v,), (), pure=False, movable=False,
+        args = (stage,) if stage is not None and stages > 1 else ()
+        self._emit_op(Op.ALLOC, (v,), args, pure=False, movable=False,
                       attrs=attrs)
         return v
 
