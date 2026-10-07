@@ -28,8 +28,7 @@ class Context:
     #: are the same statement about different things, and a report wants to
     #: name the first while generation reads the second.
     self._asked_options: Options = Options() if options is None else options
-    self._options: ResolvedOptions = self._asked_options.resolve(
-        self.target.hw, self.target.explicit_simd)
+    self._options: ResolvedOptions = self._asked_options.resolve(self.target)
 
     #: Whether every emitted body should report its peak register footprint.
     #:

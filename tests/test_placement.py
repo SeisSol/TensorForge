@@ -22,22 +22,20 @@ from dataclasses import replace
 
 import pytest
 
-from tensorforge.backend.placement import (DEFAULT_POLICY, POLICIES, Placement,
-                                           ResultPlacement, VendorPolicy,
+from tensorforge.backend.placement import (Placement, ResultPlacement,
+                                           VendorPolicy,
                                            choose_operand_placement,
                                            choose_result_placement,
                                            legal_operand_placements,
                                            legal_result_placements,
-                                           policy_for, result_is_atomic)
+                                           result_is_atomic)
+from tensorforge.common.target import PREFERENCES, Target, _explicit_simd
 
+POLICIES = {name: row.placement for name, row in PREFERENCES.items()}
+DEFAULT_POLICY = VendorPolicy()
 NVIDIA = POLICIES["nvidia"]
 AMD = POLICIES["amd"]
 INTEL = POLICIES["intel"]
-
-
-class _Hw:
-    def __init__(self, vendor):
-        self.vendor = vendor
 
 
 def _legal(policy, *, addressable=True, transposed=False,
@@ -120,9 +118,8 @@ def test_the_broadcast_claim_is_dropped_under_explicit_simd():
     half the targets: set for Intel outright, it would fix kernels under SYCL
     and break more of them under ESIMD.
     """
-    hw = _Hw("intel")
-    assert policy_for(hw).broadcast_without_staging
-    assert not policy_for(hw, explicit_simd=True).broadcast_without_staging
+    assert Target("pvc", "oneapi").prefs.placement.broadcast_without_staging
+    assert not Target("pvc", "esimd").prefs.placement.broadcast_without_staging
 
 
 @pytest.mark.parametrize("name", sorted(POLICIES))
@@ -133,9 +130,8 @@ def test_the_lowering_gate_subtracts_and_nothing_else(name):
     leaves the rest, so a target that gains an explicit-SIMD lowering later
     does not also silently lose its register staging.
     """
-    hw = _Hw(name)
-    spmd = policy_for(hw)
-    simd = policy_for(hw, explicit_simd=True)
+    spmd = PREFERENCES[name].placement
+    simd = _explicit_simd(PREFERENCES[name]).placement
 
     assert not simd.broadcast_without_staging
     assert replace(spmd, broadcast_without_staging=False) == simd

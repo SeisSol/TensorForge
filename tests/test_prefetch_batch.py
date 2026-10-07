@@ -76,7 +76,7 @@ def test_the_switch_is_off_by_default():
     """Off pending numbers, like every other switch that trades bandwidth."""
     assert Options().resolve(
         Context(arch='sm_86', backend='cuda',
-                fp_type=Datatype.F32).target.hw).enable_prefetch is False
+                fp_type=Datatype.F32).target).enable_prefetch is False
 
 
 def test_off_leaves_the_kernel_byte_identical():

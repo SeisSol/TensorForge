@@ -27,12 +27,15 @@ and `backend` when asked, so a test may stand a part in for a row the table
 does not have.
 """
 
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 
+from tensorforge.backend.placement import VendorPolicy
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.vm.hw_descr import HwDecription, hw_descr_factory
 from tensorforge.common.vm.lexic import (EXPLICIT_SIMD_BACKENDS, Lexic,
                                          lexic_factory)
+from tensorforge.common.vm.lexic.sycl_lexic import smallest_sub_group
 
 #: Names a backend is also known by.
 _ALIASES = {'hipsycl': 'acpp', 'dpcpp': 'oneapi'}
@@ -87,14 +90,124 @@ AMD_GLOBAL_LOAD_LDS = frozenset({'gfx90a', 'gfx940', 'gfx941', 'gfx942',
                                  'gfx950'})
 
 
-def smallest_sub_group(sizes: Tuple[int, ...], lanes: int) -> Optional[int]:
-    """The smallest of `sizes` that `lanes` fit in and divide, so that a
-    multiplication of that many lanes lies within one sub-group; None where
-    none does."""
-    for size in sizes:
-        if lanes <= size and size % lanes == 0:
-            return size
-    return None
+@dataclass(frozen=True)
+class Preferences:
+    """What was measured to be the better choice where every choice is
+    correct, per vendor (`PREFERENCES`) and adjusted for the lowering
+    (`Target.prefs`).
+
+    Each field names what reads it, and the reader says what the choice
+    trades; the rows say which way a vendor went and on what evidence.  A
+    measurement of one kernel on one device overrides these
+    (`generators.preferences`).
+    """
+
+    #: Threads a block holds where it stages nothing in shared memory
+    #: (`RegmaxBlockPolicy.get_num_mults_per_block`).
+    unstaged_block_threads: int = 256
+    #: Whether a lead width above one keeps the multiplications a block holds
+    #: -- the block gets smaller -- rather than its threads
+    #: (`RegmaxBlockPolicy`).
+    widening_keeps_mults: bool = True
+    #: Where operands are read from and results kept (`backend.placement`).
+    #: A vendor without a row reads everything in place, which is correct and
+    #: slow.
+    placement: VendorPolicy = field(default_factory=VendorPolicy)
+    #: The defaults of the options of the same names (`common.options`).
+    preload_globals: bool = False
+    split_predicated_load: bool = False
+    inline_constants: int = 64
+    argument_constants: bool = False
+    #: What the autotuner turns (`generators.tuning`): the matrix path,
+    tune_matrix_path: bool = False
+    #: staging the batch-constant operands,
+    tune_preload_globals: bool = False
+    #: lane counts down to the vector unit rather than to `lanes.MIN_LANES`,
+    lanes_down_to_wave: bool = False
+    #: and a lead width of two only where a lane holds one pair per column.
+    one_pair_per_lane: bool = False
+    #: How the autotuner judges registers: against the fitted allocation
+    #: rather than the modeled bytes (`tuning._over_budget`),
+    budget_by_fit: bool = False
+    #: and by the waves the allocation leaves a SIMD
+    #: (`tuning._register_blocks`).
+    rank_by_register_waves: bool = False
+    #: Registers per lane the target's compiler allocates as a function of
+    #: the modeled bytes, fitted over builds that did not spill:
+    #: `(intercept, slope)` on bytes / 4 (`tuning.register_estimate`).
+    register_fit: Optional[Tuple[float, float]] = None
+
+
+#: One row per vendor.
+PREFERENCES = {
+    'nvidia': Preferences(
+        # Four warps, one per scheduler of an SM (four since Volta), so that
+        # an SM holds several independent blocks rather than one large one.
+        # Through the generator on sm_120: `local_flux` -6.0 %, `chain_three`,
+        # `square_notrans` and `wide_cascade` within the noise (+0.1 to
+        # +1.5 %).
+        unstaged_block_threads=128,
+        placement=VendorPolicy(preload_operands_into_registers=True,
+                               keep_results_in_registers=True),
+        # A 32-bit immediate fits the instruction: a chain of four 9x9
+        # operators on sm_120 had 768 instructions instead of 888 by value.
+        inline_constants=4096,
+        argument_constants=True,
+        tune_matrix_path=True,
+        # ptxas sm_100a, 52 builds, residuals within 40.
+        register_fit=(51.0, 1.05)),
+    'amd': Preferences(
+        # The smaller block is measured to lose: `local_flux` at lead width
+        # two on gfx1150 took 242 ns an element at 128 threads (four mults)
+        # against 153 at 256 (eight), and 256 was the fastest arrangement of
+        # the kernel at either width.  The halved block NVIDIA prefers made
+        # `chain_three` 3.6 % and `wide_cascade` 4.1 % slower there.
+        widening_keeps_mults=False,
+        placement=VendorPolicy(preload_operands_into_registers=True,
+                               keep_results_in_registers=True,
+                               atomic_accumulation=True,
+                               broadcast_without_staging=True),
+        preload_globals=True,
+        # hipcc spilled every gfx942 build that needed two pairs -- 16 lanes
+        # at 35 and 56 rows, 32 at 80 and 120: 512 registers and 2 to 8 KB of
+        # scratch, where the model saw 200 -- and none that needed one.
+        one_pair_per_lane=True,
+        budget_by_fit=True,
+        rank_by_register_waves=True,
+        # hipcc gfx942, 29 builds, residuals within 38 -- no intercept worth
+        # the name.
+        register_fit=(0.0, 1.26)),
+    'intel': Preferences(
+        # The sub-group broadcast is cheap enough here that an operand whose
+        # lane axis is not where a reader expects it can be read in place.
+        placement=VendorPolicy(preload_operands_into_registers=True,
+                               keep_results_in_registers=True,
+                               broadcast_without_staging=True),
+        split_predicated_load=True,
+        tune_preload_globals=True,
+        lanes_down_to_wave=True),
+}
+
+
+def _explicit_simd(prefs: Preferences) -> Preferences:
+    """A row as the explicit-vector lowering changes it.
+
+    The broadcast without staging needs a value whose distribution over the
+    lanes is known; the SPMD lowering carries that in the index expression,
+    and the explicit-vector one carries it in the type -- where a value read
+    once and used across the whole vector has no distribution to give.  So
+    the answer is not available there, whatever the hardware could do.
+
+    Every work-item holds its own copy of an operator, so staging it once per
+    block is 1.71x over the twenty elastic kernels on pvc -- the default
+    rather than a knob, and the lane counts are the vector's width, which the
+    tuner leaves alone (`tuning.simple_space`).
+    """
+    return replace(prefs,
+                   placement=replace(prefs.placement,
+                                     broadcast_without_staging=False),
+                   preload_globals=True, tune_preload_globals=False,
+                   lanes_down_to_wave=False)
 
 
 class Target:
@@ -118,6 +231,13 @@ class Target:
         """The headers a translation unit with this target's kernels
         includes."""
         return ['tensorforge_aux.h'] + self.lexic.get_headers()
+
+    @property
+    def prefs(self) -> Preferences:
+        """This target's row of `PREFERENCES`, with what the lowering cannot
+        express removed (`_explicit_simd`)."""
+        prefs = PREFERENCES.get(self.hw.vendor, Preferences())
+        return _explicit_simd(prefs) if self.explicit_simd else prefs
 
     @property
     def sycl(self) -> bool:
@@ -320,6 +440,16 @@ class Target:
         register file.
         """
         return self.sycl and not self.explicit_simd
+
+    def lanes_share_register_file(self) -> bool:
+        """Whether the lanes of a sub-group share one thread's register file.
+
+        Intel under SPMD: one hardware thread holds the whole sub-group, so
+        what has to fit the file is a lane's footprint times the sub-group
+        (`tuning._over_budget`).  Under the explicit vector the work-item is
+        the thread and its footprint is already the whole vector.
+        """
+        return self.hw.vendor == 'intel' and not self.explicit_simd
 
     # -- memory ------------------------------------------------------------- #
 

@@ -43,6 +43,10 @@ class Compiler:
     #: through `CHECK_ERR`.
     aux: str
     suffix: str = '.cpp'
+    #: Whether the report's register count decides how many blocks an SM
+    #: holds (`register_blocks`).  Elsewhere `Resources.register_blocks` is
+    #: the compiler's own occupancy figure, which is not a count of blocks.
+    blocks_from_registers: bool = False
 
     def find(self, path: Optional[str] = None) -> Optional[str]:
         """The binary: `path` where given, else the first environment variable
@@ -67,9 +71,29 @@ class Compiler:
         """The flags that make the compiler say what a kernel costs it."""
         return []
 
+    def report_build(self, compiler: str, src: str, out_dir: str, arch: str,
+                     include: str) -> Tuple[List[str], str]:
+        """The command that compiles `src` for `arch` far enough for the
+        compiler to report on the kernel, and the file it writes."""
+        raise NotImplementedError
+
+    def reported_spill(self, product: str) -> Optional[int]:
+        """What the file `report_build` wrote says was spilled, where the log
+        is not the whole account; None where it is."""
+        return None
+
+    def register_blocks(self, registers: int, threads: int,
+                        hw) -> Optional[int]:
+        """Blocks of `threads` an SM holds at `registers` per thread, where
+        that is what the compiler's figure decides (`blocks_from_registers`);
+        None elsewhere."""
+        return None
+
 
 @dataclass(frozen=True)
 class Nvcc(Compiler):
+    blocks_from_registers: bool = True
+
     def language_flags(self):
         # The device headers call `constexpr` host functions from device code.
         return ['-std=c++17', '--expt-relaxed-constexpr']
@@ -80,6 +104,23 @@ class Nvcc(Compiler):
     def report_flags(self):
         return ['-Xptxas=-v']
 
+    #: Parts whose arch-specific features (`sm_90a`) the generated code may
+    #: use, so that the report is for the instructions it will run.
+    ARCH_SPECIFIC = ('sm_90', 'sm_100', 'sm_101', 'sm_120')
+
+    def report_build(self, compiler, src, out_dir, arch, include):
+        if not arch.endswith('a') and arch in self.ARCH_SPECIFIC:
+            arch += 'a'
+        product = os.path.join(out_dir, 'k.cubin')
+        return ([compiler, '-cubin', *self.language_flags(),
+                 *self.report_flags(), *self.target_flags(arch),
+                 '-I', include, '-o', product, src], product)
+
+    def register_blocks(self, registers, threads, hw):
+        # Registers are allocated per thread in units of eight.
+        per_thread = -(-registers // 8) * 8
+        return hw.max_reg_per_block // max(1, per_thread * threads)
+
 
 @dataclass(frozen=True)
 class Hipcc(Compiler):
@@ -88,6 +129,13 @@ class Hipcc(Compiler):
 
     def report_flags(self):
         return ['-Rpass-analysis=kernel-resource-usage']
+
+    def report_build(self, compiler, src, out_dir, arch, include):
+        product = os.path.join(out_dir, 'k.o')
+        return ([compiler, '-x', 'hip', '-c', *self.language_flags(),
+                 *self.report_flags(), *self.target_flags(arch),
+                 '--offload-device-only', '-O3', '-I', include,
+                 '-o', product, src], product)
 
 
 @dataclass(frozen=True)
@@ -109,6 +157,17 @@ class Icpx(Compiler):
         extra = os.environ.get('TF_ICPX_DEVICE_OPTIONS', '').strip()
         return ['-fsycl-targets=spir64_gen', '-Xsycl-target-backend',
                 f'-device {arch}' + (f' {extra}' if extra else '')]
+
+    def report_build(self, compiler, src, out_dir, arch, include):
+        # Linked, as a shared object: the ahead-of-time device build runs at
+        # link time, and `-c` leaves `-device` unused and IGC silent.
+        product = os.path.join(out_dir, 'k.so')
+        return ([compiler, *self.language_flags(), *self.report_flags(),
+                 *self.target_flags(arch), '-O3', '-shared', '-fPIC',
+                 '-I', include, '-o', product, src], product)
+
+    def reported_spill(self, product):
+        return zeinfo_spill(product)
 
 
 @dataclass(frozen=True)

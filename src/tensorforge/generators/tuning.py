@@ -225,7 +225,6 @@ def space(descrs, context: Context) -> List[Knob]:
     Each with the values that can change the kernel here and only those, so
     that a strategy does not spend builds on a switch that does nothing.
     """
-    hw = context.target.hw
     geometries = _geometries(descrs, context)
     knobs = [Knob('lanes', lambda c, g=tuple(geometries): g)]
     if _mergeable(descrs, context):
@@ -248,7 +247,7 @@ def space(descrs, context: Context) -> List[Knob]:
     if counts:
         knobs.append(Knob('inline_constants',
                           lambda c, v=tuple([0] + counts): v))
-    if hw.vendor == 'nvidia' and contraction_lengths(descrs):
+    if context.target.prefs.tune_matrix_path and contraction_lengths(descrs):
         knobs.append(Knob('tensor_cores', lambda c: (False, True)))
         knobs.append(Knob('mma_prefetch',
                           lambda c: ((1, 2) if c.get('tensor_cores') else (None,))))
@@ -338,10 +337,11 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # fills itself.  On a 16-wide PVC that is measured and steep: with the
     # geometry free to move, both scorers took `elastic-o6s:derivative` to
     # eight lanes and 66.1 ns an element, against 29.9 at the deduced 32 and
-    # 12.7 at sixteen.  So the floor is the vector unit there, and
-    # `MIN_LANES` elsewhere, where a narrow multiplication shares its wave.
+    # 12.7 at sixteen.  So the floor is the vector unit there
+    # (`Preferences.lanes_down_to_wave`), and `MIN_LANES` elsewhere, where a
+    # narrow multiplication shares its wave.
     floor = lane_config.MIN_LANES
-    if hw.vendor == 'intel' and not context.target.explicit_simd:
+    if context.target.prefs.lanes_down_to_wave:
         floor = max(floor, getattr(hw, 'vec_unit_length', 1))
     # Under the explicit vector, the deduced width alone.  The scorers do not
     # rank these: over the twenty elastic kernels on pvc, against the fastest
@@ -395,12 +395,11 @@ def simple_space(descrs, context: Context) -> List[Knob]:
             and context.target.packed_fma_width(Datatype.F32) == 2
             and context.target.lead_vectors() and rows % 2 == 0
             and base.lead_width == 1):
-        # On AMD only where a lane holds one pair per column.  hipcc spilled
-        # every gfx942 build that needed two -- 16 lanes at 35 and 56 rows,
-        # 32 at 80 and 120: 512 registers and 2 to 8 KB of scratch, where the
-        # model saw 200 -- and none that needed one.  ptxas does not: 16 lanes
-        # at width two was GB200's fastest at 80 and 120 rows.
-        one_pair = hw.vendor == 'amd'
+        # Only where a lane holds one pair per column, where the target's
+        # compiler spills the rest (`Preferences.one_pair_per_lane`).  ptxas
+        # does not: 16 lanes at width two was GB200's fastest at 80 and 120
+        # rows.
+        one_pair = context.target.prefs.one_pair_per_lane
         geometries += [LaneConfig(g.num_threads, base.num_active_threads, 2)
                        for g in list(geometries)
                        if g.num_threads <= rows
@@ -449,8 +448,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # default already makes correctly.  It belongs in the space once a tuned
     # ESIMD build beats its own default, which is a measurement and not an
     # opinion.
-    if (hw.vendor == 'intel'
-            and not context.target.explicit_simd
+    if (context.target.prefs.tune_preload_globals
             and any(t.addressing == Addressing.NONE for t in _tensors(descrs))):
         knobs.append(Knob('preload_globals', lambda c: (False, True)))
     # Reading an array temporary out of its producer's register image trades
@@ -728,17 +726,10 @@ def _granule(value) -> int:
     return int(value // _GRANULE)
 
 
-#: Registers per lane as a function of the modeled bytes, per vendor, fitted
-#: over builds that did not spill: `(intercept, slope)` on bytes / 4.
-#: NVIDIA: ptxas sm_100a, 52 builds, residuals within 40.  AMD: hipcc gfx942,
-#: 29 builds, residuals within 38 -- no intercept worth the name.
-_REGISTER_FIT = {'nvidia': (51.0, 1.05), 'amd': (0.0, 1.26)}
-
-
 def register_estimate(result: Build) -> Optional[float]:
-    """Registers per lane the target compiler is expected to allocate."""
-    hw = result.context.target.hw
-    fit = _REGISTER_FIT.get(hw.vendor)
+    """Registers per lane the target compiler is expected to allocate
+    (`Preferences.register_fit`)."""
+    fit = result.context.target.prefs.register_fit
     peak = result.generator.peak_pressure
     if fit is None or not peak:
         return None
@@ -746,18 +737,19 @@ def register_estimate(result: Build) -> Optional[float]:
 
 
 def _register_blocks(result: Build) -> Optional[int]:
-    """Blocks per CU the register file admits, where that is what decides.
+    """Blocks per CU the register file admits, where that is what decides
+    (`Preferences.rank_by_register_waves`).
 
-    AMD only.  A CDNA lane has 512 registers, VGPRs and AGPRs together, and a
-    SIMD holds as many waves as fit -- eight at 64 registers, one above 256.
-    On gfx942 over `local_flux` a third of the geometries sat at one wave per
+    AMD: a CDNA lane has 512 registers, VGPRs and AGPRs together, and a SIMD
+    holds as many waves as fit -- eight at 64 registers, one above 256.  On
+    gfx942 over `local_flux` a third of the geometries sat at one wave per
     SIMD without spilling a byte, which blocks per CU from shared memory and
     threads alone never shows.  NVIDIA keeps what is exact: its fit has an
     intercept that the occupancy would inherit, and the eight lanes that GB200
     ran fastest sit right at the limit.
     """
     hw = result.context.target.hw
-    if hw.vendor != 'amd':
+    if not result.context.target.prefs.rank_by_register_waves:
         return None
     regs = register_estimate(result)
     if regs is None:
@@ -790,12 +782,12 @@ def _over_budget(result: Build) -> float:
     and nothing in the model says when.  Where the target states no budget,
     there is no guard.
     """
-    hw = result.context.target.hw
-    budget = getattr(hw, 'max_reg_per_thread', None)
+    target = result.context.target
+    budget = getattr(target.hw, 'max_reg_per_thread', None)
     peak = result.generator.peak_pressure
     if not (budget and peak):
         return _over_scalar_budget(result)
-    if hw.vendor == 'amd':
+    if target.prefs.budget_by_fit:
         # hipcc allocates about 1.26 registers per modeled four bytes, so the
         # byte budget alone would let eight lanes at b = 56 through (2449 B
         # against 2048) that gfx942 spills 2 KB for.  In bytes, like the rest.
@@ -807,7 +799,7 @@ def _over_budget(result: Build) -> float:
         # scalar file gets its own term instead.
         return (max(0.0, 4 * register_estimate(result) - budget)
                 + _over_scalar_budget(result))
-    if hw.vendor == 'intel' and not result.context.target.explicit_simd:
+    if target.lanes_share_register_file():
         # The file is a *thread's*, and under SPMD one thread holds the whole
         # sub-group: the budget a lane may spend is the file divided by the
         # lanes that share it, or -- the same statement the other way up --
@@ -901,37 +893,17 @@ class CompiledScore:
             raise RuntimeError(
                 f'no compiler for {hw.vendor}: pass one in `Toolchain`, or set '
                 f'TF_NVCC / TF_HIPCC')
+        entry = toolchain.compiler_for_vendor(hw.vendor)
         with tempfile.TemporaryDirectory(prefix='tf-tune-') as tmp:
-            src = os.path.join(tmp, 'kernel.cpp' if hw.vendor == 'intel'
-                               else 'kernel.cu')
+            src = os.path.join(tmp, 'kernel' + entry.suffix)
             with open(src, 'w') as f:
                 f.write(kernel_source(result))
-            inc = self.toolchain.include_dir()
-            entry = toolchain.compiler_for_vendor(hw.vendor)
-            backend = entry.backend
-            flags = entry.language_flags() + entry.report_flags()
-            if hw.vendor == 'nvidia':
-                arch = hw.model if hw.model.endswith('a') else (
-                    hw.model + 'a' if hw.model in ('sm_90', 'sm_100', 'sm_101', 'sm_120')
-                    else hw.model)
-                cmd = [compiler, '-cubin', *flags, *entry.target_flags(arch),
-                       '-I', inc, '-o', os.path.join(tmp, 'k.cubin'), src]
-            elif hw.vendor == 'intel':
-                # Linked, as a shared object: the ahead-of-time device build
-                # runs at link time, and `-c` leaves `-device` unused and IGC
-                # silent.
-                cmd = [compiler, *flags, *entry.target_flags(hw.model), '-O3',
-                       '-shared', '-fPIC', '-I', inc,
-                       '-o', os.path.join(tmp, 'k.so'), src]
-            else:
-                cmd = [compiler, '-x', 'hip', '-c', *flags,
-                       *entry.target_flags(hw.model), '--offload-device-only',
-                       '-O3', '-I', inc, '-o', os.path.join(tmp, 'k.o'), src]
+            cmd, product = entry.report_build(compiler, src, tmp, hw.model,
+                                              self.toolchain.include_dir())
             run = subprocess.run(cmd + list(self.flags), capture_output=True,
                                  text=True, timeout=self.timeout)
-            spilled = (toolchain.zeinfo_spill(os.path.join(tmp, 'k.so'))
-                       if hw.vendor == 'intel' else None)
-        report = toolchain.resources(backend, run.stdout + run.stderr)
+            spilled = entry.reported_spill(product)
+        report = toolchain.resources(entry.backend, run.stdout + run.stderr)
         if report is None or run.returncode:
             return None
         if spilled is not None:
@@ -941,12 +913,12 @@ class CompiledScore:
             # `neighboringFlux` build retries and spills nothing, which that
             # heuristic would report as a spill for the ranking to act on.
             report = replace(report, spill_bytes=spilled)
-        if hw.vendor == 'nvidia' and report.registers:
+        if report.registers:
             gen = result.generator
             threads = gen._num_threads * gen.launch_config().mults_per_block
-            per_thread = -(-report.registers // 8) * 8
-            report = replace(report, register_blocks=hw.max_reg_per_block
-                             // max(1, per_thread * threads))
+            blocks = entry.register_blocks(report.registers, threads, hw)
+            if blocks is not None:
+                report = replace(report, register_blocks=blocks)
         self.reports[result.candidate] = report
         return report
 
@@ -959,7 +931,8 @@ class CompiledScore:
         lanes, wave, resident = _geometry(result)
         hw = result.context.target.hw
         mults = result.generator.launch_config().mults_per_block
-        if report.register_blocks is not None and hw.vendor == 'nvidia':
+        if (report.register_blocks is not None
+                and toolchain.compiler_for_vendor(hw.vendor).blocks_from_registers):
             blocks = min(result.generator.resident_blocks or 0, report.register_blocks)
             resident = blocks * mults
         # The *amount* spilled goes into the issue figure rather than in

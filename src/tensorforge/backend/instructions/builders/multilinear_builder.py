@@ -18,7 +18,7 @@ from tensorforge.backend.placement import (Placement, ResultPlacement,
                                            choose_result_placement,
                                            legal_operand_placements,
                                            legal_result_placements,
-                                           policy_for, result_is_atomic)
+                                           result_is_atomic)
 from tensorforge.common.operation import AddOperator, MulOperator
 
 
@@ -28,8 +28,7 @@ class MultilinearBuilder(OperationBuilder):
     #: What this hardware prefers among the placements that are legal.  Only
     #: preferences: nothing here can make a correct kernel incorrect, and the
     #: legality half is asked separately at each decision.
-    self._policy = policy_for(self._context.target.hw,
-                              explicit_simd=_explicit_simd(self._context))
+    self._policy = self._context.target.prefs.placement
 
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.

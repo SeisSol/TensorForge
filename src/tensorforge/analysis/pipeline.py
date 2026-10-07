@@ -115,17 +115,11 @@ def _uses(*categories, weight=1.0):
 
 
 def _family(hw) -> str:
-    if hw.vendor == 'amd':
-        return 'gfx9' if str(hw.model).startswith('gfx9') else 'gfx1'
-    return hw.vendor
+    return hw.family
 
 
 def _sm(hw) -> int:
-    model = str(hw.model)
-    try:
-        return int(model[3:]) if model.startswith('sm_') else 0
-    except ValueError:
-        return 0
+    return hw.sm_level() or 0
 
 
 def resources(hw) -> Dict[str, Resource]:

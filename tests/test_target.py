@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""What a target is and can, asked of the one object that knows.
+"""What a target is, can and prefers, asked of the one object that knows.
 
 `common.target.Target` holds the device (`hw`), the spelling (`lexic`), and
 answers every question whose answer decides what is emitted.  The questions
@@ -18,7 +18,7 @@ import pytest
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
-from tensorforge.common.target import Target
+from tensorforge.common.target import PREFERENCES, Preferences, Target
 
 
 # --------------------------------------------------------------------------- #
@@ -47,6 +47,18 @@ def test_the_headers_are_the_runtimes_and_the_lowerings():
     headers = Target('sm_86', 'cuda').headers()
     assert headers[0] == 'tensorforge_aux.h'
     assert 'tensorforge_device/cuda.h' in headers
+
+
+@pytest.mark.parametrize('arch,family', [('sm_86', 'nvidia'),
+                                         ('gfx942', 'gfx9'),
+                                         ('gfx90a', 'gfx9'),
+                                         ('gfx1150', 'gfx1'),
+                                         ('gfx1250', 'gfx1'),
+                                         ('pvc', 'intel')])
+def test_the_calibration_family(arch, family):
+    backend = ('cuda' if arch.startswith('sm_') else
+               'hip' if arch.startswith('gfx') else 'oneapi')
+    assert Target(arch, backend).hw.family == family
 
 
 # --------------------------------------------------------------------------- #
@@ -161,3 +173,53 @@ def test_launch_control_from_sm_100(arch, expected):
 def test_launch_bounds_name_resident_blocks_on_nvidia():
     assert Target('sm_86', 'cuda').min_blocks_bound()
     assert not Target('gfx942', 'hip').min_blocks_bound()
+
+
+def test_intel_spmd_lanes_share_a_thread():
+    assert Target('pvc', 'oneapi').lanes_share_register_file()
+    assert not Target('pvc', 'esimd').lanes_share_register_file()
+    assert not Target('gfx942', 'hip').lanes_share_register_file()
+
+
+# --------------------------------------------------------------------------- #
+# Preferences
+# --------------------------------------------------------------------------- #
+
+def test_a_vendor_without_a_row_takes_the_plain_preferences():
+    """Correct and slow: nothing staged, nothing kept, nothing tuned."""
+    plain = Preferences()
+    assert not plain.placement.preload_operands_into_registers
+    assert not plain.preload_globals and not plain.tune_matrix_path
+    assert plain.register_fit is None
+
+
+def test_every_vendor_has_a_row():
+    assert set(PREFERENCES) == {'nvidia', 'amd', 'intel'}
+
+
+def test_the_explicit_vector_changes_what_it_cannot_express():
+    """Staging is the default there, the broadcast in place is not available,
+    and the lane count is the vector's -- the rest of the row stands."""
+    spmd, esimd = Target('pvc', 'oneapi').prefs, Target('pvc', 'esimd').prefs
+    assert not spmd.preload_globals and esimd.preload_globals
+    assert spmd.placement.broadcast_without_staging
+    assert not esimd.placement.broadcast_without_staging
+    assert spmd.tune_preload_globals and not esimd.tune_preload_globals
+    assert spmd.lanes_down_to_wave and not esimd.lanes_down_to_wave
+    assert spmd.split_predicated_load == esimd.split_predicated_load
+
+
+@pytest.mark.parametrize('arch,backend,option,expected', [
+    ('gfx942', 'hip', 'preload_globals', True),
+    ('sm_86', 'cuda', 'preload_globals', False),
+    ('pvc', 'esimd', 'preload_globals', True),
+    ('pvc', 'oneapi', 'preload_globals', False),
+    ('sm_86', 'cuda', 'inline_constants', 4096),
+    ('gfx942', 'hip', 'inline_constants', 64),
+    ('sm_86', 'cuda', 'argument_constants', True),
+    ('pvc', 'oneapi', 'split_predicated_load', True),
+])
+def test_an_option_nobody_set_takes_the_preference(arch, backend, option,
+                                                   expected):
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+    assert getattr(ctx.get_user_options(), option) == expected

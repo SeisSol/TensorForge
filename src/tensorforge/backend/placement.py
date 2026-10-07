@@ -26,7 +26,7 @@ produces is one of these, and the code that emits loads does not have to know
 which of them asked.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from typing import FrozenSet, Optional
 
@@ -64,7 +64,7 @@ class ResultPlacement(Enum):
 
 @dataclass(frozen=True)
 class VendorPolicy:
-    """One row of the preference table.
+    """One vendor's placement preferences (`Target.prefs.placement`).
 
     Nothing here is about correctness: every field picks among answers that
     are already legal.
@@ -84,49 +84,6 @@ class VendorPolicy:
     #: A cross-lane broadcast is cheap enough that an operand missing the lane
     #: axis can be read in place instead of staged.
     broadcast_without_staging: bool = False
-
-
-#: What each vendor prefers.  A vendor with no row reads everything in place,
-#: which is correct and slow; adding a row is the whole of enabling a target.
-POLICIES = {
-    'nvidia': VendorPolicy(preload_operands_into_registers=True,
-                           keep_results_in_registers=True),
-    'amd': VendorPolicy(preload_operands_into_registers=True,
-                        keep_results_in_registers=True,
-                        atomic_accumulation=True,
-                        broadcast_without_staging=True),
-    # The sub-group broadcast is cheap enough here that an operand whose lane
-    # axis is not where a reader expects it can be read in place.  Dropped
-    # again under the explicit-SIMD lowering by `policy_for`, which is where
-    # the reason for that lives.
-    'intel': VendorPolicy(preload_operands_into_registers=True,
-                          keep_results_in_registers=True,
-                          broadcast_without_staging=True),
-}
-
-DEFAULT_POLICY = VendorPolicy()
-
-
-def policy_for(hw, explicit_simd: bool = False) -> VendorPolicy:
-    """This machine's row, with anything the lowering cannot express removed.
-
-    The table is keyed by vendor, and one field is not a fact about the vendor.
-    A cross-lane broadcast needs a value whose distribution over the lanes is
-    known; the SPMD lowering carries that in the index expression, and the
-    explicit-SIMD one carries it in the type -- where a value read once and
-    used across the whole vector has no distribution to give.  So the same
-    Intel hardware admits reading a mis-oriented operand in place under one
-    lowering and not under the other, and asking the vendor alone gets it wrong
-    for half the targets.
-
-    Dropped rather than made a separate row, because it is a subtraction: the
-    lowering cannot express the answer, so the answer is not available, whatever
-    the hardware could do.
-    """
-    policy = POLICIES.get(hw.vendor, DEFAULT_POLICY)
-    if explicit_simd and policy.broadcast_without_staging:
-        policy = replace(policy, broadcast_without_staging=False)
-    return policy
 
 
 # -- legality ------------------------------------------------------------- #

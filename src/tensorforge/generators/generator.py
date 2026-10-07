@@ -129,33 +129,24 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     #: spending the whole win on memory.  Holding the mults instead makes the
     #: block smaller: shared memory per block unchanged, blocks per SM
     #: unchanged or better, and the same work in flight with fewer
-    #: instructions issued to do it.
-    #:
-    #: Not on AMD, where the smaller block is measured to lose: `local_flux`
-    #: at lead width two on gfx1150 took 242 ns an element at 128 threads
-    #: (four mults) against 153 at 256 (eight), and 256 was the fastest
-    #: arrangement of the kernel at either width.  The same direction as
-    #: the halved NVIDIA block in `get_num_mults_per_block`, which lost there
-    #: too.
-    vendor = context.target.hw.vendor
-    self._lane_factor = 1 if vendor == 'amd' else max(1, lead_width)
+    #: instructions issued to do it -- where the target prefers the smaller
+    #: block (`Preferences.widening_keeps_mults`).
+    self._lane_factor = (max(1, lead_width)
+                         if context.target.prefs.widening_keeps_mults else 1)
 
   def get_num_mults_per_block(self):
-    # 128 threads on NVIDIA, four warps: one per scheduler of an SM (four
-    # since Volta), so that an SM holds several independent blocks rather
-    # than one large one.  Through the generator on sm_120: `local_flux`
-    # -6.0 %, `chain_three`, `square_notrans` and `wide_cascade` within the
-    # noise (+0.1 to +1.5 %).  Not on AMD: on gfx1150 the halved block made
-    # `chain_three` 3.6 % and `wide_cascade` 4.1 % slower, so it is 256
-    # there and on the other vendors until something says otherwise.
+    # As many threads as the target prefers in a block that stages nothing
+    # (`Preferences.unstaged_block_threads`: 128 on NVIDIA, one warp per
+    # scheduler, and 256 elsewhere).
     #
-    # And not where the block preloads operators into shared memory
-    # (`global_mem`): its multiplications share that one copy, and halving
-    # the block doubles the copies and halves the blocks that fit.  A
-    # multiplication wider than 128 threads takes the 256-thread bound.
+    # Not where the block preloads operators into shared memory
+    # (`global_mem`): its multiplications share that one copy, and a smaller
+    # block doubles the copies and halves the blocks that fit.  A
+    # multiplication wider than the preferred block takes the 256-thread
+    # bound.
     lanes = self._num_threads * self._lane_factor
-    vendor = self._context.target.hw.vendor
-    threads = 128 if vendor == 'nvidia' and self._global_mem == 0 else 256
+    threads = (self._context.target.prefs.unstaged_block_threads
+               if self._global_mem == 0 else 256)
     max_thread_mults = threads // lanes or 256 // lanes
     # Under the explicit-vector lowering one work-item *is* a thread and
     # holds the whole vector, so `threads // lanes` counts lanes where it

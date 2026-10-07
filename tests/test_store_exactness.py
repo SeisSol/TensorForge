@@ -35,7 +35,8 @@ from dataclasses import replace
 
 import pytest
 
-from tensorforge.backend import atomics, placement
+from tensorforge.backend import atomics
+from tensorforge.common import target
 from tensorforge.backend.instructions.memory import vectorize
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context, Options
@@ -59,9 +60,9 @@ def _generate(monkeypatch, M, arch, backend, width=2, nvidia_atomics=False):
     """`D += A B`, aligned, at `width`."""
     monkeypatch.setattr(vectorize, 'VALIDATED_LEAD_WIDTH', width)
     if nvidia_atomics:
-        monkeypatch.setitem(placement.POLICIES, 'nvidia',
-                            replace(placement.POLICIES['nvidia'],
-                                    atomic_accumulation=True))
+        row = target.PREFERENCES['nvidia']
+        monkeypatch.setitem(target.PREFERENCES, 'nvidia', replace(
+            row, placement=replace(row.placement, atomic_accumulation=True)))
     descrs = [GemmDescr(trans_a=False, trans_b=False,
                         a=_t([M, K], 'A'), b=_t([K, 3], 'B'),
                         c=_t([M, 3], 'D'), alpha=1.0, beta=1.0)]

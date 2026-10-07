@@ -13,15 +13,16 @@ Four layers answer for a value, nearest first:
 1. what the caller passed to `Options`,
 2. the option's own environment variable, where the declaration names one,
 3. `TF_OPTIONS`, a comma-separated ``name=value`` list covering every option,
-4. the vendor rule the declaration carries, or its plain default.
+4. the rule the declaration carries -- the target's preference
+   (`Target.prefs`) -- or its plain default.
 
 Layer 3 is what a caller that cannot reach the constructor uses -- the yateto
 frontend builds its own context -- and layer 2 is for the few switches whose
 spelling is already written down in tools and scripts.
 
-`resolve` runs the layers against one hardware descriptor and returns a frozen
+`resolve` runs the layers against one target and returns a frozen
 `ResolvedOptions`: one value per declared name, hashable, and carrying the
-*delta* to what the same hardware would have produced had nothing been asked at
+*delta* to what the same target would have produced had nothing been asked at
 all.  That delta is what identifies a configuration.  `label` spells it for a
 report and `digest` for a symbol name, and it is empty for a caller that asked
 for nothing, which is what keeps generated names stable for the default build.
@@ -131,21 +132,19 @@ class Opt:
     #: every kernel in the build.
     self.codegen = codegen
 
-  def base(self, hw, explicit_simd: bool = False) -> Any:
-    """The value for this target when nobody asked for one.
+  def base(self, target) -> Any:
+    """The value for `target` (`common.target.Target`) when nobody asked for
+    one.
 
-    `explicit_simd` because a default is not always a fact about the hardware:
-    the same Intel device runs both lowerings, and an operand staged once per
-    block is worth 1.71x under the explicit vector and 0.86x under SPMD.  A
-    rule that sees only the vendor has to answer both with one number.
+    The target and not the hardware, because a default is not always a fact
+    about the hardware: the same Intel device runs both lowerings, and an
+    operand staged once per block is worth 1.71x under the explicit vector and
+    0.86x under SPMD.  A rule that sees only the vendor has to answer both
+    with one number.
     """
     if self.rule is None:
       return self.default
-    try:
-      return self.rule(hw, explicit_simd)
-    except TypeError:
-      # A rule that takes the hardware alone.
-      return self.rule(hw)
+    return self.rule(target)
 
   def check(self, value: Any) -> None:
     if value is UNSET:
@@ -237,17 +236,14 @@ class Options:
   def asked(self) -> Dict[str, Any]:
     return dict(self._asked)
 
-  def resolve(self, hw, explicit_simd: bool = False) -> 'ResolvedOptions':
-    """Settle every declared option against this target.
-
-    `explicit_simd` is the lowering, which some defaults depend on -- see
-    `Opt.base`."""
+  def resolve(self, target) -> 'ResolvedOptions':
+    """Settle every declared option against `target` (`Opt.base`)."""
     from_env = _from_environment()
     asked = self.asked()
     values: Dict[str, Any] = {}
     delta: Dict[str, Any] = {}
     for name, opt in _REGISTRY.items():
-      base = opt.base(hw, explicit_simd)
+      base = opt.base(target)
       if name in asked:
         value = asked[name]
       elif name in from_env:
@@ -443,30 +439,30 @@ declare('hint_outputs',
             'destination but transfers (a `+=` destination\'s own preload).')
 
 declare('preload_globals',
-        rule=lambda hw, simd: (hw.vendor in ('amd',)
-                               or (hw.vendor == 'intel' and simd)),
+        rule=lambda target: target.prefs.preload_globals,
         parse=parse_bool,
         doc='Stage every `Addressing.NONE` operand into shared memory once per '
             'block, in the section prologue, instead of reading it from global '
             'inside the batch loop.\n'
             'A question and not a constant because the answer is a measurement '
-            'nobody has taken on NVIDIA: the rule is "AMD only", so the whole '
+            'nobody has taken on NVIDIA: the default is "AMD only", so the whole '
             'NVIDIA path -- including the tensor-core one, where a batch-constant '
             'operand would also carry a batch-constant *conversion* -- has never '
             'been compared against its own alternative.  A benchmark cannot ask '
             'a question the generator cannot be asked.\n'
             'On Intel it depends on the lowering rather than the vendor, which '
-            'is why the rule takes one.  Under the explicit vector every '
-            'work-item holds its own copy of an operator, so staging it once '
-            'per block is 1.71x over the twenty elastic kernels -- fifteen of '
-            'them faster, up to 6.4x, and the five that lose give up 1 to 9 %.  '
+            'is why the default is the target\'s (`Target.prefs`).  Under the '
+            'explicit vector every work-item holds its own copy of an '
+            'operator, so staging it once per block is 1.71x over the twenty '
+            'elastic kernels -- fifteen of them faster, up to 6.4x, and the '
+            'five that lose give up 1 to 9 %.  '
             'Under SPMD the operators are read in place and the same switch is '
             '0.86x, ranging from 0.35x to 1.41x.  Both stay in the tuner\'s '
             'space, so the five are recoverable and the default is only where '
             'the walk starts.')
 
 declare('split_predicated_load',
-        rule=lambda hw: hw.vendor == 'intel',
+        rule=lambda target: target.prefs.split_predicated_load,
         parse=parse_bool,
         doc='Read a predicated load unconditionally at a clamped address and '
             'select the value afterwards, instead of predicating the load '
@@ -529,7 +525,7 @@ declare('preload_partial',
             'them without this.')
 
 declare('inline_constants',
-        rule=lambda hw: 4096 if hw.vendor == 'nvidia' else 64,
+        rule=lambda target: target.prefs.inline_constants,
         parse=parse_int,
         doc='Most non-zero entries of a batch-constant broadcast operand -- `B` '
             'in `C = A B` -- whose numbers the description carries, for the '
@@ -550,7 +546,7 @@ declare('inline_constants',
             'on gfx1150 than read from the constant space; Intel is unmeasured.')
 
 declare('argument_constants',
-        rule=lambda hw: hw.vendor in ('nvidia',),
+        rule=lambda target: target.prefs.argument_constants,
         parse=parse_bool,
         doc='Pass a batch-constant operand every product reads as a scalar -- '
             '`B` in `C = A B` -- by value, with the numbers the description '

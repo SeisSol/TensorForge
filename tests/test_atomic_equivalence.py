@@ -37,7 +37,7 @@ from dataclasses import replace
 
 import pytest
 
-from tensorforge.backend import placement
+from tensorforge.common import target
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -96,8 +96,9 @@ def _descrs(kind, m, n, dtype):
 
 
 def _render(descrs, dtype, atomics):
-    base = placement.POLICIES['nvidia']
-    placement.POLICIES['nvidia'] = replace(base, atomic_accumulation=atomics)
+    base = target.PREFERENCES['nvidia']
+    target.PREFERENCES['nvidia'] = replace(
+        base, placement=replace(base.placement, atomic_accumulation=atomics))
     try:
         ctx = Context(arch='sm_86', backend='cuda', fp_type=dtype)
         gen = Generator(descrs, ctx)
@@ -105,7 +106,7 @@ def _render(descrs, dtype, atomics):
         gen.generate()
         return gen.get_kernel()
     finally:
-        placement.POLICIES['nvidia'] = base
+        target.PREFERENCES['nvidia'] = base
 
 
 def _lanes(src):

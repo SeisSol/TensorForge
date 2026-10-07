@@ -39,10 +39,7 @@ INSTRUCTIONS_PER_UNIT = {'nvidia': 0.43, 'gfx9': 0.87, 'gfx1': 0.69,
 
 
 def _instructions_per_unit(hw) -> float:
-    if hw.vendor == 'amd':
-        family = 'gfx9' if str(hw.model).startswith('gfx9') else 'gfx1'
-        return INSTRUCTIONS_PER_UNIT[family]
-    return INSTRUCTIONS_PER_UNIT.get(hw.vendor, 1.0)
+    return INSTRUCTIONS_PER_UNIT.get(hw.family, 1.0)
 
 
 class ICacheBudgetWarning(UserWarning):

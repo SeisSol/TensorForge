@@ -77,8 +77,8 @@ def test_rolling_the_reduction_makes_the_body_smaller():
 
 class TestWeighed:
     @staticmethod
-    def hw(size, vendor='nvidia', model='sm_120'):
-        return SimpleNamespace(icache_size=size, vendor=vendor, model=model,
+    def hw(size, family='nvidia'):
+        return SimpleNamespace(icache_size=size, family=family,
                                instruction_bytes=16)
 
     def test_what_fits_is_not_over(self):

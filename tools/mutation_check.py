@@ -901,10 +901,11 @@ GROUPS = {
          sub(TRANSFERS, 'Op.WAIT, Op.COMMIT_ASYNC', 'Op.COMMIT_ASYNC')),
     ]),
 
-    # What a target is and can.
+    # What a target is, can and prefers.
     'target': ('tests/test_target.py tests/test_nontemporal.py '
                'tests/test_prefetch.py tests/test_packed_fma.py '
-               'tests/test_atomics.py tests/test_sycl_sub_group.py', [
+               'tests/test_atomics.py tests/test_sycl_sub_group.py '
+               'tests/test_placement.py', [
         ('a hint on a wide CUDA access',
          sub(TARGET, 'return length == 1 and datatype in CUDA_CACHE_HINT_TYPES',
              'return datatype in CUDA_CACHE_HINT_TYPES', 1)),
@@ -928,6 +929,9 @@ GROUPS = {
         ('an async copy where the device has no path',
          sub(TARGET, '        if not self.async_copy_path():\n            return ()\n',
              '', 1)),
+        ('the broadcast in place kept under the explicit vector',
+         sub(TARGET, 'broadcast_without_staging=False),',
+             'broadcast_without_staging=True),', 1)),
     ]),
 
     # The transfer for the next element, issued across the back edge.

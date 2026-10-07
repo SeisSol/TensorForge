@@ -107,6 +107,18 @@ class HwDecription:
       return None
 
   @property
+  def family(self) -> str:
+    """The architecture family the calibrations are fitted per: `nvidia`,
+    `gfx9` (GCN and CDNA), `gfx1` (RDNA and gfx125x) or `intel`.
+
+    Coarser than the model on purpose: a fit is taken on one part of a family
+    (`analysis.icache`, `analysis.pipeline`) and stands for the rest of it.
+    """
+    if self.vendor == 'amd':
+      return 'gfx9' if str(self.model).startswith('gfx9') else 'gfx1'
+    return self.vendor
+
+  @property
   def instruction_bytes(self) -> int:
     """Bytes one machine instruction takes in the instruction cache, on
     average.
