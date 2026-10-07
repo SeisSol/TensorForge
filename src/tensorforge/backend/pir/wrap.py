@@ -109,27 +109,14 @@ fills is what ``k - 1`` read.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from tensorforge.common.basic_types import Datatype
-
+from .ahead import Clone, ElementLoop, Refusal, behind_defs
 from .asyncmem import strip_commits
-from .core import (BOOL, INDEX, SCALAR_LAYOUT, SIZE, Effect, MemSpace, Op,
-                   Region, ScalarType, Stmt, Value, walk_stmts)
+from .core import (INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
+                   walk_stmts)
 from .transfers import Transfer, neutral, opaque, same, transfers, writes
-
-#: The effects a statement the pass computes again for another element may
-#: not have.
-_SIDE = Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN
-
-
-class Refusal(Exception):
-    """Why a transfer, or a loop, was left where it is.  Carried rather than
-    logged: the caller asked for a transformation and is entitled to the
-    reason it did not happen."""
-
 
 def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                distance: int = 1, stages: int = 1,
@@ -283,53 +270,15 @@ class _Plan:
     single: Optional[str] = None
 
 
-class _Loop:
-    """A batch loop, taken apart: its body, the element guard in it and the
-    per-element statements the guard holds."""
+class _Loop(ElementLoop):
+    """A batch loop taken apart, and the transfers it issues one element
+    ahead."""
 
     def __init__(self, loop: Stmt, allocs: Dict[int, Stmt], scratch, report,
                  stages: int = 1, around: Sequence[Stmt] = ()):
-        self.loop = loop
+        super().__init__(loop, scratch, report, around)
         self.allocs = allocs
-        self.scratch = scratch
-        self.report = report
         self.stages = stages
-        #: The statements of the body around the loop.
-        self.around = tuple(around)
-        region = loop.regions[0]
-        self.region = region
-        self.k = region.args[0]
-        self.next = loop.attr('next')
-        self.first = loop.attr('first')
-        self.flag_word = loop.attr('flag_word')
-        guards = [i for i, s in enumerate(region.body)
-                  if s.op is Op.IF and s.attr('guard') == 'element']
-        if len(guards) > 1:
-            raise Refusal('the loop has more than one element guard')
-        self.guard_at = guards[0] if guards else None
-        self.scope: Tuple[Stmt, ...] = (
-            region.body[self.guard_at].regions[0].body
-            if self.guard_at is not None else region.body)
-
-    def _top(self) -> List[Tuple[Tuple[int, int], Stmt]]:
-        """Every statement at the top of the loop's body or of the guard,
-        keyed by the order it runs in."""
-        out = []
-        for i, s in enumerate(self.region.body):
-            if i == self.guard_at:
-                out.extend(((i, j + 1), x) for j, x in enumerate(self.scope))
-            else:
-                out.append(((i, 0), s))
-        return out
-
-    def _ahead_of(self, first: Stmt) -> List[Stmt]:
-        """What stands ahead of `first` in its own iteration."""
-        out = []
-        for _, s in self._top():
-            if s is first:
-                return out
-            out.append(s)
-        raise AssertionError('the transfer is not at the top of the loop')
 
     # -- planning ---------------------------------------------------------- #
 
@@ -356,7 +305,7 @@ class _Loop:
         if alloc is None:
             raise Refusal('the buffer is not allocated in this body')
         inside = any(s is alloc for s in walk_stmts(self.region.body))
-        if inside and not any(s is alloc for _, s in self._top()):
+        if inside and not any(s is alloc for _, s in self.top()):
             raise Refusal('the buffer is allocated inside a construct of the '
                           'body, so its declaration cannot leave the loop')
         if t.shared:
@@ -396,13 +345,13 @@ class _Loop:
                               'transfer, so it does not hold one element for '
                               'the whole iteration')
 
-        deps, owns = self._dependencies(t)
+        deps, owns = self.dependencies(t)
         reads = [a.base for x in walk_stmts(tuple(t.pieces))
                  for a in x.accesses if a.space is MemSpace.GLOBAL]
-        varies = any(self._names_index(s) for s in deps) or any(
-            self._names_index(x) for x in walk_stmts(tuple(t.pieces)))
+        varies = any(self.names_index(s) for s in deps) or any(
+            self.names_index(x) for x in walk_stmts(tuple(t.pieces)))
 
-        for x in walk_stmts(tuple(self._ahead_of(t.stmts[0]))):
+        for x in walk_stmts(tuple(self.ahead_of(t.stmts[0]))):
             for a in x.accesses:
                 if opaque(a):
                     raise Refusal('ahead of the transfer stands a statement '
@@ -460,169 +409,9 @@ class _Loop:
                 return 'the buffer is named outside the loop'
         return None
 
-    def _names_index(self, s: Stmt) -> bool:
-        return any(v.id == self.k.id for v in s.operands())
-
-    def _dependencies(self, t: Transfer) -> Tuple[List[Stmt], bool]:
-        """The statements of the loop's body `t` reads, transitively, in the
-        order they run; and whether one of them reads an element's own
-        pointer.
-
-        Only what stands at the top of the body or of the guard: a value
-        defined deeper is not visible to the transfer in the first place.
-        The loop's own arguments are not statements: the index is replaced,
-        and a value the loop carries belongs to the iteration, not to the
-        element a clone is for.
-        """
-        defs: Dict[int, Tuple[Tuple[int, int], Stmt]] = {}
-        for key, s in self._top():
-            for v in s.target:
-                defs[v.id] = (key, s)
-        inner = set()
-        for x in walk_stmts(tuple(t.pieces)):
-            inner.update(v.id for v in x.target)
-            for r in x.regions:
-                inner.update(v.id for v in r.args)
-        # The buffer it fills is not one of them: its declaration leaves the
-        # loop whole, and is not computed again.
-        inner.add(t.dest.id)
-        carried = {v.id for v in self.region.args[1:]}
-        wanted = [v.id for x in walk_stmts(tuple(t.pieces))
-                  for v in x.operands() if v.id not in inner]
-        found: Dict[int, Tuple[Tuple[int, int], Stmt]] = {}
-        while wanted:
-            vid = wanted.pop()
-            if vid in carried:
-                raise Refusal('the transfer reads a value the loop carries')
-            hit = defs.get(vid)
-            if hit is None or id(hit[1]) in found:
-                continue
-            key, s = hit
-            if s.regions or (s.effect & _SIDE) or not s.movable:
-                raise Refusal(f'the transfer reads a `{s.op}` of the body, '
-                              f'which cannot be computed again for another '
-                              f'element')
-            if any(writes(a) or opaque(a) or a.space is not MemSpace.GLOBAL
-                   for a in s.accesses):
-                raise Refusal('the transfer reads a value loaded from memory '
-                              'other than global, which another element '
-                              'cannot read again')
-            found[id(s)] = (key, s)
-            wanted.extend(v.id for v in s.operands())
-        deps = [s for _, s in sorted(found.values(), key=lambda e: e[0])]
-        # What the dependencies load must not change under the loop.  A
-        # binding is not such a load, though it declares a read of its
-        # operand: strided addressing is arithmetic, and the array a pointer
-        # is read out of is an argument the kernel never writes -- it writes
-        # through the pointers, which its accesses cannot tell apart from the
-        # array, being recorded against the operand either way.
-        roots = [a.base for s in deps if s.op is Op.LOAD for a in s.accesses]
-        for x in walk_stmts(self.region.body):
-            if any(writes(a) and any(same(a.base, r) for r in roots)
-                   for a in x.accesses):
-                raise Refusal('the body writes memory the transfer\'s address '
-                              'is computed from')
-        return deps, any(s.attr('element_pointer') for s in deps)
-
-
 # --------------------------------------------------------------------------- #
 # Rewriting
 # --------------------------------------------------------------------------- #
-
-_IDENTIFIER = re.compile(r'\b[A-Za-z_]\w*\b')
-
-
-class _Copy:
-    """Statements of the loop again, for another element: every value they
-    define new, every operand through what is known of the element, and
-    every name spelled in text that changed spelled anew.
-
-    Text is where a value can be named without being an operand -- a raw
-    statement spelling its loop's index, a copy's address -- and a copy for
-    another element that kept such a name would compute for the old one, or
-    name a value of a scope it is not in.  So the spellings travel with the
-    values: a value's own name, and a binding's, which a copy of it changes
-    to `wrap_glb_m0` for the next element and `peel_glb_m0` for the first.
-    """
-
-    def __init__(self, fresh: Callable[[Value], Value], prefix: str,
-                 taken: set):
-        self._fresh = fresh
-        self._prefix = prefix
-        self._taken = taken
-        self.mapping: Dict[int, Value] = {}
-        self.spell: Dict[str, str] = {}
-
-    def given(self, old: Value, new: Value) -> None:
-        """`old` is `new` in what this copies."""
-        self.mapping[old.id] = new
-        self.spell[str(old)] = str(new)
-
-    def _sub(self, x):
-        if isinstance(x, Value):
-            return self.mapping.get(x.id, x)
-        if isinstance(x, str):
-            return self._respell(x)
-        return x
-
-    def _respell(self, text: str) -> str:
-        if not text or not self.spell:
-            return text
-        return _IDENTIFIER.sub(lambda m: self.spell.get(m.group(0), m.group(0)),
-                               text)
-
-    def stmts(self, stmts: Sequence[Stmt], named: bool = False) -> List[Stmt]:
-        """`stmts` copied.  `named`: a copy of a declaration with a name of
-        its own gets one of its own as well, and is declared the way the
-        original is -- the backend's spelling of its type."""
-        out = []
-        for s in stmts:
-            regions = []
-            for r in s.regions:
-                args = tuple(self._fresh(v) for v in r.args)
-                for o, n in zip(r.args, args):
-                    self.given(o, n)
-                regions.append(Region(args=args, body=tuple(self.stmts(r.body))))
-            target = tuple(self._fresh(v) for v in s.target)
-            clone = replace(
-                s, target=target, args=tuple(self._sub(a) for a in s.args),
-                predicate=(self._sub(s.predicate) if s.predicate is not None
-                           else None),
-                regions=tuple(regions),
-                text=self._respell(s.text) if s.text else s.text,
-                accesses=tuple(replace(a, base=self._sub(a.base))
-                               if isinstance(a.base, Value) else a
-                               for a in s.accesses),
-                attrs=tuple((k, v if k in ('decl', 'extern') else self._sub(v))
-                            for k, v in s.attrs))
-            for o, n in zip(s.target, target):
-                self.given(o, n)
-            if named and clone.attr('extern'):
-                clone = self._name(clone, str(s.attr('extern')))
-            out.append(clone)
-        return out
-
-    def rename(self, extern: str) -> str:
-        """A name of its own for the copy of what is called `extern`, which
-        the text this copies spells from then on."""
-        name = base = f'{self._prefix}_{extern}'
-        n = 1
-        while name in self._taken:
-            name = f'{base}_{n}'
-            n += 1
-        self._taken.add(name)
-        self.spell[extern] = name
-        return name
-
-    def _name(self, s: Stmt, extern: str) -> Stmt:
-        name = self.rename(extern)
-        attrs = [(k, v) for k, v in s.attrs if k not in ('extern', 'decl')]
-        attrs.append(('extern', name))
-        decl = s.attr('decl')
-        if isinstance(decl, str) and decl.rstrip().endswith(extern):
-            attrs.append(('decl', decl.rstrip()[:-len(extern)] + name))
-        return replace(s, attrs=tuple(attrs))
-
 
 class _Rewrite:
     """A loop with its plans carried out: `(before, loop, after)`."""
@@ -640,32 +429,6 @@ class _Rewrite:
                             layout=v.layout, quals=v.quals)
 
     # -- making statements ------------------------------------------------- #
-
-    def _word(self, index, name: str) -> Tuple[List[Stmt], Value]:
-        """`index`'s flag, read as the word it is stored as."""
-        b = self.l.scratch()
-        v = b.decl_expr(f'const uint32_t {name}', self.l.flag_word,
-                        ScalarType(Datatype.U32), None, args=(index,),
-                        kind=Effect.READ, space=MemSpace.GLOBAL, hint=name,
-                        extern=name, layout=SCALAR_LAYOUT)
-        return list(b.finish()), v
-
-    def _flag(self, word, name: str) -> Tuple[List[Stmt], Value]:
-        """A flag word as the condition it stands for."""
-        b = self.l.scratch()
-        v = b.decl_expr(f'const bool {name}', 'static_cast<bool>({0})', BOOL,
-                        None, args=(word,), hint=name, extern=name)
-        return list(b.finish()), v
-
-    def _successor(self, index, hint: str) -> Tuple[List[Stmt], Value]:
-        """`index` one stride on, clamped the way the loop clamps its own
-        successor: the element a transfer issued there is for."""
-        b = self.l.scratch()
-        _, count, stride = self.l.loop.loop_bounds
-        ahead = b.op('add', SIZE, index, stride, hint=f'{hint}Ahead')
-        inside = b.op('lt', BOOL, ahead, count, hint=f'{hint}In')
-        v = b.op('select', SIZE, inside, ahead, index, hint=hint)
-        return list(b.finish()), v
 
     def _guarded(self, stmts: List[Stmt], cond: Value) -> List[Stmt]:
         """`stmts`, done only where `cond` holds.
@@ -695,7 +458,7 @@ class _Rewrite:
         return [predicate(s) for s in stmts]
 
     def _windows(self, p: _Plan, stage: Value, following: Value,
-                 peel_copy: '_Copy', tail_copy: '_Copy'
+                 peel_copy: Clone, tail_copy: Clone
                  ) -> Tuple[Stmt, Stmt, Stmt]:
         """The windows of a buffer given a second stage: the peel's, into
         the stage the first iteration reads; and in the loop the one the
@@ -742,11 +505,11 @@ class _Rewrite:
         # are the carried values `own` and `nxt` in the body.
         own = nxt = first_word = None
         if carry:
-            stmts, first_word = self._word(l.first, 'flagWordFirst')
+            stmts, first_word = self.l.word(l.first, 'flagWordFirst')
             before += stmts
-            stmts, second = self._successor(l.first, 'flagSecond')
+            stmts, second = self.l.successor(l.first, 'flagSecond')
             before += stmts
-            stmts, second_word = self._word(second, 'flagWordSecond')
+            stmts, second_word = self.l.word(second, 'flagWordSecond')
             before += stmts
             own = self.b.value(first_word.type, hint='flagWord',
                                layout=first_word.layout)
@@ -758,21 +521,21 @@ class _Rewrite:
         tail_flag_stmts: List[Stmt] = []
         if l.flag_word is not None and any(p.owns_pointer for p in self.plans):
             if first_word is None:
-                stmts, first_word = self._word(l.first, 'flagWordFirst')
+                stmts, first_word = self.l.word(l.first, 'flagWordFirst')
                 before += stmts
-            stmts, peel_flag = self._flag(first_word, 'allowed_peel')
+            stmts, peel_flag = self.l.flag(first_word, 'allowed_peel')
             before += stmts
             if nxt is not None:
-                tail_flag_stmts, tail_flag = self._flag(nxt, 'allowed_next')
+                tail_flag_stmts, tail_flag = self.l.flag(nxt, 'allowed_next')
             else:
-                stmts, word = self._word(l.next, 'flagWordNext')
-                flag_stmts, tail_flag = self._flag(word, 'allowed_next')
+                stmts, word = self.l.word(l.next, 'flagWordNext')
+                flag_stmts, tail_flag = self.l.flag(word, 'allowed_next')
                 tail_flag_stmts = stmts + flag_stmts
 
         taken: set = set()
-        peel_copy = _Copy(self._fresh, 'peel', taken)
+        peel_copy = Clone(self._fresh, 'peel', taken)
         peel_copy.given(l.k, l.first)
-        tail_copy = _Copy(self._fresh, 'wrap', taken)
+        tail_copy = Clone(self._fresh, 'wrap', taken)
         tail_copy.given(l.k, l.next)
 
         # The stage the iteration reads, carried from 0, and the one it
@@ -936,13 +699,13 @@ class _Rewrite:
         flag_ahead: List[Stmt] = []
         word_ahead = None
         if carry:
-            stmts, ahead = self._successor(l.next, 'flagAhead')
-            word_stmts, word_ahead = self._word(ahead, 'flagWordAhead')
+            stmts, ahead = self.l.successor(l.next, 'flagAhead')
+            word_stmts, word_ahead = self.l.word(ahead, 'flagWordAhead')
             flag_ahead = stmts + word_stmts
 
         if l.guard_at is None:
             new = keep(body)
-            at = _behind_defs(new, heads + flag_ahead)
+            at = behind_defs(new, heads + flag_ahead)
             new[at:at] = heads + flag_ahead
             rest = new
         else:
@@ -953,7 +716,7 @@ class _Rewrite:
                 # The guard reads the word the iteration came in with.  The
                 # read of the element's flag it replaces goes, unless
                 # something else reads it.
-                stmts, allowed = self._flag(own, 'allowed')
+                stmts, allowed = self.l.flag(own, 'allowed')
                 users = [x for x in walk_stmts(tuple(body)) if x is not guard
                          and any(v.id == cond.id for v in x.operands())]
                 if not users:
@@ -961,7 +724,7 @@ class _Rewrite:
                            if not any(v.id == cond.id for v in s.target)]
                 pre += stmts
                 cond = allowed
-            at = _behind_defs(pre, heads + flag_ahead)
+            at = behind_defs(pre, heads + flag_ahead)
             pre[at:at] = heads + flag_ahead
             pre += lifted
             regions = [replace(guard.regions[0],
@@ -1016,15 +779,3 @@ class _Rewrite:
             args=l.loop.args + tuple(inits),
             regions=(Region(args=region.args + tuple(carried),
                             body=tuple(new)),))
-
-
-def _behind_defs(stmts: List[Stmt], clones: Sequence[Stmt]) -> int:
-    """The first position in `stmts` behind every statement that defines a
-    value `clones` read."""
-    wanted = {v.id for s in clones for x in walk_stmts((s,))
-              for v in x.operands()}
-    at = 0
-    for i, s in enumerate(stmts):
-        if any(v.id in wanted for v in s.target):
-            at = i + 1
-    return at
