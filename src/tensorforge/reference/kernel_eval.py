@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import re
 import struct
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 _DECL = re.compile(
     # `alignas(N)` is a declaration specifier, not a statement of its own: a
@@ -104,9 +104,14 @@ class Slot:
     def __init__(self, seed: int = 0):
         self.data: Dict[Tuple[str, int], float] = {}
         self.seed = seed
+        #: Watches the accesses to shared memory, where one is asked for
+        #: (`evaluate_wave`, `races`).
+        self.tracker: Optional['Races'] = None
 
     def read(self, base: str, idx: int) -> float:
         key = (base, int(idx))
+        if self.tracker is not None and base == Races.SHARED:
+            self.tracker.read(key[1])
         if key not in self.data:
             h = hashlib.blake2b(f'{self.seed}:{base}:{idx}'.encode(),
                                 digest_size=8).digest()
@@ -114,7 +119,149 @@ class Slot:
         return self.data[key]
 
     def write(self, base: str, idx: int, value) -> None:
+        if self.tracker is not None and base == Races.SHARED:
+            self.tracker.write(int(idx))
         self.data[(base, int(idx))] = value
+
+
+class Race(NamedTuple):
+    """Two accesses to one slot of shared memory with nothing ordering them.
+
+    `kind` is what the later access does against the earlier one: `RAW`, a
+    read of what another lane wrote; `WAR`, a write over what another lane
+    read; `WAW`, two lanes writing one slot; `FLIGHT`, an access to a slot an
+    asynchronous copy is still landing in, by any lane, the issuing one
+    included -- the copy is only done at the wait that retires it.
+    """
+    kind: str
+    slot: int
+    lane: int
+    other: int
+    statement: str
+
+    def __str__(self) -> str:
+        return (f'{self.kind} on shared slot {self.slot}: lane {self.lane} '
+                f'against lane {self.other} at `{self.statement}`')
+
+
+class Races:
+    """Which accesses to shared memory a barrier separates, and which it
+    does not.
+
+    Barrier intervals: two accesses of one slot by two lanes, at least one of
+    them a write, are ordered exactly when both lanes took part in a barrier
+    between them.  The interpreter runs its lanes in lockstep, so a missing
+    barrier never changes a value here -- the reader always finds the write
+    done.  What this does is say where the hardware would not have.
+
+    An asynchronous copy writes its destination when the wait that retires it
+    runs, not when it is issued: `__pipeline_commit` closes the lane's open
+    copies into a group, `__pipeline_wait_prior(n)` completes all but its `n`
+    youngest.  Until then the slots are in flight, and touching them is a race
+    for every lane.
+
+    Only the lanes the run drives are seen -- one multiplication, on one
+    block -- so what is checked is the multiplication's own synchronization,
+    which is all a barrier this generator places has to provide.
+    """
+
+    #: The base the shared arena is modeled under (`_base_env`).
+    SHARED = 'shr'
+
+    #: A barrier: everything the target spells as one for the lanes of a
+    #: multiplication or the block.
+    _BARRIER = re.compile(
+        r'^(?:__syncthreads|__syncwarp|__builtin_amdgcn_s_barrier)\s*\('
+        r'|^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.sync'
+        r'|^cooperative_groups::this_grid\(\)\.sync\(')
+    _COMMIT = re.compile(r'^__pipeline_commit\s*\(\s*\)$')
+    _WAIT = re.compile(r'^__pipeline_wait_prior\s*\(\s*(\d+)\s*\)$')
+
+    def __init__(self, limit: int = 64):
+        self.time = 0
+        self.lane = 0
+        self.statement = ''
+        self.limit = limit
+        self.found: List[Race] = []
+        self._seen = set()
+        self._writes: Dict[int, Tuple[int, int]] = {}
+        self._reads: Dict[int, Dict[int, int]] = {}
+        #: (lane, other) -> the time of the last barrier both took part in
+        self._met: Dict[Tuple[int, int], int] = {}
+        self._flight: Dict[int, int] = {}
+        self._open: Dict[int, set] = {}
+        self._groups: Dict[int, List[set]] = {}
+        #: Set while an asynchronous copy writes, so its slots go in flight.
+        self.issuing = False
+
+    def statement_kind(self, stmt: str) -> Optional[str]:
+        """`'barrier'`, `'commit'`, `'wait'` or None."""
+        if self._BARRIER.match(stmt):
+            return 'barrier'
+        if self._COMMIT.match(stmt):
+            return 'commit'
+        if self._WAIT.match(stmt):
+            return 'wait'
+        return None
+
+    def tick(self, stmt: str) -> None:
+        self.time += 1
+        self.statement = stmt
+
+    def barrier(self, lanes: List[int]) -> None:
+        for a in lanes:
+            for b in lanes:
+                self._met[(a, b)] = self.time
+
+    def commit(self, lane: int) -> None:
+        self._groups.setdefault(lane, []).append(self._open.pop(lane, set()))
+
+    def wait(self, lane: int, stmt: str) -> None:
+        keep = int(self._WAIT.match(stmt).group(1))
+        groups = self._groups.get(lane, [])
+        cut = max(0, len(groups) - keep)
+        done, self._groups[lane] = groups[:cut], groups[cut:]
+        for group in done:
+            for slot in group:
+                if self._flight.get(slot) == lane:
+                    del self._flight[slot]
+                    self._writes[slot] = (lane, self.time)
+                    self._reads.pop(slot, None)
+
+    def _ordered(self, lane: int, other: int, when: int) -> bool:
+        return lane == other or self._met.get((lane, other), -1) > when
+
+    def _report(self, kind: str, slot: int, other: int) -> None:
+        key = (kind, self.statement, self.lane, other)
+        if key in self._seen or len(self.found) >= self.limit:
+            return
+        self._seen.add(key)
+        self.found.append(Race(kind, slot, self.lane, other, self.statement))
+
+    def read(self, slot: int) -> None:
+        if slot in self._flight:
+            self._report('FLIGHT', slot, self._flight[slot])
+        last = self._writes.get(slot)
+        if last is not None and not self._ordered(self.lane, last[0], last[1]):
+            self._report('RAW', slot, last[0])
+        self._reads.setdefault(slot, {})[self.lane] = self.time
+
+    def write(self, slot: int) -> None:
+        if slot in self._flight and (not self.issuing
+                                     or self._flight[slot] != self.lane):
+            self._report('FLIGHT', slot, self._flight[slot])
+        last = self._writes.get(slot)
+        if last is not None and not self._ordered(self.lane, last[0], last[1]):
+            self._report('WAW', slot, last[0])
+        for other, when in self._reads.get(slot, {}).items():
+            if not self._ordered(self.lane, other, when):
+                self._report('WAR', slot, other)
+        if self.issuing:
+            self._flight[slot] = self.lane
+            self._open.setdefault(self.lane, set()).add(slot)
+            return
+        self._writes[slot] = (self.lane, self.time)
+        self._reads.pop(slot, None)
 
 
 class Ptr:
@@ -299,6 +446,8 @@ class Interp:
         self.mem = mem
         self.env = dict(env)
         self.budget = limit
+        #: Which lane this is, for `Races`.
+        self.lane = getattr(self.env.get('threadIdx'), 'x', 0)
         #: Element size per pointer name, from the type in its declaration.
         #: An async copy is measured in bytes and the memory here is untyped,
         #: so this is the only place the two can be reconciled.
@@ -430,8 +579,17 @@ class Interp:
                         f'whose element size is {width!r}: {stmt!r}')
         di = int(self.ev(cp.group('di')))
         si = int(self.ev(cp.group('si')))
-        for k in range(nbytes // width):
-            dst[di + k] = src[si + k]
+        # In flight until the wait that retires it, for `Races`; the values
+        # land at once, which no race-free reader can tell apart.
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.issuing = True
+        try:
+            for k in range(nbytes // width):
+                dst[di + k] = src[si + k]
+        finally:
+            if tracker is not None:
+                tracker.issuing = False
 
     def assign(self, stmt: str) -> None:
         # A global window bound through a memory-space pointer,
@@ -653,6 +811,24 @@ class Lockstep:
         self.interps = interps
         for it in interps:
             it.peers = interps
+        self.tracker: Optional[Races] = interps[0].mem.tracker if interps \
+            else None
+
+    def _tracked(self, stmt: str, lanes: List['Interp']) -> None:
+        """One statement under `Races`: the synchronization it is, and which
+        lane each access belongs to."""
+        tracker = self.tracker
+        tracker.tick(stmt)
+        kind = tracker.statement_kind(stmt)
+        if kind == 'barrier':
+            tracker.barrier([it.lane for it in lanes])
+        for it in lanes:
+            tracker.lane = it.lane
+            if kind == 'commit':
+                tracker.commit(it.lane)
+            elif kind == 'wait':
+                tracker.wait(it.lane, stmt)
+            it.assign(stmt)
 
     def run(self, block: List, lanes: Optional[List['Interp']] = None) -> None:
         lanes = self.interps if lanes is None else lanes
@@ -661,6 +837,9 @@ class Lockstep:
         for node in block:
             kind = node[0]
             if kind == 'expr':
+                if self.tracker is not None:
+                    self._tracked(node[1], lanes)
+                    continue
                 for it in lanes:
                     it.assign(node[1])
             elif kind == 'if':
@@ -717,7 +896,9 @@ def launch_geometry(launcher: str) -> Tuple[int, int]:
 def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   globals_only: bool = False,
                   preset: Optional[Dict[str, float]] = None,
-                  mults: int = 1) -> Dict:
+                  mults: int = 1,
+                  races: Optional[List[Race]] = None,
+                  elements: int = 1) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
     The difference from calling `evaluate` per lane is that the lanes share
@@ -729,6 +910,11 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
 
     `lanes` is the kernel's own, from `launch_geometry`, not a round number:
     see there for what a surplus lane does with the copies modeled.
+
+    `races`, a list, collects the accesses to shared memory that no barrier
+    orders (`Races`).  `elements` is the element count the kernel is handed:
+    with one block of one multiplication the batch loop then visits each of
+    them in turn, which is what carries a write across its back edge.
     """
     body = src[src.index('{'):]
     mem = Slot(seed)
@@ -736,11 +922,20 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
         for name, value in preset.items():
             for idx in range(_PRESET_SLOTS):
                 mem.write(name, idx, value)
+    if races is not None:
+        mem.tracker = Races()
     interps = []
     for tid in range(lanes):
         env = _base_env(src, mem, tid, lanes=lanes, mults=mults)
-        interps.append(Interp(mem, env))
+        for name in re.findall(r'\b(numElements\d+)\b', src):
+            env[name] = elements
+        interp = Interp(mem, env)
+        interp.lane = tid
+        interps.append(interp)
     Lockstep(interps).run(parse(body))
+    if races is not None:
+        races.extend(mem.tracker.found)
+        mem.tracker = None
     if globals_only:
         return {k: v for k, v in mem.data.items() if k[0].startswith('m')}
     return {(k[0].split('#')[0], k[1]): v for k, v in mem.data.items()}
