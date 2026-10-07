@@ -99,7 +99,7 @@ def deduce(descr_list: List[OperationDescription],
     wave = hw.vec_unit_length
     if (0 < num_threads < wave
             and any(getattr(d, 'guarded', lambda: False)() for d in descr_list)
-            and not context.target.lexic.has_sync_mult(num_threads, hw)):
+            and not context.target.sync_mult(num_threads)):
         # A guard decides per multiplication, so a barrier inside it may only
         # wait for the threads of one.  Where a multiplication narrower than
         # the wave has no rendezvous of its own -- SYCL under SPMD, whose

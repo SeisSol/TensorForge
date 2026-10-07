@@ -55,7 +55,7 @@ INSTRUCTIONS_PER_STATEMENT: Dict[str, Dict[str, float]] = {
     # IGC's shader dump, 2026-09-18).  `xlane` is the entry worth naming: 16938
     # cross-lane statements emitted and *no* instruction compiled, because a
     # broadcast of one lane's element is a region on the reading instruction
-    # there and not an operation (`Lexic.folds_broadcast`).  `fp64` is the
+    # there and not an operation (`Target.folds_broadcast`).  `fp64` is the
     # ratio of totals like the rest and its median is 0.69: a handful of
     # kernels carry the difference, so a search ranking by it should know that
     # this row is the least settled of them.

@@ -219,7 +219,7 @@ class BatchLoop(AbstractInstruction):
         makes ``batchId0`` equal to ``blockIdx.x``, so the trip count, the size
         guard and the flag guard are alike for every thread of the block, and a
         block barrier in the body meets all of them.  That is the whole reason
-        `Lexic.has_sync_mult` reaches the thread-block policy: a target with no
+        `Target.sync_mult` reaches the thread-block policy: a target with no
         sub-block rendezvous can still run a multiplication wider than a wave,
         by being given a block that holds nothing else.
 

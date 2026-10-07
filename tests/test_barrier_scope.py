@@ -158,9 +158,9 @@ def test_a_target_without_a_sub_block_rendezvous_gets_the_block():
     from tensorforge.backend.pir.core import Participants
 
     ctx = Context(arch="pvc", backend="oneapi", fp_type=Datatype.F32)
-    lexic = ctx.target.lexic
-    assert not lexic.has_sync_mult(64, ctx.target.hw)
-    assert _sync_text(ctx, Participants.MULTGROUP, 64) == lexic.sync_block()
+    assert not ctx.target.sync_mult(64)
+    assert (_sync_text(ctx, Participants.MULTGROUP, 64)
+            == ctx.target.lexic.sync_block())
 
 
 def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
@@ -226,7 +226,7 @@ def test_a_wide_multiplication_is_packed_by_what_the_target_can_separate():
         mults = min(s.shr_mem_obj.get_mults_per_block() for s in gen._sections)
         assert threads > wave, f"{arch}: {threads} no longer exceeds the wave"
 
-        separable = target.lexic.has_sync_mult(threads, target.hw)
+        separable = target.sync_mult(threads)
         loud = any(any(i.barrier_scope() is not None for i in s.stream)
                    for s in gen._sections)
         if loud and not separable:

@@ -21,7 +21,7 @@ def parseBytes(string):
       return count * 1024**2
 
 class HwDecription:
-  def __init__(self, param_table, arch, backend, explicit_simd=False):
+  def __init__(self, param_table, arch, backend):
     self.vec_unit_length = param_table['vec_unit_length']
     self.hw_fp_word_size = param_table['hw_fp_word_size']
     self.mem_access_align_size = param_table['mem_access_align_size']
@@ -70,11 +70,9 @@ class HwDecription:
                         if param_table.get('icache_size') is not None
                         else None)
     self.model = arch
+    #: The device's backend: `oneapi` for both Intel lowerings.  Which one a
+    #: kernel is written in is `Target.backend`.
     self.backend = backend
-    #: Whether the lowering is an explicit vector per work-item (`esimd`).
-    #: `backend` is the device's and says `oneapi` for both lowerings; an
-    #: option whose default follows the lowering has only this to read.
-    self.explicit_simd = explicit_simd
 
   def sm_level(self):
     """`sm_80` -> 80, and None for anything that is not an `sm_` model.
@@ -90,6 +88,23 @@ class HwDecription:
       return None
     digits = ''.join(c for c in text[3:] if c.isdigit())
     return int(digits) if digits else None
+
+  def gfx_level(self):
+    """`gfx1030` -> 0x1030, and None for anything that is not a gfx model.
+
+    Hexadecimal, the way `amd/arch.py` reads the same string: the letters in
+    gfx90a are digits of the number, and a decimal read would both fail on them
+    and sort gfx940 above gfx1030.  None rather than 0 keeps "this is not an AMD
+    part" apart from "it is an early one", so a `sm_90` model does not answer an
+    AMD question by comparing low.
+    """
+    text = str(self.model)
+    if not text.startswith('gfx'):
+      return None
+    try:
+      return int(text[3:], base=16)
+    except ValueError:
+      return None
 
   @property
   def instruction_bytes(self) -> int:
@@ -110,25 +125,6 @@ class HwDecription:
       return 6
     return 12
 
-  def has_packed_fp32_fma(self) -> bool:
-    """Whether one instruction does two FP32 FMAs, so that a lead width of
-    two halves the arithmetic instead of only regrouping it.
-
-    NVIDIA from sm_100 to sm_11x (`FFMA2`, through `__ffma2_rn`; `cuda.h`
-    forms the pairs on exactly these).  sm_120 declares the intrinsic and
-    lowers it to two FFMA.  AMD on CDNA2 and later and on gfx1250/gfx1251
-    (`v_pk_fma_f32`, which the compiler forms by itself); RDNA3 and 3.5 have
-    no packed FP32 FMA.  A width of two elsewhere is two scalar FMAs and the
-    padding the pair costs.
-    """
-    if self.vendor == 'nvidia':
-      level = self.sm_level()
-      return level is not None and 100 <= level < 120
-    if self.vendor == 'amd':
-      return str(self.model) in ('gfx90a', 'gfx940', 'gfx941', 'gfx942',
-                                 'gfx950', 'gfx1250', 'gfx1251')
-    return False
-
 
 def report_error(usr_vendor, user_sub_arch):
   print(f'{user_sub_arch} is not listed in allowed set for {usr_vendor}')
@@ -142,7 +138,6 @@ def hw_descr_factory(arch, backend):
   # The lowering differs, the device does not: `esimd` runs on the same
   # hardware `oneapi` does and reads the same row of the table.
   from .lexic import EXPLICIT_SIMD_BACKENDS
-  explicit = backend in EXPLICIT_SIMD_BACKENDS
   backend = EXPLICIT_SIMD_BACKENDS.get(backend, backend)
 
   script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -161,22 +156,22 @@ def hw_descr_factory(arch, backend):
 
   if backend == 'cuda':
     if arch in nvidia_map.keys():
-      return HwDecription(known_arch[arch], arch, backend, explicit)
+      return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
   elif backend == 'hip':
     if arch in nvidia_map.keys() or arch in amd_map.keys():
-      return HwDecription(known_arch[arch], arch, backend, explicit)
+      return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
   elif backend == 'oneapi' or backend == 'acpp':
     if arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys():
-      return HwDecription(known_arch[arch], arch, backend, explicit)
+      return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
   elif backend == 'omptarget' or backend == 'targetdart':
     if arch in nvidia_map.keys() or arch in amd_map.keys() or arch in intel_map.keys():
-      return HwDecription(known_arch[arch], arch, backend, explicit)
+      return HwDecription(known_arch[arch], arch, backend)
     else:
       report_error(backend, arch)
 

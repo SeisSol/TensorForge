@@ -6,37 +6,6 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.writer import MultiBlock
 
-#: The types `__ldcg` and `__stcg` are declared over, as this backend spells
-#: them.
-#:
-#: A list and not a rule, because the underlying set is a list too -- CUDA
-#: declares the pair one overload at a time -- and because the answer depends
-#: on the *spelling* a datatype gets here, not on the datatype.  `tf32` is
-#: `uint32_t` on this target, so it takes the `unsigned int` overload and
-#: belongs here; on Intel the same member is a class type and would not.
-#:
-#: Absent, each for its own reason.  `F128` has no overload at any
-#: architecture, and a hinted access to one is the compile error this set
-#: exists to prevent.  `BOOL` has none either, and `const bool*` converts to
-#: no other pointer type, so it would fail the same way the day something
-#: loads one.  `F16` and `BF16` are spelled `half` and `bfloat16`, which
-#: nothing in `include/` declares for CUDA -- so a kernel carrying them fails
-#: earlier than this, and claiming an overload for a type that has no
-#: declaration would be a guess.  When that spelling arrives and resolves to
-#: `__half`/`__nv_bfloat16`, `cuda_fp16.hpp` and `cuda_bf16.hpp` do declare
-#: the pair, and this is the line that changes.
-_CACHE_HINT_TYPES = frozenset({
-    Datatype.F32,
-    Datatype.F64,
-    Datatype.I8,
-    Datatype.I16,
-    Datatype.I32,
-    Datatype.I64,
-    Datatype.U32,
-    Datatype.TF32,
-})
-
-
 class CudaLexic(Lexic):
 
   def __init__(self, backend, underlying_hardware):
@@ -125,23 +94,6 @@ class CudaLexic(Lexic):
   #: barrier 0, so a multiplication may take one of the remaining fifteen.
   NAMED_BARRIERS = 16
 
-  def has_sync_mult(self, num_threads: int, hw) -> bool:
-    """Two spellings, and which one applies turns on the width.
-
-    Below a wave the multiplication is a run of lanes inside one, and
-    `__syncwarp` takes the mask of exactly those lanes.  Above it the
-    multiplication is a whole number of waves and `barrier.sync id, count`
-    meets exactly `count` threads -- but the count must be a multiple of the
-    warp size, so a width that leaves a partial wave has no spelling here and
-    falls back to the group.  That covers the widths `MultLayout` interleaves
-    as well: their group is driven in lockstep and the block is sized to it,
-    so the block barrier is the group's (`SyncThreads.participants`).
-    """
-    wave = hw.vec_unit_length
-    if num_threads < wave:
-      return wave % num_threads == 0
-    return num_threads % wave == 0
-
   def sync_mult(self, num_threads: int, hw):
     wave = hw.vec_unit_length
     if num_threads < wave:
@@ -182,12 +134,6 @@ class CudaLexic(Lexic):
   def get_headers(self):
     return ["tensorforge_device/cuda.h", "cuda_pipeline.h"]
 
-  # cp.async: sm_80 and newer.  Gating on the architecture happens in the
-  # caller (pir.emit), which has the hardware descriptor; the lexic only
-  # knows how the text looks.
-  def copy_async_sizes(self):
-    return (4, 8, 16)
-
   def copy_async(self, dst, src, nbytes, zfill: int = 0):
     # The size is not only a count here.  Measured from what this toolchain
     # emits for sm_120: sixteen bytes lower to `cp.async.cg` and
@@ -208,24 +154,6 @@ class CudaLexic(Lexic):
 
   def wait_async(self, prior):
     return f'__pipeline_wait_prior({prior});'
-
-  def has_prefetch(self, hw):
-    """`prefetch.global.L1` and `.L2`: PTX ISA 2.0, sm_50 and up.
-
-    Everything this generator has a row for is above that, so the check is a
-    statement of what the helpers in `cuda.h` are allowed to assume rather
-    than a gate anything is expected to fail.  It is still asked, because the
-    inline PTX there carries no architecture guard of its own -- a target
-    below the line would reach `ptxas` and fail there, which is a worse place
-    to learn it.
-    """
-    level = hw.sm_level() if hw is not None else None
-    return level is not None and level >= 50
-
-  def prefetch_line_bytes(self) -> int:
-    # `prefetch.global.L2` asks for the 128-byte line holding the address;
-    # the same line size on the AMD parts the HIP lexic inherits this for.
-    return 128
 
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """The one target where the cache level is part of the instruction.
@@ -379,25 +307,6 @@ class CudaLexic(Lexic):
     return (f'tensorforge::reduction<{op}, {block}, {subblock}, {ctype}>'
             f'({variable})')
 
-  def has_nontemporal(self, datatype, length=1):
-    """Whether `__ldcg`/`__stcg` are declared for this type.
-
-    They are an overload set and not a generic: `sm_32_intrinsics.h` declares
-    them over the built-in integer types, `float`, `double`, and CUDA's own
-    vector structs.  A type outside it does not get a slower load, it gets
-    `no instance of overloaded function "__ldcg" matches the argument list`
-    -- at every architecture, since the overload set is a property of the
-    header and not of the target.
-
-    `length > 1` is refused.  A wide value is spelled
-    `tensorforge::VectorT<T, N>` here, a struct of `cuda.h`, and the
-    overloads are declared over `floatN` -- same size, same alignment, no
-    conversion between them, which is the cast `atomic_store` has to write
-    out.  A hint on a wide access needs that cast or another spelling of the
-    value; naming an intrinsic here gives it neither.
-    """
-    return length == 1 and datatype in _CACHE_HINT_TYPES
-
   @staticmethod
   def _hint_kind(nontemporal):
     """`cs` where the access asked to stream (`Options.cache_hints`), `cg`
@@ -406,13 +315,13 @@ class CudaLexic(Lexic):
     return 'cs' if nontemporal == 'cs' else 'cg'
 
   def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
-    if nontemporal and self.has_nontemporal(datatype, length):
+    if nontemporal:
       return f'__st{self._hint_kind(nontemporal)}(&{lhs}, {rhs});'
     else:
       return f'{lhs} = {rhs};'
 
   def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
-    if nontemporal and self.has_nontemporal(datatype, length):
+    if nontemporal:
       return f'__ld{self._hint_kind(nontemporal)}(&{rhs})'
     else:
       return f'{rhs}'
@@ -435,8 +344,8 @@ class CudaLexic(Lexic):
     the spelling costs: the value arrives as `tensorforge::VectorT<float, N>`,
     a struct of `cuda.h`, and `atomicAdd` is declared over CUDA's `floatN` --
     same size, same alignment, no implicit conversion between them.  Only
-    reached when `has_atomic_store` agreed for this width, so the overload it
-    names exists.
+    reached when `Target.native_atomic` agreed for this width, so the overload
+    it names exists.
     """
     if length == 1:
       return f'atomicAdd(&{access}, {variable});'

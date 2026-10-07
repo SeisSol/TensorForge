@@ -139,6 +139,13 @@ class TargetLexic(Lexic):
     stream_obj = f'static_cast<{self.stream_type} *>({pointer_name})'
     file(f'{self.stream_type} *stream = {stream_obj};')
 
+  def batch_source(self, name):
+    # targetDART reads a pointer-based operand through the device copy the
+    # kernel prologue makes of it (`kernel_definition`).
+    if self._backend == 'targetdart':
+      return f'{name}_ptr'
+    return name
+
   def get_headers(self):
     headers = ['cstdlib', 'stdexcept', 'omp.h', 'cmath']
     if self._backend == 'targetdart':

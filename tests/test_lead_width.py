@@ -351,8 +351,9 @@ def test_a_zero_blocking_is_refused():
 # `float4` unreachable, and `double2` reachable only because 2 happens to be
 # both the cap and the ceiling for FP64.
 
-from tensorforge.backend.instructions.compute.packed import packed_fma_width
 from tensorforge.backend.instructions.memory.vectorize import lead_width_cap  # noqa: E402
+from tensorforge.common.basic_types import Datatype  # noqa: E402
+from tensorforge.common.target import Target  # noqa: E402
 
 
 @pytest.mark.parametrize('elem,align,expected', [
@@ -382,10 +383,10 @@ def test_float4_is_reachable_and_double4_is_not():
     assert lead_threads_and_width(64, 8, 16, cap=lead_width_cap(8, 16))[1] == 2
 
 
-@pytest.mark.parametrize('vendor,arch', [('nvidia', 'sm_86'),
-                                         ('nvidia', 'sm_100'),
-                                         ('amd', 'gfx90a'), ('amd', 'gfx908')])
-def test_the_fma_width_is_not_the_cap(vendor, arch):
+@pytest.mark.parametrize('backend,arch', [('cuda', 'sm_86'),
+                                          ('cuda', 'sm_100'),
+                                          ('hip', 'gfx90a'), ('hip', 'gfx908')])
+def test_the_fma_width_is_not_the_cap(backend, arch):
     """A vector wider than the packed FMA is several of them, not none.
 
     The intuition runs the other way, so this states it: every element past
@@ -394,7 +395,7 @@ def test_the_fma_width_is_not_the_cap(vendor, arch):
     arithmetic packs.  A scalar-FMA target gains *more* from the step to 4
     than a packed one does, which is the opposite of a ceiling.
     """
-    packed = packed_fma_width(vendor, arch, 4)
+    packed = Target(arch, backend).packed_fma_width(Datatype.F32)
     cap = lead_width_cap(4, 16)
     assert cap >= packed, 'the address ceiling, not the instruction width'
 

@@ -95,7 +95,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     #: Whether the transfer is a `copy.async` where it can be one.  Where it
     #: cannot -- a source that is not a value of the body it is issued in --
     #: it moves its bytes with ordinary loads.
-    self._use_cuda_memcpy = self._context.target.hw.vendor == 'nvidia' and not self._no_memcpy
+    self._use_cuda_memcpy = (self._context.target.async_staging()
+                             and not self._no_memcpy)
     #: tokens issued by this transfer, for the `LoadWait` that retires them
     self._tokens = []
     self._token_owner = None
@@ -175,7 +176,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     return _find_next_coprime(size, self._context.target.hw.shmem_banks)
 
   def _explicit_simd(self) -> bool:
-    return bool(getattr(self._context.target.lexic, 'simd_mode', False))
+    return self._context.target.explicit_simd
 
   def _lane_span(self) -> int:
     """How many elements of one hop a single work-item carries.
@@ -548,7 +549,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # One `copy.async` per hop, carrying the hop's extent.  The vector
         # width stops being a cast on both sides of an assignment and becomes
         # `elems`, which is what the emitter needs anyway to check the
-        # transfer size against `copy_async_sizes()`.
+        # transfer size against `Target.copy_async_sizes`.
         # The same claim the synchronous branch below records.  A `copy.async`
         # distributes its destination exactly as a load-and-store pair does --
         # the engine moves the bytes, not the mapping -- so leaving it unsaid
@@ -602,6 +603,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # attach to is a vector and the lexic has to be told which.
         def write_load(lhs, rhs, _t=self._dest.get_fptype(), _n=increment,
                        _nt=nontemporal):
+          if not self._context.target.nontemporal(_t, _n):
+            _nt = False
           writer(f'{lhs} = {self._context.target.lexic.glb_load(rhs, datatype=_t, length=_n, nontemporal=_nt)};')
 
       # The destination's rows are longer than the source's -- padded, so

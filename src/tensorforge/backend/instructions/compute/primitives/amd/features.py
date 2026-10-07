@@ -175,10 +175,16 @@ def has_feature(ctx, feature: str) -> bool:
     nowhere", which is indistinguishable from a correct entry for hardware we
     do not target.
     """
+    return carries(amdarch(ctx), feature)
+
+
+def carries(arch: int, feature: str) -> bool:
+    """`has_feature` for the architecture number (`0x942`) rather than a
+    context."""
     if feature not in FEATURE_TARGETS:
         raise KeyError(f'unknown AMDGPU subtarget feature {feature!r}; '
                        f'known: {sorted(FEATURE_TARGETS)}')
-    return amdarch(ctx) in FEATURE_TARGETS[feature]
+    return arch in FEATURE_TARGETS[feature]
 
 
 def wave_size(ctx) -> int:

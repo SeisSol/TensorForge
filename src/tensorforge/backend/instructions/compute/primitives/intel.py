@@ -570,12 +570,12 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
 def _simd_mode(ctx) -> bool:
     """Whether `ctx` lowers with the lane in the type (ESIMD).
 
-    `abstract_instruction._explicit_simd`'s question, asked of the lexic the
+    `abstract_instruction._explicit_simd`'s question, asked of the target the
     same way; restated rather than imported, since that package imports this
     one.
     """
     try:
-        return bool(ctx.target.lexic.simd_mode)
+        return bool(ctx.target.explicit_simd)
     except AttributeError:
         return False
 

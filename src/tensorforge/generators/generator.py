@@ -94,7 +94,7 @@ class AbstractThreadBlockPolicy:
     wave = target.hw.vec_unit_length
     if self._num_threads == wave:
       return None
-    if target.lexic.has_sync_mult(self._num_threads, target.hw):
+    if target.sync_mult(self._num_threads):
       return None
     return mults_per_group(self._num_threads, wave)
 
@@ -107,7 +107,7 @@ class AbstractThreadBlockPolicy:
 
 def _explicit_simd_lowering(context) -> bool:
   """Whether this context lowers to an explicit vector."""
-  return bool(getattr(context.target.lexic, 'simd_mode', False))
+  return context.target.explicit_simd
 
 
 #: Work-items a block holds under the explicit-vector lowering when it
@@ -173,8 +173,7 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     # measurement: with no shared copy the same three block sizes are
     # 0.36x, 0.36x and 0.38x -- more work-items each staging their own copy
     # buy nothing.
-    if self._global_mem and getattr(
-        self._context.target.lexic, 'simd_mode', False):
+    if self._global_mem and self._context.target.explicit_simd:
       max_thread_mults = max(max_thread_mults, _ESIMD_WORK_ITEMS)
     if self._mem_per_mult == 0:
       mults = max_thread_mults
@@ -310,30 +309,6 @@ class _GuardGrouping:
     self._key = None
     self._literals = []
     self._pending = []
-
-
-def _supports_launch_control(context) -> bool:
-  """Does this target have `clusterlaunchcontrol.try_cancel`?
-
-  PTX ISA 8.6, and the CCCL wrappers gate the instruction on
-  `__CUDA_ARCH__ >= 1000`, so a lower target does not fail to compile -- it
-  fails to *link*, against a stub named
-  `__cuda_ptx_clusterlaunchcontrol_try_cancel_is_not_supported_before_SM_100__`.
-  Which is a decent error to read and a bad one to reach from a switch, so the
-  question is answered here.
-
-  The arch names are `sm_NN` throughout `hw_descr_db.yml`, two or three digits
-  and no `a`/`f` suffix, so the numeric part orders them; `sm_120` answers yes
-  and `sm_90` no, which is the split the instruction actually has.  Verified on
-  an sm_120 part: the plain target assembles it, no `sm_120a` needed.
-  """
-  hw = context.target.hw
-  if hw.vendor != 'nvidia':
-    return False
-  model = hw.model
-  if not model.startswith('sm_') or not model[3:].isdigit():
-    return False
-  return int(model[3:]) >= 100
 
 
 class MergeFallbackWarning(UserWarning):
@@ -542,7 +517,8 @@ class Generator:
     # Asked for and unavailable is an error, not a fallback.  A caller who
     # switched the traversal and silently got the other one would attribute
     # the grid-stride loop's numbers to the queue.
-    if context.get_user_options().launch_control and not _supports_launch_control(context):
+    if (context.get_user_options().launch_control
+        and not context.target.launch_control()):
       hw = context.target.hw
       raise GenerationError(
           f'launch_control needs `clusterlaunchcontrol`, which is sm_100 and '
@@ -1020,7 +996,7 @@ class Generator:
     # is the emit-time call the pass manager's comment defers to.
     diags = verify(stream,
                    predefined=list(self._scopes.get_global_scope().values()),
-                   backend=self._context.target.lexic._backend,
+                   backend=self._context.target.backend,
                    check_ready=True)
     errors = [d for d in diags if d.severity == 'error']
     if errors:
@@ -1096,13 +1072,13 @@ class Generator:
 
   def _mult_met_alone(self) -> bool:
     """Whether one multiplication narrower than the wave can be synchronized
-    without its neighbors in the wave (`Lexic.has_sync_mult`).
+    without its neighbors in the wave (`Target.sync_mult`).
 
     Where it cannot, its barriers reach the group, and a group whose rows run
     the body different numbers of times never arrives at them.
     """
     target = self._context.target
-    return target.lexic.has_sync_mult(self._num_threads, target.hw)
+    return target.sync_mult(self._num_threads)
 
   def _needs_wave_group(self) -> bool:
     """Whether the section holds an instruction the whole wave issues together.
@@ -1716,14 +1692,13 @@ class Generator:
           f'multiplications per block, and one launch serves them all')
     mults_per_block = mults.pop()
     shared = max(s.shared_elements for s in sections)
-    lexic = self._context.target.lexic
     wave = self._context.target.hw.vec_unit_length
     layout = MultLayout(self._num_threads, wave)
     plain = layout.contiguous or layout.whole_waves
     block_x = self._num_threads if plain else layout.unit
     block_y = (mults_per_block if plain
                else mults_per_block * layout.units_per_mult)
-    if getattr(lexic, 'simd_mode', False):
+    if self._context.target.explicit_simd:
       # One work-item per multiplication: the lanes are the vector, and the
       # block counts multiplications (`EsimdLexic`).
       block_x, block_y = 1, mults_per_block
@@ -1810,9 +1785,9 @@ class Generator:
         num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
       else:
         # Bounded by what the device holds, or covering the batch in one round
-        # where the target runs a looping block slowly (`Lexic.bounds_grid`).
+        # where the target runs a looping block slowly (`Target.bounds_grid`).
         # A cooperative launch is bounded either way.
-        bounded = coop or lexic.bounds_grid()
+        bounded = coop or self._context.target.bounds_grid()
         if bounded:
           writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize, resident=coop)}')
         if coop:
@@ -1979,7 +1954,7 @@ class Generator:
       symbol.inlined = False
     context = self._context
     options = context.get_user_options()
-    explicit = getattr(context.target.lexic, 'simd_mode', False)
+    explicit = context.target.explicit_simd
     hw = context.target.hw
     merged = {id(member) for symbol in scope
               if getattr(symbol.obj, 'is_variant', False)
@@ -2047,8 +2022,7 @@ class Generator:
     passed = [p for p in params if isinstance(p, ValueParam)]
     if not passed:
       return
-    lexic = self._context.target.lexic
-    if getattr(lexic, 'simd_mode', False):
+    if self._context.target.explicit_simd:
       # ESIMD reads a batch-constant operand with block loads, which address
       # device memory; the struct an argument is passed as is not there.
       raise GenerationError(
@@ -3055,8 +3029,7 @@ class Generator:
     # A block the SM can always hold, so that ptxas sizes the registers for
     # that and not for an occupancy it guesses (`min_blocks_per_sm`).
     min_blocks = self._context.get_user_options().min_blocks_per_sm
-    if (min_blocks
-        and self._context.target.hw.vendor == 'nvidia'):
+    if min_blocks and self._context.target.min_blocks_bound():
       launch_bounds += (min_blocks,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),

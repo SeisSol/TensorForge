@@ -20,6 +20,8 @@ import pytest
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.target import Target
+from tensorforge.common.vm.lexic.sycl_lexic import smallest_sub_group
 
 SUB_GROUP = re.compile(r'reqd_sub_group_size\((\d+)\)')
 
@@ -32,7 +34,15 @@ def _lexic(backend):
 @pytest.mark.parametrize('lanes,size', [(32, 32), (16, 16), (8, 16), (4, 16),
                                         (24, None), (64, None)])
 def test_a_multiplication_is_held_by_one_sub_group(lanes, size):
-    assert _lexic('oneapi').sub_group_for(lanes) == size
+    sizes = Target('pvc', 'oneapi').pinned_sub_groups
+    assert smallest_sub_group(sizes, lanes) == size
+
+
+def test_only_oneapi_on_intel_states_one():
+    assert Target('pvc', 'oneapi').pinned_sub_groups
+    assert Target('pvc', 'esimd').pinned_sub_groups is None
+    assert Target('sm_86', 'acpp').pinned_sub_groups is None
+    assert Target('pvc', 'acpp').pinned_sub_groups is None
 
 
 def _oneapi_kernel(threads=None):

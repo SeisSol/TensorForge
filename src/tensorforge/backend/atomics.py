@@ -13,7 +13,8 @@ one" is not a detail of the spelling, it is the premise of the decision, and
 it belongs where the decision is made rather than inside the lexic that writes
 the call down.
 
-The question is asked per `(vendor, architecture, datatype)`.  Not per vendor,
+The question is asked per `(vendor, architecture, datatype)`, of a
+`common.target.Target`.  Not per vendor,
 because the vendor is the one thing that does not decide it: one AMD answer
 would hand every AMD target `__builtin_amdgcn_global_atomic_fadd_f32` -- a
 builtin gated on `atomic-fadd-rtn-insts`, which gfx900, gfx906, gfx1010 and
@@ -71,21 +72,21 @@ reaches it, so the fallback spelling is the only way in.
 from tensorforge.common.basic_types import Datatype
 
 
-def _model(ctx) -> str:
-    return ctx.target.hw.model
+def _model(target) -> str:
+    return target.hw.model
 
 
-def _vendor(ctx) -> str:
-    return ctx.target.hw.vendor
+def _vendor(target) -> str:
+    return target.hw.vendor
 
 
 # --------------------------------------------------------------------------- #
 # NVIDIA
 # --------------------------------------------------------------------------- #
 
-def _sm(ctx) -> int:
+def _sm(target) -> int:
     """`sm_80` -> 80.  Three digits from sm_100 on, so this is not a slice."""
-    return int(_model(ctx)[3:])
+    return int(_model(target)[3:])
 
 
 #: `(datatype, length)` -> the compute capability that has it.
@@ -110,9 +111,9 @@ _NVIDIA_ADD = {
 }
 
 
-def _nvidia_add(ctx, datatype, length) -> bool:
+def _nvidia_add(target, datatype, length) -> bool:
     need = _NVIDIA_ADD.get((datatype, length))
-    return need is not None and _sm(ctx) >= need
+    return need is not None and _sm(target) >= need
 
 
 # --------------------------------------------------------------------------- #
@@ -149,14 +150,18 @@ _AMD_ADD_BUILTIN = {
 }
 
 
-def _amd_add(ctx, datatype, length) -> bool:
-    from tensorforge.backend.instructions.compute.primitives.amd import (
-        has_feature)
+def _has(target, feature) -> bool:
+    from tensorforge.backend.instructions.compute.primitives.amd.features import (
+        carries)
+    return carries(target.hw.gfx_level(), feature)
+
+
+def _amd_add(target, datatype, length) -> bool:
     feature = _AMD_ADD_FEATURE.get((datatype, length))
-    return feature is not None and has_feature(ctx, feature)
+    return feature is not None and _has(target, feature)
 
 
-def amd_add_builtin(ctx, datatype):
+def amd_add_builtin(target, datatype):
     """The intrinsic spelling, or None where this target has no builtin.
 
     None is not "no atomic": it means the guaranteed spelling is unavailable
@@ -164,16 +169,14 @@ def amd_add_builtin(ctx, datatype):
     lowers to the same instruction under the conditions the module docstring
     sets out.
     """
-    from tensorforge.backend.instructions.compute.primitives.amd import (
-        has_feature)
     entry = _AMD_ADD_BUILTIN.get(datatype)
     if entry is None:
         return None
     builtin, feature = entry
-    return builtin if has_feature(ctx, feature) else None
+    return builtin if _has(target, feature) else None
 
 
-def unsafe_fp_atomics_required(ctx, datatype) -> bool:
+def unsafe_fp_atomics_required(target, datatype) -> bool:
     """Whether the fallback spelling needs the fine-grained assurance here.
 
     False on two counts and they are different counts: because the builtin is
@@ -181,13 +184,11 @@ def unsafe_fp_atomics_required(ctx, datatype) -> bool:
     carries `agent-scope-fine-grained-remote-memory-atomics` and the compiler
     emits the instruction without being told anything.
     """
-    from tensorforge.backend.instructions.compute.primitives.amd import (
-        has_feature)
-    if _vendor(ctx) != 'amd' or not _amd_add(ctx, datatype, 1):
+    if _vendor(target) != 'amd' or not _amd_add(target, datatype, 1):
         return False
-    if amd_add_builtin(ctx, datatype) is not None:
+    if amd_add_builtin(target, datatype) is not None:
         return False
-    return not has_feature(ctx, 'agent-scope-fine-grained-remote-memory-atomics')
+    return not _has(target, 'agent-scope-fine-grained-remote-memory-atomics')
 
 
 # --------------------------------------------------------------------------- #
@@ -199,17 +200,17 @@ def unsafe_fp_atomics_required(ctx, datatype) -> bool:
 _INTEL_NATIVE_F64 = ('pvc',)
 
 
-def _intel_add(ctx, datatype, length) -> bool:
+def _intel_add(target, datatype, length) -> bool:
     # Scalar only, and that is the SPMD spelling rather than the hardware:
     # `sycl::atomic_ref` binds one reference to one element and has no packed
     # form.  A wide update under ESIMD is `atomic_update` over a `simd<T, N>`,
-    # which is a different emitter and answers for itself in `SyclLexic`.
+    # which is a different emitter and answers for itself (`Target.native_atomic`).
     if length != 1:
         return False
     if datatype is Datatype.F32:
         return True
     if datatype is Datatype.F64:
-        return _model(ctx) in _INTEL_NATIVE_F64
+        return _model(target) in _INTEL_NATIVE_F64
     return False
 
 
@@ -218,7 +219,7 @@ def _intel_add(ctx, datatype, length) -> bool:
 _VENDORS = {'nvidia': _nvidia_add, 'amd': _amd_add, 'intel': _intel_add}
 
 
-def native_add(ctx, datatype, length: int = 1) -> bool:
+def native_add(target, datatype, length: int = 1) -> bool:
     """Does this target add `length` adjacent elements in one instruction?
 
     A vendor with no entry answers False, which costs a preference and never
@@ -231,4 +232,5 @@ def native_add(ctx, datatype, length: int = 1) -> bool:
     and it has the information to make it; making it here would hide a
     doubled instruction count behind a capability query.
     """
-    return _VENDORS.get(_vendor(ctx), lambda *_: False)(ctx, datatype, length)
+    return _VENDORS.get(_vendor(target), lambda *_: False)(target, datatype,
+                                                           length)

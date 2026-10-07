@@ -133,13 +133,9 @@ class _Hardware:
     max_reg_per_thread = 1000
 
 
-class _Lexic:
-    simd_mode = False
-
-
 class _Target:
     hw = _Hardware()
-    lexic = _Lexic()
+    explicit_simd = False
 
 
 class _Context:

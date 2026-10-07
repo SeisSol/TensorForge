@@ -22,9 +22,9 @@ products paired in registers, dual issue wants them independent and scalar.
 from enum import Enum
 
 from tensorforge.common.basic_types import Datatype
-from .arch import cdna2, gfx1250, gfx1251, rdna, gfx906
+from .arch import amdarch, cdna2, gfx1250, gfx1251, rdna, gfx906
 from .caps import has_fmacdpp4, has_fmacdpp8, has_fmacdpp16
-from .features import has_feature
+from .features import carries, has_feature
 
 
 def wanted_fmadpp_step(datatype, threads, ctx):
@@ -80,7 +80,12 @@ class BroadcastForm(Enum):
 
 
 def packed_fma_lanes(datatype, ctx) -> int:
-    """Products one packed FMA covers on this target.
+    """Products one packed FMA covers on this target."""
+    return packed_fma_lanes_at(datatype, amdarch(ctx))
+
+
+def packed_fma_lanes_at(datatype, arch: int) -> int:
+    """Products one packed FMA covers on the architecture numbered `arch`.
 
     Two rows per type rather than one, because AMDGPU.td names the same
     arithmetic twice: CDNA carries `packed-fp32-ops` and gfx125x gates its
@@ -90,10 +95,10 @@ def packed_fma_lanes(datatype, ctx) -> int:
     one, which is the mistake in the other direction.
     """
     if datatype == Datatype.F32:
-        return 2 if (has_feature(ctx, 'packed-fp32-ops')
-                     or has_feature(ctx, 'packed-fp32-single-sgpr-ops')) else 1
+        return 2 if (carries(arch, 'packed-fp32-ops')
+                     or carries(arch, 'packed-fp32-single-sgpr-ops')) else 1
     if datatype == Datatype.F64:
-        return 2 if has_feature(ctx, 'packed-fp64-single-sgpr-ops') else 1
+        return 2 if carries(arch, 'packed-fp64-single-sgpr-ops') else 1
     return 1
 
 

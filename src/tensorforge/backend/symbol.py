@@ -344,7 +344,7 @@ def _linear_addr(context: Context, index, vec) -> str:
 
   """
   lexic = context.target.lexic
-  if getattr(lexic, 'simd_mode', False):
+  if context.target.explicit_simd:
     return f'{index}'
   return f'{index} + {lexic.thread_idx_x} * {vec}'
 
@@ -3056,10 +3056,11 @@ class Symbol:
         # of an intrinsic's return value.  `pre_access` is the read the hint
         # is about, and re-wrapping it after keeps the exchange where it was.
         lex = context.target.lexic
+        length = max(lead_width_of(index), vec_width_of(index))
+        if not context.target.nontemporal(self.get_fptype(), length):
+          nontemp = False
         loaded = lex.glb_load(pre_access, datatype=self.get_fptype(),
-                              length=max(lead_width_of(index),
-                                         vec_width_of(index)),
-                              nontemporal=nontemp)
+                              length=length, nontemporal=nontemp)
         if bc_lane is not None:
           loaded = lex.broadcast(loaded, bc_lane, self.num_threads)
         writer(f'{self.get_fptype()} {variable} = {loaded};', self, Effect.READ, args=_operands(variable, addrs))
@@ -3130,9 +3131,12 @@ class Symbol:
               context, access, var, None, self.get_fptype(),
               lead_width_of(index))
         else:
+          length = lead_width_of(index)
+          if not context.target.nontemporal(self.get_fptype(), length):
+            nontemp = False
           assign = context.target.lexic.glb_store(
-              access, var, datatype=self.get_fptype(),
-              length=lead_width_of(index), nontemporal=nontemp)
+              access, var, datatype=self.get_fptype(), length=length,
+              nontemporal=nontemp)
       else:
         # An `atomic` reaching here would be dropped: the update would come
         # out as `access = var;`, an assignment where an accumulation was

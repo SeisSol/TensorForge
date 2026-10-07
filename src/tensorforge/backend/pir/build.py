@@ -810,7 +810,7 @@ class IRBuilder:
     def _explicit_simd(self) -> bool:
         """Whether the lowering puts the lane in the type rather than the address."""
         try:
-            return bool(self.context.target.lexic.simd_mode)
+            return bool(self.context.target.explicit_simd)
         except AttributeError:
             return False
 

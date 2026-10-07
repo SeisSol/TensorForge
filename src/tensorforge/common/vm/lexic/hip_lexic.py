@@ -4,24 +4,6 @@
 from . import CudaLexic
 
 
-def _gfx_level(model):
-  """`gfx1030` -> 0x1030, and None for anything that is not a gfx model.
-
-  Hexadecimal, the way `amd/arch.py` reads the same string: the letters in
-  gfx90a are digits of the number, and a decimal read would both fail on them
-  and sort gfx940 above gfx1030. None rather than 0 keeps "this is not an AMD
-  part" apart from "it is an early one", so a `sm_90` model does not answer an
-  AMD question by comparing low.
-  """
-  text = str(model)
-  if not text.startswith('gfx'):
-    return None
-  try:
-    return int(text[3:], base=16)
-  except ValueError:
-    return None
-
-
 class HipLexic(CudaLexic):
   def __init__(self, backend, underlying_hardware):
     super().__init__(backend, underlying_hardware)
@@ -145,34 +127,12 @@ class HipLexic(CudaLexic):
   def sync_simd(self):
     return None
 
-  def has_sync_mult(self, num_threads: int, hw) -> bool:
-    """Within a wave, free; across waves, gfx12.5 and not before.
-
-    A multiplication inside a wave needs no instruction at all -- the lanes of
-    a wave are in lockstep, so the rendezvous has already happened -- which is
-    the same reason `sync_simd` is None.  Saying True for it is not a shortcut:
-    the barrier is genuinely narrower than a block and genuinely costs nothing.
-
-    Above a wave it needs a barrier object of its own.  GFX12 splits `s_barrier`
-    into signal and wait but leaves only the workgroup barrier visible to the
-    shader; the objects a shader may assign, 1 through 16, arrive at GFX12.5.
-    So the width has to be whole waves and the target has to be gfx1250 or
-    later.
-    """
-    wave = hw.vec_unit_length
-    if num_threads <= wave:
-      return wave % num_threads == 0
-    # Above a wave the answer is False: the objects would need a prologue --
-    # `s_barrier_init` with the expected count, a workgroup barrier so that
-    # nobody joins before the init lands, and one `s_barrier_join` per wave,
-    # all before the first use -- and the generator emits none.
-    return False
-
   def sync_mult(self, num_threads: int, hw):
     if num_threads <= hw.vec_unit_length:
       return None
-    # Reached only once `has_sync_mult` agrees above a wave, which needs the
-    # prologue.  The expected count would be in *waves* and not threads:
+    # Reached above a wave only through a barrier that asks for the
+    # multiplication on its own, which the target refuses here: the objects
+    # would need a prologue.  The expected count would be in *waves* and not threads:
     # `s_barrier` synchronizes at wavefront granularity, so what the object
     # counts is how many waves have to arrive.
     return self.sync_block()
@@ -219,13 +179,7 @@ class HipLexic(CudaLexic):
     return '__builtin_amdgcn_sched_barrier(0);'
 
   # CDNA has no __pipeline_*; the equivalent is a direct global->LDS load
-  # plus an explicit vmcnt wait.  gfx90a/gfx94x accept 1, 2 and 4 bytes per
-  # lane, gfx950 additionally 12 and 16.
-  def copy_async_sizes(self):
-    if self._underlying_hardware != 'amd':
-      return super().copy_async_sizes()
-    return (1, 2, 4)
-
+  # plus an explicit vmcnt wait (`Target.copy_async_sizes`).
   def copy_async(self, dst, src, nbytes, zfill: int = 0):
     if self._underlying_hardware != 'amd':
       return super().copy_async(dst, src, nbytes, zfill)
@@ -286,24 +240,6 @@ class HipLexic(CudaLexic):
       return super().wait_async_regs(prior)
     return self.wait_async(prior)
 
-  def has_prefetch(self, hw):
-    """gfx12 and up, where `hasPrefetch` in LLVM's subtarget is `GFX12Insts`.
-
-    Not a question about whether the call compiles: `__builtin_prefetch` is
-    accepted at every AMD target and simply selects no instruction below
-    gfx12. So a False here does not avert an error, it avoids carrying a
-    statement that reaches nothing -- and it is what makes the emitter say
-    once, per body, that this part has no prefetch to give.
-
-    HIP compiles for NVIDIA as well, where the builtin would be an NVPTX
-    question and not this one; the same condition `glb_store` and
-    `atomic_store` carry.
-    """
-    if self._underlying_hardware != 'amd':
-      return False
-    arch = _gfx_level(getattr(hw, 'model', None))
-    return arch is not None and arch >= 0x1200
-
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """`__builtin_prefetch`, which has no cache level to be given.
 
@@ -322,7 +258,7 @@ class HipLexic(CudaLexic):
     them here would fix the other in place.
     """
     if self._underlying_hardware != 'amd':
-      # Unreachable through `has_prefetch`, and spelled out rather than
+      # Unreachable through `Target.prefetch`, and spelled out rather than
       # inherited: this class extends the CUDA one, so a `super()` call here
       # would hand a HIP-on-NVIDIA build the PTX helper from `cuda.h`, which
       # that translation unit does not include.
@@ -338,28 +274,14 @@ class HipLexic(CudaLexic):
     kind = 'VectorRelaxedT' if relaxed else 'VectorT'
     return f'tensorforge::{kind}<{fptype}, {length}>'
 
-  def has_nontemporal(self, datatype, length=1):
-    """The hardware, not the type: the builtins are generic.
-
-    `__builtin_nontemporal_load` and `_store` take any scalar or vector
-    operand, so unlike the CUDA pair there is no overload set to fall outside
-    of and no type this has to turn away -- `__float128` and a `VectorT` are
-    both accepted.
-
-    HIP compiles for NVIDIA as well, where neither builtin is declared; that
-    is the condition `glb_store` and `glb_load` carry, stated here once so
-    `atomic_store` and these two answer it the same way.
-    """
-    return self._underlying_hardware == 'amd'
-
   def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
-    if nontemporal and self.has_nontemporal(datatype, length):
+    if nontemporal:
       return f'__builtin_nontemporal_store({rhs}, &{lhs});'
     else:
       return f'{lhs} = {rhs};'
 
   def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
-    if nontemporal and self.has_nontemporal(datatype, length):
+    if nontemporal:
       return f'__builtin_nontemporal_load(&{rhs})'
     else:
       return f'{rhs}'
@@ -389,14 +311,14 @@ class HipLexic(CudaLexic):
     """
     if self._underlying_hardware != 'amd':
       return super().atomic_store(ctx, access, variable, op, datatype, length)
-    # No packed FP32 or FP64 add exists here, so `has_atomic_store` refuses
+    # No packed FP32 or FP64 add exists here, so `Target.native_atomic` refuses
     # every width but one and this never sees a vector.  Asserted rather than
     # assumed: the builtin below takes a scalar and would take a GNU vector
     # by silent truncation of nothing -- it simply would not compile, which
     # is a worse way to learn it than this.
     assert length == 1, f'no packed atomic add on AMD (length {length})'
     from tensorforge.backend import atomics
-    builtin = atomics.amd_add_builtin(ctx, datatype)
+    builtin = atomics.amd_add_builtin(ctx.target, datatype)
     if builtin is not None:
       return f'{builtin}(&{access}, {variable});'
     return (f'__hip_atomic_fetch_add(&{access}, {variable}, '

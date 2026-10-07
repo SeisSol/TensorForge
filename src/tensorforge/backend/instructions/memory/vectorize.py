@@ -194,8 +194,8 @@ def lead_width_cap(elem_bytes: int, align_bytes: int) -> int:
 
     So the count falls with `w` whether or not the arithmetic packs, and a
     scalar-FMA target gains *more* from the step to 4 than a packed one does.
-    `compute/packed.py` says which of those columns a target is in, which is a
-    cost-model input and not a ceiling; the ceiling is the address.
+    `Target.packed_fma_width` says which of those columns a target is in,
+    which is a cost-model input and not a ceiling; the ceiling is the address.
 
     What is left out and would lower this is register pressure.  A width of
     `w` puts `w` times as many floats in a lane and `w` times fewer lanes on
@@ -316,28 +316,16 @@ def lead_pair(extent: int, elem_bytes: int, align_bytes: int,
 
 
 def lead_vectorize_supported(context) -> bool:
-    """Whether this backend can spell what the widened compute path emits.
+    """Whether the widened compute path is asked for and this target can
+    spell what it emits (`Target.lead_vectors`).
 
-    CUDA and HIP can: `VectorT`/`VectorRelaxedT` carry arithmetic, and the
-    naturally-aligned and element-aligned spellings convert to each other --
-    on HIP as GNU vector types, on CUDA through the operators and conversion
-    `cuda.h` gives its `VectorStruct`.
-
-    SYCL cannot, and for two separate reasons.  `sycl::vec` has no
-    element-aligned twin, so a relaxed cast has nowhere to go; and it does
-    not define `operator*` between two `vec`s the way a GNU vector does, so
-    the product does not compile even where the cast would.  The ESIMD
-    emitter is further out still -- its whole model puts the lane axis in the
-    type, so a per-lane width is a second axis it has no spelling for yet.
-
-    Left as a capability question rather than a `TODO`: the widened path is
-    correct on the backends that answer yes, and silently wrong on the ones
-    that would need `sycl::vec`'s componentwise API instead.
+    A capability question rather than a `TODO`: the widened path is correct
+    on the targets that answer yes, and silently wrong on the ones that would
+    need `sycl::vec`'s componentwise API instead.
     """
     if not context.get_user_options().lead_vectorize:
         return False
-    lex = context.target.lexic
-    return getattr(lex, '_backend', None) in ('cuda', 'hip', 'hipsycl_cuda')
+    return context.target.lead_vectors()
 
 
 def reduction_vector_width(extent: int, elem_bytes: int, align_bytes: int,

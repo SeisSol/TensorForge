@@ -19,7 +19,10 @@ from .ocl_lexic import OpenCLLexic
 EXPLICIT_SIMD_BACKENDS = {"esimd": "oneapi"}
 
 
-def lexic_factory(backend, underlying_hardware):
+def lexic_factory(backend, underlying_hardware, sub_groups=None):
+  """The spelling for `backend`.  `sub_groups` are the sub-group sizes a SYCL
+  kernel states, or None where the device picks (`Target.pinned_sub_groups`).
+  """
   if backend == "hipsycl":
     backend = "acpp"
   if backend == "dpcpp":
@@ -32,7 +35,7 @@ def lexic_factory(backend, underlying_hardware):
   elif backend == "hip":
     return HipLexic(backend, underlying_hardware)
   elif backend in ["acpp", "oneapi"]:
-    return SyclLexic(backend, underlying_hardware)
+    return SyclLexic(backend, underlying_hardware, sub_groups=sub_groups)
   elif backend in ["omptarget", "targetdart"]:
     return TargetLexic(backend, underlying_hardware)
   elif backend == "opencl":

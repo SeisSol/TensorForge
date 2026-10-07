@@ -69,7 +69,7 @@ class PrefetchData(AbstractInstruction):
   pointer already bound to the element -- `PrefetchData` the pass binds one to
   `k + 1` at the head of the body -- so the address formula is
   `GetElementPtr`'s alone and this only walks the run.  One statement per
-  `Lexic.prefetch_line_bytes`: a line where the hint names one address, up
+  `Target.prefetch_line_bytes`: a line where the hint names one address, up
   to 31 lines in one gather message where it takes an extent (ESIMD).
   """
 
@@ -89,7 +89,7 @@ class PrefetchData(AbstractInstruction):
       return
     datatype = getattr(self._src.obj, 'datatype', None)
     elem = datatype.size() if datatype is not None else 4
-    per = max(1, self._context.target.lexic.prefetch_line_bytes() // elem)
+    per = max(1, self._context.target.prefetch_line_bytes() // elem)
     end = self._first + self._count
     for start in range(self._first, end, per):
       # The run as it is: a target that needs a message-sized length rounds

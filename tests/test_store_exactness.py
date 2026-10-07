@@ -116,8 +116,8 @@ def test_amd_declines_a_widened_lead_on_the_capability(monkeypatch):
     assert 'atomic' not in src
 
     ctx = Context(arch='gfx90a', backend='hip', fp_type=Datatype.F32)
-    assert atomics.native_add(ctx, Datatype.F32, 1)
-    assert not atomics.native_add(ctx, Datatype.F32, 2)
+    assert atomics.native_add(ctx.target, Datatype.F32, 1)
+    assert not atomics.native_add(ctx.target, Datatype.F32, 2)
 
 
 def test_blackwell_accumulates_a_packed_pair(monkeypatch):

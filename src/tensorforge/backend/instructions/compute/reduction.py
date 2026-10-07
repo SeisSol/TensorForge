@@ -172,9 +172,9 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         have: `MultLayout` interleaves such widths with the other
         multiplications in the same wave (gcd units), so lane `l` of a
         multiplication is not thread `l`, and neither the slot index nor the
-        rendezvous count is expressible.  `CudaLexic.has_sync_mult` says the
-        same thing from the other side -- `barrier.sync` counts threads in
-        whole warps.
+        rendezvous count is expressible.  `Target.sync_mult` says the same
+        thing from the other side -- `barrier.sync` counts threads in whole
+        warps.
         """
         vul = self._reach()
         if self._num_threads > vul and self._num_threads % vul:
@@ -507,7 +507,7 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
             # nested inside a sequential axis hands its None to `_combine`
             # instead of returning it: the loop result is a value either way,
             # so the miss is invisible one frame up.  `Symbol.load` answers
-            # None for every structured load under `simd_mode`, and unchecked
+            # None for every structured load under ESIMD, and unchecked
             # the fold would build `max(acc, None)` out of it.
             raise InternalError(
                 f'reduction: {self._op.symbol.name} has no structured load on '

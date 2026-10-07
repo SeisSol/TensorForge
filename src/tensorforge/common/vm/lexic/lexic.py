@@ -5,9 +5,11 @@ from abc import ABC, abstractmethod
 from tensorforge.common.operation import Operation
 
 class Lexic(ABC):
-  """
-  You can use this abstract class to add a dictionary for any backend for variables like e.g.
-  threadIdx.x for CUDA that are used by the generators and loaders
+  """How a statement the generator has decided on is written in one language.
+
+  Spelling only: whether a target has an instruction, how wide it is or how
+  far it reaches is `common.target.Target`'s question, and a method here is
+  reached only once that was answered.
   """
 
   def __init__(self, underlying_hardware):
@@ -23,7 +25,6 @@ class Lexic(ABC):
     self.grid_dim_x = None
     self.stream_type = None
     self.restrict_kw = None
-    self.simd_mode = False
 
   def storage_class(self, space) -> str:
     """How a declaration says where its object resides, where it has to.
@@ -108,6 +109,12 @@ class Lexic(ABC):
     """
     return f'reinterpret_cast<{elem}*>({window})'
 
+  def batch_source(self, name: str) -> str:
+    """The array a pointer-based operand's elements are read through in the
+    kernel body: the operand itself, wherever the body can dereference what
+    the caller passed."""
+    return name
+
   def get_slm_load(self, elem: str, width: int, address: str) -> str:
     """A vector read of shared memory, where that is its own instruction.
 
@@ -119,18 +126,6 @@ class Lexic(ABC):
   def get_slm_store(self, elem: str, width: int, address: str,
                     value: str) -> str:
     return None
-
-  def bounds_grid(self) -> bool:
-    """Whether a grid-stride launch is sized to the device or to the batch.
-
-    True: `get_launch_size` answers how many blocks the device holds and the
-    grid is the smaller of that and the batch, so each block loops over its
-    share.  False: the grid covers the batch in one round,
-    `ceil(elements / mults_per_block)` blocks, and every block runs its loop
-    once.  A cooperative launch is bounded either way -- it has to be
-    resident at once.
-    """
-    return True
 
   @abstractmethod
   def get_launch_code(self, func_name, grid, block, stream, func_params):
@@ -186,43 +181,6 @@ class Lexic(ABC):
     """
     return None
 
-  def folds_broadcast(self) -> bool:
-    """Whether a broadcast of one lane's element is an operand, not a value.
-
-    On Intel it is a region: `r20.3<0;1,0>` reads one element of a register
-    and spreads it over the instruction's lanes, so the broadcast occupies no
-    register of its own -- the order-6 derivative's simd32 build has 8033 such
-    regions and not one message that is not a spill.  Where the exchange is an
-    instruction (`__shfl_sync` writes a register, and an AMD DPP chain writes
-    one per step) the result is a value like any other.
-
-    Read by `pir.pressure` through `_record_pressure`: counted as values, the
-    broadcasts would be 1944 of the 3400 bytes a lane that the order-6
-    derivative is judged by, which is 57 % of a figure compared against a
-    register file.
-    """
-    return False
-
-  def has_sync_mult(self, num_threads: int, hw) -> bool:
-    """Whether `sync_mult` rendezvouses fewer threads than the whole block.
-
-    Asked before the thread-block policy sizes a block, because the answer
-    decides how many multiplications may share one.  A target that says False
-    gets one multiplication per block whenever a multiplication is wider than
-    a wave: the block barrier is then the multiplication's own barrier, and
-    the loop around it is block-uniform, so there is a legal spelling.  Say
-    True without an implementation below and the policy packs several
-    multiplications into a block that cannot separate them.
-
-    `num_threads` is part of the question rather than decoration on it. Every
-    sub-block rendezvous counts participants, and every one of them counts in
-    a unit -- threads, waves, sub-groups -- that a width not divisible by the
-    wave cannot express.  `hw` is passed rather than read off the lexic: the
-    lexic is built from the vendor alone, while the answer turns on the
-    architecture -- named barriers arrive at gfx12.5 and not at gfx12.
-    """
-    return False
-
   def sync_mult(self, num_threads: int, hw):
     """Rendezvous exactly the ``num_threads`` threads of one multiplication.
 
@@ -230,8 +188,8 @@ class Lexic(ABC):
     than that and `SyncThreads` asks for `sync_simd` directly, because the
     threads are in lockstep anyway.  So the default is the honest one: a whole
     block, which over-synchronizes but never deadlocks, and which is exact
-    once `has_sync_mult` says False, because the policy then puts one
-    multiplication in a block.
+    where the target has no narrower rendezvous (`Target.sync_mult`), because
+    the policy then puts one multiplication in a block.
 
     The opportunity a vendor can take here is a sub-block rendezvous, which
     lets several wide multiplications share a block:
@@ -250,16 +208,6 @@ class Lexic(ABC):
     the body a different number of times.
     """
     return self.sync_block()
-
-  def exchange_reach(self, num_threads: int, hw) -> int:
-    """How many lanes one cross-lane exchange reaches -- a shuffle, a
-    broadcast, a reduction -- for a multiplication of `num_threads`.
-
-    The wave by default.  A target that states its sub-group per kernel
-    reaches that far instead, and one whose lanes are the elements of a
-    work-item's vector reaches the whole multiplication.
-    """
-    return hw.vec_unit_length
 
   def exchange_xor(self, variable, mask):
     """`variable` as held by the lane whose index differs from this one's in
@@ -320,21 +268,8 @@ class Lexic(ABC):
   # it and a positional `nontemporal` cannot land in it.  The hint is spelled
   # by an overload set on at least one target, which makes the type part of
   # the question rather than decoration on it: what an unanswered type buys is
-  # not a plainer access but a kernel that does not compile.
-
-  def has_nontemporal(self, datatype, length=1):
-    """Whether this target spells a nontemporal access of `length` x `datatype`.
-
-    The counterpart to `has_atomic_store`, asked for the same reason and
-    answered on the same terms: what the caller needs to know is whether the
-    hint *exists* for this type, not whether something could be written.  A
-    target without one says False and the access is emitted plainly, which
-    costs a cache policy and nothing else -- the hint is an optimization over
-    exactly that access.
-
-    False here, because the base spelling below has no hint to give.
-    """
-    return False
+  # not a plainer access but a kernel that does not compile.  So `nontemporal`
+  # is passed only where `Target.nontemporal` agreed for the type.
 
   def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
     return f'{lhs} = {rhs};'
@@ -349,27 +284,14 @@ class Lexic(ABC):
   # none, reaches this path with a TypeError or an AttributeError.
   #
   # `ctx` is a parameter and not a field because the lexic is constructed with
-  # the vendor alone (`Target` passes `hw.vendor`), while the answer here
-  # turns on the architecture; a field would give a per-vendor answer to a
-  # per-architecture question.
-
-  def has_atomic_store(self, ctx, op, datatype, length=1):
-    """Whether an atomic update of `length` x `datatype` is one instruction.
-
-    Not "can it be spelled": every target can spell it, and one that has no
-    instruction gets a compare-and-swap loop -- slower than the
-    read-modify-write the atomic was chosen to replace.  So the honest answer
-    to give the placement policy is about the instruction, and a backend
-    without one says False and is accumulated into normally.
-    """
-    from tensorforge.backend import atomics
-    return op is None and atomics.native_add(ctx, datatype, length)
+  # the vendor alone (`Target` passes `hw.vendor`), while the spelling turns
+  # on the architecture: which builtin names the instruction.
 
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """One atomic update, as a statement.
 
-    Only reached when `has_atomic_store` agreed, so a backend overriding this
-    does not have to answer for the cases that one turns away.
+    Only reached when `Target.native_atomic` agreed, so a backend overriding
+    this does not have to answer for the cases that one turns away.
     """
     raise NotImplementedError(
         f'{type(self).__name__} has no atomic store; see Lexic.atomic_store')
@@ -377,11 +299,8 @@ class Lexic(ABC):
   # --- asynchronous global -> shared copies --------------------------------
   # A backend without a hardware path returns None; the caller then emits a
   # synchronous fallback, so correctness never depends on these being present.
-  # All three are *per thread*: every lane copies `nbytes` bytes.
-
-  def copy_async_sizes(self):
-    """Per-thread copy sizes in bytes the hardware path accepts."""
-    return ()
+  # All three are *per thread*: every lane copies `nbytes` bytes, one of
+  # `Target.copy_async_sizes`.
 
   def copy_async(self, dst, src, nbytes, zfill: int = 0):
     """`zfill` trailing bytes are written as zero instead of copied.
@@ -412,31 +331,7 @@ class Lexic(ABC):
 
   # --- data prefetch --------------------------------------------------------
   # A hint and nothing else: it moves no value, releases no token, and the
-  # emitter drops it on a target that has none.  So a backend with no answer
-  # costs a cache policy and not a kernel, which is the same bargain
-  # `has_nontemporal` makes.
-
-  def has_prefetch(self, hw):
-    """Whether this target reaches a data prefetch instruction at all.
-
-    Takes the hardware descriptor for the reason `has_atomic_store` takes a
-    context: the lexic is built from the vendor alone, and the answer here is
-    not a per-vendor one.  On AMD it turns on the architecture -- there is no
-    prefetch below gfx12 -- while a SYCL target answers from the library it
-    compiles against and not from the part it runs on.
-
-    False here, because the spelling below has nothing to give.
-    """
-    return False
-
-  def prefetch_line_bytes(self) -> int:
-    """How much one `prefetch` statement covers, in bytes.
-
-    A cache line where the instruction names one address: a longer run is
-    that many statements apart.  A target whose hint takes an extent says how
-    much one can ask for.
-    """
-    return 64
+  # emitter drops it on a target that has none (`Target.prefetch`).
 
   def prefetch_runs(self, addresses, byte_counts, level='l2'):
     """Several hints as one statement, or None where each is its own.
@@ -455,7 +350,7 @@ class Lexic(ABC):
     says so here instead of pretending the distinction survived.  `elems` is
     likewise honored only where the instruction takes a count.
 
-    Only reached when `has_prefetch` agreed, so an implementation does not
+    Only reached when `Target.prefetch` agreed, so an implementation does not
     have to answer for the targets that one turns away.
     """
     return None

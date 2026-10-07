@@ -29,7 +29,7 @@ class Context:
     #: name the first while generation reads the second.
     self._asked_options: Options = Options() if options is None else options
     self._options: ResolvedOptions = self._asked_options.resolve(
-        self.target.hw, getattr(self.target.lexic, 'simd_mode', False))
+        self.target.hw, self.target.explicit_simd)
 
     #: Whether every emitted body should report its peak register footprint.
     #:

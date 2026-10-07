@@ -518,10 +518,9 @@ class MultilinearBuilder(OperationBuilder):
     # too, it would hold the same rows in every sub-group: at 56 rows over 64
     # lanes, rows 0..31 in both sub-groups and rows 32..55 in neither.
     lead = lead_pos
-    width = getattr(self._context.target.lexic, 'sub_group_width', None)
-    if width is not None and self._num_threads and not carries_lead:
-      group = width(self._num_threads)
-      if group < self._num_threads:
+    if self._num_threads and not carries_lead:
+      group = self._context.target.sub_group_width(self._num_threads)
+      if group is not None and group < self._num_threads:
         lead = [(lead_pos, group)]
     registers, registerAlloc = self._temporaries.register_array(
         bbox, lead,
@@ -952,14 +951,13 @@ class MultilinearBuilder(OperationBuilder):
             # is blocked by, so asking `dest` would answer for a nest that is
             # not the one about to be built.
             #
-            # Asked of the lexic and not of `atomics` directly: the backend
-            # gets the last word, because a target whose hardware has the
-            # instruction can still have a lowering that cannot reach it --
-            # ESIMD is the case, where the value is a vector and the SPMD
+            # Asked of the target and not of `atomics` directly: the
+            # lowering gets the last word, because a target whose hardware has
+            # the instruction can still have a lowering that cannot reach it
+            # -- ESIMD is the case, where the value is a vector and the SPMD
             # `atomic_ref` has no scalar to bind.
-            supported=self._context.target.lexic.has_atomic_store(
-                self._context, None, dest_symbol.get_fptype(),
-                self._lead_width),
+            supported=self._context.target.native_atomic(
+                None, dest_symbol.get_fptype(), self._lead_width),
             policy=self._policy)
         result = choose_result_placement(
             legal_result_placements(written_in_slices=in_slices),

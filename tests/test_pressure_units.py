@@ -145,13 +145,9 @@ def test_a_broadcast_the_target_folds_holds_no_register():
 
 def test_which_targets_fold_a_broadcast():
     """Intel under SPMD does; an instruction that writes a register does not."""
-    from tensorforge.common.context import Context
+    from tensorforge.common.target import Target
 
-    def lexic(arch, backend):
-        return Context(arch=arch, backend=backend,
-                       fp_type=Datatype.F32).target.lexic
-
-    assert lexic('pvc', 'oneapi').folds_broadcast()
-    assert not lexic('pvc', 'esimd').folds_broadcast()
-    assert not lexic('sm_90', 'cuda').folds_broadcast()
-    assert not lexic('gfx942', 'hip').folds_broadcast()
+    assert Target('pvc', 'oneapi').folds_broadcast()
+    assert not Target('pvc', 'esimd').folds_broadcast()
+    assert not Target('sm_90', 'cuda').folds_broadcast()
+    assert not Target('gfx942', 'hip').folds_broadcast()

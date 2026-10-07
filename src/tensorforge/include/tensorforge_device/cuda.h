@@ -202,7 +202,7 @@ __device__ __forceinline__ int lane_id() {
 ///
 /// `prefetch.global.L1` and `.L2` are PTX ISA 2.0 and sm_50, and there is no
 /// `__CUDA_ARCH__` guard here on purpose: which architectures may reach these
-/// is decided in `CudaLexic.has_prefetch`, and a guard would turn a target
+/// is decided in `Target.prefetch`, and a guard would turn a target
 /// below the line into a call that compiles and does nothing rather than into
 /// the question it is.
 ///

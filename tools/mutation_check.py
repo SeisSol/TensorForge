@@ -56,6 +56,7 @@ BARRIERS = Path('src/tensorforge/backend/pir/barriers.py')
 WRAP = Path('src/tensorforge/backend/pir/wrap.py')
 MOVE = Path('src/tensorforge/backend/pir/move.py')
 TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
+TARGET = Path('src/tensorforge/common/target.py')
 
 
 def _run_tests(target):
@@ -898,6 +899,35 @@ GROUPS = {
              '        if False or (', 1)),
         ('the wait moved with the transfer',
          sub(TRANSFERS, 'Op.WAIT, Op.COMMIT_ASYNC', 'Op.COMMIT_ASYNC')),
+    ]),
+
+    # What a target is and can.
+    'target': ('tests/test_target.py tests/test_nontemporal.py '
+               'tests/test_prefetch.py tests/test_packed_fma.py '
+               'tests/test_atomics.py tests/test_sycl_sub_group.py', [
+        ('a hint on a wide CUDA access',
+         sub(TARGET, 'return length == 1 and datatype in CUDA_CACHE_HINT_TYPES',
+             'return datatype in CUDA_CACHE_HINT_TYPES', 1)),
+        ('a HIP rendezvous across waves',
+         sub(TARGET, '                return wave % num_threads == 0\n'
+                     '            return False\n',
+             '                return wave % num_threads == 0\n'
+                     '            return True\n', 1)),
+        ('the sub-group stated where the device picks it',
+         sub(TARGET, "if (self.hw.vendor == 'intel' and self.backend == 'oneapi'):",
+             "if self.hw.vendor == 'intel':", 1)),
+        ('a prefetch below gfx12',
+         sub(TARGET, 'level >= 0x1200', 'level >= 0x1000', 1)),
+        ('the paired FFMA on sm_120',
+         sub(TARGET, 'and 100 <= level < 120) else 1',
+             'and 100 <= level) else 1', 1)),
+        ('an atomic under the explicit vector',
+         sub(TARGET, '        if self.explicit_simd:\n            return False\n'
+                     '        from tensorforge.backend import atomics\n',
+             '        from tensorforge.backend import atomics\n', 1)),
+        ('an async copy where the device has no path',
+         sub(TARGET, '        if not self.async_copy_path():\n            return ()\n',
+             '', 1)),
     ]),
 
     # The transfer for the next element, issued across the back edge.

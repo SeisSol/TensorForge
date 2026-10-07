@@ -36,20 +36,19 @@ def _record_pressure(context, body, simd: bool,
   total = pir.pressure(body, in_bytes=True, explicit_simd=simd,
                        by_file=split,
                        wave_uniform=Participants.WAVE.arrival(threads, wave),
-                       folded_crosslane=context.target.lexic
-                       .folds_broadcast())
+                       folded_crosslane=context.target.folds_broadcast())
   context.record_pressure(total, *split)
 
 
 def _explicit_simd(context) -> bool:
   """Whether this kernel is lowered with the lane in the type.
 
-  Asked of the lexic rather than passed down, for the same reason `emit()`
+  Asked of the target rather than passed down, for the same reason `emit()`
   asks it: the two lowerings are already distinguished there, and a second
   place to decide it is a second place for the two to disagree.
   """
   try:
-    return bool(context.target.lexic.simd_mode)
+    return bool(context.target.explicit_simd)
   except AttributeError:
     return False
 

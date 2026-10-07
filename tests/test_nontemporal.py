@@ -9,9 +9,9 @@ see, because `g++` never reads the intrinsic's declaration.  The device front
 end does see it, but it needs `nvcc` present; these run anywhere.
 
 What they pin is the *decision*, not the spelling: which types get a hint and
-which are emitted plainly.  Whether the hint should be `.cg` or `.cs` is a
-policy question above this, and changing the answer to it should not have to
-rewrite these.
+which are emitted plainly (`Target.nontemporal`).  Whether the hint should be
+`.cg` or `.cs` is a policy question above this, and changing the answer to it
+should not have to rewrite these.
 """
 
 from __future__ import annotations
@@ -22,18 +22,17 @@ from pathlib import Path
 import pytest
 
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.vm.lexic.cuda_lexic import CudaLexic
-from tensorforge.common.vm.lexic.hip_lexic import HipLexic
+from tensorforge.common.target import Target
 
 CASES = Path(__file__).parent / "cases"
 
 
 def _cuda():
-    return CudaLexic("cuda", "nvidia")
+    return Target("sm_86", "cuda")
 
 
-def _hip(hardware="amd"):
-    return HipLexic("hip", hardware)
+def _hip(arch="gfx90a"):
+    return Target(arch, "hip")
 
 
 # --- the gate -------------------------------------------------------------
@@ -42,17 +41,17 @@ def _hip(hardware="amd"):
                                       Datatype.I32, Datatype.I64,
                                       Datatype.U32, Datatype.TF32])
 def test_cuda_hints_the_types_the_intrinsic_declares(datatype):
-    lex = _cuda()
-    assert lex.has_nontemporal(datatype)
-    assert lex.glb_load("g[i]", datatype=datatype,
-                        nontemporal=True) == "__ldcg(&g[i])"
-    assert lex.glb_store("g[i]", "v", datatype=datatype,
-                         nontemporal=True) == "__stcg(&g[i], v);"
+    target = _cuda()
+    assert target.nontemporal(datatype)
+    assert target.lexic.glb_load("g[i]", datatype=datatype,
+                                 nontemporal=True) == "__ldcg(&g[i])"
+    assert target.lexic.glb_store("g[i]", "v", datatype=datatype,
+                                  nontemporal=True) == "__stcg(&g[i], v);"
 
 
 @pytest.mark.parametrize("datatype", [Datatype.F128, Datatype.BOOL,
                                       Datatype.F16, Datatype.BF16])
-def test_cuda_emits_a_plain_access_for_the_rest(datatype):
+def test_cuda_has_no_hint_for_the_rest(datatype):
     """No overload, so the hint is dropped rather than spelled.
 
     `__float128` is the one in the corpus: 16 bytes, no `__ldcg` declared
@@ -60,12 +59,7 @@ def test_cuda_emits_a_plain_access_for_the_rest(datatype):
     list rather than the type, which makes it look like an architecture fact
     next to the other reason that case is refused.
     """
-    lex = _cuda()
-    assert not lex.has_nontemporal(datatype)
-    assert lex.glb_load("g[i]", datatype=datatype,
-                        nontemporal=True) == "g[i]"
-    assert lex.glb_store("g[i]", "v", datatype=datatype,
-                         nontemporal=True) == "g[i] = v;"
+    assert not _cuda().nontemporal(datatype)
 
 
 @pytest.mark.parametrize("length", [2, 4])
@@ -77,30 +71,39 @@ def test_cuda_declines_a_wide_access(length):
     struct of `cuda.h`, not `floatN`.  Reaching a hint here needs a different
     value type, not a different intrinsic.
     """
-    lex = _cuda()
-    assert not lex.has_nontemporal(Datatype.F32, length)
-    assert lex.glb_load("*(tensorforge::VectorT<float, 4>*)&g[i]",
-                        datatype=Datatype.F32, length=length,
-                        nontemporal=True) == \
-        "*(tensorforge::VectorT<float, 4>*)&g[i]"
+    assert not _cuda().nontemporal(Datatype.F32, length)
 
 
 def test_hip_hints_every_type_on_amd():
     """The builtins are generic, so the type is not the question there."""
-    lex = _hip()
+    target = _hip()
     for datatype in (Datatype.F32, Datatype.F128):
-        assert lex.has_nontemporal(datatype)
-        assert lex.glb_load("g[i]", datatype=datatype, nontemporal=True) == \
+        assert target.nontemporal(datatype)
+        assert target.lexic.glb_load("g[i]", datatype=datatype,
+                                     nontemporal=True) == \
             "__builtin_nontemporal_load(&g[i])"
-    assert lex.has_nontemporal(Datatype.F32, 4)
+    assert target.nontemporal(Datatype.F32, 4)
 
 
 def test_hip_on_nvidia_hardware_has_neither():
     """HIP compiles for NVIDIA, where the builtins are not declared."""
-    lex = _hip("nvidia")
-    assert not lex.has_nontemporal(Datatype.F32)
-    assert lex.glb_load("g[i]", datatype=Datatype.F32,
-                        nontemporal=True) == "g[i]"
+    assert not _hip("sm_86").nontemporal(Datatype.F32)
+
+
+@pytest.mark.parametrize("arch,backend", [("pvc", "oneapi"), ("pvc", "esimd"),
+                                          ("sm_86", "acpp"),
+                                          ("sm_86", "omptarget")])
+def test_nothing_else_spells_one(arch, backend):
+    assert not Target(arch, backend).nontemporal(Datatype.F32)
+
+
+def test_an_unhinted_access_is_spelled_plainly():
+    """What a caller passes when the target said no."""
+    lex = _cuda().lexic
+    assert lex.glb_load("g[i]", datatype=Datatype.F128,
+                        nontemporal=False) == "g[i]"
+    assert lex.glb_store("g[i]", "v", datatype=Datatype.F128,
+                         nontemporal=False) == "g[i] = v;"
 
 
 def test_the_type_cannot_be_left_out():
@@ -111,7 +114,7 @@ def test_the_type_cannot_be_left_out():
     default would amount to exactly that.
     """
     with pytest.raises(TypeError):
-        _cuda().glb_load("g[i]", True)          # noqa: FBT003
+        _cuda().lexic.glb_load("g[i]", True)    # noqa: FBT003
 
 
 # --- end to end -----------------------------------------------------------

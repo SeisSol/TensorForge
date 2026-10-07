@@ -17,8 +17,8 @@ two vendors.  A lexic whose `atomic_store` takes other arguments than the
 single call site passes, or that has none, raises `TypeError` or
 `AttributeError` the moment it is asked.  Tests that assert a spelling would
 pass regardless -- what catches it is going through the interface the builder
-uses, which is why the lexic tests below call `has_atomic_store` first and
-then `atomic_store`, in that order and with the same arguments the builder
+uses, which is why the tests below ask `Target.native_atomic` first and then
+call `atomic_store`, in that order and with the same arguments the builder
 passes.
 """
 
@@ -56,13 +56,14 @@ def _ctx(arch, backend="hip", dtype=Datatype.F32):
 
 @pytest.mark.parametrize("arch", AMD_ARCHS)
 def test_amd_f32_follows_the_subtarget_feature(arch):
-    assert atomics.native_add(_ctx(arch), Datatype.F32) is (arch in AMD_F32)
+    assert (atomics.native_add(_ctx(arch).target, Datatype.F32)
+            is (arch in AMD_F32))
 
 
 @pytest.mark.parametrize("arch", AMD_ARCHS)
 def test_amd_f64_follows_the_subtarget_feature(arch):
     ctx = _ctx(arch, dtype=Datatype.F64)
-    assert atomics.native_add(ctx, Datatype.F64) is (arch in AMD_F64)
+    assert atomics.native_add(ctx.target, Datatype.F64) is (arch in AMD_F64)
 
 
 def test_gfx908_has_the_instruction_and_not_the_builtin():
@@ -75,8 +76,8 @@ def test_gfx908_has_the_instruction_and_not_the_builtin():
     reaches it.
     """
     ctx = _ctx("gfx908")
-    assert atomics.native_add(ctx, Datatype.F32)
-    assert atomics.amd_add_builtin(ctx, Datatype.F32) is None
+    assert atomics.native_add(ctx.target, Datatype.F32)
+    assert atomics.amd_add_builtin(ctx.target, Datatype.F32) is None
 
 
 @pytest.mark.parametrize("arch", ["gfx1250", "gfx1251"])
@@ -88,8 +89,8 @@ def test_gfx125x_has_the_f64_instruction_and_not_the_builtin(arch):
     the instruction's feature would emit an undeclared name.
     """
     ctx = _ctx(arch, dtype=Datatype.F64)
-    assert atomics.native_add(ctx, Datatype.F64)
-    assert atomics.amd_add_builtin(ctx, Datatype.F64) is None
+    assert atomics.native_add(ctx.target, Datatype.F64)
+    assert atomics.amd_add_builtin(ctx.target, Datatype.F64) is None
 
 
 @pytest.mark.parametrize("arch", sorted(AMD_F32))
@@ -98,7 +99,7 @@ def test_a_builtin_is_only_named_where_its_feature_is_present(arch):
     from tensorforge.backend.instructions.compute.primitives.amd import (
         has_feature)
     ctx = _ctx(arch)
-    named = atomics.amd_add_builtin(ctx, Datatype.F32) is not None
+    named = atomics.amd_add_builtin(ctx.target, Datatype.F32) is not None
     assert named is has_feature(ctx, "atomic-fadd-rtn-insts")
 
 
@@ -114,12 +115,14 @@ def test_the_assurance_is_asked_for_where_the_fallback_needs_it():
     `agent-scope-fine-grained-remote-memory-atomics`, so the promise has to
     come from the build.
     """
-    assert atomics.unsafe_fp_atomics_required(_ctx("gfx908"), Datatype.F32)
+    assert atomics.unsafe_fp_atomics_required(_ctx("gfx908").target,
+                                              Datatype.F32)
 
 
 @pytest.mark.parametrize("arch", ["gfx942", "gfx950", "gfx1200", "gfx1250"])
 def test_agent_scope_fine_grained_targets_need_no_assurance(arch):
-    assert not atomics.unsafe_fp_atomics_required(_ctx(arch), Datatype.F32)
+    assert not atomics.unsafe_fp_atomics_required(_ctx(arch).target,
+                                                  Datatype.F32)
 
 
 def test_a_target_with_a_builtin_needs_no_assurance():
@@ -133,14 +136,15 @@ def test_a_target_with_a_builtin_needs_no_assurance():
         has_feature)
     ctx = _ctx("gfx90a")
     assert not has_feature(ctx, "agent-scope-fine-grained-remote-memory-atomics")
-    assert atomics.amd_add_builtin(ctx, Datatype.F32) is not None
-    assert not atomics.unsafe_fp_atomics_required(ctx, Datatype.F32)
+    assert atomics.amd_add_builtin(ctx.target, Datatype.F32) is not None
+    assert not atomics.unsafe_fp_atomics_required(ctx.target, Datatype.F32)
 
 
 @pytest.mark.parametrize("arch", ["gfx900", "gfx1030"])
 def test_a_target_without_the_instruction_is_not_asked_for_one(arch):
     """Nothing to promise where nothing will be emitted."""
-    assert not atomics.unsafe_fp_atomics_required(_ctx(arch), Datatype.F32)
+    assert not atomics.unsafe_fp_atomics_required(_ctx(arch).target,
+                                                  Datatype.F32)
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +154,7 @@ def test_a_target_without_the_instruction_is_not_asked_for_one(arch):
 @pytest.mark.parametrize("arch", ["sm_60", "sm_80", "sm_90", "sm_100"])
 @pytest.mark.parametrize("dtype", [Datatype.F32, Datatype.F64])
 def test_nvidia_adds_both_float_types(arch, dtype):
-    assert atomics.native_add(_ctx(arch, "cuda", dtype), dtype)
+    assert atomics.native_add(_ctx(arch, "cuda", dtype).target, dtype)
 
 
 def test_nvidia_declines_a_half_precision_scalar():
@@ -165,16 +169,17 @@ def test_nvidia_declines_a_half_precision_scalar():
     the destination being stored are two things and only the second one is the
     question here.
     """
-    assert not atomics.native_add(_ctx("sm_90", "cuda"), Datatype.F16)
+    assert not atomics.native_add(_ctx("sm_90", "cuda").target, Datatype.F16)
 
 
 def test_intel_has_a_native_f64_add_on_pvc_only():
     """Xe-HPC has it; Xe-HPG emulates, and an emulated one is what the gate
     exists to refuse."""
-    assert atomics.native_add(_ctx("pvc", "oneapi", Datatype.F64), Datatype.F64)
-    assert not atomics.native_add(_ctx("dg1", "oneapi", Datatype.F64),
+    assert atomics.native_add(_ctx("pvc", "oneapi", Datatype.F64).target,
+                              Datatype.F64)
+    assert not atomics.native_add(_ctx("dg1", "oneapi", Datatype.F64).target,
                                   Datatype.F64)
-    assert atomics.native_add(_ctx("dg1", "oneapi"), Datatype.F32)
+    assert atomics.native_add(_ctx("dg1", "oneapi").target, Datatype.F32)
 
 
 # --------------------------------------------------------------------------- #
@@ -199,7 +204,7 @@ def test_the_offered_spelling_is_the_one_for_this_target(arch, backend, dtype,
                                                          expected):
     ctx = _ctx(arch, backend, dtype)
     lexic = ctx.target.lexic
-    assert lexic.has_atomic_store(ctx, None, dtype)
+    assert ctx.target.native_atomic(None, dtype)
     stmt = lexic.atomic_store(ctx, "glb[i]", "value", None, dtype)
     assert expected in stmt
     assert stmt.endswith(';'), 'a store is a statement, not an expression'
@@ -208,7 +213,7 @@ def test_the_offered_spelling_is_the_one_for_this_target(arch, backend, dtype,
 @pytest.mark.parametrize("arch", ["gfx900", "gfx1030"])
 def test_a_hip_target_without_the_instruction_is_not_offered_one(arch):
     ctx = _ctx(arch)
-    assert not ctx.target.lexic.has_atomic_store(ctx, None,
+    assert not ctx.target.native_atomic(None,
                                                          Datatype.F32)
 
 
@@ -250,8 +255,8 @@ def test_explicit_simd_declines_whatever_the_hardware_can_do():
     refusing is what keeps the kernel compiling."""
     spmd = _ctx("pvc", "oneapi")
     esimd = _ctx("pvc", "esimd")
-    assert spmd.target.lexic.has_atomic_store(spmd, None, Datatype.F32)
-    assert not esimd.target.lexic.has_atomic_store(esimd, None,
+    assert spmd.target.native_atomic(None, Datatype.F32)
+    assert not esimd.target.native_atomic(None,
                                                            Datatype.F32)
 
 
@@ -262,8 +267,8 @@ def test_explicit_simd_declines_whatever_the_hardware_can_do():
 def test_the_width_defaults_to_the_question_it_replaced():
     """A caller with no width to offer asks the scalar question, width 1."""
     ctx = _ctx('gfx90a')
-    assert (atomics.native_add(ctx, Datatype.F32)
-            is atomics.native_add(ctx, Datatype.F32, 1))
+    assert (atomics.native_add(ctx.target, Datatype.F32)
+            is atomics.native_add(ctx.target, Datatype.F32, 1))
 
 
 @pytest.mark.parametrize('length', [2, 4])
@@ -276,8 +281,8 @@ def test_amd_has_no_packed_float_add(length):
     table's own content rather than by a switch.
     """
     for arch in ('gfx90a', 'gfx942', 'gfx950', 'gfx1250'):
-        assert not atomics.native_add(_ctx(arch), Datatype.F32, length)
-        assert not atomics.native_add(_ctx(arch, dtype=Datatype.F64),
+        assert not atomics.native_add(_ctx(arch).target, Datatype.F32, length)
+        assert not atomics.native_add(_ctx(arch, dtype=Datatype.F64).target,
                                       Datatype.F64, length)
 
 
@@ -286,7 +291,7 @@ def test_amd_has_no_packed_float_add(length):
                           ('sm_90', 2, True), ('sm_90', 4, True),
                           ('sm_100', 2, True)])
 def test_nvidia_packs_floats_from_sm_90(arch, length, expected):
-    assert atomics.native_add(_ctx(arch, 'cuda'), Datatype.F32,
+    assert atomics.native_add(_ctx(arch, 'cuda').target, Datatype.F32,
                               length) is expected
 
 
@@ -298,10 +303,10 @@ def test_the_half_formats_exist_only_packed():
     keyed by the pair instead of by the type with a multiplier beside it.
     """
     ctx = _ctx('sm_90', 'cuda')
-    assert not atomics.native_add(ctx, Datatype.F16, 1)
-    assert atomics.native_add(ctx, Datatype.F16, 2)
-    assert atomics.native_add(_ctx('gfx942'), Datatype.BF16, 2)
-    assert not atomics.native_add(_ctx('gfx90a'), Datatype.BF16, 2)
+    assert not atomics.native_add(ctx.target, Datatype.F16, 1)
+    assert atomics.native_add(ctx.target, Datatype.F16, 2)
+    assert atomics.native_add(_ctx('gfx942').target, Datatype.BF16, 2)
+    assert not atomics.native_add(_ctx('gfx90a').target, Datatype.BF16, 2)
 
 
 def test_a_width_is_never_answered_by_splitting_it():
@@ -313,14 +318,15 @@ def test_a_width_is_never_answered_by_splitting_it():
     count behind a capability query.
     """
     ctx = _ctx('gfx90a')
-    assert atomics.native_add(ctx, Datatype.F32, 1)
-    assert not atomics.native_add(ctx, Datatype.F32, 2)
+    assert atomics.native_add(ctx.target, Datatype.F32, 1)
+    assert not atomics.native_add(ctx.target, Datatype.F32, 2)
 
 
 def test_intel_declines_a_width_whatever_the_hardware_has():
     """`sycl::atomic_ref` binds one reference to one element and has no packed
     form; a wide update is `esimd::atomic_update`, a different emitter."""
-    assert not atomics.native_add(_ctx('pvc', 'oneapi'), Datatype.F32, 2)
+    assert not atomics.native_add(_ctx('pvc', 'oneapi').target,
+                                  Datatype.F32, 2)
 
 
 def test_the_cuda_spelling_casts_to_the_vector_overload():
@@ -332,7 +338,7 @@ def test_the_cuda_spelling_casts_to_the_vector_overload():
     """
     ctx = _ctx('sm_90', 'cuda')
     lexic = ctx.target.lexic
-    assert lexic.has_atomic_store(ctx, None, Datatype.F32, 2)
+    assert ctx.target.native_atomic(None, Datatype.F32, 2)
     stmt = lexic.atomic_store(ctx, 'glb[i]', 'value', None, Datatype.F32, 2)
     assert 'float2' in stmt and 'reinterpret_cast' in stmt
     assert stmt.endswith(';')

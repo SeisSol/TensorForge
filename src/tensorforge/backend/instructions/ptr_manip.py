@@ -306,10 +306,8 @@ class GetElementPtr(AbstractInstruction):
       main_offset = f'{self._INDEX_HOLE}'
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
-      src_suffix = '_ptr' if self._context.target.lexic._backend == 'targetdart' else ''
-      rhs = self._coerce(
-          datatype, const_mod,
-          f'&{self.source_name()}{src_suffix}[{address}]')
+      source = self._context.target.lexic.batch_source(self.source_name())
+      rhs = self._coerce(datatype, const_mod, f'&{source}[{address}]')
       lhs = self._declarator(datatype, const_mod)
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'

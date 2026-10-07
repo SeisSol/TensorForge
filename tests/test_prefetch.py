@@ -31,21 +31,23 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.vm.lexic.cuda_lexic import CudaLexic
 from tensorforge.common.vm.lexic.hip_lexic import HipLexic
 from tensorforge.common.vm.lexic.ocl_lexic import OpenCLLexic
-from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
 from tensorforge.common.target import Target
 
 
 class _Hw:
-    """Just the two members the availability question reads.
+    """Just the members the availability question reads.
 
     A real `HwDecription` comes out of the hardware table, which has a row
     only for the parts the generator is built for -- and the interesting cases
     here are the ones on the far side of a threshold, which is exactly where
-    that table has no row.
+    that table has no row.  `Target` computes its answers from `hw` when
+    asked, so a target made for a part the table has can stand this in.
     """
 
     def __init__(self, model):
         self.model = model
+        self.vendor = ('nvidia' if model.startswith('sm_') else
+                       'amd' if model.startswith('gfx') else 'intel')
 
     def sm_level(self):
         text = str(self.model)
@@ -53,6 +55,24 @@ class _Hw:
             return None
         digits = ''.join(c for c in text[3:] if c.isdigit())
         return int(digits) if digits else None
+
+    def gfx_level(self):
+        text = str(self.model)
+        return int(text[3:], 16) if text.startswith('gfx') else None
+
+
+#: A part the table has, per (backend, vendor): what the stand-in replaces.
+_BASE = {('cuda', 'nvidia'): 'sm_86', ('hip', 'amd'): 'gfx90a',
+         ('hip', 'nvidia'): 'sm_86', ('oneapi', 'intel'): 'pvc',
+         ('esimd', 'intel'): 'pvc', ('acpp', 'nvidia'): 'sm_86'}
+
+
+def _on(backend, model):
+    """A target on `backend` whose device is `model`."""
+    hw = _Hw(model)
+    target = Target(_BASE[(backend, hw.vendor)], backend)
+    target.hw = hw
+    return target
 
 
 def _body(level='l2', elems=1):
@@ -121,17 +141,17 @@ def test_the_optimizer_leaves_one_hint_standing():
 
 @pytest.mark.parametrize('model', ['sm_50', 'sm_80', 'sm_90', 'sm_120'])
 def test_cuda_has_a_prefetch_from_sm_50(model):
-    assert CudaLexic('cuda', 'nvidia').has_prefetch(_Hw(model))
+    assert _on('cuda', model).prefetch()
 
 
 def test_cuda_declines_below_the_ptx_instruction():
     """The inline PTX carries no guard, so the refusal has to happen here."""
-    assert not CudaLexic('cuda', 'nvidia').has_prefetch(_Hw('sm_35'))
+    assert not _on('cuda', 'sm_35').prefetch()
 
 
 @pytest.mark.parametrize('model', ['gfx1200', 'gfx1250', 'gfx1251'])
 def test_amd_has_a_prefetch_from_gfx12(model):
-    assert HipLexic('hip', 'amd').has_prefetch(_Hw(model))
+    assert _on('hip', model).prefetch()
 
 
 @pytest.mark.parametrize('model', ['gfx900', 'gfx90a', 'gfx942', 'gfx950',
@@ -143,25 +163,23 @@ def test_amd_has_none_below_gfx12(model):
     error but a statement the IR goes on carrying to no effect, and a body
     that cannot be hinted saying nothing about it.
     """
-    assert not HipLexic('hip', 'amd').has_prefetch(_Hw(model))
+    assert not _on('hip', model).prefetch()
 
 
 def test_the_gfx_number_is_read_as_hexadecimal():
     """gfx90a has a letter in it, and gfx940 is below gfx1030, not above."""
-    lex = HipLexic('hip', 'amd')
-    assert not lex.has_prefetch(_Hw('gfx90a'))
-    assert not lex.has_prefetch(_Hw('gfx940'))
+    assert not Target('gfx90a', 'hip').prefetch()
+    assert not Target('gfx940', 'hip').prefetch()
 
 
 def test_hip_on_nvidia_declines():
     """The same condition `glb_store` and `atomic_store` carry."""
-    assert not HipLexic('hip', 'nvidia').has_prefetch(_Hw('sm_80'))
+    assert not _on('hip', 'sm_80').prefetch()
 
 
 def test_sycl_answers_from_the_library_and_not_the_part():
-    lex = SyclLexic('oneapi', 'intel')
-    assert lex.has_prefetch(_Hw('pvc'))
-    assert SyclLexic('acpp', 'nvidia').has_prefetch(_Hw('sm_80'))
+    assert Target('pvc', 'oneapi').prefetch()
+    assert _on('acpp', 'sm_80').prefetch()
 
 
 def test_esimd_has_one_where_the_lsc_does():
@@ -171,22 +189,22 @@ def test_esimd_has_one_where_the_lsc_does():
     access wants; this hook hands out a single address, and the API has an
     overload for exactly that.
     """
-    lex = SyclLexic('oneapi', 'intel', explicit_simd=True)
-    assert lex.has_prefetch(_Hw('pvc'))
-    assert lex.prefetch('&g[0]', datatype=Datatype.F32) == (
+    target = Target('pvc', 'esimd')
+    assert target.prefetch()
+    assert target.lexic.prefetch('&g[0]', datatype=Datatype.F32) == (
         'tensorforge::prefetchL2(&g[0]);')
 
 
 def test_esimd_declines_where_the_lsc_does_not():
     """DG2 and PVC, per the API's own documentation; dg1 is Xe-LP."""
-    lex = SyclLexic('oneapi', 'intel', explicit_simd=True)
-    assert not lex.has_prefetch(_Hw('dg1'))
+    assert not Target('dg1', 'esimd').prefetch()
+    assert _on('esimd', 'dg2').prefetch()
 
 
 def test_the_spmd_answer_does_not_depend_on_the_part():
     """A core SYCL call an implementation has to accept, instruction or not."""
-    lex = SyclLexic('oneapi', 'intel')
-    assert lex.has_prefetch(_Hw('dg1')) and lex.has_prefetch(_Hw('pvc'))
+    assert Target('dg1', 'oneapi').prefetch()
+    assert Target('pvc', 'oneapi').prefetch()
 
 
 # --------------------------------------------------------------------------- #
@@ -216,7 +234,7 @@ def test_amd_has_one_instruction_for_both_levels(level):
 
 
 def test_sycl_spells_the_count_and_not_the_level():
-    lex = SyclLexic('oneapi', 'intel')
+    lex = Target('pvc', 'oneapi').lexic
     text = lex.prefetch('&g[i]', datatype=Datatype.F32, elems=4, level='l1')
     assert text.endswith('.prefetch(4);')
     assert 'address_space_cast' in text, (

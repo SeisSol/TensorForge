@@ -897,7 +897,7 @@ declare('prefetch_data',
             'The transfer itself moved costs a register image or a buffer '
             'that survives the back edge; a hint costs a pointer and a few '
             'messages, and changes no result.  One hint per cache span of '
-            'each per-element source (`Lexic.prefetch_line_bytes`), for '
+            'each per-element source (`Target.prefetch_line_bytes`), for '
             '`PTR_BASED` and `STRIDED` operands; a batch-invariant one is '
             'already cached.  At `prefetch_level`.\n'
             'Off everywhere.  Under ESIMD, where one work-item per element '

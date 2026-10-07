@@ -6,8 +6,19 @@ from .lexic import Lexic, Operation
 from tensorforge.backend.writer import MultiBlock
 from tensorforge.common.basic_types import Datatype
 
+def smallest_sub_group(sizes, lanes):
+  """The smallest of `sizes` that `lanes` fit in and divide, so that a
+  multiplication of that many lanes lies within one sub-group; None where
+  none does."""
+  for size in sizes:
+    if lanes <= size and size % lanes == 0:
+      return size
+  return None
+
+
 class SyclLexic(Lexic):
-  def __init__(self, backend, underlying_hardware, explicit_simd=False):
+  def __init__(self, backend, underlying_hardware, explicit_simd=False,
+               sub_groups=None):
     super().__init__(underlying_hardware)
     self._backend = backend
     # CUDA's x is SYCL's dimension 2, and y is 1: SYCL linearizes with the
@@ -36,16 +47,10 @@ class SyclLexic(Lexic):
     # A request the caller makes rather than something derived from the
     # target -- `intel and oneapi`, say: a derivation would make selecting a
     # target select a programming model as well.
-    self.simd_mode = explicit_simd
-
-  def bounds_grid(self) -> bool:
-    # On a Data Center GPU Max 1550 a work-group that loops over more than one
-    # round of the batch is slow, whatever the occupancy: the SeisSol elastic
-    # kernels at a batch of 262144 ran as slowly at 2 rounds as at 32, and
-    # twice as fast (geomean, up to 7x) at 1, with VTune counting the same
-    # occupancy either way.  Bounded by `max_compute_units` they looped over
-    # one round per XVE.  So the grid covers the batch.
-    return False
+    self._explicit_simd = explicit_simd
+    # The sub-group sizes the kernel states, or None where the device picks
+    # its own (`Target.pinned_sub_groups`).
+    self._sub_groups = sub_groups
 
   def get_launch_size(self, func_name, block, shmem, resident=False):
     # Declares `gridsize`, which the grid right after this reads:
@@ -85,7 +90,7 @@ class SyclLexic(Lexic):
     one.  The generator has it: the arena's declaration is built once the
     body's layout has fixed the launch (`Generator._with_arena`).
     """
-    if not self.simd_mode:
+    if not self._explicit_simd:
       return ""
     if size is None:
       raise ValueError('the explicit-vector arena is `slm_init<Bytes>()` and '
@@ -97,68 +102,22 @@ class SyclLexic(Lexic):
     # reserves the largest section's size at the top of the kernel instead.
     return f'tensorforge::SlmPtr<{precision}> {name} = tensorforge::SlmPtr<{precision}>(0)'
 
-  #: The sub-group sizes an SPMD kernel may require: Xe's SIMD16 and SIMD32.
-  SUB_GROUP_SIZES = (16, 32)
-
-  @classmethod
-  def sub_group_for(cls, lanes):
-    """The sub-group one multiplication of `lanes` lanes is held in: the
-    smallest supported size it fits and divides, so that every
-    multiplication lies within one sub-group.  `None` where none does."""
-    for size in cls.SUB_GROUP_SIZES:
-      if lanes <= size and size % lanes == 0:
-        return size
-    return None
-
-  def sub_group_width(self, lanes) -> int:
-    """The sub-group the kernel asks for at `lanes` (`kernel_definition`).
-
-    `sub_group_for` answers "which supported size holds one multiplication
-    whole", and is None past the widest.  This one answers what the kernel
-    will state, which is that size where there is one and the widest
-    otherwise -- the multiplication then spans several sub-groups, and its
-    broadcast sources have to be replicated into each.
-    """
-    if not lanes:
-      return self.SUB_GROUP_SIZES[-1]
-    return (self.sub_group_for(lanes)
-            or next((s for s in self.SUB_GROUP_SIZES if s >= lanes),
-                    self.SUB_GROUP_SIZES[-1]))
-
-  def _pins_sub_group(self) -> bool:
-    """Whether the kernel states its sub-group size (`kernel_definition`),
-    so that the lexic knows it; elsewhere it is the device's."""
-    return (self._underlying_hardware == 'intel' and self._backend == 'oneapi'
-            and not self.simd_mode)
-
-  def exchange_reach(self, num_threads: int, hw) -> int:
-    """Under ESIMD the multiplication is one work-item's vector, so an
-    exchange reaches all of it.  Under SPMD with the sub-group stated, the one
-    `sub_group_for` puts it in -- 32 lanes for a 32-lane multiplication on a
-    device whose vector unit is 16."""
-    if self.simd_mode:
-      return num_threads
-    if self._pins_sub_group():
-      size = self.sub_group_for(num_threads)
-      if size is not None:
-        return size
-    return hw.vec_unit_length
-
   def exchange_xor(self, variable, mask):
     """Under SPMD, `permute_group_by_xor` over the sub-group.  A mask below
     the multiplication's width keeps a lane inside its own multiplication,
-    since `sub_group_for` places one where its size divides the sub-group --
+    since `Target.exchange_reach` places one where its size divides the
+    sub-group --
     so several multiplications in one sub-group each exchange among their own
     lanes, which `reduce_over_group` over the whole sub-group would not.
     Under ESIMD the lanes are elements of one vector and `reduction` answers
     directly."""
-    if self.simd_mode:
+    if self._explicit_simd:
       return None
     return (f'sycl::permute_group_by_xor(item.get_sub_group(), {variable}, '
             f'{mask})')
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None):
-    if self.simd_mode:
+    if self._explicit_simd:
       # The arena is reserved inside the kernel instead; see
       # `declare_shared_memory`.  Declaring an accessor as well would reserve
       # the space twice -- once by the accessor's range and once by
@@ -176,7 +135,7 @@ class SyclLexic(Lexic):
 
     props = ''
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
-      if self.simd_mode:
+      if self._explicit_simd:
         add_items = '[[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]]'
         # The large register file as a kernel property, not as the attribute
         # `[[intel::grf_size(256)]]`, which DPC++ 2026 does not know: it warns
@@ -192,9 +151,10 @@ class SyclLexic(Lexic):
         # within one would read undefined lanes: on the CPU the kernel writes
         # nothing, or 1e27 (chain_five).  A kernel of no multiplication asks
         # for 16.
-        size = (self.sub_group_for(lanes) or
-                next((s for s in self.SUB_GROUP_SIZES if s >= lanes),
-                     self.SUB_GROUP_SIZES[-1])) if lanes else 16
+        sizes = self._sub_groups
+        size = (smallest_sub_group(sizes, lanes) or
+                next((s for s in sizes if s >= lanes),
+                     sizes[-1])) if lanes else 16
         add_items = (f'[[intel::reqd_sub_group_size({size})]] '
                      f'[[intel::kernel_args_restrict]]')
     else:
@@ -209,7 +169,7 @@ class SyclLexic(Lexic):
           f"{{group_size.get(2), group_size.get(1), group_size.get(0)}}}}, "
           f"{props}[=](sycl::nd_item<3> item) {add_items}")
 
-    if self.simd_mode and total_shared_mem_size and precision is not None:
+    if self._explicit_simd and total_shared_mem_size and precision is not None:
       # Once, before any section binds a window into it; see
       # `declare_shared_memory`.  `total_shared_mem_size` is the largest
       # section's arena, which is what every section addresses.
@@ -225,7 +185,7 @@ class SyclLexic(Lexic):
     return "item.barrier();"
 
   def sync_simd(self):
-    if self.simd_mode:
+    if self._explicit_simd:
       # One work-item *is* the vector: there are no lanes to synchronize.
       return None
     # A sub-group barrier, not a work-group one.
@@ -240,50 +200,12 @@ class SyclLexic(Lexic):
     # narrow enough (16 on PVC) for ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
 
-  def folds_broadcast(self) -> bool:
-    """True under SPMD: `sycl::group_broadcast` of a fixed lane becomes a
-    scalar region on the reading instruction.
-
-    Not under an explicit vector, where a broadcast is a `simd` operation that
-    produces a vector of its own.
-    """
-    return not self.simd_mode
-
-  def has_sync_mult(self, num_threads: int, hw) -> bool:
-    """Whether one multiplication can be met on its own.
-
-    Under ESIMD one work-item *is* the vector: a multiplication of any width is
-    held by a single work-item, executed in order, with no second party to wait
-    for.  So the rendezvous costs nothing and is exact.
-
-    Under SPMD there is no mask.  `sycl::group_barrier` takes a group object,
-    the narrowest one is the sub-group, and a multiplication occupying *part*
-    of a sub-group cannot be met on its own -- the named barriers Xe has are
-    reachable from ESIMD (`named_barrier_signal` / `named_barrier_wait`) and
-    exactly there they are not needed.  Such a multiplication is met at its
-    group instead, and the block is sized to hold one.
-
-    But the sub-group's width is not the hardware wave's here: the kernel
-    states it (`reqd_sub_group_size`, `_pins_sub_group`) and states it as the
-    multiplication's own width where one of the supported sizes fits.  Where
-    it does, the sub-group *is* the multiplication and its barrier meets
-    exactly the threads that have to meet.  Asking the wave instead would
-    cost every 32-lane kernel on a 16-wide PVC its block: the cap would fall
-    to one multiplication per work-group -- 32 work-items where the thread
-    budget allows 256 -- and `elastic-o6s:derivative` runs that way at 30.2 ns
-    an element against 12.7 at sixteen lanes, where the multiplication
-    happens to equal the wave and no cap applies.
-    """
-    if self.simd_mode:
-      return True
-    return (self._pins_sub_group()
-            and self.sub_group_for(num_threads) == num_threads)
-
   def sync_mult(self, num_threads: int, hw):
-    if self.simd_mode:
+    if self._explicit_simd:
       return None
-    if self.has_sync_mult(num_threads, hw):
-      # The pinned sub-group is this multiplication, so its barrier is exact.
+    if (self._sub_groups is not None
+        and smallest_sub_group(self._sub_groups, num_threads) == num_threads):
+      # The stated sub-group is this multiplication, so its barrier is exact.
       return 'sycl::group_barrier(item.get_sub_group());'
     return self.sync_block()
 
@@ -295,7 +217,7 @@ class SyclLexic(Lexic):
     return 'item.get_sub_group()'
 
   def broadcast(self, variable, lane, block=None, subblock=1):
-    if self.simd_mode:
+    if self._explicit_simd:
       return f'{variable}.select<{block}, {subblock}>({lane})'
     else:
       # `lane` counts within the multiplication, and `group_broadcast` takes
@@ -308,8 +230,8 @@ class SyclLexic(Lexic):
       group = 'item.get_sub_group()'
       if block is None:
         return f'sycl::group_broadcast({group}, {variable}, {lane})'
-      if self._pins_sub_group():
-        size = self.sub_group_for(block)
+      if self._sub_groups is not None:
+        size = smallest_sub_group(self._sub_groups, block)
         if size is None:
           # `block` is the *image's* lane block, so this says the image is
           # spread over more lanes than a sub-group holds and no group can
@@ -321,7 +243,7 @@ class SyclLexic(Lexic):
           from tensorforge.common.exceptions import GenerationError
           raise GenerationError(
               f'a register image spread over {block} lanes lies in no '
-              f'sub-group of {" or ".join(map(str, self.SUB_GROUP_SIZES))}, '
+              f'sub-group of {" or ".join(map(str, self._sub_groups))}, '
               f'so a broadcast cannot read it within one; stage it over a '
               f'sub-group and replicate it instead')
         if size == block:
@@ -344,24 +266,9 @@ class SyclLexic(Lexic):
     # intel_esimd`, which `isycl.h` defines; without it a compile stops at the
     # first vector.  Only there: the header includes the ESIMD extension,
     # which AdaptiveCpp does not have.
-    if self.simd_mode:
+    if self._explicit_simd:
       return ['sycl/sycl.hpp', 'tensorforge_device/isycl.h']
     return ['sycl/sycl.hpp']
-
-  def has_atomic_store(self, ctx, op, datatype, length=1):
-    """No under the explicit-SIMD lowering, whatever the hardware can do.
-
-    `atomic_ref` binds one reference to one element, and under ESIMD the value
-    a store carries is a `simd<T, N>` with a mask beside it -- there is no
-    scalar to bind.  The instruction is `esimd::atomic_update<atomic_op::fadd>`,
-    which takes the vector and the `simd_mask` together and updates the whole
-    of it with atomicity per element.  That is a better fit for what the store
-    path wants than the SPMD spelling is, and it is a different emitter; until
-    it exists, refusing is what keeps an ESIMD kernel from being handed an
-    `atomic_ref<simd<float, 16>>` that does not compile.
-    """
-    return (not self.simd_mode
-            and super().has_atomic_store(ctx, op, datatype, length))
 
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """A relaxed, device-scope `atomic_ref` over the destination element.
@@ -381,40 +288,10 @@ class SyclLexic(Lexic):
             f'sycl::access::address_space::global_space>'
             f'({access}).fetch_add({variable});')
 
-  #: Intel parts whose LSC has the prefetch the ESIMD API lowers to.
-  #:
-  #: A list because the API's own documentation is one -- "DG2, PVC only" --
-  #: and there is no feature query to derive it from. An earlier Xe part
-  #: compiles the call and has no instruction under it.
-  _ESIMD_PREFETCH_ARCHS = frozenset({'pvc', 'dg2'})
-
-  def has_prefetch(self, hw):
-    """Core SYCL 2020 under SPMD, and an LSC instruction under ESIMD.
-
-    `multi_ptr::prefetch` is declared for every global-space pointer and an
-    implementation with nothing behind it still has to accept the call, which
-    is the right shape for a hint -- so the SPMD answer does not consult the
-    hardware at all.
-
-    The explicit-SIMD lowering is the opposite: `esimd::prefetch` is a thin
-    wrapper over an LSC message that two Intel generations have, so the model
-    decides. Both paths spell a single address; they differ in what has to be
-    said about the cache, which `isycl.h` says once.
-    """
-    if self.simd_mode:
-      return str(getattr(hw, 'model', '')) in self._ESIMD_PREFETCH_ARCHS
-    return True
-
-  def prefetch_line_bytes(self) -> int:
-    # ESIMD asks with one message for a run of up to 31 lines -- a gather,
-    # one lane per line, and one lane spare for a run that does not start on
-    # a line (`prefetchHinted` in `isycl.h`); SPMD asks per line.
-    return 31 * 64 if self.simd_mode else 64
-
   def prefetch_runs(self, addresses, byte_counts, level='l2'):
     # A gather with a lane per line of each run (`prefetchRunsHinted` in
     # `isycl.h`); SPMD has no instruction that names several addresses.
-    if not self.simd_mode:
+    if not self._explicit_simd:
       return None
     fn = 'prefetchRunsL1' if str(level).lower() == 'l1' else 'prefetchRunsL2'
     lengths = ', '.join(str(int(b)) for b in byte_counts)
@@ -440,7 +317,7 @@ class SyclLexic(Lexic):
     spelling, and tying generated kernels to an interface both implementations
     are moving off is not worth the shorter line.
     """
-    if self.simd_mode:
+    if self._explicit_simd:
       fn = 'prefetchL1' if str(level).lower() == 'l1' else 'prefetchL2'
       if elems > 1:
         # The block form: `elems` elements from one address, one message.
@@ -476,7 +353,7 @@ class SyclLexic(Lexic):
     orders. Saying `__restrict__` about a class type is not a weaker promise,
     it does not parse.
     """
-    if (self.simd_mode and getattr(space, 'name', None) == 'SHARED'
+    if (self._explicit_simd and getattr(space, 'name', None) == 'SHARED'
         and depth == 1):
       ro = 'const ' if readonly else ''
       tail = ' const' if const else ''
@@ -485,33 +362,33 @@ class SyclLexic(Lexic):
                                 depth)
 
   def shared_pointer_type(self, elem, restrict=False):
-    if self.simd_mode:
+    if self._explicit_simd:
       # `pointer_type` already answers for this space; the two must not drift.
       from tensorforge.backend.pir.core import MemSpace
       return self.pointer_type(elem, MemSpace.SHARED, restrict=restrict)
     return super().shared_pointer_type(elem, restrict)
 
   def shared_window_expr(self, arena, offset):
-    if self.simd_mode:
+    if self._explicit_simd:
       # An offset into an offset.  `&arena[off]` would be the address of the
       # proxy `operator[]` returns, which is a temporary.
       return f'{arena} + ({offset})'
     return super().shared_window_expr(arena, offset)
 
   def shared_window_retype(self, window, elem):
-    if self.simd_mode:
+    if self._explicit_simd:
       # An offset counts elements of its own type, so the same byte address
       # is another count; `slmCast` converts through the bytes.
       return f'tensorforge::slmCast<{elem}>({window})'
     return super().shared_window_retype(window, elem)
 
   def get_slm_load(self, elem, width, address):
-    if not self.simd_mode:
+    if not self._explicit_simd:
       return None
     return f'tensorforge::slmLoad<{elem}, {width}>({address})'
 
   def get_slm_store(self, elem, width, address, value):
-    if not self.simd_mode:
+    if not self._explicit_simd:
       return None
     return f'tensorforge::slmStore<{elem}, {width}>({address}, {value});'
 
@@ -660,7 +537,7 @@ class SyclLexic(Lexic):
     if block == subblock:
       # Nothing to combine: each group is one lane wide already.
       return variable
-    if not self.simd_mode:
+    if not self._explicit_simd:
       raise NotImplementedError(
           f'{type(self).__name__} has no SPMD cross-lane reduction. '
           f'`sycl::reduce_over_group(item.get_sub_group(), ...)` answers this '
@@ -707,7 +584,7 @@ class SyclLexic(Lexic):
     return f'tensorforge::intel_esimd::simd_mask<{size}>'
 
   def get_operation(self, op: Operation, fptype, value1, value2):
-    if self.simd_mode:
+    if self._explicit_simd:
       return self._esimd_operation(op, fptype, value1, value2)
     if op == Operation.COPY:
       return value1

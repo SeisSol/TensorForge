@@ -62,20 +62,6 @@ def _atomic(expr: str) -> bool:
     return bool(_ATOM.match(expr))
 
 
-def _sm_at_least(model: str, minimum: int) -> bool:
-    digits = ''.join(c for c in str(model)[3:] if c.isdigit())
-    return str(model).startswith('sm_') and bool(digits) and int(digits) >= minimum
-
-
-# Which architectures actually have the asynchronous global -> shared path.
-# The lexic knows how the call *looks*; this table knows whether it *exists*.
-_ASYNC_ARCH = {
-    'nvidia': lambda m: _sm_at_least(m, 80),                    # cp.async
-    'amd': lambda m: str(m) in ('gfx90a', 'gfx940', 'gfx941',   # global_load_lds
-                                'gfx942', 'gfx950'),
-}
-
-
 # generic pure ops -> infix C++ operators
 _INFIX = {
     'add': '+', 'sub': '-', 'mul': '*', 'div': '/',
@@ -412,7 +398,7 @@ class Emitter:
             # and a perfectly bad one to emit.  It arrives when a producer
             # answers with nothing and the consumer uses the answer anyway --
             # `Symbol.load` answering None for a structured load under
-            # `simd_mode`, say, with the value flowing into an arithmetic op,
+            # an explicit vector, say, with the value flowing into an arithmetic op,
             # which would come out as `sycl::max(float(acc), float(None))`.
             # Loud here, because the alternative is a compiler error pointing
             # at the arithmetic rather than at the load that had no value.
@@ -512,8 +498,7 @@ class Emitter:
         # *elements* of one value and there is no second lane to read from, so
         # neither the fault nor the remedy applies -- and an address clamped by
         # a mask is not an address at all.
-        lex = self._lexic()
-        return not getattr(lex, 'simd_mode', False)
+        return not getattr(self._target(), 'explicit_simd', False)
 
     def _infix(self, op: str, v: Value, args: Sequence[str]) -> str:
         """`a op b`.  A hook: the explicit-vector emitter spells a comparison
@@ -554,7 +539,7 @@ class Emitter:
         Read off `participants` alone, never off the arrival level: the two
         are different questions and a wave barrier answers them differently.
         `Lexic.sync_mult` is asked only for `MULT`, and only after
-        `has_sync_mult` agreed at the same width -- so a target with no
+        `Target.sync_mult` agreed at the same width -- so a target with no
         sub-block rendezvous is never handed a request it has to approximate.
 
         Falls back to the bare call when there is no lexic: the IR-level tests
@@ -648,23 +633,23 @@ class Emitter:
         if not copies:
             return
 
-        lex, hw = self._lexic(), self._hw()
-        if lex is None or hw is None:
+        target = self._target()
+        if target is None:
             self._async_note = 'no hardware description available'
             return
-        supported = _ASYNC_ARCH.get(getattr(hw, 'vendor', None))
-        if supported is None or not supported(getattr(hw, 'model', '')):
+        hw = target.hw
+        if not target.async_copy_path():
             self._async_note = f'{getattr(hw, "model", "?")} has no async copy path'
             return
 
-        sizes = lex.copy_async_sizes()
+        sizes = target.copy_async_sizes()
         for c in copies:
             nbytes = c.attr('elems', 1) * self.elem_size(c.copy_dst)
             if nbytes not in sizes:
                 self._async_note = (f'{nbytes} B per thread is not one of '
                                     f'{sizes} on {hw.model}')
                 return
-        self._async_lex = lex
+        self._async_lex = target.lexic
 
     def _decide_prefetch(self, body: Tuple[Stmt, ...]) -> None:
         """One decision per body, and a lighter one than the copies above.
@@ -675,7 +660,7 @@ class Emitter:
         data prefetch" and "nothing asked for one" then read identically in
         the output, and only one of them is worth acting on.
 
-        The question goes to the lexic rather than to a table keyed on the
+        The question goes to the target rather than to a table keyed on the
         vendor.  A SYCL target's answer is about the library it compiles
         against and not about the part it runs on, and HIP compiles for NVIDIA
         as well -- a vendor string answers neither.
@@ -684,15 +669,15 @@ class Emitter:
         if not any(s.op == Op.PREFETCH for s in walk_stmts(body)):
             return
 
-        lex, hw = self._lexic(), self._hw()
-        if lex is None or hw is None:
+        target = self._target()
+        if target is None:
             self._prefetch_note = 'no hardware description available'
             return
-        if not lex.has_prefetch(hw):
-            self._prefetch_note = (f'{getattr(hw, "model", "?")} has no data '
-                                   f'prefetch')
+        if not target.prefetch():
+            self._prefetch_note = (f'{getattr(target.hw, "model", "?")} has no '
+                                   f'data prefetch')
             return
-        self._prefetch_lex = lex
+        self._prefetch_lex = target.lexic
 
     def zero(self, t, value: Optional[Value] = None) -> str:
         """What a predicated statement produces where the predicate is false.
@@ -1053,8 +1038,13 @@ class Emitter:
             named = s.attr('extern')
             if nontemporal:
                 # The attribute is the kind of hint (`hints.cache_hint`), and
-                # the lexic spells whichever it has.
+                # the lexic spells whichever it has -- where the target has one
+                # for this type at all.
                 dt, width = self.access_type(v.type, s.args[0])
+                target = self._target()
+                if target is None or not target.nontemporal(dt, width):
+                    nontemporal = False
+            if nontemporal:
                 # Passed only when asked for: `declare` is overridden by the
                 # explicit-vector emitter, which never splits and whose
                 # signature does not carry the argument.
@@ -1096,9 +1086,11 @@ class Emitter:
             lex = self._lexic()
             if space is MemSpace.GLOBAL and lex is not None:
                 dt, width = self.access_type(vt, s.args[0])
+                hint = s.attr('nontemporal') or False
+                if hint and not self._target().nontemporal(dt, width):
+                    hint = False
                 w(lex.glb_store(access, self.operand(val),
-                                datatype=dt, length=width,
-                                nontemporal=s.attr('nontemporal') or False))
+                                datatype=dt, length=width, nontemporal=hint))
                 return
             w(f'{access} = {self.operand(val)};')
             return
@@ -1168,11 +1160,12 @@ class Emitter:
             if lex is None:
                 return
             cls = s.attr('counter', 'copy')
-            # AMD counts both classes in one vmcnt -- but only while the copy
-            # path is actually the hardware one; if copies fell back to plain
-            # assignments they are not in flight and must not be counted.
-            unified = (self._async_lex is not None and
-                       getattr(self._hw(), 'vendor', None) == 'amd')
+            # One counter for both classes (`Target.one_wait_counter`) -- but
+            # only while the copy path is actually the hardware one; if copies
+            # fell back to plain assignments they are not in flight and must
+            # not be counted.
+            unified = (self._async_lex is not None
+                       and self._target().one_wait_counter())
             n = s.attr('prior_unified' if unified else 'prior', 0)
             texts = []
             if cls in ('load', 'all'):
@@ -1445,7 +1438,7 @@ def emit(body: Tuple[Stmt, ...], writer, context: Any = None) -> None:
     simd = False
     if target is not None:
         try:
-            simd = bool(getattr(target.lexic, 'simd_mode', False))
+            simd = bool(getattr(target, 'explicit_simd', False))
         except Exception:
             simd = False
     if simd:

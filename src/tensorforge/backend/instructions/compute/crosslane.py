@@ -33,10 +33,9 @@ class CrossLaneFold:
     """The exchange, and the rendezvous where the exchange does not reach."""
 
     def _reach(self) -> int:
-        """How far one exchange reaches (`Lexic.exchange_reach`): the wave,
+        """How far one exchange reaches (`Target.exchange_reach`): the wave,
         a sub-group the kernel states, or under ESIMD the whole vector."""
-        target = self._context.target
-        return target.lexic.exchange_reach(self._num_threads, target.hw)
+        return self._context.target.exchange_reach(self._num_threads)
 
     def _lane(self, writer: Writer):
         """Which element of the distributed dimension this lane is at.

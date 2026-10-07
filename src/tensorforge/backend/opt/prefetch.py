@@ -113,7 +113,7 @@ class PrefetchData(AbstractTransformer):
     edge -- a register image carried, or a buffer the next iteration reads --
     and a peel and a drain.  This leaves every transfer where it is and puts
     at that same tail a *hint* for the data the transfer will read, one span
-    per `Lexic.prefetch_line_bytes`, through a pointer to ``k + 1`` bound at
+    per `Target.prefetch_line_bytes`, through a pointer to ``k + 1`` bound at
     the head of the body.  Nothing waits on it and nothing is produced, so it
     changes no result; the transfer then finds its lines on their way in.
 

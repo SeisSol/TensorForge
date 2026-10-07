@@ -35,15 +35,15 @@ class SyncThreads(AbstractInstruction):
     32-thread multiplication is a 32-wide vector held by one work-item,
     executed in order, with no second party to wait for.
     """
-    lex = self._context.target.lexic
-    if getattr(lex, 'simd_mode', False):
+    target = self._context.target
+    if target.explicit_simd:
       return Participants.MULT
     n, wave = self._num_threads, self._wave()
     if n == wave:
       # The multiplication *is* the wave, so the wave barrier meets exactly
       # the threads that have to meet and nothing narrower exists.
       return Participants.WAVE
-    if lex.has_sync_mult(n, self._context.target.hw):
+    if target.sync_mult(n):
       return Participants.MULT
     # No sub-block rendezvous.  What is left is the smallest set of whole
     # waves that holds this multiplication, which is its group -- and the

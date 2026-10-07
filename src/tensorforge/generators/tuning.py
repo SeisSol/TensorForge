@@ -55,20 +55,6 @@ from tensorforge.generators.lanes import LaneConfig
 # Candidates
 # --------------------------------------------------------------------------- #
 
-def backend_of(context: Context) -> str:
-    """The backend a context was made for, as `Context` was asked.
-
-    Not `hw.backend`: that is the device's, and `esimd` runs on the `oneapi`
-    device -- a context rebuilt from it is SPMD SYCL, so every ESIMD candidate
-    would be built, compiled and scored as the other lowering.
-    """
-    from tensorforge.common.vm.lexic import EXPLICIT_SIMD_BACKENDS
-    backend = context.target.hw.backend
-    if getattr(context.target.lexic, 'simd_mode', False):
-        return next(k for k, v in EXPLICIT_SIMD_BACKENDS.items() if v == backend)
-    return backend
-
-
 @dataclass(frozen=True)
 class Candidate:
     """One configuration: a lane geometry and the options it is built with.
@@ -100,7 +86,7 @@ class Candidate:
         asked = dict(base._asked_options.asked())
         asked.update(self.options)
         asked.update(override)
-        return Context(arch=hw.model, backend=backend_of(base),
+        return Context(arch=hw.model, backend=base.target.backend,
                        fp_type=base.fp_type, options=Options(**asked))
 
     def label(self) -> str:
@@ -217,8 +203,7 @@ def _geometries(descrs, context) -> List[LaneConfig]:
     lane candidate has it."""
     flat = _flat(descrs)
     out = list(lane_config.candidates(flat, context))
-    backend = getattr(context.target.lexic, '_backend', None)
-    if backend not in ('cuda', 'hip'):
+    if not context.target.lead_vectors():
         return out
     base = lane_config.deduce(flat, context)
     rows = base.num_active_threads or base.num_threads
@@ -324,7 +309,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     `lanes.MIN_LANES` -- the geometries measured on every target; the
     divisors of the extent (5 and 7 lanes for 20 and 35 rows) rank well on
     both scorers and have never been timed.  A width of two only where one
-    instruction does two FMAs (`has_packed_fp32_fma`) and the extent is even:
+    instruction does two FMAs (`Target.packed_fma_width`) and the extent is even:
     elsewhere it is two scalar FMAs, and at 35 rows on GB200 it was 70 %
     slower.  Merging where something repeats, and rolling by the largest
     divisor up to 32.  Not `prepare_operands`: the host packs for it.  Not
@@ -356,8 +341,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # 12.7 at sixteen.  So the floor is the vector unit there, and
     # `MIN_LANES` elsewhere, where a narrow multiplication shares its wave.
     floor = lane_config.MIN_LANES
-    if hw.vendor == 'intel' and not getattr(context.target.lexic,
-                                            'simd_mode', False):
+    if hw.vendor == 'intel' and not context.target.explicit_simd:
         floor = max(floor, getattr(hw, 'vec_unit_length', 1))
     # Under the explicit vector, the deduced width alone.  The scorers do not
     # rank these: over the twenty elastic kernels on pvc, against the fastest
@@ -383,7 +367,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # half of it, and four such multiplications side by side in one 32-wide
     # register would be the same work at full occupancy.  Nothing does either
     # today.
-    explicit = getattr(context.target.lexic, 'simd_mode', False)
+    explicit = context.target.explicit_simd
     if explicit and context.get_user_options().autotune != 'compiled':
         # Nothing else can rank these.  The modelled footprint counts the
         # bytes of the tile and those barely move -- half a percent between
@@ -407,9 +391,9 @@ def simple_space(descrs, context: Context) -> List[Knob]:
             t //= 2
         if context.get_user_options().autotune == 'compiled':
             geometries += _wider(base, rows, hw)
-    backend = getattr(context.target.lexic, '_backend', None)
-    if (hw.has_packed_fp32_fma() and context.fp_type == Datatype.F32
-            and backend in ('cuda', 'hip') and rows % 2 == 0
+    if (context.fp_type == Datatype.F32
+            and context.target.packed_fma_width(Datatype.F32) == 2
+            and context.target.lead_vectors() and rows % 2 == 0
             and base.lead_width == 1):
         # On AMD only where a lane holds one pair per column.  hipcc spilled
         # every gfx942 build that needed two -- 16 lanes at 35 and 56 rows,
@@ -466,7 +450,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # ESIMD build beats its own default, which is a measurement and not an
     # opinion.
     if (hw.vendor == 'intel'
-            and not getattr(context.target.lexic, 'simd_mode', False)
+            and not context.target.explicit_simd
             and any(t.addressing == Addressing.NONE for t in _tensors(descrs))):
         knobs.append(Knob('preload_globals', lambda c: (False, True)))
     # Reading an array temporary out of its producer's register image trades
@@ -823,8 +807,7 @@ def _over_budget(result: Build) -> float:
         # scalar file gets its own term instead.
         return (max(0.0, 4 * register_estimate(result) - budget)
                 + _over_scalar_budget(result))
-    if hw.vendor == 'intel' and not getattr(
-            result.context.target.lexic, 'simd_mode', False):
+    if hw.vendor == 'intel' and not result.context.target.explicit_simd:
         # The file is a *thread's*, and under SPMD one thread holds the whole
         # sub-group: the budget a lane may spend is the file divided by the
         # lanes that share it, or -- the same statement the other way up --
@@ -989,7 +972,7 @@ class CompiledScore:
         issue = _least_cycles(result.generator, lanes, wave,
                               spill_bytes=report.spill_bytes,
                               resident=resident, hw=hw)
-        if getattr(result.context.target.lexic, 'simd_mode', False):
+        if result.context.target.explicit_simd:
             # Widest unless it spills.  Under the explicit vector the lane
             # count is the vector's width, and a narrower one does strictly
             # less work per instruction; the only thing it buys is a value
@@ -1182,7 +1165,7 @@ def _key(result: Build, mode: str) -> str:
     """
     hw = result.context.target.hw
     sha = hashlib.sha256()
-    for part in (mode, hw.model, backend_of(result.context), str(result.context.fp_type),
+    for part in (mode, hw.model, result.context.target.backend, str(result.context.fp_type),
                  kernel_source(result)):
         sha.update(part.encode())
         sha.update(b'\0')
