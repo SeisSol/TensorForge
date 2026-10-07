@@ -4,16 +4,16 @@
 """``B[i, j] = A[i, j] ** 3`` — single-(constant-folded)-op ElementwiseDescr.
 
 This case exercises a binary elementwise op with a scalar operand:
-``ew.pow(b, a, 3.0)``.  ``ew.pow`` folds the exponents 2, 1, -1, 0.5,
--0.5, 1/3 and -1/3 into cheaper operations; 3.0 matches none of them,
-so it lowers to ``Operation.POW`` and reaches ``powf`` in CUDA.
+``ew.pow(b, a, 3.0)``.  ``ew.pow`` rewrites the exponents 2, 1 and -1,
+where a product, a copy and a reciprocal are the same function; 3.0 is
+none of them, so it lowers to ``Operation.POW`` and reaches the library's
+``pow``.
 
 Two reasons to include it:
 
-* it is the one case whose nonlinear op is the general power, the
-  obvious exponents being folded into sqrt/cbrt/rcp and friends;
-* it pins the fold table: a fold for ``y == 3`` would change this case's
-  generated kernel, and its snapshot would show it.
+* it is the one case whose nonlinear op is the general power;
+* it pins the rewrite table: a rewrite for ``y == 3`` would change this
+  case's generated kernel, and its snapshot would show it.
 
 Domain: signed; ``a**3`` is well-defined everywhere and bounded for
 ``standard_normal``-magnitude inputs.

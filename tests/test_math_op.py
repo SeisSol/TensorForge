@@ -15,6 +15,7 @@ table per language is one place per language for a misspelt name to hide.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import replace
 
@@ -34,6 +35,8 @@ from tensorforge.common.vm.lexic.cuda_lexic import CudaLexic
 from tensorforge.common.vm.lexic.lexic import INFIX
 from tensorforge.common.vm.lexic.sycl_lexic import SyclLexic
 from tensorforge.common.vm.lexic.target_lexic import TargetLexic
+from tensorforge.generators import elementwise as ew
+from tensorforge.generators.generator import Generator
 
 F32 = ScalarType(Datatype.F32)
 F64 = ScalarType(Datatype.F64)
@@ -143,9 +146,6 @@ def test_what_it_occupies_is_read_off_the_function():
 
 def test_the_elementwise_instruction_writes_the_operation(monkeypatch):
     """The operation reaches the IR as itself, and comes out as its call."""
-    from tensorforge.generators import elementwise as ew
-    from tensorforge.generators.generator import Generator
-
     built = []
     real = IRBuilder.math
 
@@ -169,22 +169,53 @@ def _tensor(alias):
                             datatype=Datatype.F32))
 
 
-@pytest.mark.parametrize('where,exponent,call', [
-    (CUDA, -0.5, 'rsqrtf('), (HIP, -0.5, 'rsqrtf('),
-    (SYCL, -0.5, 'sycl::rsqrt('), (ESIMD, -0.5, '::rsqrt('),
-    (CUDA, -1 / 3, 'rcbrtf('), (HIP, -1 / 3, 'rcbrtf(')])
+@pytest.mark.parametrize('where,root,call', [
+    (CUDA, ew.rsqrt, 'rsqrtf('), (HIP, ew.rsqrt, 'rsqrtf('),
+    (SYCL, ew.rsqrt, 'sycl::rsqrt('), (ESIMD, ew.rsqrt, '::rsqrt('),
+    (CUDA, ew.rcbrt, 'rcbrtf('), (HIP, ew.rcbrt, 'rcbrtf(')])
 def test_a_reciprocal_root_is_spelled_where_the_library_has_one(
-        where, exponent, call):
-    """`ew.pow` takes these two exponents to the reciprocal roots, so a
-    library that has one is asked for it."""
-    from tensorforge.generators import elementwise as ew
-    from tensorforge.generators.generator import Generator
-
-    gen = Generator([ew.pow(_tensor('B'), _tensor('A'), exponent)],
+        where, root, call):
+    """A library that has the reciprocal root is asked for it."""
+    gen = Generator([root(_tensor('B'), _tensor('A'))],
                     Context(arch=where[0], backend=where[1],
                             fp_type=Datatype.F32))
     gen.generate()
     assert call in gen.get_kernel()
+
+
+# --------------------------------------------------------------------------- #
+# What `ew.pow` writes
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize('exponent', [0.5, -0.5, 1 / 3, -1 / 3, 3.0])
+def test_a_power_is_the_power_where_a_root_is_another_function(exponent):
+    """`sqrt(-0.0)` is -0 where `pow(-0.0, 0.5)` is +0, and `cbrt(-8.0)` is
+    -2 where `pow(-8.0, 1/3)` is a NaN: a kernel that means the root asks for
+    it by name."""
+    assert ew.pow(_tensor('B'), _tensor('A'), exponent).op == Operation.POW
+
+
+def test_a_base_of_e_is_the_power():
+    """`math.e` is not e, and `pow` with it is not `exp`."""
+    assert ew.pow(_tensor('B'), math.e, _tensor('A')).op == Operation.POW
+
+
+@pytest.mark.parametrize('base,exponent,op,srcs', [
+    ('A', 2, Operation.MUL, ('A', 'A')),
+    ('A', 2.0, Operation.MUL, ('A', 'A')),
+    ('A', 1, Operation.COPY, ('A',)),
+    ('A', -1.0, Operation.RCP, ('A',)),
+    (1.0, 'A', Operation.COPY, (1.0,)),
+])
+def test_an_operation_that_is_the_same_function_stands_in(
+        base, exponent, op, srcs):
+    """Signed zeros, infinities and NaN included."""
+    tensors = {'A': _tensor('A')}
+    d = ew.pow(_tensor('B'), tensors.get(base, base),
+               tensors.get(exponent, exponent))
+    assert d.op == op
+    assert [s if isinstance(s, float) else s.tensor.alias
+            for s in d.srcs] == list(srcs)
 
 
 # --------------------------------------------------------------------------- #

@@ -18,7 +18,6 @@ order.
 
 from __future__ import annotations
 
-import math
 from typing import Union
 
 from tensorforge.common.operation import Operation
@@ -98,32 +97,29 @@ def div(dest, x, y, **kw) -> ElementwiseDescr:
 
 
 def pow(dest, x, y, **kw) -> ElementwiseDescr:
-    """``dest = x ** y``, with special cases for some exponents.
+    """``dest = x ** y``, as C's ``pow``.
 
-    ``y == 2`` becomes ``MUL(x, x)``, a single instruction with a repeated
-    operand; a shared subexpression in general is what CSE over the macro
-    stream is for.
+    Another operation stands in only where it is the same function of every
+    ``x``, signed zeros, infinities and NaN included: an exponent of 2 is
+    ``MUL(x, x)``, a single instruction with a repeated operand, 1 is ``x``,
+    -1 is ``1 / x``, and a base of 1 is 1.
+
+    The roots are not among them.  ``sqrt(-0.0)`` is -0 and ``sqrt`` of
+    -inf a NaN where ``pow`` gives +0 and +inf for the exponent 0.5; ``cbrt``
+    is real for a negative ``x``, where ``pow`` with the double nearest 1/3
+    is a NaN.  A base of ``math.e`` is not ``exp`` either: it is not e, and
+    the difference grows with the exponent.  A kernel that means the root
+    asks for it, ``sqrt`` or ``cbrt``, and gets the library's function.
     """
     if _is_num(y):
         if y in (2, 2.0):
             return _ew(Operation.MUL, dest, x, x, **kw)
-        if y == 0.5:
-            return sqrt(dest, x, **kw)
-        if y == -0.5:
-            return rsqrt(dest, x, **kw)
-        if y == 1 / 3:
-            return cbrt(dest, x, **kw)
-        if y == -1 / 3:
-            return rcbrt(dest, x, **kw)
         if y in (-1, -1.0):
             return rcp(dest, x, **kw)
         if y in (1, 1.0):
             return copy(dest, x, **kw)
-    if _is_num(x):
-        if x == math.e:
-            return exp(dest, y, **kw)
-        if x in (1, 1.0):
-            return copy(dest, x, **kw)
+    if _is_num(x) and x in (1, 1.0):
+        return copy(dest, x, **kw)
     return _ew(Operation.POW, dest, x, y, **kw)
 
 

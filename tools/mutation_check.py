@@ -60,6 +60,7 @@ MOVE = Path('src/tensorforge/backend/pir/move.py')
 TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 TARGET = Path('src/tensorforge/common/target.py')
 CUDA_LEXIC = Path('src/tensorforge/common/vm/lexic/cuda_lexic.py')
+ELEMENTWISE = Path('src/tensorforge/generators/elementwise.py')
 
 
 def _run_tests(target):
@@ -956,6 +957,13 @@ GROUPS = {
         ('two operations on one operand taken for one value',
          sub(BUILD, 'key = _cons_key(Op.MATH, type_, args, fn)',
              'key = _cons_key(Op.MATH, type_, args)', 1)),
+        ('a root standing in for a power',
+         sub(ELEMENTWISE, '        if y in (-1, -1.0):\n',
+             '        if y == 0.5:\n'
+             '            return sqrt(dest, x, **kw)\n'
+             '        if y in (-1, -1.0):\n', 1)),
+        ('a square left to the power',
+         sub(ELEMENTWISE, '        if y in (2, 2.0):\n', '        if False:\n', 1)),
     ]),
 
     # The transfer for the next element, issued across the back edge.
