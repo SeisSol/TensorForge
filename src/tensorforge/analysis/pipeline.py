@@ -4,11 +4,11 @@
 """What a kernel's instructions occupy, and the least time that takes.
 
 The emitter counts every statement it lays down by what it occupies
-(`Context.record_mix`): floating point by precision, integer and address
+(`BuildMetrics.record_mix`): floating point by precision, integer and address
 arithmetic, the transcendental unit, moves between lanes, loads and stores by
 memory space, barriers, branches -- and, beside them, the bytes a lane moves
-through each space (`Context.record_bytes`).  All of it is derived from the
-program, not predicted: the trip counts are constants and the spaces are
+through each space (`BuildMetrics.record_bytes`).  All of it is derived from
+the program, not predicted: the trip counts are constants and the spaces are
 known.  What is not known is how many machine instructions one statement
 becomes; `INSTRUCTIONS_PER_STATEMENT` is that, per category and family, and is
 fitted by `tools/calibrate_mix.py` against what nvcc and hipcc emit.
@@ -105,8 +105,8 @@ class Resource:
     (category -> instructions of this resource per instruction)."""
     rate: float
     uses: Tuple[Tuple[str, float], ...] = ()
-    #: memory keys (`Context.record_bytes`) this path carries, if it is a
-    #: bandwidth rather than an issue rate
+    #: memory keys (`BuildMetrics.record_bytes`) this path carries, if it is
+    #: a bandwidth rather than an issue rate
     moves: Tuple[str, ...] = ()
 
 
@@ -325,9 +325,9 @@ def of(generator, conservative: bool = False,
     SM and clock, DRAM included, and with what a compiler said it spilled.
 
     The spilling is the caller's to pass because this module cannot know it:
-    `Context.peak_pressure` is the emitter's own live set and sits well under
-    the file where ptxas reports spilling anyway -- 407 bytes a lane against
-    a 1020-byte budget for `elastic-o6s:derivative`, which the compiler
+    `BuildMetrics.peak_pressure` is the emitter's own live set and sits well
+    under the file where ptxas reports spilling anyway -- 407 bytes a lane
+    against a 1020-byte budget for `elastic-o6s:derivative`, which the compiler
     builds at 255 registers with spills.  What the compiler reports is the
     figure with the addressing and the schedule in it, and only
     `tuning.CompiledScore` has one.
@@ -335,7 +335,8 @@ def of(generator, conservative: bool = False,
     hw = generator._context.target.hw
     stream = (stream_bytes(generator._given) if dram_bytes_per_clock
               else None)
-    return bound(generator.issue_mix, generator.memory_bytes, hw,
+    metrics = generator.metrics
+    return bound(metrics.issue_mix, metrics.memory_bytes, hw,
                  max(1, generator._num_threads or 1),
                  generator._num_active_threads or None, conservative,
                  stream, dram_bytes_per_clock, spill_bytes)

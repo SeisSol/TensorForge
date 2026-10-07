@@ -4,15 +4,15 @@
 """Fit machine instructions per emitted statement, by category.
 
 `analysis.pipeline` bounds a kernel's time by the busiest pipe, from the
-statements the emitter counted per category (`Context.record_mix`).  How many
-machine instructions a statement becomes is the one thing there that is not
-derived from the program: an offset folds into a load, a division becomes a
+statements the emitter counted per category (`BuildMetrics.record_mix`).  How
+many machine instructions a statement becomes is the one thing there that is
+not derived from the program: an offset folds into a load, a division becomes a
 sequence, an address computation disappears into the addressing mode.  This
 fits that factor per category against the case set: each case is generated,
-compiled on its own (nvcc and `cuobjdump -sass`; hipcc to device assembly),
-and its instructions sorted into the same categories by opcode.  The factor is
-the ratio of the totals, over the copies laid down (static, as compiled), with
-the spread per kernel beside it.
+compiled on its own (nvcc and `cuobjdump -sass`; hipcc to device assembly), and
+its instructions sorted into the same categories by opcode.  The factor is the
+ratio of the totals, over the copies laid down (static, as compiled), with the
+spread per kernel beside it.
 
   python tools/calibrate_mix.py --arch sm_120 [--arch gfx942 --arch pvc ...] [--cases GLOB]
 
@@ -205,7 +205,7 @@ def main(argv=None):
                 continue
             try:
                 built = generate(path, arch)
-                if built is None or not built[0].issue_mix:
+                if built is None or not built[0].metrics.issue_mix:
                     continue
                 generator, source = built
                 with tempfile.TemporaryDirectory() as tmp:
@@ -218,7 +218,7 @@ def main(argv=None):
                 print(f'  {path.stem}: skipped ({type(error).__name__})',
                       file=sys.stderr)
                 continue
-            copies = {c: v[1] for c, v in generator.issue_mix.items()}
+            copies = {c: v[1] for c, v in generator.metrics.issue_mix.items()}
             emitted.update(copies)
             measured.update(mix)
             per_kernel.append((path.stem, copies, mix))

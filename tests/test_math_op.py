@@ -144,7 +144,6 @@ def test_what_it_occupies_is_read_off_the_function():
     does not."""
     class Counting:
         def __init__(self):
-            self.target = Target(*CUDA)
             self.categories = []
 
         def record_mix(self, category, issued, written):
@@ -154,7 +153,7 @@ def test_what_it_occupies_is_read_off_the_function():
         counting = Counting()
         b = IRBuilder(fptype=Datatype.F32)
         b.math(op, F32, b.extern_value('x', F32, hint='x'))
-        Emitter([].append, counting).run(b.finish())
+        Emitter([].append, Target(*CUDA), counting).run(b.finish())
         assert counting.categories == [expected]
 
 

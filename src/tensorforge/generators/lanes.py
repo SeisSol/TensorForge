@@ -423,26 +423,22 @@ def search(descr_factory, context: Context,
 
     from tensorforge.generators.generator import Generator
 
-    was = context.measure_pressure
-    context.measure_pressure = True
     scores = {}
     blocks = {}
     work = {}
     failed = []
-    try:
-        for config in options:
-            try:
-                gen = Generator(descr_factory(), context, lanes=config)
-                gen.generate()
-            except Exception as exc:
-                scores[config.num_threads] = exc
-                failed.append(exc)
-                continue
-            scores[config.num_threads] = gen.peak_pressure
-            blocks[config.num_threads] = gen.resident_blocks
-            work[config.num_threads] = gen.emitted_work
-    finally:
-        context.measure_pressure = was
+    for config in options:
+        try:
+            gen = Generator(descr_factory(), context, lanes=config,
+                            measure_pressure=True)
+            gen.generate()
+        except Exception as exc:
+            scores[config.num_threads] = exc
+            failed.append(exc)
+            continue
+        scores[config.num_threads] = gen.metrics.peak_pressure
+        blocks[config.num_threads] = gen.resident_blocks
+        work[config.num_threads] = gen.metrics.emitted_work
 
     # A build that measured nothing is not a build that measured zero: it has
     # no bodies the flag reached, and picking it for scoring lowest would be

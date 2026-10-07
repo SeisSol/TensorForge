@@ -44,7 +44,7 @@ def _generate(mod, wrap, report=None, **extra):
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
     if report is not None:
-        report.extend(ctx.wrap_report or [])
+        report.extend(gen.metrics.wrap_report or [])
     return gen.get_kernel(), kernel_eval.launch_geometry(gen.get_launcher())
 
 

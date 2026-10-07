@@ -63,7 +63,18 @@ class TestCopies:
 
 def test_a_kernel_counts_its_code():
     generator, _, _ = generated()
-    assert generator.code_units and generator.code_units > 0
+    assert generator.metrics.code_units and generator.metrics.code_units > 0
+
+
+def test_the_figures_are_the_builds_and_not_a_probes():
+    """`local_flux` on gfx942 is built merged, and the merge decision then
+    builds the list written out to compare: the kernel is the merged build,
+    and so are its figures -- not those of the build that came after it."""
+    decided, _, _ = generated(arch='gfx942', backend='hip')
+    merged, _, _ = generated(arch='gfx942', backend='hip', merge_variants=True)
+    assert decided.metrics.code_units == merged.metrics.code_units
+    assert decided.metrics.hot_profile == merged.metrics.hot_profile
+    assert decided.metrics.load_slack == merged.metrics.load_slack
 
 
 def test_rolling_the_reduction_makes_the_body_smaller():
@@ -71,8 +82,8 @@ def test_rolling_the_reduction_makes_the_body_smaller():
     while the arithmetic it does -- `emitted_work` -- stays the same."""
     unrolled, _, _ = generated()
     rolled, _, _ = generated(k_roll=4)
-    assert rolled.code_units < unrolled.code_units
-    assert rolled.emitted_work == unrolled.emitted_work
+    assert rolled.metrics.code_units < unrolled.metrics.code_units
+    assert rolled.metrics.emitted_work == unrolled.metrics.emitted_work
 
 
 class TestWeighed:
@@ -91,12 +102,22 @@ class TestWeighed:
     def test_a_target_without_a_stated_cache_judges_nothing(self):
         assert icache_excess(10 ** 9, self.hw(None)) == 0
 
-    def test_the_scorer_counts_whole_kilobytes_past_it(self):
-        hw = self.hw(1024)
-        result = SimpleNamespace(
-            generator=SimpleNamespace(code_units=1000),
-            context=SimpleNamespace(target=SimpleNamespace(hw=hw)))
-        assert _icache_over(result) == icache_excess(1000, hw) // 1024 > 0
+    def test_the_scorer_counts_whole_kilobytes_past_it(self, monkeypatch):
+        """Of the size the build it is handed laid down: `local_flux`
+        against a cache made too small for it."""
+        from tensorforge.common.vm import hw_descr
+        from tensorforge.generators.tuning import Build, Candidate
+        original = hw_descr.HwDecription.__init__
+
+        def small(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            self.icache_size = 1024
+        monkeypatch.setattr(hw_descr.HwDecription, '__init__', small)
+        generator, context, _ = generated()
+        over = _icache_over(Build(Candidate(), generator, context))
+        hw = context.target.hw
+        assert over == icache_excess(generator.metrics.code_units, hw) // 1024
+        assert over > 0
 
 
 def test_a_kernel_over_the_cache_says_so(monkeypatch):

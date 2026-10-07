@@ -248,9 +248,9 @@ def _bodies(**options):
     out = []
     real = pir.emit
 
-    def capture(body, writer, context=None):
+    def capture(body, writer, context=None, metrics=None):
         out.append(body)
-        return real(body, writer, context)
+        return real(body, writer, context, metrics)
 
     pir.emit = capture
     try:

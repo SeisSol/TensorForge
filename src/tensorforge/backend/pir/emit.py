@@ -78,9 +78,9 @@ _INFIX = {
 _LEXIC_BINOP = {'min': Operation.MIN, 'max': Operation.MAX}
 
 
-#: The operations `Context.record_work` counts, where the result is a floating
-#: point value: the arithmetic a lane geometry changes the amount of.  Index
-#: arithmetic is deliberately out -- it is addressing, it scales with the
+#: The operations `BuildMetrics.record_work` counts, where the result is a
+#: floating point value: the arithmetic a lane geometry changes the amount of.
+#: Index arithmetic is deliberately out -- it is addressing, it scales with the
 #: geometry for its own reasons, and counting it would drown the term it is
 #: being weighed against.
 _WORK_OPS = frozenset({'add', 'sub', 'mul', 'div', 'fma', 'neg'})
@@ -191,9 +191,12 @@ def _code_copies(unroll, trips: Optional[int]) -> int:
 
 
 class Emitter:
-    def __init__(self, writer, context: Any = None):
+    def __init__(self, writer, context: Any = None, metrics: Any = None):
         self.writer = writer
         self.context = context
+        #: Where the figures of what is written go: the build's
+        #: `BuildMetrics`, or None where nothing counts them.
+        self.metrics = metrics
         #: How many times the statement being written runs per element: the
         #: product of the trip counts of the loops around it that have
         #: constant bounds (`_emit_for`).
@@ -218,8 +221,6 @@ class Emitter:
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
     def _record_work(self) -> None:
-        # The emitter is handed a context or, from some call sites, a target;
-        # only the former counts (`Context.record_work`).
         # Times the trip counts of the loops around it: a loop the compiler
         # unrolls, or one rolled by `k_roll`, is written once and runs its
         # count.  Counted once, rolling a reduction by ten would make a kernel
@@ -227,27 +228,27 @@ class Emitter:
         # count would roll everything it could.  A loop without constant
         # bounds -- the batch loop -- counts once, so the figure stays per
         # element.
-        record = getattr(self.context, 'record_work', None)
+        record = getattr(self.metrics, 'record_work', None)
         if record is not None:
             record(self._work_scale)
 
     def _record_code(self, op) -> None:
         """What a statement puts into the instruction stream
-        (`Context.record_code`), once per copy of it (`_code_scale`).  One unit
-        a statement, two for a branch; a loop's counter, test and branch are
-        counted where the loop is (`_emit_for`).  Units, not instructions:
-        `analysis.icache` converts, with a factor fitted against the compilers
-        (`tools/calibrate_icache.py`)."""
+        (`BuildMetrics.record_code`), once per copy of it (`_code_scale`).
+        One unit a statement, two for a branch; a loop's counter, test and
+        branch are counted where the loop is (`_emit_for`).  Units, not
+        instructions: `analysis.icache` converts, with a factor fitted against
+        the compilers (`tools/calibrate_icache.py`)."""
         if op in _NO_CODE or op == Op.FOR:
             return
         self._record_code_units(2 if op == Op.IF
                                 else _LOOP_OVERHEAD if op == Op.WHILE else 1)
 
     def _record_code_units(self, units: int, written: bool = True) -> None:
-        record = getattr(self.context, 'record_code', None)
+        record = getattr(self.metrics, 'record_code', None)
         if record is not None:
             record(units * self._code_scale)
-        record = getattr(self.context, 'record_written_code', None)
+        record = getattr(self.metrics, 'record_written_code', None)
         if record is not None and written:
             record(units * self._written_scale)
 
@@ -261,17 +262,17 @@ class Emitter:
         its category, whatever its width -- a packed FMA or a 16-byte load is
         one issue, which is the point of both.
         """
-        mix = getattr(self.context, 'record_mix', None)
+        mix = getattr(self.metrics, 'record_mix', None)
         if mix is None:
             return
         category, moved = self._mix_category(s)
         if category is None:
             return
         mix(category, self._work_scale, self._code_scale)
-        hot = getattr(self.context, 'record_hot', None)
+        hot = getattr(self.metrics, 'record_hot', None)
         if hot is not None:
             hot(self._work_scale, self._code_scale)
-        record = getattr(self.context, 'record_bytes', None)
+        record = getattr(self.metrics, 'record_bytes', None)
         if record is not None:
             for key, nbytes in moved:
                 record(key, nbytes * self._work_scale)
@@ -895,7 +896,7 @@ class Emitter:
         Loads only.  Everything else has a latency the compiler can hide by
         register renaming; a memory access has one the program has to hide.
         """
-        record = getattr(self.context, 'record_slack', None)
+        record = getattr(self.metrics, 'record_slack', None)
         if record is None:
             return
         # One pass for where each value is first read, one for the loads that
@@ -1401,7 +1402,7 @@ class Emitter:
             self._record_code_units(_LOOP_OVERHEAD, written=not rolled)
             # the counter and the test, then the branch, once per iteration
             # that is not unrolled away
-            mix = getattr(self.context, 'record_mix', None)
+            mix = getattr(self.metrics, 'record_mix', None)
             if mix is not None:
                 runs = scale * trips // max(copies, 1)
                 mix('int', 2 * runs, 2 * self._code_scale)
@@ -1455,13 +1456,16 @@ class Emitter:
                 self._emit_body(s.regions[1].body, tuple(targets))
 
 
-def emit(body: Tuple[Stmt, ...], writer, context: Any = None) -> None:
+def emit(body: Tuple[Stmt, ...], writer, context: Any = None,
+         metrics: Any = None) -> None:
     """Lower ``body`` into ``writer``, in whichever model the lexic asks for.
 
     The choice is the lexic's because the lexic is where the rest of the
     model already lives -- the kernel attributes, the broadcast spelling, the
     wave barrier.  Splitting the decision between here and there could put
     an ESIMD kernel attribute on an SPMD body.
+
+    ``metrics`` counts what is written (`common.metrics.BuildMetrics`).
     """
     target = getattr(context, 'target', None)
     simd = False
@@ -1472,6 +1476,6 @@ def emit(body: Tuple[Stmt, ...], writer, context: Any = None) -> None:
             simd = False
     if simd:
         from .emit_esimd import EsimdEmitter
-        EsimdEmitter(writer, context).run(body)
+        EsimdEmitter(writer, context, metrics=metrics).run(body)
     else:
-        Emitter(writer, context).run(body)
+        Emitter(writer, context, metrics).run(body)

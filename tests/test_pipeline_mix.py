@@ -5,8 +5,9 @@
 
 The emitter sorts every statement it lays down by the pipe it occupies and
 counts the bytes a lane moves through each memory space (`pir.emit`,
-`Context.record_mix`, `Context.record_bytes`); `analysis.pipeline` turns that
-into the least clocks per element of one SM or CU and says which pipe binds.
+`BuildMetrics.record_mix`, `BuildMetrics.record_bytes`); `analysis.pipeline`
+turns that into the least clocks per element of one SM or CU and says which
+pipe binds.
 """
 
 from __future__ import annotations
@@ -45,13 +46,13 @@ def _built(name, arch, backend, **options):
                                           ('gfx1150', 'hip')])
 def test_a_build_reports_its_mix_and_what_it_moves(arch, backend):
     gen = _built('local_flux', arch, backend)
-    assert set(gen.issue_mix) <= set(pipeline.CATEGORIES)
-    issued = {c: v[0] for c, v in gen.issue_mix.items()}
+    assert set(gen.metrics.issue_mix) <= set(pipeline.CATEGORIES)
+    issued = {c: v[0] for c, v in gen.metrics.issue_mix.items()}
     # the contraction is the bulk of it, however it is spelled
     arithmetic = issued.get('fp', 0) + issued.get('matrix', 0)
     assert arithmetic > issued.get('int', 0)
-    assert gen.memory_bytes.get('global.read', 0) > 0
-    assert gen.memory_bytes.get('global.write', 0) > 0
+    assert gen.metrics.memory_bytes.get('global.read', 0) > 0
+    assert gen.metrics.memory_bytes.get('global.write', 0) > 0
 
 
 def test_a_dpp_fma_is_arithmetic_and_a_matrix_builtin_is_a_matrix_op():
@@ -59,9 +60,9 @@ def test_a_dpp_fma_is_arithmetic_and_a_matrix_builtin_is_a_matrix_op():
     counted as a move between lanes and as nothing, they would leave `fp`
     empty."""
     rdna = {c: v[0] for c, v in _built('local_flux', 'gfx1150', 'hip')
-            .issue_mix.items()}
+            .metrics.issue_mix.items()}
     cdna = {c: v[0] for c, v in _built('local_flux', 'gfx942', 'hip')
-            .issue_mix.items()}
+            .metrics.issue_mix.items()}
     assert rdna['fp'] > rdna.get('xlane', 0)
     assert cdna.get('matrix', 0) > 0
     assert 'other' not in rdna or rdna['other'] < rdna['fp'] / 100
@@ -73,10 +74,11 @@ def test_rolling_a_reduction_keeps_what_is_issued_and_shrinks_the_code():
     unrolled = _built('local_flux', 'sm_120', 'cuda', merge_variants=False)
     rolled = _built('local_flux', 'sm_120', 'cuda', merge_variants=False,
                     k_roll=8)
-    fp = lambda g, i: g.issue_mix['fp'][i]
+    fp = lambda g, i: g.metrics.issue_mix['fp'][i]
     assert fp(rolled, 0) == fp(unrolled, 0)
     assert fp(rolled, 1) < fp(unrolled, 1)
-    assert rolled.issue_mix['branch'][0] > unrolled.issue_mix['branch'][0]
+    assert (rolled.metrics.issue_mix['branch'][0]
+            > unrolled.metrics.issue_mix['branch'][0])
 
 
 def test_the_bound_names_its_pipe_and_is_the_largest_of_them():
@@ -96,7 +98,7 @@ def test_the_bound_is_per_element_and_falls_with_the_lanes_it_shares():
                     merge_variants=False)
     hw = wide._context.target.hw
     per = lambda g: pipeline.instructions_per_element(
-        g.issue_mix, hw, g._num_threads)['fp']
+        g.metrics.issue_mix, hw, g._num_threads)['fp']
     # the same FMAs in total, each warp instruction covering twice the rows
     assert per(narrow) == pytest.approx(per(wide), rel=0.2)
 

@@ -11,9 +11,10 @@ is doing.  So this is a cliff, not a slope, and it is used as one: the tuning
 scorer ranks by the excess right after the register file (`static_score`).
 
 The emitter counts units, one a statement per copy the compiler lays down
-(`pir.emit`, `Context.record_code`).  `INSTRUCTIONS_PER_UNIT` turns them into
-machine instructions -- a statement may be several (an address and a load) or
-share one (a folded offset) -- and the target's `instruction_bytes` into bytes.
+(`pir.emit`, `BuildMetrics.record_code`).  `INSTRUCTIONS_PER_UNIT` turns them
+into machine instructions -- a statement may be several (an address and a
+load) or share one (a folded offset) -- and the target's `instruction_bytes`
+into bytes.
 Both factors are fitted rather than asserted: `tools/calibrate_icache.py`
 counts what nvcc and hipcc actually emit for the case set and reports the fit
 and its spread.
@@ -69,7 +70,7 @@ def hot_set(profile: Optional[dict], share: float = 0.9) -> Optional[tuple]:
     """`(code units carrying `share` of the executions, units in total)`.
 
     The instruction cache holds code; a kernel spends its time in statements.
-    Those are the two numbers `Context.record_hot` keeps apart, and the
+    Those are the two numbers `BuildMetrics.record_hot` keeps apart, and the
     distance between them is what says whether a body over the capacity is a
     problem: `elastic-o6s:derivative` lays down 195 742 B against 131 072 B of
     cache, and if nine tenths of what it runs sits in a tenth of that code,

@@ -161,9 +161,9 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
                                                            WorkloadBuild]:
     """`(translation unit source, record)` for one workload in one unit.
 
-    Generation is not thread-safe -- `Context.peak_pressure` is per-context but
-    the lane deduction reaches into module state -- so callers run this
-    serially and parallelize the compilation, which is the slow part anyway.
+    Generation is not thread-safe -- the lane deduction reaches into module
+    state -- so callers run this serially and parallelize the compilation,
+    which is the slow part anyway.
     """
     record = WorkloadBuild(name=workload.name, origin=workload.origin)
     options = unit.config.options or Options()

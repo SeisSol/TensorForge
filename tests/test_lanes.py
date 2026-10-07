@@ -259,12 +259,14 @@ def test_the_search_picks_the_configuration_with_the_lower_footprint():
     assert config.num_threads == 64
 
 
-def test_the_search_leaves_the_measurement_flag_as_it_found_it():
-    """It costs a liveness walk per body, so it does not stay on."""
+def test_the_search_measures_its_own_builds_and_no_other():
+    """It costs a liveness walk per body, so a build the search did not make
+    does not pay for it, whatever context it shares."""
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
-    assert not ctx.measure_pressure
     lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
-    assert not ctx.measure_pressure
+    after = Generator(_gemm(56, 9, 56, Datatype.F64), ctx)
+    after.generate()
+    assert after.metrics.peak_pressure is None
 
 
 def test_a_generator_reports_its_own_peak_and_not_a_previous_one():
@@ -275,22 +277,20 @@ def test_a_generator_reports_its_own_peak_and_not_a_previous_one():
     narrower configuration exactly when the search is worth running.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
-    ctx.measure_pressure = True
-    try:
-        wide = Generator(_gemm(56, 9, 56, Datatype.F64), ctx,
-                         lanes=lanes.deduce(_gemm(56, 9, 56, Datatype.F64),
-                                            ctx, ceiling=None))
-        wide.generate()
-        narrow = Generator(_gemm(56, 9, 56, Datatype.F64), ctx,
-                           lanes=lanes.deduce(_gemm(56, 9, 56, Datatype.F64),
-                                              ctx))
-        narrow.generate()
-    finally:
-        ctx.measure_pressure = False
+    wide = Generator(_gemm(56, 9, 56, Datatype.F64), ctx,
+                     lanes=lanes.deduce(_gemm(56, 9, 56, Datatype.F64),
+                                        ctx, ceiling=None),
+                     measure_pressure=True)
+    wide.generate()
+    narrow = Generator(_gemm(56, 9, 56, Datatype.F64), ctx,
+                       lanes=lanes.deduce(_gemm(56, 9, 56, Datatype.F64), ctx),
+                       measure_pressure=True)
+    narrow.generate()
 
-    assert wide.peak_pressure < narrow.peak_pressure, (
-        f"the second build reported {narrow.peak_pressure}, which is the "
-        f"first build's {wide.peak_pressure} carried over")
+    wide, narrow = wide.metrics.peak_pressure, narrow.metrics.peak_pressure
+    assert wide < narrow, (
+        f"the second build reported {narrow}, which is the first build's "
+        f"{wide} carried over")
 
 
 def test_generating_without_the_flag_reports_nothing():
@@ -298,7 +298,7 @@ def test_generating_without_the_flag_reports_nothing():
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
     g = Generator(_gemm(56, 9, 56, Datatype.F64), ctx)
     g.generate()
-    assert g.peak_pressure is None
+    assert g.metrics.peak_pressure is None
 
 def test_a_candidate_that_does_not_build_is_not_a_candidate():
     """And on Intel the one that fails is the *default* one.
@@ -422,7 +422,7 @@ def test_a_tie_keeps_the_configuration_the_descriptors_asked_for():
 
     def flat(self):
         out = real(self)
-        self.peak_pressure = 1000        # identical for both candidates
+        self.metrics.peak_pressure = 1000    # identical for both candidates
         self.resident_blocks = 10
         return out
 
@@ -451,7 +451,7 @@ def test_the_exact_bound_outranks_the_model_where_it_speaks():
         out = real(self)
         wide = self._lanes.num_threads == 64
         # the model prefers the wide one; the exact bound prefers the narrow
-        self.peak_pressure = 100 if wide else 900
+        self.metrics.peak_pressure = 100 if wide else 900
         self.resident_blocks = 2 if wide else 8
         return out
 

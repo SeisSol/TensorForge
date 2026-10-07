@@ -241,9 +241,11 @@ class _FakeGen:
         #: What the build settled on, which `_over_budget` reads on Intel to
         #: know how many lanes share one thread's register file.
         self.lanes = LaneConfig(threads, threads, 1)
-        self.peak_pressure = peak
+        from tensorforge.common.metrics import BuildMetrics
+        self.metrics = BuildMetrics()
+        self.metrics.peak_pressure = peak
+        self.metrics.emitted_work = 1000
         self.resident_blocks = blocks
-        self.emitted_work = 1000
 
         class _Obj:
             def get_mults_per_block(_self):
@@ -334,13 +336,13 @@ def test_the_scalar_file_is_judged_on_its_own():
     against `max_reg_per_thread` shows neither, so the uniform values are
     weighed against their own budget."""
     fits = _fake('gfx1150', 'hip', 32, 4, 400)
-    fits.generator.peak_uniform_pressure = 100 * 4
+    fits.generator.metrics.peak_uniform_pressure = 100 * 4
     assert tuning._over_scalar_budget(fits) == 0
 
     over = _fake('gfx1150', 'hip', 32, 4, 400)
-    over.generator.peak_uniform_pressure = 150 * 4
+    over.generator.metrics.peak_uniform_pressure = 150 * 4
     assert tuning._over_scalar_budget(over) == (150 - 106) * 4
 
     silent = _fake('sm_120', 'cuda', 32, 4, 400)
-    silent.generator.peak_uniform_pressure = 150 * 4
+    silent.generator.metrics.peak_uniform_pressure = 150 * 4
     assert tuning._over_scalar_budget(silent) == 0, 'no file, no judgement'

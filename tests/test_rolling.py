@@ -1170,7 +1170,7 @@ def test_the_probe_leaves_nothing_behind():
     the rebuild reports are its own."""
     merged = _with_option(_flux(), merge_icache_fraction=1e-6)
     explicit = _with_option(_flux(), merge_variants=True)
-    assert merged.code_units == explicit.code_units
+    assert merged.metrics.code_units == explicit.metrics.code_units
 
 
 def test_a_pair_is_not_a_run_by_default():

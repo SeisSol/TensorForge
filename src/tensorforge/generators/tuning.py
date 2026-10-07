@@ -531,9 +531,9 @@ def build(descr_factory, base: Context, candidate: Candidate) -> Build:
     # kept `autotune` would open a walk of its own, once per trial, all the
     # way down.
     ctx = candidate.context(base, autotune='off')
-    ctx.measure_pressure = True
     try:
-        gen = Generator(descr_factory(), ctx, lanes=candidate.lanes)
+        gen = Generator(descr_factory(), ctx, lanes=candidate.lanes,
+                        measure_pressure=True)
         # asked a question, not emitting: nothing it builds reaches a file
         gen._announce_identity = False
         gen.generate()
@@ -628,7 +628,7 @@ def static_score(result: Build):
                           resident=resident,
                           hw=result.context.target.hw)
     return (over > 0, issue, -resident,
-            _icache_over(result), _granule(gen.peak_pressure or 0),
+            _icache_over(result), _granule(gen.metrics.peak_pressure or 0),
             len(gen.get_kernel() or ''))
 
 
@@ -678,7 +678,8 @@ def _least_cycles(gen, lanes: int, wave: int, spill_bytes: float = 0.0,
     """
     from tensorforge.analysis import pipeline
     b = pipeline.of(gen, spill_bytes=spill_bytes)
-    cycles = b.cycles if b is not None else (gen.emitted_work or 0) * lanes / wave
+    cycles = (b.cycles if b is not None
+              else (gen.metrics.emitted_work or 0) * lanes / wave)
     return cycles * _shortfall(lanes, wave, resident, hw)
 
 
@@ -710,8 +711,7 @@ def _icache_over(result: Build) -> int:
     """
     from tensorforge.analysis.icache import icache_excess
     hw = result.context.target.hw
-    return icache_excess(getattr(result.generator, 'code_units', None),
-                         hw) // 1024
+    return icache_excess(result.generator.metrics.code_units, hw) // 1024
 
 
 #: Bytes below which two modeled footprints are the same footprint: sixteen
@@ -730,7 +730,7 @@ def register_estimate(result: Build) -> Optional[float]:
     """Registers per lane the target compiler is expected to allocate
     (`Preferences.register_fit`)."""
     fit = result.context.target.prefs.register_fit
-    peak = result.generator.peak_pressure
+    peak = result.generator.metrics.peak_pressure
     if fit is None or not peak:
         return None
     return fit[0] + fit[1] * peak / 4
@@ -784,7 +784,7 @@ def _over_budget(result: Build) -> float:
     """
     target = result.context.target
     budget = getattr(target.hw, 'max_reg_per_thread', None)
-    peak = result.generator.peak_pressure
+    peak = result.generator.metrics.peak_pressure
     if not (budget and peak):
         return _over_scalar_budget(result)
     if target.prefs.budget_by_fit:
@@ -839,7 +839,7 @@ def _over_scalar_budget(result: Build) -> float:
         return 0.0
     hw = result.context.target.hw
     budget = getattr(hw, 'max_scalar_reg_per_wave', None)
-    peak = getattr(result.generator, 'peak_uniform_pressure', None)
+    peak = result.generator.metrics.peak_uniform_pressure
     if not (budget and peak):
         return 0.0
     return max(0.0, peak - budget)

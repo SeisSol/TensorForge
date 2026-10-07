@@ -75,7 +75,8 @@ def _build(mod, target, options):
     except Exception:
         return None
     launch = gen.launch_config()
-    return list(ctx.wrap_report or []), launch.shared_bytes if launch else 0
+    return (list(gen.metrics.wrap_report or []),
+            launch.shared_bytes if launch else 0)
 
 
 def _reason(line):

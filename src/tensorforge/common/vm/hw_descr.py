@@ -49,8 +49,8 @@ class HwDecription:
     #: None elsewhere, and not because the others have nothing of the kind:
     #: NVIDIA's uniform datapath carries integer and address arithmetic only,
     #: so a uniform *float* is a vector register there and no budget of its
-    #: own applies.  `Context.peak_uniform_pressure` is what it is compared
-    #: against.
+    #: own applies.  `BuildMetrics.peak_uniform_pressure` is what it is
+    #: compared against.
     self.max_scalar_reg_per_wave = (
         parseBytes(param_table['max_scalar_reg_per_wave'])
         if param_table.get('max_scalar_reg_per_wave') is not None else None)

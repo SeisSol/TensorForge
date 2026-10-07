@@ -98,11 +98,10 @@ def _local_flux(rows):
 
 def _peak(mod, width):
     ctx = Context(arch='sm_100', backend='cuda', fp_type=mod.DTYPE)
-    ctx.measure_pressure = True
     gen = Generator(mod.descr_list(), ctx,
-                    lanes=LaneConfig(16, mod._M, width))
+                    lanes=LaneConfig(16, mod._M, width), measure_pressure=True)
     gen.generate()
-    return gen.peak_pressure
+    return gen.metrics.peak_pressure
 
 
 def test_a_peeled_element_is_one_slot_and_not_the_whole_array():

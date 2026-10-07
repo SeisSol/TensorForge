@@ -3,14 +3,15 @@
 # SPDX-License-Identifier: MIT
 """Fit the instruction-cache estimate against what the compilers emit.
 
-`analysis.icache` weighs the emitter's units (`Context.record_code`) against a
-target's instruction cache, through `INSTRUCTIONS_PER_UNIT` -- machine
-instructions per unit -- and the target's `instruction_bytes`.  This fits the
-first against the case set: each case is generated, its device code compiled
-on its own (nvcc to a cubin and `cuobjdump -sass`; hipcc to device assembly),
-and the instructions of the kernel counted.  The fit is through the origin,
-and the spread is printed beside it: a factor that is right on the totals and
-off by half on a mid-sized kernel is fine for a cliff and for nothing finer.
+`analysis.icache` weighs the emitter's units (`BuildMetrics.record_code`)
+against a target's instruction cache, through `INSTRUCTIONS_PER_UNIT` --
+machine instructions per unit -- and the target's `instruction_bytes`.  This
+fits the first against the case set: each case is generated, its device code
+compiled on its own (nvcc to a cubin and `cuobjdump -sass`; hipcc to device
+assembly), and the instructions of the kernel counted.  The fit is through the
+origin, and the spread is printed beside it: a factor that is right on the
+totals and off by half on a mid-sized kernel is fine for a cliff and for
+nothing finer.
 
   python tools/calibrate_icache.py --arch sm_120 [--arch gfx942 ...] [--cases GLOB]
 """
@@ -107,7 +108,7 @@ def main(argv=None):
                 continue
             try:
                 built = generate(path, arch)
-                if built is None or not built[0].code_units:
+                if built is None or not built[0].metrics.code_units:
                     continue
                 generator, source = built
                 with tempfile.TemporaryDirectory() as tmp:
@@ -117,7 +118,7 @@ def main(argv=None):
                 print(f'  {path.stem}: skipped ({type(error).__name__})',
                       file=sys.stderr)
                 continue
-            points.append((path.stem, generator.code_units, count))
+            points.append((path.stem, generator.metrics.code_units, count))
         if not points:
             print(f'{arch}: nothing measured')
             continue

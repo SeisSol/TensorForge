@@ -641,6 +641,26 @@ GROUPS = {
              '    return False')),
     ]),
 
+    # What a build measured of what it laid down, as that build's.
+    'metrics': ('tests/test_icache.py tests/test_lanes.py', [
+        ('the bodies written without counting',
+         sub(ABSTR, '    pir.emit(body, writer, context, metrics)',
+             '    pir.emit(body, writer, context, None)', 1)),
+        ('the register footprint measured unasked',
+         sub(ABSTR, '    if metrics is not None and metrics.pressure:',
+             '    if metrics is not None:', 1)),
+        ('a probe counting into its caller\'s figures',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '    other._announce_identity = False\n',
+             '    other._announce_identity = False\n'
+             '    other.metrics = self.metrics\n', 1)),
+        ('the scorer reading a size the build does not keep',
+         sub(Path('src/tensorforge/generators/tuning.py'),
+             'icache_excess(result.generator.metrics.code_units, hw)',
+             "icache_excess(getattr(result.generator, 'code_units', None), hw)",
+             1)),
+    ]),
+
     # A section is one body, and its traversal's indices are values of it.
     'sectionbody': ('tests/test_section_body.py', [
         ('the traversal indices left unpublished',

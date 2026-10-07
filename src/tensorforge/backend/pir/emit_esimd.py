@@ -52,8 +52,9 @@ class EsimdEmitter(Emitter):
     #: and which*, and a generator that stops at the first tells you nothing
     #: about the size of what is left.  `run()` raises at the end if any were
     #: collected.
-    def __init__(self, writer, context: Any = None, strict: bool = True):
-        super().__init__(writer, context)
+    def __init__(self, writer, context: Any = None, strict: bool = True,
+                 metrics: Any = None):
+        super().__init__(writer, context, metrics)
         self.strict = strict
         self.unresolved: list = []
         #: Register buffers held as one `simd`, by name (`_plan_register_buffers`).

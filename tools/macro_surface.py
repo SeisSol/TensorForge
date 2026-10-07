@@ -50,9 +50,9 @@ def main() -> int:
     emitted = []            # text every PIR body produced
     orig_emit = pir.emit
 
-    def patched_emit(body, writer, context=None):
+    def patched_emit(body, writer, context=None, metrics=None):
         before = writer.get_src()
-        orig_emit(body, writer, context)
+        orig_emit(body, writer, context, metrics)
         emitted.append(writer.get_src()[len(before):])
 
     pir.emit = patched_emit

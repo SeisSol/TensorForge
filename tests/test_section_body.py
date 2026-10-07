@@ -52,9 +52,9 @@ def test_a_section_is_emitted_as_one_body(case_file, backend, arch,
     emitted = []
     original = pir.emit
 
-    def counting(body, writer, context=None):
+    def counting(body, writer, context=None, metrics=None):
         emitted.append(body)
-        return original(body, writer, context)
+        return original(body, writer, context, metrics)
 
     monkeypatch.setattr(abstract_instruction.pir, "emit", counting)
     gen = _generator(case_file, backend, arch, merge_variants=False)

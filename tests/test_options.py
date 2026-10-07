@@ -218,11 +218,3 @@ def test_two_contexts_do_not_share_their_options():
   second = _ctx()
   assert first.get_user_options().move_distance == 2
   assert second.get_user_options().move_distance == 1
-
-
-def test_two_contexts_do_not_share_their_pressure_state():
-  first, second = _ctx(), _ctx()
-  first.measure_pressure = True
-  first.record_pressure(128)
-  assert second.measure_pressure is False
-  assert second.peak_pressure is None

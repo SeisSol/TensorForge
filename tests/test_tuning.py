@@ -171,6 +171,6 @@ def test_rolling_a_reduction_does_not_change_its_work():
                       options=Options(**opts))
         gen = Generator(mod.descr_list(), ctx)
         gen.generate()
-        return gen.emitted_work
+        return gen.metrics.emitted_work
 
     assert work(k_roll=28) == work()

@@ -15,29 +15,26 @@ from tensorforge.backend.pir.core import (Access, Effect, MemSpace,
                                           Uniformity)
 
 
-def _record_pressure(context, body, simd: bool,
+def _record_pressure(metrics, context, body, simd: bool,
                      num_threads: Optional[int] = None) -> None:
-  """Measure `body` and hand the figure to the context, split by file.
+  """Measure `body` and add the figure to the build's, split by file.
 
   What separates the two files is whether a whole wave agrees on the value,
   and that is a fact about the geometry rather than about the value: a
   multiplication narrower than a wave holds several per wave, so mult-uniform
   is then not wave-uniform.  `Participants.WAVE.arrival` answers exactly that
-  question for barriers, and the answer is the same one here.
-
-  The thread count comes from the instruction where there is one and from the
-  context otherwise -- the shared body is built by a classmethod, which has no
-  instruction to ask.
+  question for barriers, and the answer is the same one here.  `num_threads`
+  is how many lanes a multiplication is spread over, a wave where not said.
   """
   from tensorforge.backend.pir.core import Participants
   wave = context.target.hw.vec_unit_length
-  threads = num_threads or getattr(context, 'lane_threads', None) or wave
+  threads = num_threads or wave
   split: List[int] = []
   total = pir.pressure(body, in_bytes=True, explicit_simd=simd,
                        by_file=split,
                        wave_uniform=Participants.WAVE.arrival(threads, wave),
                        folded_crosslane=context.target.folds_broadcast())
-  context.record_pressure(total, *split)
+  metrics.record_pressure(total, *split)
 
 
 def _explicit_simd(context) -> bool:
@@ -407,7 +404,7 @@ class AbstractInstruction(ABC):
 
   @classmethod
   def optimized_body(cls, context, names, fill, arena=None, place=None,
-                     barriers=None):
+                     barriers=None, metrics=None):
     """`fill(builder)` as one body, through the pipeline, ready to emit.
 
     The half of `build_shared_body` that needs no writer: `names` is the
@@ -421,6 +418,7 @@ class AbstractInstruction(ABC):
     where a shared buffer that names no other one goes; `place` lays the
     buffers out (`pir.PlaceBuffers`) and `barriers` places the barriers
     (`pir.PlaceBarriers`), both behind everything that moves a statement.
+    `metrics` takes what the passes report (`BuildMetrics.record_wrap`).
     """
     def attempt():
       builder = cls._body_builder(context, names, arena)
@@ -433,7 +431,8 @@ class AbstractInstruction(ABC):
     _, body = _fused_if_over_budget(
         context, attempt,
         lambda builder, body: cls._optimize_shared_body(context, builder, body,
-                                                        place, barriers))
+                                                        place, barriers,
+                                                        metrics))
     return body
 
   @staticmethod
@@ -442,7 +441,8 @@ class AbstractInstruction(ABC):
                          alloc=names, arena=arena)
 
   @staticmethod
-  def _optimize_shared_body(context, builder, body, place=None, barriers=None):
+  def _optimize_shared_body(context, builder, body, place=None, barriers=None,
+                            metrics=None):
     """A shared body through the pipeline, with the transfers issued ahead
     where that is asked for: within their statement list, and across the
     batch loop's back edge.
@@ -473,9 +473,8 @@ class AbstractInstruction(ABC):
                         place=place, barriers=barriers, prefetch=prefetch,
                         where='shared body')
     if wrap is not None:
-      record = getattr(context, 'record_wrap', None)
-      if record is not None:
-        record(report)
+      if metrics is not None:
+        metrics.record_wrap(report)
       if options.ir_debug:
         for line in report:
           print(f'wrap: {line}')
@@ -485,12 +484,18 @@ class AbstractInstruction(ABC):
     return body
 
   @staticmethod
-  def _emit_shared_body(context, writer, body) -> None:
+  def _emit_shared_body(context, writer, body, metrics=None,
+                        num_threads=None) -> None:
+    """Write `body`, counting into `metrics` (`common.metrics.BuildMetrics`)
+    where it is given: what the emitter lays down, and the body's register
+    footprint where the build asked for it.  `num_threads` is how many lanes
+    a multiplication is spread over."""
     _check_register_budget(body, _explicit_simd(context), context,
                            'shared body')
-    if getattr(context, 'measure_pressure', False):
-      _record_pressure(context, body, _explicit_simd(context))
-    pir.emit(body, writer, context)
+    if metrics is not None and metrics.pressure:
+      _record_pressure(metrics, context, body, _explicit_simd(context),
+                       num_threads)
+    pir.emit(body, writer, context, metrics)
 
   def through_pir(self, writer: Writer, build) -> None:
     """Route ``build(sink)`` through the pseudo-IR into ``writer``.
@@ -530,14 +535,6 @@ class AbstractInstruction(ABC):
                                             where=type(self).__name__))
 
     self._check_register_budget(body, simd)
-    # Reported here because this is where the body exists: it is discarded
-    # after `emit`, so anything wanting a number about it has to take it now.
-    # Computing it always would put a liveness walk into every generation for
-    # the sake of the callers that search over configurations, and they are
-    # the only ones that read it.
-    if getattr(self._context, 'measure_pressure', False):
-      _record_pressure(self._context, body, simd,
-                       getattr(self, '_num_threads', None))
     if self._context.get_user_options().ir_stats:
       print(f'{type(self).__name__}: {sum(1 for _ in pir.walk(body))} nodes, '
             f'register pressure {pir.pressure(body)} values, '

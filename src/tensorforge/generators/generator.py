@@ -6,6 +6,7 @@ import hashlib
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.generators.rolling import ForDescr, roll
 from tensorforge.common.context import Context
+from tensorforge.common.metrics import BuildMetrics
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, Residence
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.generators.kernel_params import KernelParam
@@ -391,7 +392,8 @@ class Generator:
                thread_block_policy_type: Type[AbstractThreadBlockPolicy] = RegmaxBlockPolicy,
                lanes: Optional[LaneConfig] = None,
                attrs: Optional[dict] = None,
-               merge_within: Optional[tuple] = None):
+               merge_within: Optional[tuple] = None,
+               measure_pressure: bool = False):
     # In the form the builders take: what a frontend states beyond it -- an
     # operand on other axes, an accumulation, a factor -- is rewritten here,
     # whichever frontend stated it.
@@ -448,26 +450,12 @@ class Generator:
     #: instead" -- the thing a search over configurations needs and a constant
     #: cannot offer.
     self._lanes: Optional[LaneConfig] = lanes
-    #: Peak register footprint over this kernel's bodies, in bytes per lane,
-    #: or None when the context did not ask for it.  A maximum and not a sum,
-    #: because the budget is per kernel and the widest body is what has to
-    #: fit.
-    self.peak_pressure: Optional[int] = None
-    #: The same, split by the file that holds it: lane-varying values, and the
-    #: ones a whole wave agrees on.  A scalar register file is AMD's; see
-    #: `Context.peak_lane_pressure`.  Peaks of their own, so they do not add
-    #: up to `peak_pressure`.
-    self.peak_lane_pressure: Optional[int] = None
-    self.peak_uniform_pressure: Optional[int] = None
-    #: Arithmetic operations this build wrote out (`Context.record_work`).
-    self.emitted_work: Optional[int] = None
-    #: Instructions laid down, in emitter units (`Context.record_code`); what
-    #: `analysis.icache` weighs against the instruction cache.
-    self.code_units: Optional[int] = None
-    #: Statements by what they occupy (`Context.record_mix`) and bytes by
-    #: space (`Context.record_bytes`); what `analysis.pipeline` bounds.
-    self.issue_mix: Optional[dict] = None
-    self.memory_bytes: Optional[dict] = None
+    #: Whether this build measures each body's peak register footprint
+    #: (`BuildMetrics.pressure`): a liveness walk per body, which only a
+    #: caller searching over configurations reads.
+    self._measure_pressure: bool = measure_pressure
+    #: What this build measures of what it lays down.
+    self.metrics: BuildMetrics = BuildMetrics(measure_pressure)
     #: Blocks resident per SM under the resources that are known exactly --
     #: shared memory and threads.  Not the register limit; see
     #: `_resident_blocks`.
@@ -618,7 +606,8 @@ class Generator:
     other = Generator(self._given if descrs is None else descrs,
                       self._context, self._thread_block_policy_type,
                       lanes=self._lanes, attrs=self._attrs,
-                      merge_within=merge_within)
+                      merge_within=merge_within,
+                      measure_pressure=self._measure_pressure)
     other._may_tune = False
     other._merge_decided = True
     other._announce_identity = False
@@ -643,8 +632,6 @@ class Generator:
     if self._auto_merge():
       # built, by the generator this one has taken over
       return None
-    # After every probe above, which build against the same context.
-    self._context.begin_build()
 
     self.register()
 
@@ -688,7 +675,8 @@ class Generator:
       return
     tuned = Generator(given, pick.context(self._context),
                       self._thread_block_policy_type, lanes=pick.lanes,
-                      attrs=self._attrs)
+                      attrs=self._attrs,
+                      measure_pressure=self._measure_pressure)
     tuned._base_kernel_name = self._base_kernel_name
     tuned.tuned = pick
     self._adopt(tuned)
@@ -755,8 +743,8 @@ class Generator:
     except Exception:
       return self._merge_by_written_out()
     budget = opts.merge_icache_fraction * capacity
-    above = code_bytes(probe.written_code_units, hw)
-    below = code_bytes(probe.code_units, hw)
+    above = code_bytes(probe.metrics.written_code_units, hw)
+    below = code_bytes(probe.metrics.code_units, hw)
     if (above is None or below is None or above <= budget
             or not list_cost(list(self._given)).flops):
       return self._keep_written_out()
@@ -818,7 +806,7 @@ class Generator:
       probe.generate()
     except Exception:
       return self._keep_written_out()
-    size = code_bytes(probe.code_units, hw)
+    size = code_bytes(probe.metrics.code_units, hw)
     budget = opts.merge_icache_fraction * hw.icache_size
     whole = list_cost(list(self._given)).flops
     if size is None or size <= budget or not whole:
@@ -1396,7 +1384,8 @@ class Generator:
     body = AbstractInstruction.optimized_body(
         self._context, self._names,
         lambda body: self._emit_section(body, index, section),
-        arena=obj.name, place=place, barriers=self._barriers(section))
+        arena=obj.name, place=place, barriers=self._barriers(section),
+        metrics=self.metrics)
     return body, place.layout
 
   def _with_arena(self, section, body):
@@ -1575,18 +1564,11 @@ class Generator:
 
       for section in self._sections:
         with writer.AnonymousScope():
-          AbstractInstruction._emit_shared_body(self._context, writer,
-                                                section.body)
+          AbstractInstruction._emit_shared_body(
+              self._context, writer, section.body, self.metrics,
+              self._num_threads)
 
     self._kernel = writer.get_src()
-    self.peak_pressure = self._context.peak_pressure
-    self.peak_lane_pressure = self._context.peak_lane_pressure
-    self.peak_uniform_pressure = self._context.peak_uniform_pressure
-    self.emitted_work = self._context.emitted_work
-    self.code_units = self._context.code_units
-    self.written_code_units = self._context.written_code_units
-    self.issue_mix = self._context.issue_mix
-    self.memory_bytes = self._context.memory_bytes
     self._warn_icache()
     self.resident_blocks = self._resident_blocks()
     self.lanes = LaneConfig(self._num_threads, self._num_active_threads,
@@ -1604,10 +1586,11 @@ class Generator:
     from tensorforge.analysis.icache import (ICacheBudgetWarning, code_bytes,
                                              icache_excess)
     hw = self._context.target.hw
-    excess = icache_excess(self.code_units, hw)
+    excess = icache_excess(self.metrics.code_units, hw)
     if excess:
       warnings.warn(
-          f'{self._base_kernel_name}: about {code_bytes(self.code_units, hw)} '
+          f'{self._base_kernel_name}: about '
+          f'{code_bytes(self.metrics.code_units, hw)} '
           f'B of code against an instruction cache of {hw.icache_size} B on '
           f'{hw.model}; the batch loop fetches the difference again on every '
           f'iteration.  Rolling a reduction (`k_roll`, `k_unroll_max`), '
@@ -1851,9 +1834,6 @@ class Generator:
     self._num_threads = config.num_threads
     self._num_active_threads = config.num_active_threads
     self._lead_width = config.lead_width
-    # Where only the context is to hand -- the shared body is built by a
-    # classmethod -- this is what says whether mult-uniform is wave-uniform.
-    self._context.lane_threads = config.num_threads
 
   def _preload_admits(self, symbol) -> bool:
     """Whether `preload_globals` may stage this batch-constant operand."""

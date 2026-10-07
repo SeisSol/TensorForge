@@ -60,9 +60,9 @@ def _capture():
     bodies = []
     original = pir.emit
 
-    def hooked(body, writer, context=None):
+    def hooked(body, writer, context=None, metrics=None):
         bodies.append(body)
-        return original(body, writer, context)
+        return original(body, writer, context, metrics)
 
     pir.emit = hooked
     return bodies, (lambda: setattr(pir, 'emit', original))
