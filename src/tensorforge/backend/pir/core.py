@@ -880,6 +880,12 @@ class Op:
     # against the buffers' own accesses by declaring a write of them, and by
     # nothing else, so it is no wall for anything that touches other memory.
     MARK = 'mark'
+    # `fn(args)` for one of the elementwise operations a description carries
+    # (`common.operation.Operation`, the `fn` attribute), spelled by the lexic
+    # (`Lexic.get_operation`).  Pure and without memory, like the arithmetic
+    # below; a name of its own because its spelling is a function of the
+    # target, where theirs is an operator.
+    MATH = 'math'
     # escape hatches into raw text
     RAWEXPR = 'rawexpr'     # exactly one target; `text` is an *expression*
     RAWSTMT = 'rawstmt'     # no target;          `text` is a *statement*

@@ -345,6 +345,16 @@ class Emitter:
             if _CROSSLANE_CALL.search(callee):
                 return 'xlane', []
             return _text_category(callee, 'other'), []
+        if op == Op.MATH:
+            # Read off the target's spelling, as a raw expression's is: which
+            # library function an operation becomes decides whether it goes to
+            # the transcendental unit.  Over placeholders for the values, so an
+            # operand inlined into the call is counted where it is computed
+            # and not a second time here.
+            places = iter(range(len(s.args)))
+            shape = ['{%d}' % next(places) if isinstance(a, Value)
+                     else self.operand(a, s.target[0].type) for a in s.args]
+            return _text_category(self._math(s, shape), 'other'), []
         if op == Op.RAWEXPR:
             if s.attr('crosslane'):
                 return 'xlane', []
@@ -517,6 +527,21 @@ class Emitter:
             return f'{op}({", ".join(args)})'
         base = getattr(v.type, 'base', None)
         return lex.get_operation(_LEXIC_BINOP[op], base, args[0], args[1])
+
+    def _math(self, s: Stmt, args: Sequence[str]) -> str:
+        """An `Op.MATH` over operands spelled `args`, as the lexic writes its
+        operation for the result's type.
+
+        The operation's name as a call where there is no lexic, for the
+        reason `_lexic_binop` gives.
+        """
+        fn = s.attr('fn')
+        lex = self._lexic()
+        if lex is None:
+            return f'{fn.name.lower()}({", ".join(args)})'
+        # A unary operation is asked for with an empty second operand.
+        return lex.get_operation(fn, s.target[0].type.base, *args,
+                                 *[''] * (2 - len(args)))
 
     def _fma(self, v: Value, args: Sequence[str]) -> str:
         """`a * b + c`, unless the lexic spells a vector one itself.
@@ -942,6 +967,12 @@ class Emitter:
                 return
             text = s.text.format(*[self.operand(a) for a in s.args])
             self.declare(v, text, s)
+            return
+
+        if op == Op.MATH:
+            v = s.target[0]
+            self.declare(v, self._math(s, [self.operand(a, v.type)
+                                           for a in s.args]), s)
             return
 
         if op == Op.RAWBLOCK:

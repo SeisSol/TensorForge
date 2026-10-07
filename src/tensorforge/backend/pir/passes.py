@@ -364,6 +364,11 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                             '`while`; nested, the condition it fires on is no '
                             'longer the one the loop is entered under')
 
+        elif s.op == Op.MATH:
+            if len(s.target) != 1 or not 1 <= len(s.args) <= 2:
+                diag.append('math: needs one target and one or two operands')
+            if s.attr('fn') is None:
+                diag.append('math: no operation (`fn`)')
         elif s.op == Op.RAWEXPR:
             if len(s.target) != 1 or s.text is None:
                 diag.append('rawexpr: needs exactly one target and text')

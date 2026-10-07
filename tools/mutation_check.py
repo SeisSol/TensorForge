@@ -57,6 +57,7 @@ WRAP = Path('src/tensorforge/backend/pir/wrap.py')
 MOVE = Path('src/tensorforge/backend/pir/move.py')
 TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 TARGET = Path('src/tensorforge/common/target.py')
+CUDA_LEXIC = Path('src/tensorforge/common/vm/lexic/cuda_lexic.py')
 
 
 def _run_tests(target):
@@ -937,6 +938,22 @@ GROUPS = {
                      "        return not self.sycl",
              "SYCL, whose lexic has no `sync_grid`.\"\"\"\n"
                      "        return True", 1)),
+    ]),
+
+    # An elementwise operation as one typed statement, spelled per target.
+    'math': ('tests/test_math_op.py', [
+        ('a misspelt function in one library',
+         sub(CUDA_LEXIC, "(Operation.LOG1P, 'log1p')",
+             "(Operation.LOG1P, 'logp1')", 1)),
+        ('spelled for another type than the result',
+         sub(EMIT, 'return lex.get_operation(fn, s.target[0].type.base, *args,',
+             'return lex.get_operation(fn, Datatype.F64, *args,', 1)),
+        ('the operation left off the statement',
+         sub(BUILD, "self._emit_op(Op.MATH, (v,), args, attrs=(('fn', fn),))",
+             "self._emit_op(Op.MATH, (v,), args)", 1)),
+        ('two operations on one operand taken for one value',
+         sub(BUILD, 'key = _cons_key(Op.MATH, type_, args, fn)',
+             'key = _cons_key(Op.MATH, type_, args)', 1)),
     ]),
 
     # The transfer for the next element, issued across the back edge.

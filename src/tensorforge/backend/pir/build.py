@@ -1719,6 +1719,28 @@ class IRBuilder:
                     f'access to it: {code.strip()[:70]!r}. Either add the '
                     f'access or drop the `accesses` argument.')
 
+    def math(self, fn, type_, *args: Operand, hint: str = '') -> Value:
+        """`fn(args)`: one of the elementwise operations
+        (`common.operation.Operation`), with one or two operands.
+
+        Typed, where a raw expression of its spelling would be text: the
+        passes see which operation it is and what it reads, and the lexic
+        spells it at emission (`Lexic.get_operation`).  Shared like `op` --
+        the same operation on the same operands is the same value -- and
+        elementwise over its operands in uniformity and layout.
+        """
+        if not 1 <= len(args) <= 2:
+            raise IRError(f'math {fn}: one or two operands, not {len(args)}')
+        key = _cons_key(Op.MATH, type_, args, fn)
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
+        v = self.value(type_, hint=hint, uniform=_join(args),
+                       layout=join_layout(args))
+        self._emit_op(Op.MATH, (v,), args, attrs=(('fn', fn),))
+        self._share(key, v)
+        return v
+
     def rawexpr(self, text: str, *args: Operand, type_=None, hint: str = '',
                 pure: bool = False, movable: bool = False,
                 layout: Optional[RegisterLayout] = None,

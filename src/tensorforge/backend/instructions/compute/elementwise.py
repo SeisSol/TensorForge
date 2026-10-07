@@ -132,36 +132,27 @@ class ElementwiseInstruction(ComputeInstruction):
         from tensorforge.backend.pir.core import ScalarType
 
         def inner(varlist):
-            operands = []
-            args = []
             values = []
             for src in self._srcs:
                 if isinstance(src, ScalarLike):
-                    operands.append(self._context.fp_type.literal(src))
                     values.append(src)
                     continue
                 v = src.symbol.load(writer, self._context, None,
                                     self._index(src, varlist), False)
                 if v is None:
                     return self._body_named(writer, varlist)
-                operands.append('{%d}' % len(args))
-                args.append(v)
                 values.append(v)
 
             if self._op == Operation.SELECT:
                 result = self._select(writer, *values)
             else:
-                # get_operation always takes two values; unary ops pass '' as
-                # the second.  Handing it placeholders instead of names keeps
-                # the operand order but lets the emitter fill in whatever the
-                # value ends up being called -- or inline it entirely.
-                padded = operands + [''] if len(operands) == 1 else operands
-                lexic = self._context.target.lexic
-                text = lexic.get_operation(self._op, self._context.fp_type,
-                                           *padded)
-                result = writer.rawexpr(text, *args,
-                                        type_=ScalarType(self._context.fp_type),
-                                        hint='e', pure=True, movable=True)
+                # The operation itself, spelled by the emitter for its
+                # target; a number stays a number, which the kernel's type
+                # spells as it reads it (`Datatype.literal`, through `float`).
+                result = writer.math(
+                    self._op, ScalarType(self._context.fp_type),
+                    *(float(x) if isinstance(x, ScalarLike) else x
+                      for x in values), hint='e')
             self._dest.symbol.store(writer, self._context, result,
                                     self._index(self._dest, varlist), False)
 
