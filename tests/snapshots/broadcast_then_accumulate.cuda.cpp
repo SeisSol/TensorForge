@@ -1,5 +1,5 @@
 // === base name ===
-kernel_8e9131e00d6da035
+kernel_d59367156322f01d
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_8e9131e00d6da035 = {{32, 4, 1}, 32, 32, 1, 4, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_8e9131e00d6da035(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_8e9131e00d6da035(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_d59367156322f01d = {{32, 4, 1}, 32, 32, 1, 4, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_d59367156322f01d(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_d59367156322f01d(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_8e9131e00d6da035(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_d59367156322f01d(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 4, 1);
@@ -69,7 +69,7 @@ tensorforge::LaunchConfig launch_config_kernel_8e9131e00d6da035(size_t numElemen
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_8e9131e00d6da035, block.x * block.y * block.z, 0 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_d59367156322f01d, block.x * block.y * block.z, 0 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -90,19 +90,19 @@ tensorforge::LaunchConfig launch_config_kernel_8e9131e00d6da035(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_8e9131e00d6da035(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_8e9131e00d6da035(numElements0, streamPtr);
+void launcher_kernel_d59367156322f01d(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_d59367156322f01d(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_8e9131e00d6da035, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
+        cudaFuncSetAttribute(kernel_kernel_d59367156322f01d, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
-  kernel_kernel_8e9131e00d6da035<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_d59367156322f01d<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
@@ -110,7 +110,7 @@ void launcher_kernel_8e9131e00d6da035(const float ** m0, size_t m0_extraOffset, 
 // === kernel ===
 __global__ void 
 __launch_bounds__(128, 1)
- kernel_kernel_8e9131e00d6da035(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+ kernel_kernel_d59367156322f01d(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, float ** m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     using namespace tensorforge::literals;
@@ -148,22 +148,20 @@ __launch_bounds__(128, 1)
           float r2[3]{};
           // r2 = load{g>r}(glb_m1);
           #pragma unroll
-          for (int32_t v27_i0 = 0; v27_i0 < 1; ++v27_i0) {
-            int32_t v30_lead = v21_lead + (v27_i0 * 32);
+          for (int32_t v31_i0 = 0; v31_i0 < 1; ++v31_i0) {
+            int32_t v34_lead = v21_lead + (v31_i0 * 32);
             #pragma unroll
-            for (int32_t v28_i1 = 0; v28_i1 < 3; ++v28_i1) {
-              float v33_data = __ldcg(&glb_m1[(v30_lead + (v28_i1 * 32))]);
-              r2[(v27_i0 + v28_i1)] = v33_data;
+            for (int32_t v32_i1 = 0; v32_i1 < 3; ++v32_i1) {
+              float v37_data = __ldcg(&glb_m1[(v34_lead + (v32_i1 * 32))]);
+              r2[(v31_i0 + v32_i1)] = v37_data;
             }
           }
-          // wait(r0 = load{g>r}(glb_m0););
           float r1[1]{};
           // r1 = +(r0) + None
           // [(0, 32)] []
-          float v36_data = r0[0];
-          float v37_data = r1[0];
-          r1[0] = (v37_data + v36_data);
-          // wait(r2 = load{g>r}(glb_m1););
+          float v27_data = r0[0];
+          float v28_data = r1[0];
+          r1[0] = (v28_data + v27_data);
           float r3[3]{};
           // r3 = +(r2) + None
           // [(0, 32), (0, 3)] []

@@ -1,5 +1,5 @@
 // === base name ===
-kernel_12fa34dc89f4b4f2
+kernel_de5c67279ba995c4
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_12fa34dc89f4b4f2 = {{32, 8, 1}, 32, 32, 1, 8, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_12fa34dc89f4b4f2(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_12fa34dc89f4b4f2(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_de5c67279ba995c4 = {{32, 8, 1}, 32, 32, 1, 8, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_de5c67279ba995c4(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_de5c67279ba995c4(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_12fa34dc89f4b4f2(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_de5c67279ba995c4(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 8, 1);
@@ -67,14 +67,14 @@ tensorforge::LaunchConfig launch_config_kernel_12fa34dc89f4b4f2(size_t numElemen
         int device, smCount, blocksPerSM;
         CHECK_RES(hipGetDevice(&device));
         CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
-        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_12fa34dc89f4b4f2, block.x * block.y * block.z, 0 * sizeof(float)));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_de5c67279ba995c4, block.x * block.y * block.z, 0 * sizeof(float)));
         CHECK_ERR;
         int gfxMajor = 0;
         CHECK_RES(hipDeviceGetAttribute(&gfxMajor, hipDeviceAttributeComputeCapabilityMajor, device));
         if (gfxMajor >= 10 && (0 * sizeof(float)) > 0) {
           int ldsPerMP = 0, blocksNoLds = 0;
           CHECK_RES(hipDeviceGetAttribute(&ldsPerMP, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device));
-          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_12fa34dc89f4b4f2, block.x * block.y * block.z, 0));
+          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_de5c67279ba995c4, block.x * block.y * block.z, 0));
           const int blocksByLds = static_cast<int>((2 * static_cast<std::size_t>(ldsPerMP)) / (0 * sizeof(float)));
           blocksPerSM = std::max(blocksPerSM, std::min(blocksNoLds, blocksByLds));
         }
@@ -97,20 +97,20 @@ tensorforge::LaunchConfig launch_config_kernel_12fa34dc89f4b4f2(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_12fa34dc89f4b4f2(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_12fa34dc89f4b4f2(numElements0, streamPtr);
+void launcher_kernel_de5c67279ba995c4(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_de5c67279ba995c4(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_12fa34dc89f4b4f2), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
+        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_de5c67279ba995c4), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
         CHECK_ERR;
         shmemsizeset = true;
       }
       
   hipStream_t stream = (streamPtr != nullptr) ? static_cast<hipStream_t>(streamPtr) : 0;
   tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0Arg = (tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace>)flags0;
-  hipLaunchKernelGGL(kernel_kernel_12fa34dc89f4b4f2, grid, block, config.sharedMemBytes, stream, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0Arg);
+  hipLaunchKernelGGL(kernel_kernel_de5c67279ba995c4, grid, block, config.sharedMemBytes, stream, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, m4, m4_extraOffset, numElements0, flags0Arg);
   CHECK_ERR;
 }
 
@@ -118,7 +118,7 @@ void launcher_kernel_12fa34dc89f4b4f2(const float ** m0, size_t m0_extraOffset, 
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_12fa34dc89f4b4f2(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0) {
+ kernel_kernel_de5c67279ba995c4(const float ** m0, size_t m0_extraOffset, const float ** m1, size_t m1_extraOffset, const float ** m2, size_t m2_extraOffset, float ** m3, size_t m3_extraOffset, const float ** m4, size_t m4_extraOffset, size_t numElements0, tensorforge::SpacePtr<unsigned, tensorforge::GlobalMemspace> flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     using namespace tensorforge::literals;
@@ -162,142 +162,138 @@ __launch_bounds__(256)
           }
           float r2[9]{};
           // r2 = load{g>r}(glb_m1);
-          bool v33_g = v23_lead < 16;
-          if (v33_g) {
+          bool v61_g = v23_lead < 16;
+          if (v61_g) {
             #pragma unroll
-            for (int32_t v34_i1 = 0; v34_i1 < 9; ++v34_i1) {
-              float v39_data = __builtin_nontemporal_load(&glb_m1[(v23_lead + (v34_i1 * 16))]);
-              r2[v34_i1] = v39_data;
+            for (int32_t v62_i1 = 0; v62_i1 < 9; ++v62_i1) {
+              float v67_data = __builtin_nontemporal_load(&glb_m1[(v23_lead + (v62_i1 * 16))]);
+              r2[v62_i1] = v67_data;
             }
           }
-          // wait(r0 = load{g>r}(glb_m0););
           float r1[9]{};
           // r1 = +(r0) + None
           // [(0, 32), (0, 9)] []
-          float v42_data = r0[0];
-          float v43_data = r1[0];
-          r1[0] = (v43_data + v42_data);
-          float v45_data = r0[1];
-          float v46_data = r1[1];
-          r1[1] = (v46_data + v45_data);
-          float v48_data = r0[2];
-          float v49_data = r1[2];
-          r1[2] = (v49_data + v48_data);
-          float v51_data = r0[3];
-          float v52_data = r1[3];
-          r1[3] = (v52_data + v51_data);
-          float v54_data = r0[4];
-          float v55_data = r1[4];
-          r1[4] = (v55_data + v54_data);
-          float v57_data = r0[5];
-          float v58_data = r1[5];
-          r1[5] = (v58_data + v57_data);
-          float v60_data = r0[6];
-          float v61_data = r1[6];
-          r1[6] = (v61_data + v60_data);
-          float v63_data = r0[7];
-          float v64_data = r1[7];
-          r1[7] = (v64_data + v63_data);
-          float v66_data = r0[8];
-          float v67_data = r1[8];
-          r1[8] = (v67_data + v66_data);
+          float v33_data = r0[0];
+          float v34_data = r1[0];
+          r1[0] = (v34_data + v33_data);
+          float v36_data = r0[1];
+          float v37_data = r1[1];
+          r1[1] = (v37_data + v36_data);
+          float v39_data = r0[2];
+          float v40_data = r1[2];
+          r1[2] = (v40_data + v39_data);
+          float v42_data = r0[3];
+          float v43_data = r1[3];
+          r1[3] = (v43_data + v42_data);
+          float v45_data = r0[4];
+          float v46_data = r1[4];
+          r1[4] = (v46_data + v45_data);
+          float v48_data = r0[5];
+          float v49_data = r1[5];
+          r1[5] = (v49_data + v48_data);
+          float v51_data = r0[6];
+          float v52_data = r1[6];
+          r1[6] = (v52_data + v51_data);
+          float v54_data = r0[7];
+          float v55_data = r1[7];
+          r1[7] = (v55_data + v54_data);
+          float v57_data = r0[8];
+          float v58_data = r1[8];
+          r1[8] = (v58_data + v57_data);
           float r4[9]{};
           // r4 = load{g>r}(glb_m2);
-          if (v33_g) {
+          if (v61_g) {
             #pragma unroll
-            for (int32_t v70_i1 = 0; v70_i1 < 9; ++v70_i1) {
-              float v75_data = __builtin_nontemporal_load(&glb_m2[(v23_lead + (v70_i1 * 16))]);
-              r4[v70_i1] = v75_data;
+            for (int32_t v104_i1 = 0; v104_i1 < 9; ++v104_i1) {
+              float v109_data = __builtin_nontemporal_load(&glb_m2[(v23_lead + (v104_i1 * 16))]);
+              r4[v104_i1] = v109_data;
             }
           }
-          // wait(r2 = load{g>r}(glb_m1););
           float r3[9]{};
           // ir3 = +(r2)
           // [(0, 16), (0, 9)] []
           float ir3[9]{};
-          float v79_data = r2[0];
-          float v80_data = ir3[0];
-          ir3[0] = (v80_data + v79_data);
-          float v82_data = r2[1];
-          float v83_data = ir3[1];
-          ir3[1] = (v83_data + v82_data);
-          float v85_data = r2[2];
-          float v86_data = ir3[2];
-          ir3[2] = (v86_data + v85_data);
-          float v88_data = r2[3];
-          float v89_data = ir3[3];
-          ir3[3] = (v89_data + v88_data);
-          float v91_data = r2[4];
-          float v92_data = ir3[4];
-          ir3[4] = (v92_data + v91_data);
-          float v94_data = r2[5];
-          float v95_data = ir3[5];
-          ir3[5] = (v95_data + v94_data);
-          float v97_data = r2[6];
-          float v98_data = ir3[6];
-          ir3[6] = (v98_data + v97_data);
-          float v100_data = r2[7];
-          float v101_data = ir3[7];
-          ir3[7] = (v101_data + v100_data);
-          float v103_data = r2[8];
-          float v104_data = ir3[8];
-          ir3[8] = (v104_data + v103_data);
+          float v71_data = r2[0];
+          float v72_data = ir3[0];
+          ir3[0] = (v72_data + v71_data);
+          float v74_data = r2[1];
+          float v75_data = ir3[1];
+          ir3[1] = (v75_data + v74_data);
+          float v77_data = r2[2];
+          float v78_data = ir3[2];
+          ir3[2] = (v78_data + v77_data);
+          float v80_data = r2[3];
+          float v81_data = ir3[3];
+          ir3[3] = (v81_data + v80_data);
+          float v83_data = r2[4];
+          float v84_data = ir3[4];
+          ir3[4] = (v84_data + v83_data);
+          float v86_data = r2[5];
+          float v87_data = ir3[5];
+          ir3[5] = (v87_data + v86_data);
+          float v89_data = r2[6];
+          float v90_data = ir3[6];
+          ir3[6] = (v90_data + v89_data);
+          float v92_data = r2[7];
+          float v93_data = ir3[7];
+          ir3[7] = (v93_data + v92_data);
+          float v95_data = r2[8];
+          float v96_data = ir3[8];
+          ir3[8] = (v96_data + v95_data);
           // r3 = ir3 + r1
           #pragma unroll
-          for (int32_t v106_n1 = 0; v106_n1 < 9; ++v106_n1) {
-            float v108_data = ir3[v106_n1];
-            float v109_data = r1[v106_n1];
-            r3[v106_n1] = (v109_data + v108_data);
+          for (int32_t v98_n1 = 0; v98_n1 < 9; ++v98_n1) {
+            float v100_data = ir3[v98_n1];
+            float v101_data = r1[v98_n1];
+            r3[v98_n1] = (v101_data + v100_data);
           }
           float r6[9]{};
           // r6 = load{g>r}(glb_m4);
           if (v23_lead < 9) {
             #pragma unroll
-            for (int32_t v113_i1 = 0; v113_i1 < 9; ++v113_i1) {
-              float v118_data = __builtin_nontemporal_load(&glb_m4[(v23_lead + (v113_i1 * 9))]);
-              r6[v113_i1] = v118_data;
+            for (int32_t v147_i1 = 0; v147_i1 < 9; ++v147_i1) {
+              float v152_data = __builtin_nontemporal_load(&glb_m4[(v23_lead + (v147_i1 * 9))]);
+              r6[v147_i1] = v152_data;
             }
           }
-          // wait(r4 = load{g>r}(glb_m2););
           float r5[9]{};
           // ir5 = +(r4)
           // [(0, 16), (0, 9)] []
           float ir5[9]{};
-          float v122_data = r4[0];
-          float v123_data = ir5[0];
-          ir5[0] = (v123_data + v122_data);
-          float v125_data = r4[1];
-          float v126_data = ir5[1];
-          ir5[1] = (v126_data + v125_data);
-          float v128_data = r4[2];
-          float v129_data = ir5[2];
-          ir5[2] = (v129_data + v128_data);
-          float v131_data = r4[3];
-          float v132_data = ir5[3];
-          ir5[3] = (v132_data + v131_data);
-          float v134_data = r4[4];
-          float v135_data = ir5[4];
-          ir5[4] = (v135_data + v134_data);
-          float v137_data = r4[5];
-          float v138_data = ir5[5];
-          ir5[5] = (v138_data + v137_data);
-          float v140_data = r4[6];
-          float v141_data = ir5[6];
-          ir5[6] = (v141_data + v140_data);
-          float v143_data = r4[7];
-          float v144_data = ir5[7];
-          ir5[7] = (v144_data + v143_data);
-          float v146_data = r4[8];
-          float v147_data = ir5[8];
-          ir5[8] = (v147_data + v146_data);
+          float v113_data = r4[0];
+          float v114_data = ir5[0];
+          ir5[0] = (v114_data + v113_data);
+          float v116_data = r4[1];
+          float v117_data = ir5[1];
+          ir5[1] = (v117_data + v116_data);
+          float v119_data = r4[2];
+          float v120_data = ir5[2];
+          ir5[2] = (v120_data + v119_data);
+          float v122_data = r4[3];
+          float v123_data = ir5[3];
+          ir5[3] = (v123_data + v122_data);
+          float v125_data = r4[4];
+          float v126_data = ir5[4];
+          ir5[4] = (v126_data + v125_data);
+          float v128_data = r4[5];
+          float v129_data = ir5[5];
+          ir5[5] = (v129_data + v128_data);
+          float v131_data = r4[6];
+          float v132_data = ir5[6];
+          ir5[6] = (v132_data + v131_data);
+          float v134_data = r4[7];
+          float v135_data = ir5[7];
+          ir5[7] = (v135_data + v134_data);
+          float v137_data = r4[8];
+          float v138_data = ir5[8];
+          ir5[8] = (v138_data + v137_data);
           // r5 = ir5 + r3
           #pragma unroll
-          for (int32_t v149_n1 = 0; v149_n1 < 9; ++v149_n1) {
-            float v151_data = ir5[v149_n1];
-            float v152_data = r3[v149_n1];
-            r5[v149_n1] = (v152_data + v151_data);
+          for (int32_t v140_n1 = 0; v140_n1 < 9; ++v140_n1) {
+            float v142_data = ir5[v140_n1];
+            float v143_data = r3[v140_n1];
+            r5[v140_n1] = (v143_data + v142_data);
           }
-          // wait(r6 = load{g>r}(glb_m4););
           float r7[9]{};
           // r7 = +(r5 * r6) + None
           // [(0, 32), (0, 9)] [(0, 9)]

@@ -1049,8 +1049,8 @@ class MultilinearBuilder(OperationBuilder):
     section's statements and puts barriers where that order needs them, which
     is strictly better information than this builder has.  It keeps the ones
     it finds, so a barrier appended here would stand in the stream for the
-    whole optimization pipeline -- and `MoveLoads` treats a barrier as a wall
-    for any transfer that touches shared memory.  On `local_flux` that would
+    whole optimization pipeline -- and a barrier is a wall for a transfer
+    into shared memory moving up (`pir.move`).  On `local_flux` that would
     pin all five global-to-shared transfers where they are built: not one
     would move, so every `__pipeline_commit` would end up next to its
     `__pipeline_wait_prior(0)` and the asynchronous copies would be issued and

@@ -34,12 +34,12 @@ statements may swap when none of these holds:
 
 `sink_waits` and `hoist_issues` apply it greedily, one in each direction, and
 they are in the pipeline nowhere.  That is a measurement, not an oversight:
-between them they move nothing but comments on the corpus --- 15 of 232
-outputs differ, all of them in comment placement, and the mean
-issue-to-wait distance goes 7.7 to 8.1 statements entirely through comments
-changing places.  The macro layer already emits the wait immediately before
-the read that needs it and the issue immediately after the pointer binding it
-reads, so the schedule is already at the fixed point of both greedy moves.
+behind `move`, which issues each transfer early under a distance, they find
+almost nothing --- 21 of 505 outputs differ on the corpus for five targets,
+all but three in where a comment stands, and those three by a statement.
+`move` leaves the issue right behind what stopped it and the wait in front of
+the read that needs it, so the schedule is at the fixed point of both greedy
+moves but for those.
 
 The distance that is missing is not reachable by a local swap.  More than half
 the transfers have five statements or fewer of cover; getting more means
@@ -56,10 +56,12 @@ they belong on top of this predicate rather than inside it.
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, replace
+from functools import cached_property
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
-from .core import Effect, Op, Stmt, accesses_conflict, walk, walk_stmts
+from .core import (Effect, MemSpace, Op, Stmt, accesses_conflict, walk,
+                   walk_stmts)
 
 #: Effects that no access analysis can reason across.
 _WALL = Effect.BARRIER | Effect.UNKNOWN
@@ -95,6 +97,79 @@ def touches(s: Stmt) -> Optional[Tuple]:
     return tuple(out)
 
 
+@dataclass(frozen=True)
+class Footprint:
+    """What crossing a statement is about: what its subtree touches -- None
+    where it is a wall (`_touches_fixed`) -- and the values it defines and
+    reads.  Of several statements moved as one, the union, which crosses
+    exactly what every one of them crosses."""
+    touches: Optional[Tuple]
+    defines: FrozenSet[int]
+    uses: FrozenSet[int]
+
+    @staticmethod
+    def of(s: Stmt) -> 'Footprint':
+        return Footprint(_touches_fixed(s), frozenset(_defines(s)),
+                         frozenset(_uses(s)))
+
+    def __or__(self, other: 'Footprint') -> 'Footprint':
+        touches = (None if self.touches is None or other.touches is None
+                   else self.touches + other.touches)
+        return Footprint(touches, self.defines | other.defines,
+                         self.uses | other.uses)
+
+    @cached_property
+    def kinds(self):
+        """The touches by what an access can conflict with: reads (1) and
+        writes (2) per `(space, base)`, per space, and of an unknown space.
+
+        `accesses_conflict` asks the same of every pair, and one access
+        meets few of a statement's: a write in another space or of another
+        named buffer never conflicts.  So the pairs are looked up rather
+        than walked -- the answer is the same.
+        """
+        by_base: Dict[tuple, int] = {}
+        by_space: Dict[MemSpace, int] = {}
+        unknown = 0
+        for a in self.touches or ():
+            bit = 2 if a.writes else 1
+            if a.space is MemSpace.UNKNOWN:
+                unknown |= bit
+                continue
+            key = (a.space, None if a.base is None else id(a.base))
+            by_base[key] = by_base.get(key, 0) | bit
+            by_space[a.space] = by_space.get(a.space, 0) | bit
+        return by_base, by_space, unknown
+
+
+def crosses(mover: Footprint, fixed: Footprint) -> bool:
+    """`may_cross`, on footprints: for a caller that asks about the same
+    statements many times."""
+    if mover.touches is None or fixed.touches is None:
+        return False
+    if mover.defines & fixed.uses or fixed.defines & mover.uses:
+        return False
+    by_base, by_space, unknown = fixed.kinds
+    for a in mover.touches:
+        # What conflicts with it: anything, where it writes; a write where
+        # it only reads.
+        need = 3 if a.writes else 2
+        if unknown & need:
+            return False
+        if a.space is MemSpace.UNKNOWN:
+            if any(bits & need for bits in by_space.values()):
+                return False
+            continue
+        if a.base is None:
+            if by_space.get(a.space, 0) & need:
+                return False
+            continue
+        if (by_base.get((a.space, id(a.base)), 0)
+                | by_base.get((a.space, None), 0)) & need:
+            return False
+    return True
+
+
 def may_cross(mover: Stmt, fixed: Stmt) -> bool:
     """May ``mover`` be emitted on the other side of ``fixed``?
 
@@ -117,12 +192,7 @@ def may_cross(mover: Stmt, fixed: Stmt) -> bool:
     # question here: the caller has already decided to move it, and asks only
     # what crossing costs.  What still has to hold is that both sides can be
     # described, which is what `touches` answers for a subtree.
-    tm, tf = _touches_fixed(mover), _touches_fixed(fixed)
-    if tm is None or tf is None:
-        return False
-    if _defines(mover) & _uses(fixed) or _defines(fixed) & _uses(mover):
-        return False
-    return not any(accesses_conflict(x, y) for x in tm for y in tf)
+    return crosses(Footprint.of(mover), Footprint.of(fixed))
 
 
 def _touches_fixed(s: Stmt) -> Optional[Tuple]:
@@ -201,12 +271,9 @@ def sink_waits(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
 def hoist_issues(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     """Move every async issue as early as legality allows.
 
-    The mirror of `sink_waits`, and on the current corpus the one that has
-    something to do.  Sinking waits moves almost nothing, because the macro
-    layer already emits the wait immediately before the read that needs it ---
-    which is the right place and leaves nothing to win.  The distance is short
-    at the other end: the issue sits where its instruction sits, which is
-    wherever the transfer happened to be scheduled at macro level.
+    The mirror of `sink_waits`, a copy at a time and without a distance: an
+    issue rises past whatever it may swap with -- other transfers, pointer
+    bindings it does not read -- where `move` stops a whole transfer.
 
     Same predicate, opposite direction, and the same stopping rule: an issue
     rises until it meets something it may not cross, which for a `copy.async`

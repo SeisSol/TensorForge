@@ -320,10 +320,11 @@ _USE = re.compile(r"//\s*(\w+) = \+\(([^)]*)\)(?: \+ name: (\w+))?")
 def _stale_reads(src):
     """Loads whose tensor is stored to before the loaded value is consumed.
 
-    `MoveLoads` splits a load into transfer and wait so the transfer can go
-    early.  Between the two positions nothing may write what it reads, or the
-    consumer gets the value from before that write.  Reading the emitted order
-    back is an exact test: the transfer is where the comment sits.
+    `enable_move_loads` issues a transfer early and leaves its wait where the
+    read is (`pir.move`).  Between the two positions nothing may write what
+    it reads, or the consumer gets the value from before that write.  Reading
+    the emitted order back is an exact test: the transfer is where the
+    comment sits.
     """
     seq = []
     for line in src.splitlines():

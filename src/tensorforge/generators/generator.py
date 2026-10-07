@@ -377,6 +377,29 @@ def _one_lane_stores(stream) -> tuple:
   return tuple(roots.get(id(sym), sym) for sym in out)
 
 
+def _wait_for_transfers(instrs) -> list:
+  """`instrs` with a wait behind every transfer into shared memory that has
+  none, in every region.
+
+  Behind it and not at its consumer, which is where a builder writes a
+  transfer anyway: right in front of the statement that first reads it.  The
+  transfer moves up from there, if anything moves it (`pir.move`), and the
+  wait stays -- written at the consumer, it would stand between the two.  A
+  transfer that put nothing in flight waits for nothing (`LoadWait`).
+  """
+  from tensorforge.backend.instructions.memory.load import (GlbToShrLoader,
+                                                            LoadWait)
+  out = []
+  waited = {id(i._instr) for i in instrs if isinstance(i, LoadWait)}
+  for instr in instrs:
+    for index, region in enumerate(instr.regions()):
+      instr.replace_region(index, _wait_for_transfers(list(region)))
+    out.append(instr)
+    if isinstance(instr, GlbToShrLoader) and id(instr) not in waited:
+      out.append(LoadWait(instr))
+  return out
+
+
 class Generator:
   #: Hex characters of the digest that end up in the symbol.  Sixty-four bits
   #: rather than forty: the digest is the whole of the name's discriminating
@@ -900,6 +923,7 @@ class Generator:
 
         self._emit_global_ir()
         self._emit_ir(codesection)
+        self._section.ir = _wait_for_transfers(self._section.ir)
 
         # Build the loop *before* optimizing, so that the passes see the body
         # as the loop's region: what one adds goes into the region, and the
@@ -2631,14 +2655,9 @@ class Generator:
       align = max(1, 16 // dtype.size())
     loader.set_window(True, True, align)
     self._section.stage_loaders.append(loader)
-    # The wait goes where `MoveLoads` puts every load's: at the loader's place,
-    # in front of the second barrier, with the transfer hoisted up to the
-    # first.  Written here as well it would be a second wait the pass takes
-    # for a load.  Without the pass, an asynchronous copy still has to be
-    # retired before the barrier publishes it.
-    wait = ([] if self._context.get_user_options().enable_move_loads
-            else [LoadWait(loader)])
-    return binding + [SyncBlock(self._context), loader, *wait,
+    # Retired before the second barrier publishes it: a barrier orders the
+    # threads, not the copies they issued.
+    return binding + [SyncBlock(self._context), loader, LoadWait(loader),
                       SyncBlock(self._context)]
 
   def _stage_group(self) -> int:

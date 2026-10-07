@@ -54,6 +54,8 @@ ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
 LAYOUT = Path('src/tensorforge/backend/pir/layout_check.py')
 BARRIERS = Path('src/tensorforge/backend/pir/barriers.py')
 WRAP = Path('src/tensorforge/backend/pir/wrap.py')
+MOVE = Path('src/tensorforge/backend/pir/move.py')
+TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 
 
 def _run_tests(target):
@@ -872,16 +874,42 @@ GROUPS = {
          sub(ALLOC, '        end_block = at + b.size', '        end_block = at', 1)),
     ]),
 
+    # A transfer issued ahead of where its builder wrote it.
+    'move': ('tests/test_pir_move.py', [
+        ('a transfer moved past whatever stands above it',
+         sub(MOVE, '        if not (register and x.op is Op.BARRIER and not x.regions) and not (\n'
+                   '                crosses(moving, footprint(x))):',
+             '        if False:', 1)),
+        ('a shared transfer moved across a barrier',
+         sub(MOVE, '        if not (register and x.op is Op.BARRIER',
+             '        if not (x.op is Op.BARRIER', 1)),
+        ('the distance ignored',
+         sub(MOVE, '            if len(passed) + 1 >= distance:',
+             '            if len(passed) + 1 >= 1:', 1)),
+        ('a pointer binding crossed',
+         sub(MOVE, '        if _binding(x):\n            break',
+             '        if False:\n            break', 1)),
+        ('moved from the top down',
+         sub(MOVE, '    for i in reversed(range(len(found))):',
+             '    for i in range(len(found)):', 1)),
+        ('its declaration left behind',
+         sub(MOVE, '        if (x.op is Op.ALLOC and x.target\n'
+                   '                and x.target[0].id == t.dest.id) or (',
+             '        if False or (', 1)),
+        ('the wait moved with the transfer',
+         sub(TRANSFERS, 'Op.WAIT, Op.COMMIT_ASYNC', 'Op.COMMIT_ASYNC')),
+    ]),
+
     # The transfer for the next element, issued across the back edge.
     'wrap': ('tests/test_pir_wrap.py tests/test_pass_pipeline.py', [
         ('the tail fetches the element the iteration computes',
          sub(WRAP, '        tail_copy.given(l.k, l.next)',
              '        tail_copy.given(l.k, l.k)', 1)),
         ('the distance ignored',
-         sub(WRAP, '        for t in transfers[:distance]:',
-             '        for t in transfers[:1]:', 1)),
+         sub(WRAP, '        for t in found[:distance]:',
+             '        for t in found[:1]:', 1)),
         ('a buffer another statement writes moved all the same',
-         sub(WRAP, "            if any(_writes(a) and _same(a.base, d) for a in x.accesses):\n"
+         sub(WRAP, "            if any(writes(a) and same(a.base, d) for a in x.accesses):\n"
                    "                raise Refusal('the buffer is written by more than this '",
              "            if False:\n"
              "                raise Refusal('the buffer is written by more than this '", 1)),

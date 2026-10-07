@@ -34,6 +34,7 @@ from .asyncmem import schedule_async
 from .allocate import allocate
 from .barriers import place_barriers
 from .core import Stmt, dump
+from .move import move_loads
 from .wrap import wrap_loads
 from .passes import (converge_crosslane, cse, dce, flatten_scopes, fold,
                      if_convert, licm, load_cse, verify)
@@ -164,6 +165,27 @@ class PlaceBarriers(Pass):
                                  report=self._report)
 
 
+class MoveLoads(Pass):
+    """Issue every transfer up to `distance` transfers ahead of where it was
+    written (`move.move_loads`).
+
+    First of all, ahead of ``flatten``: the statements of an instruction
+    still stand in the scope it opened, and a transfer crosses the
+    instruction as one statement rather than one by one.  And ahead of the
+    wrap, which takes the first transfers of the body where this one left
+    them.
+    """
+
+    name = 'move'
+    is_transform = True
+
+    def __init__(self, distance: int = 1):
+        self._distance = distance
+
+    def run(self, pc: BodyContext) -> None:
+        pc.body = move_loads(pc.body, distance=self._distance)
+
+
 class WrapLoads(Pass):
     """Issue a batch loop's first transfers one element ahead
     (`wrap.wrap_loads`).
@@ -197,7 +219,8 @@ class WrapLoads(Pass):
 def standard_pipeline(debug: str = '',
                       wrap: Optional[WrapLoads] = None,
                       place: Optional[PlaceBuffers] = None,
-                      barriers: Optional[PlaceBarriers] = None) -> PassManager:
+                      barriers: Optional[PlaceBarriers] = None,
+                      move: Optional[MoveLoads] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -223,14 +246,26 @@ def standard_pipeline(debug: str = '',
     on ``local_flux`` at order 6, which does not pay for another sweep of the
     whole body, so it is not in the pipeline.
 
+    ``move`` issues each transfer ahead of where its builder wrote it, up to
+    `move_distance` transfers, and stops at what it may not cross and at a
+    pointer binding.  It runs first.  Ahead of ``flatten``, since the scopes
+    the instructions open are what it crosses: one statement each, where
+    flattened they are hundreds -- on `chain_five` the pass takes 0.26 s in
+    front of ``flatten`` and 0.6 s behind it.  And ahead of ``load_cse``: a
+    copy the hardware carries out on its own publishes memory the per-thread
+    model cannot see, so a read of shared memory behind it is not taken over
+    from one in front of it -- which, where the copy comes to stand between
+    two products that read one window, is what keeps the first product's
+    operands from staying live through the second: on `chain_five`, 504
+    values per thread.
+
     `schedule.hoist_issues` and `schedule.sink_waits` are deliberately *not*
-    here.  Both are correct, and on the corpus they move nothing but comments
-    between them, on 15 of 232 outputs, and the mean issue-to-wait distance
-    goes 7.7 to 8.1 statements entirely through comments changing places.
-    The schedule the macro layer produces is already at the fixed point of
-    those two greedy moves --- the wait sits immediately before the read that
-    needs it, and the issue sits immediately after the pointer binding it
-    reads.
+    here.  Both are correct, and behind ``move`` they find almost nothing: on
+    the corpus for five targets they change 21 of 505 outputs, all but three
+    in where a comment stands, and those three by a statement.  ``move``
+    leaves each issue right behind what stopped it -- the binding it reads,
+    the transfer before it -- and the wait where the builder wrote the
+    transfer, in front of the first read.
 
     That is worth knowing rather than working around.  The distance that is
     missing is not reachable by any local swap: more than half the transfers
@@ -246,13 +281,17 @@ def standard_pipeline(debug: str = '',
     happened already.
     """
     pm = PassManager(debug=debug, delivers=('scheduled',))
+    if move is not None:
+        pm.add(move)
     pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))
     pm.add(Rewrite('if_convert',
                    lambda body: if_convert(body, sink_into_loops=True),
                    preserves=('flat',), when=lambda pc: pc.explicit_simd))
     for name, fn in (('converge', converge_crosslane), ('fold', fold),
-                     ('cse', cse), ('loads', load_cse), ('licm', licm),
-                     ('cse2', cse), ('dce', dce)):
+                     ('cse', cse)):
+        pm.add(Rewrite(name, fn, preserves=('flat',)))
+    for name, fn in (('loads', load_cse), ('licm', licm), ('cse2', cse),
+                     ('dce', dce)):
         pm.add(Rewrite(name, fn, preserves=('flat',)))
     if wrap is not None:
         pm.add(wrap)
@@ -273,6 +312,7 @@ def standard_pipeline(debug: str = '',
 
 def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              debug: str = '', diagnostics: Optional[List[str]] = None,
+             move: Optional[MoveLoads] = None,
              wrap: Optional[WrapLoads] = None,
              place: Optional[PlaceBuffers] = None,
              barriers: Optional[PlaceBarriers] = None,
@@ -280,12 +320,13 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     """`body` through the standard pipeline (`standard_pipeline`).
 
     ``diagnostics`` collects what the scheduler could not determine;
-    ``wrap`` adds the transfers moved across the back edge, ``place`` the
-    placement of shared memory and ``barriers`` the barriers behind both;
-    ``where`` names what built the body in the findings `debug` reports.
+    ``move`` adds the transfers issued ahead within their list, ``wrap`` the
+    ones moved across the back edge, ``place`` the placement of shared memory
+    and ``barriers`` the barriers behind all of them; ``where`` names what
+    built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
-    standard_pipeline(debug, wrap, place, barriers).run(pc)
+    standard_pipeline(debug, wrap, place, barriers, move).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

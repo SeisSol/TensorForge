@@ -358,10 +358,11 @@ declare('enable_multibuffer',
 declare('enable_move_loads',
         default=True,
         parse=parse_bool,
-        doc='Issue a load early and wait where the value is needed.\n'
-            '`MoveLoads` splits a transfer from its `LoadWait` and walks the '
-            'transfer up the stream to hide its latency, stopping where '
-            'something between the two would write what the load reads.\n'
+        doc='Issue a transfer early and wait where the value is needed.\n'
+            'The transfer moves up its statement list to hide its latency, '
+            'and the wait stays at the first read; it stops where something '
+            'between the two would write what it reads, and after '
+            '`move_distance` transfers.  See backend/pir/move.py.\n'
             'On by default -- this switch exists so the default can be '
             '*priced*, not because it is in doubt. A pass with '
             'no way to be turned off is a pass whose contribution nobody has '
@@ -372,17 +373,19 @@ declare('enable_wrap_loads',
         default=False,
         doc='Prefetch across the back edge: issue each transfer for the next '
             'element at the tail of the current iteration, after the last '
-            'instruction that touches its buffer -- where MoveLoads would put '
-            'it in the loop unrolled once.  One buffer copy, register and '
-            'shared destinations alike; see backend/pir/wrap.py.')
+            'instruction that touches its buffer -- where '
+            '`enable_move_loads` would put it in the loop unrolled once.  One '
+            'buffer copy, register and shared destinations alike; see '
+            'backend/pir/wrap.py.')
 
 declare('move_distance',
         default=1,
-        doc='How many loads a transfer is moved ahead by.  `MoveLoads` lets a '
-            'load travel past this many earlier loads before it stops (1: the '
-            'one before it); `enable_wrap_loads` wraps the transfers whose '
-            'move runs across the back edge, which are the first this many of '
-            'the body.  A dependence stops a transfer whatever the distance.')
+        doc='How many transfers a transfer is moved ahead by.  '
+            '`enable_move_loads` lets one travel past this many earlier '
+            'transfers before it stops (1: the one before it); '
+            '`enable_wrap_loads` wraps the transfers whose move runs across '
+            'the back edge, which are the first this many of the body.  A '
+            'dependence stops a transfer whatever the distance.')
 
 declare('enable_prefetch',
         default=False,

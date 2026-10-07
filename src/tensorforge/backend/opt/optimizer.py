@@ -14,10 +14,9 @@ from tensorforge.common.context import Context
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
 from tensorforge.backend.data_types import ShrMemObject
 
-from tensorforge.backend.passmanager import PassManager, PassScope
+from tensorforge.backend.passmanager import PassManager
 
 from .manager import StreamContext, Transform
-from .memmove import MoveLoads
 from .prefetch import PrefetchBatch, PrefetchData
 
 
@@ -45,15 +44,6 @@ class OptimizationStage:
   def _build_pipeline(self) -> PassManager:
     opts = self._user_options
     pm = PassManager(debug=opts.ir_debug)
-
-    # Hoist loads away from their uses.  Scheduling within a straight-line
-    # block: per region, or it would hoist a load across a loop boundary.
-    pm.add(Transform(
-        'MoveLoads',
-        lambda pc, instrs: MoveLoads(pc.context, instrs,
-                                     distance=opts.move_distance),
-        scope=PassScope.PER_REGION,
-        enabled=lambda pc: opts.enable_move_loads))
 
     # The cache hint for the next element's pointer, at the head of the
     # region.  It moves nothing itself, so nothing downstream has to be told

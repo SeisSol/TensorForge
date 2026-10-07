@@ -21,15 +21,14 @@ not an ``AttributeError`` halfway through code generation.
 *Verification between passes.*  Under ``ir_debug`` the context checks the IR
 after every pass, so a diagnostic names the pass that introduced it.
 
-What an IR is, how it is checked and what a region of it is, is the
-context's business: the macro stream (`opt.manager.StreamContext`) and the
-pseudo-IR body (`pir.pipeline.BodyContext`) answer those differently, and the
-manager asks the same three questions of both.
+What an IR is and how it is checked is the context's business: the macro
+stream (`opt.manager.StreamContext`) and the pseudo-IR body
+(`pir.pipeline.BodyContext`) answer that differently, and the manager asks
+the same question of both.
 """
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import Any, Dict, Iterable, List, Sequence, Set
 
 from tensorforge.common.exceptions import GenerationError
@@ -76,39 +75,6 @@ class PassContext:
         """Check the IR after `stage` -- `'build'` before the first pass -- and
         dump it where `debug` asks for that.  Called only under `ir_debug`."""
 
-    def run_per_region(self, p: 'Pass') -> None:
-        """Invoke a `PER_REGION` pass on every region of the IR."""
-        raise GenerationError(
-            f'pass {p.name!r} asks to run per region, and '
-            f'{type(self).__name__} has no regions to hand it')
-
-
-class PassScope(Enum):
-    """What an instruction stream means to a pass.
-
-    Since an instruction can carry a region, "the instruction list" is
-    ambiguous and the right reading differs per pass:
-
-    ``WHOLE_NEST``  the pass gets the top-level stream and walks regions itself.
-                    Correct for anything global: liveness needs the back edges,
-                    and shared-memory allocation sizes one arena for the whole
-                    kernel.
-
-    ``PER_REGION``  the manager invokes the pass once per region, innermost
-                    first, and substitutes the result.  Correct for anything
-                    that reasons within a straight-line block: instruction
-                    scheduling, and barrier insertion, where "the previous
-                    write" must not be read across a loop boundary.
-
-    Getting this wrong is not a performance question.  A scheduler handed a
-    whole nest would move a load across a loop boundary; a liveness handed one
-    region at a time cannot see a value carried across the back edge.
-    """
-
-    WHOLE_NEST = 'whole_nest'
-    PER_REGION = 'per_region'
-
-
 class Pass:
     """Base class.
 
@@ -117,7 +83,6 @@ class Pass:
     ``provides``   facts this pass establishes: an analysis result, or a
                    property of the IR a transform leaves behind
     ``preserves``  facts that survive this pass (transforms only)
-    ``scope``      see :class:`PassScope`
     """
 
     name: str = ''
@@ -125,17 +90,11 @@ class Pass:
     provides: Sequence[str] = ()
     preserves: Sequence[str] = ()
     is_transform: bool = False
-    scope: PassScope = PassScope.WHOLE_NEST
 
     def enabled(self, pc: PassContext) -> bool:
         return True
 
     def run(self, pc: PassContext) -> None:
-        """Whole-nest entry point."""
-        raise NotImplementedError
-
-    def run_region(self, instrs: List[Any], pc: PassContext) -> List[Any]:
-        """Per-region entry point: rewrite one straight-line block."""
         raise NotImplementedError
 
 
@@ -188,10 +147,7 @@ class PassManager:
                 raise GenerationError(
                     f'pass {p.name!r} needs {missing}, invalidated by an '
                     f'earlier transform and not recomputed')
-            if p.scope is PassScope.PER_REGION:
-                pc.run_per_region(p)
-            else:
-                p.run(pc)
+            p.run(pc)
             if p.is_transform:
                 pc.invalidate(keep=tuple(p.preserves) + tuple(p.provides))
             if self._debug:

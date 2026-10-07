@@ -895,15 +895,16 @@ class LoadWait(MemoryInstruction, LoadInstruction):
     # starts at the issue.
     return self._instr.defs()
 
+  def gen_ir(self, sink) -> None:
+    # Nothing in flight, nothing written: neither a wait nor the comment
+    # naming one.  A transfer into registers puts nothing in flight, and
+    # neither does one that took the reordering path and moved its data with
+    # plain loads and stores.  `_issued_async` records what the transfer did;
+    # `_use_cuda_memcpy` is only what it was allowed to do.
+    if isinstance(self._instr, GlbToShrLoader) and self._instr._issued_async:
+      super().gen_ir(sink)
+
   def gen_code_inner(self, writer: Writer) -> None:
-    if not isinstance(self._instr, GlbToShrLoader):
-      return
-    if not self._instr._issued_async:
-      # Nothing was put in flight: the transfer took the reordering path and
-      # moved its data with plain loads and stores, and a wait would retire
-      # nothing.  `_issued_async` records what the transfer did;
-      # `_use_cuda_memcpy` is only what it was allowed to do.
-      return
     tokens = self._instr.tokens_for(writer)
     if not tokens and self._instr._issued_structured:
       # The transfer issued structurally but into a different body, so its

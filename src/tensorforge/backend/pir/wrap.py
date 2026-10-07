@@ -29,12 +29,10 @@ moves up past ``distance`` loads, and that runs off the top of the body into
 the previous iteration exactly when ``j < distance``.  So the first
 ``distance`` transfers of the body wrap, in body order, and the rest stay.
 
-*What a transfer is* is read off the accesses: a statement of the
-per-element body that reads global memory and writes one register array or
-one shared window, and nothing else.  The statements of one transfer follow
-each other -- a hop loop and its predicated tail, the copies and the guard
-around the last of them -- and move together, with the comments and the
-`mark defines` that lead them.
+*What a transfer is* is read off the accesses (`transfers`): statements of
+the per-element body that read global memory and write one register array or
+one shared window, and nothing else -- with the comments and the `mark
+defines` that lead them.
 
 *What may move.*  The transfer for ``k + 1`` comes from its place in
 iteration ``k + 1``, so it crosses what stands ahead of it there, and then
@@ -112,14 +110,15 @@ fills is what ``k - 1`` read.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from tensorforge.common.basic_types import Datatype
 
 from .asyncmem import strip_commits
-from .core import (BOOL, INDEX, SCALAR_LAYOUT, SIZE, Access, Effect,
-                   MemSpace, Op, Region, ScalarType, Stmt, Value, walk_stmts)
+from .core import (BOOL, INDEX, SCALAR_LAYOUT, SIZE, Effect, MemSpace, Op,
+                   Region, ScalarType, Stmt, Value, walk_stmts)
+from .transfers import Transfer, neutral, opaque, same, transfers, writes
 
 #: The effects a statement the pass computes again for another element may
 #: not have.
@@ -242,187 +241,6 @@ def _drop_unread(body: Tuple[Stmt, ...],
     return strip(body)
 
 
-# --------------------------------------------------------------------------- #
-# What a transfer is
-# --------------------------------------------------------------------------- #
-
-def _writes(a: Access) -> bool:
-    return bool(a.kind & (Effect.WRITE | Effect.ATOMIC))
-
-
-def _opaque(a: Access) -> bool:
-    return a.space is MemSpace.UNKNOWN or a.base is None
-
-
-def _same(x, y) -> bool:
-    if isinstance(x, Value) and isinstance(y, Value):
-        return x.id == y.id
-    return x is y
-
-
-def _neutral(s: Stmt) -> bool:
-    """Text that touches nothing and defines nothing: a comment, a blank
-    line.  It moves with the transfer it leads."""
-    return (s.op is Op.RAWSTMT and not s.target and not s.args
-            and not s.accesses and s.effect == Effect.NONE)
-
-
-def _glue(s: Stmt) -> bool:
-    """Arithmetic: no memory, no effect, no region."""
-    return (s.pure and not s.regions and not s.accesses
-            and s.effect == Effect.NONE and bool(s.target))
-
-
-def _defines_whole(s: Stmt, dest: Value) -> bool:
-    return (s.op is Op.MARK and s.attr('mark') == 'defines'
-            and all(isinstance(a, Value) and a.id == dest.id for a in s.args))
-
-
-def _fill_target(s: Stmt, fetched=frozenset()) -> Optional[Value]:
-    """The buffer `s` fills, where `s` is a piece of a transfer.
-
-    A piece reads global memory and writes one register array or one shared
-    window, and touches nothing else -- whatever is inside it included.  A
-    statement that reads a register or shared buffer computes rather than
-    transfers, and one that says nothing about what it touches is not
-    something this pass can account for.
-
-    And what it writes is what it read: a copy, or a store of a value a load
-    in the piece produced.  A reduction over global memory reads the same
-    and writes the same, and is a computation all the same -- moving it
-    would move the arithmetic with it, and count it among the transfers the
-    distance is a number of.  `fetched` are values loaded from global memory
-    by statements of their own, ahead of this one.
-    """
-    if s.op in (Op.WAIT, Op.COMMIT_ASYNC, Op.MARK, Op.ALLOC, Op.YIELD):
-        return None
-    dest = None
-    fetches = False
-    loaded = {t.id for x in walk_stmts((s,)) if x.op is Op.LOAD
-              for t in x.target} | set(fetched)
-    if fetched and s.op is Op.STORE:
-        fetches = isinstance(s.args[1], Value) and s.args[1].id in fetched
-    for x in walk_stmts((s,)):
-        if (x.op in (Op.LOAD_ASYNC, Op.WAIT, Op.COMMIT_ASYNC, Op.MARK,
-                     Op.ALLOC) or x.effect & Effect.BARRIER):
-            return None
-        for a in x.accesses:
-            if _opaque(a):
-                return None
-            if _writes(a):
-                if (a.kind & Effect.READ
-                        or a.space not in (MemSpace.REGISTER, MemSpace.SHARED)
-                        or not isinstance(a.base, Value)):
-                    return None
-                moves = x.op is Op.COPY_ASYNC or (
-                    x.op is Op.STORE and isinstance(x.args[1], Value)
-                    and x.args[1].id in loaded)
-                if not moves:
-                    return None
-                if dest is None:
-                    dest = a.base
-                elif dest.id != a.base.id:
-                    return None
-            elif a.space is MemSpace.GLOBAL:
-                fetches = True
-            else:
-                return None
-    return dest if fetches else None
-
-
-@dataclass
-class _Transfer:
-    """One transfer of the per-element body: the buffer it fills and its
-    statements there, in order."""
-    dest: Value
-    stmts: List[Stmt] = field(default_factory=list)
-    #: The statements that move data, without what leads them.
-    pieces: List[Stmt] = field(default_factory=list)
-
-    @property
-    def shared(self) -> bool:
-        return self.dest.type.space is MemSpace.SHARED
-
-    def tokens(self) -> List[Value]:
-        return [t for x in walk_stmts(tuple(self.pieces))
-                if x.op is Op.COPY_ASYNC for t in x.target]
-
-
-def _fetch(s: Stmt) -> bool:
-    """A read of global memory into a value, standing on its own: the first
-    half of a transfer whose second half is a store of it."""
-    return (s.op is Op.LOAD and len(s.target) == 1 and not s.regions
-            and bool(s.accesses) and all(
-                a.space is MemSpace.GLOBAL and not _writes(a)
-                for a in s.accesses))
-
-
-def _transfers(scope: Sequence[Stmt]) -> List[_Transfer]:
-    """The transfers of `scope`, in body order.
-
-    A transfer written out without a loop is a load and a store per hop, each
-    a statement of its own, and the loads belong to it as much as the stores
-    -- as long as nothing else reads what they loaded.
-
-    Arithmetic between two pieces of one transfer does not end it -- what
-    `licm` lifts out of a hop loop lands there -- and stays where it is: a
-    moved piece that reads it gets a copy of it (`_Loop._dependencies`).
-    Anything else between two pieces ends the transfer, and the buffer is
-    then filled by two, which no plan accepts.
-    """
-    uses: Dict[int, int] = {}
-    for x in walk_stmts(tuple(scope)):
-        for v in x.operands():
-            uses[v.id] = uses.get(v.id, 0) + 1
-    out: List[_Transfer] = []
-    current: Optional[_Transfer] = None
-    between: List[Stmt] = []
-    for s in scope:
-        fetched = {x.target[0].id: x for x in between if _fetch(x)}
-        dest = _fill_target(s, frozenset(fetched))
-        if dest is None:
-            if _neutral(s) or _glue(s) or _fetch(s) or s.op is Op.MARK:
-                between.append(s)
-            else:
-                current, between = None, []
-            continue
-        stored = {x.args[1].id for x in walk_stmts((s,))
-                  if x.op is Op.STORE and isinstance(x.args[1], Value)}
-        if any(uses.get(vid, 0) != 1 for vid in stored & set(fetched)):
-            # It stores a value something else reads as well, and the load
-            # cannot leave with it.
-            current, between = None, []
-            continue
-        halves = {id(fetched[vid]) for vid in stored & set(fetched)}
-
-        def joins(x):
-            return id(x) in halves or _neutral(x) or _defines_whole(x, dest)
-        if (current is not None and current.dest.id == dest.id
-                and all(joins(x) or _glue(x) for x in between)):
-            current.stmts.extend(x for x in between if joins(x))
-            current.pieces.extend(x for x in between if id(x) in halves)
-        else:
-            lead: List[Stmt] = []
-            for x in reversed(between):
-                if joins(x):
-                    lead.append(x)
-                elif not _glue(x):
-                    break
-            lead.reverse()
-            if len([x for x in lead if id(x) in halves]) != len(halves):
-                # A half stands behind something that is not the transfer's.
-                current, between = None, []
-                continue
-            current = _Transfer(dest)
-            current.stmts.extend(lead)
-            current.pieces.extend(x for x in lead if id(x) in halves)
-            out.append(current)
-        current.stmts.append(s)
-        current.pieces.append(s)
-        between = []
-    return out
-
-
 def _name(v: Value, alloc: Optional[Stmt]) -> str:
     extern = alloc.attr('extern') if alloc is not None else None
     return str(extern or v.hint or v)
@@ -447,7 +265,7 @@ def _line(p) -> str:
 @dataclass
 class _Plan:
     """A transfer the loop moves, and what moving it takes."""
-    transfer: _Transfer
+    transfer: Transfer
     alloc: Stmt
     #: Whether the allocation stands in the loop and leaves it.
     alloc_moves: bool
@@ -516,11 +334,11 @@ class _Loop:
     # -- planning ---------------------------------------------------------- #
 
     def wrap(self, distance: int):
-        transfers = _transfers(self.scope)
-        if not transfers:
+        found = transfers(self.scope)
+        if not found:
             raise Refusal('no transfer in the body')
         plans: List[_Plan] = []
-        for t in transfers[:distance]:
+        for t in found[:distance]:
             alloc = self.allocs.get(t.dest.id)
             try:
                 plans.append(self._plan(t, alloc))
@@ -533,7 +351,7 @@ class _Loop:
             self.report.extend(_line(p) for p in plans)
         return _Rewrite(self, plans)
 
-    def _plan(self, t: _Transfer, alloc: Optional[Stmt]) -> _Plan:
+    def _plan(self, t: Transfer, alloc: Optional[Stmt]) -> _Plan:
         d = t.dest
         if alloc is None:
             raise Refusal('the buffer is not allocated in this body')
@@ -573,7 +391,7 @@ class _Loop:
         for x in walk_stmts(self.region.body):
             if id(x) in mine or x is wait or x.op in (Op.MARK, Op.ALLOC):
                 continue
-            if any(_writes(a) and _same(a.base, d) for a in x.accesses):
+            if any(writes(a) and same(a.base, d) for a in x.accesses):
                 raise Refusal('the buffer is written by more than this '
                               'transfer, so it does not hold one element for '
                               'the whole iteration')
@@ -586,14 +404,14 @@ class _Loop:
 
         for x in walk_stmts(tuple(self._ahead_of(t.stmts[0]))):
             for a in x.accesses:
-                if _opaque(a):
+                if opaque(a):
                     raise Refusal('ahead of the transfer stands a statement '
                                   'that does not say what it touches')
-                if _same(a.base, d):
+                if same(a.base, d):
                     raise Refusal('ahead of the transfer stands an access to '
                                   'its buffer, so it cannot leave its own '
                                   'iteration')
-                if _writes(a) and any(_same(a.base, r) for r in reads):
+                if writes(a) and any(same(a.base, r) for r in reads):
                     raise Refusal('ahead of the transfer stands a write of '
                                   'what it reads, which it would read before '
                                   'the write')
@@ -604,7 +422,7 @@ class _Loop:
             for x in walk_stmts(self.region.body):
                 if id(x) in mine:
                     continue
-                if any(_writes(a) and any(_same(a.base, r) for r in reads)
+                if any(writes(a) and any(same(a.base, r) for r in reads)
                        for a in x.accesses):
                     raise Refusal('the body writes what the transfer reads, '
                                   'which is the same for every element')
@@ -615,7 +433,7 @@ class _Loop:
                      rotate=t.shared and self.stages > 1 and single is None,
                      single=single)
 
-    def _single_stage(self, t: _Transfer, alloc: Stmt, inside: bool,
+    def _single_stage(self, t: Transfer, alloc: Stmt, inside: bool,
                       tokens: Sequence[Value]) -> Optional[str]:
         """Why `t` keeps one stage where two were asked for, or None.
 
@@ -634,7 +452,7 @@ class _Loop:
         extern = alloc.attr('extern')
         for x in walk_stmts(tuple(s for s in self.around if s is not alloc)):
             if (any(v.id == d.id for v in x.operands())
-                    or any(_same(a.base, d) for a in x.accesses)):
+                    or any(same(a.base, d) for a in x.accesses)):
                 return 'the buffer is used outside the loop'
             text = x.text or ''
             if extern and not text.lstrip().startswith('//') and _names_in(
@@ -645,7 +463,7 @@ class _Loop:
     def _names_index(self, s: Stmt) -> bool:
         return any(v.id == self.k.id for v in s.operands())
 
-    def _dependencies(self, t: _Transfer) -> Tuple[List[Stmt], bool]:
+    def _dependencies(self, t: Transfer) -> Tuple[List[Stmt], bool]:
         """The statements of the loop's body `t` reads, transitively, in the
         order they run; and whether one of them reads an element's own
         pointer.
@@ -684,7 +502,7 @@ class _Loop:
                 raise Refusal(f'the transfer reads a `{s.op}` of the body, '
                               f'which cannot be computed again for another '
                               f'element')
-            if any(_writes(a) or _opaque(a) or a.space is not MemSpace.GLOBAL
+            if any(writes(a) or opaque(a) or a.space is not MemSpace.GLOBAL
                    for a in s.accesses):
                 raise Refusal('the transfer reads a value loaded from memory '
                               'other than global, which another element '
@@ -700,7 +518,7 @@ class _Loop:
         # array, being recorded against the operand either way.
         roots = [a.base for s in deps if s.op is Op.LOAD for a in s.accesses]
         for x in walk_stmts(self.region.body):
-            if any(_writes(a) and any(_same(a.base, r) for r in roots)
+            if any(writes(a) and any(same(a.base, r) for r in roots)
                    for a in x.accesses):
                 raise Refusal('the body writes memory the transfer\'s address '
                               'is computed from')
@@ -1051,7 +869,7 @@ class _Rewrite:
                 # the loop read is a window of the loop.
                 peel_win = peel_copy.mapping[p.transfer.dest.id]
                 accesses = tuple(replace(a, base=peel_win)
-                                 if _same(a.base, p.transfer.dest) else a
+                                 if same(a.base, p.transfer.dest) else a
                                  for a in accesses)
             after.append(Stmt(op=Op.WAIT, args=tuple(
                 past.get(a.id, a) if isinstance(a, Value) else a
@@ -1098,7 +916,7 @@ class _Rewrite:
                 # With the comment that says what it waits for.
                 at = next(i for i, x in enumerate(scope) if x is p.wait)
                 lead = at
-                while (lead > 0 and _neutral(scope[lead - 1])
+                while (lead > 0 and neutral(scope[lead - 1])
                        and id(scope[lead - 1]) not in moved):
                     lead -= 1
                 lifted += scope[lead:at] + [waits[id(p.wait)]]

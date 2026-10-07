@@ -6,9 +6,8 @@
 
 The manager itself is IR-agnostic (`backend.passmanager`).  What is specific
 to this level lives here: the stream and the prologue it may read but not
-rewrite, the shared-memory object the allocation passes fill in, the
-per-region dispatch over instruction regions, the macro verifier between
-passes, and the adapters that turn an optimization stage into a pass.
+rewrite, the macro verifier between passes, and the adapter that turns an
+optimization stage into a pass.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
-from tensorforge.backend.passmanager import Pass, PassContext, PassScope
+from tensorforge.backend.passmanager import Pass, PassContext
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import GenerationError
 
@@ -57,24 +56,6 @@ class StreamContext(PassContext):
         """
         return self.global_ir + self.instrs
 
-    # -- per-region dispatch ---------------------------------------------- #
-
-    def run_per_region(self, p: Pass) -> None:
-        """Invoke ``p`` on every region, innermost first, then the top level.
-
-        Innermost first so that a pass which inspects an instruction's regions
-        sees them already rewritten -- and so that the top-level invocation acts
-        on a settled nest.
-        """
-
-        def visit(instrs: List[AbstractInstruction]) -> List[AbstractInstruction]:
-            for instr in instrs:
-                for index, region in enumerate(instr.regions()):
-                    instr.replace_region(index, visit(list(region)))
-            return list(p.run_region(instrs, self))
-
-        self.instrs[:] = visit(self.instrs)
-
     # -- verification ------------------------------------------------------ #
 
     def check(self, stage: str, debug: str) -> None:
@@ -106,8 +87,7 @@ class Transform(Pass):
     """An ``AbstractTransformer`` as a pass: construct, ``apply``, take the list.
 
     The stage keeps its own constructor arguments; the factory binds them from
-    the pass context.  It takes the instruction list explicitly rather than
-    reading ``pc.instrs``, so the same wrapper serves both scopes.
+    the pass context and the stream.
     """
 
     is_transform = True
@@ -115,11 +95,9 @@ class Transform(Pass):
     def __init__(self, name: str,
                  factory: Callable[[StreamContext, List[AbstractInstruction]], Any],
                  *, preserves: Sequence[str] = (),
-                 enabled: Optional[Callable[[StreamContext], bool]] = None,
-                 scope: PassScope = PassScope.WHOLE_NEST):
+                 enabled: Optional[Callable[[StreamContext], bool]] = None):
         self.name = name
         self.preserves = preserves
-        self.scope = scope
         self._factory = factory
         self._enabled = enabled
 
@@ -127,36 +105,6 @@ class Transform(Pass):
         return True if self._enabled is None else self._enabled(pc)
 
     def run(self, pc: StreamContext) -> None:
-        pc.instrs[:] = self.run_region(pc.instrs, pc)
-
-    def run_region(self, instrs: List[AbstractInstruction],
-                   pc: StreamContext) -> List[AbstractInstruction]:
-        opt = self._factory(pc, instrs)
+        opt = self._factory(pc, pc.instrs)
         opt.apply()
-        return list(opt.get_instructions())
-
-
-class Analysis(Pass):
-    """An ``AbstractOptStage`` that computes one named result, as a pass.
-
-    Always ``WHOLE_NEST``: an analysis whose result is consumed against the
-    whole stream must be computed over the whole stream.
-    """
-
-    is_transform = False
-    scope = PassScope.WHOLE_NEST
-
-    def __init__(self, name: str, factory: Callable[[StreamContext], Any],
-                 getter: Callable[[Any], Any], provides: str,
-                 *, requires: Sequence[str] = ()):
-        self.name = name
-        self.provides = (provides,)
-        self.requires = requires
-        self._factory = factory
-        self._getter = getter
-        self._key = provides
-
-    def run(self, pc: StreamContext) -> None:
-        opt = self._factory(pc)
-        opt.apply()
-        pc.put(self._key, self._getter(opt))
+        pc.instrs[:] = list(opt.get_instructions())

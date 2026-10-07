@@ -1,5 +1,5 @@
 // === base name ===
-kernel_52b9439b8665053a
+kernel_a524ce48cb955f4e
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_52b9439b8665053a = {{1, 16, 1}, 16, 12, 1, 16, 2048, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_52b9439b8665053a(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_52b9439b8665053a(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_a524ce48cb955f4e = {{1, 16, 1}, 16, 12, 1, 16, 2048, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_a524ce48cb955f4e(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_a524ce48cb955f4e(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_52b9439b8665053a(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_a524ce48cb955f4e(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (1, 16, 1);
@@ -73,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_52b9439b8665053a(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_52b9439b8665053a(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_52b9439b8665053a(numElements0, streamPtr);
+void launcher_kernel_a524ce48cb955f4e(const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_a524ce48cb955f4e(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_52b9439b8665053a(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, numElements0, flags0);
+  kernel_kernel_a524ce48cb955f4e(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, m3, m3_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_52b9439b8665053a(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_a524ce48cb955f4e(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, const float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]] {
       tensorforge::slmReserve<512 * sizeof(float)>(); {
@@ -126,39 +126,36 @@ inline void kernel_kernel_52b9439b8665053a(sycl::queue *stream, sycl::range<3> g
               r0.template select<6, 1>(0) = v23_data;
               tensorforge::intel_esimd::simd<float, 16> r2(0.0f);
               // r2 = load{g>r}(glb_m1);
-              tensorforge::intel_esimd::simd<float, 6> v25_data;
-              v25_data.copy_from(glb_m1 + (0_i32));
-              r2.template select<6, 1>(0) = v25_data;
-              // wait(r0 = load{g>r}(glb_m0););
+              tensorforge::intel_esimd::simd<float, 6> v30_data;
+              v30_data.copy_from(glb_m1 + (0_i32));
+              r2.template select<6, 1>(0) = v30_data;
               tensorforge::intel_esimd::simd<float, 16> r1(0.0f);
               // r1 = +(r0) + None
               // [(0, 6)] []
-              tensorforge::intel_esimd::simd<float, 16> v27_data(r0.template select<16, 1>(0));
-              tensorforge::intel_esimd::simd<float, 16> v28_data(r1.template select<16, 1>(0));
-              r1.template select<16, 1>(0) = (v28_data + v27_data);
+              tensorforge::intel_esimd::simd<float, 16> v25_data(r0.template select<16, 1>(0));
+              tensorforge::intel_esimd::simd<float, 16> v26_data(r1.template select<16, 1>(0));
+              r1.template select<16, 1>(0) = (v26_data + v25_data);
               // s0 = store{r>s}(localShrMem0, r1);
-              tensorforge::intel_esimd::simd<float, 6> v30_data(r1.template select<6, 1>(0));
-              tensorforge::slmStore<float, 6>(s0 + (0_i32), v30_data);
+              tensorforge::intel_esimd::simd<float, 6> v28_data(r1.template select<6, 1>(0));
+              tensorforge::slmStore<float, 6>(s0 + (0_i32), v28_data);
               tensorforge::intel_esimd::simd<float, 16> r4(0.0f);
               // r4 = load{g>r}(glb_m2);
-              tensorforge::intel_esimd::simd<float, 12> v34_data;
-              v34_data.copy_from(glb_m2 + (0_i32));
-              r4.template select<12, 1>(0) = v34_data;
-              // wait(r2 = load{g>r}(glb_m1););
+              tensorforge::intel_esimd::simd<float, 12> v42_data;
+              v42_data.copy_from(glb_m2 + (0_i32));
+              r4.template select<12, 1>(0) = v42_data;
               tensorforge::intel_esimd::simd<float, 16> r3(0.0f);
               // ir3 = +(r2)
               // [(0, 6)] []
               tensorforge::intel_esimd::simd<float, 16> ir3(0.0f);
-              tensorforge::intel_esimd::simd<float, 16> v37_data(r2.template select<16, 1>(0));
-              tensorforge::intel_esimd::simd<float, 16> v38_data(ir3.template select<16, 1>(0));
-              ir3.template select<16, 1>(0) = (v38_data + v37_data);
+              tensorforge::intel_esimd::simd<float, 16> v33_data(r2.template select<16, 1>(0));
+              tensorforge::intel_esimd::simd<float, 16> v34_data(ir3.template select<16, 1>(0));
+              ir3.template select<16, 1>(0) = (v34_data + v33_data);
               // r3 = ir3
-              tensorforge::intel_esimd::simd<float, 6> v40_data(ir3.template select<6, 1>(0));
-              r3.template select<6, 1>(0) = v40_data;
+              tensorforge::intel_esimd::simd<float, 6> v36_data(ir3.template select<6, 1>(0));
+              r3.template select<6, 1>(0) = v36_data;
               // s0 = store{r>s}(localShrMem0, r3);
-              tensorforge::intel_esimd::simd<float, 6> v41_data(r3.template select<6, 1>(0));
-              tensorforge::slmStore<float, 6>(s0 + (6_i32), v41_data);
-              // wait(r4 = load{g>r}(glb_m2););
+              tensorforge::intel_esimd::simd<float, 6> v37_data(r3.template select<6, 1>(0));
+              tensorforge::slmStore<float, 6>(s0 + (6_i32), v37_data);
               tensorforge::intel_esimd::simd<float, 16> r5(0.0f);
               // ir5 = +(r4)
               // [(0, 12)] []

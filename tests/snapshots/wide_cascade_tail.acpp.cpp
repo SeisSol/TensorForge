@@ -1,5 +1,5 @@
 // === base name ===
-kernel_18c48e800b8caccd
+kernel_6b71ccba23df9195
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_18c48e800b8caccd = {{32, 1, 1}, 32, 24, 1, 1, 0, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_18c48e800b8caccd(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_18c48e800b8caccd(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_6b71ccba23df9195 = {{32, 1, 1}, 32, 24, 1, 1, 0, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_6b71ccba23df9195(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_6b71ccba23df9195(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_18c48e800b8caccd(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_6b71ccba23df9195(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (32, 1, 1);
@@ -73,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_18c48e800b8caccd(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_18c48e800b8caccd(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_18c48e800b8caccd(numElements0, streamPtr);
+void launcher_kernel_6b71ccba23df9195(float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_6b71ccba23df9195(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_18c48e800b8caccd(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_6b71ccba23df9195(stream, grid, block, m0, m0_extraOffset, m1, m1_extraOffset, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_18c48e800b8caccd(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_6b71ccba23df9195(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, size_t m1_extraOffset, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (0, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -131,8 +131,6 @@ inline void kernel_kernel_18c48e800b8caccd(sycl::queue *stream, sycl::range<3> g
                   r1[v31_i1] = v36_data;
                 }
               }
-              // wait(r0 = load{g>r}(glb_m1););
-              // wait(r1 = load{g>r}(glb_m2););
               float r2[9]{};
               // ir2 = +(r0 * r1)
               // [(0, 24), (0, 9)] [(0, 24)]

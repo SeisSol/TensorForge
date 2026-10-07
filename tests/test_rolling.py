@@ -982,10 +982,10 @@ def _unnamed(gen):
     return re.sub(r'kernel_[0-9a-f]{16}|// options:.*', '', gen.get_kernel())
 
 
-# On sm_86 the four contributions lay down 6460 B written out, 3536 B merged,
-# and the merged build bounds the written-out size from above at 6501 B --
+# On sm_86 the four contributions lay down 6432 B written out, 3522 B merged,
+# and the merged build bounds the written-out size from above at 6474 B --
 # so a fraction of the 128 KB cache puts the budget on either side of each.
-BETWEEN_AND_FITS = 0.0495       # 6488 B
+BETWEEN_AND_FITS = 0.0492       # 6449 B
 BETWEEN_AND_OVER = 0.040        # 5243 B
 
 
@@ -1105,9 +1105,9 @@ def _accumulate_then_read():
 def test_a_merged_accumulation_is_read_back_after_the_loop(arch):
     """`D += W_i Q B_i` three times, merged, then `O = D C`.
 
-    The loop states no definitions of its own and counts as a barrier; a
-    `MoveLoads` that let the final product's read of `D` cross it would compute
-    every row of `O` from a `D` two terms short.  The merged build is checked
+    A transfer moved up across the loop -- the final product's read of `D`
+    issued ahead of the accumulation into it -- would compute every row of
+    `O` from a `D` two terms short.  The merged build is checked
     on its own against numpy, since it names its buffers differently."""
     import numpy as np
 

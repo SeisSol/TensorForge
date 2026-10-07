@@ -32,7 +32,7 @@ from .asyncmem import (check_tokens, place_commits, schedule_async,
 from .build import IRBuilder, access_of
 from .passes import cluster_loads, flatten_scopes, if_convert, pressure, cse, dce, fold, licm, load_cse, substitute, verify
 from .barriers import Arena
-from .pipeline import (BodyContext, PlaceBarriers, PlaceBuffers,
+from .pipeline import (BodyContext, MoveLoads, PlaceBarriers, PlaceBuffers,
                        WrapLoads, optimize, standard_pipeline)
 from .emit import Emitter, emit
 
@@ -44,6 +44,7 @@ __all__ = [
     'cse', 'dce', 'cluster_loads', 'flatten_scopes', 'if_convert', 'pressure', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
     'free_values', 'licm', 'load_cse', 'may_alias', 'optimize', 'place_commits',
     'schedule_async', 'standard_pipeline', 'strip_commits',
-    'substitute', 'verify', 'PlaceBarriers', 'PlaceBuffers', 'WrapLoads',
+    'substitute', 'verify', 'MoveLoads', 'PlaceBarriers', 'PlaceBuffers',
+    'WrapLoads',
     'walk',
 ]

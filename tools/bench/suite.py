@@ -166,13 +166,9 @@ CONFIGS: Dict[str, Config] = {
     # measured neither.
     'prepare': Config('prepare', Options(preload_globals=False,
                                          prepare_operands=True)),
-    # Blackwell's hardware work queue against the grid-stride loop.  Depth 1
-    # hides the queue's own latency behind the body; depth 2 is the first at
-    # which the *next* element's index is known at the top of the iteration,
-    # and both are listed because the interesting comparison is between them
-    # rather than against the baseline alone.
-    # `MoveLoads` is on by default and has no other way to be turned off, so
-    # this config is how its contribution gets a number rather than a belief.
+    # `enable_move_loads` is on by default and has no other way to be turned
+    # off, so this config is how its contribution gets a number rather than a
+    # belief.
     'no-move-loads': Config('no-move-loads', Options(enable_move_loads=False)),
     # The prefetch hint, at both levels it can ask for.  Two entries because
     # the level is the open question: L1 is closer and smaller, so a hint
@@ -181,6 +177,11 @@ CONFIGS: Dict[str, Config] = {
     'prefetch': Config('prefetch', Options(enable_prefetch=True)),
     'prefetch-l1': Config('prefetch-l1', Options(enable_prefetch=True,
                                                  prefetch_level='l1')),
+    # Blackwell's hardware work queue against the grid-stride loop.  Depth 1
+    # hides the queue's own latency behind the body; depth 2 is the first at
+    # which the *next* element's index is known at the top of the iteration,
+    # and both are listed because the interesting comparison is between them
+    # rather than against the baseline alone.
     'launchctrl': Config('launchctrl', Options(launch_control=True)),
     'launchctrl2': Config('launchctrl2', Options(launch_control=True,
                                                  launch_control_depth=2)),

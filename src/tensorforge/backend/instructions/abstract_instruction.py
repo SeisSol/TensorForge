@@ -445,22 +445,25 @@ class AbstractInstruction(ABC):
 
   @staticmethod
   def _optimize_shared_body(context, builder, body, place=None, barriers=None):
-    """A shared body through the pipeline, with the transfers moved across
-    the batch loop's back edge where that is asked for.
+    """A shared body through the pipeline, with the transfers issued ahead
+    where that is asked for: within their statement list, and across the
+    batch loop's back edge.
 
-    The pass goes behind the cleanup and ahead of the allocator
-    (`pir.standard_pipeline`), and the statements it adds are built by a
-    builder numbering its values from the one that built this body.
+    Both go behind the cleanup and ahead of the allocator
+    (`pir.standard_pipeline`), and the statements the second adds are built
+    by a builder numbering its values from the one that built this body.
     """
     options = context.get_user_options()
-    wrap = None
+    move = wrap = None
     report: list = []
+    if getattr(options, 'enable_move_loads', False):
+      move = pir.MoveLoads(distance=options.move_distance)
     if getattr(options, 'enable_wrap_loads', False):
       wrap = pir.WrapLoads(builder.scratch, distance=options.move_distance,
                            stages=2 if options.enable_multibuffer else 1,
                            report=report)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
-                        debug=options.ir_debug, wrap=wrap,
+                        debug=options.ir_debug, move=move, wrap=wrap,
                         place=place, barriers=barriers, where='shared body')
     if wrap is not None:
       record = getattr(context, 'record_wrap', None)
