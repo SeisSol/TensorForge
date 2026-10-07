@@ -62,6 +62,7 @@ TARGET = Path('src/tensorforge/common/target.py')
 LEXIC = Path('src/tensorforge/common/vm/lexic/lexic.py')
 SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
 ELEMENTWISE = Path('src/tensorforge/generators/elementwise.py')
+LEGALIZE = Path('src/tensorforge/generators/legalize.py')
 
 
 def _run_tests(target):
@@ -942,6 +943,30 @@ GROUPS = {
                      "        return not self.sycl",
              "SYCL, whose lexic has no `sync_grid`.\"\"\"\n"
                      "        return True", 1)),
+    ]),
+
+    # What a descriptor states beyond what the builders take, rewritten.
+    'legalize': ('tests/test_legalize.py', [
+        ('an accumulation written in place',
+         sub(LEGALIZE, '    if not d.add:\n      return d.dest, lambda: []',
+             '    if True:\n      return d.dest, lambda: []', 1)),
+        ('an operand on other axes read as it is',
+         sub(LEGALIZE, '      if axes == list(range(rank)) or',
+             '      if True or', 1)),
+        ('the destination not cut at an operand\'s edge',
+         sub(LEGALIZE, '  if all(list(box.lower()) == lower and list(box.upper()) == upper\n'
+                       '         for box in boxes):',
+             '  if True:', 1)),
+        ('pieces written in place where the destination owes zeros',
+         sub(LEGALIZE, '    if dest.owed_zeros() is None:\n      return dest, cells,',
+             '    if True:\n      return dest, cells,', 1)),
+        ('the factor dropped',
+         sub(LEGALIZE, '    if alpha is None:\n      return []',
+             '    if True:\n      return []', 1)),
+        ('two hoists under one guard version',
+         sub(LEGALIZE, '    version = -self._hoisted', '    version = -1', 1)),
+        ('a ternary hoisted over the condition it writes',
+         sub(LEGALIZE, ' or cond.tensor is d.dest.tensor:', ':', 1)),
     ]),
 
     # An elementwise operation as one typed statement, spelled per target.

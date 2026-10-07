@@ -16,6 +16,7 @@ from tensorforge.backend.residency import Residency
 from tensorforge.backend.section_plan import SectionPlan
 from tensorforge.generators import lanes as lane_config
 from tensorforge.generators.lanes import LaneConfig
+from tensorforge.generators.legalize import legalize
 from tensorforge.backend.temporaries import Temporaries
 from tensorforge.backend.symbol import Symbol, SymbolType, passed_by_value
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
@@ -390,6 +391,10 @@ class Generator:
                lanes: Optional[LaneConfig] = None,
                attrs: Optional[dict] = None,
                merge_within: Optional[tuple] = None):
+    # In the form the builders take: what a frontend states beyond it -- an
+    # operand on other axes, an accumulation, a factor -- is rewritten here,
+    # whichever frontend stated it.
+    gemm_list = legalize(gemm_list)
     self.descr_list: List[OperationDescription] = gemm_list
     #: The list as the caller handed it, before merging rewrites it -- what
     #: `Options.autotune` builds its candidates from and rebuilds the pick on.

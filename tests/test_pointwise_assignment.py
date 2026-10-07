@@ -16,7 +16,7 @@ free-surface-gravity kernel has this shape on its contraction side.
 
 `fixtures/kernels/pointwise_assignment.json` holds the two statements as
 yateto describes them, and variants of them in the same form: a slice (which
-owns only its part), a destination cut into pieces (`DescriptionReader._cells`),
+owns only its part), a destination cut into pieces (`legalize._cells`),
 a first write read back wider than it wrote, and a reduction.  The generated
 kernel is interpreted on the host (`kernel_eval`), so what is checked is what
 the kernel computes -- the numbers below are written down from the

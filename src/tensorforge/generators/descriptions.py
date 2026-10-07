@@ -10,7 +10,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.basic_types import Addressing
 
-from typing import List
+from typing import List, Optional
 
 class GuardLiteral:
   """One term of a guard: a rank-0 condition tensor, taken or negated.
@@ -319,6 +319,22 @@ class ElementwiseDescr(OperationDescription):
   temporaries, which has the side benefit that the intermediate is a ``Symbol``
   the allocator can see -- a writer-allocated name would be invisible to every
   pass.
+
+  That is the form the builder takes.  A frontend may state more, and
+  `generators.legalize` rewrites it into that form:
+
+  ``target``
+      For each operand, the destination axes its own axes are, in its own
+      order, as `MultilinearDescr.target` states them; a negative number is
+      an axis the destination does not carry.  An operand may then carry
+      fewer of the destination's axes, or the same ones in another order,
+      and its box marks where it can be non-zero -- it reads zero outside.
+      ``None`` is every operand on the destination's axes, in its shape.
+  ``add``
+      Add onto the destination rather than overwrite it, as
+      `MultilinearDescr.add`.
+  ``alpha``
+      A factor without axes, the result is scaled by.
   """
 
   # The arity of each operation, so that what a caller passes is checked here
@@ -348,14 +364,21 @@ class ElementwiseDescr(OperationDescription):
                dest,
                srcs: List,
                strict_match: bool = False,
-               prefer_align: bool = False):
+               prefer_align: bool = False,
+               target: Optional[List] = None,
+               add=False,
+               alpha=None):
     self.op = op
     self.dest = dest
-    # A source is either a tensor or a scalar constant.  `pow_int` is the only
-    # current user of the latter.
+    # A source is either a tensor or a scalar constant.
     self.srcs = list(srcs)
     self.strict_match = strict_match
     self.prefer_align = prefer_align
+    self.target = None if target is None else [
+        None if axes is None else list(axes) for axes in target]
+    self.add_dims = list(add) if isinstance(add, (list, tuple)) else None
+    self.add = bool(add) if not isinstance(add, (list, tuple)) else True
+    self.alpha = alpha
 
     expected = (1 if op in self.UNARY else 2 if op in self.BINARY
                 else 3 if op in self.TERNARY else None)
@@ -365,6 +388,21 @@ class ElementwiseDescr(OperationDescription):
       raise InternalError(
           f'elementwise: {op.name} takes {expected} operand(s), '
           f'got {len(self.srcs)}')
+    if self.target is not None:
+      if len(self.target) != len(self.srcs):
+        raise InternalError(
+            f'elementwise: {len(self.target)} axis lists for '
+            f'{len(self.srcs)} operand(s)')
+      for src, axes in zip(self.srcs, self.target):
+        if hasattr(src, 'bbox') and len(axes or []) != src.bbox.rank():
+          raise InternalError(
+              f'elementwise: {len(axes or [])} axes stated for an operand of '
+              f'rank {src.bbox.rank()}')
+
+    if not self.legal():
+      # What it stands for is built and states the data flow
+      # (`generators.legalize`).
+      return
 
     dest.tensor.set_data_flow_direction(DataFlowDirection.SINK)
     for src in self.tensor_srcs():
@@ -378,6 +416,24 @@ class ElementwiseDescr(OperationDescription):
             f'elementwise: operand shape {list(src.bbox.sizes())} does not '
             f'match destination {list(dest.bbox.sizes())}; a shape-changing '
             f'operation is not elementwise')
+
+  def legal(self) -> bool:
+    """Whether the builder takes this as it is: operands in the
+    destination's shape, overwriting it, unscaled."""
+    return self.target is None and not self.add and self.alpha is None
+
+  def target_of(self, position: int) -> List[int]:
+    """The destination axes operand `position` is stated on, in its own
+    axis order."""
+    if self.target is not None and self.target[position] is not None:
+      return list(self.target[position])
+    src = self.srcs[position]
+    return list(range(src.bbox.rank())) if hasattr(src, 'bbox') else []
+
+  def add_mask(self):
+    """`add` as it was stated: a mask over the destination's axes, or a
+    bool."""
+    return self.add_dims if self.add_dims is not None else self.add
 
   def tensor_srcs(self) -> List:
     return [s for s in self.srcs if not isinstance(s, (int, float, np.integer,
@@ -434,12 +490,17 @@ class ReductionDescr(OperationDescription):
   """
 
   def __init__(self, dest, var, dims: List[int], op: ReductionOperator,
-               prefer_align: bool = False):
+               prefer_align: bool = False, add=False, alpha=None):
     self.dest = dest
     self.var = var
     self.dims = list(dims)
     self.op = op
     self.prefer_align = prefer_align
+    #: Add onto the destination rather than overwrite it, and the factor the
+    #: result is scaled by -- what the builder does not take, and
+    #: `generators.legalize` rewrites (`ElementwiseDescr`).
+    self.add = add is not False and add is not None
+    self.alpha = alpha
 
     rank = var.bbox.rank()
     for d in self.dims:
@@ -458,8 +519,14 @@ class ReductionDescr(OperationDescription):
           f'shape {list(var.bbox.sizes())} with axes {self.dims} removed '
           f'({kept})')
 
+    if not self.legal():
+      return
     var.tensor.set_data_flow_direction(DataFlowDirection.SOURCE)
     dest.tensor.set_data_flow_direction(DataFlowDirection.SINK)
+
+  def legal(self) -> bool:
+    """Whether the builder takes this as it is: overwriting, unscaled."""
+    return not self.add and self.alpha is None
 
   def reads(self):
     return [self.var]

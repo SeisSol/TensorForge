@@ -11,11 +11,10 @@ from tensorforge.common.matrix.spp import FullSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
 from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, ReductionDescr, GridBarrierDescr, GridFenceDescr, RegionDescription, GuardLiteral
+from tensorforge.generators.legalize import legalize
 from tensorforge.common.operation import Operation
 from tensorforge.common.operation import AddOperator, MulOperator, MinOperator, MaxOperator, AndOperator, OrOperator, XorOperator
 
-import copy
-import itertools
 import numpy as np
 import re
 
@@ -77,14 +76,6 @@ class DescriptionReader(Reader):
     #: Generator is what reads them.
     self._attrs = attrs
 
-    #: Numbers the scratch tensors this reader introduces, so that two of them
-    #: in one kernel do not land on the same name.
-    self._scratch = 0
-
-    #: Numbers the ternaries hoisted into guards (`_hoist_ternary`); each
-    #: gets a guard version of its own.
-    self._hoisted = 0
-
   #: yateto names its operations after the class that implements them; the
   #: enum here is spelled differently and is not a superset.  What is missing
   #: is named in `add_operation_new` rather than mapped to something close.
@@ -105,7 +96,7 @@ class DescriptionReader(Reader):
     'CmpLt': Operation.LT, 'CmpLe': Operation.LE,
     'CmpGt': Operation.GT, 'CmpGe': Operation.GE,
     # `where(condition, yes, no)`: yes, no, condition.  One whose condition
-    # has no axes does not get here -- `add_operation_new` hoists it.
+    # has no axes is two guarded statements instead (`legalize`).
     'Ternary': Operation.SELECT,
   }
 
@@ -194,18 +185,6 @@ class DescriptionReader(Reader):
     permute = [list(range(len(arg['indices']))) for arg in args]
     return target, permute
 
-  @staticmethod
-  def _accumulates(add):
-    """Whether an operation adds onto its destination rather than overwriting.
-
-    yateto states the accumulation as a mask over the destination's axes, so
-    the value is either `False` -- overwrite -- or the axes the accumulated
-    value spans. A rank-0 destination has no axes, so the mask that
-    accumulates onto a scalar is the empty one, and `bool` answers the
-    opposite of the question there. `False` is the only value that overwrites.
-    """
-    return add is not False
-
   def _reduction_dims(self, result, arg):
     """The axes of `arg` that the reduction removes.
 
@@ -225,154 +204,6 @@ class DescriptionReader(Reader):
         f'ReductionDescr.')
     return dims
 
-  def _conform(self, result, argrefs, args):
-    """Bring every operand of a pointwise operation onto the destination's axes.
-
-    An elementwise operation applies one scalar operation cell by cell, so
-    each operand has to be indexed by exactly the destination's axes, in the
-    destination's order. yateto does not require that: it names the axes, and
-    an operand may carry fewer of them, or the same ones in another order --
-    `t[i,j,k] = A[i,k] + B[k,j]` is an elementwise sum over a semiring.
-
-    An operand that does not already match is copied into a scratch tensor
-    that does, by a multilinear over one operand with no axis contracted.
-    That is the same operation a broadcast already is on this path, so it is
-    spelled the same way rather than given a kind of its own.
-
-    Judged on the axes and not on the extents. Two operands of a square
-    destination can have matching extents and still name their axes the other
-    way round, and comparing shapes calls that a match -- which computes the
-    transpose of what was asked for and says nothing.
-    """
-    axes = list(result['indices'])
-    conformed = []
-    for ref, arg in zip(argrefs, args):
-      indices = list(ref['indices'])
-      if indices and any(int(size) == 0 for size in arg.bbox.sizes()):
-        # A box with nothing in it: yateto knows the operand is zero
-        # everywhere (`0.0 * C` stores nothing) and says so by its storage.
-        # The number is what the operation reads, a constant source.
-        conformed.append(0)
-        continue
-      if indices == axes or (not indices
-                             and getattr(arg.tensor, 'rank0', False)):
-        # The same axes, or none at all: an operand without axes is read
-        # with an empty index and broadcast by the pointwise operation.
-        conformed.append(arg)
-        continue
-      missing = [index for index in indices if index not in axes]
-      if missing:
-        raise NotImplementedError(
-          f'an elementwise operand is indexed by {missing}, which its '
-          f'destination {axes} does not carry; an axis that survives in no '
-          f'operand of a pointwise operation has nothing to iterate.')
-      conformed.append(self._conform_one(result, arg, axes, indices))
-    return conformed
-
-  def _conform_one(self, result, arg, axes, indices):
-    """One operand, copied onto the destination's axes.
-
-    The scratch takes the destination occurrence's box rather than a box of
-    its own, so that the copy writes and the operation reads the same cells
-    in the same coordinates. Its datatype is the operand's: a copy does not
-    convert, and a sum over booleans stays boolean.
-    """
-    box = self.tensor_ref(result).bbox
-    name = f'{self._prefix}_conform{self._scratch}'
-    self._scratch += 1
-
-    tensor = Tensor(shape=[int(extent) for extent in box.upper()],
-                    addressing=Addressing.PTR_BASED,
-                    bbox=box,
-                    alias=name,
-                    is_tmp=True,
-                    datatype=getattr(arg.tensor, 'datatype', None))
-    self._cache[name] = tensor
-    dest = SubTensor(tensor, box)
-
-    target = [[axes.index(index) for index in indices]]
-    permute = [list(range(len(indices)))]
-    self._descr_list.append(MultilinearDescr(dest,
-                                             [arg],
-                                             target,
-                                             permute,
-                                             add=False,
-                                             strict_match=False,
-                                             prefer_align=False))
-    return dest
-
-  def _accumulator(self, result, dest, add):
-    """Where a non-accumulating descriptor writes when yateto wanted a sum.
-
-    Neither `ElementwiseDescr` nor `ReductionDescr` accumulates; both
-    overwrite their destination. An operation that yateto marked as
-    accumulating therefore writes a scratch tensor, and a multilinear adds
-    that onto the destination afterwards -- the same two-step shape a scaled
-    result already takes.
-
-    Returns the destination to write and a callable that appends the
-    accumulation, which is nothing when there is none.
-    """
-    if not self._accumulates(add):
-      return dest, lambda: None
-    return self._through_scratch(result, dest, 'accum', add=True)
-
-  def _through_scratch(self, result, dest, kind, add):
-    """A scratch tensor over `dest`'s box, and the multilinear that puts it
-    into the result afterwards: adding it on, or assigning it."""
-    box = dest.bbox
-    name = f'{self._prefix}_{kind}{self._scratch}'
-    self._scratch += 1
-    tensor = Tensor(shape=[int(extent) for extent in box.upper()],
-                    addressing=Addressing.PTR_BASED,
-                    bbox=box,
-                    alias=name,
-                    is_tmp=True,
-                    datatype=getattr(dest.tensor, 'datatype', None))
-    self._cache[name] = tensor
-    scratch = SubTensor(tensor, box)
-
-    # The scratch has the destination *view's* shape, so its axes are the
-    # ones to state -- not `result['indices']`, which counts a rank-0 result
-    # as having none while the view carries it as an axis of extent one.
-    axes = list(range(box.rank()))
-
-    def put():
-      self._descr_list.append(MultilinearDescr(self.tensor_ref(result),
-                                               [scratch],
-                                               [axes],
-                                               [axes],
-                                               add=axes if add else False,
-                                               strict_match=False,
-                                               prefer_align=False))
-
-    return scratch, put
-
-  def _assembled(self, result, dest, args):
-    """Where the pieces `_cells` cuts an assignment into are written.
-
-    An assignment to the tensor itself through a narrower window defines the
-    whole tensor, zeros outside the window (`SubTensor.owed_zeros`), and each
-    `ElementwiseDescr` keeps that promise on its own.  A piece of one would
-    zero its siblings' parts with it.  So pieces that owe zeros are assembled
-    in a scratch over the window, which owes nothing, and one multilinear
-    assigns the scratch to the destination, zeros included -- the shape an
-    accumulating one already takes (`_accumulator`).
-
-    Returns the view to write, the pieces, and a callable appending the
-    assignment, which is nothing where the pieces write the destination.
-    """
-    cells = self._cells(dest, args)
-    if len(cells) == 1:
-      # one piece is the whole window (an operand's box reaching past it was
-      # clamped to it): it is the destination, and owes what the destination
-      # owes -- a piece marked as a slice would owe nothing
-      return dest, [(dest, cells[0][1])], lambda: None
-    if dest.owed_zeros() is None:
-      return dest, cells, lambda: None
-    scratch, assign = self._through_scratch(result, dest, 'pieces', add=False)
-    return scratch, self._cells(scratch, args), assign
-
   def add_operation_new(self, d):
     kind = d['type']
     result = self.tensor_ref(d['result'])
@@ -388,8 +219,8 @@ class DescriptionReader(Reader):
     # empty mask means a destination without axes is accumulated onto, and
     # `bool([])` says the opposite.
     add = linear.get('add', False)
-    # the guard covers every descriptor this operation turns into, the
-    # scaling that may follow included
+    # the guard covers every descriptor this operation turns into, and
+    # `legalize` puts what one stands for under the same guard
     first = len(self._descr_list)
 
     if kind == 'multilinear':
@@ -431,36 +262,30 @@ class DescriptionReader(Reader):
                                                add=add,
                                                strict_match=False,
                                                prefer_align=False))
-    elif (kind == 'elementwise' and d.get('optype') == 'Ternary'
-          and self._hoistable(d)):
-      return self._hoist_ternary(d, result, condition, linear, add)
     elif kind == 'elementwise':
-      dest, accumulate = self._accumulator(d['result'], result, add)
-      args = self._conform(d['result'], d['args'], args)
+      # As stated: on the axes yateto names, accumulating and scaled as it
+      # says.  `legalize` brings it into the form the builder takes.
+      target = [self._axes(d['result'], ref) for ref in d['args']]
       if d.get('optype') == 'LogicalNot':
         # `!x` as `x == 0`: the logical negation, where `Not` is the bitwise
         # one (`~true` is -2, and true again as a condition).
-        op, args = Operation.EQ, args + [0]
+        op, args, target = Operation.EQ, args + [0], target + [None]
       else:
         op = self.convert_op(d['optype'], d['result'])
-      dest, cells, assign = self._assembled(d['result'], dest, args)
-      for cell, cell_args in cells:
-        self._descr_list.append(ElementwiseDescr(op, cell, cell_args,
-                                                 strict_match=False,
-                                                 prefer_align=False))
-      self._append_scaling(d['result'], linear.get('alpha'), dest)
-      assign()
-      accumulate()
+      self._descr_list.append(ElementwiseDescr(op, result, args,
+                                               strict_match=False,
+                                               prefer_align=False,
+                                               target=target, add=add,
+                                               alpha=self._factor(linear)))
     elif kind == 'reduction':
-      dest, accumulate = self._accumulator(d['result'], result, add)
       assert len(args) == 1
-      self._descr_list.append(ReductionDescr(dest,
+      self._descr_list.append(ReductionDescr(result,
                                              args[0],
                                              self._reduction_dims(d['result'], d['args'][0]),
                                              self.convert_reduction_op(d['optype']),
-                                             prefer_align=False))
-      self._append_scaling(d['result'], linear.get('alpha'), dest)
-      accumulate()
+                                             prefer_align=False,
+                                             add=add,
+                                             alpha=self._factor(linear)))
     else:
       raise NotImplementedError(f'yateto exported an operation of type {kind!r}')
 
@@ -470,126 +295,25 @@ class DescriptionReader(Reader):
     return 0# self._descr_list[-1].get_flops()
 
   @staticmethod
-  def _cells(dest, args):
-    """The destination cut into boxes on which each operand is all or nothing.
+  def _axes(result, arg):
+    """Where `arg`'s axes land among `result`'s: the position there, or a
+    negative number, counting down from -1, for one the result does not
+    carry -- the numbering `_linear_layout` gives a multilinear over this one
+    operand."""
+    axis = {index: position for position, index in enumerate(result['indices'])}
+    contracted = -1
+    out = []
+    for index in arg['indices']:
+      if index not in axis:
+        axis[index] = contracted
+        contracted -= 1
+      out.append(axis[index])
+    return out
 
-    yateto narrows an operand's box to where it can be non-zero -- a table
-    storing three of eight entries has a box of three -- and a pointwise
-    operation over the whole destination reads zero outside it: `exp` of it
-    is one, `x + 0` is `x`, `0 > 0` is false.  An `ElementwiseDescr` runs one
-    operation over one box and refuses operands of another shape, which would
-    stop three of yateto's `elementwise` kernels.  So the destination is cut
-    at every edge an operand's box has inside it; in each piece an operand
-    either covers it and is read there, or misses it and is the number 0.
-    One piece, the destination itself, where every box agrees.
-    """
-    def boxed(arg):
-      return (hasattr(arg, 'bbox') and arg.bbox.rank() > 0
-              and arg.bbox.rank() == dest.bbox.rank())
-    lower, upper = list(dest.bbox.lower()), list(dest.bbox.upper())
-    boxes = [arg.bbox for arg in args if boxed(arg)]
-    if all(list(box.lower()) == lower and list(box.upper()) == upper
-           for box in boxes):
-      return [(dest, args)]
-    cuts = []
-    for dim in range(len(lower)):
-      points = {lower[dim], upper[dim]}
-      for box in boxes:
-        points.update(min(max(int(p), lower[dim]), upper[dim])
-                      for p in (box.lower()[dim], box.upper()[dim]))
-      points = sorted(points)
-      cuts.append(list(zip(points, points[1:])))
-    cells = []
-    for pieces in itertools.product(*cuts):
-      lo = [piece[0] for piece in pieces]
-      hi = [piece[1] for piece in pieces]
-      cell = copy.copy(dest)
-      cell.bbox = BBox(lo, hi)
-      # a piece owns its part and nothing else: as the tensor itself through
-      # a narrower window, it would owe zeros over its siblings' parts
-      # (`SubTensor.owed_zeros`), which `_assembled` keeps for the whole
-      cell.sliced = True
-      cell_args = []
-      for arg in args:
-        if not boxed(arg):
-          cell_args.append(arg)
-        elif all(arg.bbox.lower()[k] <= lo[k] and hi[k] <= arg.bbox.upper()[k]
-                 for k in range(len(lo))):
-          part = copy.copy(arg)
-          part.bbox = BBox(lo, hi)
-          cell_args.append(part)
-        else:
-          cell_args.append(0)
-      cells.append((cell, cell_args))
-    return cells
-
-  def _hoistable(self, d):
-    """Whether a ternary's condition is one value per batch element, and not
-    the tensor the ternary writes -- the second half of a hoist reads the
-    condition after the first half has written the result.  Nor where a
-    branch stores nothing (`0.0 * C`): the select takes that as the number 0,
-    and a copy of it would have no cells to copy."""
-    yes, no, cond = d['args']
-    empty = any(ref['indices'] and any(int(size) == 0 for size in
-                                       self.tensor_ref(ref).bbox.sizes())
-                for ref in (yes, no))
-    return (not cond['indices'] and cond['name'] != d['result']['name']
-            and not empty)
-
-  def _hoist_ternary(self, d, result, condition, linear, add):
-    """`result = cond ? yes : no` with a rank-0 condition, as two statements.
-
-    `result = yes` under the guard and `cond`, `result = no` under the guard
-    and not `cond` -- the guards yateto already sends, so the condition is read
-    once where each region opens, the branch not taken is not computed at all,
-    and neither is a select per entry.  Each half is a single-operand
-    multilinear, as an `AS_MULTILINEAR` operation is: that is what broadcasts a
-    branch of lower rank, permutes, accumulates and takes a named factor.
-
-    The version only groups neighboring statements under one guard, so a
-    hoist's own is a negative one: yateto's start at zero, and two hoists over
-    the same condition tensor must not merge into one region.
-    """
-    self._hoisted += 1
-    version = -self._hoisted
-    cond = self.tensor_ref(d['args'][2])
-    for argref, negated in ((d['args'][0], False), (d['args'][1], True)):
-      argrefs, args = [argref], [self.tensor_ref(argref)]
-      if self._is_named_scalar(linear.get('alpha')):
-        argrefs = argrefs + [linear['alpha']]
-        args = args + [self.tensor_ref(linear['alpha'])]
-      target, permute = self._linear_layout(d['result'], argrefs)
-      descr = MultilinearDescr(result, args, target, permute, add=add,
-                               strict_match=False, prefer_align=False)
-      descr.condition = list(condition) + [GuardLiteral(cond, version,
-                                                        negated)]
-      self._descr_list.append(descr)
-    return 0
-
-  def _append_scaling(self, result, alpha, view=None):
-    """Scale a result in place, as an operation of its own.
-
-    Neither an elementwise operation nor a reduction carries a factor, and
-    folding one into a reduction would change what it starts from. Applying
-    it afterwards is a multilinear over the result and the factor, which is
-    the same shape of operation yateto sends for a scaled contraction.
-    """
-    if not self._is_named_scalar(alpha):
-      return
-    # `view` is what the operation actually wrote. It is the destination
-    # itself for an operation that overwrites, and the scratch for one whose
-    # result is still to be added on -- the factor multiplies what was
-    # computed, not what it will be added to.
-    scaled = self.tensor_ref(result) if view is None else view
-    axes = list(range(scaled.bbox.rank()))
-    self._descr_list.append(MultilinearDescr(scaled,
-                                             [scaled,
-                                              self.tensor_ref(alpha)],
-                                             [axes, []],
-                                             [axes, []],
-                                             add=False,
-                                             strict_match=False,
-                                             prefer_align=False))
+  def _factor(self, linear):
+    """The factor an operation's result is scaled by, or None for one."""
+    alpha = linear.get('alpha')
+    return self.tensor_ref(alpha) if self._is_named_scalar(alpha) else None
 
   def _is_named_scalar(self, alpha):
     """Whether `alpha` is a runtime argument rather than the constant one.
@@ -752,7 +476,14 @@ class DescriptionReader(Reader):
       self.add_tensor(tensor)
     for operation in description['operations']:
       self.add_operation_new(operation)
-    return self.result()
+    descrs, cache = self.result()
+    descrs = legalize(descrs)
+    # and the scratch tensors legalizing introduced, which the descriptors
+    # name as well
+    for descr in descrs:
+      for view in descr.matrix_list():
+        cache.setdefault(view.tensor.alias, view.tensor)
+    return descrs, cache
 
 
 class TermReader(Reader):
