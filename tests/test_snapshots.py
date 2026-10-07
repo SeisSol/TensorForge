@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 """Golden-output tests: the generated source, byte for byte.
 
-Why this exists: every pass in ``backend.pir`` and ``backend.opt`` is a
-source-to-source transform, and the only cheap statement about a refactor
-that is worth anything is *the generated code did not change*.  Without a
-frozen baseline that statement cannot be made, so a rework either ships
-unverified or gets re-derived by hand each time.
+Why this exists: every pass in ``backend.pir`` is a source-to-source
+transform, and the only cheap statement about a refactor that is worth
+anything is *the generated code did not change*.  Without a frozen baseline
+that statement cannot be made, so a rework either ships unverified or gets
+re-derived by hand each time.
 
 These tests need no GPU and no toolchain.  They are deliberately dumb:
 generate, compare to a file, print a diff.  A snapshot changing is not a

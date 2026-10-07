@@ -1,4 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from .optimizer import OptimizationStage
+
+"""The macro instruction stream, inspected: `inspect.verify` and
+`inspect.dump`.  What rewrites a section is the pseudo-IR pipeline
+(`backend.pir.pipeline`)."""

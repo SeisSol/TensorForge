@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Running a list of passes over an IR, for both levels.
+"""Running a list of passes over an IR.
 
 Three things are explicit here:
 
@@ -21,10 +21,8 @@ not an ``AttributeError`` halfway through code generation.
 *Verification between passes.*  Under ``ir_debug`` the context checks the IR
 after every pass, so a diagnostic names the pass that introduced it.
 
-What an IR is and how it is checked is the context's business: the macro
-stream (`opt.manager.StreamContext`) and the pseudo-IR body
-(`pir.pipeline.BodyContext`) answer that differently, and the manager asks
-the same question of both.
+What an IR is and how it is checked is the context's business, not the
+manager's: the pseudo-IR body's context is `pir.pipeline.BodyContext`.
 """
 
 from __future__ import annotations

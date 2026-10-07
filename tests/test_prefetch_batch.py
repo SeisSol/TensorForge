@@ -3,16 +3,14 @@
 # SPDX-License-Identifier: MIT
 """The pointer hint: which operands get one, and what it costs when they do.
 
-`PrefetchBatch` builds `Op.PREFETCH` statements, so what it has to answer for
+`pir.prefetch` builds `Op.PREFETCH` statements, so what it has to answer for
 is narrower than the op's own tests: not what a hint means, but which address
 is worth one and which loops can name it.
 
 The address is the pointer array under `Addressing.PTR_BASED`, because that is
 the one place a batched kernel pays a dependent load -- `m[batchId0]` has to
 arrive before any address in the iteration exists. Strided addressing pays no
-such load, and a hint for it would need the element-offset formula written a
-second time, which is why the pass leaves it alone rather than covering it
-approximately.
+such load, which is why the pass leaves it alone.
 
 The other half is that turning the switch off leaves no trace in the output.
 A pass that is off has to be invisible, and this one inserts into the head of
@@ -23,8 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
-from tensorforge.backend.instructions.prefetch import PrefetchBatchPointer
+from tensorforge.backend.instructions.batch_loop import LoopMode
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -119,7 +116,7 @@ def test_the_hint_names_the_next_element_and_not_this_one():
 
 
 def test_strided_addressing_is_left_alone():
-    """No dependent load to shadow, and the address formula lives elsewhere.
+    """No dependent load to shadow.
 
     Matched on the call and not on the word: the resolved options are written
     into the kernel as a comment, so `enable_prefetch=1` is in the text of
@@ -136,20 +133,8 @@ def test_each_operand_is_hinted_once():
 
 
 # --------------------------------------------------------------------------- #
-# Which loops
+# Which targets
 # --------------------------------------------------------------------------- #
-
-def _loops(instrs):
-    for instr in instrs:
-        if isinstance(instr, BatchLoop):
-            yield instr
-        for region in instr.regions():
-            yield from _loops(region)
-
-
-def _hints_in(loop):
-    return [i for i in loop.region if isinstance(i, PrefetchBatchPointer)]
-
 
 def test_a_target_without_a_prefetch_drops_it_and_says_so():
     """The pass still runs: what a target can spell is the emitter's question.
@@ -196,11 +181,9 @@ def test_the_hint_sits_at_the_head_of_the_body():
     """Ahead of the first binding, so the whole iteration is cover.
 
     And outside the flag guard, ahead of it.  Inside, a masked element would
-    issue no hint, and under `enable_wrap_loads` -- whose wrapped transfer's
-    pointer is an unguarded prefix of the body -- a hint inside the guard
-    ahead of it would make the prefix non-contiguous, and the combination
-    would not generate.  Outside is safe: the address is a clamped index into
-    the pointer array, and nothing dereferences what it asks for.
+    issue no hint for its successor.  Outside is safe: the address is a
+    clamped index into the pointer array, and nothing dereferences what it
+    asks for.
     """
     src = _kernel(Addressing.PTR_BASED, enable_prefetch=True).splitlines()
     first_hint = next(n for n, ln in enumerate(src)

@@ -452,17 +452,26 @@ class AbstractInstruction(ABC):
     by a builder numbering its values from the one that built this body.
     """
     options = context.get_user_options()
-    move = wrap = None
+    move = wrap = prefetch = None
     report: list = []
+    hints: list = []
     if getattr(options, 'enable_move_loads', False):
       move = pir.MoveLoads(distance=options.move_distance)
     if getattr(options, 'enable_wrap_loads', False):
       wrap = pir.WrapLoads(builder.scratch, distance=options.move_distance,
                            stages=2 if options.enable_multibuffer else 1,
                            report=report)
+    if options.enable_prefetch or options.prefetch_data:
+      prefetch = pir.Prefetch(builder.scratch,
+                              pointers=options.enable_prefetch,
+                              data=options.prefetch_data,
+                              level=options.prefetch_level,
+                              line_bytes=context.target.prefetch_line_bytes(),
+                              report=hints)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         debug=options.ir_debug, move=move, wrap=wrap,
-                        place=place, barriers=barriers, where='shared body')
+                        place=place, barriers=barriers, prefetch=prefetch,
+                        where='shared body')
     if wrap is not None:
       record = getattr(context, 'record_wrap', None)
       if record is not None:
@@ -470,6 +479,9 @@ class AbstractInstruction(ABC):
       if options.ir_debug:
         for line in report:
           print(f'wrap: {line}')
+    if prefetch is not None and options.ir_debug:
+      for line in hints:
+        print(f'prefetch: {line}')
     return body
 
   @staticmethod

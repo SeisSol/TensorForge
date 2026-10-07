@@ -7,8 +7,8 @@
 takes.
 
 The batch loop computes one element per iteration.  A pass that issues work
-for the element ahead -- the transfer for it, as `wrap` does -- needs these
-things of the loop:
+for the element ahead -- the transfer for it (`wrap`), a cache hint for its
+data (`prefetch`) -- needs the same things of the loop:
 
 * the loop taken apart: its index, its successor and first element, the
   element guard and the per-element statements it holds (`ElementLoop`);
@@ -37,9 +37,9 @@ _SIDE = Effect.WRITE | Effect.ATOMIC | Effect.BARRIER | Effect.UNKNOWN
 
 
 class Refusal(Exception):
-    """Why a transfer, or a loop, was left as it is.  Carried rather than
-    logged: the caller asked for a transformation and is entitled to the
-    reason it did not happen."""
+    """Why a transfer, a hint or a loop was left as it is.  Carried rather
+    than logged: the caller asked for a transformation and is entitled to
+    the reason it did not happen."""
 
 
 class ElementLoop:
@@ -58,6 +58,9 @@ class ElementLoop:
         region = loop.regions[0]
         self.region = region
         self.k = region.args[0]
+        #: The element the body is on: the induction value, or what a loop
+        #: over groups of rows binds for each row (`element`).
+        self.element = loop.attr('element') or self.k
         self.next = loop.attr('next')
         self.first = loop.attr('first')
         self.flag_word = loop.attr('flag_word')
@@ -93,6 +96,9 @@ class ElementLoop:
     def names_index(self, s: Stmt) -> bool:
         return any(v.id == self.k.id for v in s.operands())
 
+    def names_element(self, s: Stmt) -> bool:
+        return any(v.id in (self.k.id, self.element.id) for v in s.operands())
+
     def dependencies(self, t: Transfer) -> Tuple[List[Stmt], bool]:
         """The statements of the loop's body `t` reads, transitively, in the
         order they run; and whether one of them reads an element's own
@@ -102,13 +108,16 @@ class ElementLoop:
         defined deeper is not visible to the transfer in the first place.
         The loop's own arguments are not statements: the index is replaced,
         and a value the loop carries belongs to the iteration, not to the
-        element a clone is for.
+        element a clone is for.  Nor is the element, where the body binds
+        it: a clone is given the other element in its place, and what binds
+        this one -- a row of a group, offset from the group's index -- would
+        offset that element a second time.
         """
         defs: Dict[int, Tuple[Tuple[int, int], Stmt]] = {}
         for key, s in self.top():
             for v in s.target:
                 defs[v.id] = (key, s)
-        inner = set()
+        inner = {self.element.id}
         for x in walk_stmts(tuple(t.pieces)):
             inner.update(v.id for v in x.target)
             for r in x.regions:
@@ -138,7 +147,7 @@ class ElementLoop:
                               'other than global, which another element '
                               'cannot read again')
             found[id(s)] = (key, s)
-            wanted.extend(v.id for v in s.operands())
+            wanted.extend(v.id for v in s.operands() if v.id not in inner)
         deps = [s for _, s in sorted(found.values(), key=lambda e: e[0])]
         # What the dependencies load must not change under the loop.  A
         # binding is not such a load, though it declares a read of its

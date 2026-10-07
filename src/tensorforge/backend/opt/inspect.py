@@ -154,11 +154,11 @@ def verify(instrs: Sequence[AbstractInstruction],
     """Structural checks over one instruction stream.
 
     ``check_ready`` is phase-gated: it needs the windows declared, which
-    happens once the optimization stage is done (`Generator._declare_buffers`),
-    so it is an emit-time check, not a between-passes one -- reported early,
-    it would describe the absence of a later step rather than a defect.  Where
-    a buffer sits is not asked here: the allocator decides it in the body
-    (`pir.allocate`), and `pir.layout_check` checks it there.
+    happens once the section's loop is assembled
+    (`Generator._declare_buffers`), so it is an emit-time check -- reported
+    earlier, it would describe the absence of a later step rather than a
+    defect.  Where a buffer sits is not asked here: the allocator decides it
+    in the body (`pir.allocate`), and `pir.layout_check` checks it there.
 
     ``max_barrier_scope`` is the strongest barrier legal at this level.  The
     loop is an instruction with a region, so recursion derives it from
@@ -231,9 +231,6 @@ def verify(instrs: Sequence[AbstractInstruction],
                 f'{type(instr).__name__} does not describe its data flow; '
                 f'passes must treat it as opaque'))
 
-        # -- 5b. a prefetch for the next element, left under the flag guard
-        diags.extend(_check_guarded_prefetch(instr, index))
-
         # -- 6. recurse into regions, tightening the barrier limit
         inner_limit = min(max_barrier_scope, instr.uniform_scope())
         for region in instr.regions():
@@ -246,50 +243,6 @@ def verify(instrs: Sequence[AbstractInstruction],
         for sym in instr.defs():
             defined.add(sym)
 
-    return diags
-
-
-def _check_guarded_prefetch(instr: AbstractInstruction,
-                            index: Optional[int]) -> List['Diagnostic']:
-    """A transfer for element ``k + 1`` must not sit under the element guard.
-
-    The batch loop wraps its body in ``if (flags[batchId0])``, a runtime mask
-    over individual elements.  A transfer addressed from a *lookahead* index is
-    issued in iteration ``k`` for element ``k + 1``, so skipping element ``k``
-    skips the prefetch, and iteration ``k + 1`` reads whatever the iteration
-    before that left in the buffer.  Nothing crashes; the numbers are wrong for
-    every element after the first masked one.
-
-    ``BatchLoop.mark_unguarded`` lifts a *prefix* of the region out of the
-    guard and ``mark_unguarded_tail`` a *suffix* -- the guard is one
-    contiguous block, so those are the two shapes it can leave.  The prefetch
-    hints put what they issue for the next element there and mark it, so
-    this should not fire for anything they produced.  It is the check that an
-    instruction for another element is never left under this element's mask,
-    whichever pass put it there.
-    """
-    from tensorforge.backend.instructions.batch_loop import BatchLoop
-    from tensorforge.backend.instructions.ptr_manip import GetElementPtr
-
-    if not isinstance(instr, BatchLoop):
-        return []
-    unguarded = getattr(instr, '_unguarded', set())
-    ahead = set()
-    diags: List['Diagnostic'] = []
-    for inner in instr.region:
-        if isinstance(inner, GetElementPtr):
-            offset = inner._batch_offset
-            if isinstance(offset, int) and offset > 0:
-                ahead.update(id(d) for d in inner.defs())
-            continue
-        if id(inner) in unguarded:
-            continue
-        if any(id(u) in ahead for u in inner.uses()):
-            diags.append(Diagnostic(
-                'warning', index,
-                f'{type(inner).__name__} prefetches the next element from '
-                f'inside the per-element flag guard; a masked element skips '
-                f'it and the next iteration reads a stale buffer'))
     return diags
 
 

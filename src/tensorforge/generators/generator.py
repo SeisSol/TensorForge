@@ -10,7 +10,6 @@ from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.generators.kernel_params import KernelParam
 from tensorforge.backend.data_types import ShrMemObject
 from tensorforge.backend import pir
-from tensorforge.backend.opt import OptimizationStage
 from tensorforge.backend.opt.inspect import format_diagnostics, verify
 from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.residency import Residency
@@ -892,10 +891,6 @@ class Generator:
         self._emit_ir(codesection)
         self._section.ir = _wait_for_transfers(self._section.ir)
 
-        # Build the loop *before* optimizing, so that the passes see the body
-        # as the loop's region: what one adds goes into the region, and the
-        # loop is what knows which of it stays outside the per-element guard
-        # (`BatchLoop.mark_unguarded`).
         index = len(self._sections)
         start, stride = self._section_traversal(index)
         loop = BatchLoop(context=self._context,
@@ -910,16 +905,7 @@ class Generator:
                          narrow_group=self._num_threads
                          < self._context.target.hw.vec_unit_length)
 
-        # The prologue stays *out* of the rewritable stream: what the passes
-        # here move is the per-element body.
-        opt = OptimizationStage(context=self._context,
-                                shr_mem=self._section.shr_mem_obj,
-                                instructions=[loop],
-                                num_threads=self._num_threads,
-                                scopes = self._scopes,
-                                global_ir = self._section.global_ir)
-        opt.optimize()
-        self._section.stream = list(self._section.global_ir) + opt.get_instructions()
+        self._section.stream = list(self._section.global_ir) + [loop]
 
         # Final sync for persistent threads: it guards the next iteration's
         # writes against the previous iteration's reads, which the barrier
@@ -983,8 +969,7 @@ class Generator:
     instruction, so ``verify`` recurses into its region and derives the legal
     barrier scope from ``uniform_scope`` rather than the caller passing a flag.
     """
-    # `check_ready` needs the thread-block policy, which has run by now: this
-    # is the emit-time call the pass manager's comment defers to.
+    # `check_ready` needs the thread-block policy, which has run by now.
     diags = verify(stream,
                    predefined=list(self._scopes.get_global_scope().values()),
                    grid_barrier=self._context.target.grid_barrier(),

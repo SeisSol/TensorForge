@@ -54,6 +54,8 @@ ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
 LAYOUT = Path('src/tensorforge/backend/pir/layout_check.py')
 BARRIERS = Path('src/tensorforge/backend/pir/barriers.py')
 WRAP = Path('src/tensorforge/backend/pir/wrap.py')
+AHEAD = Path('src/tensorforge/backend/pir/ahead.py')
+PREFETCH = Path('src/tensorforge/backend/pir/prefetch.py')
 MOVE = Path('src/tensorforge/backend/pir/move.py')
 TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 TARGET = Path('src/tensorforge/common/target.py')
@@ -1006,6 +1008,39 @@ GROUPS = {
         ('the stage of a window not spelled',
          sub(EMIT, '                    off = off.format(*(self.operand(a) for a in s.args))',
              '                    pass', 1)),
+    ]),
+
+    # The cache hints for the element the loop reaches next.
+    'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
+                 'tests/test_prefetch_data.py', [
+        ('the entry asked for at the element\'s own index',
+         sub(PREFETCH, '            b.prefetch(base, self.l.next, level=self.level)',
+             '            b.prefetch(base, self.l.element, level=self.level)', 1)),
+        ('an entry asked for once per binding reading it',
+         sub(PREFETCH, '            if id(base) in seen:\n                continue\n',
+             '', 1)),
+        ('the data asked for of the element itself',
+         sub(PREFETCH, '        clone.given(self.l.element, self.l.next)',
+             '        clone.given(self.l.element, self.l.element)', 1)),
+        ('what binds the element copied for its successor',
+         sub(AHEAD, '        inner = {self.element.id}', '        inner = set()', 1)),
+        ('a hint per element rather than per line',
+         sub(PREFETCH, '        per = max(1, self.line_bytes // elem)',
+             '        per = 1', 1)),
+        ('an element\'s own pointer followed under no flag',
+         sub(PREFETCH, '        if tails and owns and l.flag_word is not None:',
+             '        if False:', 1)),
+        ('the flag named as the wrap names its own',
+         sub(PREFETCH, "'allowed_hint'", "'allowed_next'", 1)),
+        ('the tail behind the barrier closing the iteration',
+         sub(PREFETCH, '            body[closing:closing] = tails',
+             '            body[closing + 1:closing + 1] = tails', 1)),
+        ('the head ahead of what it reads',
+         sub(PREFETCH, '        at = behind_defs(body, head)', '        at = 0', 1)),
+        ('a compressed operand asked for over its view',
+         sub(Path('src/tensorforge/backend/instructions/ptr_manip.py'),
+             "        or not getattr(obj, 'is_dense', lambda: True)()):",
+             "        or False):", 1)),
     ]),
 
     'equiv': ('tests/test_access_equiv.py', [

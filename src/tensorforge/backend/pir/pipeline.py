@@ -35,6 +35,7 @@ from .allocate import allocate
 from .barriers import place_barriers
 from .core import Stmt, dump
 from .move import move_loads
+from .prefetch import prefetch_hints
 from .wrap import wrap_loads
 from .passes import (converge_crosslane, cse, dce, flatten_scopes, fold,
                      if_convert, licm, load_cse, verify)
@@ -216,11 +217,45 @@ class WrapLoads(Pass):
                              stages=self._stages, report=self._report)
 
 
+class Prefetch(Pass):
+    """Hint the next element's pointers and data (`prefetch.prefetch_hints`).
+
+    Right behind ``flatten``, which brings the transfers out of the scopes
+    the loaders open, and ahead of everything else: the pointers bound for
+    the next element and the guard around the hints go through the cleanup
+    and, under the explicit vector, through ``if_convert`` like the rest of
+    the body.  Ahead of the wrap, which moves what the hints only ask for.
+    """
+
+    name = 'prefetch'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, scratch, pointers: bool = False, data: bool = False,
+                 level: str = 'l2', line_bytes: int = 128,
+                 report: Optional[List[str]] = None):
+        self._scratch = scratch
+        self._pointers = pointers
+        self._data = data
+        self._level = level
+        self._line_bytes = line_bytes
+        self._report = report
+
+    def run(self, pc: BodyContext) -> None:
+        pc.body = prefetch_hints(pc.body, self._scratch,
+                                 pointers=self._pointers, data=self._data,
+                                 level=self._level,
+                                 line_bytes=self._line_bytes,
+                                 report=self._report)
+
+
 def standard_pipeline(debug: str = '',
                       wrap: Optional[WrapLoads] = None,
                       place: Optional[PlaceBuffers] = None,
                       barriers: Optional[PlaceBarriers] = None,
-                      move: Optional[MoveLoads] = None) -> PassManager:
+                      move: Optional[MoveLoads] = None,
+                      prefetch: Optional[Prefetch] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -276,6 +311,10 @@ def standard_pipeline(debug: str = '',
     in the anonymous scopes the loaders open until ``flatten`` has removed
     them.
 
+    ``prefetch``, where asked for, runs right behind ``flatten``: the hints
+    for the next element are statements of the body like any other, and go
+    through the cleanup with it (`Prefetch`).
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
@@ -284,6 +323,8 @@ def standard_pipeline(debug: str = '',
     if move is not None:
         pm.add(move)
     pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))
+    if prefetch is not None:
+        pm.add(prefetch)
     pm.add(Rewrite('if_convert',
                    lambda body: if_convert(body, sink_into_loops=True),
                    preserves=('flat',), when=lambda pc: pc.explicit_simd))
@@ -316,6 +357,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              wrap: Optional[WrapLoads] = None,
              place: Optional[PlaceBuffers] = None,
              barriers: Optional[PlaceBarriers] = None,
+             prefetch: Optional[Prefetch] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
@@ -326,7 +368,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
-    standard_pipeline(debug, wrap, place, barriers, move).run(pc)
+    standard_pipeline(debug, wrap, place, barriers, move, prefetch).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

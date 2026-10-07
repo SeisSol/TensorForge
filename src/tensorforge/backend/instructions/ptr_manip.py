@@ -21,7 +21,6 @@ class GetElementPtr(AbstractInstruction):
                src,
                dest,
                include_extra_offset=True,
-               batch_offset=0,
                table=None,
                variant=None):
     super(GetElementPtr, self).__init__(context)
@@ -37,8 +36,6 @@ class GetElementPtr(AbstractInstruction):
     self._dest = dest
     self._include_extra_offset = include_extra_offset
     self._is_ready = True
-    # `batchId{n}`, the n-th lookahead index bound by the loop.
-    self._batch_offset = batch_offset
 
   #: Stands in for the element index while an address is being assembled.
   #:
@@ -60,13 +57,15 @@ class GetElementPtr(AbstractInstruction):
   _VARIANT_HOLE = '\x00variantIndex\x00'
 
   def batch_index(self) -> str:
-    """The name this binding's element index goes by.
+    """The name this binding's element index goes by: the loop's own.
 
     A key rather than a spelling: the loop's bindings carry no `extern`, so
     what the emitted code calls the index is the IR's business, and the name
-    is what a pass and a loop agree to call the same element.
+    is what a pass and a loop agree to call the same element.  A binding for
+    another element is a pass's copy of this one (`pir.ahead.Clone`), given
+    that element's index as an operand.
     """
-    return f'{GeneralLexicon.BATCH_ID_NAME}{self._batch_offset}'
+    return f'{GeneralLexicon.BATCH_ID_NAME}0'
 
   def batch_value(self, writer):
     """The element index, as something this body can name as an operand.
@@ -87,8 +86,7 @@ class GetElementPtr(AbstractInstruction):
     Where the loop is elsewhere, the seam: a value standing for a name bound
     outside this body.  No edge -- there is nothing here to have an edge to --
     but the index is an operand rather than text, so the address stops having
-    an element spelled into it.  This is what a peeled binding gets, whose
-    index is bound ahead of the loop, and what every binding gets when a body
+    an element spelled into it.  This is what every binding gets when a body
     is one macro instruction wide.
 
     `None` where the index is not named `batchId<something>`, which nothing
@@ -171,20 +169,6 @@ class GetElementPtr(AbstractInstruction):
     carries no such promise to break.
     """
     return getattr(self._src.obj, 'addressing', None) == Addressing.PTR_BASED
-
-  def reads_the_pointer_array(self) -> bool:
-    """Does this binding load `m[batchId0]` out of an array of pointers?
-
-    Narrower than `dereferences_the_batch`, which asks about the addressing
-    mode alone. Two bindings carry that mode and still read no pointer array
-    by the loop's own index: a table-fed one takes its base from a table the
-    prologue already built, so the element index does not enter the address at
-    all, and a lookahead one names an element the loop has not reached, whose
-    pointer is therefore already being asked for.
-    """
-    return (self.dereferences_the_batch()
-            and self._table is None
-            and self._batch_offset == 0)
 
   def source_name(self) -> str:
     """What the right-hand side reads the base pointer out of."""
@@ -407,12 +391,15 @@ class GetElementPtr(AbstractInstruction):
 
     The reads name the binding as their buffer (`IRBuilder.load`), so its
     type is what a lowering asks how far a run of them may go -- the explicit
-    vector merges consecutive reads into one message only inside the buffer.
-    The extent is the one the operand would have answered: its storage where
-    it is stored in an order of its own, its view otherwise.
+    vector merges consecutive reads into one message only inside the buffer
+    -- and how far a hint for the element reaches (`pir.prefetch`).  The
+    extent is the one the operand would have answered: its storage where it
+    is stored in an order of its own, compressed where it is sparse, its view
+    otherwise.
     """
     obj = self._dest.obj
-    if getattr(obj, 'storage_order', None) is not None:
+    if (getattr(obj, 'storage_order', None) is not None
+        or not getattr(obj, 'is_dense', lambda: True)()):
       return int(obj.storage_volume())
     view = self._dest.data_view
     shape = getattr(view, 'shape', None) if view is not None else None

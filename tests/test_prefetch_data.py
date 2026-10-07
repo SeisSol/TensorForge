@@ -5,10 +5,10 @@
 `enable_wrap_loads` would fetch them, with the transfers left where they are.
 
 Held here: off unless asked, ESIMD included; under ESIMD the hints of a body
-are gathered a line per lane, elsewhere one line each; the transfers
-themselves do not move; and the pointer
-hints of `enable_prefetch` sit outside the flag guard, which is what lets
-them stand next to a wrapped transfer at all.
+are gathered a line per lane, elsewhere one line each; a compressed operand
+is asked for as it is stored; the transfers themselves do not move; a group
+of rows hints each row's successor; and the hints stand beside a wrapped
+transfer, under a flag of their own.
 """
 
 from __future__ import annotations
@@ -26,12 +26,13 @@ from tensorforge.generators.generator import Generator
 CASES = Path(__file__).resolve().parent / "cases"
 
 
-def _kernel(backend='esimd', arch='pvc', **opts):
+def _kernel(backend='esimd', arch='pvc', case='local_flux', **opts):
     # unmerged: the hints counted here are one per operator of the unmerged
     # kernel, and a merged run reads its operators through a table
     opts.setdefault('merge_variants', False)
-    path = CASES / 'local_flux.py'
-    spec = importlib.util.spec_from_file_location('tf_pfd__local_flux', path)
+    path = CASES / f'{case}.py'
+    spec = importlib.util.spec_from_file_location(
+        f'tf_pfd__{path.stem}', path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
@@ -103,3 +104,36 @@ def test_pointer_hints_stand_beside_a_wrapped_transfer():
         src = _kernel(backend, arch, enable_prefetch=True,
                       enable_wrap_loads=True, prefetch_data=True)
         assert 'prefetchL2' in src or 'prefetchRunsL2' in src
+
+
+def test_a_group_of_rows_hints_each_rows_successor():
+    """A traversal over groups of rows binds each row's element in its body
+    (`mixed/ml_then_ew` on pvc under SYCL is one).  The hints are for that
+    element's successor: the pointer is bound at `batchId1`, and what binds
+    the row's own element is not computed again -- for the successor, it
+    would offset the group's index by the row a second time."""
+    src = _kernel('oneapi', 'pvc', case='mixed/ml_then_ew', prefetch_data=True)
+    bindings = re.findall(r'pf_glb_\w+ = &\w+\[(\w+) \*', src)
+    assert bindings and all(i.endswith('batchId1') for i in bindings), src
+    assert 'pf_batchIdActive' not in src
+
+
+def test_the_hints_flag_is_not_the_wraps():
+    """A pointer of the element's own is followed under the successor's
+    flag, by the hints and by the wrapped transfer alike, at one tail: each
+    declares its own (`allowed_hint`, `allowed_next`), once."""
+    src = _kernel('cuda', 'sm_86', case='addressing_ptr_based',
+                  enable_prefetch=True, prefetch_data=True,
+                  enable_wrap_loads=True)
+    assert src.count('const bool allowed_hint ') == 1, src
+    assert src.count('const bool allowed_next ') == 1, src
+    assert 'if (allowed_hint)' in src
+
+
+def test_a_compressed_operand_is_asked_for_as_it_is_stored():
+    """`sparsity_band` stores B compressed, 46 floats an element where its
+    view is 16 x 16: two lines of 128 bytes, and nothing of the elements
+    behind it."""
+    src = _kernel('cuda', 'sm_86', case='sparsity_band', prefetch_data=True)
+    starts = re.findall(r'prefetchL2\(&pf_glb_m2\[(\d+)\]\)', src)
+    assert starts == ['0', '32'], src

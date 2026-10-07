@@ -63,14 +63,12 @@ class BatchLoop(AbstractInstruction):
         # whether this section has a `flags{i}` parameter, and whether it may
         # be null; `ABSENT` leaves the body unguarded
         self._flags = flags
-        # how many elements ahead are bound as batchid1, batchid2, ... for
-        # prefetching; only the strided loop rebinds them per iteration
+        # how many elements ahead are bound as batchid1, batchid2, ...; only
+        # the strided loop rebinds them per iteration
         self._lookahead = lookahead
         # The element index as a value, while the body is being built.
         self._induction = None
         self._first_lookahead = None
-        # ids of region instructions emitted outside the flag guard
-        self._unguarded: set = set()
         # `LAUNCHCTRL` only: how many cancel requests are kept in flight.  One
         # is enough to hide the queue's own latency behind the body, because
         # the request for the next element is posted before the current one is
@@ -329,95 +327,6 @@ class BatchLoop(AbstractInstruction):
                 return bound
         return None
 
-    def index_name(self, lookahead: int = 0) -> str:
-        """The variable holding the element index ``lookahead`` iterations ahead.
-
-        Valid *inside* the region only.  ``index_name(0)`` is the loop variable.
-        """
-        if lookahead > self._lookahead:
-            raise InternalError(
-                f'loop binds {self._lookahead} lookahead indices, '
-                f'{lookahead} requested')
-        return self._batch(lookahead)
-
-    def lookahead_value(self):
-        """``batchId1`` as an operand, once the loop has bound it.
-
-        The name is available from construction; the value is not, and the
-        difference matters to anything inside the region that means the *next*
-        element. An index spelled into text is a computation the IR reads as
-        having no inputs, so it is loop-invariant as far as any pass can tell
-        -- which is how it ends up hoisted out of the loop that defines what
-        it reads.
-
-        ``None`` before the bindings are emitted, and on a plain `Writer`,
-        which has no operands to hand out.
-        """
-        return self._first_lookahead
-
-    def mark_unguarded(self, instrs) -> None:
-        """Emit these region instructions *outside* the per-element flag guard.
-
-        The guard is ``if (flags[batchId0])``: a runtime mask that skips
-        individual elements.  What is issued for another element than the
-        body's has to sit outside it -- element ``k`` being masked says
-        nothing about ``k + 1`` -- and the prefetch hints for the next
-        element are such instructions.  The marked instructions must form a
-        prefix of the region, because the guard is one contiguous block; the
-        pass that inserts them puts them there.  `mark_unguarded_tail` is
-        the other shape the guard can leave, a suffix.
-
-        Adds to what is marked rather than replacing it, so a head and a tail
-        marked by different passes both survive.
-        """
-        self._unguarded = set(self._unguarded) | {id(i) for i in instrs}
-
-    def mark_unguarded_tail(self, instrs) -> None:
-        """Emit these region instructions *after* the flag guard, unguarded.
-
-        The other half of what `mark_unguarded` says it cannot do: what is
-        issued for the next element once the body is done is the end of the
-        body and not its beginning, so it can only leave the guard as a
-        suffix.  The instructions must end the region, barriers aside: see
-        `_split_guard`.
-        """
-        self._unguarded = set(self._unguarded) | {id(i) for i in instrs}
-
-    def _split_guard(self):
-        """``(unguarded prefix, guarded middle, unguarded suffix)``.
-
-        The suffix is a trailing run of marked instructions, and barriers may
-        sit inside and after it.  One lands there without being marked: the
-        one the generator appends to every persistent loop after optimization
-        -- which would otherwise break the run it is appended to.  A barrier
-        outside the guard is reached by every lane of the multiplication, a
-        masked element's included, so moving one out is never the unsafe
-        direction.  The run is trimmed to start at a marked instruction, so a
-        body with nothing marked at its end keeps its closing barrier inside
-        the guard.
-        """
-        unguarded = set(self._unguarded)
-        if not unguarded:
-            return [], list(self._region), []
-        region = self._region
-        cut = 0
-        while cut < len(region) and id(region[cut]) in unguarded:
-            cut += 1
-        start = len(region)
-        while start > cut and (id(region[start - 1]) in unguarded
-                               or region[start - 1].barrier_scope() is not None):
-            start -= 1
-        while start < len(region) and id(region[start]) not in unguarded:
-            start += 1
-        stray = [i for i in region[cut:start] if id(i) in unguarded]
-        if stray:
-            raise InternalError(
-                f'{len(stray)} instruction(s) marked unguarded form neither a '
-                f'prefix nor a suffix of the region, first is '
-                f'{type(stray[0]).__name__}; the flag guard is one block and '
-                f'cannot be reopened')
-        return region[:cut], region[cut:start], region[start:]
-
     def _declare_windows_early(self, writer, guarded) -> None:
         """Declare the shared windows ahead of the flag guard.
 
@@ -594,21 +503,8 @@ class BatchLoop(AbstractInstruction):
         self._first_lookahead = first
 
     def _emit_body(self, writer) -> None:
-        head, guarded, tail = self._split_guard()
-        for instr in head:
-            instr.gen_code(writer)
-        # The next element's flag, read here and not where the tail first
-        # needs it: there it is a load its user waits on at once.
-        next_flag = None
-        if self._flags is not FlagMode.ABSENT and any(
-                getattr(i, '_guard_by_own_flag', False) for i in tail):
-            next_flag = self._element_flag(
-                writer, self._tail_element(writer), 'allowed_next')
         if self._flags is FlagMode.ABSENT:
-            # Nothing to skip against, so no condition and no block.  The
-            # split above still holds: `head` is what has to run for every
-            # element, and running it first keeps the order the pass that
-            # marked it arranged, whether or not a guard follows it.
+            # Nothing to skip against, so no condition and no block.
             #
             # But without the block, nothing keeps the compiler from hoisting
             # the body's invariant loads out of the loop -- see
@@ -621,10 +517,7 @@ class BatchLoop(AbstractInstruction):
                     writer(fence, accesses=())
                 else:
                     writer(fence)
-            self._emit_guarded(writer, guarded)
-            self._emit_own_flagged(writer, tail,
-                                   lambda: self._tail_element(writer),
-                                   'allowed_next')
+            self._emit_guarded(writer, list(self._region))
             return
         cond = self._flag_guard(writer)
         # A real `Op.IF` where the condition is a value.  A raw block would
@@ -637,65 +530,18 @@ class BatchLoop(AbstractInstruction):
                  if hasattr(writer, 'if_') and not isinstance(cond, str)
                  else writer.If(cond))
         with guard:
-            self._emit_guarded(writer, guarded)
-        self._emit_own_flagged(writer, tail,
-                               lambda: self._tail_element(writer),
-                               'allowed_next', cond=next_flag)
-
-    def _emit_own_flagged(self, writer, instrs, element, name,
-                          cond=None) -> None:
-        """Emit `instrs`; those that follow their element's pointer, under that
-        element's flag.
-
-        For the hints issued for the next element at the tail
-        (`opt.prefetch.PrefetchData`), and only where the address comes out of
-        a pointer array.  Such a hint is outside the guard on purpose, so a
-        masked element still asks for its successor; but the successor may
-        itself be masked, and nothing in the interface promises the pointer of
-        an element the caller told us to skip.  Reading the array entry is
-        fine, the index is clamped into range; following it is not.  So the
-        hint, and nothing else, runs under the flag of the element it is for.
-
-        `element` is called only if something here needs the flag, since
-        asking for the index may emit a binding.  `cond` is that flag where
-        the caller has read it already.
-        """
-        instrs = list(instrs)
-        i = 0
-        while i < len(instrs):
-            instr = instrs[i]
-            i += 1
-            if (self._flags is FlagMode.ABSENT
-                    or not getattr(instr, '_guard_by_own_flag', False)):
-                instr.gen_code(writer)
-                continue
-            if cond is None:
-                cond = self._element_flag(writer, element(), name)
-            # The instructions after it that sit under the same flag share its
-            # block: one branch rather than one per instruction, and the
-            # statements side by side where the lowering can take them as one
-            # (the prefetch hints, which ESIMD asks for in one gather).
-            group = [instr]
-            while (i < len(instrs)
-                   and getattr(instrs[i], '_guard_by_own_flag', False)):
-                group.append(instrs[i])
-                i += 1
-            guard = (writer.if_(cond) if hasattr(writer, 'if_')
-                     and not isinstance(cond, str) else writer.If(cond))
-            with guard:
-                for member in group:
-                    member.gen_code(writer)
+            self._emit_guarded(writer, list(self._region))
 
     def _flag_word(self):
         """How an element's flag is read, as the word it is stored as, with
         the element at `{0}`; None where the section has no mask.
 
         Stated on the loop for a pass that issues work for another element
-        than the body's (`pir.wrap`): it reads that element's flag the way
-        the traversal reads its own.  `1` and not `1u` where the mask may be
-        absent: the conditional converts it to the word's type anyway, and
-        the oracle that reads kernels in the tests parses C literals without
-        suffixes.
+        than the body's (`pir.wrap`, `pir.prefetch`): it reads that element's
+        flag the way the traversal reads its own.  `1` and not `1u` where the
+        mask may be absent: the conditional converts it to the word's type
+        anyway, and the oracle that reads kernels in the tests parses C
+        literals without suffixes.
         """
         if self._flags is FlagMode.ABSENT:
             return None
@@ -704,28 +550,6 @@ class BatchLoop(AbstractInstruction):
         if self._flags is FlagMode.OPTIONAL:
             read = f'{flags} == nullptr ? 1 : {read}'
         return read
-
-    def _element_flag(self, writer, index, name):
-        """`flags[index]`, spelled the way `_flag_guard` spells the current one."""
-        flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
-        read = f'static_cast<bool>({flags}[{{0}}])'
-        if self._flags is FlagMode.OPTIONAL:
-            read = f'{flags} == nullptr ? true : {read}'
-        if hasattr(writer, 'decl_expr') and not isinstance(index, str):
-            from tensorforge.backend.pir.core import BOOL, Effect, MemSpace
-            return writer.decl_expr(
-                f'const bool {name}', read, BOOL, None, args=(index,),
-                kind=Effect.READ, space=MemSpace.GLOBAL, hint=name,
-                extern=name)
-        writer(f'const bool {name} = {read.format(index)};')
-        return name
-
-    def _tail_element(self, writer):
-        """The element the tail prefetches: this loop's clamped successor."""
-        bound = BatchLoop.indices_in(writer)
-        if bound is not None and self._batch(1) in bound:
-            return bound[self._batch(1)]
-        return self._batch(1)
 
     def _prologue_element(self, writer):
         """The element the peel fetches: `prologue_index`, bound before the loop.
@@ -860,9 +684,7 @@ class BatchLoop(AbstractInstruction):
                                  self._stride, hint=self._batch(0),
                                  index_type=SIZE, peel_index=peel,
                                  uniform=Uniformity.MULT,
-                                 flag_word=(self._flag_word()
-                                            if peel is not None
-                                            else None)) as loop:
+                                 flag_word=self._flag_word()) as loop:
                     # The induction *value*, not just its name.  Anything
                     # inside that mentions `batchId0` has to say so as an
                     # operand, or the IR sees a computation with no inputs and
@@ -1115,7 +937,8 @@ class BatchLoop(AbstractInstruction):
                  f'({lexic.block_idx_x})')
         with writer.for_(start, self._num_elements(), self._stride,
                          hint=self._group_batch(), index_type=SIZE,
-                         uniform=Uniformity.MULTGROUP) as loop:
+                         uniform=Uniformity.MULTGROUP,
+                         flag_word=self._flag_word()) as loop:
             group = loop.induction
             row = writer.op('add', SIZE, group, lane, hint='row')
             # One named declaration, because every global write spells the
@@ -1143,6 +966,7 @@ class BatchLoop(AbstractInstruction):
                     bound[self._batch(0)] = batch
                     self._lookahead_bindings(writer, bound)
                     loop._next_index = self._first_lookahead
+                    loop._element_index = batch
                     # No block around the body: the mask holds only the global
                     # writes, so every read runs on every trip -- the case
                     # `_emit_body` fences when the flags are absent, and here

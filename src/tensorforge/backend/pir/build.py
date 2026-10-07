@@ -1507,7 +1507,7 @@ class IRBuilder:
         the element at `{0}`, for a loop whose elements a caller may mask.  A
         pass that issues work for another element than the body's -- the next
         one, or the first -- reads that element's flag the same way
-        (`wrap.wrap_loads`).
+        (`wrap.wrap_loads`, `prefetch.prefetch_hints`).
         """
         return _ForHandle(self, lo, hi, step, tuple(inits), tuple(types),
                           unroll, hint, extern, next_index, peel_index,
@@ -2169,6 +2169,10 @@ class _ForHandle:
         # so nothing in the body notices.  A peel runs before the guard and
         # does notice.
         self._peel_index = peel_index
+        # The element the body is on, where it is not the induction value: a
+        # loop over groups of rows binds each row's element in its body.  Set
+        # by the traversal while the body is built, as `_next_index` is.
+        self._element_index = None
         self.builder = builder
         self._args = (lo, hi, step) + inits
         self._types = types
@@ -2230,6 +2234,8 @@ class _ForHandle:
             attrs = attrs + (('next', self._next_index),)
         if self._peel_index is not None:
             attrs = attrs + (('first', self._peel_index),)
+        if self._element_index is not None:
+            attrs = attrs + (('element', self._element_index),)
         if self._rolled:
             attrs = attrs + (('rolled', True),)
         if self._flag_word is not None:
