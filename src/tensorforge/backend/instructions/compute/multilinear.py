@@ -199,6 +199,32 @@ class MultilinearInstruction(ComputeInstruction):
                     pins.add(op.offset[j] % threads)
         return next(iter(pins)) if len(pins) == 1 else 0
 
+    def _lane_readable_by_reduction(self, i):
+        """Whether operand `i` can be read across the lanes by `(k, n)`.
+
+        That is how every vendor path reads the second operand: `unwindK` hands
+        out the first reduction index as a `LeadIndex`, so lane `s` reads the
+        element at `k = s`.  An operand in memory takes any such index.  One in
+        registers holds element `s` of its distributed dimension in lane `s %
+        T` and no other, so it can be read that way only where that is the
+        reduction index, from a whole block on.  Spread by another of its
+        dimensions -- a matrix held a row per lane and read here by column --
+        the element a lane needs is in the registers of another lane, at an
+        index of its own, which no shuffle reads; and a shift by part of a
+        block moves the data between the lanes.  The nest takes both: it reads
+        such an operand an element at a time and broadcasts it.
+        """
+        op = self._ops[i]
+        if op.symbol is None or op.symbol.stype not in (SymbolType.Register,
+                                                        SymbolType.Scratch):
+            return True
+        reduced = [d for d, nk in enumerate(self._opdim_to_nks[i]) if nk == 'k0']
+        spread = list(getattr(op.symbol, 'lead_dims', None) or [])
+        if spread and spread != reduced:
+            return False
+        span = self._num_threads * self._lead_width
+        return not span or all(self._eff_offset(i, d) % span == 0 for d in reduced)
+
     def _check_offsets(self):
         """A slicing offset is a logical->storage shift, never a loop bound.
 
@@ -1367,6 +1393,8 @@ class MultilinearInstruction(ComputeInstruction):
         # the sparse test and the broadcast reads take its lead index for a
         # number.  The nest computes it.
         if len(self._ops) > 1 and 'n0' in self._opdim_to_nks[1]:
+            return False
+        if len(self._ops) > 1 and not self._lane_readable_by_reduction(1):
             return False
 
         if plan[0].strategy is not Strategy.GENERIC:
