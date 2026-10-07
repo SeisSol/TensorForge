@@ -933,7 +933,7 @@ def _with_option(descrs, arch='sm_86', backend='cuda', **options):
 
 def _merged(gen):
     return any(type(i).__name__ == 'VariantLoop'
-               for i in gen._sections[0].ir)
+               for i in gen.built._sections[0].ir)
 
 
 def test_the_option_rewrites_and_emits_in_one_step():
@@ -1049,6 +1049,15 @@ def test_between_the_bounds_the_written_out_size_decides(fraction, merged,
                                                   merge_variants=merged))
 
 
+def test_a_generator_that_hands_its_build_on_keeps_none_of_its_own():
+    """Its sections and scopes would be an empty build, read off it for the
+    kernel's; the kernel's are those of the generator that built it."""
+    gen = _with_option(_flux(), merge_icache_fraction=1e-6)
+    assert gen.built is not gen
+    assert gen._sections is None and gen._scopes is None
+    assert gen.built._sections and _merged(gen)
+
+
 def test_a_written_out_probe_is_taken_over_only_where_it_is_the_build(
         monkeypatch):
     """What is taken over is what building it again gives, which a generator
@@ -1080,7 +1089,7 @@ def test_a_sibling_builds_what_its_generator_would():
     gen = Generator(_flux(), Context(arch='sm_86', backend='cuda',
                                      fp_type=DTYPE), lanes=lanes, attrs={})
     gen.set_kernel_name('kernel_pinned')
-    gen.tuned = object()
+    gen._tuned = object()
     sibling = gen._sibling()
     assert sibling._lanes == lanes and sibling._attrs == {}
     assert sibling._base_kernel_name == 'kernel_pinned'

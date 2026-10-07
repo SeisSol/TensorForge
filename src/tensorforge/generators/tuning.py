@@ -29,6 +29,12 @@ The compiler is the caller's to name.  Nothing here assumes one is installed:
 `toolchain.Toolchain` takes paths, falls back on the environment (`TF_NVCC`,
 `TF_HIPCC`, `TF_ICPX`) and then on `PATH`, and a scorer that finds none says
 so instead of guessing.
+
+So is the build.  The generator tunes a kernel through this module
+(`Options.autotune`), so nothing here names it: whatever builds a
+configuration takes `generate`, which builds a descriptor list in a context
+at a lane geometry and returns the generator that built it, or raises --
+`Generator.trial`.
 """
 
 from __future__ import annotations
@@ -48,6 +54,9 @@ from tensorforge.common.context import Context, Options
 from tensorforge import toolchain
 from tensorforge.toolchain import Resources, Toolchain
 from tensorforge.generators import lanes as lane_config
+from tensorforge.generators import preferences
+from tensorforge.generators.descriptions import (ElementwiseDescr,
+                                                 contraction_lengths)
 from tensorforge.generators.lanes import LaneConfig
 
 
@@ -137,24 +146,6 @@ def _tensors(descrs):
             tensor = getattr(op, 'tensor', None)
             if tensor is not None:
                 yield tensor
-
-
-def contraction_lengths(descrs) -> List[int]:
-    """The extent of every contracted axis, one per multilinear operand axis
-    that the destination does not have (`target` -1)."""
-    out = []
-    for d in _flat(descrs):
-        target = getattr(d, 'target', None)
-        if target is None or len(getattr(d, 'ops', ())) < 2:
-            continue
-        for op, axes in zip(d.ops, target):
-            box = getattr(op, 'bbox', None)
-            if box is None:
-                continue
-            for axis, t in enumerate(axes):
-                if t == -1 and axis < box.rank():
-                    out.append(int(box.size(axis)))
-    return out
 
 
 def _roll_values(descrs) -> List[int]:
@@ -324,7 +315,6 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     the vendor default stands: nobody has taken the measurement.
     """
     from tensorforge.common.basic_types import Datatype
-    from tensorforge.generators.descriptions import ElementwiseDescr
     flat = _flat(descrs)
     if any(isinstance(d, ElementwiseDescr) for d in flat):
         return []
@@ -488,6 +478,23 @@ def start(descrs, context: Context) -> Candidate:
     return Candidate(lanes=base)
 
 
+def preferred(pref: preferences.Preference, descrs,
+              context: Context) -> Candidate:
+    """The configuration a measured preference asks for, on this kernel."""
+    base = lane_config.deduce(_flat(descrs), context)
+    asked = dict(pref.prefer)
+    lanes = LaneConfig(
+        num_threads=int(asked.pop('lanes', base.num_threads)),
+        num_active_threads=base.num_active_threads,
+        lead_width=int(asked.pop('width', base.lead_width)))
+    if asked.get('k_roll') == 'auto':
+        depths = contraction_lengths(descrs)
+        k = max(depths) if depths else 0
+        divisors = [d for d in range(2, min(32, k - 1) + 1) if k and k % d == 0]
+        asked['k_roll'] = divisors[-1] if divisors else 0
+    return Candidate(lanes=lanes, options=tuple(sorted(asked.items())))
+
+
 def enumerate_space(knobs: Sequence[Knob], origin: Candidate) -> Iterable[Candidate]:
     """Every point, conditional knobs included.  For a small space."""
     def expand(i, cand):
@@ -517,14 +524,14 @@ class Build:
         return self.error is None
 
 
-def build(descr_factory, base: Context, candidate: Candidate) -> Build:
-    """Generate `candidate` from a fresh descriptor list.
+def build(descr_factory, base: Context, candidate: Candidate,
+          generate) -> Build:
+    """Generate `candidate` from a fresh descriptor list, with `generate`.
 
     Fresh every time, and not as a convenience: preparing an operand stores
     its order on the `Tensor` itself, so a build at eight lanes leaves an
     eight-lane interleave behind for the next build to inherit.
     """
-    from tensorforge.generators.generator import Generator
     # Tuning off for the trial: it asks what *this* candidate costs, so it
     # builds this one and does not go looking for another.  With a knob pinned
     # the tuner does not stand aside when a geometry is given, so a trial that
@@ -532,11 +539,7 @@ def build(descr_factory, base: Context, candidate: Candidate) -> Build:
     # way down.
     ctx = candidate.context(base, autotune='off')
     try:
-        gen = Generator(descr_factory(), ctx, lanes=candidate.lanes,
-                        measure_pressure=True)
-        # asked a question, not emitting: nothing it builds reaches a file
-        gen._announce_identity = False
-        gen.generate()
+        gen = generate(descr_factory(), ctx, candidate.lanes)
     except Exception as exc:
         return Build(candidate, context=ctx, error=exc)
     return Build(candidate, generator=gen, context=ctx)
@@ -560,7 +563,8 @@ def _geometry(result: Build) -> Tuple[int, int, int]:
     gen = result.generator
     hw = result.context.target.hw
     mults = gen.launch_config().mults_per_block
-    return gen._num_threads, hw.vec_unit_length, (gen.resident_blocks or 0) * mults
+    return (gen.lanes.num_threads, hw.vec_unit_length,
+            (gen.resident_blocks or 0) * mults)
 
 
 def static_score(result: Build):
@@ -759,7 +763,7 @@ def _register_blocks(result: Build) -> Optional[int]:
     per_lane = max(granule, -(-int(regs) // granule) * granule)
     waves_per_simd = max(0, min(8, file // per_lane))
     gen = result.generator
-    threads = gen._num_threads * gen.launch_config().mults_per_block
+    threads = gen.lanes.num_threads * gen.launch_config().mults_per_block
     waves_per_block = max(1, -(-threads // hw.vec_unit_length))
     return (4 * waves_per_simd) // waves_per_block
 
@@ -915,7 +919,8 @@ class CompiledScore:
             report = replace(report, spill_bytes=spilled)
         if report.registers:
             gen = result.generator
-            threads = gen._num_threads * gen.launch_config().mults_per_block
+            threads = (gen.lanes.num_threads
+                       * gen.launch_config().mults_per_block)
             blocks = entry.register_blocks(report.registers, threads, hw)
             if blocks is not None:
                 report = replace(report, register_blocks=blocks)
@@ -1032,10 +1037,10 @@ class Outcome:
     trials: List[Trial] = field(default_factory=list)
 
 
-def _evaluate(descr_factory, context, scorer, candidate, cache):
+def _evaluate(descr_factory, context, scorer, candidate, cache, generate):
     if candidate in cache:
         return cache[candidate]
-    result = build(descr_factory, context, candidate)
+    result = build(descr_factory, context, candidate, generate)
     if not result.ok:
         # Not the scorer's to judge: a build that failed has no figure, and a
         # scorer written for successes should not have to know that.
@@ -1055,7 +1060,7 @@ def _better(a, b) -> bool:
 
 def exhaustive(descr_factory, context: Context, scorer,
                knobs: Optional[Sequence[Knob]] = None,
-               origin: Optional[Candidate] = None) -> Outcome:
+               origin: Optional[Candidate] = None, *, generate) -> Outcome:
     """Every point.  Only for a space small enough to build whole."""
     descrs = descr_factory()
     knobs = space(descrs, context) if knobs is None else knobs
@@ -1063,7 +1068,8 @@ def exhaustive(descr_factory, context: Context, scorer,
     cache: Dict[Candidate, Trial] = {}
     best = None
     for cand in enumerate_space(knobs, origin):
-        trial = _evaluate(descr_factory, context, scorer, cand, cache)
+        trial = _evaluate(descr_factory, context, scorer, cand, cache,
+                          generate)
         if _better(trial.score, None if best is None else best.score):
             best = trial
     return _outcome(best, cache, origin)
@@ -1073,7 +1079,8 @@ def coordinate(descr_factory, context: Context, scorer,
                knobs: Optional[Sequence[Knob]] = None,
                origin: Optional[Candidate] = None,
                rounds: int = 3, budget: Optional[int] = None,
-               seed: Optional[Dict[Candidate, Trial]] = None) -> Outcome:
+               seed: Optional[Dict[Candidate, Trial]] = None, *,
+               generate) -> Outcome:
     """One knob at a time, from the default, keeping whatever improves.
 
     A round costs the sum of the knobs' value counts rather than their
@@ -1085,7 +1092,7 @@ def coordinate(descr_factory, context: Context, scorer,
     knobs = space(descrs, context) if knobs is None else knobs
     origin = start(descrs, context) if origin is None else origin
     cache: Dict[Candidate, Trial] = dict(seed or {})
-    best = _evaluate(descr_factory, context, scorer, origin, cache)
+    best = _evaluate(descr_factory, context, scorer, origin, cache, generate)
     for _ in range(rounds):
         moved = False
         for knob in knobs:
@@ -1094,7 +1101,8 @@ def coordinate(descr_factory, context: Context, scorer,
                 if (budget is not None and cand not in cache
                         and len(cache) >= budget):
                     continue
-                trial = _evaluate(descr_factory, context, scorer, cand, cache)
+                trial = _evaluate(descr_factory, context, scorer, cand, cache,
+                                  generate)
                 if _better(trial.score, best.score):
                     best, moved = trial, True
         if not moved:
@@ -1113,10 +1121,11 @@ def _outcome(best: Optional[Trial], cache, origin) -> Outcome:
 
 
 def tune(descr_factory, context: Context, scorer=static_score,
-         strategy: Callable = coordinate, **kwargs) -> Outcome:
+         strategy: Callable = coordinate, *, generate, **kwargs) -> Outcome:
     """Choose a configuration for `descr_factory()`'s kernel on `context`'s
     target.  `descr_factory` returns a fresh descriptor list per call."""
-    return strategy(descr_factory, context, scorer, **kwargs)
+    return strategy(descr_factory, context, scorer, generate=generate,
+                    **kwargs)
 
 
 # --------------------------------------------------------------------------- #
@@ -1172,7 +1181,8 @@ def _store(path: Optional[str], key: str, pick: Candidate) -> None:
 def autotune(descr_factory, context: Context, mode: str = 'static',
              budget: Optional[int] = 24,
              cache: Optional[str] = None,
-             fixed: Optional[Mapping[str, Any]] = None) -> Optional[Candidate]:
+             fixed: Optional[Mapping[str, Any]] = None, *,
+             generate) -> Optional[Candidate]:
     """The configuration `Options.autotune` builds a kernel with.
 
     One build of the default first: its source is the cache key, and a kernel
@@ -1193,11 +1203,10 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     # this shape, it is taken as it is, whatever the scorers would say --
     # they rank what a build reports about itself, and the preference is what
     # the machine did.  One build, to check that it builds at all.
-    from tensorforge.generators import preferences
     pref = preferences.lookup(descrs, context)
     if pref is not None:
-        chosen = preferences.candidate(pref, descrs, context)
-        if build(descr_factory, context, chosen).ok:
+        chosen = preferred(pref, descrs, context)
+        if build(descr_factory, context, chosen, generate).ok:
             return chosen
         warnings.warn(f'autotune: the preference from {pref.source} '
                       f'({pref.evidence}) does not build here; ranking instead')
@@ -1208,7 +1217,7 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     for name, value in (fixed or {}).items():
         origin = origin.set(name, value)
     knobs = [knob for knob in knobs if knob.name not in (fixed or {})]
-    first = build(descr_factory, context, origin)
+    first = build(descr_factory, context, origin, generate)
     if not first.ok:
         return None
     if not knobs:
@@ -1235,8 +1244,9 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     # One build held back for the margin below, so that `autotune_budget`
     # stays what it says: the most builds this spends on one kernel.
     out = coordinate(descr_factory, context, scorer, knobs=knobs, origin=origin,
-                     budget=max(1, budget - 1) if budget else budget, seed=seed)
-    best = _worth_it(descr_factory, context, out.best, origin, first)
+                     budget=max(1, budget - 1) if budget else budget, seed=seed,
+                     generate=generate)
+    best = _worth_it(descr_factory, context, out.best, origin, first, generate)
     _store(cache, key, best)
     return best
 
@@ -1272,7 +1282,7 @@ def _bound_cycles(result: Optional['Build']) -> Optional[float]:
 
 
 def _worth_it(descr_factory, context: Context, best: Candidate,
-              origin: Candidate, first: 'Build') -> Candidate:
+              origin: Candidate, first: 'Build', generate) -> Candidate:
     """`best`, or the default where the bound says the move is not worth it.
 
     Ranking alone picks the winner of a tie-breaker as readily as a winner:
@@ -1291,7 +1301,7 @@ def _worth_it(descr_factory, context: Context, best: Candidate,
     """
     if best == origin:
         return origin
-    least = _bound_cycles(build(descr_factory, context, best))
+    least = _bound_cycles(build(descr_factory, context, best, generate))
     was = _bound_cycles(first)
     if least is None or was is None:
         return best

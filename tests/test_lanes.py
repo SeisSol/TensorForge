@@ -21,6 +21,7 @@ start from a constant.
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,6 +49,18 @@ def _gemm(m, n, k, dt=Datatype.F32):
 
 def _ctx(arch, backend, dt=Datatype.F32):
     return Context(arch=arch, backend=backend, fp_type=dt)
+
+
+def _crafted(peak, blocks):
+    """A `generate` for `lanes.search` that builds, and reports `peak(config)`
+    and `blocks(config)` in place of what the build measured."""
+    def generate(descrs, context, config):
+        gen = Generator.trial(descrs, context, config)
+        return SimpleNamespace(
+            metrics=SimpleNamespace(peak_pressure=peak(config),
+                                    emitted_work=gen.metrics.emitted_work),
+            resident_blocks=blocks(config))
+    return generate
 
 
 def _register_slots(src: str) -> int:
@@ -234,7 +247,8 @@ def test_the_search_measures_nothing_when_there_is_nothing_to_choose():
     ctx = _ctx("sm_86", "cuda", Datatype.F64)
     only = lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)[:1]
     config, scores = lanes.search(
-        lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=only)
+        lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=only,
+        generate=Generator.trial)
     assert scores == {config.num_threads: None}
 
 
@@ -252,7 +266,8 @@ def test_the_search_picks_the_configuration_with_the_lower_footprint():
     pair = [c for c in lanes.candidates(_gemm(56, 9, 56, Datatype.F64), ctx)
             if c.num_threads in (32, 64)]
     config, scores = lanes.search(
-        lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=pair)
+        lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=pair,
+        generate=Generator.trial)
 
     assert set(scores) == {32, 64}
     assert scores[64] < scores[32]
@@ -263,7 +278,8 @@ def test_the_search_measures_its_own_builds_and_no_other():
     """It costs a liveness walk per body, so a build the search did not make
     does not pay for it, whatever context it shares."""
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
-    lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
+    lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx,
+                 generate=Generator.trial)
     after = Generator(_gemm(56, 9, 56, Datatype.F64), ctx)
     after.generate()
     assert after.metrics.peak_pressure is None
@@ -315,24 +331,20 @@ def test_a_candidate_that_does_not_build_is_not_a_candidate():
             if c.num_threads in (16, 32)]
     assert [c.num_threads for c in pair] == [32, 16]
 
-    calls = {"n": 0}
-    real = Generator.generate
+    calls = []
 
-    def flaky(self):
+    def flaky(descrs, context, config):
         # the wider candidate refuses, the narrower one builds
-        calls["n"] += 1
-        if self._lanes and self._lanes.num_threads > 16:
+        calls.append(config.num_threads)
+        if config.num_threads > 16:
             raise GenerationError("group barrier under a simd-uniform loop")
-        return real(self)
+        return Generator.trial(descrs, context, config)
 
-    Generator.generate = flaky
-    try:
-        config, scores = lanes.search(
-            lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=pair)
-    finally:
-        Generator.generate = real
+    config, scores = lanes.search(
+        lambda: _gemm(56, 9, 56, Datatype.F64), ctx, options=pair,
+        generate=flaky)
 
-    assert calls["n"] == 2, "both candidates should have been tried"
+    assert len(calls) == 2, "both candidates should have been tried"
     assert config.num_threads == 16
     assert isinstance(scores[32], GenerationError)
 
@@ -344,17 +356,13 @@ def test_a_kernel_that_builds_at_no_width_still_raises():
     a configuration that was never shown to work.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
-    real = Generator.generate
 
-    def always_fails(self):
+    def always_fails(descrs, context, config):
         raise GenerationError("nope")
 
-    Generator.generate = always_fails
-    try:
-        with pytest.raises(GenerationError, match="nope"):
-            lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
-    finally:
-        Generator.generate = real
+    with pytest.raises(GenerationError, match="nope"):
+        lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx,
+                     generate=always_fails)
 
 
 # ----------------------------------------------------------------------
@@ -418,20 +426,10 @@ def test_a_tie_keeps_the_configuration_the_descriptors_asked_for():
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
     default = lanes.deduce(_gemm(56, 9, 56, Datatype.F64), ctx)
-    real = Generator.generate
-
-    def flat(self):
-        out = real(self)
-        self.metrics.peak_pressure = 1000    # identical for both candidates
-        self.resident_blocks = 10
-        return out
-
-    Generator.generate = flat
-    try:
-        config, scores = lanes.search(
-            lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
-    finally:
-        Generator.generate = real
+    # identical for both candidates
+    flat = _crafted(peak=lambda config: 1000, blocks=lambda config: 10)
+    config, scores = lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx,
+                                  generate=flat)
 
     assert scores[32] == scores[64]
     assert config.num_threads == default.num_threads
@@ -445,21 +443,12 @@ def test_the_exact_bound_outranks_the_model_where_it_speaks():
     that they agree.
     """
     ctx = _ctx("gfx90a", "hip", Datatype.F64)
-    real = Generator.generate
-
-    def crafted(self):
-        out = real(self)
-        wide = self._lanes.num_threads == 64
-        # the model prefers the wide one; the exact bound prefers the narrow
-        self.metrics.peak_pressure = 100 if wide else 900
-        self.resident_blocks = 2 if wide else 8
-        return out
-
-    Generator.generate = crafted
-    try:
-        config, _ = lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx)
-    finally:
-        Generator.generate = real
+    # the model prefers the wide one; the exact bound prefers the narrow
+    crafted = _crafted(
+        peak=lambda config: 100 if config.num_threads == 64 else 900,
+        blocks=lambda config: 2 if config.num_threads == 64 else 8)
+    config, _ = lanes.search(lambda: _gemm(56, 9, 56, Datatype.F64), ctx,
+                             generate=crafted)
 
     assert config.num_threads == 32, (
         "the modeled figure won against a measured block count")

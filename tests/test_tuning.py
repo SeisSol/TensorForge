@@ -10,6 +10,7 @@ second each.  The space and the work count are checked on real builds.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 
@@ -99,16 +100,19 @@ def test_no_width_two_where_the_backend_cannot_spell_it():
 # strategies, against a scorer that knows the answer
 # ---------------------------------------------------------------------- #
 
-def _stub_builds(monkeypatch, fail=()):
+def _stub_builds(fail=()):
+    """A `generate` that builds nothing, and the configurations it was asked
+    for: the geometry and the options the context was asked with.  One with
+    `k_roll` in `fail` raises, as a build that fails does."""
     built = []
 
-    def build(factory, context, candidate):
-        built.append(candidate)
-        if candidate.get('k_roll') in fail:
-            return tuning.Build(candidate, context=context, error=ValueError('no'))
-        return tuning.Build(candidate, generator=object(), context=context)
-    monkeypatch.setattr(tuning, 'build', build)
-    return built
+    def generate(descrs, context, lanes):
+        asked = context.get_asked_options().asked()
+        built.append((lanes, tuple(sorted(asked.items()))))
+        if asked.get('k_roll') in fail:
+            raise ValueError('no')
+        return object()
+    return generate, built
 
 
 def _separable(result):
@@ -118,11 +122,12 @@ def _separable(result):
             + (c.get('k_roll') != 8))
 
 
-def test_coordinate_descent_finds_a_separable_optimum(monkeypatch):
+def test_coordinate_descent_finds_a_separable_optimum():
     mod = _case("local_flux.py")
     ctx = Context(arch='sm_100', backend='cuda', fp_type=mod.DTYPE)
-    built = _stub_builds(monkeypatch)
-    out = tuning.tune(mod.descr_list, ctx, scorer=_separable)
+    generate, built = _stub_builds()
+    out = tuning.tune(mod.descr_list, ctx, scorer=_separable,
+                      generate=generate)
     assert out.score == 0
     assert out.best.lanes.num_threads == 8 and out.best.get('k_roll') == 8
     assert out.best.get('merge_variants') is True
@@ -132,25 +137,52 @@ def test_coordinate_descent_finds_a_separable_optimum(monkeypatch):
         'a coordinate walk should cost a fraction of the whole space')
 
 
-def test_a_candidate_that_does_not_build_is_passed_over(monkeypatch):
+def test_a_candidate_that_does_not_build_is_passed_over():
     mod = _case("local_flux.py")
     ctx = Context(arch='sm_100', backend='cuda', fp_type=mod.DTYPE)
-    _stub_builds(monkeypatch, fail=(8,))
-    out = tuning.tune(mod.descr_list, ctx, scorer=_separable)
+    generate, _ = _stub_builds(fail=(8,))
+    out = tuning.tune(mod.descr_list, ctx, scorer=_separable,
+                      generate=generate)
     assert out.best.get('k_roll') != 8
     assert any(t.error is not None for t in out.trials)
 
 
-def test_exhaustive_agrees_with_coordinate_on_a_separable_score(monkeypatch):
+def test_exhaustive_agrees_with_coordinate_on_a_separable_score():
     mod = _case("local_flux.py")
     ctx = Context(arch='sm_100', backend='cuda', fp_type=mod.DTYPE)
-    _stub_builds(monkeypatch)
+    generate, _ = _stub_builds()
     knobs = [k for k in tuning.space(mod.descr_list(), ctx)
              if k.name in ('lanes', 'merge_variants', 'k_roll')]
     a = tuning.tune(mod.descr_list, ctx, scorer=_separable,
-                    strategy=tuning.exhaustive, knobs=knobs)
-    b = tuning.tune(mod.descr_list, ctx, scorer=_separable, knobs=knobs)
+                    strategy=tuning.exhaustive, knobs=knobs, generate=generate)
+    b = tuning.tune(mod.descr_list, ctx, scorer=_separable, knobs=knobs,
+                    generate=generate)
     assert a.score == b.score == 0
+
+
+def _imported(module):
+    """Every module `module` imports, at its top or inside a function."""
+    tree = ast.parse(Path(module.__file__).read_text())
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            out.add(node.module)
+            out.update(f'{node.module}.{alias.name}' for alias in node.names)
+        elif isinstance(node, ast.Import):
+            out.update(alias.name for alias in node.names)
+    return out
+
+
+def test_the_searches_build_with_what_they_are_handed():
+    """The generator tunes through `tuning` and settles its geometry with
+    `lanes`, so neither names it: a search builds with the `generate` it is
+    handed (`Generator.trial`).  Nor does `preferences`, which `tuning`
+    reads, name `tuning`."""
+    from tensorforge.generators import lanes, preferences
+    for module in (tuning, lanes, preferences):
+        assert 'tensorforge.generators.generator' not in _imported(module), (
+            module.__name__)
+    assert 'tensorforge.generators.tuning' not in _imported(preferences)
 
 
 # ---------------------------------------------------------------------- #

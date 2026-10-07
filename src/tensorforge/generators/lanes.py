@@ -361,13 +361,15 @@ def requested(descr_list: List[OperationDescription],
 
 
 def search(descr_factory, context: Context,
-           options: Optional[List[LaneConfig]] = None):
+           options: Optional[List[LaneConfig]] = None, *, generate):
     """Build the kernel at each candidate geometry and keep the tightest.
 
     `descr_factory` returns a fresh descriptor list per attempt.  A list would
     also work -- generating twice from one is idempotent -- but a factory says
     that this builds repeatedly, which a caller passing a list it still holds
-    a reference to should know.
+    a reference to should know.  `generate` builds one, as `tuning` does
+    (`Generator.trial`): the generator settles its geometry with this module,
+    so this module does not name it.
 
     Three keys, in order, and the order is the point: what is known exactly
     decides before what is modeled, and neither decides where both are
@@ -421,17 +423,13 @@ def search(descr_factory, context: Context,
     if len(options) == 1:
         return options[0], {options[0].num_threads: None}
 
-    from tensorforge.generators.generator import Generator
-
     scores = {}
     blocks = {}
     work = {}
     failed = []
     for config in options:
         try:
-            gen = Generator(descr_factory(), context, lanes=config,
-                            measure_pressure=True)
-            gen.generate()
+            gen = generate(descr_factory(), context, config)
         except Exception as exc:
             scores[config.num_threads] = exc
             failed.append(exc)

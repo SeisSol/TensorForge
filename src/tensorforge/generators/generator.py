@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 from typing import List, Optional, Union, Type
+import copy
+import functools
 import hashlib
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.generators.rolling import ForDescr, roll
@@ -17,6 +19,7 @@ from tensorforge.backend.scopes import Scopes
 from tensorforge.backend.residency import Residency
 from tensorforge.backend.section_plan import SectionPlan
 from tensorforge.generators import lanes as lane_config
+from tensorforge.generators import tuning
 from tensorforge.generators.lanes import LaneConfig
 from tensorforge.generators.legalize import legalize
 from tensorforge.backend.temporaries import Temporaries
@@ -368,6 +371,15 @@ def _wait_for_transfers(instrs) -> list:
   return out
 
 
+def _of_the_build(method):
+  """`method`, answered by the generator that built the kernel
+  (`Generator.built`)."""
+  @functools.wraps(method)
+  def answer(self, *args, **kwargs):
+    return method(self.built, *args, **kwargs)
+  return answer
+
+
 class Generator:
   #: Hex characters of the digest that end up in the symbol.  Sixty-four bits
   #: rather than forty: the digest is the whole of the name's discriminating
@@ -398,12 +410,16 @@ class Generator:
     # operand on other axes, an accumulation, a factor -- is rewritten here,
     # whichever frontend stated it.
     gemm_list = legalize(gemm_list)
-    self.descr_list: List[OperationDescription] = gemm_list
+    #: The list this generator builds (`descr_list`).
+    self._descr_list: List[OperationDescription] = gemm_list
     #: The list as the caller handed it, before merging rewrites it -- what
     #: `Options.autotune` builds its candidates from and rebuilds the pick on.
     self._given: List[OperationDescription] = gemm_list
-    #: The configuration `Options.autotune` chose, or None where it did not run.
-    self.tuned = None
+    #: The configuration `Options.autotune` chose (`tuned`).
+    self._tuned = None
+    #: The generator this one handed its build to (`built`), or None where
+    #: it builds its own kernel.
+    self._built: Optional['Generator'] = None
     self._context: Context = context
     #: Switches the frontend's caller set on this kernel, or None from a
     #: frontend that has no attribute channel.  Only the flag mask reads
@@ -454,23 +470,17 @@ class Generator:
     #: (`BuildMetrics.pressure`): a liveness walk per body, which only a
     #: caller searching over configurations reads.
     self._measure_pressure: bool = measure_pressure
-    #: What this build measures of what it lays down.
-    self.metrics: BuildMetrics = BuildMetrics(measure_pressure)
-    #: Blocks resident per SM under the resources that are known exactly --
-    #: shared memory and threads.  Not the register limit; see
-    #: `_resident_blocks`.
-    self.resident_blocks: Optional[int] = None
+    #: What this build measures of what it lays down (`metrics`).
+    self._metrics: BuildMetrics = BuildMetrics(measure_pressure)
     #: Whether `Options.autotune` applies to this generator.  False on the
-    #: ones built here to ask a question -- the merging probe, the prefetch
-    #: probes -- because the configuration is the caller's kernel's and was
-    #: settled before they were built: tuning them again would open a walk
-    #: inside every probe, and a probe inside every build of every walk.
+    #: ones built here to ask a question -- the probes of the merge decision
+    #: -- and on the configuration the tuner picked, because their
+    #: configuration was settled before they were built: tuning them again
+    #: would open a walk inside every probe, and a probe inside every build
+    #: of every walk.
     self._may_tune: bool = True
-    #: The geometry this build settled on, which with none asked for is what
-    #: the deduction, or the tuner, arrived at.  Beside the other figures a
-    #: caller reads back, because a harness that reports the geometry it
-    #: passed in reports the question and not the answer.
-    self.lanes: Optional[LaneConfig] = None
+    #: The geometry this build settled on (`lanes`).
+    self._lane_config: Optional[LaneConfig] = None
 
     self._section: Section = Section()
     self._sections: List[Section] = []
@@ -490,12 +500,12 @@ class Generator:
       # it takes to fit, rather than every one -- or `EVERY_RUN`, its probe.
       budget = ({} if not merge_within
                 else dict(fit_within=merge_within[0], size=merge_within[1]))
-      self.descr_list = roll(self.descr_list,
-                             min_count=options.merge_min_count,
-                             max_arity=options.merge_max_arity, **budget)
+      self._descr_list = roll(self._descr_list,
+                              min_count=options.merge_min_count,
+                              max_arity=options.merge_max_arity, **budget)
       self._emit_loops = True
 
-    self._name_operands(self.descr_list)
+    self._name_operands(self._descr_list)
 
     # Asked for and unavailable is an error, not a fallback.  A caller who
     # switched the traversal and silently got the other one would attribute
@@ -563,6 +573,55 @@ class Generator:
             'hands out next; the two cannot be combined until the lookahead '
             'index is read from the queue (needs launch_control_depth >= 2)')
 
+  @property
+  def built(self) -> 'Generator':
+    """The generator whose build is this one's kernel: this one, unless it
+    handed the build to another -- the configuration `Options.autotune`
+    picked (`_autotune`), or a build the merge decision took over
+    (`_take_over`).
+
+    What a build lays down is that generator's.  This one answers for the
+    kernel's surfaces and figures (`get_kernel`, `launch_config`,
+    `metrics`, ...) from it, and anything else of the build -- its
+    sections, its scopes -- is read off it (`_hand_over`).
+    """
+    built = self
+    while built._built is not None:
+      built = built._built
+    return built
+
+  @property
+  def descr_list(self) -> List[OperationDescription]:
+    """The operations the kernel was built from, a merged run as its
+    loop."""
+    return self.built._descr_list
+
+  @property
+  def tuned(self):
+    """The configuration `Options.autotune` chose (`tuning.Candidate`), or
+    None where it did not run."""
+    return self.built._tuned
+
+  @property
+  def metrics(self) -> BuildMetrics:
+    """What the build measured of what it laid down."""
+    return self.built._metrics
+
+  @property
+  def resident_blocks(self) -> Optional[int]:
+    """Blocks resident per SM under the resources that are known exactly --
+    shared memory and threads -- or None before `generate`.  Not the
+    register limit; see `_resident_blocks`."""
+    return self.built._resident_blocks()
+
+  @property
+  def lanes(self) -> Optional[LaneConfig]:
+    """The geometry the build settled on, or None before `generate`: with
+    none asked for, what the deduction or the tuner arrived at.  Beside the
+    other figures a caller reads back, because a harness that reports the
+    geometry it passed in reports the question and not the answer."""
+    return self.built._lane_config
+
   def set_kernel_name(self, name):
     self._base_kernel_name = name
 
@@ -596,7 +655,7 @@ class Generator:
                merge_within: Optional[tuple] = None,
                emit_loops: Optional[bool] = None) -> 'Generator':
     """A generator for this kernel, built to answer a question or to be taken
-    over (`_adopt`).
+    over (`_take_over`).
 
     Same context, policy, lanes and attributes, and what was settled after
     construction -- a pinned name, the configuration the tuner picked -- so
@@ -612,23 +671,17 @@ class Generator:
     other._merge_decided = True
     other._announce_identity = False
     other._base_kernel_name = self._base_kernel_name
-    other.tuned = self.tuned
+    other._tuned = self._tuned
     if emit_loops is not None:
       other._emit_loops = emit_loops
     return other
 
-  def _adopt(self, other: 'Generator') -> None:
-    """Become `other`: what it built, or, unbuilt, what it would build.
-
-    Whether a completed build announces its name stays this generator's --
-    it is the caller's generator, and `other` was made not to.
-    """
-    announce = self._announce_identity
-    self.__dict__.update(other.__dict__)
-    self._announce_identity = announce
-
   def generate(self):
-    self._autotune()
+    tuned = self._autotune()
+    if tuned is not None:
+      # built, by the configuration the tuner picked
+      self._hand_over(tuned)
+      return tuned.generate()
     if self._auto_merge():
       # built, by the generator this one has taken over
       return None
@@ -640,8 +693,23 @@ class Generator:
     with self._lane_mapping():
       return self._generate_bound()
 
-  def _autotune(self) -> None:
-    """Rebuild this generator at the configuration `Options.autotune` picks.
+  @staticmethod
+  def trial(descrs, context: Context,
+            lanes: Optional[LaneConfig] = None) -> 'Generator':
+    """`descrs` built at `lanes` to be asked about rather than emitted: with
+    the register footprint of every body measured, and without announcing
+    its name, since nothing it builds reaches a file.  What a search over
+    configurations builds a candidate with (`tuning.build`,
+    `lanes.search`)."""
+    gen = Generator(descrs, context, lanes=lanes, measure_pressure=True)
+    gen._announce_identity = False
+    gen.generate()
+    return gen
+
+  def _autotune(self) -> Optional['Generator']:
+    """The generator for the configuration `Options.autotune` picks, to
+    build this one's kernel; None where tuning does not apply or picks
+    nothing.
 
     What the caller fixed stays fixed and the rest is still tuned: an explicit
     `lanes`, or `Options.lanes_per_mult`, pins that knob and leaves the others
@@ -650,15 +718,14 @@ class Generator:
     build, so nothing measured through it would be tuned.
 
     The candidates are built from deep copies, because preparing and rolling
-    leave their marks on the tensors; the pick is then built here, on the
-    caller's own, which is where the host reads the storage from.
+    leave their marks on the tensors; the pick is then built on the caller's
+    own, which is where the host reads the storage from.  It settles nothing
+    again -- its configuration is the pick -- and announces its name where
+    this generator would have.
     """
     opts = self._context.get_user_options()
     if opts.autotune in ('', 'off') or not self._may_tune:
-      return
-    import copy
-    from tensorforge.generators import lanes as lane_config
-    from tensorforge.generators import tuning
+      return None
     given = self._given
     fixed = {}
     if self._lanes is not None:
@@ -670,16 +737,18 @@ class Generator:
     pick = tuning.autotune(lambda: copy.deepcopy(given), self._context,
                            mode=opts.autotune, budget=opts.autotune_budget,
                            cache=opts.autotune_cache or None,
-                           fixed=fixed or None)
+                           fixed=fixed or None, generate=Generator.trial)
     if pick is None:
-      return
+      return None
     tuned = Generator(given, pick.context(self._context),
                       self._thread_block_policy_type, lanes=pick.lanes,
                       attrs=self._attrs,
                       measure_pressure=self._measure_pressure)
+    tuned._may_tune = False
+    tuned._announce_identity = self._announce_identity
     tuned._base_kernel_name = self._base_kernel_name
-    tuned.tuned = pick
-    self._adopt(tuned)
+    tuned._tuned = pick
+    return tuned
 
   def _auto_merge(self) -> bool:
     """Merge repeated runs where the kernel written out crowds the
@@ -761,16 +830,25 @@ class Generator:
     list holds fewer temporaries, so the one a probe named `t2` is `t8`
     written out.  They are named again, for the list this generator builds.
     """
-    self._name_operands(self.descr_list)
+    self._name_operands(self._descr_list)
     return False
 
   def _take_over(self, other: 'Generator') -> bool:
-    """Become `other`, built, with the operands named as its build named
-    them (`_keep_written_out`), and register its name."""
-    self._adopt(other)
-    self._name_operands(self.descr_list)
+    """Hand the build to `other`, built, with the operands named as its
+    build named them (`_keep_written_out`), and register its name."""
+    self._hand_over(other)
+    other._name_operands(other._descr_list)
     self._announce()
     return True
+
+  def _hand_over(self, other: 'Generator') -> None:
+    """Make `other` the generator that builds this one's kernel (`built`).
+
+    What this one set up for a build of its own goes with it: its sections
+    and scopes, read off it, would be an empty build taken for the kernel's.
+    """
+    self._built = other
+    self._sections = self._section = self._scopes = None
 
   def _runs_to_merge(self, budget, size) -> list:
     """The list with as many runs merged as a written-out `size` takes to fit
@@ -840,7 +918,7 @@ class Generator:
     """Register the name of a build taken over from a sibling, which did
     not announce it."""
     if self._announce_identity:
-      registry().register(self._base_kernel_name, self.unnamed_source(),
+      registry().register(self.get_base_name(), self.unnamed_source(),
                           self.descr_list)
 
   def _generate_bound(self):
@@ -851,7 +929,7 @@ class Generator:
     descrlist = []
     currlist = []
     barrier = []
-    for descr in self.descr_list:
+    for descr in self._descr_list:
       if descr.barrier():
         # avoid empty sections
         if len(currlist) > 0:
@@ -1385,7 +1463,7 @@ class Generator:
         self._context, self._names,
         lambda body: self._emit_section(body, index, section),
         arena=obj.name, place=place, barriers=self._barriers(section),
-        metrics=self.metrics)
+        metrics=self._metrics)
     return body, place.layout
 
   def _with_arena(self, section, body):
@@ -1565,14 +1643,13 @@ class Generator:
       for section in self._sections:
         with writer.AnonymousScope():
           AbstractInstruction._emit_shared_body(
-              self._context, writer, section.body, self.metrics,
+              self._context, writer, section.body, self._metrics,
               self._num_threads)
 
     self._kernel = writer.get_src()
     self._warn_icache()
-    self.resident_blocks = self._resident_blocks()
-    self.lanes = LaneConfig(self._num_threads, self._num_active_threads,
-                            self._lead_width)
+    self._lane_config = LaneConfig(self._num_threads,
+                                   self._num_active_threads, self._lead_width)
 
   def _warn_icache(self) -> None:
     """Say so when the kernel's code is larger than the instruction cache.
@@ -1586,11 +1663,11 @@ class Generator:
     from tensorforge.analysis.icache import (ICacheBudgetWarning, code_bytes,
                                              icache_excess)
     hw = self._context.target.hw
-    excess = icache_excess(self.metrics.code_units, hw)
+    excess = icache_excess(self._metrics.code_units, hw)
     if excess:
       warnings.warn(
           f'{self._base_kernel_name}: about '
-          f'{code_bytes(self.metrics.code_units, hw)} '
+          f'{code_bytes(self._metrics.code_units, hw)} '
           f'B of code against an instruction cache of {hw.icache_size} B on '
           f'{hw.model}; the batch loop fetches the difference again on every '
           f'iteration.  Rolling a reduction (`k_roll`, `k_unroll_max`), '
@@ -1675,6 +1752,7 @@ class Generator:
         persistent=bool(self._persistent_threading),
         sections=sections)
 
+  @_of_the_build
   def launch_config(self) -> LaunchConfig:
     """The launch this kernel runs under; `None` before `generate`."""
     return self._launch
@@ -1828,7 +1906,7 @@ class Generator:
     """Adopt the section's lane geometry: the caller's, or the deduced one."""
     # Over the expansion: lane geometry follows from the operations, and a
     # descriptor that stands for several is not one of them.
-    flat = [op for descr in self.descr_list for op in descr.operations()]
+    flat = [op for descr in self._descr_list for op in descr.operations()]
     config = (self._lanes or lane_config.requested(flat, self._context)
               or lane_config.deduce(flat, self._context))
     self._num_threads = config.num_threads
@@ -1862,7 +1940,7 @@ class Generator:
     as carrying it.  `id`s of the tensors, as the preload bookkeeping keeps.
     """
     lead, seen = set(), set()
-    for op in (o for d in self.descr_list for o in d.operations()):
+    for op in (o for d in self._descr_list for o in d.operations()):
       if hasattr(op, 'ops') and hasattr(op, 'target'):
         for sub, target in zip(op.ops, op.target or ()):
           tensor = getattr(sub, 'tensor', sub)
@@ -1962,7 +2040,7 @@ class Generator:
       return set()
     limit = options.k_unroll_max
     seen, rolled = set(), set()
-    for op in (o for d in self.descr_list for o in d.operations()):
+    for op in (o for d in self._descr_list for o in d.operations()):
       if not (hasattr(op, 'ops') and hasattr(op, 'target')):
         continue
       for sub, target in zip(op.ops, op.target or ()):
@@ -2650,12 +2728,15 @@ class Generator:
       return False
     return walk(stream) or bool(_one_lane_stores(stream))
 
+  @_of_the_build
   def get_kernel(self):
     return self._kernel
 
+  @_of_the_build
   def get_launcher(self):
     return self._launcher
 
+  @_of_the_build
   def get_header(self):
     return self._header
 
@@ -2733,6 +2814,7 @@ class Generator:
                       stype=stype)
         self._scopes.add_to_global(symbol)
 
+  @_of_the_build
   def unnamed_source(self) -> str:
     """Everything this kernel contributes to a file, with the name left out.
 
@@ -2782,11 +2864,13 @@ class Generator:
     if self._announce_identity:
       registry().register(self._base_kernel_name,
                           self.unnamed_source(),
-                          self.descr_list)
+                          self._descr_list)
 
+  @_of_the_build
   def get_base_name(self):
     return self._base_kernel_name
 
+  @_of_the_build
   def param_table_types(self) -> List[str]:
     """The by-value types the signature names, for whoever writes the file."""
     return [table.struct_definition() for table in self._param_tables]
@@ -2796,15 +2880,15 @@ class Generator:
     # What was asked for, so that a file found on its own says which of several
     # configurations of one workload it is.
     writer(f'// options: {self._context.get_user_options().describe()}')
-    if self.tuned is not None:
-      writer(f'// tuned: {self.tuned.label()}')
+    if self._tuned is not None:
+      writer(f'// tuned: {self._tuned.label()}')
     if self._launch is not None:
       writer(f'// launch: {self._launch.describe()}')
     writer('// operands:')
     for matrix in self._scopes.get_global_scope().values():
       writer(f'//   {matrix.obj.gen_descr()}')
     writer('// operations:')
-    for item in self.descr_list:
+    for item in self._descr_list:
       text = item.summary() if hasattr(item, 'summary') else str(item)
       for line in text.splitlines():
         writer(f'//   {line}')
@@ -2816,6 +2900,7 @@ class Generator:
                         separators=(',', ':'), ensure_ascii=False))
     writer.new_line()
 
+  @_of_the_build
   def kernel_info(self) -> dict:
     """What this kernel is, as data: the operands, every operation (a merged
     run's written out, its loop kept beside) and the launch.  The
@@ -2870,7 +2955,7 @@ class Generator:
       return row
 
     operations, loops = [], []
-    for descr in self.descr_list:
+    for descr in self._descr_list:
       if hasattr(descr, 'decompose') and hasattr(descr, 'to_dict'):
         loops.append(compact(descr.to_dict()))
       for op in descr.operations():
@@ -3005,6 +3090,7 @@ class Generator:
                                          host=True))
     return f'void launcher_{self._base_kernel_name}({str_params})'
 
+  @_of_the_build
   def get_helper_headers(self):
     headerset = set()
     for section in self._sections:
@@ -3020,6 +3106,7 @@ class Generator:
     # and into the name derived from it.
     return sorted(headerset)
 
+  @_of_the_build
   def generate_call_site(self,
                          mat_name_map,
                          offset_name_map):
@@ -3042,7 +3129,7 @@ class Generator:
 
     flags = []
     regions = 0
-    for desc in self.descr_list:
+    for desc in self._descr_list:
       if isinstance(desc, RegionDescription):
         regions += 1
         args.append(f'{desc.name}.numElements')

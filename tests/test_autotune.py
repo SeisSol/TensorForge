@@ -62,8 +62,8 @@ def test_autotune_is_off_by_default_and_off_changes_nothing():
 def test_static_autotune_builds_its_pick_and_says_so():
     gen = _generate(autotune='static', autotune_budget=6)
     assert gen.tuned is not None
-    assert gen._num_threads == gen.tuned.lanes.num_threads
-    assert gen._lead_width == gen.tuned.lanes.lead_width
+    assert gen.lanes.num_threads == gen.tuned.lanes.num_threads
+    assert gen.lanes.lead_width == gen.tuned.lanes.lead_width
     assert f'// tuned: {gen.tuned.label()}' in gen.get_kernel()
 
 
@@ -71,9 +71,9 @@ def test_the_budget_caps_the_builds(monkeypatch):
     built = []
     real = tuning.build
 
-    def counting(factory, context, candidate):
+    def counting(factory, context, candidate, generate):
         built.append(candidate)
-        return real(factory, context, candidate)
+        return real(factory, context, candidate, generate)
     monkeypatch.setattr(tuning, 'build', counting)
     _generate(autotune='static', autotune_budget=4)
     # four for the walk, the default among them, and the cache key's build
@@ -84,19 +84,19 @@ def test_the_budget_caps_the_builds(monkeypatch):
 def test_a_probe_the_generator_builds_for_itself_is_not_tuned(monkeypatch):
     """Tuning is one question about the caller's kernel, asked once.
 
-    The merging probe and the prefetch probes are generators this one builds
-    to ask something about itself, at a geometry that is already settled.
-    Tuning them would open a walk inside every probe and a probe inside every
-    build of every walk -- hundreds of builds that all keep to
-    `autotune_budget` in *distinct* candidates, so the budget test above
-    would not see them.  Counted here, in total.
+    The probes of the merge decision are generators this one builds to ask
+    something about itself, at a geometry that is already settled, and so is
+    the pick it builds.  Tuning them would open a walk inside every probe and
+    a probe inside every build of every walk -- hundreds of builds that all
+    keep to `autotune_budget` in *distinct* candidates, so the budget test
+    above would not see them.  Counted here, in total.
     """
     built = []
     real = tuning.build
 
-    def counting(factory, context, candidate):
+    def counting(factory, context, candidate, generate):
         built.append(candidate)
-        return real(factory, context, candidate)
+        return real(factory, context, candidate, generate)
     monkeypatch.setattr(tuning, 'build', counting)
     # sm_120: no measured preference, so the walk actually runs
     _generate("sm_120", autotune='static', autotune_budget=4)
@@ -114,9 +114,9 @@ def test_a_remembered_pick_costs_one_build(monkeypatch, tmp_path):
     built = []
     real = tuning.build
 
-    def counting(factory, context, candidate):
+    def counting(factory, context, candidate, generate):
         built.append(candidate)
-        return real(factory, context, candidate)
+        return real(factory, context, candidate, generate)
     monkeypatch.setattr(tuning, 'build', counting)
     again = _generate("sm_120", autotune='static', autotune_budget=4,
                       autotune_cache=str(path))
@@ -143,7 +143,7 @@ def test_an_explicit_geometry_is_kept_and_the_rest_still_turned(monkeypatch):
     asked = {}
 
     def watching(factory, context, mode='static', budget=None, cache=None,
-                 fixed=None):
+                 fixed=None, *, generate):
         asked['fixed'] = fixed
         return None
 
@@ -236,24 +236,15 @@ def test_width_two_only_where_one_instruction_does_two_fmas(arch, backend, paire
 
 class _FakeGen:
     def __init__(self, threads, mults, peak, blocks=16):
-        self._num_threads = threads
         from tensorforge.generators.lanes import LaneConfig
-        #: What the build settled on, which `_over_budget` reads on Intel to
-        #: know how many lanes share one thread's register file.
+        #: What the build settled on: the lanes a multiplication spans, and
+        #: on Intel how many share one thread's register file.
         self.lanes = LaneConfig(threads, threads, 1)
         from tensorforge.common.metrics import BuildMetrics
         self.metrics = BuildMetrics()
         self.metrics.peak_pressure = peak
         self.metrics.emitted_work = 1000
         self.resident_blocks = blocks
-
-        class _Obj:
-            def get_mults_per_block(_self):
-                return mults
-
-        class _Section:
-            shr_mem_obj = _Obj()
-        self._section = _Section()
 
         class _Launch:
             mults_per_block = mults

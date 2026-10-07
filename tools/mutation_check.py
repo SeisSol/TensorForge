@@ -637,8 +637,46 @@ GROUPS = {
              'self._written_scale * copies)')),
         ('the list built after a probe keeps the probe\'s names',
          sub(Path('src/tensorforge/generators/generator.py'),
-             '    self._name_operands(self.descr_list)\n    return False',
+             '    self._name_operands(self._descr_list)\n    return False',
              '    return False')),
+    ]),
+
+    # A generator that hands its build to another answers from it.
+    'delegation': ('tests/test_autotune.py tests/test_rolling.py '
+                   'tests/test_icache.py', [
+        ('the kernel asked of the generator that handed it on',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '    while built._built is not None:\n', '    while False:\n', 1)),
+        ('a build taken over with the operands as the last probe named them',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '    other._name_operands(other._descr_list)\n', '', 1)),
+        ('the configuration the tuner picked tuned again',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '    tuned._may_tune = False\n', '', 1)),
+        ('a build handed on with this generator\'s own left to read',
+         sub(Path('src/tensorforge/generators/generator.py'),
+             '    self._sections = self._section = self._scopes = None\n', '',
+             1)),
+    ]),
+
+    # The searches build with what they are handed, and the generator's
+    # modules import one another one way.
+    'drivers': ('tests/test_tuning.py', [
+        ('the tuner naming the generator',
+         sub(Path('src/tensorforge/generators/tuning.py'),
+             "    ctx = candidate.context(base, autotune='off')\n",
+             "    from tensorforge.generators.generator import Generator  # noqa\n"
+             "    ctx = candidate.context(base, autotune='off')\n", 1)),
+        ('the lane search naming the generator',
+         sub(Path('src/tensorforge/generators/lanes.py'),
+             '    scores = {}\n    blocks = {}\n',
+             '    from tensorforge.generators.generator import Generator  # noqa\n'
+             '    scores = {}\n    blocks = {}\n', 1)),
+        ('the preferences reading the tuner',
+         sub(Path('src/tensorforge/generators/preferences.py'),
+             '    flat = [op for d in descrs for op in d.operations()]\n',
+             '    from tensorforge.generators.tuning import _flat\n'
+             '    flat = _flat(descrs)\n', 1)),
     ]),
 
     # What a build measured of what it laid down, as that build's.
@@ -653,7 +691,7 @@ GROUPS = {
          sub(Path('src/tensorforge/generators/generator.py'),
              '    other._announce_identity = False\n',
              '    other._announce_identity = False\n'
-             '    other.metrics = self.metrics\n', 1)),
+             '    other._metrics = self._metrics\n', 1)),
         ('the scorer reading a size the build does not keep',
          sub(Path('src/tensorforge/generators/tuning.py'),
              'icache_excess(result.generator.metrics.code_units, hw)',

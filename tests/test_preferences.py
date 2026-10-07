@@ -99,7 +99,7 @@ def test_the_shipped_gb200_entry_reaches_local_flux():
     ctx = _ctx()
     pref = preferences.lookup(descrs, ctx)
     assert pref is not None and pref.source == preferences.SHIPPED
-    cand = preferences.candidate(pref, descrs, ctx)
+    cand = tuning.preferred(pref, descrs, ctx)
     assert (cand.lanes.num_threads, cand.lanes.lead_width) == (8, 1)
     # `auto`: the largest divisor of the 56-step reduction up to 32
     assert cand.get('k_roll') == 28 and cand.get('merge_variants') is True
@@ -110,9 +110,9 @@ def test_prefer_builds_the_preference_and_nothing_else(monkeypatch):
     built = []
     real = tuning.build
 
-    def counting(factory, context, candidate):
+    def counting(factory, context, candidate, generate):
         built.append(candidate)
-        return real(factory, context, candidate)
+        return real(factory, context, candidate, generate)
     monkeypatch.setattr(tuning, 'build', counting)
     mod = _case()
     gen = Generator(mod.descr_list(), _ctx(autotune='prefer'))

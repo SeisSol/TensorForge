@@ -30,10 +30,10 @@ it.
 
 ## What it prefers
 
-`prefer` is what a `tuning.Candidate` is made of: `lanes` and `width`, and any
-option.  `k_roll: auto` is the largest divisor of the longest reduction up to
-32, which is what the measured rolls were -- a number there would only fit
-the one reduction length it was measured at.
+`prefer` is what a `tuning.Candidate` is made of (`tuning.preferred`):
+`lanes` and `width`, and any option.  `k_roll: auto` is the largest divisor
+of the longest reduction up to 32, which is what the measured rolls were -- a
+number there would only fit the one reduction length it was measured at.
 
 ## Where from
 
@@ -52,6 +52,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from tensorforge.common.context import Context
+from tensorforge.generators import lanes as lane_config
+from tensorforge.generators.descriptions import contraction_lengths
 
 SHIPPED = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        'preferences.yml')
@@ -126,9 +128,7 @@ def device_names(context: Context) -> List[str]:
 
 def features(descrs, context: Context) -> Dict[str, Any]:
     """What a preference can match on, read off the descriptors."""
-    from tensorforge.generators import lanes as lane_config
-    from tensorforge.generators.tuning import _flat, contraction_lengths
-    flat = _flat(descrs)
+    flat = [op for d in descrs for op in d.operations()]
     base = lane_config.deduce(flat, context)
     columns = 0
     for d in flat:
@@ -156,22 +156,3 @@ def lookup(descrs, context: Context) -> Optional[Preference]:
             if pref.device == name and pref.matches(feats):
                 return pref
     return None
-
-
-def candidate(pref: Preference, descrs, context: Context):
-    """The `tuning.Candidate` a preference asks for, on this kernel."""
-    from tensorforge.generators import lanes as lane_config
-    from tensorforge.generators.tuning import (Candidate, _flat,
-                                               contraction_lengths)
-    base = lane_config.deduce(_flat(descrs), context)
-    asked = dict(pref.prefer)
-    lanes = lane_config.LaneConfig(
-        num_threads=int(asked.pop('lanes', base.num_threads)),
-        num_active_threads=base.num_active_threads,
-        lead_width=int(asked.pop('width', base.lead_width)))
-    if asked.get('k_roll') == 'auto':
-        depths = contraction_lengths(descrs)
-        k = max(depths) if depths else 0
-        divisors = [d for d in range(2, min(32, k - 1) + 1) if k and k % d == 0]
-        asked['k_roll'] = divisors[-1] if divisors else 0
-    return Candidate(lanes=lanes, options=tuple(sorted(asked.items())))

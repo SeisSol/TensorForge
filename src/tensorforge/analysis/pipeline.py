@@ -332,13 +332,14 @@ def of(generator, conservative: bool = False,
     figure with the addressing and the schedule in it, and only
     `tuning.CompiledScore` has one.
     """
-    hw = generator._context.target.hw
-    stream = (stream_bytes(generator._given) if dram_bytes_per_clock
+    built = generator.built
+    hw = built._context.target.hw
+    stream = (stream_bytes(built._given) if dram_bytes_per_clock
               else None)
-    metrics = generator.metrics
+    metrics = built.metrics
     return bound(metrics.issue_mix, metrics.memory_bytes, hw,
-                 max(1, generator._num_threads or 1),
-                 generator._num_active_threads or None, conservative,
+                 max(1, built._num_threads or 1),
+                 built._num_active_threads or None, conservative,
                  stream, dram_bytes_per_clock, spill_bytes)
 
 

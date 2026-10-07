@@ -85,7 +85,7 @@ def test_the_bound_names_its_pipe_and_is_the_largest_of_them():
     gen = _built('local_flux', 'sm_120', 'cuda')
     b = pipeline.of(gen)
     assert b.binding in pipeline.resources(
-        gen._context.target.hw)
+        gen.built._context.target.hw)
     assert b.cycles == max(b.per_resource.values())
     assert b.share(b.binding) == 1.0
 
@@ -128,9 +128,9 @@ def test_dram_is_what_an_element_streams_and_binds_when_scarce():
     once for the batch, so they are not in it, and a bandwidth low enough
     makes DRAM the binding pipe."""
     gen = _built('local_flux', 'sm_120', 'cuda')
-    stream = pipeline.stream_bytes(gen._given)
+    stream = pipeline.stream_bytes(gen.built._given)
     from tensorforge.analysis.cost import list_cost
-    assert 0 < stream <= list_cost(gen._given, batch=1).bytes
+    assert 0 < stream <= list_cost(gen.built._given, batch=1).bytes
     scarce = pipeline.of(gen, dram_bytes_per_clock=1e-3)
     assert scarce.binding == 'dram'
     assert 'dram' not in pipeline.of(gen).per_resource

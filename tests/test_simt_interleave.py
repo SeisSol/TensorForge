@@ -38,7 +38,7 @@ def _generate(monkeypatch, options):
                     Context(arch="sm_120", backend="cuda", fp_type=mod.DTYPE))
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
-    operators = [s.obj for s in gen._scopes.get_global_scope().values()
+    operators = [s.obj for s in gen.built._scopes.get_global_scope().values()
                  if s.obj.alias and s.obj.alias.startswith("A")]
     return gen.get_kernel(), operators
 
@@ -129,7 +129,7 @@ def _seissol(kernel, config="elastic-linearck-o6-s", options=None):
     gen = Generator(descrs, ctx)
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
-    operators = [s.obj for s in gen._scopes.get_global_scope().values()
+    operators = [s.obj for s in gen.built._scopes.get_global_scope().values()
                  if getattr(s.obj, "addressing", None) is Addressing.NONE]
     return gen.get_kernel(), operators
 

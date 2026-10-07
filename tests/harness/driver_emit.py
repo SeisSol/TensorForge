@@ -76,7 +76,8 @@ class DriverOperand:
 
 
 def collect_operands(generator) -> List[DriverOperand]:
-    """Walk the generator's global scope and materialize operand metadata.
+    """Walk the global scope of the generator that built the kernel
+    (`Generator.built`) and materialize operand metadata.
 
     The global scope's insertion order is the same order the launcher takes
     its parameters in, so host-side args line up by index -- for everything
@@ -87,7 +88,7 @@ def collect_operands(generator) -> List[DriverOperand]:
     compile error at the call and says nothing about where it came from.
     """
     ops: List[DriverOperand] = []
-    for sym in generator._scopes.get_global_scope().values():
+    for sym in generator.built._scopes.get_global_scope().values():
         t = sym.obj
         if getattr(t, 'is_variant', False):
             continue
@@ -187,7 +188,7 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
     # section. With a single descr or only fence-less chains the section
     # count is 1 — the default. ``GridFenceDescr`` / ``GridBarrierDescr``
     # between descrs split sections, raising the count.
-    num_sections = len(getattr(generator, "_sections", [None]))
+    num_sections = len(getattr(generator.built, "_sections", [None]))
     for _ in range(num_sections):
         call_args.append(batch)
     # Whether a ``flags{i}`` parameter sits beside each of them is the

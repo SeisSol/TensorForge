@@ -154,7 +154,7 @@ def _bodies(case: Path, backend: str, arch: str, **options):
                   options=Options(**options))
     gen = Generator(mod.descr_list(), ctx)
     gen.generate()
-    return [section.body for section in gen._sections]
+    return [section.body for section in gen.built._sections]
 
 
 # How many statements in each case refuse to say what they touch, so the

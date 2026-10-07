@@ -264,7 +264,7 @@ def test_packed_buffers_take_what_is_live_and_no_more():
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         gen.generate()
-    for section in gen._sections:
+    for section in gen.built._sections:
         assert section.shr_mem_obj.get_mults_per_block() >= 2
         assert section.shr_mem_obj.get_size_per_mult() * 8 < 50_000
         violations, opaque = check_layout(section.body)
@@ -313,7 +313,8 @@ def _carried(system, config, kernel):
         warnings.simplefilter('ignore')
         warnings.simplefilter('error', MergeFallbackWarning)
         gen.generate()
-    loops = [i for s in gen._sections for i in s.ir if isinstance(i, VariantLoop)]
+    loops = [i for s in gen.built._sections for i in s.ir
+             if isinstance(i, VariantLoop)]
     assert loops, kernel
     return [len(loop._carried) for loop in loops]
 
@@ -374,7 +375,7 @@ def test_a_merged_run_carries_the_temporaries_it_reads_back():
             for region in instr.regions() or ():
                 yield from loops(region)
 
-    found = [loop for section in gen._sections
+    found = [loop for section in gen.built._sections
              for loop in loops(section.stream)]
     assert found, 'the damage step merged nothing'
     biggest = max(found, key=lambda loop: len(loop.region))

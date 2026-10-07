@@ -660,3 +660,22 @@ class RegionDescription(OperationDescription):
 
   def __str__(self):
     return f'region "{self.name}"'
+
+
+def contraction_lengths(descrs) -> List[int]:
+  """The extent of every contracted axis of a list, a merged run written
+  out: one per multilinear operand axis that the destination does not have
+  (`target` -1)."""
+  out = []
+  for d in (op for descr in descrs for op in descr.operations()):
+    target = getattr(d, 'target', None)
+    if target is None or len(getattr(d, 'ops', ())) < 2:
+      continue
+    for op, axes in zip(d.ops, target):
+      box = getattr(op, 'bbox', None)
+      if box is None:
+        continue
+      for axis, t in enumerate(axes):
+        if t == -1 and axis < box.rank():
+          out.append(int(box.size(axis)))
+  return out
