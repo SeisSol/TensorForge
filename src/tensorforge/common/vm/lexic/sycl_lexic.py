@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import GeneralLexicon
-from .lexic import Lexic, Operation
+from .lexic import INFIX, Lexic, Operation
 from tensorforge.backend.writer import MultiBlock
 from tensorforge.common.basic_types import Datatype
 
@@ -427,13 +427,6 @@ class SyclLexic(Lexic):
   _ESIMD_F32 = {
     Operation.TANH: 'tensorforge::tanhF32({})',
   }
-  #: Spelled with C++ operators, which `simd<>` overloads.
-  _ESIMD_INFIX = {
-    Operation.ADD: '+', Operation.SUB: '-', Operation.MUL: '*',
-    Operation.DIV: '/', Operation.XOR: '^',
-    Operation.LT: '<', Operation.LE: '<=', Operation.GT: '>',
-    Operation.GE: '>=', Operation.EQ: '==', Operation.NEQ: '!=',
-  }
   _ESIMD_COMPARISONS = frozenset((Operation.LT, Operation.LE, Operation.GT,
                                   Operation.GE, Operation.EQ, Operation.NEQ))
 
@@ -457,9 +450,10 @@ class SyclLexic(Lexic):
       # kernel's floating-point type -- it is 1 and 0 of that type.  The
       # mask has no `copy_to` into one (every SeisSol `damageStep`).
       return (f'tensorforge::asNumber<{fptype.ctype()}>('
-              f'{value1} {self._ESIMD_INFIX[op]} {value2})')
-    if op in self._ESIMD_INFIX:
-      return f'({value1} {self._ESIMD_INFIX[op]} {value2})'
+              f'{value1} {INFIX[op]} {value2})')
+    # The operators, which `simd<>` overloads.
+    if op in INFIX:
+      return f'({value1} {INFIX[op]} {value2})'
     # A logical operation typed as a floating-point number -- the value a
     # boolean tensor's register image holds -- takes its operands as masks,
     # whatever they arrive as, and gives 1 and 0 of that type.  `~` and `&`
@@ -583,94 +577,25 @@ class SyclLexic(Lexic):
     """
     return f'tensorforge::intel_esimd::simd_mask<{size}>'
 
+  #: SYCL's math functions, under SPMD (`get_operation`).
+  MATH = {
+    Operation.ABS: 'sycl::fabs({0})',
+    Operation.MIN: 'sycl::min({t}({0}), {t}({1}))',
+    Operation.MAX: 'sycl::max({t}({0}), {t}({1}))',
+    Operation.POW: 'sycl::pow({0}, {1})',
+    **{op: f'sycl::{name}({{0}})' for op, name in (
+      (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
+      (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
+      (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
+      (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
+      (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
+      (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),
+      (Operation.COSH, 'cosh'), (Operation.TANH, 'tanh'),
+      (Operation.ASINH, 'asinh'), (Operation.ACOSH, 'acosh'),
+      (Operation.ATANH, 'atanh'))},
+  }
+
   def get_operation(self, op: Operation, fptype, value1, value2):
     if self._explicit_simd:
       return self._esimd_operation(op, fptype, value1, value2)
-    if op == Operation.COPY:
-      return value1
-    elif op == Operation.ADD:
-      return f'({value1} + {value2})'
-    elif op == Operation.SUB:
-      return f'({value1} - {value2})'
-    elif op == Operation.MUL:
-      return f'({value1} * {value2})'
-    elif op == Operation.DIV:
-      return f'({value1} / {value2})'
-    elif op == Operation.RCP:
-      return f'(1 / {value1})'
-    elif op == Operation.ABS:
-      return f'sycl::fabs({value1})'
-    elif op == Operation.MIN:
-      return f'sycl::min({fptype}({value1}), {fptype}({value2}))'
-    elif op == Operation.MAX:
-      return f'sycl::max({fptype}({value1}), {fptype}({value2}))'
-    elif op == Operation.POW:
-      return f'sycl::pow({value1}, {value2})'
-    elif op == Operation.ABS:
-      return f'sycl::abs({value1})'
-    elif op == Operation.NEG:
-      return f'(-{value1})'
-    elif op == Operation.EXP:
-      return f'sycl::exp({value1})' # has __expf
-    elif op == Operation.LOG:
-      return f'sycl::log({value1})' # has __logf
-    elif op == Operation.EXPM1:
-      return f'sycl::expm1({value1})'
-    elif op == Operation.LOG1P:
-      return f'sycl::log1p({value1})'
-    elif op == Operation.SQRT:
-      return f'sycl::sqrt({value1})'
-    elif op == Operation.CBRT:
-      return f'sycl::cbrt({value1})'
-    elif op == Operation.SIN:
-      return f'sycl::sin({value1})' # has __sinf
-    elif op == Operation.COS:
-      return f'sycl::cos({value1})' # has __cosf
-    elif op == Operation.TAN:
-      return f'sycl::tan({value1})' # has __tanf
-    elif op == Operation.ASIN:
-      return f'sycl::asin({value1})'
-    elif op == Operation.ACOS:
-      return f'sycl::acos({value1})'
-    elif op == Operation.ATAN:
-      return f'sycl::atan({value1})'
-    elif op == Operation.SINH:
-      return f'sycl::sinh({value1})' # has __sinf
-    elif op == Operation.COSH:
-      return f'sycl::cosh({value1})' # has __cosf
-    elif op == Operation.TANH:
-      return f'sycl::tanh({value1})' # has __tanf
-    elif op == Operation.ASINH:
-      return f'sycl::asinh({value1})'
-    elif op == Operation.ACOSH:
-      return f'sycl::acosh({value1})'
-    elif op == Operation.ATANH:
-      return f'sycl::atanh({value1})'
-    elif op == Operation.NOT and fptype == Datatype.BOOL:
-      return f'(!{value1})'
-    elif op == Operation.NOT and fptype != Datatype.BOOL:
-      return f'(~{value1})'
-    elif op == Operation.AND and fptype == Datatype.BOOL:
-      return f'({value1} && {value2})'
-    elif op == Operation.OR and fptype == Datatype.BOOL:
-      return f'({value1} || {value2})'
-    elif op == Operation.AND and fptype != Datatype.BOOL:
-      return f'({value1} & {value2})'
-    elif op == Operation.OR and fptype != Datatype.BOOL:
-      return f'({value1} | {value2})'
-    elif op == Operation.XOR:
-      return f'({value1} ^ {value2})'
-    elif op == Operation.LT:
-      return f'({value1} < {value2})'
-    elif op == Operation.LE:
-      return f'({value1} <= {value2})'
-    elif op == Operation.GT:
-      return f'({value1} > {value2})'
-    elif op == Operation.GE:
-      return f'({value1} >= {value2})'
-    elif op == Operation.EQ:
-      return f'({value1} == {value2})'
-    elif op == Operation.NEQ:
-      return f'({value1} != {value2})'
-
-    raise NotImplementedError(f'{op}')
+    return super().get_operation(op, fptype, value1, value2)

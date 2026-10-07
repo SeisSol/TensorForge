@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: MIT
 from tensorforge.common.basic_types import GeneralLexicon, Addressing, DataFlowDirection
 from .lexic import Lexic, Operation
-from tensorforge.common.basic_types import Datatype
 
 class TargetLexic(Lexic):
   def __init__(self, backend, underlying_hardware):
@@ -157,91 +156,20 @@ class TargetLexic(Lexic):
     return (f'__attribute__ ((vector_size (sizeof({fptype}) * {length})'
             f'{align})) {fptype}')
 
-  def get_operation(self, op: Operation, fptype, value1, value2):
-    fpsuffix = 'f' if fptype == Datatype.F32 else ''
-    if op == Operation.COPY:
-      return value1
-    elif op == Operation.ADD:
-      return f'({value1} + {value2})'
-    elif op == Operation.SUB:
-      return f'({value1} - {value2})'
-    elif op == Operation.MUL:
-      return f'({value1} * {value2})'
-    elif op == Operation.DIV:
-      return f'({value1} / {value2})'
-    elif op == Operation.RCP:
-      return f'(1 / {value1})'
-    elif op == Operation.ABS:
-      return f'std::fabs{fpsuffix}({value1})'
-    elif op == Operation.NEG:
-      return f'(-{value1})'
-    elif op == Operation.MIN:
-      return f'std::min({fptype}({value1}), {fptype}({value2}))'
-    elif op == Operation.MAX:
-      return f'std::max({fptype}({value1}), {fptype}({value2}))'
-    elif op == Operation.POW:
-      return f'std::pow({value1}, {value2})'
-    elif op == Operation.EXP:
-      return f'std::exp({value1})' # has __expf
-    elif op == Operation.LOG:
-      return f'std::log({value1})' # has __logf
-    elif op == Operation.EXPM1:
-      return f'std::expm1({value1})'
-    elif op == Operation.LOG1P:
-      return f'std::log1p({value1})'
-    elif op == Operation.SQRT:
-      return f'std::sqrt({value1})'
-    elif op == Operation.CBRT:
-      return f'std::cbrt({value1})'
-    elif op == Operation.SIN:
-      return f'std::sin({value1})'
-    elif op == Operation.COS:
-      return f'std::cos({value1})'
-    elif op == Operation.TAN:
-      return f'std::tan({value1})'
-    elif op == Operation.ASIN:
-      return f'std::asin({value1})'
-    elif op == Operation.ACOS:
-      return f'std::acos({value1})'
-    elif op == Operation.ATAN:
-      return f'std::atan({value1})'
-    elif op == Operation.SINH:
-      return f'std::sinh({value1})'
-    elif op == Operation.COSH:
-      return f'std::cosh({value1})'
-    elif op == Operation.TANH:
-      return f'std::tanh({value1})'
-    elif op == Operation.ASINH:
-      return f'std::asinh({value1})'
-    elif op == Operation.ACOSH:
-      return f'std::acosh({value1})'
-    elif op == Operation.ATANH:
-      return f'std::atanh({value1})'
-    elif op == Operation.NOT and fptype == Datatype.BOOL:
-      return f'(!{value1})'
-    elif op == Operation.NOT and fptype != Datatype.BOOL:
-      return f'(~{value1})'
-    elif op == Operation.AND and fptype == Datatype.BOOL:
-      return f'({value1} && {value2})'
-    elif op == Operation.OR and fptype == Datatype.BOOL:
-      return f'({value1} || {value2})'
-    elif op == Operation.AND and fptype != Datatype.BOOL:
-      return f'({value1} & {value2})'
-    elif op == Operation.OR and fptype != Datatype.BOOL:
-      return f'({value1} | {value2})'
-    elif op == Operation.XOR:
-      return f'({value1} ^ {value2})'
-    elif op == Operation.LT:
-      return f'({value1} < {value2})'
-    elif op == Operation.LE:
-      return f'({value1} <= {value2})'
-    elif op == Operation.GT:
-      return f'({value1} > {value2})'
-    elif op == Operation.GE:
-      return f'({value1} >= {value2})'
-    elif op == Operation.EQ:
-      return f'({value1} == {value2})'
-    elif op == Operation.NEQ:
-      return f'({value1} != {value2})'
-
-    raise NotImplementedError(f'{op}')
+  #: The C++ standard library's `<cmath>`.
+  MATH = {
+    Operation.ABS: 'std::fabs{f}({0})',
+    Operation.MIN: 'std::min({t}({0}), {t}({1}))',
+    Operation.MAX: 'std::max({t}({0}), {t}({1}))',
+    Operation.POW: 'std::pow({0}, {1})',
+    **{op: f'std::{name}({{0}})' for op, name in (
+      (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
+      (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
+      (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
+      (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
+      (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
+      (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),
+      (Operation.COSH, 'cosh'), (Operation.TANH, 'tanh'),
+      (Operation.ASINH, 'asinh'), (Operation.ACOSH, 'acosh'),
+      (Operation.ATANH, 'atanh'))},
+  }

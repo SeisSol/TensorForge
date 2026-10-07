@@ -2,7 +2,18 @@
 #
 # SPDX-License-Identifier: MIT
 from abc import ABC, abstractmethod
+from typing import Dict
+
+from tensorforge.common.basic_types import Datatype
 from tensorforge.common.operation import Operation
+
+#: The operations every C-like spelling writes with an operator.
+INFIX = {
+  Operation.ADD: '+', Operation.SUB: '-', Operation.MUL: '*',
+  Operation.DIV: '/', Operation.XOR: '^',
+  Operation.LT: '<', Operation.LE: '<=', Operation.GT: '>',
+  Operation.GE: '>=', Operation.EQ: '==', Operation.NEQ: '!=',
+}
 
 class Lexic(ABC):
   """How a statement the generator has decided on is written in one language.
@@ -227,9 +238,42 @@ class Lexic(ABC):
   def get_headers(self):
     pass
 
-  @abstractmethod
-  def get_operation(self, op: Operation, value1, value2):
-    pass
+  #: The functions this spelling calls, by the operation they compute: a
+  #: template over the operands `{0}` and `{1}`, the suffix `{f}` the C math
+  #: library gives a `float` function (`f`, and nothing for any other type),
+  #: and the type `{t}`.  What has neither an entry nor an operator is refused
+  #: (`get_operation`), and not substituted: a function that exists under one
+  #: library's name and not another's is a numerics question, not a spelling.
+  MATH: Dict[Operation, str] = {}
+
+  def get_operation(self, op: Operation, fptype, value1, value2):
+    """`op` over `value1` and `value2` as an expression in `fptype`.
+
+    `value2` is `''` for a unary operation.  The operators are the same in
+    every C-like spelling and are written here once; the functions differ by
+    library and come from `MATH`.
+    """
+    if op == Operation.COPY:
+      return value1
+    if op == Operation.NEG:
+      return f'(-{value1})'
+    if op == Operation.RCP:
+      return f'(1 / {value1})'
+    template = self.MATH.get(op)
+    if template is not None:
+      return template.format(value1, value2,
+                             f='f' if fptype == Datatype.F32 else '',
+                             t=fptype)
+    if op in INFIX:
+      return f'({value1} {INFIX[op]} {value2})'
+    boolean = fptype == Datatype.BOOL
+    if op == Operation.NOT:
+      return f'(!{value1})' if boolean else f'(~{value1})'
+    if op == Operation.AND:
+      return f'({value1} {"&&" if boolean else "&"} {value2})'
+    if op == Operation.OR:
+      return f'({value1} {"||" if boolean else "|"} {value2})'
+    raise NotImplementedError(f'{op}')
 
   def vector_fma(self, a, b, c):
     """`a * b + c` over the target's vector type, spelled as a call, or

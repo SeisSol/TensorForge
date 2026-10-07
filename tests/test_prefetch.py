@@ -245,7 +245,7 @@ def test_sycl_spells_the_count_and_not_the_level():
 def test_opencl_passes_the_extent_through():
     """The one builtin so far whose instruction takes a count.
 
-    Unbound, because `OpenCLLexic` cannot be constructed: six of `Lexic`'s
+    Unbound, because `OpenCLLexic` cannot be constructed: several of `Lexic`'s
     abstract methods have no implementation there, so the backend is a stub
     and instantiating it raises. That is worth knowing rather than working
     around -- the spelling is checked here so that it is right on the day the

@@ -184,99 +184,25 @@ class CudaLexic(Lexic):
     # contracted expression everywhere else.
     return f'tensorforge::fma({a}, {b}, {c})'
 
-  def get_operation(self, op: Operation, fptype, value1, value2):
-    fpsuffix = 'f' if fptype == Datatype.F32 else ''
-    if op == Operation.COPY:
-      return value1
-    elif op == Operation.ADD:
-      return f'({value1} + {value2})'
-    elif op == Operation.SUB:
-      return f'({value1} - {value2})'
-    elif op == Operation.MUL:
-      return f'({value1} * {value2})'
-    elif op == Operation.DIV:
-      return f'({value1} / {value2})'
-    elif op == Operation.RCP:
-      return f'(1 / {value1})'
-    elif op == Operation.MIN:
-      return f'fmin{fpsuffix}({value1}, {value2})'
-    elif op == Operation.MAX:
-      return f'fmax{fpsuffix}({value1}, {value2})'
-    elif op == Operation.ABS:
-      return f'fabs{fpsuffix}({value1})'
-    elif op == Operation.NEG:
-      return f'(-{value1})'
-    elif op == Operation.GAMMA:
-      return f'tgamma{fpsuffix}({value1})'
-    elif op == Operation.ERF:
-      return f'erf{fpsuffix}({value1})'
-    elif op == Operation.EXP:
-      return f'exp{fpsuffix}({value1})' # has __expf
-    elif op == Operation.LOG:
-      return f'log{fpsuffix}({value1})' # has __logf
-    elif op == Operation.EXPM1:
-      return f'expm1{fpsuffix}({value1})'
-    elif op == Operation.LOG1P:
-      return f'log1p{fpsuffix}({value1})'
-    elif op == Operation.SQRT:
-      # return f'__{fpprefix}sqrt_rn({value1})'
-      return f'sqrt{fpsuffix}({value1})'
-    elif op == Operation.CBRT:
-      return f'cbrt{fpsuffix}({value1})'
-    elif op == Operation.POW:
-      return f'pow{fpsuffix}({value1}, {value2})'
-    elif op == Operation.SIN:
-      return f'sin{fpsuffix}({value1})' # has __sinf
-    elif op == Operation.COS:
-      return f'cos{fpsuffix}({value1})' # has __cosf
-    elif op == Operation.TAN:
-      return f'tan{fpsuffix}({value1})' # has __tanf
-    elif op == Operation.ASIN:
-      return f'asin{fpsuffix}({value1})'
-    elif op == Operation.ACOS:
-      return f'acos{fpsuffix}({value1})'
-    elif op == Operation.ATAN:
-      return f'atan{fpsuffix}({value1})'
-    elif op == Operation.SINH:
-      return f'sinh{fpsuffix}({value1})'
-    elif op == Operation.COSH:
-      return f'cosh{fpsuffix}({value1})'
-    elif op == Operation.TANH:
-      return f'tanh{fpsuffix}({value1})'
-    elif op == Operation.ASINH:
-      return f'asinh{fpsuffix}({value1})'
-    elif op == Operation.ACOSH:
-      return f'acosh{fpsuffix}({value1})'
-    elif op == Operation.ATANH:
-      return f'atanh{fpsuffix}({value1})'
-    elif op == Operation.NOT and fptype == Datatype.BOOL:
-      return f'(!{value1})'
-    elif op == Operation.NOT and fptype != Datatype.BOOL:
-      return f'(~{value1})'
-    elif op == Operation.AND and fptype == Datatype.BOOL:
-      return f'({value1} && {value2})'
-    elif op == Operation.OR and fptype == Datatype.BOOL:
-      return f'({value1} || {value2})'
-    elif op == Operation.AND and fptype != Datatype.BOOL:
-      return f'({value1} & {value2})'
-    elif op == Operation.OR and fptype != Datatype.BOOL:
-      return f'({value1} | {value2})'
-    elif op == Operation.XOR:
-      return f'({value1} ^ {value2})'
-    elif op == Operation.LT:
-      return f'({value1} < {value2})'
-    elif op == Operation.LE:
-      return f'({value1} <= {value2})'
-    elif op == Operation.GT:
-      return f'({value1} > {value2})'
-    elif op == Operation.GE:
-      return f'({value1} >= {value2})'
-    elif op == Operation.EQ:
-      return f'({value1} == {value2})'
-    elif op == Operation.NEQ:
-      return f'({value1} != {value2})'
-
-    raise NotImplementedError(f'{op}')
+  #: The C math library, as CUDA declares it for device code (`sinf`,
+  #: `sin`).  HIP declares the same names.
+  MATH = {
+    Operation.MIN: 'fmin{f}({0}, {1})',
+    Operation.MAX: 'fmax{f}({0}, {1})',
+    Operation.POW: 'pow{f}({0}, {1})',
+    Operation.ABS: 'fabs{f}({0})',
+    Operation.GAMMA: 'tgamma{f}({0})',
+    **{op: name + '{f}({0})' for op, name in (
+      (Operation.ERF, 'erf'), (Operation.EXP, 'exp'), (Operation.LOG, 'log'),
+      (Operation.EXPM1, 'expm1'), (Operation.LOG1P, 'log1p'),
+      (Operation.SQRT, 'sqrt'), (Operation.CBRT, 'cbrt'),
+      (Operation.SIN, 'sin'), (Operation.COS, 'cos'), (Operation.TAN, 'tan'),
+      (Operation.ASIN, 'asin'), (Operation.ACOS, 'acos'),
+      (Operation.ATAN, 'atan'), (Operation.SINH, 'sinh'),
+      (Operation.COSH, 'cosh'), (Operation.TANH, 'tanh'),
+      (Operation.ASINH, 'asinh'), (Operation.ACOSH, 'acosh'),
+      (Operation.ATANH, 'atanh'))},
+  }
 
   #: C++ `tensorforge::Operation` members, by the `Operation` they lower from.
   REDUCTION_OPS = {
