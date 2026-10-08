@@ -427,8 +427,16 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
             if len(s.target) != 1 or len(s.args) != 1:
                 diag.append('extract: takes one vector and produces one value')
             elif isinstance(s.args[0], Value) and isinstance(s.args[0].type, ScalarType):
-                n = s.args[0].type.length
+                vec, out = s.args[0], s.target[0]
+                n = vec.type.length
                 lane = s.attr('lane')
+                if (n is None and vec.distributed and out.layout is not None
+                        and not out.distributed):
+                    # One lane's element of a value spread over the lanes,
+                    # read into one every lane holds: under an explicit
+                    # vector the lanes are the vector's elements, and this is
+                    # its broadcast (`IRBuilder.lane_broadcast`).
+                    n = vec.lane_span()
                 if n is None:
                     diag.append('extract: the operand must be a vector')
                 elif not isinstance(lane, int) or not 0 <= lane < n:

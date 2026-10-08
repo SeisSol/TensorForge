@@ -776,6 +776,22 @@ GROUPS = {
              ' for t in x.target}', 1)),
     ]),
 
+    # Under an explicit vector a broadcast is an element read out of the
+    # vector the lanes make up; an element that keeps its lanes needs a slot
+    # axis to come from.
+    'lanebroadcast': ('tests/test_layout.py', [
+        ('the broadcast read out of no vector',
+         sub(PASSES, '                    n = vec.lane_span()\n',
+             '                    n = None\n', 1)),
+        ('the broadcast read past the lanes the value spans',
+         sub(PASSES, '                    n = vec.lane_span()\n',
+             '                    n = vec.lane_span() + 1\n', 1)),
+        ('an element kept on its lanes taken for a broadcast',
+         sub(PASSES, '                if (n is None and vec.distributed and out.layout is not None\n'
+             '                        and not out.distributed):\n',
+             '                if (n is None and vec.distributed):\n', 1)),
+    ]),
+
     # A copy into an image whose rows are padded keeps every row whole: no
     # access crosses the end of a row, and under an explicit vector, where
     # every transfer would, the image keeps the operand's rows.

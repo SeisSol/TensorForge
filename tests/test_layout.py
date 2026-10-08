@@ -415,6 +415,90 @@ def test_the_degenerate_axis_is_normalized():
 
 
 # --------------------------------------------------------------------------- #
+# The explicit vector's broadcast
+# --------------------------------------------------------------------------- #
+
+def _spread():
+    """A builder for the explicit-vector lowering, and a value of it spread
+    over 16 lanes -- which that lowering holds as a vector of 16."""
+    ctx = Context(arch='pvc', backend='esimd', fp_type=Datatype.F32)
+    b = IRBuilder(Datatype.F32, context=ctx)
+    lanes = RegisterLayout((LaneAxis(16, 1),))
+    return b, b.rawexpr('v', type_=F32, pure=True, layout=lanes)
+
+
+def test_a_broadcast_of_one_lane_verifies_under_an_explicit_vector():
+    """`lane_broadcast` is an element read there: one lane's value, into one
+    every lane holds.  The value has no slot axis, and the lanes are the
+    elements it is read from."""
+    b, spread = _spread()
+    out = b.lane_broadcast(spread, 15, 16)
+    assert out.layout == SCALAR_LAYOUT
+    assert passes.verify(b.finish(), strict=False) == []
+
+
+def test_a_broadcast_reads_a_lane_the_value_spans():
+    b, spread = _spread()
+    b.lane_broadcast(spread, 16, 16)
+    assert passes.verify(b.finish(), strict=False) == [
+        'extract: lane 16 out of range for a 16-vector']
+
+
+def test_an_element_kept_on_its_lanes_needs_a_vector_to_come_from():
+    """`extract` keeps the lanes and indexes the slot axis, and one value
+    per lane has none."""
+    b, spread = _spread()
+    b.extract(spread, 0, F32)
+    assert passes.verify(b.finish(), strict=False) == [
+        'extract: the operand must be a vector']
+
+
+@pytest.mark.parametrize('stem', ['accumulate_chain', 'csa_alpha'])
+def test_the_broadcasts_of_a_generated_explicit_vector_body_verify(
+        stem, monkeypatch):
+    """The register-only product on pvc reads its broadcast operand one lane
+    at a time, every one of them an `extract` out of a vector over the
+    lanes."""
+    import contextlib
+    import importlib.util
+    import io
+    import warnings
+    from pathlib import Path
+
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.core import Op
+    from tensorforge.backend.pir.passes import walk_stmts
+    from tensorforge.common.options import Options
+    from tensorforge.generators.generator import Generator
+
+    bodies = []
+    emit = pir.emit
+
+    def keep(body, writer, context=None, metrics=None):
+        bodies.append(body)
+        return emit(body, writer, context, metrics)
+
+    monkeypatch.setattr(pir, 'emit', keep)
+    path = Path(__file__).resolve().parent / 'cases' / f'{stem}.py'
+    spec = importlib.util.spec_from_file_location('tf_bcast__' + stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ctx = Context(arch='pvc', backend='esimd',
+                  fp_type=getattr(mod, 'DTYPE', None), options=Options())
+    gen = Generator(mod.descr_list(), ctx, attrs=getattr(mod, 'ATTRS', None))
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        gen.generate()
+    reads = [s for body in bodies for s in walk_stmts(body)
+             if s.op == Op.EXTRACT and s.args[0].distributed
+             and not s.target[0].distributed]
+    assert reads, 'no broadcast: nothing to check'
+    found = [d for body in bodies for d in passes.verify(body, strict=False)
+             if d.startswith('extract:')]
+    assert found == []
+
+
+# --------------------------------------------------------------------------- #
 # Written arguments need an address
 # --------------------------------------------------------------------------- #
 
