@@ -699,6 +699,19 @@ GROUPS = {
              1)),
     ]),
 
+    # A lane-varying value claims no layout it does not have: an untracked
+    # operand the lanes differ in leaves the join untracked, and so does a
+    # loop the lanes count from starts of their own.
+    'layoutjoin': ('tests/test_layout.py', [
+        ('an untracked lane-varying operand passed over in the join',
+         sub(CORE, '    if any(x.layout is None and x.uniformity <= '
+             'Uniformity.LANE\n           for x in values):\n'
+             '        return None\n', '', 1)),
+        ('a lane-varying loop counting as a replicated index',
+         sub(BUILD, '        if _as_uniformity(uniform) <= Uniformity.LANE:\n',
+             '        if False:\n', 1)),
+    ]),
+
     # A section is one body, and its traversal's indices are values of it.
     'sectionbody': ('tests/test_section_body.py', [
         ('the traversal indices left unpublished',

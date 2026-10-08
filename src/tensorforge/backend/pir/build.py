@@ -2177,8 +2177,16 @@ class _ForHandle:
         self._args = (lo, hi, step) + inits
         self._types = types
         self._unroll = unroll
-        self.induction = builder.index(hint=hint, uniform=uniform,
-                                       type_=index_type)
+        if _as_uniformity(uniform) <= Uniformity.LANE:
+            # The lanes count from starts of their own, so the induction is
+            # no more known than the lane's index it starts at -- not the
+            # replicated counter `index` makes of it.
+            self.induction = builder.value(
+                INDEX if index_type is None else index_type, hint=hint,
+                uniform=uniform)
+        else:
+            self.induction = builder.index(hint=hint, uniform=uniform,
+                                           type_=index_type)
         # A loop-carried value is distributed exactly like the init it starts
         # from -- the back edge cannot change how a value is spread across the
         # lanes, only what it holds.  Left untracked, an accumulator would be

@@ -674,8 +674,18 @@ def join_layout(operands) -> Optional[RegisterLayout]:
     Genuine disagreement -- two *different distributions* -- still gives
     ``None``.  A vendor intrinsic may legitimately consume two of those, so it
     is not an error here, but nothing may be concluded from it either.
+
+    So does an untracked operand that differs between the lanes: what it
+    holds in each lane is unknown, so the result's is too, and calling it
+    replicated for the operands that are -- ``lead + 32`` with the constant
+    the one tracked operand -- would claim the one thing it is not.  An
+    untracked operand the lanes agree on (`uniformity`) is replicated in
+    all but name, and vetoes nothing.
     """
     values = [x for x in operands if isinstance(x, Value)]
+    if any(x.layout is None and x.uniformity <= Uniformity.LANE
+           for x in values):
+        return None
     if operands and not values:
         # Every operand is a literal.  A literal is the same in every lane by
         # definition, so anything computed from literals alone is too -- the

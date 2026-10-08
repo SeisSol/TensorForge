@@ -18,8 +18,9 @@ import pytest
 
 from tensorforge.backend.pir import passes
 from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import (LaneAxis, RegisterLayout,
-                                          ScalarType, accesses_conflict,
+from tensorforge.backend.pir.core import (INDEX, SCALAR_LAYOUT, LaneAxis,
+                                          RegisterLayout, ScalarType,
+                                          Uniformity, accesses_conflict,
                                           join_layout)
 from tensorforge.backend.pir.emit import Emitter
 from tensorforge.backend.symbol import LeadIndex
@@ -113,6 +114,34 @@ def test_elementwise_ops_inherit_an_agreed_layout():
     # disagreement is not an error, but the result stops being tracked
     assert b.op('add', F32, x, z).layout is None
     assert join_layout([x, 4]) == lay               # literals say nothing
+
+
+def test_an_untracked_operand_the_lanes_differ_in_leaves_the_result_untracked():
+    """`lead + 32` with the 32 a constant: the constant is replicated, and
+    the lane index is untracked and differs between the lanes, so the sum
+    does -- it is not replicated, nor known to be spread any one way.  An
+    untracked operand the lanes agree on vetoes nothing."""
+    b = IRBuilder(Datatype.F32)
+    lead = b.op('rem', INDEX, b.thread_id('x'), 32)
+    assert lead.layout is None and lead.uniformity <= Uniformity.LANE
+    thirty_two = b.const(32, INDEX)
+    assert b.op('add', INDEX, lead, thirty_two).layout is None
+    assert b.op('add', F32, b.value(F32, layout=RegisterLayout(
+        (LaneAxis(16, 1),))), b.op('mul', F32, lead, 2.0)).layout is None
+    row = b.op('mul', INDEX, b.thread_id('y'), 4)
+    assert row.layout is None and row.uniformity > Uniformity.LANE
+    assert b.op('add', INDEX, row, thirty_two).layout == SCALAR_LAYOUT
+
+
+def test_a_loop_whose_lanes_start_apart_counts_untracked():
+    """Started at the lane's own index, the induction is no more known than
+    that index: the replicated layout every other loop's induction has is a
+    claim the verifier reports as wrong."""
+    b = IRBuilder(Datatype.F32)
+    with b.for_(b.thread_id('x'), 64, 32, uniform=Uniformity.LANE) as f:
+        assert f.induction.layout is None
+    with b.for_(0, 64, 32) as f:
+        assert f.induction.layout == SCALAR_LAYOUT
 
 
 def test_a_call_does_not_inherit_unless_asked():
@@ -420,3 +449,49 @@ def test_a_non_value_cannot_be_written():
     reg = b.declare(ScalarType(Datatype.F32), hint='r')
     with pytest.raises(IRError):
         b.call_stmt('f', reg, writes=(reg, 3.0))
+
+
+# --------------------------------------------------------------------------- #
+# The generated bodies
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize('stem, arch, backend', [
+    ('local_flux', 'sm_86', 'cuda'), ('chain_five', 'sm_86', 'cuda'),
+    ('local_flux', 'gfx942', 'hip'), ('chain_five', 'pvc', 'esimd')])
+def test_no_lane_varying_value_of_a_generated_body_claims_to_be_replicated(
+        stem, arch, backend, monkeypatch):
+    """What the verifier reports where a value's layout and its uniformity
+    disagree, over bodies whose lane indices -- a lane's row of a column, a
+    swizzled shared address -- meet constants in every address."""
+    import contextlib
+    import importlib.util
+    import io
+    import warnings
+    from pathlib import Path
+
+    from tensorforge.backend import pir
+    from tensorforge.common.options import Options
+    from tensorforge.generators.generator import Generator
+
+    bodies = []
+    emit = pir.emit
+
+    def keep(body, writer, context=None, metrics=None):
+        bodies.append(body)
+        return emit(body, writer, context, metrics)
+
+    monkeypatch.setattr(pir, 'emit', keep)
+    path = Path(__file__).resolve().parent / 'cases' / f'{stem}.py'
+    spec = importlib.util.spec_from_file_location('tf_layout__' + stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ctx = Context(arch=arch, backend=backend,
+                  fp_type=getattr(mod, 'DTYPE', None), options=Options())
+    gen = Generator(mod.descr_list(), ctx, attrs=getattr(mod, 'ATTRS', None))
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        gen.generate()
+    assert bodies
+    found = [d for body in bodies for d in passes.verify(body, strict=False)
+             if 'is lane-varying but its layout says' in d]
+    assert found == []
