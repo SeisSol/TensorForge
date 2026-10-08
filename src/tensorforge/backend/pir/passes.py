@@ -192,6 +192,20 @@ def _same_types(a: Sequence[Operand], b: Sequence[Value]) -> bool:
     return True
 
 
+def _risen(s: Stmt) -> set:
+    """The copies' tokens that rise out of `s`'s regions into the scope
+    around it.  Tokens rise out of the regions that issued them
+    (`asyncmem.place_commits`): a hop loop issues a copy every trip and a
+    lane-predicated hop under its guard, and the wait that retires them
+    stands behind the region, where the commit closes their group.  A token
+    a loop carries across its back edge is consumed by its yield inside;
+    waited for behind the loop as well, it would be consumed twice, which
+    `check_tokens` reports.  A `load.async` token does not rise: it is the
+    value its wait produces."""
+    return {t.id for r in s.regions for x in walk_stmts(r.body)
+            if x.op == Op.COPY_ASYNC for t in x.target}
+
+
 def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                  reachable_at: Uniformity, in_while: bool = False) -> None:
     """``live`` is the set of value ids visible from enclosing scopes.
@@ -490,6 +504,7 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
             for r in s.regions:
                 _check_scope(r.body, live | {a.id for a in r.args}, diag, inner,
                              in_while=(s.op == Op.WHILE))
+            live.update(_risen(s))
 
         for t in s.target:
             live.add(t.id)

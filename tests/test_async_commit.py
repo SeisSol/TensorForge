@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tensorforge.backend.pir import walk
+from tensorforge.backend.pir import verify, walk
 from tensorforge.backend.pir.asyncmem import (check_commits, place_commits,
                                               schedule_async, strip_commits)
 from tensorforge.backend.pir.build import IRBuilder
@@ -144,6 +144,83 @@ def test_the_commit_closes_where_it_was_issued_not_before_the_wait():
                                             Op.WAIT)]
     assert order == [Op.COPY_ASYNC, Op.COMMIT_ASYNC, Op.WAIT,
                      Op.COPY_ASYNC, Op.COMMIT_ASYNC, Op.WAIT]
+
+
+# --------------------------------------------------------------------------- #
+# What the verifier takes
+# --------------------------------------------------------------------------- #
+
+def _rising(region):
+    """A copy issued in `region` -- a hop loop, a lane-predicated hop -- and
+    waited for behind it."""
+    b = _scratch()
+    dst = b.alloc(Datatype.F32, (512,), MemSpace.SHARED, hint='s')
+    glb = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='g')
+    lane = b.thread_id('x')
+    if region == 'loop':
+        scope = b.for_(0, 15, 1)
+    else:
+        scope = b.if_(b.op('lt', None, lane, 24, hint='tail'))
+    with scope as f:
+        at = f.induction if region == 'loop' else lane
+        tok = b.copy_async(dst, glb, dst_index=(at,), src_index=(at,))
+    b.wait(tok)
+    return place_commits(b.finish())
+
+
+@pytest.mark.parametrize('region', ['loop', 'predicate'])
+def test_a_copys_token_rises_out_of_the_region_that_issued_it(region):
+    """The wait behind a hop loop or a predicated hop names a token the
+    region defined: it rises (`place_commits`), and the verifier has it in
+    scope there."""
+    assert verify(_rising(region), strict=False) == []
+
+
+def test_a_load_token_does_not_rise():
+    """A `load.async` token is the value its wait produces; a wait behind
+    the region that issued it is a use the region does not reach."""
+    b = _scratch()
+    glb = b.alloc(Datatype.F32, (4096,), MemSpace.GLOBAL, hint='g')
+    lane = b.thread_id('x')
+    with b.if_(b.op('lt', None, lane, 24, hint='tail')):
+        tok = b.load_async(glb, lane, hint='r')
+    b.wait(tok)
+    found = verify(b.finish(), strict=False)
+    assert any('used before definition' in d for d in found), found
+
+
+@pytest.mark.parametrize('stem', ['accumulate_then_read', 'accumulate_chain',
+                                  'local_flux'])
+def test_a_generated_bodys_waits_name_tokens_in_scope(stem, monkeypatch):
+    """The loader issues a split transfer from a hop loop the macro layer
+    writes, and waits behind it."""
+    from tensorforge.backend import pir
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+
+    bodies = []
+    emit = pir.emit
+
+    def keep(body, writer, context=None, metrics=None):
+        bodies.append(body)
+        return emit(body, writer, context, metrics)
+
+    monkeypatch.setattr(pir, 'emit', keep)
+    path = next(Path(__file__).parent.joinpath('cases').rglob(f'{stem}.py'))
+    spec = importlib.util.spec_from_file_location('tf_async__' + stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    gen = Generator(mod.descr_list(),
+                    Context(arch='sm_86', backend='cuda',
+                            fp_type=getattr(mod, 'DTYPE', None),
+                            options=Options()),
+                    attrs=getattr(mod, 'ATTRS', None))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    assert any(s.op == Op.WAIT for body in bodies for s, _ in walk(body))
+    found = [d for body in bodies for d in verify(body, strict=False)]
+    assert not [d for d in found if 'used before definition' in d], found
 
 
 # --------------------------------------------------------------------------- #

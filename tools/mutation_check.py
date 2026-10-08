@@ -65,6 +65,7 @@ LEGALIZE = Path('src/tensorforge/generators/legalize.py')
 ORACLE = Path('src/tensorforge/reference/kernel_eval.py')
 SHARDS = Path('src/tensorforge/backend/pir/shards.py')
 LOAD = Path('src/tensorforge/backend/instructions/memory/load.py')
+PASSES = Path('src/tensorforge/backend/pir/passes.py')
 GEN = Path('src/tensorforge/generators/generator.py')
 
 
@@ -762,6 +763,17 @@ GROUPS = {
         ('a lane-varying loop counting as a replicated index',
          sub(BUILD, '        if _as_uniformity(uniform) <= Uniformity.LANE:\n',
              '        if False:\n', 1)),
+    ]),
+
+    # The verifier has a copy's token in scope behind the region that issued
+    # it, where its wait stands, and a load's token only where it was made.
+    'risen': ('tests/test_async_commit.py', [
+        ("a copy's token kept inside the region that issued it",
+         sub(PASSES, '            live.update(_risen(s))\n', '', 1)),
+        ("a load's token rising with the copies'",
+         sub(PASSES, '            if x.op == Op.COPY_ASYNC for t in x.target}',
+             '            if x.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC)'
+             ' for t in x.target}', 1)),
     ]),
 
     # A copy into an image whose rows are padded keeps every row whole: no
