@@ -62,6 +62,7 @@ TARGET = Path('src/tensorforge/common/target.py')
 LEXIC = Path('src/tensorforge/common/vm/lexic/lexic.py')
 SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
 LEGALIZE = Path('src/tensorforge/generators/legalize.py')
+ORACLE = Path('src/tensorforge/reference/kernel_eval.py')
 
 
 def _run_tests(target):
@@ -697,6 +698,18 @@ GROUPS = {
              'icache_excess(result.generator.metrics.code_units, hw)',
              "icache_excess(getattr(result.generator, 'code_units', None), hw)",
              1)),
+    ]),
+
+    # The host oracle runs the block: every multiplication's threads take
+    # their share of what the block copies, and an integer quotient is one.
+    'oracleblock': ('tests/test_oracle_block.py', [
+        ('every multiplication run as the first',
+         sub(ORACLE, '                            mult=mult)', '                            mult=0)', 1)),
+        ('an integer quotient left a fraction',
+         sub(ORACLE, '        q = abs(a) // abs(b)\n        return q if (a >= 0) == (b >= 0) else -q\n',
+             '        return a / b\n', 1)),
+        ('a remainder signed like the divisor',
+         sub(ORACLE, '        return a - b * _cdiv(a, b)\n', '        return a % b\n', 1)),
     ]),
 
     # A lane-varying value claims no layout it does not have: an untracked

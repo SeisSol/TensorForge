@@ -26,6 +26,8 @@ memory reads as seed fill there.  A construct outside the subset raises
 
 from __future__ import annotations
 
+import ast
+import functools
 import hashlib
 import re
 import struct
@@ -444,6 +446,50 @@ def _py(expr: str) -> str:
     return e
 
 
+def _cdiv(a, b):
+    """`a / b` as C has it: between integers the quotient truncated toward
+    zero, where Python's `/` is not an integer at all."""
+    if isinstance(a, int) and isinstance(b, int):
+        q = abs(a) // abs(b)
+        return q if (a >= 0) == (b >= 0) else -q
+    return a / b
+
+
+def _cmod(a, b):
+    """`a % b` as C has it between integers: what is left of `_cdiv`'s
+    quotient, signed like `a`, where Python's takes the sign of `b`."""
+    if isinstance(a, int) and isinstance(b, int):
+        return a - b * _cdiv(a, b)
+    return a % b
+
+
+class _CArithmetic(ast.NodeTransformer):
+    """`/` and `%` of a translated expression through `_cdiv` and
+    `_cmod`.  Which of the two meanings applies is the operands' type, and
+    that is known when the expression is evaluated, not in its text."""
+
+    def visit_BinOp(self, node):
+        self.generic_visit(node)
+        name = {ast.Div: 'CDIV', ast.Mod: 'CMOD'}.get(type(node.op))
+        if name is None:
+            return node
+        return ast.copy_location(
+            ast.Call(ast.Name(name, ast.Load()), [node.left, node.right], []),
+            node)
+
+
+#: What a compiled expression finds besides a lane's own names.
+_GLOBALS = {'__builtins__': {}, 'CDIV': _cdiv, 'CMOD': _cmod}
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled(expr: str):
+    """`expr` translated (`_py`) and compiled, once for every lane and
+    every trip that evaluates it."""
+    tree = _CArithmetic().visit(ast.parse(_py(expr).strip(), mode='eval'))
+    return compile(ast.fix_missing_locations(tree), '<kernel>', 'eval')
+
+
 class Interp:
     def __init__(self, mem: Slot, env: Dict[str, object], limit: int = 400000):
         self.mem = mem
@@ -538,7 +584,7 @@ class Interp:
         if self.budget < 0:
             raise Abort('budget exhausted')
         try:
-            return eval(_py(expr), {'__builtins__': {}}, self.env)
+            return eval(_compiled(expr), _GLOBALS, self.env)
         except Abort:
             raise
         except Exception as exc:
@@ -775,16 +821,17 @@ def parse(src: str) -> List:
 
 
 def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
-              mults: int = 1) -> Dict[str, object]:
+              mults: int = 1, mult: int = 0) -> Dict[str, object]:
     """The names a kernel body starts with, for one lane.
 
     `blockDim` follows the launcher.  `blockDim.x` appears in no generated
     kernel today, but `blockDim.y` is the stride of the batch loop in most of
     them, and a fixed 1 there is a guess that happens to agree only while
-    `numElements` is 1.
+    `numElements` is 1.  `mult` is the multiplication of the block the lane
+    belongs to, `threadIdx.y`.
     """
     env = {
-        'threadIdx': type('T', (), {'x': tid, 'y': 0, 'z': 0})(),
+        'threadIdx': type('T', (), {'x': tid, 'y': mult, 'z': 0})(),
         'blockIdx': type('B', (), {'x': 0, 'y': 0, 'z': 0})(),
         'blockDim': type('D', (), {'x': lanes, 'y': mults, 'z': 1})(),
         'gridDim': type('G', (), {'x': 1, 'y': 1, 'z': 1})(),
@@ -811,12 +858,17 @@ class Lockstep:
     and a lane that is masked off simply does not execute the statements
     inside -- which is why a `readlane` of a value it never defined aborts
     rather than inventing one.
+
+    `groups` are the lanes that read across each other, each a
+    multiplication of the block; all of them together unless given.
     """
 
-    def __init__(self, interps: List['Interp']):
+    def __init__(self, interps: List['Interp'],
+                 groups: Optional[List[List['Interp']]] = None):
         self.interps = interps
-        for it in interps:
-            it.peers = interps
+        for group in groups if groups is not None else [interps]:
+            for it in group:
+                it.peers = group
         self.tracker: Optional[Races] = interps[0].mem.tracker if interps \
             else None
 
@@ -904,7 +956,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   preset: Optional[Dict[str, float]] = None,
                   mults: int = 1,
                   races: Optional[List[Race]] = None,
-                  elements: int = 1) -> Dict:
+                  elements: int = 1, block: bool = False) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
     The difference from calling `evaluate` per lane is that the lanes share
@@ -921,6 +973,14 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     orders (`Races`).  `elements` is the element count the kernel is handed:
     with one block of one multiplication the batch loop then visits each of
     them in turn, which is what carries a write across its back edge.
+
+    The lanes run are those of the block's first multiplication, unless
+    `block` asks for all `mults` of them.  What the block does together
+    before its batch loop -- copying an operand all elements read into
+    shared memory, each thread its share -- is only whole with every thread
+    of the block taking part: run with the first multiplication alone, the
+    other shares read as uninitialized shared memory.  The lanes of each
+    multiplication read across their own multiplication only.
     """
     body = src[src.index('{'):]
     mem = Slot(seed)
@@ -930,15 +990,20 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                 mem.write(name, idx, value)
     if races is not None:
         mem.tracker = Races()
-    interps = []
-    for tid in range(lanes):
-        env = _base_env(src, mem, tid, lanes=lanes, mults=mults)
-        for name in re.findall(r'\b(numElements\d+)\b', src):
-            env[name] = elements
-        interp = Interp(mem, env)
-        interp.lane = tid
-        interps.append(interp)
-    Lockstep(interps).run(parse(body))
+    groups = []
+    for mult in range(mults if block else 1):
+        group = []
+        for tid in range(lanes):
+            env = _base_env(src, mem, tid, lanes=lanes, mults=mults,
+                            mult=mult)
+            for name in re.findall(r'\b(numElements\d+)\b', src):
+                env[name] = elements
+            interp = Interp(mem, env)
+            interp.lane = tid + mult * lanes
+            group.append(interp)
+        groups.append(group)
+    interps = [it for group in groups for it in group]
+    Lockstep(interps, groups).run(parse(body))
     if races is not None:
         races.extend(mem.tracker.found)
         mem.tracker = None
