@@ -15,14 +15,19 @@ ones a vendor string or a backend string alone gets wrong.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
 
-from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import GenerationError
+from tensorforge.common.matrix.boundingbox import BoundingBox
+from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.common.target import PREFERENCES, Preferences, Target
+from tensorforge.generators.descriptions import GemmDescr
+from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).parent / "cases"
 
@@ -161,6 +166,41 @@ def test_a_wide_lead_is_spelled_by_cuda_and_hip_alone():
     assert Target('gfx942', 'hip').lead_vectors()
     assert not Target('pvc', 'oneapi').lead_vectors()
     assert not Target('sm_86', 'acpp').lead_vectors()
+
+
+@pytest.mark.parametrize('arch,backend,expected', [
+    ('sm_86', 'cuda', True), ('gfx942', 'hip', True), ('pvc', 'esimd', True),
+    ('pvc', 'oneapi', False), ('pvc', 'acpp', False), ('generic', 'acpp', False)])
+def test_a_wide_access_legal_at_element_alignment(arch, backend, expected):
+    """Not under SYCL's SPMD lowering, where `sycl::vec` brings an alignment
+    of its own."""
+    assert Target(arch, backend).relaxed_vectors is expected
+
+
+def _gemm_f64(alignment):
+    def tensor(shape, alias):
+        return Tensor(list(shape), Addressing.STRIDED,
+                      BoundingBox([0, 0], list(shape)), alias=alias,
+                      datatype=Datatype.F64, alignment=alignment)
+    return [GemmDescr(False, False, SubTensor(tensor((32, 16), 'A')),
+                      SubTensor(tensor((16, 16), 'B')),
+                      SubTensor(tensor((32, 16), 'C')), alpha=1.0, beta=0.0)]
+
+
+@pytest.mark.parametrize('alignment,wide', [(0, False), (8, False), (16, True)])
+def test_sycl_reads_a_global_operand_as_wide_as_its_alignment_proves(alignment,
+                                                                     wide):
+    """`generic` stages the second operand in local memory.  Matrices stored
+    back to back, such as 9 x 9 doubles, are aligned to an element only; a
+    `sycl::vec` read from one is undefined, and on the host a vector load that
+    faults."""
+    gen = Generator(_gemm_f64(alignment),
+                    Context(arch='generic', backend='acpp',
+                            fp_type=Datatype.F64))
+    gen.generate()
+    reads = re.findall(r'\*\(sycl::vec<double, \d+>\*\)&glb_\w+\[',
+                       gen.get_kernel())
+    assert bool(reads) is wide
 
 
 def test_sycl_covers_the_batch_in_one_round():

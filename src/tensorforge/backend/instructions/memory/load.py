@@ -143,8 +143,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     does, and that is asked at the access -- see `_swizzle_cap`.
     """
     elem = self._dest.get_fptype().size()
-    limit = min(16, self._src.linear_align_bytes()) if self._use_cuda_memcpy \
-        else 16
+    # Also where the target cannot write a wide access that is legal at
+    # element alignment (`Target.relaxed_vectors`): a `sycl::vec` read from a
+    # pointer-based operand that is only element-aligned is undefined, and on
+    # a CPU device it is an aligned vector load that faults.
+    proven = (self._use_cuda_memcpy
+              or not self._context.target.relaxed_vectors)
+    limit = min(16, self._src.linear_align_bytes()) if proven else 16
     return [m for m in [4, 2, 1] if m * elem <= limit]
 
   def _swizzle_cap(self, writer) -> int:

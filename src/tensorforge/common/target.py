@@ -243,6 +243,15 @@ class Target:
     def sycl(self) -> bool:
         return self.backend in SYCL_BACKENDS
 
+    @property
+    def relaxed_vectors(self) -> bool:
+        """Whether a wide access can be written so that it is legal at element
+        alignment (`Lexic.get_fptype(relaxed=True)`).  Not under SYCL's SPMD
+        lowering: `sycl::vec` brings its own alignment, so the width of an
+        access there has to come from an alignment its address proves.  The
+        explicit vector reads a `simd` at element alignment."""
+        return not self.sycl or self.explicit_simd
+
     # -- arithmetic --------------------------------------------------------- #
 
     def packed_fma_width(self, datatype: Datatype) -> int:
