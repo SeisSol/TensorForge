@@ -5,7 +5,7 @@ from typing import List, Union
 import math
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
-from tensorforge.backend.symbol import Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, add_offset
+from tensorforge.backend.symbol import RELAXED, Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
@@ -162,7 +162,10 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     attached -- 16 where the layout reports an aligned stride, the element
     size where it reports nothing.  An unproved alignment and a natural one
     are the same number and opposite facts, so the element size means width 1,
-    and the whole transfer drops to it rather than only its tail.
+    and the whole transfer drops to it rather than only its tail.  Where a
+    load and a store move the bytes and the target can write a wide access
+    that is legal at element alignment, an unproved source keeps the width and
+    is written that way instead (`_hop_claim`).
 
     The destination is 16-byte aligned by construction (the allocator starts
     every buffer in either arena on 16 bytes, `pir.allocate`), so it
@@ -554,6 +557,30 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         self._write_hop(writer, src_offset, dst_offset, index, pos, pos + 1,
                         1, nontemporal, linscale, lanes=width)
 
+  @staticmethod
+  def _hop_claim(symbol, offset, width):
+    """What an access `width` elements wide into `symbol` at `offset`, and at
+    the whole widths a hop adds to it, proves about its address: a byte count
+    of at least the access, or `RELAXED`, which spells it with the vector type
+    that needs no more than the element -- and `None` for one element, which
+    is not a vector at all.
+
+    The base is what `Symbol.linear_align_bytes` promises, and the lane and
+    hop terms of the index are multiples of `width` by construction, so only
+    `offset` can take from it (`Symbol._linear_claim`).  Nor does a row of a
+    padded image: an access keeps one whole, and the image's rows are whole
+    widths (`_keeps_rows`).  Without a promise -- an operand the frontend says
+    nothing about -- the width stands and the spelling is what changes: a
+    transfer only the cast held back would read its operand an element at a
+    time.
+    """
+    if width == 1:
+      return None
+    claim = symbol._linear_claim(offset, width)
+    if claim == RELAXED or claim < width * symbol.get_fptype().size():
+      return RELAXED
+    return claim
+
   def _write_hop(self, writer, src_offset, dst_offset, index, start, end,
                  increment, nontemporal, linscale, lanes=None, zfill=0):
     """`lanes` narrows the transfer's own register without touching the claim
@@ -628,12 +655,16 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
                                          self._lane_span(), writer)
         dst_buf = self._dest.pir_buffer(writer)
         src_buf = self._src.pir_buffer(writer)
+        # What each end proves for an access this wide (`_hop_claim`).
+        src_claim = self._hop_claim(self._src, src_offset, increment)
+        dst_claim = self._hop_claim(self._dest, dst_offset, increment)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
-                       _t=fpt, _nt=nontemporal, _l=xfer_layout):
+                       _t=fpt, _nt=nontemporal, _l=xfer_layout,
+                       _sa=src_claim, _da=dst_claim):
           ltype = ScalarType(_t) if _n == 1 else ScalarType(_t, _n)
           value = writer.load(_s, rhs, type_=ltype, hint='ld',
-                              nontemporal=_nt, layout=_l)
-          writer.store(_d, value, lhs)
+                              nontemporal=_nt, layout=_l, align=_sa)
+          writer.store(_d, value, lhs, align=_da)
       else:
         # `increment`, not 1: above a width of one both sides of this
         # assignment are `*(VectorT<T, N>*)&...`, so the value the hint would

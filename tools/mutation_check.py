@@ -792,6 +792,34 @@ GROUPS = {
              '                if (n is None and vec.distributed):\n', 1)),
     ]),
 
+    # A synchronous copy's wide accesses state what they prove about their
+    # addresses: bytes where the promise covers the access, the relaxed
+    # spelling where it does not.
+    'hopclaims': ('tests/test_hop_claims.py', [
+        ("the copy's load without its claim",
+         sub(LOAD, 'nontemporal=_nt, layout=_l, align=_sa)',
+             'nontemporal=_nt, layout=_l)', 1)),
+        ("the copy's store without its claim",
+         sub(LOAD, 'writer.store(_d, value, lhs, align=_da)',
+             'writer.store(_d, value, lhs)', 1)),
+        ('an operand without a promise claimed at the width',
+         sub(LOAD, '    if claim == RELAXED or claim < width * symbol.get_fptype().size():\n'
+             '      return RELAXED\n    return claim\n',
+             '    if claim == RELAXED:\n      return RELAXED\n'
+             '    return max(claim, width * symbol.get_fptype().size())\n', 1)),
+        ('a promised operand read through the relaxed type',
+         sub(LOAD, '    if claim == RELAXED or claim < width * symbol.get_fptype().size():\n'
+             '      return RELAXED\n    return claim\n',
+             '    return RELAXED\n', 1)),
+        ('a lowering without the relaxed type copying past its promise',
+         sub(LOAD, '    proven = (self._use_cuda_memcpy\n'
+             '              or not self._context.target.relaxed_vectors)\n',
+             '    proven = self._use_cuda_memcpy\n', 1)),
+        ('the explicit vector taken for a lowering without the relaxed type',
+         sub(TARGET, '        return not self.sycl or self.explicit_simd\n',
+             '        return not self.sycl\n', 1)),
+    ]),
+
     # A copy into an image whose rows are padded keeps every row whole: no
     # access crosses the end of a row, and under an explicit vector, where
     # every transfer would, the image keeps the operand's rows.
