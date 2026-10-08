@@ -65,6 +65,9 @@ class AbstractThreadBlockPolicy:
     #: The multiplications a block barrier has to meet, where the section
     #: states it rather than the lane layout implying it (`stage_members`).
     self._barrier_group = None
+    #: Whether the block holds a copy of operator data its multiplications
+    #: share, whatever `global_mem` says (`set_stages`).
+    self._stages: bool = False
 
     hw = self._context.target.hw
     self._max_blocks = hw.max_block_per_sm
@@ -109,6 +112,12 @@ class AbstractThreadBlockPolicy:
   def set_barrier_group(self, group) -> None:
     self._barrier_group = group
 
+  def set_stages(self) -> None:
+    """Size the block as one that holds a copy of operator data, before
+    the copy is part of `global_mem`: the block the shards of a section are
+    budgeted for (`Generator._shard_budget`)."""
+    self._stages = True
+
 
 def _explicit_simd_lowering(context) -> bool:
   """Whether this context lowers to an explicit vector."""
@@ -145,13 +154,13 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     # scheduler, and 256 elsewhere).
     #
     # Not where the block preloads operators into shared memory
-    # (`global_mem`): its multiplications share that one copy, and a smaller
-    # block doubles the copies and halves the blocks that fit.  A
-    # multiplication wider than the preferred block takes the 256-thread
-    # bound.
+    # (`global_mem`), or holds shards of them (`set_stages`): its
+    # multiplications share that one copy, and a smaller block doubles the
+    # copies and halves the blocks that fit.  A multiplication wider than the
+    # preferred block takes the 256-thread bound.
     lanes = self._num_threads * self._lane_factor
     threads = (self._context.target.prefs.unstaged_block_threads
-               if self._global_mem == 0 else 256)
+               if self._global_mem == 0 and not self._stages else 256)
     max_thread_mults = threads // lanes or 256 // lanes
     # Under the explicit-vector lowering one work-item *is* a thread and
     # holds the whole vector, so `threads // lanes` counts lanes where it
@@ -200,6 +209,15 @@ class Section:
     #: The section as one PIR body, built and optimized, and not yet written:
     #: what the launch is decided from and the kernel emitted from.
     self.body = None
+    #: The elements the shards of the batch-constant operands may take in
+    #: the placement being built, where it holds them
+    #: (`Generator._place_section`), and what of them its body holds.
+    self.shards: Optional[int] = None
+    self.shard_report: List[str] = []
+
+class _Unsettled(Exception):
+  """A section whose body read a launch its own layout did not lead to,
+  three builds in a row (`Generator._settle`)."""
 
 class _GuardGrouping:
   """Collects the instructions of neighboring operations under one guard.
@@ -1325,11 +1343,50 @@ class Generator:
     launch its layout leads to is not the one it read, it is built again for
     that one.  Nothing a body reads of the launch decides how large its
     buffers are, so the second build lays out as the first did.
+
+    The shards of the batch-constant operands, where `Options.preload_shards`
+    asks for them, are given what the section placed without them leaves its
+    block (`_shard_budget`), and the section is placed again with them.  That
+    budget is settled before the second placement and nothing in it changes
+    it, so the launch it leads to settles as the first did.  Where it does
+    not after all, or holds no shard, the placement without them stands.
     """
     obj = self._section.shr_mem_obj
     obj.set_size_per_mult(self._size_per_mult(0))
     if not self._deduce_mults_per_block():
       return False
+    try:
+      placed = self._settle(index, None)
+    except _Unsettled:
+      raise InternalError(
+          f'section {index}: the body read a launch its own layout does not '
+          f'lead to, three builds in a row') from None
+    if placed is None:
+      return False
+    budget = self._shard_budget()
+    if budget:
+      try:
+        held = self._settle(index, budget)
+      except _Unsettled:
+        held = None
+      if held is not None and any(line.startswith('+ ') for line
+                                  in self._section.shard_report):
+        placed = held
+      else:
+        self._restore(placed[1])
+    body, _ = placed
+    self._check_layout(body, index)
+    self._section.body = self._with_arena(self._section, body)
+    return True
+
+  def _settle(self, index: int, shards: Optional[int]):
+    """Section `index` built, laid out and its block sized until the launch
+    the body read is the one its layout leads to: the body and its layout,
+    or None where a multiplication does not fit.  `shards` is the elements
+    the shards of its batch-constant operands may take, where it holds them.
+    Raises `_Unsettled` after three builds that do not settle."""
+    obj = self._section.shr_mem_obj
+    self._section.shards = shards
     for _ in range(3):
       self._set_threadconfig()
       body, layout = self._build_section(index, self._section)
@@ -1337,16 +1394,65 @@ class Generator:
       obj.set_global_size(layout.block)
       obj.set_size_per_mult(self._size_per_mult(layout.per_mult))
       if not self._deduce_mults_per_block():
-        return False
+        return None
       if self._launch_read(self._section) == read:
-        break
+        return body, layout
+    raise _Unsettled()
+
+  def _restore(self, layout) -> None:
+    """The block sized again from `layout`, the layout of the section placed
+    without shards, and the placement's state as that placement left it."""
+    obj = self._section.shr_mem_obj
+    self._section.shards = None
+    obj.set_global_size(layout.block)
+    obj.set_size_per_mult(self._size_per_mult(layout.per_mult))
+    self._deduce_mults_per_block()
+    self._set_threadconfig()
+
+  def _shard_budget(self) -> int:
+    """The shared memory, in elements, the shards of the section's
+    batch-constant operands may take; 0 where it holds none.
+
+    The section is placed: its block's arena and a multiplication's are what
+    they take without shards.  A block holding them is sized as one that
+    holds a copy of operator data (`set_stages`), and it may take as much
+    more as keeps as many of those blocks resident per SM as fit without --
+    by shared memory and threads, the two known exactly (`_resident_blocks`).
+    `Options.preload_shard_budget` puts its bytes in place of that, up to
+    what the block can take at all.
+
+    Not under the explicit vector, where a multiplication is one work-item
+    and its lanes are no thread's: an index there is not a function of the
+    thread's indices.  Nor where a multiplication is neither a run of lanes
+    inside one wave nor whole waves, whose lane is derived rather than the
+    thread's (`_lane_mapping`).
+    """
+    options = self._context.get_user_options()
+    if not options.preload_shards or _explicit_simd_lowering(self._context):
+      return 0
+    hw = self._context.target.hw
+    layout = MultLayout(self._num_threads, hw.vec_unit_length)
+    if not (layout.contiguous or layout.whole_waves):
+      return 0
+    obj = self._section.shr_mem_obj
+    block, per_mult = obj.get_global_size(), obj.get_size_per_mult()
+    mults, fits = self._mults_for(block, per_mult, stages=True)
+    if not fits:
+      return 0
+    size = self._context.fp_type.size()
+    align = self._shared_align()
+    start = -(-block // align) * align
+    taken = (start + per_mult * mults) * size
+    cap = hw.max_local_mem_size_per_block
+    if options.preload_shard_budget:
+      allowed = min(options.preload_shard_budget, cap - taken)
     else:
-      raise InternalError(
-          f'section {index}: the body read a launch its own layout does not '
-          f'lead to, three builds in a row')
-    self._check_layout(body, index)
-    self._section.body = self._with_arena(self._section, body)
-    return True
+      limits = [hw.max_block_per_sm,
+                hw.max_threads_per_sm // (self._num_threads * mults)]
+      if taken:
+        limits.append(cap // taken)
+      allowed = cap // max(1, min(limits)) - taken
+    return max(0, allowed // size - (start - block))
 
   @staticmethod
   def _check_layout(body, index: int) -> None:
@@ -1364,11 +1470,12 @@ class Generator:
   def _launch_read(self, section) -> tuple:
     """What the body built for `section` read of the launch, as far as the
     answer would change it: how many multiplications share the block, where
-    a block-wide copy divides its elements among them or the traversal is
-    driven a group of rows at a time; how uniform each traversal is, which
-    decides where a barrier may sit; and the distance between the
-    multiplications' arenas, where a matrix path addresses its neighbors'
-    tiles (`set_mult_stride`)."""
+    a block-wide copy divides its elements among them, the traversal is
+    driven a group of rows at a time, or the threads of the block copy in the
+    shards of the batch-constant operands (`_shard_spec`); how uniform
+    each traversal is, which decides where a barrier may sit; and the
+    distance between the multiplications' arenas, where a matrix path
+    addresses its neighbors' tiles (`set_mult_stride`)."""
     obj = section.shr_mem_obj
     loops = []
 
@@ -1379,8 +1486,9 @@ class Generator:
         for region in instr.regions():
           walk(region)
     walk(section.stream)
-    return (obj.get_mults_per_block() if self._depends_on_mults(section)
-            else None,
+    return (obj.get_mults_per_block()
+            if (self._depends_on_mults(section)
+                or section.shards) else None,
             tuple(loop.uniform_scope() for loop in loops),
             obj.get_size_per_mult() if self._asked_mult_stride(section)
             else None)
@@ -1463,8 +1571,20 @@ class Generator:
         self._context, self._names,
         lambda body: self._emit_section(body, index, section),
         arena=obj.name, place=place, barriers=self._barriers(section),
-        metrics=self._metrics)
+        metrics=self._metrics, shards=self._shard_spec(section))
     return body, place.layout
+
+  def _shard_spec(self, section) -> Optional[dict]:
+    """What `pir.ShardLoads` takes besides the body, where the placement
+    gives `section` shards (`_place_section`): their budget, and the block
+    whose threads copy them in."""
+    if not section.shards:
+      return None
+    return dict(arena=GeneralLexicon.TOTAL_SHR_MEM,
+                align=self._shared_align(), budget=section.shards,
+                mults=section.shr_mem_obj.get_mults_per_block(),
+                threads=self._num_threads, fptype=self._context.fp_type,
+                report=section.shard_report)
 
   def _with_arena(self, section, body):
     """`body` behind the declarations of the arena it addresses, which are
@@ -2679,16 +2799,23 @@ class Generator:
     want = max(1, int(self._context.get_user_options().stage_group))
     return -(-want // base) * base
 
-  def _deduce_mults_per_block(self):
+  def _mults_for(self, global_size: int, size_per_mult: int,
+                 stages: bool = False):
+    """How many multiplications the section's block holds where its arena
+    takes `global_size` elements and each multiplication's `size_per_mult`,
+    and whether one fits at all; `stages` sizes it as a block that holds a
+    copy of operator data (`set_stages`)."""
     policy = self._thread_block_policy_type(self._context,
-                                            self._section.shr_mem_obj.get_global_size(),
-                                            self._section.shr_mem_obj.get_size_per_mult(),
+                                            global_size,
+                                            size_per_mult,
                                             self._num_threads,
                                             self._lead_width
                                             * self._context.get_user_options().lead_blocking)
     policy.set_has_barrier(self._has_barrier(self._section.stream))
     if self._section.stage_loaders:
       policy.set_barrier_group(self._stage_group())
+    if stages:
+      policy.set_stages()
     num_mults_per_block = policy.get_num_mults_per_block()
     fits = num_mults_per_block >= 1
     # A block holds whole groups or the group is not a unit.  Rounding down
@@ -2699,6 +2826,12 @@ class Generator:
     if group > 1:
       num_mults_per_block = max(group, num_mults_per_block
                                 - num_mults_per_block % group)
+    return num_mults_per_block, fits
+
+  def _deduce_mults_per_block(self):
+    obj = self._section.shr_mem_obj
+    num_mults_per_block, fits = self._mults_for(obj.get_global_size(),
+                                                obj.get_size_per_mult())
     self._section.shr_mem_obj.set_mults_per_block(num_mults_per_block)
     # The loop reads it to answer how far its body is uniform, and the answer
     # is what `verify` weighs a barrier against.  Over the optimized stream

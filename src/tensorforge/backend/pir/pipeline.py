@@ -36,6 +36,7 @@ from .barriers import place_barriers
 from .core import Stmt, dump
 from .move import move_loads
 from .prefetch import prefetch_hints
+from .shards import shard_loads
 from .wrap import wrap_loads
 from .passes import (converge_crosslane, cse, dce, flatten_scopes, fold,
                      if_convert, licm, load_cse, verify)
@@ -250,12 +251,41 @@ class Prefetch(Pass):
                                  report=self._report)
 
 
+class ShardLoads(Pass):
+    """Read the shards of the batch-constant operands that fit from the
+    block's shared memory (`shards.shard_loads`).
+
+    Behind everything that cleans the body up, so that the loads are the
+    ones that remain and their indices are values; ahead of the wrap, which
+    moves the transfers that are left, of the allocator, which places the
+    buffers this adds, and of the barriers, which see the copies and the
+    barrier behind them.  `spec` is what the pass takes besides the body
+    (`shard_loads`), and `report` collects what of each operand is held.
+    """
+
+    name = 'shards'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, scratch, spec: dict,
+                 report: Optional[List[str]] = None):
+        self._scratch = scratch
+        self._spec = dict(spec)
+        self._report = report
+
+    def run(self, pc: BodyContext) -> None:
+        pc.body = shard_loads(pc.body, self._scratch, report=self._report,
+                              **self._spec)
+
+
 def standard_pipeline(debug: str = '',
                       wrap: Optional[WrapLoads] = None,
                       place: Optional[PlaceBuffers] = None,
                       barriers: Optional[PlaceBarriers] = None,
                       move: Optional[MoveLoads] = None,
-                      prefetch: Optional[Prefetch] = None) -> PassManager:
+                      prefetch: Optional[Prefetch] = None,
+                      shards: Optional[ShardLoads] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -315,6 +345,10 @@ def standard_pipeline(debug: str = '',
     for the next element are statements of the body like any other, and go
     through the cleanup with it (`Prefetch`).
 
+    ``shards``, where asked for, runs behind the cleanup: it moves the loads
+    of the batch-constant operands that remain to shared memory, as much of
+    them as the budget it is handed admits (`ShardLoads`).
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
@@ -334,6 +368,8 @@ def standard_pipeline(debug: str = '',
     for name, fn in (('loads', load_cse), ('licm', licm), ('cse2', cse),
                      ('dce', dce)):
         pm.add(Rewrite(name, fn, preserves=('flat',)))
+    if shards is not None:
+        pm.add(shards)
     if wrap is not None:
         pm.add(wrap)
         # What the moved transfers read is computed again for the elements
@@ -358,6 +394,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              place: Optional[PlaceBuffers] = None,
              barriers: Optional[PlaceBarriers] = None,
              prefetch: Optional[Prefetch] = None,
+             shards: Optional[ShardLoads] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
@@ -368,7 +405,8 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
-    standard_pipeline(debug, wrap, place, barriers, move, prefetch).run(pc)
+    standard_pipeline(debug, wrap, place, barriers, move, prefetch,
+                      shards).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

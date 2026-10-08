@@ -63,6 +63,8 @@ LEXIC = Path('src/tensorforge/common/vm/lexic/lexic.py')
 SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
 LEGALIZE = Path('src/tensorforge/generators/legalize.py')
 ORACLE = Path('src/tensorforge/reference/kernel_eval.py')
+SHARDS = Path('src/tensorforge/backend/pir/shards.py')
+GEN = Path('src/tensorforge/generators/generator.py')
 
 
 def _run_tests(target):
@@ -698,6 +700,42 @@ GROUPS = {
              'icache_excess(result.generator.metrics.code_units, hw)',
              "icache_excess(getattr(result.generator, 'code_units', None), hw)",
              1)),
+    ]),
+
+    # The shards of the batch-constant operands: held where the loads read
+    # them, copied whole by the whole block ahead of a barrier, as many as
+    # the budget admits -- least cover first -- and that budget one that
+    # keeps the blocks an SM holds.
+    'shards': ('tests/test_shard_loads.py', [
+        ('a scalar load held',
+         sub(SHARDS, "    if 'x' not in leaves:\n        return None\n", '', 1)),
+        ('an operand the kernel writes held',
+         sub(SHARDS, '        if any(accesses_conflict(w, a) for a in stmt.accesses for w in writes):\n',
+             '        if False:\n', 1)),
+        ('a load over a loop\'s trips taking the lane blocks with it',
+         sub(SHARDS, 'by_buffer.setdefault((load.buffer.id, load.trips), [])',
+             'by_buffer.setdefault((load.buffer.id, False), [])', 1)),
+        ('a load moved by the shard\'s start the wrong way',
+         sub(SHARDS, 'base - shard.lo, scratch)', 'shard.lo - base, scratch)', 1)),
+        ('a wide load counted as one element',
+         sub(SHARDS, "    width = getattr(stmt.target[0].type, 'length', None) or 1\n",
+             '    width = 1\n', 1)),
+        ('the distance between runs left out of a copy',
+         sub(SHARDS, "b.op('mul', INDEX, k, step - copy.count)", "b.op('mul', INDEX, k, step)", 1)),
+        ('a copy larger than the block taken in one pass',
+         sub(SHARDS, '    if copy.total <= block:\n', '    if True:\n', 1)),
+        ('the copy not ordered ahead of the reads',
+         sub(SHARDS, '    b.barrier(Participants.BLOCK)\n', '', 1)),
+        ('a shard held past the budget',
+         sub(SHARDS, '        if used + need > free:\n            continue\n', '', 1)),
+        ('the longest cover first',
+         sub(SHARDS, 'key=lambda s: (s.cover, s.position)', 'key=lambda s: (-s.cover, s.position)', 1)),
+        ('a shard off the alignment its operand gives it',
+         sub(SHARDS, '            end += (shard.lo - end) % align\n', '', 1)),
+        ('the copy stepping by the block the body was first built for',
+         sub(GEN, '                or section.shards) else None,', '                or False) else None,', 1)),
+        ('the budget taking blocks off the SM',
+         sub(GEN, '      allowed = cap // max(1, min(limits)) - taken', '      allowed = cap - taken', 1)),
     ]),
 
     # The host oracle runs the block: every multiplication's threads take

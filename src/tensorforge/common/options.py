@@ -580,6 +580,32 @@ declare('preload_roles',
             'slower.  The rest are read from global memory, as '
             '`preload_partial` leaves them.')
 
+declare('preload_shards',
+        default=False,
+        parse=parse_bool,
+        doc='Keep what fits of the batch-constant operands read from global '
+            'memory inside the batch loop in the block\'s shared memory, a '
+            'shard at a time, instead of all of an operand or none of it '
+            '(`preload_globals`, `preload_partial`).\n'
+            'A shard is what one load reads across the lanes of a '
+            'multiplication -- a lane block of a column -- and the block '
+            'copies the shards that fit in ahead of the loop, those whose '
+            'loads stand nearest their readers first (`pir.shards`).  What '
+            'fits: as much as a block can take more and an SM still hold as '
+            'many blocks, by shared memory and threads '
+            '(`Generator._shard_budget`), or `preload_shard_budget`.  Off '
+            'until it is measured: at order 8 in double precision no operator '
+            'fits an AMD block whole, and that is what this is for.')
+
+declare('preload_shard_budget',
+        default=0,
+        parse=parse_int,
+        doc='Bytes of shared memory a block\'s shards (`preload_shards`) may '
+            'take, up to what the block can take at all, in place of what '
+            'keeps the blocks an SM holds -- which counts no registers, so '
+            'where they bind first, as on AMD at order 8, a block can take '
+            'more than that at no cost.  0 is that default.')
+
 declare('stage_members',
         default=False,
         parse=parse_bool,

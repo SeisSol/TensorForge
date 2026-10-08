@@ -404,7 +404,7 @@ class AbstractInstruction(ABC):
 
   @classmethod
   def optimized_body(cls, context, names, fill, arena=None, place=None,
-                     barriers=None, metrics=None):
+                     barriers=None, metrics=None, shards=None):
     """`fill(builder)` as one body, through the pipeline, ready to emit.
 
     The half of `build_shared_body` that needs no writer: `names` is the
@@ -418,7 +418,11 @@ class AbstractInstruction(ABC):
     where a shared buffer that names no other one goes; `place` lays the
     buffers out (`pir.PlaceBuffers`) and `barriers` places the barriers
     (`pir.PlaceBarriers`), both behind everything that moves a statement.
-    `metrics` takes what the passes report (`BuildMetrics.record_wrap`).
+    `metrics` takes what the passes report (`BuildMetrics.record_wrap`), and
+    `shards` is what `pir.ShardLoads` takes besides the body, where the
+    batch-constant operands are held in shared memory a shard at a time --
+    with a `report` list, where it has one, that ends up holding what the
+    pass reported for the body returned.
     """
     def attempt():
       builder = cls._body_builder(context, names, arena)
@@ -432,7 +436,7 @@ class AbstractInstruction(ABC):
         context, attempt,
         lambda builder, body: cls._optimize_shared_body(context, builder, body,
                                                         place, barriers,
-                                                        metrics))
+                                                        metrics, shards))
     return body
 
   @staticmethod
@@ -442,7 +446,7 @@ class AbstractInstruction(ABC):
 
   @staticmethod
   def _optimize_shared_body(context, builder, body, place=None, barriers=None,
-                            metrics=None):
+                            metrics=None, shards=None):
     """A shared body through the pipeline, with the transfers issued ahead
     where that is asked for: within their statement list, and across the
     batch loop's back edge.
@@ -452,9 +456,10 @@ class AbstractInstruction(ABC):
     by a builder numbering its values from the one that built this body.
     """
     options = context.get_user_options()
-    move = wrap = prefetch = None
+    move = wrap = prefetch = held = None
     report: list = []
     hints: list = []
+    kept: list = []
     if getattr(options, 'enable_move_loads', False):
       move = pir.MoveLoads(distance=options.move_distance)
     if getattr(options, 'enable_wrap_loads', False):
@@ -468,10 +473,16 @@ class AbstractInstruction(ABC):
                               level=options.prefetch_level,
                               line_bytes=context.target.prefetch_line_bytes(),
                               report=hints)
+    if shards is not None:
+      spec = dict(shards)
+      kept = spec.pop('report', kept)
+      # A body built again reports afresh.
+      del kept[:]
+      held = pir.ShardLoads(builder.scratch, spec, report=kept)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         debug=options.ir_debug, move=move, wrap=wrap,
                         place=place, barriers=barriers, prefetch=prefetch,
-                        where='shared body')
+                        shards=held, where='shared body')
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)
@@ -481,6 +492,9 @@ class AbstractInstruction(ABC):
     if prefetch is not None and options.ir_debug:
       for line in hints:
         print(f'prefetch: {line}')
+    if held is not None and options.ir_debug:
+      for line in kept:
+        print(f'shards: {line}')
     return body
 
   @staticmethod
