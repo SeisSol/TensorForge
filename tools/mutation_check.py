@@ -64,6 +64,7 @@ SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
 LEGALIZE = Path('src/tensorforge/generators/legalize.py')
 ORACLE = Path('src/tensorforge/reference/kernel_eval.py')
 SHARDS = Path('src/tensorforge/backend/pir/shards.py')
+LOAD = Path('src/tensorforge/backend/instructions/memory/load.py')
 GEN = Path('src/tensorforge/generators/generator.py')
 
 
@@ -761,6 +762,21 @@ GROUPS = {
         ('a lane-varying loop counting as a replicated index',
          sub(BUILD, '        if _as_uniformity(uniform) <= Uniformity.LANE:\n',
              '        if False:\n', 1)),
+    ]),
+
+    # A copy into an image whose rows are padded keeps every row whole: no
+    # access crosses the end of a row, and under an explicit vector, where
+    # every transfer would, the image keeps the operand's rows.
+    'stagerows': ('tests/test_stage_rows.py', [
+        ('a stepped access across the end of a row',
+         sub(LOAD, '          and _keeps_rows(vecsize, linscale)):',
+             '          and True):', 1)),
+        ('a bypassing access across the end of a row',
+         sub(LOAD, '    if not _keeps_rows(width, linscale):\n      return 0\n',
+             '', 1)),
+        ('an explicit vector copying into padded rows',
+         sub(LOAD, '    if self._explicit_simd():\n      # The image keeps',
+             '    if False:\n      # The image keeps', 1)),
     ]),
 
     # A section is one body, and its traversal's indices are values of it.

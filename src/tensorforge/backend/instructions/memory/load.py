@@ -38,6 +38,24 @@ def _find_next_coprime(number, conumber):
 from . import vectorize
 
 
+def _keeps_rows(width: int, linscale) -> bool:
+  """Whether accesses `width` elements wide keep every row of a padded image
+  whole.
+
+  `linscale` is the rows' length in the operand and in the image, or None
+  for an image that has the operand's rows.  A linear transfer counts in
+  elements of the operand, and each access takes its address in the image
+  from its first element: the rest of it follows that one.  So an access
+  over the end of a row puts the first elements of the next row into the
+  pad, where nothing reads them, and leaves their places in the image
+  unwritten.  Accesses start on whole widths, so a row of whole widths ends
+  where one ends; an image row of whole widths starts every access where an
+  access that wide may start.
+  """
+  return linscale is None or (linscale[0] % width == 0
+                              and linscale[1] % width == 0)
+
+
 class LoadInstruction:
   pass
 
@@ -73,6 +91,15 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     if 'alignment' in kwargs:
       self._alignment = kwargs['alignment']
     else:
+      self._alignment = 1
+    if self._explicit_simd():
+      # The image keeps the operand's rows here.  A transfer under an
+      # explicit vector is a vector over all the lanes, read from one address
+      # and written to one -- the tail's as well (`_write_tail_vector`) --
+      # and a padded row holds it whole only where the row is a whole number
+      # of those vectors long (`_keeps_rows`).  An image written out of
+      # registers (`StoreRegToShr`) goes element by element and is padded
+      # all the same.
       self._alignment = 1
 
     #: Copy the operand's storage scalar for scalar, as the host laid it out
@@ -375,7 +402,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       for loop in loops[::-1]:
         loop.__exit__(None, None, None)
 
-  def _bypass_covering(self, writer, src_offset, length) -> int:
+  def _bypass_covering(self, writer, src_offset, length, linscale=None) -> int:
     """Elements per access if this whole run can take the L1-bypassing form.
 
     Width is not only a count of accesses here.  On sm_120 the 16-byte
@@ -397,6 +424,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     * the run is the only one, so the elements the last access zero-fills are
       past the data rather than in the next row of it -- a padded row would do
       as well, and `stage_row_bytes` is how one gets asked for;
+    * a sixteen-byte access keeps every row of a padded image whole
+      (`_keeps_rows`);
     * the window has room for them, which `align_shr_mem` gives by rounding a
       stage up to the vector unit.
     """
@@ -409,6 +438,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     elem = self._dest.get_fptype().size()
     width = min(max(self._hop_granularities()), self._swizzle_cap(writer))
     if width * elem != 16 or src_offset % width:
+      return 0
+    if not _keeps_rows(width, linscale):
       return 0
     if length % width and self._context.target.lexic.copy_async('d', 's', 16, 4) is None:
       # The last access covers part of an element group, which only the
@@ -433,7 +464,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
     granularities = self._hop_granularities()
 
-    wide = self._bypass_covering(writer, src_offset, length)
+    wide = self._bypass_covering(writer, src_offset, length, linscale)
     if wide:
       # Every access sixteen bytes, so every access bypasses L1.  The whole
       # rounds first, then the one partial round: the lanes that still have a
@@ -463,7 +494,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
     cap = self._swizzle_cap(writer)
     for vecsize in granularities:
-      if vecsize <= cap and src_offset % vecsize == 0:
+      if (vecsize <= cap and src_offset % vecsize == 0
+          and _keeps_rows(vecsize, linscale)):
         num_hops = ((length - pos * self._num_threads) // (self._num_threads * vecsize)) * vecsize
         self._write_hop(writer, src_offset, dst_offset, index, pos, pos + num_hops, vecsize, nontemporal, linscale)
         pos += num_hops

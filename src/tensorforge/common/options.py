@@ -994,11 +994,16 @@ declare('stage_row_bytes',
         doc='Pad the leading dimension of a staged shared-memory image up to a '
             'multiple of this many bytes.  0 copies the storage box as it is.\n'
             'The image is our own layout -- the tensor keeps its own in global '
-            "memory -- so this costs shared memory and nothing else.  What it "
-            'buys is a row whose length a wide access divides: `k_width` 2 '
+            "memory -- so this costs shared memory, and the width of a copy "
+            'into it from global memory: every access of that copy keeps a row '
+            'whole, so rows of 9 floats are copied an element at a time.  What '
+            'it buys is a row whose length a wide access divides: `k_width` 2 '
             "packs SeisSol's damage step only out of the buffers whose row is "
             'even, and every one of its 4216 refusals is a row of 125.  The pad '
-            'is never read: a group that does not fit whole stays scalar.')
+            'is never read: a group that does not fit whole stays scalar.\n'
+            'Under the explicit-vector lowering (ESIMD) only an image written '
+            'out of registers is padded: a copy from global memory is a vector '
+            'over the lanes from one address, which a longer row would split.')
 
 declare('ir_debug',
         default='',
