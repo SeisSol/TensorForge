@@ -15,6 +15,8 @@ TF = pathlib.Path(__file__).resolve().parents[1] / "src"
 equation, solver, order, precision, out = sys.argv[1:6]
 out = os.path.abspath(out)          # the generator runs from the codegen directory
 mechanisms = int(sys.argv[sys.argv.index('--mechanisms') + 1]) if '--mechanisms' in sys.argv else 0
+arch = sys.argv[sys.argv.index('--arch') + 1].split(':') if '--arch' in sys.argv else 'nvidia:cuda:sm_86'.split(':')
+simcount = int(sys.argv[sys.argv.index('--simcount') + 1]) if '--simcount' in sys.argv else 1
 
 sys.path.insert(0, str(TF))
 sys.path.insert(0, str(CODEGEN))
@@ -87,9 +89,9 @@ start = time.monotonic()
 with tempfile.TemporaryDirectory() as tmp:
     sys.argv = ['generate.py', '--equations', equation, '--solver', solver, '--order', order,
                 '--precision', precision, '--matricesDir', str(CODEGEN / 'matrices'), '--outputDir', tmp,
-                '--host_arch', 'hsw', '--device_backend', 'cuda', '--device_arch', 'sm_86',
-                '--device_vendor', 'nvidia', '--numMechanisms', str(mechanisms), '--memLayout', 'auto',
-                '--multipleSimulations', '1', '--PlasticityMethod', 'nb', '--gemm_tools', 'none',
+                '--host_arch', 'hsw', '--device_backend', arch[1], '--device_arch', arch[2],
+                '--device_vendor', arch[0], '--numMechanisms', str(mechanisms), '--memLayout', 'auto',
+                '--multipleSimulations', str(simcount), '--PlasticityMethod', 'nb', '--gemm_tools', 'none',
                 '--device_codegen', 'tensorforge', '--drQuadRule', 'stroud']
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
@@ -97,8 +99,8 @@ with tempfile.TemporaryDirectory() as tmp:
 name_pending('<unnamed>')
 
 config = dict(equation=equation, solver=solver, order=int(order), precision=precision,
-              mechanisms=mechanisms, device='cuda/sm_86', host='hsw', plasticity='nb', dr_quad='stroud',
-              mem_layout='auto', multiple_simulations=1, workarounds=sorted(workarounds))
+              mechanisms=mechanisms, device=f'{arch[1]}/{arch[2]}', host='hsw', plasticity='nb', dr_quad='stroud',
+              mem_layout='auto', multiple_simulations=simcount, workarounds=sorted(workarounds))
 pathlib.Path(out).write_text(json.dumps({
     'source': ('SeisSol codegen (seissol21, master plus the damage and viscoacoustic systems) through '
                'seissol/yateto 50200d3, interface 7; recorded by tools/seissol_export.py'),
