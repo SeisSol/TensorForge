@@ -57,6 +57,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox  # noqa: E402
 from tensorforge.common.matrix.tensor import SubTensor, Tensor  # noqa: E402
 from tensorforge.generators import lanes  # noqa: E402
 from tensorforge.generators.descriptions import MultilinearDescr  # noqa: E402
+from tensorforge.frontend.yateto import DescriptionReader  # noqa: E402
 
 #: Where the case corpus lives.  `TF_TESTS` overrides, so a suite can be run
 #: against the corpus of another checkout.
@@ -229,7 +230,6 @@ def from_cases(pattern: str = '*', root: Optional[Path] = None
             origin=f'cases/{path.relative_to(root)}'))
     return out
 
-
 def from_dump(path: Path, pattern: str = '*',
               datatype: Datatype = Datatype.F32) -> List[Workload]:
     """Workloads from a `tools/host/dump_descriptors.py` capture.
@@ -244,10 +244,22 @@ def from_dump(path: Path, pattern: str = '*',
     one, and no temporary would ever be recognized as such.
     """
     blob = json.loads(Path(path).read_text())
+
+    out: List[Workload] = []
+
+    if 'descriptions' in blob:
+        # use yateto descriptors directly
+        for symbol, description in sorted(blob['descriptions'].items()):
+            def factory(description=description):
+                return DescriptionReader(arch=None).read(description)[0]
+            out.append(Workload(name=symbol, descrs=factory, datatype=datatype,
+                            origin=f'dump:{Path(path).name}'))
+        return out
+
+    # "old" method, interface yateto python
     kernels = blob['all'] if 'all' in blob else blob
     addressing = {str(a): a for a in Addressing}
 
-    out: List[Workload] = []
     for symbol, rows in sorted(kernels.items()):
         if not fnmatch.fnmatch(symbol, pattern):
             continue
