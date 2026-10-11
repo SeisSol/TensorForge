@@ -366,7 +366,7 @@ declare('enable_move_loads',
             'a question applies to it.')
 
 declare('enable_wrap_loads',
-        default=False,
+        default=True,
         doc='Prefetch across the back edge: issue each transfer for the next '
             'element at the tail of the current iteration, after the last '
             'instruction that touches its buffer -- where '
