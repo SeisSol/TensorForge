@@ -1337,6 +1337,59 @@ GROUPS = {
                    '                    return None\n', '', 1)),
     ]),
 
+    # A window copied by the tensor memory accelerator: only where the target
+    # has one and the operand proves the alignment; the cursor armed ahead of
+    # everything behind a barrier, its barrier kept apart; no group, no
+    # barrier behind its wait; one stage; and every wait -- the drains and
+    # the one behind the loop included -- a wait on the cursor.
+    'bulk': ('tests/test_bulk_copies.py', [
+        ('a bulk copy on a part without one',
+         sub(TARGET, '        return level is not None and level >= 90\n',
+             '        return level is not None and level >= 80\n', 1)),
+        ('a bulk copy from a source not proved aligned',
+         sub(LOAD, '    if (self._loadsize * elem) % 16 or self._src.linear_align_bytes() < 16:\n',
+             '    if (self._loadsize * elem) % 16:\n', 1)),
+        ('a bulk copy whatever the option',
+         sub(LOAD, "    if not getattr(self._context.get_user_options(), 'bulk_copies', False):\n"
+                   '      return False\n', '', 1)),
+        ('the cursor armed where it is asked for',
+         sub(BUILD, '        body = tuple(self._prologue) + tuple(self._stack[0].body)',
+             '        body = tuple(self._stack[0].body)', 1)),
+        ('no barrier behind the arming',
+         sub(BUILD, '        b.barrier(participants, threads=threads)\n'
+                    '        self._prologue += list(b.finish())',
+             '        self._prologue += list(b.finish())', 1)),
+        ('the barrier sharing bytes with what the body holds after',
+         sub(ALLOC, "        if b.arena == MULT and any(w.attr('lifetime') == 'body'",
+             "        if False and any(w.attr('lifetime') == 'body'", 1)),
+        ('a bulk copy in a group',
+         sub(Path('src/tensorforge/backend/pir/asyncmem.py'),
+             "    return s.op == Op.COPY_ASYNC and s.counter == 'copy'\n",
+             '    return s.op == Op.COPY_ASYNC\n', 1)),
+        ('a barrier behind the wait for a bulk copy',
+         sub(BARRIERS, "        if s.attr('bulk') is not None:\n",
+             '        if False:\n', 1)),
+        ('a second stage for a bulk copy',
+         sub(WRAP, "        if any(x.op is Op.COPY_ASYNC and x.counter == 'bulk'\n"
+                   '               for x in walk_stmts(tuple(t.pieces))):\n',
+             '        if False:\n', 1)),
+        ('the wait behind the loop without its cursor',
+         sub(WRAP, '                effect=p.wait.effect, accesses=accesses,\n'
+                   '                attrs=p.wait.attrs))',
+             '                effect=p.wait.effect, accesses=accesses))', 1)),
+        ('a wait for a bulk copy without its cursor',
+         sub(BUILD, "                             attrs=(('bulk', cursor),) if cursor else ())",
+             '                             )', 1)),
+        ('a bulk copy in the pipeline of cp.async',
+         sub(TRANSFERS, "    if any(x.op is Op.COPY_ASYNC and x.counter == 'bulk'\n"
+                        '           for x in walk_stmts(tuple(t.pieces))):\n'
+                        '        return BULK\n', '', 1)),
+        ('a drain waiting on no cursor',
+         sub(EMIT, "                texts += [f'tensorforge::bulk_wait({c});'\n"
+                   '                          for c in self._bulk_cursors]\n',
+             '                pass\n', 1)),
+    ]),
+
     # What a target is, can and prefers.
     'target': ('tests/test_target.py tests/test_nontemporal.py '
                'tests/test_prefetch.py tests/test_packed_fma.py '

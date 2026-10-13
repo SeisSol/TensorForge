@@ -34,7 +34,8 @@ occupies both.  A raw block whose head the IR cannot read may run its body
 any number of times, so it is treated as a loop, which can only add
 occupancy; and a statement that does not say what it touches reads every
 buffer, which keeps all of them where they are.  A buffer nothing touches
-occupies nothing, and takes no room.
+occupies nothing, and takes no room.  One that holds something for the whole
+body says so (`lifetime`), and is occupied together with every other.
 
 The layout is the largest buffer first, each at the lowest offset clear of
 every buffer it is occupied together with, on the alignment every buffer
@@ -278,6 +279,18 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
     live = _Liveness(buffers, value_key, single)
     live.recording = True
     live.backward(body, 0)
+    # A buffer that holds something for the whole body -- the barrier a bulk
+    # copy completes on, armed once and counting phases from then on
+    # (`IRBuilder.bulk_channel`) -- is occupied together with every other,
+    # whatever its accesses say.
+    for b in buffers.values():
+        if b.arena == MULT and any(w.attr('lifetime') == 'body'
+                                   for w in b.windows):
+            bit = live.bit[b.key]
+            live.touched |= 1 << bit
+            live.neighbors[bit] = live.everything
+            for n in range(len(live.neighbors)):
+                live.neighbors[n] |= 1 << bit
     mult = [b for b in buffers.values() if b.arena == MULT]
     by_bit = {live.bit[b.key]: b for b in mult}
     placed: Dict[int, int] = {}

@@ -7,8 +7,8 @@
 
 An interpreter for the subset of CUDA the generator emits: declarations,
 assignments, `if`/`else`, counted `for`, ternaries, array and pointer
-indexing, short vectors (`Vec`), the `cp.async` transfer, atomic accumulation
-and the cross-lane reads.  `evaluate_wave` runs the lanes of one
+indexing, short vectors (`Vec`), the `cp.async` transfer and the bulk copy,
+atomic accumulation and the cross-lane reads.  `evaluate_wave` runs the lanes of one
 multiplication together over one memory, statement by statement
 (`Lockstep`), which is what a cooperatively staged operand, an atomic and a
 `readlane` need; `evaluate` runs one lane on its own.
@@ -75,6 +75,34 @@ _VEC_ASSIGN = re.compile(r'^\*\s*\([^)]*\)\s*&\s*\w+\s*\[.*\]\s*=')
 _ASYNC_COPY = re.compile(
     r'^__pipeline_memcpy_async\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
     r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
+
+#: A bulk copy's cursor, armed by the thread the condition names
+#: (`tensorforge::bulk_arm`); the copy through it, which that thread issues for
+#: the whole multiplication; and the wait on it, after which the bytes are
+#: visible to the thread that waited.
+_BULK_ARM = re.compile(
+    r'^tensorforge::BulkCursor\s+(?P<name>\w+)\s*=\s*tensorforge::bulk_arm'
+    r'\s*\(\s*(?P<bar>\w+)\s*,\s*(?P<leader>.+)\)$')
+_BULK_COPY = re.compile(
+    r'^tensorforge::bulk_copy\s*\(\s*(?P<cursor>\w+)\s*,'
+    r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
+_BULK_WAIT = re.compile(r'^tensorforge::bulk_wait\s*\(\s*(?P<cursor>\w+)\s*\)$')
+
+
+class _Cursor(NamedTuple):
+    """A lane's `tensorforge::BulkCursor`: which one, whether this lane
+    issues the copies through it, and the barrier they complete on.
+
+    The barrier is memory as far as `Races` goes in one respect: arming it
+    writes it, and every wait reads it -- so a thread that waits before a
+    barrier made the leader's arming visible to it is a race, as it is on the
+    hardware.  The phases a copy completes are synchronization, and touch no
+    slot here."""
+    name: str
+    leader: bool
+    barrier: Optional['Ptr'] = None
+
 
 #: Scalar type -> bytes, for turning a copy's byte count into element slots.
 #: The interpreter's memory is untyped, so the width has to come from the
@@ -195,6 +223,12 @@ class Races:
         self._groups: Dict[int, List[set]] = {}
         #: Set while an asynchronous copy writes, so its slots go in flight.
         self.issuing = False
+        #: The cursor a bulk copy writing right now goes through, if one is.
+        self.bulk: Optional[str] = None
+        #: slot -> (cursor, when) of the bulk copy in flight into it, and
+        #: (cursor, lane) -> when that lane last waited on the cursor.
+        self._bulk_flight: Dict[int, Tuple[str, int]] = {}
+        self._landed: Dict[Tuple[str, int], int] = {}
 
     def statement_kind(self, stmt: str) -> Optional[str]:
         """`'barrier'`, `'commit'`, `'wait'` or None."""
@@ -230,6 +264,24 @@ class Races:
                     self._writes[slot] = (lane, self.time)
                     self._reads.pop(slot, None)
 
+    def bulk_wait(self, lane: int, cursor: str) -> None:
+        """`lane` waited on `cursor`: what the bulk copies through it wrote
+        so far is visible to it."""
+        self._landed[(cursor, lane)] = self.time
+
+    def _bulk_read(self, slot: int) -> bool:
+        """A read of a slot a bulk copy wrote: in flight for a lane that has
+        not waited on the copy's cursor since, landed for one that has --
+        every lane waits for itself, and no barrier is part of it."""
+        found = self._bulk_flight.get(slot)
+        if found is None:
+            return False
+        cursor, when = found
+        if self._landed.get((cursor, self.lane), -1) <= when:
+            self._report('FLIGHT', slot, -1)
+        self._reads.setdefault(slot, {})[self.lane] = self.time
+        return True
+
     def _ordered(self, lane: int, other: int, when: int) -> bool:
         return lane == other or self._met.get((lane, other), -1) > when
 
@@ -241,6 +293,8 @@ class Races:
         self.found.append(Race(kind, slot, self.lane, other, self.statement))
 
     def read(self, slot: int) -> None:
+        if self._bulk_read(slot):
+            return
         if slot in self._flight:
             self._report('FLIGHT', slot, self._flight[slot])
         last = self._writes.get(slot)
@@ -249,6 +303,10 @@ class Races:
         self._reads.setdefault(slot, {})[self.lane] = self.time
 
     def write(self, slot: int) -> None:
+        landing = self._bulk_flight.pop(slot, None)
+        if landing is not None and self._landed.get(
+                (landing[0], self.lane), -1) <= landing[1]:
+            self._report('FLIGHT', slot, -1)
         if slot in self._flight and (not self.issuing
                                      or self._flight[slot] != self.lane):
             self._report('FLIGHT', slot, self._flight[slot])
@@ -261,6 +319,12 @@ class Races:
         if self.issuing:
             self._flight[slot] = self.lane
             self._open.setdefault(self.lane, set()).add(slot)
+            return
+        if self.bulk is not None:
+            # In flight until each lane waits on the cursor for itself.
+            self._bulk_flight[slot] = (self.bulk, self.time)
+            self._writes.pop(slot, None)
+            self._reads.pop(slot, None)
             return
         self._writes[slot] = (self.lane, self.time)
         self._reads.pop(slot, None)
@@ -641,7 +705,61 @@ class Interp:
             if tracker is not None:
                 tracker.issuing = False
 
+    def _bulk_copy(self, bc, stmt: str) -> None:
+        """The copy through a bulk cursor: the leader moves the bytes for the
+        whole multiplication, every other lane only notes it."""
+        cursor = self.env.get(bc.group('cursor'))
+        if not isinstance(cursor, _Cursor):
+            raise Abort(f'bulk copy through an unarmed cursor: {stmt!r}')
+        if not cursor.leader:
+            return
+        dst = self.env.get(bc.group('dst'))
+        src = self.env.get(bc.group('src'))
+        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+            raise Abort(f'bulk copy between unknown buffers: {stmt!r}')
+        width = self.widths.get(bc.group('dst'))
+        nbytes = int(bc.group('bytes'))
+        if width is None or nbytes % width or nbytes % 16:
+            raise Abort(f'bulk copy of {nbytes} B into {bc.group("dst")!r}, '
+                        f'whose element size is {width!r}: {stmt!r}')
+        di = int(self.ev(bc.group('di')))
+        si = int(self.ev(bc.group('si')))
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.bulk = cursor.name
+        try:
+            for k in range(nbytes // width):
+                dst[di + k] = src[si + k]
+        finally:
+            if tracker is not None:
+                tracker.bulk = None
+
     def assign(self, stmt: str) -> None:
+        bm = _BULK_ARM.match(stmt)
+        if bm:
+            barrier = self.env.get(bm.group('bar'))
+            if not isinstance(barrier, Ptr):
+                raise Abort(f'bulk cursor on an unknown barrier: {stmt!r}')
+            cursor = _Cursor(bm.group('name'), bool(self.ev(bm.group('leader'))),
+                             barrier)
+            if cursor.leader:
+                barrier[0] = 1.0
+            self.env[cursor.name] = cursor
+            return
+        bc = _BULK_COPY.match(stmt)
+        if bc:
+            self._bulk_copy(bc, stmt)
+            return
+        bw = _BULK_WAIT.match(stmt)
+        if bw:
+            cursor = self.env.get(bw.group('cursor'))
+            if not isinstance(cursor, _Cursor):
+                raise Abort(f'bulk wait on an unarmed cursor: {stmt!r}')
+            cursor.barrier[0]
+            tracker = self.mem.tracker
+            if tracker is not None:
+                tracker.bulk_wait(tracker.lane, cursor.name)
+            return
         # A global window bound through a memory-space pointer,
         # `tensorforge::SpacePtrRestrict<double, tensorforge::GlobalMemspace>
         # const glb_m0 = ...`, is a pointer to its element type here: the

@@ -16,6 +16,11 @@ loads.  Every wait is therefore annotated twice --- `prior` counts only units
 of its own class, `prior_unified` counts every class --- and the emitter, which
 knows the target, picks one.
 
+A bulk copy (`IRBuilder.copy_bulk`, the tensor memory accelerator's) is a
+third class, which nothing counts: it completes on a barrier of its own, and
+its wait is a wait on that barrier.  It joins no group, and a wait for it
+closes none.
+
 On the copy class the counted unit is not the copy but the *group*, and a
 group is closed by a `commit.async`.  That is why the commit is a statement
 here rather than a line the emitter appends to each copy: `cp.async.commit_group`
@@ -203,9 +208,15 @@ def place_commits(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     return out
 
 
+def _grouped(s: Stmt) -> bool:
+    """A copy a group counts: not a bulk copy, which completes on a barrier
+    of its own (`IRBuilder.copy_bulk`)."""
+    return s.op == Op.COPY_ASYNC and s.counter == 'copy'
+
+
 def _issues(s: Stmt, toks) -> bool:
     """Does this statement, or anything inside it, issue one of `toks`?"""
-    if s.op == Op.COPY_ASYNC and any(t.id in toks for t in s.target):
+    if _grouped(s) and any(t.id in toks for t in s.target):
         return True
     return any(_issues(inner, toks)
                for r in s.regions for inner in r.body)
@@ -335,13 +346,14 @@ def _place(body: Tuple[Stmt, ...], waits: Dict[int, int]):
                     from_region = True
                     exact = exact and up_exact
             s = replace(s, regions=tuple(regions))
-        elif s.op == Op.COPY_ASYNC:
+        elif _grouped(s):
             issued = tuple(t.id for t in s.target)
 
         groups = _by_wait(issued, waits)
         # Both closures happen *before* the statement is appended, so that
-        # `_insert` still finds the previous run's last issue behind it.
-        if s.op == Op.WAIT:
+        # `_insert` still finds the previous run's last issue behind it.  A
+        # wait for a bulk copy retires no group.
+        if s.op == Op.WAIT and s.attr('bulk') is None:
             flush()
         elif s.op == Op.FOR and run and _waits_inside(s.regions[0].body):
             # The same rule on the way in: a run still open ahead of a loop

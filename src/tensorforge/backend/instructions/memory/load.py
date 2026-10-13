@@ -402,10 +402,55 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       if len(self._dst_shape) > 0 and self._dst_shape[0] != self._read_shape[0]:
         linscale = (self._read_shape[0], self._dst_shape[0])
 
-      self._write_datatransfer(writer, 0, 0, index, self._loadsize, allow_nontemporal, linscale)
+      if not (structured_issue and self._write_bulk(writer, index, linscale)):
+        self._write_datatransfer(writer, 0, 0, index, self._loadsize,
+                                 allow_nontemporal, linscale)
 
       for loop in loops[::-1]:
         loop.__exit__(None, None, None)
+
+  def _write_bulk(self, writer, index, linscale) -> bool:
+    """The whole window as one bulk copy (`Options.bulk_copies`), where it
+    can be one; False where the transfer keeps `cp.async`.
+
+    Where it can: the target has the tensor memory accelerator
+    (`Target.bulk_copy_path`), and the transfer is one multiplication's, in a
+    section's body -- whose prologue is where the barrier the copy completes
+    on is armed (`IRBuilder.bulk_channel`).  And the window is one run, as
+    the copy moves it: no reordering, no rows of its own, no padded rows,
+    no permutation; a multiple of sixteen bytes, from a source the operand
+    proves sixteen-byte aligned (`Symbol.linear_align_bytes`), into a window
+    the allocator starts on sixteen bytes (`pir.allocate`).  The first
+    thread of the multiplication issues it and every thread waits for it.
+    """
+    if not getattr(self._context.get_user_options(), 'bulk_copies', False):
+      return False
+    if not self._context.target.bulk_copy_path() or self._explicit_simd():
+      return False
+    if (self._blockwide or self._loop_indices or self._needs_reorder
+        or linscale is not None):
+      return False
+    if not self._shared_body or not hasattr(writer, 'copy_bulk'):
+      return False
+    elem = self._dest.get_fptype().size()
+    if (self._loadsize * elem) % 16 or self._src.linear_align_bytes() < 16:
+      return False
+    if self._swizzle_cap(writer) != 16:
+      return False
+    cursor = writer.bulk_channel(self._dest.name,
+                                 leader=f'{self._linear_idx()} == 0',
+                                 threads=self._num_threads)
+    if cursor is None:
+      return False
+    # The claim a copy of the same bytes in hops leaves on the image.
+    self._dest._record_linear_layout(0, 1, self._lane_span(), writer)
+    dest_access_index = self._dest.access_address(self._context, index, writer)
+    src_access_index = self._src.access_address(self._context, index, writer)
+    self._tokens.append(writer.copy_bulk(
+        self._destination_buffer(writer), self._src.pir_buffer(writer),
+        cursor=cursor, dst_index=(f'0 + {dest_access_index}',),
+        src_index=(f'0 + {src_access_index}',), elems=self._loadsize))
+    return True
 
   def _bypass_covering(self, writer, src_offset, length, linscale=None) -> int:
     """Elements per access if this whole run can take the L1-bypassing form.

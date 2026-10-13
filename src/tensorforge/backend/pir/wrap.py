@@ -561,6 +561,12 @@ class _Loop(ElementLoop):
         if not tokens:
             return ('its copies are loads and stores, which stall where they '
                     'are issued')
+        if any(x.op is Op.COPY_ASYNC and x.counter == 'bulk'
+               for x in walk_stmts(tuple(t.pieces))):
+            # A second stage would put the next copy in flight on the barrier
+            # the copy before it has not completed yet, and a phase counts
+            # the bytes of both.
+            return 'its copy is a bulk copy, one in flight on its barrier'
         if not inside and not any(s is alloc for s in self.around):
             return 'the buffer is declared where the loop cannot declare it'
         from .build import _names_in
@@ -875,10 +881,12 @@ class _Rewrite:
                 accesses = tuple(replace(a, base=peel_win)
                                  if same(a.base, p.transfer.dest) else a
                                  for a in accesses)
+            # With the wait's attributes: a bulk copy's names its cursor.
             after.append(Stmt(op=Op.WAIT, args=tuple(
                 past.get(a.id, a) if isinstance(a, Value) else a
                 for a in p.wait.args), pure=False, movable=True,
-                effect=p.wait.effect, accesses=accesses))
+                effect=p.wait.effect, accesses=accesses,
+                attrs=p.wait.attrs))
             inits += peel_tokens
             carried += args
             yields += tail_tokens

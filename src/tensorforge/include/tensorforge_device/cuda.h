@@ -471,6 +471,105 @@ template <int Depth = 1> struct ClusterLaunchCursor {
 
 #endif
 
+/// A window copied into shared memory by the tensor memory accelerator: one
+/// `cp.async.bulk` for the whole window, issued by one thread of the
+/// multiplication and completing on an mbarrier in shared memory, where
+/// `cp.async` has every thread copy sixteen bytes at a time and count groups.
+///
+/// The same split as `ClusterLaunchQueue` and `ClusterLaunchCursor`: the
+/// barrier is shared, the cursor is per thread.  Every thread keeps the phase
+/// it waits for, and whether a copy is in flight at all -- which is what lets
+/// a wait that may come with nothing in flight (a masked element's drain, the
+/// drain behind a loop) be the same call as one behind a copy: with nothing
+/// pending it returns at once, where a wait on the barrier would wait for a
+/// phase no copy completes.  One copy in flight a barrier, so a cursor is the
+/// whole of a window's pipeline.
+///
+/// Inline PTX rather than `cuda::ptx`: the wrappers for the bulk copy and the
+/// parity wait arrive in different CCCL releases, and the instructions are
+/// the same on every toolkit that has sm_90 at all.
+struct BulkCursor {
+  uint64_t *barrier;
+  uint32_t phase;
+  bool pending;
+  bool leader;
+};
+
+__device__ __forceinline__ uint32_t bulk_shared_address(const void *p) {
+  return static_cast<uint32_t>(__cvta_generic_to_shared(p));
+}
+
+/// The cursor for the barrier at `barrier`, which `leader` arms: one arrival
+/// a phase, the leader's, which also announces the bytes in flight.  No
+/// thread may wait on it before a barrier behind this made the arming
+/// visible; the generator places one.
+__device__ __forceinline__ BulkCursor bulk_arm(void *barrier, bool leader) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (leader) {
+    asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::"r"(
+                     bulk_shared_address(barrier))
+                 : "memory");
+    // The copy completes the barrier through the async proxy, and the
+    // initialization went through the generic one.
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return BulkCursor{static_cast<uint64_t *>(barrier), 0u, false, leader};
+}
+
+/// `bytes` from `src` to `dst`, both on sixteen bytes and `bytes` a multiple
+/// of sixteen: the leader announces them on the barrier and issues the copy,
+/// and every thread notes that one is in flight.
+__device__ __forceinline__ void bulk_copy(BulkCursor &cursor, void *dst,
+                                          const void *src, uint32_t bytes) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (cursor.leader) {
+    // What the threads read of the window before the barrier in front of
+    // this, they read through the generic proxy; the copy writes through the
+    // async one.
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    // expect-tx before the copy that completes it, as for `post` above.
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(
+                     bulk_shared_address(cursor.barrier)),
+                 "r"(bytes)
+                 : "memory");
+    asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::"
+                 "bytes [%0], [%1], %2, [%3];" ::"r"(bulk_shared_address(dst)),
+                 "l"(src), "r"(bytes), "r"(bulk_shared_address(cursor.barrier))
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  cursor.pending = true;
+}
+
+/// The copy in flight landed, if there is one: the barrier's phase has gone
+/// past the one this thread waits for, which makes the bytes visible to it.
+__device__ __forceinline__ void bulk_wait(BulkCursor &cursor) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (cursor.pending) {
+    uint32_t done = 0;
+    do {
+      asm volatile("{\n"
+                   ".reg .pred p;\n"
+                   "mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                   "selp.u32 %0, 1, 0, p;\n"
+                   "}"
+                   : "=r"(done)
+                   : "r"(bulk_shared_address(cursor.barrier)), "r"(cursor.phase)
+                   : "memory");
+    } while (!done);
+    cursor.phase ^= 1u;
+    cursor.pending = false;
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
 ///
 /// A typedef and not a wrapper struct, and the reason is the constraint

@@ -282,16 +282,26 @@ def executed(stmts: Sequence[Stmt]) -> int:
 # Pipelines
 # --------------------------------------------------------------------------- #
 
-def memory_path(t: Transfer) -> MemSpace:
-    """The pipeline `t` moves in: the way its bytes go, which the space it
-    fills names -- global to shared memory or global to registers.
+#: The pipeline of a bulk copy (`memory_path`).
+BULK = 'bulk'
 
-    The two retire apart where the hardware keeps them apart: on NVIDIA a
-    copy into shared memory is counted in groups and a load into registers
-    is scoreboarded on its own (`asyncmem`), so neither waits for the other.
-    On AMD one counter takes both in order; there the pipelines say only how
-    far each transfer is issued ahead of the next of its kind.
+
+def memory_path(t: Transfer):
+    """The pipeline `t` moves in: the way its bytes go, which the space it
+    fills names -- global to shared memory or global to registers -- and the
+    tensor memory accelerator's bulk copy, which goes a third way.
+
+    They retire apart where the hardware keeps them apart: on NVIDIA a copy
+    into shared memory is counted in groups, a load into registers is
+    scoreboarded on its own (`asyncmem`) and a bulk copy completes on a
+    barrier of its own (`IRBuilder.copy_bulk`), so none waits for another.
+    On AMD one counter takes both of the first two in order; there the
+    pipelines say only how far each transfer is issued ahead of the next of
+    its kind.
     """
+    if any(x.op is Op.COPY_ASYNC and x.counter == 'bulk'
+           for x in walk_stmts(tuple(t.pieces))):
+        return BULK
     return t.dest.type.space
 
 

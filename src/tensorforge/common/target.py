@@ -543,6 +543,16 @@ class Target:
             return (1, 2, 4) if self.hw.vendor == 'amd' else (4, 8, 16)
         return ()
 
+    def bulk_copy_path(self) -> bool:
+        """Whether a window may go into shared memory as one bulk copy by the
+        tensor memory accelerator (`cp.async.bulk`, completing on an
+        mbarrier): CUDA from sm_90 on.  HIP on an NVIDIA part spells only the
+        `cp.async` of `copy_async_sizes`, and nothing here spells AMD's."""
+        if self.backend != 'cuda' or self.hw.vendor != 'nvidia':
+            return False
+        level = self.hw.sm_level()
+        return level is not None and level >= 90
+
     def one_wait_counter(self) -> bool:
         """Whether loads into registers and asynchronous copies retire
         through one counter, so that a wait for either counts both: AMD's

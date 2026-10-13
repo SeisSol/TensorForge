@@ -240,6 +240,12 @@ class IRBuilder:
         self._undo: List[Any] = []
         #: Whether a `transfer` is being built.
         self._in_transfer = False
+        #: token id -> the cursor of the bulk copy that issued it (`copy_bulk`)
+        self._token_bulk: Dict[int, str] = {}
+        #: What goes ahead of everything else in the body (`bulk_channel`).
+        self._prologue: List[Stmt] = []
+        #: window name -> the cursor of its bulk copies in this body
+        self._bulk_cursors: Dict[str, str] = {}
 
     # -- values ------------------------------------------------------------ #
 
@@ -894,7 +900,8 @@ class IRBuilder:
               swizzle: Optional[XorSwizzle] = None,
               identity: Any = None, stages: int = 1,
               stage: Optional[Operand] = None,
-              place_align: Optional[int] = None) -> Value:
+              place_align: Optional[int] = None,
+              lifetime: Optional[str] = None) -> Value:
         """Request a buffer *symbolically*.
 
         No offset and no address: for registers the compiler assigns those,
@@ -912,6 +919,8 @@ class IRBuilder:
         elements, beyond what every buffer of its arena starts on.
         `identity` is the buffer a window is one of the windows of, which is
         what tells two windows of one rotating buffer apart from two buffers.
+        `lifetime` `'body'` keeps the buffer occupied everywhere in the body,
+        whatever its accesses say (`bulk_channel`).
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
@@ -930,6 +939,8 @@ class IRBuilder:
                 attrs = attrs + (('stages', stages),)
             if place_align:
                 attrs = attrs + (('place_align', place_align),)
+            if lifetime is not None:
+                attrs = attrs + (('lifetime', lifetime),)
         elif arena is not None:
             attrs = (('arena', arena), ('offset', offset))
         if extern is not None:
@@ -1291,6 +1302,80 @@ class IRBuilder:
         self._token_results[tok.id] = ()
         return tok
 
+    def bulk_channel(self, window: str, leader: str,
+                     participants: Union[str, Participants] = Participants.MULT,
+                     threads: Optional[int] = None) -> Optional[str]:
+        """The cursor the bulk copies into the window `window` names go
+        through in this body (`copy_bulk`), set up the first time it is asked
+        for -- or None in a body without an arena, which has nowhere to keep
+        the barrier and no allocator to place it.
+
+        Set up ahead of everything else in the body (`finish`): the barrier a
+        copy completes on, eight bytes in the multiplication's arena that stay
+        occupied for the whole body, since the barrier is armed once and
+        counts phases from then on (`alloc`, `lifetime`); the cursor, a local
+        of every thread, which `leader` arms; and a barrier of `participants`
+        behind both, so that no thread waits on the copy's barrier before the
+        leader armed it.  The cursor is text the copies and their waits
+        spell, the way the launch queue's is -- per thread, and changed by
+        both, which no value of the IR is.
+        """
+        found = self._bulk_cursors.get(window)
+        if found is not None:
+            return found
+        if self._arena is None:
+            return None
+        cursor = self._bulk_cursors[window] = f'{window}_bulk'
+        b = self.scratch()
+        slots = max(1, 8 // self._fptype.size())
+        barrier = b.alloc(self._fptype, (slots,), MemSpace.SHARED,
+                          hint=f'{window}Barrier', extern=f'{window}_barrier',
+                          place_align=slots, lifetime='body')
+        b(f'tensorforge::BulkCursor {cursor} = '
+          f'tensorforge::bulk_arm({{0}}, {leader});', barrier,
+          accesses=(Access(Effect.WRITE, MemSpace.SHARED, barrier),),
+          fmt=True)
+        b.barrier(participants, threads=threads)
+        self._prologue += list(b.finish())
+        return cursor
+
+    def copy_bulk(self, dst: Any, src: Any, *, cursor: str,
+                  dst_index: Sequence[Operand] = (),
+                  src_index: Sequence[Operand] = (),
+                  elems: int = 1,
+                  predicate: Optional[Value] = None,
+                  hint: str = 'bk') -> Value:
+        """Issue one bulk copy of `elems` elements ``src -> dst`` through
+        `cursor` (`bulk_channel`); returns its token.
+
+        A `copy.async` like any other to every pass -- the same accesses on
+        the copy and its wait, a token one wait consumes -- but of the whole
+        window, by one thread, and counted in no group: its counter is
+        `'bulk'`, which `place_commits` leaves alone and the emitter waits
+        for on the cursor instead (`wait`).  A permuted window cannot take
+        it: the copy writes the bytes in their order.
+        """
+        swizzle = getattr(getattr(dst, 'type', None), 'swizzle', None)
+        if swizzle is not None and swizzle.width > 1:
+            raise IRError(f'a bulk copy writes {dst} in order, and it is '
+                          f'permuted ({swizzle})')
+        dst_space = self._space_of(dst)
+        src_space = self._space_of(src)
+        accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
+                    Access(Effect.WRITE, dst_space, self.alias_root(dst)))
+        tok = self.value(TOKEN, hint=hint)
+        self._emit_op(Op.COPY_ASYNC, (tok,),
+                      (dst, src) + tuple(dst_index) + tuple(src_index),
+                      pure=False, movable=True, predicate=predicate,
+                      effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                      accesses=accesses,
+                      attrs=(('ndst', len(tuple(dst_index))), ('elems', elems),
+                             ('counter', 'bulk'), ('bulk', cursor)))
+        self._token_accesses[tok.id] = accesses
+        self._token_results[tok.id] = ()
+        self._token_bulk[tok.id] = cursor
+        return tok
+
     def load_async(self, base: Any, *indices: Operand, type_=None,
                    hint: str = 'ld', space: Optional[MemSpace] = None,
                    predicate: Optional[Value] = None,
@@ -1404,10 +1489,13 @@ class IRBuilder:
             results = tuple(self.value(t, hint=tokens[0].hint or 'ld',
                                        uniform=self._token_uniform.get(tokens[0].id, True))
                             for t in types)
+        # A bulk copy is waited for on its cursor.
+        cursor = self._token_bulk.get(tokens[0].id) if tokens else None
         stmt = self._emit_op(Op.WAIT, results, tokens,
                              pure=False, movable=True,
                              effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
-                             accesses=accesses)
+                             accesses=accesses,
+                             attrs=(('bulk', cursor),) if cursor else ())
         if len(results) == 1:
             return results[0]
         if results:
@@ -2099,7 +2187,7 @@ class IRBuilder:
     def finish(self) -> Tuple[Stmt, ...]:
         if len(self._stack) != 1:
             raise IRError(f'{len(self._stack) - 1} scope(s) left open')
-        body = tuple(self._stack[0].body)
+        body = tuple(self._prologue) + tuple(self._stack[0].body)
         self._check_swizzles_are_total(body)
         return body
 

@@ -237,6 +237,9 @@ class Emitter:
         self._consts: Dict[int, str] = {}
         self._async_lex = None
         self._async_note = ''
+        #: The cursors of the body's bulk copies, which a full drain waits on
+        #: as well (`_decide_async`).
+        self._bulk_cursors: Tuple[str, ...] = ()
         self._prefetch_lex = None
         self._prefetch_note = ''
         self._inline: set = set()
@@ -676,6 +679,12 @@ class Emitter:
         """
         self._async_lex = None
         copies = [s for s in walk_stmts(body) if s.op == Op.COPY_ASYNC]
+        # A bulk copy is none of these: it is the tensor memory accelerator's,
+        # whose size is the window's, and it completes on its own barrier,
+        # which every full drain waits on as well.
+        self._bulk_cursors = tuple(sorted({c.attr('bulk') for c in copies
+                                           if c.counter == 'bulk'}))
+        copies = [c for c in copies if c.counter != 'bulk']
         if not copies:
             return
 
@@ -1172,6 +1181,10 @@ class Emitter:
             src_a = self.address(s.copy_src, s.copy_src_index)
             elems = s.attr('elems', 1)
             zfill = s.attr('zfill', 0)
+            if s.counter == 'bulk':
+                w(f'tensorforge::bulk_copy({s.attr("bulk")}, &{dst_b}[{dst_a}], '
+                  f'&{src_b}[{src_a}], {elems * self.elem_size(s.copy_dst)});')
+                return
             text = None
             if self._async_lex is not None:
                 elem = self.elem_size(s.copy_dst)
@@ -1228,6 +1241,13 @@ class Emitter:
                 texts.append(lex.wait_async_regs(n))
             if cls in ('copy', 'all') and self._async_lex is not None:
                 texts.append(lex.wait_async(n))
+            # A bulk copy on its cursor, and a full drain on every cursor of
+            # the body: one with nothing in flight returns at once.
+            if cls == 'bulk':
+                texts.append(f'tensorforge::bulk_wait({s.attr("bulk")});')
+            elif cls == 'all':
+                texts += [f'tensorforge::bulk_wait({c});'
+                          for c in self._bulk_cursors]
             for txt in texts:
                 if txt:
                     w(txt)

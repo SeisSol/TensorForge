@@ -18,7 +18,9 @@ they assume the worst about lanes -- what one lane writes, another reads:
 * **read after write**: a read of a buffer written since the last barrier.
   An asynchronous copy writes its buffer at the wait that retires it, and the
   wait makes it visible to the issuing lane only, so the wait is a write too,
-  and a barrier between the issue and the wait fences nothing of it.
+  and a barrier between the issue and the wait fences nothing of it.  A bulk
+  copy is no such write, nor its wait: every lane waits for it on the barrier
+  it completes on, which makes it visible to each (`IRBuilder.copy_bulk`).
 * **write after read**: a write over memory read since the last barrier, the
   buffer's own or another's that the allocation placed on the same bytes.
   The wait is no such write: whatever reads the buffer between the issue and
@@ -321,6 +323,11 @@ class _Pass:
         reads, writes = self.accesses(s)
         if not reads and not writes:
             return state
+        if s.attr('bulk') is not None:
+            # A bulk copy, or the wait for one: every thread waits for the
+            # copy itself, and the barrier it completes on makes the bytes
+            # visible to whoever waits on it -- no lane hands them to another.
+            writes = []
         out = state.copy()
         for key, ext, root in writes:
             out.writes[key] = (key in self.handoff, root)

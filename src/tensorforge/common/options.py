@@ -426,6 +426,20 @@ declare('issue_cover',
             'warps on a scheduler, a warp issues 150 to 200 instructions in '
             'that time, and 512 leaves room.  0 is no limit.')
 
+declare('bulk_copies',
+        default=False,
+        parse=parse_bool,
+        doc='Copy a window into shared memory as one bulk copy by the tensor '
+            'memory accelerator (`cp.async.bulk`, sm_90 and newer) instead of '
+            'the sixteen bytes a thread of `cp.async`: issued by one thread of '
+            'the multiplication, completing on an mbarrier every thread waits '
+            'on, and counted in no group.  Only a window that is one run, of a '
+            'multiple of sixteen bytes, on addresses the operand proves '
+            'sixteen-byte aligned, without padded rows or a permutation, in a '
+            'section\'s body; any other copy keeps `cp.async`.  One copy is '
+            'in flight on a barrier, so a bulk copy keeps one stage under '
+            '`enable_multibuffer`.  Off until measured against `cp.async`.')
+
 declare('enable_prefetch',
         default=False,
         parse=parse_bool,
