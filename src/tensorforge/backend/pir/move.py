@@ -50,10 +50,10 @@ that ends up further ahead of its first read than its latency needs goes back
 down among the statements, into the middle of an instruction if need be.
 
 Each statement list on its own, the innermost first: a transfer does not
-leave the guard or the scope it was written in, nor a loop -- unless the loop
-is a merged run's and the transfer is the same on every trip of it
-(`_out_of_loop`): then it runs once, ahead of the loop, and goes up the list
-there.  Across the batch loop's back edge is `wrap`'s.
+leave the guard or the scope it was written in, nor a loop -- unless the
+loop's trips are counted (`ahead.counted`) and the transfer is the same on
+every trip of it (`_out_of_loop`): then it runs once, ahead of the loop, and
+goes up the list there.  Across a back edge is `wrap`'s.
 """
 
 from __future__ import annotations
@@ -61,6 +61,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Sequence, Tuple
 
+from .ahead import counted
 from .core import (BufferType, Effect, MemSpace, Op, Stmt, accesses_conflict,
                    walk_stmts)
 from .schedule import Footprint, crosses
@@ -132,29 +133,15 @@ def _list(stmts: Sequence[Stmt], distance: int, memo: Dict[int, bool],
     return tuple(out) if changed else tuple(stmts)
 
 
-def _counted(s: Stmt) -> bool:
-    """A merged run's loop (`VariantLoop`): rolled, over constant bounds, at
-    least one trip.  What it does once a trip it does at least once, so a
-    transfer that is the same on every trip can be done once, ahead of it.
-
-    Only a run's: it is the loop whose body the macro layer writes for every
-    trip alike, operands the trips share included, and the one this is
-    measured on.
-    """
-    if s.op is not Op.FOR or not s.regions or not s.attr('rolled'):
-        return False
-    lo, hi, step = s.loop_bounds
-    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0
-            and lo < hi)
-
-
 def _out_of_loop(loop: Stmt) -> Tuple[List[Stmt], Stmt]:
     """The transfers of `loop` that fill the same buffer from the same data on
     every trip, taken out to run once ahead of it -- and `loop` without them.
 
-    A merged run's body (`VariantLoop`) stages the operands every iteration
-    shares as well as the one its counter selects, and the first are the same
-    copy every trip.  Such a transfer leaves when
+    A loop whose trips are counted (`ahead.counted`) runs at least once, so
+    what it does on every trip alike can be done once, ahead of it.  A merged
+    run's body (`VariantLoop`) is the case in point: it stages the operands
+    every iteration shares as well as the one its counter selects, and the
+    first are the same copy every trip.  Such a transfer leaves when
 
     * nothing it reads is computed in the loop: the induction, a value the
       loop carries, a binding the counter selects -- except arithmetic that
@@ -171,7 +158,7 @@ def _out_of_loop(loop: Stmt) -> Tuple[List[Stmt], Stmt]:
     across the loop; the transfer then goes up the list ahead of the loop as
     any other.
     """
-    if not _counted(loop):
+    if not counted(loop):
         return [], loop
     region = loop.regions[0]
     body = region.body

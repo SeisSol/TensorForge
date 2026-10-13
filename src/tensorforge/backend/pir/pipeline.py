@@ -199,8 +199,8 @@ class MoveLoads(Pass):
 
 
 class WrapLoads(Pass):
-    """Issue a batch loop's first transfers one element ahead, and a merged
-    run's one trip ahead (`wrap.wrap_loads`).
+    """Issue a batch loop's first transfers one element ahead, and those of
+    a loop whose trips are counted one trip ahead (`wrap.wrap_loads`).
 
     Behind everything that cleans the body up -- the transfers sit in the
     scopes the loaders open until ``flatten`` has removed them -- and ahead

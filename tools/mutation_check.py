@@ -1113,7 +1113,7 @@ GROUPS = {
          sub(MOVE, '                        if writes(a) or order[id(x)] < start:',
              '                        if False:', 1)),
         ('a loop that may not run left with its transfers ahead of it',
-         sub(MOVE, '    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0\n'
+         sub(AHEAD, '    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0\n'
                    '            and lo < hi)',
              '    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0)', 1)),
         ('a shared copy taken across the barriers of its loop',
@@ -1126,9 +1126,6 @@ GROUPS = {
         ('the comment saying what a wait retires left behind',
          sub(MOVE, '            while j >= 0 and neutral(body[j]) and id(body[j]) not in mine:',
              '            while False:', 1)),
-        ('a transfer taken out of a loop no run was rolled into',
-         sub(MOVE, "    if s.op is not Op.FOR or not s.regions or not s.attr('rolled'):",
-             "    if s.op is not Op.FOR or not s.regions:", 1)),
     ]),
 
     # A merged run's loop: the selection its counter makes, a value the
@@ -1539,19 +1536,51 @@ GROUPS = {
         ('the stage of a window not spelled',
          sub(EMIT, '                    off = off.format(*(self.operand(a) for a in s.args))',
              '                    pass', 1)),
-        ('a merged run left as it is',
-         sub(WRAP, '    for s in body:\n        if _run(s):',
-             '    for s in body:\n        if False:', 1)),
+        ('a counted loop left as it is',
+         sub(WRAP, "        if counted(s) and (kind == 'run' or transfers(s.regions[0].body)):",
+             "        if False:", 1)),
         ('the trip after the last one fetched',
          sub(WRAP, "    following = b.op('select', counter.type, inside, ahead, counter,\n"
                    "                     hint='trip')",
              "    following = ahead", 1)),
-        ('a run wrapped again as a batch loop',
-         sub(WRAP, "                or s.attr('first') is None or s.attr('rolled')):",
+        ('a counted loop wrapped again as a batch loop',
+         sub(WRAP, "                or s.attr('first') is None or id(s) in done):",
              "                or s.attr('first') is None):", 1)),
         ('a value its consumer spells twice inlined',
          sub(EMIT, '        out = [(a, times.get(i, 1)) for i, a in enumerate(s.args)',
              '        out = [(a, 1) for i, a in enumerate(s.args)', 1)),
+    ]),
+
+    # Any loop whose trips are counted, and not only a merged run's: moved in
+    # by `move` and `wrap` alike, the innermost first, a transfer's own hops
+    # left alone.
+    'counted': ('tests/test_counted_loops.py '
+                'tests/test_pir_move.py::test_any_counted_loop_loses_what_every_trip_does_alike '
+                'tests/test_pir_move.py::test_a_loop_that_may_not_run_keeps_its_transfers', [
+        ('a counted loop no run was rolled into passed over',
+         sub(AHEAD, "    if s.op is not Op.FOR or not s.regions or s.attr('next') is not None:",
+             "    if s.op is not Op.FOR or not s.regions or s.attr('next') is not None or not s.attr('rolled'):", 1)),
+        ('a loop that may not run taken for a counted one',
+         sub(AHEAD, '    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0\n'
+                    '            and lo < hi)',
+             '    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0)', 1)),
+        ('a loop over bounds known at run time taken for a counted one',
+         sub(AHEAD, '    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0\n'
+                    '            and lo < hi)',
+             '    return (isinstance(step, int) and step > 0\n'
+             '            and (not all(isinstance(x, int) for x in (lo, hi)) or lo < hi))', 1)),
+        ("a transfer's own hops wrapped",
+         sub(WRAP, "            if id(s) in pieces:\n                # A transfer's own loop",
+             "            if False:\n                # A transfer's own loop", 1)),
+        ('the outer loop first',
+         sub(WRAP, "        regions = []\n        for r in s.regions:\n            inner, changed = _runs(",
+             "        regions = []\n        for r in (() if counted(s) else s.regions):\n            inner, changed = _runs(", 1)),
+        ('a reduction without a transfer reported',
+         sub(WRAP, "        if counted(s) and (kind == 'run' or transfers(s.regions[0].body)):",
+             "        if counted(s):", 1)),
+        ('the loop itself taken for what stands around it',
+         sub(WRAP, '        around = tuple(x for x in body if x is not s)\n        regions = []',
+             '        around = tuple(body)\n        regions = []', 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

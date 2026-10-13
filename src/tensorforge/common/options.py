@@ -372,8 +372,8 @@ declare('enable_wrap_loads',
             'instruction that touches its buffer -- where '
             '`enable_move_loads` would put it in the loop unrolled once.  One '
             'buffer copy, register and shared destinations alike.  The same '
-            'within a merged run, for the operand its counter selects on the '
-            'next trip; see backend/pir/wrap.py.')
+            'in any loop over constant bounds -- a merged run, a rolled '
+            'reduction -- for its next trip; see backend/pir/wrap.py.')
 
 declare('move_distance',
         default=1,
@@ -404,13 +404,13 @@ declare('wrap_early',
             'rather than at the tail -- where its buffer is not shared with '
             'what the rest of the iteration holds, the allocator keeps it '
             'apart, so a buffer of its own buys the stretch behind that access '
-            'as cover.  In a merged run and in a loop without an element guard '
-            'every moved transfer; in a guarded batch loop a transfer into '
-            'registers, behind the last access inside the guard and, for a '
-            'masked element, in the guard\'s other arm.  A copy into shared '
-            'memory there keeps the tail, since a copy issued in one arm only '
-            'would leave the count of groups in flight differing between the '
-            'paths; `enable_multibuffer` moves it to the head instead.  No '
+            'as cover.  In a counted loop and in a batch loop without an '
+            'element guard every moved transfer; in a guarded batch loop a '
+            'transfer into registers, behind the last access inside the guard '
+            'and, for a masked element, in the guard\'s other arm.  A copy into '
+            'shared memory there keeps the tail, since a copy issued in one arm '
+            'only would leave the count of groups in flight differing between '
+            'the paths; `enable_multibuffer` moves it to the head instead.  No '
             'earlier than `issue_cover` ahead of its first read.')
 
 declare('issue_cover',

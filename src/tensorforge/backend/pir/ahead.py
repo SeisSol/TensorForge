@@ -18,6 +18,9 @@ data (`prefetch`) -- needs the same things of the loop:
 * those statements again, for the element (`Clone`);
 * an index one stride on, and an element's flag where the loop has a mask
   (`ElementLoop.successor`, `ElementLoop.word`, `ElementLoop.flag`).
+
+A loop whose trips are counted ahead of it (`counted`) is taken apart the
+same way, its trips standing in for the elements.
 """
 
 from __future__ import annotations
@@ -40,6 +43,24 @@ class Refusal(Exception):
     """Why a transfer, a hint or a loop was left as it is.  Carried rather
     than logged: the caller asked for a transformation and is entitled to
     the reason it did not happen."""
+
+
+def counted(s: Stmt) -> bool:
+    """A loop whose trips are counted ahead of it: a `for` over constant
+    bounds with at least one trip.  A merged run's loop (`VariantLoop`) is
+    one, and so is a reduction rolled by `k_roll`.  What such a loop does
+    once a trip it does at least once, its first trip is its lower bound and
+    the trip after any trip the counter one step on.
+
+    Not the batch loop, which names its successor and its first element
+    itself (`next`, `first`): its bounds are the batch's, and its trips the
+    elements of a thread.
+    """
+    if s.op is not Op.FOR or not s.regions or s.attr('next') is not None:
+        return False
+    lo, hi, step = s.loop_bounds
+    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0
+            and lo < hi)
 
 
 class ElementLoop:

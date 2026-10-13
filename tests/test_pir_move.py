@@ -407,34 +407,43 @@ def test_a_buffer_written_by_something_else_in_the_loop_keeps_its_transfer():
     assert _inside(_loop(t.moved()), r0)
 
 
+def _trip_loop(body):
+    return next(s for s in body if s.op is Op.FOR
+                and s.regions[0].args[0].hint == 'trip')
+
+
+@pytest.mark.parametrize('rolled', [True, False])
 @pytest.mark.parametrize('bounds', ['empty', 'unknown'])
-def test_a_loop_that_may_not_run_keeps_its_transfers(bounds):
+def test_a_loop_that_may_not_run_keeps_its_transfers(bounds, rolled):
     """A copy ahead of a loop of no trips would be one that never ran."""
     t = Body()
     m0 = t.binding('m0')
     count = (4 if bounds == 'empty' else
              t.b.extern_value('count', INDEX, uniform=Uniformity.MULT,
                               hint='count'))
-    with t.b.for_(4 if bounds == 'empty' else 0, count, 1,
-                  rolled=True) as trip:
+    with t.b.for_(4 if bounds == 'empty' else 0, count, 1, hint='trip',
+                  rolled=rolled) as trip:
         r0 = t.register(m0, 'r0')
         t.use(r0, trip.induction)
     t.finish()
-    assert _inside(_loop(t.moved()), r0)
+    assert _inside(_trip_loop(t.moved()), r0)
 
 
-def test_a_loop_no_run_was_rolled_into_keeps_its_transfers():
-    """Only a merged run's loop is written with the operands every trip
-    shares in it, and only that one is measured without them."""
+@pytest.mark.parametrize('unroll', [2, True, False])
+def test_any_counted_loop_loses_what_every_trip_does_alike(unroll):
+    """Not only a merged run's: a loop over constant bounds runs at least
+    once whatever wrote it -- a reduction rolled by a count, say -- and a
+    transfer the same on every trip of it is done once, ahead of it."""
     t = Body()
     m0 = t.binding('m0')
-    with t.b.for_(0, 4, 1) as trip:
+    with t.b.for_(0, 4, 1, unroll=unroll, hint='trip') as trip:
         r0 = t.register(m0, 'r0')
         t.use(r0, trip.induction)
     t.finish()
-    loop = next(s for s in t.moved() if s.op is Op.FOR
-                and s.loop_bounds == (0, 4, 1))
-    assert _inside(loop, r0)
+    out = t.moved()
+    loop = _trip_loop(out)
+    assert not _inside(loop, r0)
+    assert _first_write(out, r0) < _at(out, loop)
 
 
 @pytest.mark.parametrize('kind', ['shared', 'register'])
