@@ -60,6 +60,8 @@ class LoadInstruction:
   pass
 
 class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
+  _transfer = True
+
   def __init__(self, **kwargs):
     super(GlbToShrLoader, self).__init__(kwargs['context'])
     self._dest = kwargs['dest']
@@ -793,6 +795,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
 
 class GlbToRegLoader(MemoryInstruction, LoadInstruction):
+  _transfer = True
+
   def __init__(self,
                context: Context,
                src: Symbol,

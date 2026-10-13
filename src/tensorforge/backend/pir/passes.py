@@ -24,6 +24,7 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    accesses_conflict, collect_accesses, collect_effect,
                    def_use, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens
+from .transfers import tagged
 
 
 # --------------------------------------------------------------------------- #
@@ -742,7 +743,11 @@ def _cse_key(s: Stmt, with_predicate: bool = True):
     # accumulator seeded from an integer zero would come out as `0_i32`.  For
     # an operator whose neutral element is 0 that still computes the right
     # answer; the same merge on an infinity would not.
-    return (s.op, tuple(k(a) for a in s.args), s.text, s.attrs,
+    #
+    # The transfer a statement was written for is not: the lane index every
+    # transfer computes is the same value in each of them.
+    attrs = tuple(a for a in s.attrs if a[0] != 'transfer')
+    return (s.op, tuple(k(a) for a in s.args), s.text, attrs,
             tuple((t.layout, t.type) for t in s.target)) + (
         (None if s.predicate is None else s.predicate.id,)
         if with_predicate else ())
@@ -1976,16 +1981,20 @@ def flatten_scopes(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     one.
 
     Conservative on purpose: a region that declares a name in raw text keeps
-    its braces.
+    its braces.  One a transfer was written in hands its tag to what it held
+    (`IRBuilder.transfer`).
     """
     out: List[Stmt] = []
     for s in body:
         s = _map_regions(s, lambda __b: flatten_scopes(__b))
         if (s.op == Op.RAWBLOCK and not s.text and not s.target
-                and not s.attrs and len(s.regions) == 1
+                and all(k == 'transfer' for k, _ in s.attrs)
+                and len(s.regions) == 1
                 and not s.regions[0].args
                 and not _declares(s.regions[0].body)):
-            out.extend(s.regions[0].body)
+            tag = s.attr('transfer')
+            out.extend(s.regions[0].body if tag is None
+                       else (tagged(x, tag) for x in s.regions[0].body))
             continue
         out.append(s)
     return tuple(out)

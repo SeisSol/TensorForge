@@ -31,6 +31,7 @@ from .core import (INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Operand, Region, RegisterLayout, ScalarType, Stmt,
                    TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
                    base_space, Uniformity, SIZE)
+from .transfers import tagged
 
 
 def barrier_stmt(participants: Union[str, Participants], wave: int,
@@ -191,6 +192,9 @@ class IRBuilder:
     #: the mistake `Symbol.pir_buffer` is there to prevent, so it must not be
     #: the mechanism that makes it.
     _next_uid = 0
+    #: Monotonic as well: a transfer's tag names it in a body, and the bodies a
+    #: pass splices together come from several builders (`scratch`).
+    _next_transfer = 0
 
     def __init__(self, fptype: Datatype = Datatype.F32, context: Any = None,
                  alloc: Any = None, arena: Optional[str] = None):
@@ -234,6 +238,8 @@ class IRBuilder:
         #: Undo callbacks for state written outside the body; see
         #: `on_rollback`.
         self._undo: List[Any] = []
+        #: Whether a `transfer` is being built.
+        self._in_transfer = False
 
     # -- values ------------------------------------------------------------ #
 
@@ -1543,6 +1549,35 @@ class IRBuilder:
         where the caller knows: the arms produce it, and nothing downstream
         can derive it from the branch."""
         return _IfHandle(self, cond, tuple(types), layouts=layouts)
+
+    # -- transfers --------------------------------------------------------- #
+
+    @contextmanager
+    def transfer(self):
+        """What is built here is one transfer: the statements it adds to the
+        statement list it was opened in carry its tag (`transfers.tag`).
+
+        The passes that issue a transfer ahead of where it was written tell
+        one from the next by the tag, so that two transfers written in a row
+        into one buffer stay two.  A tag and not a region: `flatten`, `cse` and
+        `licm` work across the statements of a transfer as across any others
+        -- a region would be a wall to each of them -- and what they keep keeps
+        its tag.  Yields the tag.
+        """
+        if self._in_transfer:
+            raise IRError('a transfer opened inside a transfer')
+        IRBuilder._next_transfer += 1
+        tag = IRBuilder._next_transfer
+        scope = self._stack[-1]
+        start = len(scope.body)
+        self._in_transfer = True
+        try:
+            yield tag
+        finally:
+            self._in_transfer = False
+        if self._stack[-1] is not scope:
+            raise IRError('a transfer left the scope stack unbalanced')
+        scope.body[start:] = [tagged(s, tag) for s in scope.body[start:]]
 
     # -- speculative emission ---------------------------------------------- #
 

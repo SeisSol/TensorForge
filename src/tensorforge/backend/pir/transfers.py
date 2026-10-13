@@ -19,6 +19,14 @@ The wait that retires a copy the hardware carries out on its own is not part
 of it: the wait stays where the first read is, and the distance to it is what
 issuing the transfer early is for.
 
+A loader tags the statements of its transfer (`IRBuilder.transfer`), and a
+transfer is one tag: two loaders that fill one buffer in a row write two
+transfers, which the accesses alone would read as one.  What a statement may
+be within a transfer is still read off its accesses -- a tagged statement
+that, after the passes, reads something besides global memory ends the
+transfer as an untagged one does -- and a body nobody tagged is read off its
+accesses alone.
+
 How far a transfer is issued ahead is counted in transfers of its own
 pipeline, and what a pipeline is, is a key over the transfer
 (`PIPELINES`): by default the memory path it takes, so that a copy into
@@ -27,11 +35,24 @@ shared memory and a load into registers do not hold each other back.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence
 
 from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts
 
+
+
+def tag(s: Stmt) -> Optional[int]:
+    """The transfer `s` was written for (`IRBuilder.transfer`), if any."""
+    return s.attr('transfer')
+
+
+def tagged(s: Stmt, transfer: int) -> Stmt:
+    """`s` as a statement of the transfer `transfer`, unless it is one of
+    another already."""
+    if tag(s) is not None:
+        return s
+    return replace(s, attrs=s.attrs + (('transfer', transfer),))
 
 
 def writes(a: Access) -> bool:
@@ -133,6 +154,8 @@ class Transfer:
     stmts: List[Stmt] = field(default_factory=list)
     #: The statements that move data, without what leads them.
     pieces: List[Stmt] = field(default_factory=list)
+    #: The tag its loader gave it (`IRBuilder.transfer`), or None.
+    tag: Optional[int] = None
 
     @property
     def shared(self) -> bool:
@@ -163,7 +186,7 @@ def transfers(scope: Sequence[Stmt]) -> List[Transfer]:
     `licm` lifts out of a hop loop lands there -- and is not part of it
     either: what a pass that moves the transfer does with it is the pass's
     to decide.  Anything else between two pieces ends the transfer, and the
-    buffer is then filled by two.
+    buffer is then filled by two -- as it is by two pieces of different tags.
     """
     uses: Dict[int, int] = {}
     for x in walk_stmts(tuple(scope)):
@@ -196,6 +219,7 @@ def transfers(scope: Sequence[Stmt]) -> List[Transfer]:
         def joins(x):
             return id(x) in halves or neutral(x) or defines_whole(x, dest)
         if (current is not None and current.dest.id == dest.id
+                and current.tag == tag(s)
                 and all(joins(x) or glue(x) for x in between)):
             current.stmts.extend(x for x in between if joins(x))
             current.pieces.extend(x for x in between if id(x) in halves)
@@ -211,7 +235,7 @@ def transfers(scope: Sequence[Stmt]) -> List[Transfer]:
                 # A half stands behind something that is not the transfer's.
                 current, between, fetched = None, [], {}
                 continue
-            current = Transfer(dest)
+            current = Transfer(dest, tag=tag(s))
             current.stmts.extend(lead)
             current.pieces.extend(x for x in lead if id(x) in halves)
             out.append(current)

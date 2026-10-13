@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 from ..abstract_instruction import AbstractInstruction, _explicit_simd
 from abc import abstractmethod
+from contextlib import nullcontext
 from tensorforge.backend.writer import Writer
 from typing import Union
 from tensorforge.common.context import Context
@@ -10,6 +11,10 @@ from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.pir.core import Qual, MemSpace
 
 class MemoryInstruction(AbstractInstruction):
+  #: Whether what this writes is a transfer out of global memory, which the
+  #: pseudo-IR is told (`IRBuilder.transfer`).
+  _transfer = False
+
   def __init__(self, context: Context):
     super().__init__(context)
     self._declare = True
@@ -30,9 +35,11 @@ class MemoryInstruction(AbstractInstruction):
     # No braces around the transfer: it names nothing that could clash -- its
     # temporaries are values the shared allocator numbers -- and an opaque
     # block head is a wall the async scheduler gives up its state at and
-    # nothing reorders across.
-    sink.Comment(self.__str__())
-    self.gen_code_inner(sink)
+    # nothing reorders across.  A tag instead, which is no wall to anything.
+    begin = getattr(sink, 'transfer', None) if self._transfer else None
+    with begin() if begin is not None else nullcontext():
+      sink.Comment(self.__str__())
+      self.gen_code_inner(sink)
 
 class AbstractShrMemWrite(MemoryInstruction):
   def __init__(self, context: Context):

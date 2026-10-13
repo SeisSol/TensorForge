@@ -1263,6 +1263,42 @@ GROUPS = {
              '    if getattr(options, \'enable_wrap_loads\', False):', 1)),
     ]),
 
+    # A transfer is one tag: a loader out of global memory tags what it
+    # writes and nothing else does, two in a row stay two, and the passes
+    # ahead of the ones that move a transfer neither lose the tag nor stop at
+    # it.
+    'tags': ('tests/test_pir_transfers.py', [
+        ('two transfers into one buffer read as one',
+         sub(TRANSFERS, '                and current.tag == tag(s)\n', '', 1)),
+        ('a transfer opened inside a transfer',
+         sub(BUILD, "        if self._in_transfer:\n"
+                    "            raise IRError('a transfer opened inside a transfer')\n",
+             '', 1)),
+        ('the tag part of what cse compares',
+         sub(PASSES, "    attrs = tuple(a for a in s.attrs if a[0] != 'transfer')\n",
+             '    attrs = s.attrs\n', 1)),
+        ('a scope a transfer opened kept by flatten',
+         sub(PASSES, "                and all(k == 'transfer' for k, _ in s.attrs)\n",
+             '                and not s.attrs\n', 1)),
+        ('the tag of a scope flatten takes away dropped',
+         sub(PASSES, '            out.extend(s.regions[0].body if tag is None\n'
+                     '                       else (tagged(x, tag) for x in s.regions[0].body))\n',
+             '            out.extend(s.regions[0].body)\n', 1)),
+        ('a loader into registers writing no tag',
+         sub(LOAD, 'class GlbToRegLoader(MemoryInstruction, LoadInstruction):\n'
+                   '  _transfer = True\n',
+             'class GlbToRegLoader(MemoryInstruction, LoadInstruction):\n'
+             '  _transfer = False\n', 1)),
+        ('a loader into shared memory writing no tag',
+         sub(LOAD, 'class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):\n'
+                   '  _transfer = True\n',
+             'class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):\n'
+             '  _transfer = False\n', 1)),
+        ('the wait for a copy tagged as the copy',
+         sub(Path('src/tensorforge/backend/instructions/memory/__init__.py'),
+             '  _transfer = False\n', '  _transfer = True\n', 1)),
+    ]),
+
     # What a target is, can and prefers.
     'target': ('tests/test_target.py tests/test_nontemporal.py '
                'tests/test_prefetch.py tests/test_packed_fma.py '
