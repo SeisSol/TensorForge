@@ -102,6 +102,12 @@ flight.  A copy written as loads and stores stalls on its loads where it is
 issued, at the head as at the tail, and keeps one stage; so does a buffer used
 outside the loop, whose windows could not follow the stage there.
 
+At the head the copy follows the next element's pointer right away, and where
+that is an element's own, read out of an array, the read is what the copy
+waits for.  So such a pointer is a stage of its own (`pointer_stage`): read
+an iteration earlier still, with the element after next, and carried into
+the iteration whose copy follows it; the peel reads the first two elements'.
+
 *Issued early* (`early`), a transfer goes right behind the last access to its
 buffer in the iteration instead of to the tail.  At the tail it has the head
 of the next iteration ahead of its wait and nothing else -- in a merged run,
@@ -153,7 +159,7 @@ fills is what ``k - 1`` read.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .ahead import Clone, ElementLoop, Refusal, behind_defs, counted
@@ -168,7 +174,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                report: Optional[List[str]] = None,
                pipeline=memory_path, early: bool = False,
                cover: int = 0,
-               explicit_simd: bool = False) -> Tuple[Stmt, ...]:
+               explicit_simd: bool = False,
+               pointer_stage: bool = False) -> Tuple[Stmt, ...]:
     """`body` with the first `distance` transfers of each batch loop issued
     one element ahead, and of each loop whose trips are counted one trip
     ahead.
@@ -182,6 +189,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     pipeline, of which the first `distance` transfers each wrap.
     `explicit_simd` is whether the body is lowered as an explicit vector,
     whose loads a uniform predicate cannot hold back (`_Rewrite._guarded`).
+    `pointer_stage` carries the next element's own pointers into the
+    iteration for a transfer at the head (`_Rewrite._staged`).
 
     A batch loop is a `for` that names its successor index and its first
     element (`next`, `first`); a loop over groups of rows names its first
@@ -217,7 +226,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
             around = tuple(x for x in body if x is not s)
             rewrite = _Loop(s, allocs, scratch, report, stages, around,
                             early=early, cover=cover,
-                            explicit_simd=explicit_simd).wrap(distance,
+                            explicit_simd=explicit_simd,
+                            pointer_stage=pointer_stage).wrap(distance,
                                                               pipeline)
             before, loop, after = rewrite.run()
         except Refusal as why:
@@ -449,12 +459,16 @@ class _Loop(ElementLoop):
     def __init__(self, loop: Stmt, allocs: Dict[int, Stmt], scratch, report,
                  stages: int = 1, around: Sequence[Stmt] = (),
                  kind: Optional[str] = None, early: bool = False,
-                 cover: int = 0, explicit_simd: bool = False):
+                 cover: int = 0, explicit_simd: bool = False,
+                 pointer_stage: bool = False):
         super().__init__(loop, scratch, report, around)
         self.allocs = allocs
         self.stages = stages
         #: Whether the body is lowered as an explicit vector.
         self.explicit_simd = explicit_simd
+        #: Whether the next element's own pointers ride the loop, for a
+        #: transfer at the head (`_Rewrite._staged`).
+        self.pointer_stage = pointer_stage
         #: Whether a transfer for the next element goes right behind the last
         #: access to its buffer rather than to the tail (`_Rewrite._early`).
         self.early = early
@@ -628,6 +642,30 @@ class _Loop(ElementLoop):
 # --------------------------------------------------------------------------- #
 # Rewriting
 # --------------------------------------------------------------------------- #
+
+@dataclass
+class _Staged:
+    """The element pointers a loop carries (`_Rewrite._staged`): the
+    bindings, what the loop starts with, the values the iteration holds and
+    what it reads for the iteration after it -- one of each per binding."""
+    bindings: List[Stmt]
+    inits: List[Value] = field(default_factory=list)
+    held: List[Value] = field(default_factory=list)
+    fetched: List[Value] = field(default_factory=list)
+
+
+def _closure(s: Stmt, deps: Sequence[Stmt]) -> List[Stmt]:
+    """`s` and what of `deps` it reads, transitively, in the order of
+    `deps`, which is the order they run in."""
+    at = next(i for i, d in enumerate(deps) if d is s)
+    wanted = {v.id for v in s.operands()}
+    out = [s]
+    for d in reversed(deps[:at]):
+        if any(v.id in wanted for v in d.target):
+            out.insert(0, d)
+            wanted |= {v.id for v in d.operands()}
+    return out
+
 
 class _Rewrite:
     """A loop with its plans carried out: `(before, loop, after)`."""
@@ -839,6 +877,8 @@ class _Rewrite:
         done_peel: set = set()
         done_tail: set = set()
         heads: List[Stmt] = list(l.next_stmts)
+        staged = self._staged(taken, tail_copy, before, heads)
+        done_tail.update(id(s) for s in staged.bindings)
         tails_reg: List[Stmt] = []
         tails_shared: List[Stmt] = []
         # Issued early: in a body without an element guard anywhere behind
@@ -943,11 +983,68 @@ class _Rewrite:
             inits.append(zero)
             carried.append(stage)
             results.append(self._fresh(stage))
+        inits += staged.inits
+        carried += staged.held
+        results += [self._fresh(v) for v in staged.held]
         loop = self._body(heads, tails_reg, tails_shared, tail_flag_stmts,
                           waits, carry, own, nxt, yields, carried, inits,
                           results, top, following, early_rest,
-                          early_guard)
+                          early_guard, staged.fetched)
         return before, loop, after
+
+    def _staged(self, taken: set, tail_copy: Clone, before: List[Stmt],
+                heads: List[Stmt]) -> '_Staged':
+        """The pointers of the elements' own that a transfer at the head
+        follows, a stage of their own (`pointer_stage`): the next element's
+        is carried into the iteration, read a whole iteration ahead with the
+        element after it, and the peel reads the first two elements'.
+
+        At the head the copy for the next element follows its pointer right
+        away, and the read of the pointer array would be what the copy waits
+        for.  Behind the head -- at the tail, behind a buffer's last access
+        -- the read at the head has the body ahead of the transfer as cover,
+        and a stage would only hold a register.
+
+        Adds to `before` what the loop starts with and to `heads` what each
+        iteration reads for the iteration after it, and has `tail_copy` read
+        the carried pointer where it would have read the binding again.
+        """
+        l = self.l
+        bindings: List[Stmt] = []
+        if l.pointer_stage:
+            for p in self.plans:
+                if p.rotate and p.owns_pointer:
+                    bindings += [s for s in p.deps
+                                 if s.attr('element_pointer')
+                                 and all(s is not x for x in bindings)]
+        out = _Staged(bindings)
+        if not bindings:
+            return out
+        stmts, second = l.successor(l.first, 'ptrSecond')
+        before += stmts
+        stmts, ahead = l.successor(l.next, 'ptrAhead')
+        heads += stmts
+        second_copy = Clone(self._fresh, 'second', taken)
+        second_copy.given(l.k, second)
+        ahead_copy = Clone(self._fresh, 'ahead', taken)
+        ahead_copy.given(l.k, ahead)
+        for s in bindings:
+            owner = next(p for p in self.plans
+                         if any(s is d for d in p.deps))
+            reads = _closure(s, owner.deps)
+            starts = second_copy.stmts(reads, named=True)
+            fetch = ahead_copy.stmts(reads, named=True)
+            before += starts
+            heads += fetch
+            old = s.target[0]
+            held = self._fresh(old)
+            tail_copy.given(old, held)
+            if s.attr('extern'):
+                tail_copy.spell[str(s.attr('extern'))] = str(held)
+            out.inits.append(starts[-1].target[0])
+            out.held.append(held)
+            out.fetched.append(fetch[-1].target[0])
+        return out
 
     def _spot(self, stmts: List[Stmt], last: int, beyond: int) -> int:
         """Where in `stmts` a transfer for the next element goes: behind
@@ -968,7 +1065,8 @@ class _Rewrite:
 
     def _body(self, heads, tails_reg, tails_shared, tail_flag_stmts, waits,
               carry, own, nxt, yields, carried, inits, results, top,
-              following, early_rest=(), early_guard=()) -> Stmt:
+              following, early_rest=(), early_guard=(),
+              fetched=()) -> Stmt:
         l = self.l
         region = l.region
         moved = {id(s) for p in self.plans for s in p.transfer.stmts}
@@ -1121,6 +1219,7 @@ class _Rewrite:
             yielded += [nxt, word_ahead]
         if following is not None:
             yielded.append(following)
+        yielded += fetched
         if yielded:
             new.append(replace(terminator, args=tuple(yielded))
                        if terminator is not None

@@ -218,7 +218,8 @@ class WrapLoads(Pass):
 
     def __init__(self, scratch, distance: int = 1, stages: int = 1,
                  report: Optional[List[str]] = None, pipeline=memory_path,
-                 early: bool = False, cover: int = 0):
+                 early: bool = False, cover: int = 0,
+                 pointer_stage: bool = False):
         self._scratch = scratch
         self._distance = distance
         self._stages = stages
@@ -226,13 +227,15 @@ class WrapLoads(Pass):
         self._pipeline = pipeline
         self._early = early
         self._cover = cover
+        self._pointer_stage = pointer_stage
 
     def run(self, pc: BodyContext) -> None:
         pc.body = wrap_loads(pc.body, self._scratch, distance=self._distance,
                              stages=self._stages, report=self._report,
                              pipeline=self._pipeline, early=self._early,
                              cover=self._cover,
-                             explicit_simd=pc.explicit_simd)
+                             explicit_simd=pc.explicit_simd,
+                             pointer_stage=self._pointer_stage)
 
 
 class Prefetch(Pass):

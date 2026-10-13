@@ -362,6 +362,20 @@ class Ptr:
         return Ptr(self.mem, self.base, self.off + int(n))
 
 
+class PtrTable:
+    """An array of pointers, one per element -- an operand addressed through
+    the elements' own pointers (`Addressing.PTR_BASED`): entry `e` points at
+    an array of its own, the slots of `base@e`."""
+
+    __slots__ = ('mem', 'base')
+
+    def __init__(self, mem: Slot, base: str):
+        self.mem, self.base = mem, base
+
+    def __getitem__(self, e):
+        return Ptr(self.mem, f'{self.base}@{int(e)}')
+
+
 class Vec(tuple):
     """A short vector value: `VectorT<T, N>`, `floatN`, or a `{a, b}` list.
 
@@ -451,16 +465,29 @@ def _py(expr: str) -> str:
     # zero-initialization and is handled by `_DECL`, so it never reaches here.
     e = re.sub(r'\{\s*([^{}]+?)\s*\}', r'VEC(\1)', e)
 
+    def _subscript(at):
+        """The end of the subscript whose `[` stands just ahead of `at`."""
+        depth, j = 1, at
+        while j < len(e) and depth:
+            depth += (e[j] == '[') - (e[j] == ']')
+            j += 1
+        return j
+
     out, i = [], 0                                    # &p[i] -> ADDR(p, i)
     while i < len(e):
         m = re.compile(r'&(\w+)\[').match(e, i)
         if not m:
             out.append(e[i]); i += 1; continue
-        depth, j = 1, m.end()
-        while j < len(e) and depth:
-            depth += (e[j] == '[') - (e[j] == ']')
-            j += 1
-        out.append(f'ADDR({m.group(1)}, ' + e[m.end():j - 1] + ')')
+        j = _subscript(m.end())
+        first = e[m.end():j - 1]
+        if j < len(e) and e[j] == '[':
+            # `&p[e][i]`: entry `e` of a table of pointers, and slot `i` of
+            # the array it points at.
+            k = _subscript(j + 1)
+            out.append(f'ADDR({m.group(1)}[{first}], ' + e[j + 1:k - 1] + ')')
+            i = k
+            continue
+        out.append(f'ADDR({m.group(1)}, ' + first + ')')
         i = j
     e = ''.join(out)
     e = e.replace('true', 'True').replace('false', 'False')
@@ -968,6 +995,11 @@ def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
         'blockDim': type('D', (), {'x': lanes, 'y': mults, 'z': 1})(),
         'gridDim': type('G', (), {'x': 1, 'y': 1, 'z': 1})(),
     }
+    # An operand declared a pointer to pointers is a table of them, one per
+    # element.
+    for name in re.findall(r'\*\s*(?:const\s*)?\*\s*(?:__restrict__\s*)?(m\d+)\b',
+                           src):
+        env.setdefault(name, PtrTable(mem, name))
     for name in re.findall(r'\b(m\d+)\b', src):
         env.setdefault(name, Ptr(mem, name))
     for name in re.findall(r'\b(\w*_extraOffset)\b', src):

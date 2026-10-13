@@ -413,6 +413,20 @@ declare('wrap_early',
             'the paths; `enable_multibuffer` moves it to the head instead.  No '
             'earlier than `issue_cover` ahead of its first read.')
 
+declare('pointer_stage',
+        default=True,
+        parse=parse_bool,
+        doc='Read the pointer an element owns -- its entry in a pointer '
+            'array, `Addressing.PTR_BASED` -- a whole iteration before the '
+            'transfer that follows it, where `enable_multibuffer` issues that '
+            'transfer at the head of the body.  There the copy for the next '
+            'element follows its pointer right away, and the read of the '
+            'pointer array is what the copy waits for; carried in from the '
+            'iteration before, the pointer is there.  It costs a register per '
+            'pointer, and the head reads the entries of the element after '
+            'next.  Elsewhere the read at the head has the body ahead of the '
+            'transfer as cover, and nothing changes.  See backend/pir/wrap.py.')
+
 declare('issue_cover',
         default=512,
         parse=parse_int,

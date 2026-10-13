@@ -470,7 +470,8 @@ class AbstractInstruction(ABC):
                            stages=2 if options.enable_multibuffer else 1,
                            report=report, pipeline=pipeline,
                            early=options.wrap_early,
-                           cover=options.issue_cover)
+                           cover=options.issue_cover,
+                           pointer_stage=options.pointer_stage)
     if options.enable_prefetch or options.prefetch_data:
       prefetch = pir.Prefetch(builder.scratch,
                               pointers=options.enable_prefetch,

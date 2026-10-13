@@ -1230,9 +1230,9 @@ GROUPS = {
              '                           early=True,\n', 1)),
         ('the cover not reaching the wrap',
          sub(ABSTR, '                           early=options.wrap_early,\n'
-                    '                           cover=options.issue_cover)',
+                    '                           cover=options.issue_cover,\n',
              '                           early=options.wrap_early,\n'
-             '                           cover=0)', 1)),
+             '                           cover=0,\n', 1)),
     ]),
 
     # The cover a transfer keeps: down to it and no further, up to the wait
@@ -1324,8 +1324,8 @@ GROUPS = {
         ('the explicit vector not reaching wrap',
          sub(Path('src/tensorforge/backend/pir/pipeline.py'),
              '                             cover=self._cover,\n'
-             '                             explicit_simd=pc.explicit_simd)',
-             '                             cover=self._cover)', 1)),
+             '                             explicit_simd=pc.explicit_simd,\n',
+             '                             cover=self._cover,\n', 1)),
         ("a load's own predicate dropped for the flag",
          sub(WRAP, '            if held is None:\n                return cond\n',
              '            return cond\n', 1)),
@@ -1606,6 +1606,31 @@ GROUPS = {
              "        first = writer.op('select', SIZE, inside, begin, 0,\n"
              "                          hint=f'{self._group_batch()}First')",
              '        first = begin', 1)),
+    ]),
+
+    # An element's own pointer a copy at the head follows, read an iteration
+    # earlier and carried: the loop starting with the second element's, the
+    # head reading the one after next, the copy following the carried one --
+    # and only there.
+    'pointerstage': ('tests/test_pointer_stage.py '
+                     'tests/test_pir_wrap.py::test_a_pointer_the_copy_at_the_head_follows_rides_the_loop '
+                     'tests/test_pir_wrap.py::test_a_pointer_nothing_follows_at_the_head_has_no_stage', [
+        ("the loop started with the first element's pointer",
+         sub(WRAP, '        second_copy.given(l.k, second)',
+             '        second_copy.given(l.k, l.first)', 1)),
+        ("the next element's pointer read for the one after it",
+         sub(WRAP, '        ahead_copy.given(l.k, ahead)',
+             '        ahead_copy.given(l.k, l.next)', 1)),
+        ('the copy following the pointer read for this element',
+         sub(WRAP, '            tail_copy.given(old, held)\n', '', 1)),
+        ('a pointer staged for a transfer behind the head',
+         sub(WRAP, '                if p.rotate and p.owns_pointer:\n                    bindings',
+             '                if p.owns_pointer:\n                    bindings', 1)),
+        ('a table of pointers read as one array',
+         sub(ORACLE, "        env.setdefault(name, PtrTable(mem, name))\n", '', 1)),
+        ('the option not reaching the wrap',
+         sub(ABSTR, '                           pointer_stage=options.pointer_stage)',
+             '                           pointer_stage=False)', 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

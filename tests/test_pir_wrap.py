@@ -525,6 +525,65 @@ def test_a_register_transfer_keeps_its_place_beside_a_second_stage():
 
 
 # --------------------------------------------------------------------------- #
+# the pointer stage
+# --------------------------------------------------------------------------- #
+
+def _carried_pointers(loop):
+    """The pointers a loop carries -- its other carried values are tokens,
+    flag words and the stage."""
+    return [v for v in loop.iter_args if isinstance(v.type, BufferType)]
+
+
+def test_a_pointer_the_copy_at_the_head_follows_rides_the_loop():
+    """With a second stage the copy for the next element goes to the head
+    and follows its pointer there: the pointer comes in with the iteration,
+    read a whole iteration ahead with the element after it, and the peel
+    reads the second element's for the loop to start with."""
+    sec = Section(shared=True, element_pointer=True)
+    out = sec.wrap(stages=2, pointer_stage=True)
+    loop = _loop(out)
+    [held] = _carried_pointers(loop)
+    region = loop.regions[0].body
+    copies = [s for s, _ in walk(region) if s.op is Op.COPY_ASYNC]
+    assert copies and all(held in c.args for c in copies)
+    defs = _defs(out)
+    at = list(loop.iter_args).index(held)
+    fetch = defs[region[-1].args[at].id]
+    assert fetch.attr('extern') == 'ahead_glb_m0'
+    ahead = defs[fetch.args[0].id]
+    assert ahead.op == 'select' and ahead.args[2] is sec.next, (
+        'the element after next, held at the last')
+    start = defs[loop.loop_inits[at].id]
+    assert start.attr('extern') == 'second_glb_m0'
+    second = defs[start.args[0].id]
+    assert second.op == 'select' and second.args[2] is sec.first
+    # The read of the element after next stands ahead of the copy.
+    reads = [i for i, s in enumerate(region) if s is fetch]
+    first_copy = next(i for i, s in enumerate(region)
+                      if s.op is Op.COPY_ASYNC or any(
+                          x.op is Op.COPY_ASYNC for x, _ in walk((s,))))
+    assert reads and reads[0] < first_copy
+
+
+def test_without_the_stage_the_head_reads_the_next_pointer():
+    sec = Section(shared=True, element_pointer=True)
+    out = sec.wrap(stages=2)
+    assert not _carried_pointers(_loop(out))
+    assert any(s.attr('extern') == 'wrap_glb_m0' for s, _ in walk(out))
+
+
+@pytest.mark.parametrize('kwargs', [dict(shared=True, flags=False),
+                                    dict(element_pointer=True)],
+                         ids=['strided', 'at-the-tail'])
+def test_a_pointer_nothing_follows_at_the_head_has_no_stage(kwargs):
+    """Arithmetic needs no stage, and a pointer the transfer follows at
+    the tail has the whole body ahead of it."""
+    sec = Section(**kwargs)
+    out = sec.wrap(stages=2, pointer_stage=True)
+    assert not _carried_pointers(_loop(out))
+
+
+# --------------------------------------------------------------------------- #
 # the mask
 # --------------------------------------------------------------------------- #
 
