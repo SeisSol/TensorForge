@@ -49,11 +49,13 @@ def _binding(b, index, *, base=SRC, name='glb_m0', element_pointer=False,
         else ())
 
 
-def _register_transfer(b, src, dest, name, n=8):
-    # The comment the macro layer writes, in its names.
+def _register_transfer(b, src, dest, name, n=8, held=None):
+    # The comment the macro layer writes, in its names.  `held` is a predicate
+    # its loads keep to, as a ragged lane tail's do.
     b.Comment(f'{name} = load{{g>r}}(glb_m0)')
     with b.for_(0, n, 1, unroll=True) as i:
-        b.store(dest, b.load(src, i.induction, hint='g'), i.induction)
+        b.store(dest, b.load(src, i.induction, hint='g', predicate=held),
+                i.induction)
 
 
 class Section:
@@ -63,7 +65,7 @@ class Section:
                  shared=False, ahead=None, init='', second_writer=False,
                  closing_barrier=True, first=True, reread=False,
                  read_after=False, trailing=0, reg_read_after=False,
-                 late_next=False):
+                 late_next=False, held=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         count = b.extern_value('numElements0', SIZE, hint='count')
         start = b.extern_value('start', SIZE, uniform=Uniformity.MULT,
@@ -142,7 +144,9 @@ class Section:
                         if ahead == 'read':
                             b.store(out, b.load(dest, 0, hint='early'), 0)
                         self.bufs.append(dest)
-                        _register_transfer(b, src, dest, f'r{j}')
+                        lanes = (b.op('lt', BOOL, b.thread_id('x'), 4,
+                                      hint='g') if held else None)
+                        _register_transfer(b, src, dest, f'r{j}', held=lanes)
                         if second_writer:
                             b.store(dest, 2.0, 0)
                         b.store(out, b.load(dest, 3, hint='u'), j)
@@ -541,9 +545,67 @@ def test_the_flags_ride_the_loop():
     assert yielded[0] is carried[1], 'the next word becomes the own one'
 
 
+def _global_loads(stmts):
+    return [x for x, _ in walk(tuple(stmts)) if x.op is Op.LOAD
+            and any(a.space is MemSpace.GLOBAL for a in x.accesses)]
+
+
 def test_a_pointer_of_the_element_is_followed_under_its_flag():
+    """A transfer into registers takes the flag into the predicate of its
+    loads: no block around it, and zeros where the element is masked."""
     sec = Section(element_pointer=True)
     out = sec.wrap()
+    region = _loop(out).regions[0].body
+    guard = next(i for i, s in enumerate(region) if s.op is Op.IF
+                 and s.attr('guard') == 'element')
+    defs = _defs(out)
+    tail = _global_loads(region[guard + 1:])
+    assert tail and all(
+        defs[x.predicate.id].attr('extern') == 'allowed_next' for x in tail)
+    assert not any(s.op is Op.IF for s in region[guard + 1:])
+    peel = _global_loads(_ops_before_loop(out))
+    assert peel and all(
+        defs[x.predicate.id].attr('extern') == 'allowed_peel' for x in peel)
+    # The array entry itself is read at the head, unconditionally.
+    bound = [s for s in region[:guard] if s.attr('extern') == 'wrap_glb_m0']
+    assert bound
+
+
+def test_a_load_keeps_its_own_predicate_behind_the_flag():
+    """A load already held to some of the lanes is held to them and to the
+    flag."""
+    sec = Section(element_pointer=True, held=True)
+    out = sec.wrap()
+    region = _loop(out).regions[0].body
+    guard = next(i for i, s in enumerate(region) if s.op is Op.IF
+                 and s.attr('guard') == 'element')
+    defs = _defs(out)
+    tail = _global_loads(region[guard + 1:])
+    assert tail
+    for x in tail:
+        both = defs[x.predicate.id]
+        assert both.op == 'and'
+        flag, lanes = both.args
+        assert defs[flag.id].attr('extern') == 'allowed_next'
+        assert defs[lanes.id].op == 'lt'
+
+
+def test_a_copy_written_as_loads_and_stores_is_followed_in_a_block():
+    """Into shared memory, zeros would land in a window other threads read:
+    the transfer stays in a block under the flag."""
+    sec = Section(shared='sync', element_pointer=True)
+    out = sec.wrap()
+    region = _loop(out).regions[0].body
+    guard = next(i for i, s in enumerate(region) if s.op is Op.IF
+                 and s.attr('guard') == 'element')
+    tails = [s for s in region[guard + 1:] if s.op is Op.IF]
+    assert tails and all(x.predicate is None for x in _global_loads(tails))
+
+
+def test_under_the_explicit_vector_a_pointer_is_followed_in_a_block():
+    """Its loads fill a vector, which a uniform predicate does not mask."""
+    sec = Section(element_pointer=True)
+    out = sec.wrap(explicit_simd=True)
     region = _loop(out).regions[0].body
     guard = next(i for i, s in enumerate(region) if s.op is Op.IF
                  and s.attr('guard') == 'element')
@@ -551,11 +613,9 @@ def test_a_pointer_of_the_element_is_followed_under_its_flag():
     assert tails, 'the tail is not under a flag'
     defs = _defs(out)
     assert defs[tails[0].cond.id].attr('extern') == 'allowed_next'
+    assert all(x.predicate is None for x in _global_loads(tails))
     peels = [s for s in _ops_before_loop(out) if s.op is Op.IF]
     assert peels and defs[peels[0].cond.id].attr('extern') == 'allowed_peel'
-    # The array entry itself is read at the head, unconditionally.
-    bound = [s for s in region[:guard] if s.attr('extern') == 'wrap_glb_m0']
-    assert bound
 
 
 def test_without_a_mask_a_pointer_is_followed_unguarded():

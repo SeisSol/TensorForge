@@ -926,7 +926,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
           # hold the same ones.
           loops += [LeadLoop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i],
                              self._dest.lead_block(lead_pos), 1,
-                             width=self._lead_width)]
+                             width=self._lead_width,
+                             full_lane=self._full_lane_tail(i))]
         else:
           loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -939,6 +940,28 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         self._dest.store(writer, self._context, value, indices, False)
 
       write_loops(self._context, writer, loops, inner)
+
+  def _full_lane_tail(self, i) -> bool:
+    """May the ragged end of lead dimension `i` load on every lane?
+
+    Only where the lanes past the end are no rows of the tensor at all: where
+    the transfer reads the tensor's whole box along `i`, from its first row.
+    The lanes past the end of the box in its last slot are then the image
+    rounded up to whole slots, which no reader takes as data, and their loads
+    hold themselves to the lanes that have data (`Symbol._valid_access`):
+    `lane < valid ? p[i] : 0` instead of a branch around the block, with
+    zeros in the padding.  A window of the box -- a slice, one shifted off the
+    first row -- has other rows of the tensor beside it in the same slots,
+    which a resident image may hold, and keeps its guard.  At one element a
+    lane only (`LeadLoop`), and where the option allows it
+    (`Options.full_lane_tails`).
+    """
+    opts = self._context.get_user_options()
+    if not getattr(opts, 'full_lane_tails', False) or self._lead_width != 1:
+      return False
+    box = self._src.obj.get_bbox()
+    window = (self._bbox.lower()[i], self._bbox.upper()[i])
+    return window == (0, box.upper()[i]) and box.lower()[i] == 0
 
   def __str__(self) -> str:
     return f'{self._dest.name} = load{{g>r}}({self._src.name});'

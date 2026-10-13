@@ -216,6 +216,26 @@ def test_a_loop_over_groups_of_rows_is_not_wrapped(monkeypatch):
     assert 'wrap_glb_' in plain and 'peel_glb_' in plain
 
 
+@pytest.mark.parametrize("backend,arch,block", [("cuda", "sm_86", False),
+                                                ("esimd", "pvc", True)])
+def test_the_next_elements_pointer_is_followed_where_its_flag_holds(
+        backend, arch, block):
+    """`addressing_ptr_based` reads its operands through the elements' own
+    pointers, and the next element's may be one a masked element does not
+    have.  Into registers the flag is in the predicate of each load; under
+    the explicit vector, whose loads fill a vector a uniform predicate does
+    not mask, the transfer is in a block."""
+    kernel = _generate("addressing_ptr_based.py", backend, arch)
+    lines = kernel.splitlines()
+    loads = [i for i, l in enumerate(lines)
+             if "r0 = load{g>r}(wrap_glb_" in l]
+    assert loads
+    blocks = [i for i in loads if "if (allowed_next)" in lines[i - 1]]
+    assert bool(blocks) == block
+    if not block:
+        assert re.search(r"allowed_next \? \(__ldcg\(&wrap_glb_", kernel)
+
+
 # ---------------------------------------------------------------------- #
 # pipelines
 # ---------------------------------------------------------------------- #

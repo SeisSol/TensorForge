@@ -231,7 +231,8 @@ class WrapLoads(Pass):
         pc.body = wrap_loads(pc.body, self._scratch, distance=self._distance,
                              stages=self._stages, report=self._report,
                              pipeline=self._pipeline, early=self._early,
-                             cover=self._cover)
+                             cover=self._cover,
+                             explicit_simd=pc.explicit_simd)
 
 
 class Prefetch(Pass):

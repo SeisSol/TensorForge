@@ -92,6 +92,30 @@ def test_spmd_keeps_only_the_memory_to_the_tail():
     assert not re.search(r'v\d+_g \? \(glb_m0\[', off)
 
 
+def _guarded_reads(kernel, operand):
+    """Branches on a lane guard with a read of `operand` right inside."""
+    lines = kernel.splitlines()
+    return sum(1 for i, line in enumerate(lines)
+               if re.search(r'if \(v\d+_g\) \{', line)
+               and any(f'{operand}[' in x for x in lines[i + 1:i + 5]))
+
+
+def test_a_transfer_into_registers_reads_its_tail_on_every_lane():
+    """`chain_five`: a 56-row operand into registers, on 32 lanes.  Off, the
+    tail block of the transfer is a loop in a branch on the lane; on, the loop
+    stands alone and reads `lane < 24 ? p[i] : 0`, zeros into the image's
+    padding."""
+    mod = _module('chain_five')
+    off = _kernel(mod.descr_list(), backend='cuda', arch='sm_86',
+                  full_lane_tails=False)
+    on = _kernel(mod.descr_list(), backend='cuda', arch='sm_86',
+                 full_lane_tails=True)
+    folded = re.compile(r'v\d+_g \? \(__ldcg\(&peel_glb_m0\[')
+    assert folded.search(on) and not folded.search(off)
+    assert _guarded_reads(off, 'peel_glb_m0') and not _guarded_reads(
+        on, 'peel_glb_m0')
+
+
 def _slice_accumulation():
     """`t = A v` over 64 rows, then `t[0:40] += B w` into the image that
     already holds `t`, then `D = t`: the accumulator of the second product is

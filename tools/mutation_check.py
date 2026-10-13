@@ -1299,6 +1299,44 @@ GROUPS = {
              '  _transfer = False\n', '  _transfer = True\n', 1)),
     ]),
 
+    # A transfer into registers without a branch: its ragged tail read on
+    # every lane, and the next element's flag in the predicate of its loads
+    # -- ahead of the predicate they have, into registers only, and not under
+    # the explicit vector.
+    'ternary': ('tests/test_pir_wrap.py '
+                'tests/test_full_lane_tails.py::test_a_transfer_into_registers_reads_its_tail_on_every_lane '
+                'tests/test_full_lane_tails.py::test_a_lead_origin_shift_keeps_the_tail_narrow '
+                'tests/test_wrap_loads.py::test_the_next_elements_pointer_is_followed_where_its_flag_holds', [
+        ('the tail of a transfer into registers in a branch',
+         sub(LOAD, '                             full_lane=self._full_lane_tail(i))]',
+             '                             full_lane=False)]', 1)),
+        ('the loader reading its tail on every lane whatever the option',
+         sub(LOAD, "    if not getattr(opts, 'full_lane_tails', False) or self._lead_width != 1:\n",
+             '    if self._lead_width != 1:\n', 1)),
+        ('a window of the box read on every lane',
+         sub(LOAD, '    return window == (0, box.upper()[i]) and box.lower()[i] == 0\n',
+             '    return True\n', 1)),
+        ('the flag in a block around a transfer into registers',
+         sub(WRAP, '            predicated = (None if self.l.explicit_simd\n'
+                   '                          else self._predicated(stmts, cond))\n',
+             '            predicated = None\n', 1)),
+        ('the flag in the predicate under the explicit vector',
+         sub(WRAP, '            predicated = (None if self.l.explicit_simd\n'
+                   '                          else self._predicated(stmts, cond))\n',
+             '            predicated = self._predicated(stmts, cond)\n', 1)),
+        ('the explicit vector not reaching wrap',
+         sub(Path('src/tensorforge/backend/pir/pipeline.py'),
+             '                             cover=self._cover,\n'
+             '                             explicit_simd=pc.explicit_simd)',
+             '                             cover=self._cover)', 1)),
+        ("a load's own predicate dropped for the flag",
+         sub(WRAP, '            if held is None:\n                return cond\n',
+             '            return cond\n', 1)),
+        ('a copy into shared memory predicated load by load',
+         sub(WRAP, '                if writes(a) and a.space is not MemSpace.REGISTER:\n'
+                   '                    return None\n', '', 1)),
+    ]),
+
     # What a target is, can and prefers.
     'target': ('tests/test_target.py tests/test_nontemporal.py '
                'tests/test_prefetch.py tests/test_packed_fma.py '

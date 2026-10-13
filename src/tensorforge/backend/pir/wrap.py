@@ -153,7 +153,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                distance: int = 1, stages: int = 1,
                report: Optional[List[str]] = None,
                pipeline=memory_path, early: bool = False,
-               cover: int = 0) -> Tuple[Stmt, ...]:
+               cover: int = 0,
+               explicit_simd: bool = False) -> Tuple[Stmt, ...]:
     """`body` with the first `distance` transfers of each batch loop issued
     one element ahead, and of each merged run's loop one trip ahead.
 
@@ -164,6 +165,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     collects one line per transfer: `+` and the buffer where it moved, `-`
     and the reason where it did not.  `pipeline` keys a transfer to its
     pipeline, of which the first `distance` transfers each wrap.
+    `explicit_simd` is whether the body is lowered as an explicit vector,
+    whose loads a uniform predicate cannot hold back (`_Rewrite._guarded`).
 
     A batch loop is a `for` that names its successor index and its first
     element (`next`, `first`).  A traversal that has no first element to
@@ -197,8 +200,9 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
         try:
             around = tuple(x for x in body if x is not s)
             rewrite = _Loop(s, allocs, scratch, report, stages, around,
-                            early=early,
-                            cover=cover).wrap(distance, pipeline)
+                            early=early, cover=cover,
+                            explicit_simd=explicit_simd).wrap(distance,
+                                                              pipeline)
             before, loop, after = rewrite.run()
         except Refusal as why:
             if report is not None:
@@ -416,10 +420,13 @@ class _Loop(ElementLoop):
 
     def __init__(self, loop: Stmt, allocs: Dict[int, Stmt], scratch, report,
                  stages: int = 1, around: Sequence[Stmt] = (),
-                 run: bool = False, early: bool = False, cover: int = 0):
+                 run: bool = False, early: bool = False, cover: int = 0,
+                 explicit_simd: bool = False):
         super().__init__(loop, scratch, report, around)
         self.allocs = allocs
         self.stages = stages
+        #: Whether the body is lowered as an explicit vector.
+        self.explicit_simd = explicit_simd
         #: Whether a transfer for the next element goes right behind the last
         #: access to its buffer rather than to the tail (`_Rewrite._early`).
         self.early = early
@@ -598,9 +605,20 @@ class _Rewrite:
         groups in flight can tell, and the loop carrying its token would lose
         the steady state its waits are counted against.  The predicate is a
         branch per copy all the same, so a pointer is still not followed
-        where it may not be.  Everything else goes into one block.
+        where it may not be.
+
+        A transfer into registers takes it into the predicate of each of its
+        loads (`_predicated`): a masked element loads zeros it never reads,
+        and the transfer is one stretch without a branch, which the compiler
+        may schedule into what stands around it.  Not under the explicit
+        vector, whose loads fill a vector that a uniform predicate does not
+        mask.  Everything else goes into one block.
         """
         if not any(x.op is Op.COPY_ASYNC for x in walk_stmts(tuple(stmts))):
+            predicated = (None if self.l.explicit_simd
+                          else self._predicated(stmts, cond))
+            if predicated is not None:
+                return predicated
             b = self.l.scratch()
             with b.if_(cond):
                 for s in stmts:
@@ -616,6 +634,48 @@ class _Rewrite:
                     for r in s.regions))
             return s
         return [predicate(s) for s in stmts]
+
+    def _predicated(self, stmts: List[Stmt],
+                    cond: Value) -> Optional[List[Stmt]]:
+        """`stmts` with `cond` in the predicate of every load from global
+        memory, ahead of the predicate it has -- or None where they are not a
+        transfer into registers that can take it: one that writes anything
+        else, reads global memory other than by a load, or loads under a
+        predicate it computes itself, which `cond` could not be put ahead of.
+        """
+        every = list(walk_stmts(tuple(stmts)))
+        own = {v.id for x in every for v in x.target}
+        for x in every:
+            for a in x.accesses:
+                if writes(a) and a.space is not MemSpace.REGISTER:
+                    return None
+                if (a.space is MemSpace.GLOBAL and not writes(a)
+                        and x.op is not Op.LOAD):
+                    return None
+            if (x.op is Op.LOAD and isinstance(x.predicate, Value)
+                    and x.predicate.id in own):
+                return None
+        b = self.l.scratch()
+        both: Dict[int, Value] = {}
+
+        def under(held: Optional[Value]) -> Value:
+            if held is None:
+                return cond
+            if held.id not in both:
+                both[held.id] = b.op('and', BOOL, cond, held, hint='g')
+            return both[held.id]
+
+        def predicate(s: Stmt) -> Stmt:
+            if s.op is Op.LOAD and any(a.space is MemSpace.GLOBAL
+                                       for a in s.accesses):
+                return replace(s, predicate=under(s.predicate))
+            if s.regions:
+                return replace(s, regions=tuple(
+                    replace(r, body=tuple(predicate(x) for x in r.body))
+                    for r in s.regions))
+            return s
+        out = [predicate(s) for s in stmts]
+        return list(b.finish()) + out
 
     def _windows(self, p: _Plan, stage: Value, following: Value,
                  peel_copy: Clone, tail_copy: Clone
