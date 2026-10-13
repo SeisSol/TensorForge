@@ -1238,6 +1238,31 @@ GROUPS = {
              '                           cover=0)', 1)),
     ]),
 
+    # The cover a transfer keeps: down to it and no further, up to the wait
+    # for a copy, past only what it may cross and above a transfer of its
+    # own pipeline; and the option reaching `move` through the pipeline.
+    'cover': ('tests/test_pir_move.py tests/test_issue_cover.py', [
+        ('a capped transfer taken past one of its own pipeline',
+         sub(MOVE, '        if other is not None and other != k and keys[other] == keys[k]:\n'
+                   '            break\n', '', 1)),
+        ('a capped transfer taken past what it may not cross',
+         sub(MOVE, '        if not (register and x.op is Op.BARRIER and not x.regions) and not (\n'
+                   '                crosses(moving, footprint(x))):\n'
+                   '            break\n', '', 1)),
+        ('a capped transfer taken below its cover',
+         sub(MOVE, '        if ahead - units[n] < cover:\n            break\n', '', 1)),
+        ('a copy capped against its first read rather than its wait',
+         sub(MOVE, '    copied = bool(t.tokens())\n', '    copied = False\n', 1)),
+        ('the cap left out of the pipeline',
+         sub(Path('src/tensorforge/backend/pir/pipeline.py'),
+             '    if move is not None and move.cover > 0:\n', '    if False:\n', 1)),
+        ('the cover not reaching move',
+         sub(ABSTR, '                           cover=options.issue_cover)\n'
+                    '    if getattr(options, \'enable_wrap_loads\', False):',
+             '                           cover=0)\n'
+             '    if getattr(options, \'enable_wrap_loads\', False):', 1)),
+    ]),
+
     # What a target is, can and prefers.
     'target': ('tests/test_target.py tests/test_nontemporal.py '
                'tests/test_prefetch.py tests/test_packed_fma.py '

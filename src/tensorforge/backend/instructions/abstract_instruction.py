@@ -463,7 +463,8 @@ class AbstractInstruction(ABC):
     kept: list = []
     pipeline = pipelines(options.transfer_pipelines)
     if getattr(options, 'enable_move_loads', False):
-      move = pir.MoveLoads(distance=options.move_distance, pipeline=pipeline)
+      move = pir.MoveLoads(distance=options.move_distance, pipeline=pipeline,
+                           cover=options.issue_cover)
     if getattr(options, 'enable_wrap_loads', False):
       wrap = pir.WrapLoads(builder.scratch, distance=options.move_distance,
                            stages=2 if options.enable_multibuffer else 1,

@@ -558,3 +558,119 @@ def test_a_load_into_registers_passes_a_copy_in_a_pipeline_of_its_own():
     verify(two)
     assert _issue(one, r2) > min(_reads(one, r0))
     assert _issue(two, r0) < _issue(two, r2) < min(_reads(two, r0))
+
+
+# --------------------------------------------------------------------------- #
+# the cover a transfer needs
+# --------------------------------------------------------------------------- #
+
+def _far():
+    """A load into registers written in front of its read, thirty statements
+    behind the transfer before it: `move` issues it past all of them."""
+    t = Body()
+    m0, m1 = t.binding('m0'), t.binding('m1')
+    r1 = t.register(m1, 'r1')
+    t.use(r1, 1)
+    for n in range(30):
+        t.b.store(t.out, float(n), 16 + n)
+    r0 = t.register(m0, 'r0')
+    t.use(r0)
+    t.finish()
+    return t, r0, r1
+
+
+def _ahead(body, buf):
+    """The cover of the transfer into `buf`: what runs between its last
+    statement and the first read of what it filled."""
+    from tensorforge.backend.pir.transfers import executed
+    last = max(i for i, s in enumerate(body)
+               if any(a.writes and a.base is buf
+                      for x in walk_stmts((s,)) for a in x.accesses))
+    read = min(_reads(body, buf))
+    return executed(body[last + 1:read])
+
+
+def test_a_transfer_with_more_cover_than_it_needs_goes_back_down():
+    from tensorforge.backend.pir.move import cap_cover
+    t, r0, r1 = _far()
+    moved = move_loads(t.body, distance=2)
+    assert _ahead(moved, r0) >= 30, 'move issues r0 past the thirty'
+    capped = cap_cover(moved, 10)
+    verify(capped)
+    assert 10 <= _ahead(capped, r0) <= 11
+    assert len(capped) == len(moved)
+
+
+def test_a_cap_of_zero_leaves_the_body_as_it_is():
+    from tensorforge.backend.pir.move import cap_cover
+    t, r0, r1 = _far()
+    moved = move_loads(t.body, distance=2)
+    assert cap_cover(moved, 0) is moved
+
+
+def test_a_capped_transfer_stays_above_one_of_its_own_pipeline():
+    """Going down, a transfer keeps the order of its pipeline: it stops
+    above the next transfer of its own kind."""
+    from tensorforge.backend.pir.move import cap_cover
+    t = Body()
+    m0, m1 = t.binding('m0'), t.binding('m1')
+    r0 = t.register(m0, 'r0')
+    r1 = t.register(m1, 'r1')
+    for n in range(30):
+        t.b.store(t.out, float(n), 16 + n)
+    t.use(r1, 1)
+    t.use(r0)
+    t.finish()
+    capped = cap_cover(t.body, 5)
+    verify(capped)
+    assert _first_write(capped, r0) < _first_write(capped, r1)
+
+
+def test_a_capped_copy_goes_down_to_its_cover_ahead_of_its_wait():
+    """A copy the hardware carries out on its own is wanted at its wait,
+    not at the read behind it: the cover it keeps runs up to the wait."""
+    from tensorforge.backend.pir.move import cap_cover
+    from tensorforge.backend.pir.transfers import executed
+    t = Body()
+    b = t.b
+    m0 = t.binding('m0')
+    s0 = b.alloc(F32, (64,), MemSpace.SHARED, hint='s0', extern='s0')
+    b.Comment('s0 = load{g>s}(...)')
+    b.mark('defines', s0)
+    lane = b.thread_id('x')
+    token = b.copy_async(s0, m0, dst_index=(lane,), src_index=(lane,))
+    for n in range(30):
+        b.store(t.out, float(n), 16 + n)
+    b.Comment('wait(s0 = load{g>s}(...))')
+    b.wait(token)
+    for n in range(10):
+        b.store(t.out, float(n), 50 + n)
+    t.use(s0)
+    t.finish()
+    capped = cap_cover(t.body, 10)
+    verify(capped)
+    copy = next(i for i, s in enumerate(capped) if s.op is Op.COPY_ASYNC)
+    wait = next(i for i, s in enumerate(capped) if s.op is Op.WAIT)
+    assert 10 <= executed(capped[copy + 1:wait]) <= 11
+
+
+def test_a_capped_transfer_stays_above_a_write_of_what_it_reads():
+    """Going down, a transfer passes only what it may cross: a store into
+    the memory it loads from holds it right above."""
+    from tensorforge.backend.pir.move import cap_cover
+    t = Body()
+    m0 = t.binding('m0', writable=True)
+    r0 = t.register(m0, 'r0')
+    for n in range(10):
+        t.b.store(t.out, float(n), 16 + n)
+    t.b.store(m0, 1.0, 0)
+    for n in range(20):
+        t.b.store(t.out, float(n), 26 + n)
+    t.use(r0)
+    t.finish()
+    capped = cap_cover(t.body, 5)
+    verify(capped)
+    # A global access is recorded against the operand it goes through.
+    write = next(i for i, s in enumerate(capped) if s.op is Op.STORE
+                 and any(a.base == 'm0' and a.writes for a in s.accesses))
+    assert _first_write(capped, r0) == write - 1

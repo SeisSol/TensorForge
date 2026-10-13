@@ -44,6 +44,11 @@ the first: one copy in flight, the pipeline of copies drained at every wait.
 the arithmetic its addresses are computed from, where those stand above it --
 a transfer that stopped for them would hardly move.
 
+*How much is enough* is `cover`, behind `flatten` (`cap_cover`): moved over
+instructions as wholes, a transfer that passes one passes all of it, and one
+that ends up further ahead of its first read than its latency needs goes back
+down among the statements, into the middle of an instruction if need be.
+
 Each statement list on its own, the innermost first: a transfer does not
 leave the guard or the scope it was written in, nor a loop -- unless the loop
 is a merged run's and the transfer is the same on every trip of it
@@ -59,7 +64,8 @@ from typing import Dict, List, Sequence, Tuple
 from .core import (BufferType, Effect, MemSpace, Op, Stmt, accesses_conflict,
                    walk_stmts)
 from .schedule import Footprint, crosses
-from .transfers import Transfer, glue, memory_path, neutral, transfers, writes
+from .transfers import (Transfer, executed, glue, memory_path, neutral,
+                        transfers, writes)
 
 
 def move_loads(body: Tuple[Stmt, ...], distance: int = 1,
@@ -327,3 +333,118 @@ def _hoist(out: List[Stmt], t: Transfer, i: int, index: Dict[int, int],
     if all(a is b for a, b in zip(moved, out)):
         return None
     return moved
+
+
+# --------------------------------------------------------------------------- #
+# The cover a transfer needs
+# --------------------------------------------------------------------------- #
+
+def cap_cover(body: Tuple[Stmt, ...], cover: int,
+              pipeline=memory_path) -> Tuple[Stmt, ...]:
+    """`body` with every transfer issued more than `cover` ahead of its first
+    read -- its wait, for a copy the hardware carries out on its own -- issued
+    later, down to `cover` ahead of it.
+
+    `move` runs over the instructions as wholes, so a transfer that passes one
+    passes all of it: the load of an accumulation's destination, written in
+    front of the last product, goes up past every product before it and holds
+    its registers through all of them.  Behind `flatten` the statements of an
+    instruction stand on their own, and the transfer goes back down among
+    them, into the middle of a product if that is where its cover is enough.
+    Cover is what a load's latency needs and no more (`executed`); anything
+    beyond holds the buffer.
+
+    It goes down past what it may cross (`schedule.crosses`), and stops above
+    a transfer of its own pipeline, whose order it keeps.  `cover` 0 leaves
+    the body as it is.
+    """
+    if cover <= 0:
+        return body
+    return _cap_list(body, cover, pipeline)
+
+
+def _cap_list(stmts: Sequence[Stmt], cover: int,
+              pipeline) -> Tuple[Stmt, ...]:
+    out = list(stmts)
+    changed = False
+    found = transfers(out)
+    pieces = {id(x) for t in found for x in t.stmts}
+    for i, s in enumerate(out):
+        if s.regions and id(s) not in pieces:
+            regions = tuple(replace(r, body=_cap_list(r.body, cover, pipeline))
+                            for r in s.regions)
+            if any(n.body is not r.body for n, r in zip(regions, s.regions)):
+                out[i] = replace(s, regions=regions)
+                changed = True
+    if changed:
+        found = transfers(out)
+    if not found:
+        return tuple(out) if changed else tuple(stmts)
+    keys = [pipeline(t) for t in found]
+    owner = {id(x): j for j, t in enumerate(found) for x in t.stmts}
+    prints: Dict[int, Footprint] = {}
+    for k in reversed(range(len(found))):
+        moved = _sink(out, found[k], k, keys, owner, cover, prints)
+        if moved is not None:
+            out = moved
+            changed = True
+    return tuple(out) if changed else tuple(stmts)
+
+
+def _consumes(s: Stmt, t: Transfer, copied: bool) -> bool:
+    """Whether `s` is where `t`'s buffer is first wanted: the wait for its
+    copies, or a read of what it filled."""
+    for x in walk_stmts((s,)):
+        if copied and x.op is not Op.WAIT:
+            continue
+        if any(a.base is not None and getattr(a.base, 'id', None) == t.dest.id
+               and (copied or not writes(a)) for a in x.accesses):
+            return True
+    return False
+
+
+def _sink(out: List[Stmt], t: Transfer, k: int, keys: Sequence, owner,
+          cover: int, prints: Dict[int, Footprint]):
+    """`out` with transfer `t` down to `cover` ahead of its first read, or
+    None where it stays."""
+    def footprint(s: Stmt) -> Footprint:
+        found = prints.get(id(s))
+        if found is None:
+            found = prints[id(s)] = Footprint.of(s)
+        return found
+
+    mine = {id(x) for x in t.stmts}
+    at = [j for j, x in enumerate(out) if id(x) in mine]
+    first, last = at[0], at[-1]
+    unit = out[first:last + 1]
+    copied = bool(t.tokens())
+    consumer = next((j for j in range(last + 1, len(out))
+                     if _consumes(out[j], t, copied)), None)
+    if consumer is None:
+        return None
+    units = [executed((x,)) for x in out[last + 1:consumer]]
+    ahead = sum(units)
+    if ahead <= cover:
+        return None
+    moving = footprint(unit[0])
+    for x in unit[1:]:
+        moving = moving | footprint(x)
+    register = t.dest.type.space is MemSpace.REGISTER
+    land = last + 1
+    for n, x in enumerate(out[last + 1:consumer]):
+        if ahead - units[n] < cover:
+            break
+        other = owner.get(id(x))
+        if other is not None and other != k and keys[other] == keys[k]:
+            break
+        if not (register and x.op is Op.BARRIER and not x.regions) and not (
+                crosses(moving, footprint(x))):
+            break
+        ahead -= units[n]
+        land = last + 2 + n
+    # Comments lead what follows them: the transfer does not come between.
+    while land > last + 1 and neutral(out[land - 1]):
+        land -= 1
+    if land == last + 1:
+        return None
+    return out[:first] + out[last + 1:land] + unit + out[land:]

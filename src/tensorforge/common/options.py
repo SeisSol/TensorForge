@@ -416,9 +416,11 @@ declare('wrap_early',
 declare('issue_cover',
         default=512,
         parse=parse_int,
-        doc='The most cover a transfer issued early (`wrap_early`) is given, '
-            'in the units the emitter counts code in, a counted loop\'s body '
-            'once per trip: it goes no further ahead of its first read.  '
+        doc='The most cover a transfer is issued with, in the units the '
+            'emitter counts code in, a counted loop\'s body once per trip: one '
+            '`move` takes further ahead of its first read goes back down '
+            'behind `flatten`, and one issued early (`wrap_early`) goes no '
+            'further ahead.  '
             'Cover beyond what hides a load\'s latency only holds its buffer: '
             'at some 600 to 800 cycles for a load from global memory and four '
             'warps on a scheduler, a warp issues 150 to 200 instructions in '

@@ -34,7 +34,7 @@ from .asyncmem import schedule_async
 from .allocate import allocate
 from .barriers import place_barriers
 from .core import Stmt, dump
-from .move import move_loads
+from .move import cap_cover, move_loads
 from .transfers import memory_path
 from .prefetch import prefetch_hints
 from .shards import shard_loads
@@ -183,9 +183,15 @@ class MoveLoads(Pass):
     name = 'move'
     is_transform = True
 
-    def __init__(self, distance: int = 1, pipeline=memory_path):
+    def __init__(self, distance: int = 1, pipeline=memory_path,
+                 cover: int = 0):
         self._distance = distance
         self._pipeline = pipeline
+        #: The most cover a transfer keeps behind `flatten` (`cap_cover`).
+        self.cover = cover
+
+    def cap(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        return cap_cover(body, self.cover, self._pipeline)
 
     def run(self, pc: BodyContext) -> None:
         pc.body = move_loads(pc.body, distance=self._distance,
@@ -351,6 +357,11 @@ def standard_pipeline(debug: str = '',
     in the anonymous scopes the loaders open until ``flatten`` has removed
     them.
 
+    ``cap``, where ``move`` asks for one, runs right behind ``flatten``: there
+    the statements of an instruction stand on their own, and a transfer
+    issued further ahead of its first read than its cover needs goes back
+    down among them (`move.cap_cover`).
+
     ``prefetch``, where asked for, runs right behind ``flatten``: the hints
     for the next element are statements of the body like any other, and go
     through the cleanup with it (`Prefetch`).
@@ -367,6 +378,9 @@ def standard_pipeline(debug: str = '',
     if move is not None:
         pm.add(move)
     pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))
+    if move is not None and move.cover > 0:
+        pm.add(Rewrite('cap', move.cap, requires=('flat',),
+                       preserves=('flat',)))
     if prefetch is not None:
         pm.add(prefetch)
     pm.add(Rewrite('if_convert',
