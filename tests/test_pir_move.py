@@ -64,6 +64,7 @@ class Body:
         b.mark('defines', dest)
         lane = b.thread_id('x')
         token = b.copy_async(dest, src, dst_index=(lane,), src_index=(lane,))
+        b.Comment(f'wait({name} = load{{g>s}}(...))')
         b.wait(token)
         return dest
 
@@ -296,6 +297,157 @@ def test_a_transfer_does_not_leave_its_list():
     guard = next(s for s in out if s.op is Op.IF)
     assert any(s.op is Op.FOR for s in guard.regions[0].body), (
         'the transfer is still inside the guard')
+
+
+# --------------------------------------------------------------------------- #
+# out of a counted loop
+# --------------------------------------------------------------------------- #
+
+def _loop(body):
+    return next(s for s in body if s.op is Op.FOR and s.attr('rolled'))
+
+
+def _inside(loop, buf):
+    """Whether anything in `loop` still writes `buf`."""
+    return any(a.writes and a.base is buf
+               for x in walk_stmts(loop.regions[0].body) for a in x.accesses)
+
+
+def test_a_transfer_the_same_every_trip_leaves_the_loop():
+    """A merged run's body copies an operand every iteration shares as well
+    as the one its counter selects; the first is one copy, ahead of the
+    loop, and the reads in the loop stay where they are."""
+    t = Body()
+    m0, m1 = t.binding('m0'), t.binding('m1')
+    with t.b.for_(0, 4, 1, rolled=True) as trip:
+        r0 = t.register(m0, 'r0')
+        t.use(r0, trip.induction)
+        r1 = t.register(m1, 'r1', index=trip.induction)
+        t.use(r1, trip.induction)
+    t.finish()
+    out = t.moved()
+    loop = _loop(out)
+    assert _first_write(out, r0) < _at(out, loop)
+    assert not _inside(loop, r0)
+    assert _inside(loop, r1), 'the copy the counter selects stays'
+    assert _reads(loop.regions[0].body, r0), 'and so do the reads'
+
+
+def test_its_declaration_and_its_arithmetic_leave_with_it():
+    t = Body()
+    m0 = t.binding('m0')
+    base = t.b.extern_value('base', INDEX, uniform=Uniformity.MULT,
+                            hint='base')
+    with t.b.for_(0, 4, 1, rolled=True) as trip:
+        offset = t.b.op('add', INDEX, base, 8, hint='offset')
+        r0 = t.register(m0, 'r0', index=offset)
+        t.use(r0, trip.induction)
+    t.finish()
+    out = t.moved()
+    loop = _loop(out)
+    alloc = next(i for i, s in enumerate(out) if s.op is Op.ALLOC
+                 and s.target[0] is r0)
+    arithmetic = next(i for i, s in enumerate(out) if offset in s.target)
+    assert alloc < _first_write(out, r0) < _at(out, loop)
+    assert arithmetic < _first_write(out, r0)
+
+
+def test_a_copy_leaves_with_its_wait():
+    """Nothing the hardware carries out on its own is in flight across the
+    loop: the wait goes right behind the copy -- and the comment saying what
+    it waits for with it."""
+    t = Body()
+    m0 = t.binding('m0')
+    with t.b.for_(0, 4, 1, rolled=True) as trip:
+        s0 = t.shared(m0, 's0')
+        t.use(s0, trip.induction)
+    t.finish()
+    out = t.moved()
+    loop = _loop(out)
+    copy = next(i for i, s in enumerate(out) if s.op is Op.COPY_ASYNC)
+    wait = next(i for i, s in enumerate(out) if s.op is Op.WAIT)
+    assert copy < wait < _at(out, loop)
+    assert out[wait - 1].text.startswith('// wait(s0')
+    assert not any(x.op in (Op.COPY_ASYNC, Op.WAIT) or x.text
+                   for x in walk_stmts(loop.regions[0].body))
+
+
+def test_a_transfer_through_what_the_trip_binds_stays():
+    """The member the counter selects is bound in the loop: a copy through
+    that binding is a different copy every trip."""
+    t = Body()
+    with t.b.for_(0, 4, 1, rolled=True) as trip:
+        member = t.binding('m5')
+        r0 = t.register(member, 'r0')
+        t.use(r0, trip.induction)
+    t.finish()
+    assert _inside(_loop(t.moved()), r0)
+
+
+def test_a_transfer_from_what_the_loop_writes_stays():
+    t = Body()
+    m1 = t.binding('m1', writable=True)
+    with t.b.for_(0, 4, 1, rolled=True) as trip:
+        r0 = t.register(m1, 'r0')
+        t.use(r0, trip.induction)
+        t.b.store(m1, 1.0, trip.induction)
+    t.finish()
+    assert _inside(_loop(t.moved()), r0)
+
+
+def test_a_buffer_written_by_something_else_in_the_loop_keeps_its_transfer():
+    t = Body()
+    m0 = t.binding('m0')
+    with t.b.for_(0, 4, 1, rolled=True) as trip:
+        r0 = t.register(m0, 'r0')
+        t.use(r0, trip.induction)
+        t.b.store(r0, 0.0, 1)
+    t.finish()
+    assert _inside(_loop(t.moved()), r0)
+
+
+@pytest.mark.parametrize('bounds', ['empty', 'unknown'])
+def test_a_loop_that_may_not_run_keeps_its_transfers(bounds):
+    """A copy ahead of a loop of no trips would be one that never ran."""
+    t = Body()
+    m0 = t.binding('m0')
+    count = (4 if bounds == 'empty' else
+             t.b.extern_value('count', INDEX, uniform=Uniformity.MULT,
+                              hint='count'))
+    with t.b.for_(4 if bounds == 'empty' else 0, count, 1,
+                  rolled=True) as trip:
+        r0 = t.register(m0, 'r0')
+        t.use(r0, trip.induction)
+    t.finish()
+    assert _inside(_loop(t.moved()), r0)
+
+
+def test_a_loop_no_run_was_rolled_into_keeps_its_transfers():
+    """Only a merged run's loop is written with the operands every trip
+    shares in it, and only that one is measured without them."""
+    t = Body()
+    m0 = t.binding('m0')
+    with t.b.for_(0, 4, 1) as trip:
+        r0 = t.register(m0, 'r0')
+        t.use(r0, trip.induction)
+    t.finish()
+    loop = next(s for s in t.moved() if s.op is Op.FOR
+                and s.loop_bounds == (0, 4, 1))
+    assert _inside(loop, r0)
+
+
+@pytest.mark.parametrize('kind', ['shared', 'register'])
+def test_a_barrier_in_the_loop_keeps_a_shared_copy_and_not_a_register_one(
+        kind):
+    t = Body()
+    m0 = t.binding('m0')
+    with t.b.for_(0, 4, 1, rolled=True) as trip:
+        buf = (t.shared(m0, 's0') if kind == 'shared'
+               else t.register(m0, 'r0'))
+        t.use(buf, trip.induction)
+        t.b.barrier(Participants.MULT, threads=32)
+    t.finish()
+    assert _inside(_loop(t.moved()), buf) is (kind == 'shared')
 
 
 def test_where_nothing_may_move_the_body_is_the_same():

@@ -37,8 +37,10 @@ the arithmetic its addresses are computed from, where those stand above it --
 a transfer that stopped for them would hardly move.
 
 Each statement list on its own, the innermost first: a transfer does not
-leave the loop, the guard or the scope it was written in.  Across the batch
-loop's back edge is `wrap`'s.
+leave the guard or the scope it was written in, nor a loop -- unless the loop
+is a merged run's and the transfer is the same on every trip of it
+(`_out_of_loop`): then it runs once, ahead of the loop, and goes up the list
+there.  Across the batch loop's back edge is `wrap`'s.
 """
 
 from __future__ import annotations
@@ -46,7 +48,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Sequence, Tuple
 
-from .core import BufferType, MemSpace, Op, Stmt
+from .core import (BufferType, Effect, MemSpace, Op, Stmt, accesses_conflict,
+                   walk_stmts)
 from .schedule import Footprint, crosses
 from .transfers import Transfer, glue, neutral, transfers, writes
 
@@ -79,6 +82,7 @@ def _list(stmts: Sequence[Stmt], distance: int,
     pieces = {id(x) for t in found for x in t.stmts}
     out: List[Stmt] = []
     changed = False
+    left = False
     for s in stmts:
         # The regions of a transfer are its own hop loops, with nothing in
         # them to move.
@@ -88,7 +92,15 @@ def _list(stmts: Sequence[Stmt], distance: int,
             if any(n.body is not r.body for n, r in zip(regions, s.regions)):
                 s = replace(s, regions=regions)
                 changed = True
+            leaving, s = _out_of_loop(s)
+            if leaving:
+                out.extend(leaving)
+                changed = left = True
         out.append(s)
+    if left:
+        # What left a loop is a transfer of this list now, and goes up it
+        # like the ones written here.
+        found = transfers(out)
     index: Dict[int, int] = {id(x): i for i, t in enumerate(found)
                              for x in t.stmts}
     # What crossing a statement takes, asked of the same statements by every
@@ -100,6 +112,138 @@ def _list(stmts: Sequence[Stmt], distance: int,
             out = moved
             changed = True
     return tuple(out) if changed else tuple(stmts)
+
+
+def _counted(s: Stmt) -> bool:
+    """A merged run's loop (`VariantLoop`): rolled, over constant bounds, at
+    least one trip.  What it does once a trip it does at least once, so a
+    transfer that is the same on every trip can be done once, ahead of it.
+
+    Only a run's: it is the loop whose body the macro layer writes for every
+    trip alike, operands the trips share included, and the one this is
+    measured on.
+    """
+    if s.op is not Op.FOR or not s.regions or not s.attr('rolled'):
+        return False
+    lo, hi, step = s.loop_bounds
+    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0
+            and lo < hi)
+
+
+def _out_of_loop(loop: Stmt) -> Tuple[List[Stmt], Stmt]:
+    """The transfers of `loop` that fill the same buffer from the same data on
+    every trip, taken out to run once ahead of it -- and `loop` without them.
+
+    A merged run's body (`VariantLoop`) stages the operands every iteration
+    shares as well as the one its counter selects, and the first are the same
+    copy every trip.  Such a transfer leaves when
+
+    * nothing it reads is computed in the loop: the induction, a value the
+      loop carries, a binding the counter selects -- except arithmetic that
+      reads nothing of the loop itself, which leaves with it;
+    * nothing in the loop writes what it reads, and nothing there says
+      nothing about what it touches;
+    * it alone writes its buffer, and nothing ahead of it in the loop reads
+      the buffer;
+    * for a shared buffer, the loop holds no barrier: one orders what the
+      other threads did to shared memory around the copy.
+
+    The waits that retire its copies leave with it and stand right behind
+    it, so that nothing the hardware carries out on its own is in flight
+    across the loop; the transfer then goes up the list ahead of the loop as
+    any other.
+    """
+    if not _counted(loop):
+        return [], loop
+    region = loop.regions[0]
+    body = region.body
+    found = transfers(body)
+    if not found:
+        return [], loop
+    every = list(walk_stmts(body))
+    if any(x.effect & Effect.UNKNOWN for x in every):
+        return [], loop
+    inside = {a.id for a in region.args}
+    defs: Dict[int, Stmt] = {}
+    for x in every:
+        for v in x.target:
+            inside.add(v.id)
+            defs[v.id] = x
+        for r in x.regions:
+            inside.update(a.id for a in r.args)
+    order = {id(x): i for i, x in enumerate(body)}
+    barrier = any(x.effect & Effect.BARRIER for x in every)
+    taken: Dict[int, Stmt] = {}
+
+    def along(vid: int, need: Dict[int, Stmt]) -> bool:
+        """Whether the value `vid` the transfer reads is available ahead of
+        the loop -- defined outside it, or by arithmetic of the body that
+        is, and then collected into `need`."""
+        if vid not in inside:
+            return True
+        x = defs.get(vid)
+        if x is not None and (id(x) in need or id(x) in taken):
+            return True
+        if x is None or id(x) not in order or not glue(x):
+            return False
+        need[id(x)] = x
+        return all(along(v.id, need) for v in x.operands())
+
+    for t in found:
+        mine = {id(x) for x in t.stmts}
+        own = {v.id for x in walk_stmts(tuple(t.stmts)) for v in x.target}
+        own |= {a.id for x in walk_stmts(tuple(t.stmts))
+                for r in x.regions for a in r.args}
+        need: Dict[int, Stmt] = {}
+        alloc = defs.get(t.dest.id)
+        if (alloc is not None and alloc.op is Op.ALLOC
+                and id(alloc) in order):
+            # Its declaration, which a buffer filled ahead of the loop needs
+            # ahead of the loop as well.
+            need[id(alloc)] = alloc
+        if not all(along(v.id, need)
+                   for x in walk_stmts(tuple(t.stmts)) for v in x.operands()
+                   if v.id not in own):
+            continue
+        if t.shared and barrier:
+            continue
+        tokens = {v.id for v in t.tokens()}
+        waits = [x for x in body if x.op is Op.WAIT and x.waited is not None
+                 and x.waited.id in tokens]
+        # And the comments leading each, which say what it waits for.
+        for i in sorted(order[id(x)] for x in waits):
+            j = i - 1
+            while j >= 0 and neutral(body[j]) and id(body[j]) not in mine:
+                waits.append(body[j])
+                j -= 1
+        leaving = mine | set(need) | {id(x) for x in waits}
+        reads = [a for x in walk_stmts(tuple(t.pieces)) for a in x.accesses
+                 if a.space is MemSpace.GLOBAL and not writes(a)]
+        start = min(order[i] for i in mine)
+        legal = True
+        for x in body:
+            if id(x) in leaving or id(x) in taken:
+                continue
+            for y in walk_stmts((x,)):
+                for a in y.accesses:
+                    if a.base is not None and getattr(a.base, 'id', None) == t.dest.id:
+                        if writes(a) or order[id(x)] < start:
+                            legal = False
+                    if writes(a) and any(accesses_conflict(r, a) for r in reads):
+                        legal = False
+            if not legal:
+                break
+        if not legal:
+            continue
+        taken.update((i, x) for i, x in need.items())
+        taken.update((id(x), x) for x in t.stmts)
+        taken.update((id(x), x) for x in waits)
+    if not taken:
+        return [], loop
+    leaving = [x for x in body if id(x) in taken]
+    rest = tuple(x for x in body if id(x) not in taken)
+    return leaving, replace(loop, regions=(replace(region, body=rest),)
+                            + tuple(loop.regions[1:]))
 
 
 def _binding(s: Stmt) -> bool:
