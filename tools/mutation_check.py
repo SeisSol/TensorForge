@@ -1195,6 +1195,49 @@ GROUPS = {
              '    found = PIPELINES.get(name, memory_path)\n', 1)),
     ]),
 
+    # A transfer for the next element issued right behind the last access to
+    # its buffer: behind the last access and not the first, behind the head
+    # it reads its pointer from, inside the guard with the masked element's
+    # copy in the other arm, and where both paths must agree, at the tail.
+    'early': ('tests/test_pir_wrap.py '
+              'tests/test_wrap_loads.py::test_wrapped_write_lands_after_the_last_read '
+              'tests/test_wrap_loads.py::test_the_next_elements_registers_are_loaded_inside_the_guard '
+              'tests/test_wrap_loads.py::test_the_next_elements_registers_are_loaded_at_the_tail_unless_asked '
+              'tests/test_wrap_loads.py::test_issued_early_a_load_keeps_no_more_cover_than_it_needs', [
+        ('issued early behind the first access to the buffer',
+         sub(WRAP, '            last = _last_access(rest, dest)\n',
+             '            last = _first_access(rest, dest)\n', 1)),
+        ('issued early behind the first access inside the guard',
+         sub(WRAP, '                last = _last_access(then, dest)\n',
+             '                last = _first_access(then, dest)\n', 1)),
+        ('issued early ahead of the head',
+         sub(WRAP, '            at = self._spot(rest, max(last, floor),',
+             '            at = self._spot(rest, last,', 1)),
+        ('a buffer read behind the guard filled inside it',
+         sub(WRAP, '                if last is None or _last_access(later, dest) is not None:',
+             '                if last is None:', 1)),
+        ('the masked element issuing nothing for its successor',
+         sub(WRAP, '                rest_else += masked_arm\n', '                pass\n', 1)),
+        ('a copy into shared memory issued in one arm of the guard',
+         sub(WRAP, '            if (l.early and not p.rotate and l.guard_at is not None\n'
+                   '                    and not p.transfer.shared):',
+             '            if (l.early and not p.rotate and l.guard_at is not None):', 1)),
+        ('a copy issued early ahead of the barrier closing the iteration',
+         sub(WRAP, '            if last is None or (p.transfer.shared and closing is not None):',
+             '            if last is None:', 1)),
+        ('issued early whatever the cover',
+         sub(WRAP, '        if self.l.cover <= 0:\n            return at\n',
+             '        return at\n', 1)),
+        ('issued early whatever the option',
+         sub(ABSTR, '                           early=options.wrap_early,\n',
+             '                           early=True,\n', 1)),
+        ('the cover not reaching the wrap',
+         sub(ABSTR, '                           early=options.wrap_early,\n'
+                    '                           cover=options.issue_cover)',
+             '                           early=options.wrap_early,\n'
+             '                           cover=0)', 1)),
+    ]),
+
     # What a target is, can and prefers.
     'target': ('tests/test_target.py tests/test_nontemporal.py '
                'tests/test_prefetch.py tests/test_packed_fma.py '
@@ -1329,8 +1372,8 @@ GROUPS = {
          sub(WRAP, '            yielded.append(following)',
              '            yielded.append(carried[-1])', 1)),
         ('a copy into the second stage left at the tail',
-         sub(WRAP, '                heads += tail\n            else:',
-             '                tails_shared.extend(tail)\n            else:', 1)),
+         sub(WRAP, '                heads += tail\n            elif l.early and l.guard_at is None:',
+             '                tails_shared.extend(tail)\n            elif l.early and l.guard_at is None:', 1)),
         ('the masked path drains behind a copy at the head',
          sub(WRAP, '            if waits and not lift:',
              '            if waits:', 1)),

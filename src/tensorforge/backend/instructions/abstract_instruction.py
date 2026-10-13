@@ -467,7 +467,9 @@ class AbstractInstruction(ABC):
     if getattr(options, 'enable_wrap_loads', False):
       wrap = pir.WrapLoads(builder.scratch, distance=options.move_distance,
                            stages=2 if options.enable_multibuffer else 1,
-                           report=report, pipeline=pipeline)
+                           report=report, pipeline=pipeline,
+                           early=options.wrap_early,
+                           cover=options.issue_cover)
     if options.enable_prefetch or options.prefetch_data:
       prefetch = pir.Prefetch(builder.scratch,
                               pointers=options.enable_prefetch,

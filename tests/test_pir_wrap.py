@@ -62,7 +62,8 @@ class Section:
     def __init__(self, *, flags=True, element_pointer=False, transfers=1,
                  shared=False, ahead=None, init='', second_writer=False,
                  closing_barrier=True, first=True, reread=False,
-                 read_after=False):
+                 read_after=False, trailing=0, reg_read_after=False,
+                 late_next=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         count = b.extern_value('numElements0', SIZE, hint='count')
         start = b.extern_value('start', SIZE, uniform=Uniformity.MULT,
@@ -77,11 +78,15 @@ class Section:
                     uniform=Uniformity.MULT,
                     flag_word='flags0[{0}]' if flags else None) as f:
             k = self.k = f.induction
-            ahead_k = b.op('add', SIZE, k, 'stride', hint='ahead1')
-            fits = b.op('lt', BOOL, ahead_k, count, hint='inbatch1')
-            self.next = b.op('select', SIZE, fits, ahead_k, k, hint='batchId1',
-                             escapes=True)
-            f._next_index = self.next
+
+            def successor():
+                ahead_k = b.op('add', SIZE, k, 'stride', hint='ahead1')
+                fits = b.op('lt', BOOL, ahead_k, count, hint='inbatch1')
+                self.next = b.op('select', SIZE, fits, ahead_k, k,
+                                 hint='batchId1', escapes=True)
+                f._next_index = self.next
+            if not late_next:
+                successor()
             srcs = [_binding(b, k, base=PTRS if element_pointer else SRC,
                              name=f'glb_m0_{j}' if j else 'glb_m0',
                              element_pointer=element_pointer)
@@ -95,6 +100,10 @@ class Section:
             else:
                 from contextlib import nullcontext
                 guard = nullcontext()
+            # Declared ahead of the guard where it is read behind it as well.
+            early_alloc = (b.alloc(F32, (8,), MemSpace.REGISTER, hint='r',
+                                   extern='r0', init=init)
+                           if reg_read_after else None)
             with guard:
                 if ahead == 'store':
                     b.store(srcs[0], 1.0, 0)
@@ -126,8 +135,10 @@ class Section:
                         b.wait(tok)
                         b.store(out, b.load(dest, lane, hint='u'), lane)
                     else:
-                        dest = b.alloc(F32, (8,), MemSpace.REGISTER,
-                                       hint='r', extern=f'r{j}', init=init)
+                        dest = (early_alloc if early_alloc is not None
+                                and j == 0 else
+                                b.alloc(F32, (8,), MemSpace.REGISTER,
+                                        hint='r', extern=f'r{j}', init=init))
                         if ahead == 'read':
                             b.store(out, b.load(dest, 0, hint='early'), 0)
                         self.bufs.append(dest)
@@ -137,6 +148,16 @@ class Section:
                         b.store(out, b.load(dest, 3, hint='u'), j)
                         if reread:
                             b.store(out, b.load(dest, 4, hint='v'), j + 8)
+                # Work behind the last read of the buffers, which a transfer
+                # issued early has as cover.
+                for n in range(trailing):
+                    b.store(out, float(n), 16 + n)
+            if reg_read_after:
+                b.store(out, b.load(self.bufs[0], 5, hint='w'), 30)
+            if late_next:
+                # The next element's index computed at the end of the body,
+                # behind every read of the buffers.
+                successor()
             if closing_barrier:
                 b.barrier(Participants.MULT, threads=32)
         if read_after:
@@ -144,10 +165,10 @@ class Section:
         self.body = b.finish()
         verify(self.body)
 
-    def wrap(self, distance=1, stages=1):
+    def wrap(self, distance=1, stages=1, **kwargs):
         self.report = []
         out = wrap_loads(self.body, self.b.scratch, distance=distance,
-                         stages=stages, report=self.report)
+                         stages=stages, report=self.report, **kwargs)
         verify(out)
         return out
 
@@ -568,7 +589,7 @@ class Run:
     chain selecting a member by it, the binding reading the chain, and the
     transfer through that binding."""
 
-    def __init__(self, *, shared=False, transfer=True, trips=4):
+    def __init__(self, *, shared=False, transfer=True, trips=4, trailing=0):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         members = [_binding(b, k, base=f'm{3 + j}', name=f'glb_m{3 + j}')
@@ -601,6 +622,8 @@ class Run:
             elif transfer:
                 _register_transfer(b, binding, self.dest, 'r0')
             b.store(out, b.load(self.dest, lane, hint='u'), c)
+            for n in range(trailing):
+                b.store(out, float(n), 16 + n)
         self.body = b.finish()
         verify(self.body)
 
@@ -746,3 +769,168 @@ def test_with_one_pipeline_the_first_transfer_alone_wraps():
     out = wrap_loads(body, b.scratch, report=report, pipeline=one_pipeline)
     verify(out)
     assert report == ['+ r0 [reg]']
+
+
+# --------------------------------------------------------------------------- #
+# issued early
+# --------------------------------------------------------------------------- #
+
+def _last_read(stmts, buf):
+    return max(i for i, s in enumerate(stmts)
+               if any(a.base is buf and not a.writes
+                      for x, _ in walk((s,)) for a in x.accesses))
+
+
+def _filling(body, buf):
+    """The statements of `body` writing `buf`, the waits that retire a copy
+    into it apart."""
+    return [i for i, s in enumerate(body)
+            if any(a.writes and a.base is buf
+                   for x, _ in walk((s,)) if x.op is not Op.WAIT
+                   for a in x.accesses)]
+
+
+def _only_comments_between(body, lo, hi):
+    return all(s.op is Op.RAWSTMT and not s.accesses and not s.target
+               or s.op is Op.MARK for s in body[lo + 1:hi])
+
+
+@pytest.mark.parametrize('shared', [False, True], ids=['reg', 'shr'])
+def test_a_run_issues_the_next_trip_behind_the_last_read(shared):
+    """Issued early, the transfer for the next trip goes right behind the
+    trip's last read of its buffer, with the rest of the trip as cover."""
+    run = Run(shared=shared, trailing=6)
+    out = run.wrap(early=True)
+    body = _run_loop(out).regions[0].body
+    fills = _filling(body, run.dest)
+    assert fills, 'nothing fills the buffer in the loop'
+    last = _last_read(body, run.dest)
+    assert min(fills) > last and _only_comments_between(body, last,
+                                                         min(fills))
+    assert len(body) - max(fills) > 6, 'the trailing work stands behind it'
+
+
+@pytest.mark.parametrize('shared', [False, True], ids=['reg', 'shr'])
+def test_a_run_issues_at_the_tail_unless_asked(shared):
+    run = Run(shared=shared, trailing=6)
+    out = run.wrap()
+    body = _run_loop(out).regions[0].body
+    fills = _filling(body, run.dest)
+    trailing = [i for i, s in enumerate(body) if s.op is Op.STORE
+                and isinstance(s.args[1], float)]
+    assert min(fills) > max(trailing)
+
+
+def test_the_cover_cap_holds_an_early_transfer_back():
+    """`cover`: no more ahead of the first read than the cap -- here two of
+    the six statements behind the last read, and the stretch at the head."""
+    run = Run(trailing=6)
+    early = _run_loop(run.wrap(early=True)).regions[0].body
+    capped = _run_loop(Run(trailing=6).wrap(early=True, cover=3)).regions[0].body
+    assert min(_filling(capped, _run_dest(capped))) > min(
+        _filling(early, _run_dest(early)))
+
+
+def _run_dest(body):
+    return next(a.base for s in body for x, _ in walk((s,)) for a in x.accesses
+                if a.writes and getattr(a.base, 'type', None) is not None
+                and a.base.type.space in (MemSpace.REGISTER, MemSpace.SHARED))
+
+
+@pytest.mark.parametrize('reread', [False, True], ids=['once', 'twice'])
+def test_a_guarded_register_transfer_goes_into_the_guard(reread):
+    """In a guarded batch loop the transfer into registers for the next
+    element goes behind the last read inside the guard -- the last of two,
+    not the first, which would refill the buffer the arm still reads -- and a
+    masked element issues it in the guard's other arm."""
+    sec = Section(trailing=6, reread=reread)
+    out = sec.wrap(early=True)
+    region = _loop(out).regions[0].body
+    guard = next(s for s in region if s.op is Op.IF
+                 and s.attr('guard') == 'element')
+    inside = guard.regions[0].body
+    buf = sec.bufs[0]
+    fills = _filling(inside, buf)
+    last = _last_read(inside, buf)
+    assert fills and min(fills) > last
+    assert _only_comments_between(inside, last, min(fills))
+    assert len(guard.regions) == 2, 'the masked arm'
+    other = guard.regions[1].body
+    assert any(a.writes and a.base is buf
+               for x, _ in walk(other) for a in x.accesses)
+    after = region[region.index(guard) + 1:]
+    assert not any(a.writes and a.base is buf
+                   for x, _ in walk(tuple(after)) for a in x.accesses), (
+        'and nothing behind the guard fills it any more')
+
+
+def test_a_register_read_behind_the_guard_keeps_the_tail():
+    sec = Section(trailing=6, reg_read_after=True, closing_barrier=False)
+    out = sec.wrap(early=True)
+    region = _loop(out).regions[0].body
+    guard = next(s for s in region if s.op is Op.IF
+                 and s.attr('guard') == 'element')
+    buf = sec.bufs[0]
+    assert not any(a.writes and a.base is buf
+                   for x, _ in walk(guard.regions[0].body) for a in x.accesses)
+    after = region[region.index(guard) + 1:]
+    assert any(a.writes and a.base is buf
+               for x, _ in walk(tuple(after)) for a in x.accesses)
+
+
+def test_a_guarded_copy_into_shared_memory_keeps_the_tail():
+    """A copy issued in one arm would leave the paths with different counts
+    of groups in flight: it stays behind the guard."""
+    sec = Section(shared=True, trailing=6)
+    out = sec.wrap(early=True)
+    region = _loop(out).regions[0].body
+    guard = next(s for s in region if s.op is Op.IF
+                 and s.attr('guard') == 'element')
+    assert not any(x.op is Op.COPY_ASYNC for x, _ in walk(guard.regions[0].body))
+    after = region[region.index(guard) + 1:]
+    assert any(x.op is Op.COPY_ASYNC for x, _ in walk(tuple(after)))
+
+
+def test_an_early_body_renders():
+    sec = Section(trailing=6)
+    out = sec.wrap(early=True)
+    w = Writer()
+    emit(placed(out), w, Target('sm_86', 'cuda'))
+    src = w.get_src()
+    assert 'wrap_glb_m0' in src and 'else' in src
+
+
+def test_an_early_copy_stays_behind_the_barrier_that_closes_the_iteration():
+    """Where a barrier closes the iteration it fences every thread's reads
+    of the window against the write for the next element: issued early or
+    not, a copy into shared memory stays behind it."""
+    sec = Section(flags=False, shared=True, trailing=6)
+    region = _loop(sec.wrap(early=True)).regions[0].body
+    closing = max(i for i, s in enumerate(region) if s.op is Op.BARRIER)
+    copies = [i for i, s in enumerate(region)
+              if any(x.op is Op.COPY_ASYNC for x, _ in walk((s,)))]
+    assert copies and min(copies) > closing
+
+
+def test_an_early_copy_goes_behind_the_last_read_where_no_barrier_closes():
+    sec = Section(flags=False, shared=True, trailing=6, closing_barrier=False)
+    region = _loop(sec.wrap(early=True)).regions[0].body
+    last = _last_read(region, sec.window)
+    copies = [i for i, s in enumerate(region)
+              if any(x.op is Op.COPY_ASYNC for x, _ in walk((s,)))]
+    assert copies and min(copies) > last
+    assert _only_comments_between(region, last, min(copies))
+
+
+def test_an_early_transfer_stands_behind_the_head():
+    """The transfer for the next element reads the pointer the head computes
+    for it, and goes behind the head even where the buffer's last read comes
+    first -- here the body computes the next element's index at its end."""
+    sec = Section(flags=False, closing_barrier=False, trailing=6,
+                  late_next=True)
+    region = _loop(sec.wrap(early=True)).regions[0].body
+    pointer = next(i for i, s in enumerate(region)
+                   if str(s.attr('extern') or '').startswith('wrap_'))
+    fills = _filling(region, sec.bufs[0])
+    assert pointer > _last_read(region, sec.bufs[0])
+    assert fills and min(fills) > pointer

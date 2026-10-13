@@ -222,6 +222,39 @@ def transfers(scope: Sequence[Stmt]) -> List[Transfer]:
 
 
 # --------------------------------------------------------------------------- #
+# Cover
+# --------------------------------------------------------------------------- #
+
+#: What lays nothing into the instruction stream, as the emitter counts code
+#: (`emit._NO_CODE`).
+_NO_CODE = frozenset({Op.CONST, Op.YIELD, Op.DECLARE, Op.ALLOC, Op.EXTRACT,
+                      Op.SPLIT, Op.PACK, Op.MARK})
+
+
+def executed(stmts: Sequence[Stmt]) -> int:
+    """How much `stmts` issue when they run, in the emitter's units of code
+    -- one a statement, two a branch -- and a counted loop's body once per
+    trip: the cover a transfer issued ahead of them has.  A branch counts its
+    longer arm, and a loop whose trips are not known its body once.
+    """
+    n = 0
+    for s in stmts:
+        if s.op is Op.FOR:
+            lo, hi, step = s.loop_bounds
+            trips = 1
+            if all(isinstance(x, int) for x in (lo, hi, step)) and step > 0:
+                trips = max(0, -(-(hi - lo) // step))
+            n += trips * sum(executed(r.body) for r in s.regions)
+        elif s.op is Op.IF:
+            n += 2 + max((executed(r.body) for r in s.regions), default=0)
+        elif s.regions:
+            n += 1 + sum(executed(r.body) for r in s.regions)
+        elif s.op not in _NO_CODE:
+            n += 1
+    return n
+
+
+# --------------------------------------------------------------------------- #
 # Pipelines
 # --------------------------------------------------------------------------- #
 

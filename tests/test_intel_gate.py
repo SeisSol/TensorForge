@@ -506,11 +506,18 @@ def _products(src):
     # this the match finds nothing and every assertion below passes or fails
     # for the wrong reason -- `test_one_b_vector_per_output_column` would be
     # green on an empty set.
-    for m in re.finditer(
-            r'(\w+_acc) \+= \(\((?:static_cast<\w+>\()?(\w+)\[(\d+)\]\)?\) \* (\w+)\)',
-            src):
+    read = r'(?:static_cast<\w+>\()?(\w+)\[(\d+)\]\)?'
+    for m in re.finditer(rf'(\w+_acc) \+= \(\({read}\) \* (\w+)\)', src):
         out.setdefault(m.group(1), []).append(
             (m.group(2), int(m.group(3)), m.group(4)))
+    # A transfer issued right behind the lane's read (`wrap_early`) stands
+    # between the read and the product, which then multiplies the value the
+    # read was given a name for.
+    named = {m.group(1): (m.group(2), int(m.group(3)))
+             for m in re.finditer(rf'float (\w+_bc) = {read};', src)}
+    for m in re.finditer(r'(\w+_acc) \+= \((\w+_bc) \* (\w+)\)', src):
+        out.setdefault(m.group(1), []).append(
+            named[m.group(2)] + (m.group(3),))
     return out
 
 

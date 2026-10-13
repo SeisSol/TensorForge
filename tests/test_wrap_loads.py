@@ -237,3 +237,61 @@ def test_a_copy_wraps_in_a_pipeline_of_its_own():
 def test_an_unknown_pipeline_is_refused():
     with pytest.raises(ValueError, match="transfer_pipelines"):
         _generate(CHAIN, "cuda", "sm_86", transfer_pipelines="lanes")
+
+
+# ---------------------------------------------------------------------- #
+# issued early
+# ---------------------------------------------------------------------- #
+
+def _guard_span(lines):
+    """The lines of the element guard of the loop: from `if (allowed)` to
+    the brace that closes it, and the `else` behind it if there is one."""
+    start = next(i for i, l in enumerate(lines)
+                 if re.search(r"if \(allowed\)", l))
+    depth = 0
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if depth == 0 and i > start:
+            return start, i
+    raise AssertionError("the guard does not close")
+
+
+def test_the_next_elements_registers_are_loaded_inside_the_guard():
+    """`wrap_early`, the default: the transfer into registers for the next
+    element goes behind the last read of its buffer inside the element
+    guard, and a masked element issues it in the guard's other arm."""
+    lines = _generate(CHAIN, "cuda", "sm_86").splitlines()
+    start, end = _guard_span(lines)
+    loads = [i for i, l in enumerate(lines)
+             if re.search(r"=\s*(__ldcg\()?&?wrap_glb_\w+\[", l)]
+    assert any(start < i < end for i in loads), (
+        "no load for the next element inside the guard")
+    assert "else" in lines[end] or "else" in lines[end + 1]
+
+
+def test_the_next_elements_registers_are_loaded_at_the_tail_unless_asked():
+    lines = _generate(CHAIN, "cuda", "sm_86",
+                      wrap_early=False).splitlines()
+    start, end = _guard_span(lines)
+    loads = [i for i, l in enumerate(lines)
+             if re.search(r"=\s*(__ldcg\()?&?wrap_glb_\w+\[", l)]
+    assert loads and all(i > end for i in loads)
+
+
+def _early_gap(kernel):
+    """Lines from the last read of the buffer the next element's load into
+    registers fills to that load."""
+    lines = kernel.splitlines()
+    at = next(i for i, l in enumerate(lines)
+              if re.search(r"// \w+ = load\{g>r\}\(wrap_glb_", l))
+    name = re.search(r"// (\w+) = load", lines[at]).group(1)
+    last = max(i for i in range(at) if re.search(rf"=\s*{name}\[", lines[i]))
+    return at - last
+
+
+def test_issued_early_a_load_keeps_no_more_cover_than_it_needs():
+    """`issue_cover`: at 0 the next element's load goes right behind the
+    last read of its buffer; the rest of the element is more cover than the
+    default asks for, and there it goes further down."""
+    assert _early_gap(_generate(CHAIN, "cuda", "sm_86", issue_cover=0)) == 1
+    assert _early_gap(_generate(CHAIN, "cuda", "sm_86")) > 100

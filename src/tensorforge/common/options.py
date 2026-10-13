@@ -396,6 +396,34 @@ declare('transfer_pipelines',
             '`one` puts every transfer into one pipeline, as one counter would '
             'see them.  See backend/pir/transfers.py.')
 
+declare('wrap_early',
+        default=True,
+        parse=parse_bool,
+        doc='Issue a transfer `enable_wrap_loads` moves into the next '
+            'iteration right behind the last access to its buffer in this one, '
+            'rather than at the tail -- where its buffer is not shared with '
+            'what the rest of the iteration holds, the allocator keeps it '
+            'apart, so a buffer of its own buys the stretch behind that access '
+            'as cover.  In a merged run and in a loop without an element guard '
+            'every moved transfer; in a guarded batch loop a transfer into '
+            'registers, behind the last access inside the guard and, for a '
+            'masked element, in the guard\'s other arm.  A copy into shared '
+            'memory there keeps the tail, since a copy issued in one arm only '
+            'would leave the count of groups in flight differing between the '
+            'paths; `enable_multibuffer` moves it to the head instead.  No '
+            'earlier than `issue_cover` ahead of its first read.')
+
+declare('issue_cover',
+        default=512,
+        parse=parse_int,
+        doc='The most cover a transfer issued early (`wrap_early`) is given, '
+            'in the units the emitter counts code in, a counted loop\'s body '
+            'once per trip: it goes no further ahead of its first read.  '
+            'Cover beyond what hides a load\'s latency only holds its buffer: '
+            'at some 600 to 800 cycles for a load from global memory and four '
+            'warps on a scheduler, a warp issues 150 to 200 instructions in '
+            'that time, and 512 leaves room.  0 is no limit.')
+
 declare('enable_prefetch',
         default=False,
         parse=parse_bool,

@@ -102,6 +102,21 @@ flight.  A copy written as loads and stores stalls on its loads where it is
 issued, at the head as at the tail, and keeps one stage; so does a buffer used
 outside the loop, whose windows could not follow the stage there.
 
+*Issued early* (`early`), a transfer goes right behind the last access to
+its buffer in the iteration instead of to the tail.  At the tail it has the
+head of the next iteration ahead of its wait and nothing else -- in a merged
+run, whose trip reads the member it selects at once, a dozen statements.
+Behind the last access it has the rest of the iteration as well, and the
+allocator keeps the buffer apart from what that stretch holds: a buffer of
+its own buys the stretch.  No earlier than `cover` ahead of the first read,
+which is what a load's latency needs.  In a run, and in a loop without an
+element guard, every moved transfer goes there.  In a guarded batch loop a
+transfer into registers goes behind the last access inside the guard, and a
+masked element, which reads nothing, issues it in the guard's other arm; a
+copy into shared memory keeps the tail, since a copy issued in one arm only
+would leave the two paths with different counts of groups in flight.  The
+second stage below is its way to the head.
+
 *A merged run's loop* (`VariantLoop`) is a loop of the same kind one level
 in: its counter selects a member of each varying operand per trip, so the
 transfer through the selection is a different one every trip -- what every
@@ -131,13 +146,14 @@ from .ahead import Clone, ElementLoop, Refusal, behind_defs
 from .asyncmem import strip_commits
 from .core import (BOOL, INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
                    walk_stmts)
-from .transfers import (Transfer, memory_path, neutral, opaque, same,
-                        transfers, writes)
+from .transfers import (Transfer, executed, memory_path, neutral, opaque,
+                        same, transfers, writes)
 
 def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                distance: int = 1, stages: int = 1,
                report: Optional[List[str]] = None,
-               pipeline=memory_path) -> Tuple[Stmt, ...]:
+               pipeline=memory_path, early: bool = False,
+               cover: int = 0) -> Tuple[Stmt, ...]:
     """`body` with the first `distance` transfers of each batch loop issued
     one element ahead, and of each merged run's loop one trip ahead.
 
@@ -168,7 +184,7 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     # itself is then a transfer of the body around it like any other.
     copied: List[Stmt] = []
     body, rewritten = _runs(body, allocs, scratch, distance, stages, report,
-                            copied, pipeline)
+                            copied, pipeline, early, cover)
     out: List[Stmt] = []
     removed: set = set()
     for s in body:
@@ -180,8 +196,9 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
             continue
         try:
             around = tuple(x for x in body if x is not s)
-            rewrite = _Loop(s, allocs, scratch, report, stages,
-                            around).wrap(distance, pipeline)
+            rewrite = _Loop(s, allocs, scratch, report, stages, around,
+                            early=early,
+                            cover=cover).wrap(distance, pipeline)
             before, loop, after = rewrite.run()
         except Refusal as why:
             if report is not None:
@@ -235,7 +252,7 @@ def _trips(loop: Stmt, scratch) -> Stmt:
 
 def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
           report: Optional[List[str]], copied: List[Stmt],
-          pipeline=memory_path):
+          pipeline=memory_path, early: bool = False, cover: int = 0):
     """`(body, rewritten)`: `body` with the loops of the merged runs in it
     issuing their first transfers one trip ahead, wherever they stand.
 
@@ -256,8 +273,8 @@ def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
             try:
                 around = tuple(x for x in body if x is not s)
                 rewrite = _Loop(_trips(s, scratch), allocs, scratch, report,
-                                stages, around,
-                                run=True).wrap(distance, pipeline)
+                                stages, around, run=True, early=early,
+                                cover=cover).wrap(distance, pipeline)
                 before, loop, after = rewrite.run()
             except Refusal as why:
                 if report is not None:
@@ -274,7 +291,8 @@ def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
             regions = []
             for r in s.regions:
                 inner, changed = _runs(r.body, allocs, scratch, distance,
-                                       stages, report, copied, pipeline)
+                                       stages, report, copied, pipeline,
+                                       early, cover)
                 regions.append(replace(r, body=inner) if changed else r)
                 rewritten = rewritten or changed
             if any(n is not r for n, r in zip(regions, s.regions)):
@@ -285,6 +303,21 @@ def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
         # now declares itself.
         out = [x for x in out if id(x) not in removed]
     return (tuple(out), True) if rewritten else (body, False)
+
+
+def _touches(s: Stmt, buf: Value) -> bool:
+    return any(same(a.base, buf) for x in walk_stmts((s,)) for a in x.accesses)
+
+
+def _last_access(stmts: Sequence[Stmt], buf: Value) -> Optional[int]:
+    """The last of `stmts` that accesses `buf`, or None."""
+    return max((i for i, x in enumerate(stmts) if _touches(x, buf)),
+               default=None)
+
+
+def _first_access(stmts: Sequence[Stmt], buf: Value) -> Optional[int]:
+    """The first of `stmts` that accesses `buf`, or None."""
+    return next((i for i, x in enumerate(stmts) if _touches(x, buf)), None)
 
 
 def _drop_unread(body: Tuple[Stmt, ...],
@@ -383,10 +416,15 @@ class _Loop(ElementLoop):
 
     def __init__(self, loop: Stmt, allocs: Dict[int, Stmt], scratch, report,
                  stages: int = 1, around: Sequence[Stmt] = (),
-                 run: bool = False):
+                 run: bool = False, early: bool = False, cover: int = 0):
         super().__init__(loop, scratch, report, around)
         self.allocs = allocs
         self.stages = stages
+        #: Whether a transfer for the next element goes right behind the last
+        #: access to its buffer rather than to the tail (`_Rewrite._early`).
+        self.early = early
+        #: The most cover such a transfer is issued with, 0 for any.
+        self.cover = cover
         #: Whether this is a merged run's loop rather than a batch loop: what
         #: it issues ahead is for the next trip, and the report says so.
         self.run = run
@@ -694,6 +732,12 @@ class _Rewrite:
         heads: List[Stmt] = []
         tails_reg: List[Stmt] = []
         tails_shared: List[Stmt] = []
+        # Issued early: in a body without an element guard anywhere behind
+        # the buffer's last access; in a guarded body a transfer into
+        # registers, inside the guard and, for a masked element, in its
+        # other arm (`_early`).
+        early_rest: List[Tuple[_Plan, List[Stmt]]] = []
+        early_guard: List[Tuple[_Plan, List[Stmt], List[Stmt]]] = []
         waits: Dict[int, Stmt] = {}
         inits: List[Value] = []
         carried: List[Value] = []
@@ -710,6 +754,15 @@ class _Rewrite:
             heads += tail_copy.stmts(new, named=True)
             done_tail.update(id(s) for s in new)
 
+            masked = None
+            if (l.early and not p.rotate and l.guard_at is not None
+                    and not p.transfer.shared):
+                # A second copy for the masked arm, with the same
+                # dependencies and values of its own.
+                other = Clone(self._fresh, 'wrap', taken)
+                other.mapping = dict(tail_copy.mapping)
+                other.spell = dict(tail_copy.spell)
+                masked = other.stmts(p.transfer.stmts)
             peel = peel_copy.stmts(p.transfer.stmts)
             tail = tail_copy.stmts(p.transfer.stmts)
             if p.rotate:
@@ -721,12 +774,18 @@ class _Rewrite:
             if p.owns_pointer and peel_flag is not None:
                 peel = self._guarded(peel, peel_flag)
                 tail = self._guarded(tail, tail_flag)
+                if masked is not None:
+                    masked = self._guarded(masked, tail_flag)
             before += peel
             if p.rotate:
                 if flag_at_head and tail_flag_stmts:
                     heads += tail_flag_stmts
                     tail_flag_stmts = []
                 heads += tail
+            elif l.early and l.guard_at is None:
+                early_rest.append((p, tail))
+            elif masked is not None:
+                early_guard.append((p, tail, masked))
             else:
                 (tails_shared if p.transfer.shared else tails_reg).extend(tail)
             if p.wait is None:
@@ -775,12 +834,30 @@ class _Rewrite:
             results.append(self._fresh(stage))
         loop = self._body(heads, tails_reg, tails_shared, tail_flag_stmts,
                           waits, carry, own, nxt, yields, carried, inits,
-                          results, top, following)
+                          results, top, following, early_rest,
+                          early_guard)
         return before, loop, after
+
+    def _spot(self, stmts: List[Stmt], last: int, beyond: int) -> int:
+        """Where in `stmts` a transfer for the next element goes: behind
+        `last`, the last statement it may not precede, and as late as the
+        cover still reaches the most it is issued with (`cover`) -- what
+        stands behind it in `stmts` and `beyond`, the stretch of the next
+        iteration ahead of the buffer's first access."""
+        at = last + 1
+        if self.l.cover <= 0:
+            return at
+        units = [executed((x,)) for x in stmts]
+        behind = 0
+        for i in range(len(stmts), at, -1):
+            if behind + beyond >= self.l.cover:
+                return i
+            behind += units[i - 1]
+        return at
 
     def _body(self, heads, tails_reg, tails_shared, tail_flag_stmts, waits,
               carry, own, nxt, yields, carried, inits, results, top,
-              following) -> Stmt:
+              following, early_rest=(), early_guard=()) -> Stmt:
         l = self.l
         region = l.region
         moved = {id(s) for p in self.plans for s in p.transfer.stmts}
@@ -849,8 +926,30 @@ class _Rewrite:
             at = behind_defs(pre, heads + flag_ahead)
             pre[at:at] = heads + flag_ahead
             pre += lifted
-            regions = [replace(guard.regions[0],
-                               body=tuple(keep(guard.regions[0].body)))]
+            then = keep(guard.regions[0].body)
+            later = body[l.guard_at + 1:]
+            masked_arm: List[Stmt] = []
+            for p, tail, masked in early_guard:
+                dest = p.transfer.dest
+                last = _last_access(then, dest)
+                if last is None or _last_access(later, dest) is not None:
+                    # Read behind the guard as well: the tail is the first
+                    # place the buffer is done with.
+                    tails_reg.extend(tail)
+                    continue
+                if tail_flag_stmts:
+                    # The next element's flag, ahead of both arms.
+                    pre += tail_flag_stmts
+                    tail_flag_stmts = []
+                first = _first_access(then, dest)
+                beyond = (executed(keep(later)) + executed(pre)
+                          + executed(then[:first]))
+                at = self._spot(then, last, beyond)
+                then[at:at] = tail
+                masked_arm += masked
+            regions = [replace(guard.regions[0], body=tuple(then))]
+            rest_else = list(guard.regions[1].body if len(guard.regions) > 1
+                             else ())
             if waits and not lift:
                 # A masked element skips the waits at its consumers, and what
                 # they would have retired is still in flight into the buffer
@@ -861,10 +960,13 @@ class _Rewrite:
                 drain = waits[next(iter(waits))]
                 drain = Stmt(op=Op.WAIT, pure=False, movable=False,
                              effect=drain.effect)
-                rest_else = (guard.regions[1].body if len(guard.regions) > 1
-                             else ())
-                regions.append(Region(args=(), body=tuple(rest_else)
-                                      + (drain,)))
+                rest_else.append(drain)
+            if masked_arm:
+                # A masked element is done with the buffer at once: its
+                # successor's transfer goes out in the other arm.
+                rest_else += masked_arm
+            if (waits and not lift) or masked_arm:
+                regions.append(Region(args=(), body=tuple(rest_else)))
             guard = replace(guard, args=(cond,) + tuple(guard.args[1:]),
                             regions=tuple(regions))
             rest = keep(body[l.guard_at + 1:])
@@ -875,6 +977,24 @@ class _Rewrite:
         # reads against the write.
         closing = max((i for i, s in enumerate(rest) if s.op is Op.BARRIER),
                       default=None)
+        for p, tail in early_rest:
+            # Right behind the last access to the buffer, behind the next
+            # element's dependencies at the head.  A copy into shared memory
+            # where a barrier closes the iteration stays behind it.
+            dest = p.transfer.dest
+            last = _last_access(rest, dest)
+            if last is None or (p.transfer.shared and closing is not None):
+                (tails_shared if p.transfer.shared else tails_reg).extend(tail)
+                continue
+            floor = max((i for i, x in enumerate(rest)
+                         if any(x is h for h in heads)), default=-1)
+            first = _first_access(rest, dest)
+            at = self._spot(rest, max(last, floor),
+                            executed(rest[:first]) if first is not None
+                            else 0)
+            rest[at:at] = tail
+            if closing is not None and at <= closing:
+                closing += len(tail)
         if closing is None:
             rest += tail_flag_stmts + tails_reg + tails_shared
         else:
