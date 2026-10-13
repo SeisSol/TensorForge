@@ -35,6 +35,7 @@ from .allocate import allocate
 from .barriers import place_barriers
 from .core import Stmt, dump
 from .move import move_loads
+from .transfers import memory_path
 from .prefetch import prefetch_hints
 from .shards import shard_loads
 from .wrap import wrap_loads
@@ -168,8 +169,9 @@ class PlaceBarriers(Pass):
 
 
 class MoveLoads(Pass):
-    """Issue every transfer up to `distance` transfers ahead of where it was
-    written (`move.move_loads`).
+    """Issue every transfer up to `distance` transfers of its pipeline ahead
+    of where it was written (`move.move_loads`); `pipeline` keys a transfer
+    to its pipeline (`transfers.PIPELINES`).
 
     First of all, ahead of ``flatten``: the statements of an instruction
     still stand in the scope it opened, and a transfer crosses the
@@ -181,11 +183,13 @@ class MoveLoads(Pass):
     name = 'move'
     is_transform = True
 
-    def __init__(self, distance: int = 1):
+    def __init__(self, distance: int = 1, pipeline=memory_path):
         self._distance = distance
+        self._pipeline = pipeline
 
     def run(self, pc: BodyContext) -> None:
-        pc.body = move_loads(pc.body, distance=self._distance)
+        pc.body = move_loads(pc.body, distance=self._distance,
+                             pipeline=self._pipeline)
 
 
 class WrapLoads(Pass):
@@ -207,15 +211,17 @@ class WrapLoads(Pass):
     is_transform = True
 
     def __init__(self, scratch, distance: int = 1, stages: int = 1,
-                 report: Optional[List[str]] = None):
+                 report: Optional[List[str]] = None, pipeline=memory_path):
         self._scratch = scratch
         self._distance = distance
         self._stages = stages
         self._report = report
+        self._pipeline = pipeline
 
     def run(self, pc: BodyContext) -> None:
         pc.body = wrap_loads(pc.body, self._scratch, distance=self._distance,
-                             stages=self._stages, report=self._report)
+                             stages=self._stages, report=self._report,
+                             pipeline=self._pipeline)
 
 
 class Prefetch(Pass):

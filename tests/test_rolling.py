@@ -1518,6 +1518,10 @@ def test_a_factor_the_loop_binds_is_read_inside_it():
     text = _generated(roll(descrs, min_count=3))
     declared, used = {}, {}
     for i, line in enumerate(text.splitlines(), 1):
+        # A comment names what it describes, which is no use of the name: a
+        # wait keeps the line naming the copy it retires after the copy has
+        # moved to a binding of its own.
+        line = line.split('//', 1)[0]
         for m in re.finditer(r'\bglb_(\w+)\b', line):
             if re.search(rf'(float|double)[^;=]*\bglb_{m.group(1)}\b\s*=', line):
                 declared.setdefault(m.group(1), i)

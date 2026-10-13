@@ -18,6 +18,11 @@ loads belong to it as much as the stores.
 The wait that retires a copy the hardware carries out on its own is not part
 of it: the wait stays where the first read is, and the distance to it is what
 issuing the transfer early is for.
+
+How far a transfer is issued ahead is counted in transfers of its own
+pipeline, and what a pipeline is, is a key over the transfer
+(`PIPELINES`): by default the memory path it takes, so that a copy into
+shared memory and a load into registers do not hold each other back.
 """
 
 from __future__ import annotations
@@ -214,3 +219,40 @@ def transfers(scope: Sequence[Stmt]) -> List[Transfer]:
         current.pieces.append(s)
         between, fetched = [], {}
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Pipelines
+# --------------------------------------------------------------------------- #
+
+def memory_path(t: Transfer) -> MemSpace:
+    """The pipeline `t` moves in: the way its bytes go, which the space it
+    fills names -- global to shared memory or global to registers.
+
+    The two retire apart where the hardware keeps them apart: on NVIDIA a
+    copy into shared memory is counted in groups and a load into registers
+    is scoreboarded on its own (`asyncmem`), so neither waits for the other.
+    On AMD one counter takes both in order; there the pipelines say only how
+    far each transfer is issued ahead of the next of its kind.
+    """
+    return t.dest.type.space
+
+
+def one_pipeline(t: Transfer) -> None:
+    """Every transfer in the one pipeline."""
+    return None
+
+
+#: The pipelines a transfer moves in, by the name `Options.transfer_pipelines`
+#: gives them.  A pipeline is whatever the key says belongs together, and a
+#: key may group transfers of any path; these are the two asked for.
+PIPELINES = {'path': memory_path, 'one': one_pipeline}
+
+
+def pipelines(name: str):
+    """The key function `name` stands for."""
+    found = PIPELINES.get(name)
+    if found is None:
+        raise ValueError(f'transfer_pipelines: {name!r} is none of '
+                         f'{", ".join(sorted(PIPELINES))}')
+    return found

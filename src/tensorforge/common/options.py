@@ -379,10 +379,22 @@ declare('move_distance',
         default=1,
         doc='How many transfers a transfer is moved ahead by.  '
             '`enable_move_loads` lets one travel past this many earlier '
-            'transfers before it stops (1: the one before it); '
-            '`enable_wrap_loads` wraps the transfers whose move runs across '
-            'the back edge, which are the first this many of the body.  A '
-            'dependence stops a transfer whatever the distance.')
+            'transfers of its pipeline before it stops (1: the one before '
+            'it; `transfer_pipelines`); `enable_wrap_loads` wraps the '
+            'transfers whose move runs across the back edge, which are the '
+            'first this many of each pipeline in the body.  A dependence '
+            'stops a transfer whatever the distance.')
+
+declare('transfer_pipelines',
+        default='path',
+        parse=parse_str,
+        doc='Which transfers form one pipeline for `move_distance`.  `path`, '
+            'the default, gives every memory path its own: transfers into '
+            'shared memory and transfers into registers move past each other '
+            'without using up each other\'s distance, and '
+            '`enable_wrap_loads` wraps the first `move_distance` of each.  '
+            '`one` puts every transfer into one pipeline, as one counter would '
+            'see them.  See backend/pir/transfers.py.')
 
 declare('enable_prefetch',
         default=False,

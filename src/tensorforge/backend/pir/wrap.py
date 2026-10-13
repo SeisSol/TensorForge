@@ -27,7 +27,10 @@ masked says nothing about ``k + 1``, and a fetch under ``k``'s mask would leave
 ahead by.  In the loop unrolled once, the ``j``-th transfer of an iteration
 moves up past ``distance`` loads, and that runs off the top of the body into
 the previous iteration exactly when ``j < distance``.  So the first
-``distance`` transfers of the body wrap, in body order, and the rest stay.
+``distance`` transfers of the body wrap, in body order, and the rest stay --
+counted per pipeline, as `move` counts them (`transfers.PIPELINES`): with a
+pipeline for every memory path the first transfer into shared memory and
+the first into registers both wrap at distance 1.
 
 *What a transfer is* is read off the accesses (`transfers`): statements of
 the per-element body that read global memory and write one register array or
@@ -128,11 +131,13 @@ from .ahead import Clone, ElementLoop, Refusal, behind_defs
 from .asyncmem import strip_commits
 from .core import (BOOL, INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
                    walk_stmts)
-from .transfers import Transfer, neutral, opaque, same, transfers, writes
+from .transfers import (Transfer, memory_path, neutral, opaque, same,
+                        transfers, writes)
 
 def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                distance: int = 1, stages: int = 1,
-               report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+               report: Optional[List[str]] = None,
+               pipeline=memory_path) -> Tuple[Stmt, ...]:
     """`body` with the first `distance` transfers of each batch loop issued
     one element ahead, and of each merged run's loop one trip ahead.
 
@@ -141,7 +146,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     (`IRBuilder.scratch`).  `stages` is how many copies of a shared buffer a
     moved transfer may have: two moves it to the head of the body.  `report`
     collects one line per transfer: `+` and the buffer where it moved, `-`
-    and the reason where it did not.
+    and the reason where it did not.  `pipeline` keys a transfer to its
+    pipeline, of which the first `distance` transfers each wrap.
 
     A batch loop is a `for` that names its successor index and its first
     element (`next`, `first`).  A traversal that has no first element to
@@ -162,7 +168,7 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     # itself is then a transfer of the body around it like any other.
     copied: List[Stmt] = []
     body, rewritten = _runs(body, allocs, scratch, distance, stages, report,
-                            copied)
+                            copied, pipeline)
     out: List[Stmt] = []
     removed: set = set()
     for s in body:
@@ -175,7 +181,7 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
         try:
             around = tuple(x for x in body if x is not s)
             rewrite = _Loop(s, allocs, scratch, report, stages,
-                            around).wrap(distance)
+                            around).wrap(distance, pipeline)
             before, loop, after = rewrite.run()
         except Refusal as why:
             if report is not None:
@@ -228,7 +234,8 @@ def _trips(loop: Stmt, scratch) -> Stmt:
 
 
 def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
-          report: Optional[List[str]], copied: List[Stmt]):
+          report: Optional[List[str]], copied: List[Stmt],
+          pipeline=memory_path):
     """`(body, rewritten)`: `body` with the loops of the merged runs in it
     issuing their first transfers one trip ahead, wherever they stand.
 
@@ -249,7 +256,8 @@ def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
             try:
                 around = tuple(x for x in body if x is not s)
                 rewrite = _Loop(_trips(s, scratch), allocs, scratch, report,
-                                stages, around, run=True).wrap(distance)
+                                stages, around,
+                                run=True).wrap(distance, pipeline)
                 before, loop, after = rewrite.run()
             except Refusal as why:
                 if report is not None:
@@ -266,7 +274,7 @@ def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
             regions = []
             for r in s.regions:
                 inner, changed = _runs(r.body, allocs, scratch, distance,
-                                       stages, report, copied)
+                                       stages, report, copied, pipeline)
                 regions.append(replace(r, body=inner) if changed else r)
                 rewritten = rewritten or changed
             if any(n is not r for n, r in zip(regions, s.regions)):
@@ -385,12 +393,20 @@ class _Loop(ElementLoop):
 
     # -- planning ---------------------------------------------------------- #
 
-    def wrap(self, distance: int):
+    def wrap(self, distance: int, pipeline=memory_path):
         found = transfers(self.scope)
         if not found:
             raise Refusal('no transfer in the body')
+        # The first `distance` of each pipeline: the ones whose move runs
+        # across the back edge in the loop unrolled once.
+        picked, count = [], {}
+        for t in found:
+            key = pipeline(t)
+            if count.get(key, 0) < distance:
+                picked.append(t)
+                count[key] = count.get(key, 0) + 1
         plans: List[_Plan] = []
-        for t in found[:distance]:
+        for t in picked:
             alloc = self.allocs.get(t.dest.id)
             try:
                 plans.append(self._plan(t, alloc))

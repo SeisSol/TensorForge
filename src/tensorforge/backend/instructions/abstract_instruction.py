@@ -11,6 +11,7 @@ import warnings
 from contextlib import contextmanager
 
 from tensorforge.backend import pir
+from tensorforge.backend.pir.transfers import pipelines
 from tensorforge.backend.pir.core import (Access, Effect, MemSpace,
                                           Uniformity)
 
@@ -460,12 +461,13 @@ class AbstractInstruction(ABC):
     report: list = []
     hints: list = []
     kept: list = []
+    pipeline = pipelines(options.transfer_pipelines)
     if getattr(options, 'enable_move_loads', False):
-      move = pir.MoveLoads(distance=options.move_distance)
+      move = pir.MoveLoads(distance=options.move_distance, pipeline=pipeline)
     if getattr(options, 'enable_wrap_loads', False):
       wrap = pir.WrapLoads(builder.scratch, distance=options.move_distance,
                            stages=2 if options.enable_multibuffer else 1,
-                           report=report)
+                           report=report, pipeline=pipeline)
     if options.enable_prefetch or options.prefetch_data:
       prefetch = pir.Prefetch(builder.scratch,
                               pointers=options.enable_prefetch,

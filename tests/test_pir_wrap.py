@@ -23,6 +23,7 @@ from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import (BOOL, SIZE, BufferType, Effect,
                                           MemSpace, Op, Participants,
                                           Uniformity)
+from tensorforge.backend.pir.transfers import one_pipeline
 from tensorforge.backend.pir.wrap import wrap_loads
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
@@ -685,3 +686,63 @@ def test_the_trip_a_run_fetches_for_is_named_once():
     name = re.search(r'\((\w+) == 0\)', line).group(1)
     assert line.count(f'({name} == ') == 3
     assert '?' not in line.split('=', 1)[1].split('== 0')[0]
+
+
+# --------------------------------------------------------------------------- #
+# pipelines
+# --------------------------------------------------------------------------- #
+
+def _two_paths():
+    """A batch loop whose body loads into registers and then copies into
+    shared memory: a transfer of each memory path."""
+    b = IRBuilder(fptype=F32, arena='shrMem')
+    count = b.extern_value('numElements0', SIZE, hint='count')
+    start = b.extern_value('start', SIZE, uniform=Uniformity.MULT,
+                           hint='start')
+    inside = b.op('lt', BOOL, start, count, hint='inside')
+    first = b.op('select', SIZE, inside, start, 0, hint='batchId1',
+                 escapes=True)
+    window = b.alloc(F32, (64,), MemSpace.SHARED, hint='s', extern='s0')
+    with b.for_('start', count, 'stride', hint='batchId0', index_type=SIZE,
+                peel_index=first, uniform=Uniformity.MULT) as f:
+        k = f.induction
+        ahead_k = b.op('add', SIZE, k, 'stride', hint='ahead1')
+        fits = b.op('lt', BOOL, ahead_k, count, hint='inbatch1')
+        f._next_index = b.op('select', SIZE, fits, ahead_k, k,
+                             hint='batchId1', escapes=True)
+        src = _binding(b, k, name='glb_m0')
+        staged = _binding(b, k, base='m3', name='glb_m3')
+        out = _binding(b, k, base=DST, name='glb_m1', writable=True)
+        reg = b.alloc(F32, (8,), MemSpace.REGISTER, hint='r', extern='r0')
+        _register_transfer(b, src, reg, 'r0')
+        b.store(out, b.load(reg, 3, hint='u'), 0)
+        b.mark('defines', window)
+        lane = b.thread_id('x')
+        tok = b.copy_async(window, staged, dst_index=(lane,),
+                           src_index=(lane,))
+        b.store(out, 0.0, 1)
+        b.wait(tok)
+        b.store(out, b.load(window, lane, hint='v'), lane)
+        b.barrier(Participants.MULT, threads=32)
+    body = b.finish()
+    verify(body)
+    return b, body
+
+
+def test_the_first_transfer_of_each_pipeline_wraps():
+    """A pipeline for every memory path (the default): at distance 1 the
+    load into registers and the copy into shared memory are each the first
+    of theirs, and both go one element ahead."""
+    b, body = _two_paths()
+    report = []
+    out = wrap_loads(body, b.scratch, report=report)
+    verify(out)
+    assert report == ['+ r0 [reg]', '+ s0 [shr]']
+
+
+def test_with_one_pipeline_the_first_transfer_alone_wraps():
+    b, body = _two_paths()
+    report = []
+    out = wrap_loads(body, b.scratch, report=report, pipeline=one_pipeline)
+    verify(out)
+    assert report == ['+ r0 [reg]']

@@ -1176,6 +1176,25 @@ GROUPS = {
          sub(PTR, '    out, seen = [], set(scoped)\n', '    return ()\n', 1)),
     ]),
 
+    # A pipeline for every memory path.
+    'pipelines': ('tests/test_pir_move.py tests/test_pir_wrap.py '
+                  'tests/test_wrap_loads.py::test_a_copy_wraps_in_a_pipeline_of_its_own '
+                  'tests/test_wrap_loads.py::test_an_unknown_pipeline_is_refused', [
+        ('move counting every transfer, whatever its pipeline',
+         sub(MOVE, '                and (not keys or keys[other] == keys[i])):',
+             '                ):', 1)),
+        ('wrap taking the first transfers of the body, whatever their pipeline',
+         sub(WRAP, '            key = pipeline(t)\n', '            key = None\n', 1)),
+        ('every path in one pipeline',
+         sub(TRANSFERS, '    return t.dest.type.space\n', '    return None\n', 1)),
+        ('the option not reaching the passes',
+         sub(ABSTR, '    pipeline = pipelines(options.transfer_pipelines)\n',
+             "    pipeline = pipelines('path')\n", 1)),
+        ('an unknown pipeline taken for the default',
+         sub(TRANSFERS, '    found = PIPELINES.get(name)\n',
+             '    found = PIPELINES.get(name, memory_path)\n', 1)),
+    ]),
+
     # What a target is, can and prefers.
     'target': ('tests/test_target.py tests/test_nontemporal.py '
                'tests/test_prefetch.py tests/test_packed_fma.py '
@@ -1281,8 +1300,8 @@ GROUPS = {
          sub(WRAP, '        tail_copy.given(l.k, l.next)',
              '        tail_copy.given(l.k, l.k)', 1)),
         ('the distance ignored',
-         sub(WRAP, '        for t in found[:distance]:',
-             '        for t in found[:1]:', 1)),
+         sub(WRAP, '            if count.get(key, 0) < distance:',
+             '            if count.get(key, 0) < 1:', 1)),
         ('a buffer another statement writes moved all the same',
          sub(WRAP, "            if any(writes(a) and same(a.base, d) for a in x.accesses):\n"
                    "                raise Refusal('the buffer is written by more than this '",

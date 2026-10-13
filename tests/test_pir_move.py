@@ -19,6 +19,7 @@ from tensorforge.backend.pir.core import (INDEX, SIZE, BufferType, Effect,
                                           MemSpace, Op, Participants,
                                           Uniformity, walk_stmts)
 from tensorforge.backend.pir.move import move_loads
+from tensorforge.backend.pir.transfers import one_pipeline
 from tensorforge.common.basic_types import Datatype
 
 F32 = Datatype.F32
@@ -483,3 +484,77 @@ def test_a_merged_run_keeps_the_reads_it_shares_and_licm_lifts_others(
     loop = next(s for s in out if s.op is Op.FOR)
     inside = any(s.op is Op.LOAD for s in walk_stmts(loop.regions[0].body))
     assert inside is rolled
+
+
+# --------------------------------------------------------------------------- #
+# pipelines
+# --------------------------------------------------------------------------- #
+
+def _issue(body, buf):
+    """Where the transfer filling `buf` starts: its first write."""
+    return next(i for i, s in enumerate(body)
+                if any(a.writes and a.base is buf
+                       for x in walk_stmts((s,)) for a in x.accesses))
+
+
+def _wait(body, buf):
+    """Where the copy into `buf` is waited for."""
+    return next(i for i, s in enumerate(body) if s.op is Op.WAIT
+                and any(a.base is buf for a in s.accesses))
+
+
+def _mixed():
+    """A copy into shared memory, a load into registers, and a second copy:
+    each written right in front of what reads it."""
+    t = Body()
+    m0, m1, m2 = t.binding('m0'), t.binding('m1'), t.binding('m2')
+    s0 = t.shared(m0, 's0')
+    t.use(s0)
+    r1 = t.register(m1, 'r1')
+    t.use(r1, 1)
+    s2 = t.shared(m2, 's2')
+    t.use(s2, 2)
+    t.finish()
+    return t, s0, r1, s2
+
+
+def test_with_one_pipeline_a_copy_waits_for_a_load_into_registers():
+    """One pipeline: the load into r1 is the transfer before the copy into
+    s2, which stops below it -- behind the wait for s0, so that one copy is
+    in flight at a time."""
+    t, s0, r1, s2 = _mixed()
+    out = move_loads(t.body, distance=1, pipeline=one_pipeline)
+    verify(out)
+    assert _issue(out, r1) < _issue(out, s2)
+    assert _issue(out, s2) > _wait(out, s0)
+
+
+def test_a_copy_passes_a_load_into_registers_in_a_pipeline_of_its_own():
+    """Two pipelines, one per memory path (the default): the load into r1 is not one of the
+    copy's, so the copy into s2 goes past it -- and ahead of the wait for s0,
+    the copy before it in its own pipeline: two copies in flight."""
+    t, s0, r1, s2 = _mixed()
+    out = move_loads(t.body, distance=1)
+    verify(out)
+    assert _issue(out, s0) < _issue(out, s2) < _wait(out, s0)
+
+
+def test_a_load_into_registers_passes_a_copy_in_a_pipeline_of_its_own():
+    """And the other way round: the load into r2 passes the copy into s1 and
+    stops below r0, the load before it in its own pipeline -- ahead of the
+    first read of r0."""
+    t = Body()
+    m0, m1, m2 = t.binding('m0'), t.binding('m1'), t.binding('m2')
+    r0 = t.register(m0, 'r0')
+    t.use(r0)
+    s1 = t.shared(m1, 's1')
+    t.use(s1, 1)
+    r2 = t.register(m2, 'r2')
+    t.use(r2, 2)
+    t.finish()
+    one = move_loads(t.body, distance=1, pipeline=one_pipeline)
+    two = move_loads(t.body, distance=1)
+    verify(one)
+    verify(two)
+    assert _issue(one, r2) > min(_reads(one, r0))
+    assert _issue(two, r0) < _issue(two, r2) < min(_reads(two, r0))

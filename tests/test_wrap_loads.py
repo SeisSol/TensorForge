@@ -214,3 +214,26 @@ def test_a_loop_over_groups_of_rows_is_not_wrapped(monkeypatch):
     plain = _generate("local_flux.py", "cuda", "sm_120",
                       enable_wrap_loads=True, lanes_per_mult=16)
     assert 'wrap_glb_' in plain and 'peel_glb_' in plain
+
+
+# ---------------------------------------------------------------------- #
+# pipelines
+# ---------------------------------------------------------------------- #
+
+def test_a_copy_wraps_in_a_pipeline_of_its_own():
+    """`transfer_pipelines`: the first transfer of `chain_five`'s body is a
+    load into registers and its first copy into shared memory comes later.
+    With a pipeline for every memory path, the default, the copy is the first
+    of its own and goes one element ahead as well; in one pipeline it is the
+    second transfer and stays."""
+    path = _generate(CHAIN, "cuda", "sm_86")
+    one = _generate(CHAIN, "cuda", "sm_86", transfer_pipelines="one")
+
+    def wrapped(kernel):
+        return re.findall(r'__pipeline_memcpy_async\([^;]*\bwrap_glb_', kernel)
+    assert wrapped(path) and not wrapped(one)
+
+
+def test_an_unknown_pipeline_is_refused():
+    with pytest.raises(ValueError, match="transfer_pipelines"):
+        _generate(CHAIN, "cuda", "sm_86", transfer_pipelines="lanes")

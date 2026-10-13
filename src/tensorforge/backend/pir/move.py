@@ -21,6 +21,14 @@ The transfer above counts where it was written, not where it is going: the
 transfers move from the bottom up, and each stops below its predecessor's
 place before the predecessor leaves it.
 
+*Which transfers count* is the pipeline (`transfers.PIPELINES`): only those
+of its own.  By default every memory path is one -- global to shared memory
+and global to registers -- so a copy into shared memory passes a load into
+registers without counting it, and the other way round.  On NVIDIA the two
+retire on counters of their own, and with one pipeline a load into registers
+written between two copies would keep the second copy behind the wait for
+the first: one copy in flight, the pipeline of copies drained at every wait.
+
 *What stops it* sooner:
 
 * a statement it may not cross (`schedule.may_cross`): one that defines a
@@ -51,15 +59,17 @@ from typing import Dict, List, Sequence, Tuple
 from .core import (BufferType, Effect, MemSpace, Op, Stmt, accesses_conflict,
                    walk_stmts)
 from .schedule import Footprint, crosses
-from .transfers import Transfer, glue, neutral, transfers, writes
+from .transfers import Transfer, glue, memory_path, neutral, transfers, writes
 
 
-def move_loads(body: Tuple[Stmt, ...], distance: int = 1) -> Tuple[Stmt, ...]:
-    """`body` with every transfer moved up, `distance` transfers ahead at
-    most."""
+def move_loads(body: Tuple[Stmt, ...], distance: int = 1,
+               pipeline=memory_path) -> Tuple[Stmt, ...]:
+    """`body` with every transfer moved up, `distance` transfers of its own
+    pipeline ahead at most.  `pipeline` keys a transfer to its pipeline
+    (`transfers.PIPELINES`)."""
     if distance < 1:
         raise ValueError(f'move distance must be >= 1, got {distance}')
-    return _list(body, distance, {})
+    return _list(body, distance, {}, pipeline)
 
 
 def _reads_global(s: Stmt, memo: Dict[int, bool]) -> bool:
@@ -74,8 +84,8 @@ def _reads_global(s: Stmt, memo: Dict[int, bool]) -> bool:
     return found
 
 
-def _list(stmts: Sequence[Stmt], distance: int,
-          memo: Dict[int, bool]) -> Tuple[Stmt, ...]:
+def _list(stmts: Sequence[Stmt], distance: int, memo: Dict[int, bool],
+          pipeline=memory_path) -> Tuple[Stmt, ...]:
     if not any(_reads_global(s, memo) for s in stmts):
         return tuple(stmts)
     found = transfers(stmts)
@@ -87,7 +97,8 @@ def _list(stmts: Sequence[Stmt], distance: int,
         # The regions of a transfer are its own hop loops, with nothing in
         # them to move.
         if s.regions and id(s) not in pieces:
-            regions = tuple(replace(r, body=_list(r.body, distance, memo))
+            regions = tuple(replace(r, body=_list(r.body, distance, memo,
+                                                   pipeline))
                             for r in s.regions)
             if any(n.body is not r.body for n, r in zip(regions, s.regions)):
                 s = replace(s, regions=regions)
@@ -106,8 +117,9 @@ def _list(stmts: Sequence[Stmt], distance: int,
     # What crossing a statement takes, asked of the same statements by every
     # transfer below them.
     prints: Dict[int, Footprint] = {}
+    keys = [pipeline(t) for t in found]
     for i in reversed(range(len(found))):
-        moved = _hoist(out, found[i], i, index, distance, prints)
+        moved = _hoist(out, found[i], i, index, distance, prints, keys)
         if moved is not None:
             out = moved
             changed = True
@@ -254,7 +266,8 @@ def _binding(s: Stmt) -> bool:
 
 
 def _hoist(out: List[Stmt], t: Transfer, i: int, index: Dict[int, int],
-           distance: int, prints: Dict[int, Footprint]):
+           distance: int, prints: Dict[int, Footprint],
+           keys: Sequence = ()):
     """`out` with transfer `t` -- the `i`-th of its list -- as far up as it
     may go, or None where it stays."""
     def footprint(s: Stmt) -> Footprint:
@@ -289,7 +302,8 @@ def _hoist(out: List[Stmt], t: Transfer, i: int, index: Dict[int, int],
         while lead > 0 and neutral(out[lead - 1]):
             lead -= 1
         other = index.get(id(x))
-        if other is not None and other < i and other not in passed:
+        if (other is not None and other < i and other not in passed
+                and (not keys or keys[other] == keys[i])):
             if len(passed) + 1 >= distance:
                 break
             passed.add(other)
