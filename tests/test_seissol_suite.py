@@ -123,9 +123,9 @@ def test_a_merged_derivative_stores_its_members_before_the_loop():
     can go wrong there, silently: the three contractions with `dQ(k)` reading
     it through the first one's window (`antiunify.substitute`);
     `dQ(k+1) = dQext(k+1)` asking for rows the register image does not hold,
-    so that the merge falls back; and the peeled level keeping `dQ(1)` in
-    registers, stored after the loop, so that the loop reads the buffer as the
-    launch found it.
+    so that the merge falls back; and a level built ahead of the loop keeping
+    `dQ(1)` in registers, stored after the loop, so that the loop reads the
+    buffer as the launch found it.
     """
     import re
 
@@ -355,7 +355,7 @@ def test_a_merged_run_carries_the_temporaries_it_reads_back():
     tensor -- `glb_` and the tensor's name -- is the symbol for a kernel
     parameter and for nothing else: a temporary is `s233` where its tensor is
     `t232`.  With such keys the damage step's seven integrals would never be
-    found -- the peeled copy would leave each as a register image, the chain
+    found -- each would be left in registers ahead of the loop, the chain
     would never close, and `I` and `sourceI` would come out wrong while
     `transportDer(0..3)`, which are parameters, would be right.
     """

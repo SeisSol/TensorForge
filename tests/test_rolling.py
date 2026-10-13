@@ -742,36 +742,74 @@ def test_the_counter_selects_through_a_value():
     assert chain.target[0] in named('glb_v0').args
 
 
-def _loop_region():
-    from tensorforge.common.context import Context
-    from tensorforge.generators.generator import Generator
-    gen = Generator(roll(accumulation()),
-                    Context(arch='sm_86', backend='cuda', fp_type=DTYPE))
-    gen._emit_loops = True
-    gen.generate()
-    loop = next(i for i in gen._sections[0].ir
-                if type(i).__name__ == 'VariantLoop')
-    return loop
+def _around_the_loop(gen):
+    """`(ahead, loop, behind)`: the section's instructions on either side of
+    its merged run."""
+    ir = getattr(gen, 'built', gen)._sections[0].ir
+    at = next(k for k, i in enumerate(ir) if type(i).__name__ == 'VariantLoop')
+    return ir[:at], ir[at], ir[at + 1:]
 
 
-def test_the_peeled_iteration_leaves_the_invariants_outside():
-    """What every iteration shares is done once, without a pass for it.
-
-    The shared staging of the operand all iterations read and the load of the
-    destination both happen in the peeled copy, and the residency keeps the
-    body from repeating them.
-    """
-    loop = _loop_region()
-    kinds = [type(i).__name__ for i in loop.region]
-    assert kinds.count('GlbToShrLoader') == 0
-    assert kinds.count('GlbToRegLoader') == 1
-    assert len(loop.region) < 6
+def _kinds(instrs):
+    return [type(i).__name__ for i in instrs]
 
 
-def test_the_loop_runs_the_iterations_the_peel_did_not():
-    loop = _loop_region()
-    assert (loop.start, loop.count) == (1, 4)
+def _rolled_body(gen):
+    """The statements of the merged run's loop in the section's pseudo-IR,
+    nested ones included."""
+    from tensorforge.backend.pir.core import Op, walk_stmts
+    loop = next(s for s in walk_stmts(gen._sections[0].body)
+                if s.op is Op.FOR and s.attr('rolled'))
+    return list(walk_stmts(loop.regions[0].body))
+
+
+def test_the_loop_runs_every_iteration():
+    """Nothing is built beside the loop: the destination it accumulates onto
+    is made resident ahead of it instead (`Generator._establish`)."""
+    ahead, loop, _ = _around_the_loop(_merged_build(roll(accumulation())))
+    assert (loop.start, loop.count) == (0, 4)
     assert loop.header().startswith('int32_t ')
+    assert 'MultilinearInstruction' not in _kinds(ahead)
+
+
+def test_the_destination_is_loaded_ahead_of_the_loop():
+    """Where the policy keeps results in registers, the first iteration finds
+    the destination loaded, as the written-out list's first operation would
+    have loaded it, and every iteration adds onto the one before it."""
+    ahead, loop, behind = _around_the_loop(_merged_build(roll(accumulation())))
+    loads = [i for i in ahead if type(i).__name__ == 'GlbToRegLoader']
+    assert len(loads) == 1
+    assert loads[0].uses()[0].obj.alias == 'Q'
+    # the varying operand is still loaded every iteration, and the sum goes
+    # out once, after the loop
+    assert _kinds(loop.region).count('GlbToRegLoader') == 1
+    assert _kinds(behind).count('StoreRegToGlb') == 1
+
+
+def test_an_atomic_destination_starts_from_zeros():
+    """Where the policy adds atomically, the first iteration takes no bias,
+    so the chain starts as zeros owed to the atomic update after the loop --
+    nothing is read ahead of it."""
+    gen = _merged_build(roll(accumulation()), arch='gfx942', backend='hip')
+    ahead, loop, behind = _around_the_loop(gen)
+    assert loop.start == 0
+    assert not any('Loader' in k for k in _kinds(ahead))
+    store, = [i for i in behind if type(i).__name__ == 'StoreRegToGlb']
+    assert store._atomic
+
+
+def test_what_every_iteration_shares_leaves_the_loop():
+    """The operand every iteration reads is staged in the body, the same copy
+    on every trip, and leaves the loop in the pseudo-IR (`pir.move`) -- with
+    the wait that retires it, so nothing is in flight across the loop."""
+    from tensorforge.backend.pir.core import Effect, MemSpace, Op
+    gen = _merged_build(roll(accumulation()))
+    _, loop, _ = _around_the_loop(gen)
+    assert 'GlbToShrLoader' in _kinds(loop.region)
+    body = _rolled_body(gen)
+    assert not any(a.space is MemSpace.SHARED and a.kind & Effect.WRITE
+                   for s in body for a in s.accesses)
+    assert not any(s.op is Op.WAIT for s in body)
 
 
 def _writer_of_the_destination(loop):
@@ -926,8 +964,67 @@ def test_a_run_after_an_assigning_contribution_is_not_peeled_again():
     assert len(outside) == 1
 
 
-def test_a_run_with_nothing_before_it_still_peels():
-    loop = _loop_of(roll(accumulation()))
+def test_where_every_result_goes_out_to_memory_the_run_is_peeled():
+    """A policy that stores each result as it is computed leaves nothing in
+    registers for the next iteration to add onto, so there is no image to
+    make resident ahead of the loop (`MultilinearBuilder.establish`)."""
+    from dataclasses import replace
+
+    from tensorforge.common import target
+    base = target.PREFERENCES['nvidia']
+    target.PREFERENCES['nvidia'] = replace(base, placement=replace(
+        base.placement, keep_results_in_registers=False))
+    try:
+        _, loop, _ = _around_the_loop(_merged_build(roll(accumulation())))
+    finally:
+        target.PREFERENCES['nvidia'] = base
+    assert loop.start == 1
+
+
+def _read_first(count=4):
+    """`T_i = W_i D; D += V_i T_i`: each iteration reads the destination
+    before it adds to it."""
+    out = []
+    for i in range(count):
+        tmp = make('tmp', [9, 4], is_tmp=True)
+        out.append(gemm(make(f'W{i}', [9, 9]), make('D', [9, 4]), tmp))
+        out.append(gemm(make(f'V{i}', [9, 9]), tmp, make('D', [9, 4]),
+                        add=True))
+    return out
+
+
+def test_a_run_that_reads_its_destination_first_is_peeled():
+    """A chain that starts with a read of the destination needs its value,
+    not a place to add onto, so the first iteration is built beside the loop
+    and leaves the residency behind."""
+    ahead, loop, _ = _around_the_loop(_merged_build(roll(_read_first())))
+    assert (loop.start, loop.count) == (1, 4)
+    assert 'MultilinearInstruction' in _kinds(ahead)
+
+
+def _add_onto_a_read(count=4):
+    """`D += W_i D`: each iteration's first touch of the destination is an
+    accumulation that also reads it."""
+    return [gemm(make(f'W{i}', [9, 9]), make('D', [9, 4]), make('D', [9, 4]),
+                 add=True) for i in range(count)]
+
+
+def test_a_run_that_adds_onto_what_it_reads_is_peeled():
+    """An accumulation that reads its own destination needs the value as
+    well as a place to add onto -- decided at the chain's first statement,
+    which here is the accumulation itself."""
+    ahead, loop, _ = _around_the_loop(_merged_build(roll(_add_onto_a_read())))
+    assert (loop.start, loop.count) == (1, 4)
+    assert 'MultilinearInstruction' in _kinds(ahead)
+
+
+def test_a_destination_assembled_from_several_writes_is_peeled():
+    """Each write of a destination written in slices goes out to memory as
+    it is produced, so there is no image to carry from one iteration to the
+    next (`MultilinearBuilder.establish`)."""
+    gen = _with_option(_accumulate_then_read().descr_list(),
+                       merge_variants=True)
+    _, loop, _ = _around_the_loop(gen)
     assert loop.start == 1
 
 
@@ -1182,6 +1279,125 @@ def test_a_merged_accumulation_is_read_back_after_the_loop(arch):
     assert np.allclose(read('D', m, n), d, rtol=1e-4, atol=1e-3)
     assert np.allclose(read('O', m, n), d @ read('C', n, n),
                        rtol=1e-4, atol=1e-2)
+
+
+def _written_by_alias(gen, descrs, numbering):
+    """What the kernel leaves in the operands it writes, on the host oracle,
+    keyed by alias and element -- with every operand given its inputs by
+    alias, so that two builds naming their parameters differently read the
+    same numbers.  `numbering` is shared between the builds compared."""
+    import re
+
+    from tensorforge.reference import kernel_eval
+    names = {}
+    for outer in descrs:
+        for d in outer.operations():
+            for m in d.matrix_list():
+                t = getattr(m, 'tensor', m)
+                if not getattr(t, 'is_variant', False):
+                    names.setdefault(t.name, t.alias)
+    canonical = {name: f'm{900 + numbering.setdefault(alias, len(numbering))}'
+                 for name, alias in names.items()}
+    src = re.sub(r'\bm\d+\b', lambda m: canonical.get(m.group(0), m.group(0)),
+                 gen.get_kernel())
+    signature = re.search(r'\bkernel_\w+\(([^)]*)\)', src).group(1)
+    outputs = {p.split()[-1] for p in signature.split(',')
+               if '*' in p and 'const' not in p}
+    lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
+    mem = kernel_eval.evaluate_wave(src, lanes, seed=29, globals_only=True,
+                                    mults=mults, block=True)
+    alias = {v: names[k] for k, v in canonical.items()}
+    return {(alias[k[0]], k[1]): v for k, v in mem.items() if k[0] in outputs}
+
+
+def _staged(count=4):
+    """`Q += K_i I` over batch-constant operators, which `stage_members`
+    stages a block barrier apart in the loop, and `O = I S` behind it."""
+    operator = Addressing.NONE
+    out = []
+    for i in range(count):
+        k = Tensor([24, 24], operator, BoundingBox([0, 0], [24, 24]),
+                   alias=f'K{i}', datatype=DTYPE)
+        out.append(gemm(SubTensor(k), make('I', [24, 5]), make('Q', [24, 5]),
+                        add=True))
+    s = Tensor([5, 5], operator, BoundingBox([0, 0], [5, 5]), alias='S',
+               datatype=DTYPE)
+    return out + [gemm(make('I', [24, 5]), SubTensor(s), make('O', [24, 5]))]
+
+
+def test_a_window_the_loop_fills_is_declared_ahead_of_it():
+    """A barrier in the run keeps the staging of what every iteration shares
+    in the body (`pir.move`), and the operation behind the loop reads the
+    staged copy: its window is declared ahead of the header, or the name
+    would be scoped to the loop (`VariantLoop._declare_windows_early`)."""
+    import re
+    gen = _merged_build(roll(_staged()), stage_members=True)
+    _, loop, behind = _around_the_loop(gen)
+    staged = [i.get_dest() for i in loop.region
+              if type(i).__name__ == 'GlbToShrLoader'
+              and not getattr(i.get_dest(), 'block_shared', False)]
+    window, = staged
+    assert any(window in i.uses() for i in behind)
+    lines = gen.get_kernel().splitlines()
+    header = next(k for k, line in enumerate(lines)
+                  if 'for (int32_t batchIdv' in line)
+    declared = next(k for k, line in enumerate(lines)
+                    if re.search(rf'\b{window.name} = &', line))
+    assert declared < header
+    assert any(window.name in line for line in lines[header + 1:]
+               if 'load{g>s}' in line), 'staged in the loop all the same'
+
+
+@pytest.mark.parametrize('shape, atomics, options', [
+    ('accumulation', False, {}),
+    ('accumulation', True, {}),
+    ('read_first', False, {}),
+    ('staged', False, {'stage_members': True}),
+])
+def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
+                                                              options):
+    """The run built as one loop leaves the numbers the operations built one
+    by one do -- with the destination made resident ahead of the loop, from
+    zeros where the policy adds atomically, and with the first iteration
+    built beside the loop where it cannot be (`read_first`; a destination
+    written in slices is checked against numpy above).  `staged` keeps the
+    staging of what every iteration shares in the loop -- a barrier stands
+    there -- and reads it again behind the loop."""
+    from dataclasses import replace
+
+    import numpy as np
+
+    from tensorforge.common import target
+
+    def descrs():
+        # Small, since the oracle interprets every lane of the block.
+        make.pool = {}
+        if shape == 'accumulation':
+            return [gemm(make(f'P{i}', [24, 24]), make('I', [24, 5]),
+                         make('Q', [24, 5]), add=True) for i in range(4)]
+        if shape == 'read_first':
+            return _read_first()
+        return _staged()
+
+    base = target.PREFERENCES['nvidia']
+    target.PREFERENCES['nvidia'] = replace(
+        base, placement=replace(base.placement, atomic_accumulation=atomics))
+    try:
+        numbering = {}
+        plain = descrs()
+        expected = _written_by_alias(_with_option(plain, merge_variants=False,
+                                                  **options),
+                                     plain, numbering)
+        merged = roll(descrs())
+        gen = _merged_build(merged, **options)
+        assert any(isinstance(d, ForDescr) for d in merged)
+        got = _written_by_alias(gen, merged, numbering)
+    finally:
+        target.PREFERENCES['nvidia'] = base
+    assert expected and set(got) == set(expected)
+    bad = [k for k in expected
+           if not np.isclose(got[k], expected[k], rtol=1e-4, atol=1e-3)]
+    assert not bad, f'{len(bad)} of {len(expected)} differ, e.g. {bad[:3]}'
 
 
 def test_a_merged_loop_fences_its_head_against_its_tail():

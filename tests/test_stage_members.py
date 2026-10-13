@@ -31,13 +31,14 @@ def test_the_current_member_is_copied_by_the_block_between_barriers(arch):
     src = _kernel_at('local_flux', arch, merge_variants=True,
                      stage_members=True)
     body = _variant_loop(src)
-    staged = STAGED.findall(body)
+    # the buffer's window is declared ahead of the loop, as every window
+    # its body fills (`VariantLoop._declare_windows_early`)
+    staged = STAGED.findall(src[:src.index('for (int32_t batchIdv')])
     assert staged and BINDING.findall(body) == staged
     # the table still selects global pointers; the copy sits between barriers
-    head = body[:body.index(f'glb_{staged[0]} = &totalShrMem')]
-    assert head.count('__syncthreads();') == 1
-    after = body[body.index(f'glb_{staged[0]} = &totalShrMem'):]
-    assert '__syncthreads();' in after
+    copy = body.index(f'// glb_{staged[0]} = load{{g>s}}(glb_{staged[0]}g')
+    assert body[:copy].count('__syncthreads();') == 1
+    assert '__syncthreads();' in body[copy:]
     # every multiplication of the block on the same trips: one group of 8 --
     # spelled in the loop start where it is IR (a multiplication narrower
     # than the wave) and through `batchIdLane0` where it is text

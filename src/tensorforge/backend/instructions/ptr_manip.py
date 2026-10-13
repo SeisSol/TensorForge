@@ -11,7 +11,7 @@ from tensorforge.common.helper import get_extra_offset_name, Addressing
 from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
 from tensorforge.common.exceptions import (GenerationError,
                                            InternalError)
-from tensorforge.backend.pir.core import Effect, Qual
+from tensorforge.backend.pir.core import Access, Effect, Qual
 from tensorforge.backend.pir.core import MemSpace
 from tensorforge.backend.symbol import SymbolType, passed_by_value
 
@@ -885,6 +885,59 @@ class VariantLoop(AbstractInstruction):
       out.extend(table.get_operands())
     return out
 
+  def uses(self) -> Tuple:
+    """The members its tables select from, and what its body reads before
+    it writes it -- as `BatchLoop` says of its own body."""
+    out, seen, defined = [], set(), set()
+    for sym in self.get_operands():
+      if id(sym) not in seen:
+        seen.add(id(sym))
+        out.append(sym)
+    for instr in self._region:
+      for sym in instr.uses():
+        if id(sym) not in defined and id(sym) not in seen:
+          seen.add(id(sym))
+          out.append(sym)
+      for sym in instr.defs():
+        defined.add(id(sym))
+    return tuple(out)
+
+  def defs(self) -> Tuple:
+    """What its body defines, and is defined behind the loop as well.
+
+    Which is everything but the bindings its counter selects, which are
+    declared in the body and scoped to it.  The loop runs at least once
+    (`__init__`), registers are allocated ahead of it
+    (`Generator._emit_variant_loop`) and shared windows declared ahead of it
+    (`_declare_windows_early`), so an operand the first iteration stages is
+    there for whatever reads it after the loop -- a later operation the
+    residency or the scopes hand the staged copy.
+    """
+    scoped = {id(sym) for instr in self._region
+              if isinstance(instr, GetElementPtr) for sym in instr.defs()}
+    out, seen = [], set(scoped)
+    for instr in self._region:
+      for sym in instr.defs():
+        if id(sym) not in seen:
+          seen.add(id(sym))
+          out.append(sym)
+    return tuple(out)
+
+  def accesses(self) -> Tuple:
+    """What its body touches, and the members it reaches through its tables:
+    the body's accesses name the stand-ins."""
+    out = []
+    for table in self._tables:
+      for sym in table.get_operands():
+        space = MemSpace.from_symbol_type(getattr(sym, 'stype', None))
+        if space is not MemSpace.NONE:
+          kind = Effect.READ | (Effect.WRITE if table.writable
+                                else Effect.NONE)
+          out.append(Access(kind, space, sym))
+    for instr in self._region:
+      out.extend(instr.accesses())
+    return tuple(out)
+
   # -- the counter, as a value ---------------------------------------------- #
 
   #: `(builder, {name: value})`, innermost last: what the runs open here bind.
@@ -935,11 +988,45 @@ class VariantLoop(AbstractInstruction):
     for instruction in self._region:
       instruction.gen_code(writer)
 
+  def _declare_windows_early(self, writer, instrs, cleared) -> None:
+    """Declare the shared windows the body fills ahead of the header.
+
+    The same hoist `BatchLoop` and `Conditional` do out of their own
+    regions, for the same reason: a window is declared by the first
+    instruction that fills it, and one inside the body would scope the name
+    to the body, where everything after the loop that reads the buffer --
+    the residency hands a later operation the copy the loop staged, and a
+    temporary the loop assigns is read behind it -- names something never
+    declared where it stands.  The offset is the allocator's and the same on
+    every trip, so the declaration does not depend on the counter.  Nested
+    regions too: a guard in the body would declare its windows ahead of the
+    guard, which is still inside the loop.
+    """
+    for instr in instrs:
+      declare = getattr(instr, 'gen_code_declare', None)
+      if declare is not None and getattr(instr, '_declare', False):
+        declare(writer)
+        instr._declare = False
+        cleared.append(instr)
+      for region in instr.regions():
+        self._declare_windows_early(writer, region, cleared)
+
   def gen_code(self, writer) -> None:
+    # Restored afterwards: clearing the flag is a statement about this build,
+    # and a body built twice would otherwise declare nothing at all.
+    cleared = []
+    try:
+      self._gen_code(writer, cleared)
+    finally:
+      for instr in cleared:
+        instr._declare = True
+
+  def _gen_code(self, writer, cleared) -> None:
     invariant = [t for t in self._tables if t.loop_invariant()]
     per_iteration = [t for t in self._tables if not t.loop_invariant()]
     for table in invariant:
       table.gen_code(writer)
+    self._declare_windows_early(writer, self._region, cleared)
 
     if hasattr(writer, 'for_'):
       # `extern` because the counter's name is the macro layer's: a table

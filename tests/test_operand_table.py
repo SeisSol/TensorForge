@@ -217,6 +217,12 @@ class Marker:
     def gen_code(self, writer):
         writer(self.text)
 
+    def regions(self):
+        """None, as for any instruction that holds no body of its own: the
+        loop walks its children's regions for the windows to declare ahead
+        of the header."""
+        return []
+
 
 def test_the_header_is_a_counted_loop_over_the_members():
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
@@ -465,7 +471,10 @@ def test_the_loop_takes_the_structured_path_where_one_is_open():
 
     depth = []
 
-    class Probe:
+    class Probe(Marker):
+        def __init__(self):
+            super().__init__('')
+
         def gen_code(self, writer):
             depth.append(len(writer._stack))
 

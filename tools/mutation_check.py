@@ -68,6 +68,7 @@ LOAD = Path('src/tensorforge/backend/instructions/memory/load.py')
 PASSES = Path('src/tensorforge/backend/pir/passes.py')
 GEN = Path('src/tensorforge/generators/generator.py')
 PTR = Path('src/tensorforge/backend/instructions/ptr_manip.py')
+MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py')
 
 
 def _run_tests(target):
@@ -1131,13 +1132,48 @@ GROUPS = {
     ]),
 
     # A merged run's loop: the selection its counter makes, a value the
-    # bindings read.
-    'runs': ('tests/test_rolling.py::test_the_counter_selects_through_a_value', [
+    # bindings read; the destination made resident ahead of the loop rather
+    # than an iteration built beside it, what the loop shares taken out of
+    # it, and the names its body declares where whatever reads them sees
+    # them.
+    'runs': ('tests/test_rolling.py::test_the_counter_selects_through_a_value '
+             'tests/test_rolling.py::test_the_loop_runs_every_iteration '
+             'tests/test_rolling.py::test_the_destination_is_loaded_ahead_of_the_loop '
+             'tests/test_rolling.py::test_an_atomic_destination_starts_from_zeros '
+             'tests/test_rolling.py::test_what_every_iteration_shares_leaves_the_loop '
+             'tests/test_rolling.py::test_where_every_result_goes_out_to_memory_the_run_is_peeled '
+             'tests/test_rolling.py::test_a_run_that_reads_its_destination_first_is_peeled '
+             'tests/test_rolling.py::test_a_run_that_adds_onto_what_it_reads_is_peeled '
+             'tests/test_rolling.py::test_a_destination_assembled_from_several_writes_is_peeled '
+             'tests/test_rolling.py::test_a_window_the_loop_fills_is_declared_ahead_of_it '
+             'tests/test_rolling.py::test_a_merged_run_computes_what_the_list_written_out_does '
+             'tests/test_rolling.py::test_a_merged_accumulation_is_read_back_after_the_loop '
+             'tests/test_rolling.py::test_a_run_reads_its_table_and_its_factor_inside_the_loop', [
         ('the select chain left a wall',
          sub(PTR, '    self._value = (writer.uid, self._declare_chain(writer, decl, counter,\n'
                   '                                                   datatype, stars))',
              "    self._declare(writer, f'{decl} = ' + self._chain(\n"
              "        lambda m: self._member(m, datatype, stars), self._variant) + ';')", 1)),
+        ('every run peeled as before',
+         sub(GEN, '    resident = not missing or self._establish(body, builders, missing)',
+             '    resident = not missing', 1)),
+        ('a destination written in slices made resident ahead',
+         sub(MLB, '        or dest_symbol.stype != SymbolType.Global\n'
+                  '        or self._plan.written_in_slices(self._dest_obj.tensor)):',
+             '        or dest_symbol.stype != SymbolType.Global):', 1)),
+        ('a policy that stores every result taken for one that keeps it',
+         sub(MLB, '    if not self._policy.keep_results_in_registers:\n      return False\n',
+             '', 1)),
+        ('a chain that starts with a read of its destination made resident',
+         sub(GEN, '          or any(self._residency_key(v) == key for v in first.reads())):',
+             '          or False):', 1)),
+        ('the atomic chain started from a load',
+         sub(MLB, '    if self._policy.atomic_accumulation:\n      supported = self._context.target.native_atomic(',
+             '    if False:\n      supported = self._context.target.native_atomic(', 1)),
+        ('the windows a run fills declared in its body',
+         sub(PTR, '    self._declare_windows_early(writer, self._region, cleared)\n', '', 1)),
+        ('what a run defines not defined behind it',
+         sub(PTR, '    out, seen = [], set(scoped)\n', '    return ()\n', 1)),
     ]),
 
     # What a target is, can and prefers.

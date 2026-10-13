@@ -2482,32 +2482,69 @@ class Generator:
     from tensorforge.backend.instructions.builders.ptr_manip_builder import \
         GetElementPtrBuilder
 
-    # The first iteration is peeled, and it is not an optimization.
+    body, variants = loop.decompose()
+    written = {id(d.writes().tensor) for d in body if d.writes() is not None}
+
+    # What the body threads through itself.  A destination is not accumulated
+    # in place: each build takes a fresh register and reads the last one, so
+    # the expanded form is a chain and one turn of it is what the body holds.
     #
-    # A body built cold does what the *first* of the expanded descriptors did:
-    # it loads the destination and computes a result from it.  Repeating that
-    # recomputes `Q + contribution` from the stored `Q` every time and keeps
-    # only the last one.  What the loop wants is what descriptors two onwards
-    # did -- accumulate into a destination that is already resident -- and the
-    # way to build that body is to let one iteration establish the residency
-    # first.
+    # Read off either side of the build, because that is the only moment both
+    # links exist.  Keyed by the *binding*, which is what the residency is
+    # keyed by -- the tensor is `m0`, its entry is `glb_m0`, and asking for the
+    # tensor finds nothing and looks exactly like nothing to carry.
     #
-    # It also settles the invariants without a pass: the shared staging of an
-    # operand every iteration shares, and the destination's load, both happen
-    # in the peeled copy and the residency stops the body from repeating them.
-    # The cost is one body written out beside the loop, so four iterations
-    # cost two copies rather than four.
-    # ...unless something before the loop already did.  A run that follows a
-    # descriptor writing the same destination -- which is what a frontend
-    # produces when the first contribution assigns and the rest add -- has its
-    # residency established already, and peeling again writes a second copy of
-    # the body for nothing.
-    accumulated_keys = [
-        key for key in (self._residency_key(d.writes()) for d in loop.body(0)
-                        if getattr(d, 'add', False) and d.writes() is not None)
-        if key is not None]
-    resident = bool(accumulated_keys) and all(
-        self._residency.get(key) is not None for key in accumulated_keys)
+    # And only what the body reads before it assigns it rides the back edge.
+    # A tensor assigned first starts afresh on every pass: each of the damage
+    # model's projections computes `I = dQ(0) ...; I += ...` and reads it
+    # back, and chaining that `I` round the loop would rename its reload and
+    # not the product reading it -- `QDR(1..3)` would come out zero.
+    def carries(tensor) -> bool:
+      for descr in body:
+        if any(view.tensor is tensor for view in descr.reads()):
+          return True
+        dest = descr.writes()
+        if dest is not None and dest.tensor is tensor:
+          return bool(getattr(descr, 'add', False))
+      return False
+
+    # Every destination the body reads before it assigns, and not only the
+    # accumulating ones.  `carries` is the whole question, and asking it of
+    # `+=` destinations alone answers it for a chain written as `X += ...`
+    # and not for one written as `X = f(X, ...)` -- the same dependency, from
+    # a frontend that folded the read into the operands.  SeisSol's damage
+    # step has fifteen of the second kind and none of the first.
+    keys = list(dict.fromkeys(
+        key for key in (self._residency_key(descr.writes()) for descr in body
+                        if descr.writes() is not None
+                        and carries(descr.writes().tensor))
+        if key is not None))
+
+    # Every iteration builds this one body, and the body adds onto what its
+    # destinations hold when it starts: for the first iteration, what a load
+    # of each gives.  A destination not resident yet is made so ahead of the
+    # loop -- loaded, or zeros owed to an atomic update (`_establish`) -- so
+    # that a load stands ahead of the loop rather than an iteration beside it.
+    # An operand every iteration shares is staged in the body, the same copy
+    # on every trip, and leaves the loop in the pseudo-IR (`pir.move`).  A
+    # destination that varies is the member's own on each pass, read and
+    # stored there.
+    #
+    # Where a destination cannot be made resident that way -- one in shared
+    # memory, one written in slices, one the body reads before it adds to
+    # it -- the first iteration is built beside the loop instead and leaves
+    # the residency behind.  Not
+    # the body itself: built cold, it does what the *first* of the expanded
+    # descriptors did, loads the destination and computes a result from it,
+    # and repeated it recomputes `Q + contribution` from the stored `Q` every
+    # time and keeps only the last one.
+    missing = list(dict.fromkeys(
+        key for key in (self._residency_key(d.writes()) for d in body
+                        if d.writes() is not None
+                        and not getattr(d.writes().tensor, 'is_variant', False)
+                        and carries(d.writes().tensor))
+        if key is not None and self._residency.get(key) is None))
+    resident = not missing or self._establish(body, builders, missing)
 
     if not resident:
       for descr in loop.body(0):
@@ -2517,16 +2554,13 @@ class Generator:
             self._section.ir.extend(builder.get_instructions())
             break
 
-    body, variants = loop.decompose()
-    written = {id(d.writes().tensor) for d in body if d.writes() is not None}
-
     # The loop reaches its members through a table, and a table is an address:
     # it reads memory and never asks the residency.  So a member whose newest
     # copy is still in registers has to be stored before the loop, or the loop
     # reads the buffer as it was.  SeisSol's anelastic time derivative is the
-    # case -- the peeled level leaves `dQ(1)` in registers, and if that were
-    # stored only after the loop, the next level would read the launch's
-    # input in its place.
+    # case -- a level built ahead of the loop leaves `dQ(1)` in registers, and
+    # if that were stored only after the loop, the next level would read the
+    # launch's input in its place.
     for variant in variants:
       for view in variant.members:
         member = self._member_symbol(view)
@@ -2574,40 +2608,6 @@ class Generator:
       pointers.build(stand_in, table=table, variant=counter)
       region.extend(pointers.get_instructions())
 
-    # What the body threads through itself.  A destination is not accumulated
-    # in place: each build takes a fresh register and reads the last one, so
-    # the expanded form is a chain and one turn of it is what the body holds.
-    #
-    # Read off either side of the build, because that is the only moment both
-    # links exist.  Keyed by the *binding*, which is what the residency is
-    # keyed by -- the tensor is `m0`, its entry is `glb_m0`, and asking for the
-    # tensor finds nothing and looks exactly like nothing to carry.
-    #
-    # And only what the body reads before it assigns it rides the back edge.
-    # A tensor assigned first starts afresh on every pass: each of the damage
-    # model's projections computes `I = dQ(0) ...; I += ...` and reads it
-    # back, and chaining that `I` round the loop would rename its reload and
-    # not the product reading it -- `QDR(1..3)` would come out zero.
-    def carries(tensor) -> bool:
-      for descr in body:
-        if any(view.tensor is tensor for view in descr.reads()):
-          return True
-        dest = descr.writes()
-        if dest is not None and dest.tensor is tensor:
-          return bool(getattr(descr, 'add', False))
-      return False
-
-    # Every destination the body reads before it assigns, and not only the
-    # accumulating ones.  `carries` is the whole question, and asking it of
-    # `+=` destinations alone answers it for a chain written as `X += ...`
-    # and not for one written as `X = f(X, ...)` -- the same dependency, from
-    # a frontend that folded the read into the operands.  SeisSol's damage
-    # step has fifteen of the second kind and none of the first.
-    keys = list(dict.fromkeys(
-        key for key in (self._residency_key(descr.writes()) for descr in body
-                        if descr.writes() is not None
-                        and carries(descr.writes().tensor))
-        if key is not None))
     before = {}
     for key in keys:
       entry = self._residency.get(key)
@@ -2644,6 +2644,16 @@ class Generator:
       if (was is not None and entry is not None and not entry.is_preload
           and entry.image is not was):
         carried.append((key, was, entry.image))
+    # What was made resident ahead of the loop has to come out of the body
+    # resident again, or there is no chain to close: every iteration would
+    # add its term onto the image ahead of the loop, and only the last one's
+    # sum would be kept.  `_establish` asks the builders not to promise what
+    # their build will not do; this is where a broken promise would show.
+    broken = sorted(set(missing) - {key for key, _, _ in carried})
+    if resident and broken:
+      raise InternalError(
+          f'merged run: {", ".join(broken)} made resident ahead of the loop '
+          f'and not left resident by its body')
 
     # Close the chain: the body reads one register and writes another, and a
     # loop needs the two to be one.  Substituted on the built region rather
@@ -2693,6 +2703,43 @@ class Generator:
         VariantLoop(self._context, counter, loop.iterations, region, tables,
                     start=0 if resident else 1, carried=tuple(carried)))
 
+  def _establish(self, body, builders, keys) -> bool:
+    """Make every destination in `keys` resident ahead of a merged run, as
+    the run's first iteration finds it right before adding its terms
+    (`MultilinearBuilder.establish`).
+
+    Each has to be one the body's first touch of adds to -- a chain that
+    starts with a read of it would need the value itself, not a place to
+    add onto.  All or nothing: where one cannot be, what the others recorded
+    is dropped again and nothing is emitted.
+    """
+    planned = []
+    for key in keys:
+      first = next((d for d in body
+                    if any(self._residency_key(v) == key for v in d.reads())
+                    or (d.writes() is not None
+                        and self._residency_key(d.writes()) == key)), None)
+      if (first is None or not getattr(first, 'add', False)
+          or self._residency_key(first.writes()) != key
+          or any(self._residency_key(v) == key for v in first.reads())):
+        return False
+      builder = next((b for kind, b in builders
+                      if (isinstance(first, kind) if isinstance(kind, type)
+                          else kind(first))), None)
+      if not hasattr(builder, 'establish'):
+        return False
+      planned.append((key, first, builder))
+    done, emitted = [], []
+    for key, first, builder in planned:
+      if not builder.establish(first):
+        for name in done:
+          self._residency.drop(name)
+        return False
+      done.append(key)
+      emitted.extend(builder.get_instructions())
+    self._section.ir.extend(emitted)
+    return True
+
   def _member_symbol(self, view):
     """The symbol a merged run reaches an operand through.
 
@@ -2721,10 +2768,10 @@ class Generator:
     carry its parameters round the back edge and none of its temporaries.
 
     SeisSol's damage step is where that shows: the seven integrals its
-    outputs are read from are temporaries, the peeled copy leaves each as a
-    register image, and with the chain never closed every iteration would
-    read the image the peel left.  `I` and `sourceI` would come out at three
-    fifths of what the written-out kernel computes, while
+    outputs are read from are temporaries, each left in registers ahead of
+    the loop, and with the chain never closed every iteration would read the
+    image left there.  `I` and `sourceI` would come out at three fifths of
+    what the written-out kernel computes, while
     `transportDer(0..3)` -- kernel parameters, and so the one kind such a key
     matches -- would be right.
     """
