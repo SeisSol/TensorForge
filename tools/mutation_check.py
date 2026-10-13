@@ -1325,6 +1325,19 @@ GROUPS = {
         ('the stage of a window not spelled',
          sub(EMIT, '                    off = off.format(*(self.operand(a) for a in s.args))',
              '                    pass', 1)),
+        ('a merged run left as it is',
+         sub(WRAP, '    for s in body:\n        if _run(s):',
+             '    for s in body:\n        if False:', 1)),
+        ('the trip after the last one fetched',
+         sub(WRAP, "    following = b.op('select', counter.type, inside, ahead, counter,\n"
+                   "                     hint='trip')",
+             "    following = ahead", 1)),
+        ('a run wrapped again as a batch loop',
+         sub(WRAP, "                or s.attr('first') is None or s.attr('rolled')):",
+             "                or s.attr('first') is None):", 1)),
+        ('a value its consumer spells twice inlined',
+         sub(EMIT, '        out = [(a, times.get(i, 1)) for i, a in enumerate(s.args)',
+             '        out = [(a, 1) for i, a in enumerate(s.args)', 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

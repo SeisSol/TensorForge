@@ -556,3 +556,132 @@ def test_a_name_in_text_is_spelled_for_the_copy():
                 and (s.text or '').startswith('// r0')]
     assert '// r0 = load{g>r}(peel_glb_m0)' in comments
     assert '// r0 = load{g>r}(wrap_glb_m0)' in comments
+
+
+# --------------------------------------------------------------------------- #
+# a merged run's loop
+# --------------------------------------------------------------------------- #
+
+class Run:
+    """A merged run's loop, the way `VariantLoop` writes one: a counter, the
+    chain selecting a member by it, the binding reading the chain, and the
+    transfer through that binding."""
+
+    def __init__(self, *, shared=False, transfer=True, trips=4):
+        b = self.b = IRBuilder(fptype=F32, arena='shrMem')
+        k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
+        members = [_binding(b, k, base=f'm{3 + j}', name=f'glb_m{3 + j}')
+                   for j in range(trips)]
+        out = _binding(b, k, base=DST, name='glb_m1', writable=True)
+        self.dest = (b.alloc(F32, (64,), MemSpace.SHARED, hint='s',
+                             extern='s0') if shared
+                     else b.alloc(F32, (8,), MemSpace.REGISTER, hint='r',
+                                  extern='r0'))
+        with b.for_(0, trips, 1, extern='batchIdv0', rolled=True) as run:
+            self.counter = c = run.induction
+            text = f'{{{trips}}}'
+            for j in reversed(range(trips - 1)):
+                text = f'({{0}} == {j}) ? {{{j + 1}}} : {text}'
+            pointer = BufferType(F32, (64,), MemSpace.GLOBAL, readonly=True)
+            self.chain = b.decl_expr('const float *const v0Table', text,
+                                     pointer, None, args=(c, *members),
+                                     hint='v0Table', extern='v0Table')
+            binding = b.decl_expr(
+                'const float *const __restrict__ glb_v0', '{0}', pointer,
+                'v0', args=(self.chain,), kind=Effect.READ,
+                space=MemSpace.GLOBAL, hint='glb_v0', extern='glb_v0')
+            lane = b.thread_id('x')
+            if transfer and shared:
+                b.mark('defines', self.dest)
+                tok = b.copy_async(self.dest, binding, dst_index=(lane,),
+                                   src_index=(lane,))
+                b.store(out, 0.0, 1)
+                b.wait(tok)
+            elif transfer:
+                _register_transfer(b, binding, self.dest, 'r0')
+            b.store(out, b.load(self.dest, lane, hint='u'), c)
+        self.body = b.finish()
+        verify(self.body)
+
+    def wrap(self, **kwargs):
+        self.report = []
+        out = wrap_loads(self.body, self.b.scratch, report=self.report,
+                         **kwargs)
+        verify(out)
+        return out
+
+
+def _run_loop(body):
+    return next(s for s, _ in walk(body) if s.op is Op.FOR
+                and s.attr('rolled'))
+
+
+def _chains(stmts):
+    return {s.attr('extern'): s for s, _ in walk(tuple(stmts))
+            if s.op is Op.RAWEXPR and s.attr('extern', '').endswith('Table')}
+
+
+def test_a_run_fetches_the_next_trips_member_at_its_tail():
+    """The operand a run's counter selects is a different member every
+    trip: fetched for the trip after once this one is done with its buffer,
+    from the chain computed again for that trip -- and the first trip's
+    ahead of the loop, from the chain at the loop's first trip."""
+    run = Run()
+    out = run.wrap()
+    assert run.report == ['+ r0 [reg] in a run']
+    loop = _run_loop(out)
+    body = loop.regions[0].body
+    following = loop.attr('next')
+    ahead = _chains(body)
+    assert set(ahead) == {'wrap_v0Table'}
+    assert ahead['wrap_v0Table'].args[0] is following
+    # the trip after, held at the last one
+    defs = _defs(out)
+    select = defs[following.id]
+    assert select.op == 'select' and select.args[2] is run.counter
+    assert defs[select.args[1].id].args[:2] == (run.counter, 1)
+    tail = [s for s in body if s.op is Op.FOR]
+    assert tail and body.index(tail[-1]) > max(
+        i for i, s in enumerate(body) if s.op is Op.LOAD
+        and s.accesses[0].base is run.dest)
+    peel = _chains(out[:out.index(loop)])
+    assert set(peel) == {'peel_v0Table'}
+    assert peel['peel_v0Table'].args[0] == 0
+
+
+def test_a_run_reads_no_member_through_its_own_chain_any_more():
+    """What the trip itself selected was only there to be fetched, and the
+    fetch is now the trip before's."""
+    out = Run().wrap()
+    names = {s.attr('extern') for s, _ in walk(out) if s.attr('extern')}
+    assert not names & {'v0Table', 'glb_v0'}
+    assert {'peel_glb_v0', 'wrap_glb_v0'} <= names
+
+
+def test_a_runs_shared_copy_rides_the_loop_and_is_drained():
+    run = Run(shared=True)
+    out = run.wrap()
+    assert run.report and run.report[0].startswith('+ s0 [shr]')
+    loop = _run_loop(out)
+    assert loop.target, 'the loop carries the tail\'s copies'
+    behind = out[out.index(loop) + 1:]
+    assert any(s.op is Op.WAIT for s in behind)
+
+
+def test_a_run_without_a_transfer_is_left_alone():
+    run = Run(transfer=False)
+    assert run.wrap() is run.body
+    assert run.report == ['- run: no transfer in the body']
+
+
+def test_the_trip_a_run_fetches_for_is_named_once():
+    """The chain spells its counter once per member: the trip after is a
+    value of its own there, and not computed again at every spelling."""
+    out = Run().wrap()
+    w = Writer()
+    emit(placed(out), w, Target('sm_86', 'cuda'))
+    src = w.get_src()
+    line = next(l for l in src.splitlines() if 'wrap_v0Table =' in l)
+    name = re.search(r'\((\w+) == 0\)', line).group(1)
+    assert line.count(f'({name} == ') == 3
+    assert '?' not in line.split('=', 1)[1].split('== 0')[0]

@@ -175,6 +175,28 @@ def _value_bytes(type_) -> int:
     return size * (getattr(type_, 'length', None) or 1)
 
 
+_PLACEHOLDER = re.compile(r'\{(\d+)\}')
+
+
+def _spelled(s: Stmt) -> List[Tuple[Any, int]]:
+    """`(operand, times)`: how often `s` writes each of its operands out.
+
+    Once per operand, but for text with placeholders (`IRBuilder.rawexpr`,
+    a raw statement with `fmt`), which spells `args[i]` wherever `{i}`
+    stands: a merged run's select chain names its counter once per member.
+    """
+    if s.text and (s.op is Op.RAWEXPR or s.attr('fmt')):
+        times: Dict[int, int] = {}
+        for m in _PLACEHOLDER.finditer(s.text.replace('{{', '').replace('}}', '')):
+            times[int(m.group(1))] = times.get(int(m.group(1)), 0) + 1
+        out = [(a, times.get(i, 1)) for i, a in enumerate(s.args)
+               if isinstance(a, Value)]
+        if s.predicate is not None and isinstance(s.predicate, Value):
+            out.append((s.predicate, 1))
+        return out
+    return [(v, 1) for v in s.operands()]
+
+
 def _code_copies(unroll, trips: Optional[int]) -> int:
     """How many copies of a `for` body the compiler lays down.
 
@@ -829,10 +851,12 @@ class Emitter:
             return inline
 
         def scan(stmts: Tuple[Stmt, ...]) -> None:
+            # A value its one consumer spells twice would be computed twice,
+            # inlined: it is named instead.
             here: Dict[int, int] = {}
             for s in stmts:
-                for v in s.operands():
-                    here[v.id] = here.get(v.id, 0) + 1
+                for v, times in _spelled(s):
+                    here[v.id] = here.get(v.id, 0) + times
 
             pending: set = set()
             for s in stmts:

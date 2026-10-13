@@ -99,6 +99,18 @@ flight.  A copy written as loads and stores stalls on its loads where it is
 issued, at the head as at the tail, and keeps one stage; so does a buffer used
 outside the loop, whose windows could not follow the stage there.
 
+*A merged run's loop* (`VariantLoop`) is a loop of the same kind one level
+in: its counter selects a member of each varying operand per trip, so the
+transfer through the selection is a different one every trip -- what every
+trip shares has left the loop by the time this pass runs (`move`).  The run's
+transfers go one trip ahead the same way, from the selection computed again
+for the next trip and, in the peel, for the first; the next trip is the
+counter one step on, held at the last trip as a batch loop holds its
+successor at the last element.  A run has no element guard and no flags, so
+what is about those does not arise.  Runs first, wherever they stand: what a
+run leaves ahead of itself is a transfer of the body around it, for the batch
+loop to move in turn.
+
 Barriers and the buffer's place are not this pass's: the barrier placement
 fences the tail's write against the reads before it and the reads at the head
 of the next iteration against it (`barriers`), and the allocator keeps a
@@ -114,7 +126,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .ahead import Clone, ElementLoop, Refusal, behind_defs
 from .asyncmem import strip_commits
-from .core import (INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
+from .core import (BOOL, INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
                    walk_stmts)
 from .transfers import Transfer, neutral, opaque, same, transfers, writes
 
@@ -122,7 +134,7 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                distance: int = 1, stages: int = 1,
                report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with the first `distance` transfers of each batch loop issued
-    one element ahead.
+    one element ahead, and of each merged run's loop one trip ahead.
 
     `scratch` makes a builder for the statements this adds -- the clones,
     the flag reads, the carried values -- whose values are new in `body`
@@ -146,13 +158,18 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     body = strip_commits(body)
     allocs = {s.target[0].id: s for s in walk_stmts(body)
               if s.op is Op.ALLOC and s.target}
-    out: List[Stmt] = []
+    # The merged runs first, wherever they stand: what a run leaves ahead of
+    # itself is then a transfer of the body around it like any other.
     copied: List[Stmt] = []
+    body, rewritten = _runs(body, allocs, scratch, distance, stages, report,
+                            copied)
+    out: List[Stmt] = []
     removed: set = set()
-    rewritten = False
     for s in body:
+        # A run's loop names its next trip once it is wrapped, and is not a
+        # batch loop for that (`_runs`).
         if (s.op is not Op.FOR or s.attr('next') is None
-                or s.attr('first') is None):
+                or s.attr('first') is None or s.attr('rolled')):
             out.append(s)
             continue
         try:
@@ -178,6 +195,88 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
         # now declares itself.
         out = [x for x in out if id(x) not in removed]
     return _drop_unread(tuple(out), copied)
+
+
+def _run(s: Stmt) -> bool:
+    """A merged run's loop (`VariantLoop`): rolled, over constant bounds,
+    at least one trip -- and so a loop whose next trip is known in its body
+    and whose first trip ahead of it."""
+    if s.op is not Op.FOR or not s.attr('rolled') or s.attr('next') is not None:
+        return False
+    lo, hi, step = s.loop_bounds
+    return (all(isinstance(x, int) for x in (lo, hi, step)) and step > 0
+            and lo < hi)
+
+
+def _trips(loop: Stmt, scratch) -> Stmt:
+    """A run's loop as `_Loop` takes a batch loop: with the trip after the
+    body's -- the counter one step on, held at the last trip there, as a
+    batch loop holds its successor at the last element -- computed at the
+    head of the body, and the first trip, its lower bound."""
+    lo, hi, step = loop.loop_bounds
+    region = loop.regions[0]
+    counter = region.args[0]
+    b = scratch()
+    ahead = b.op('add', counter.type, counter, step, hint='tripAhead')
+    inside = b.op('lt', BOOL, ahead, hi, hint='tripIn')
+    following = b.op('select', counter.type, inside, ahead, counter,
+                     hint='trip')
+    return replace(loop, regions=(replace(region, body=tuple(b.finish())
+                                          + region.body),)
+                   + tuple(loop.regions[1:]),
+                   attrs=loop.attrs + (('next', following), ('first', lo)))
+
+
+def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
+          report: Optional[List[str]], copied: List[Stmt]):
+    """`(body, rewritten)`: `body` with the loops of the merged runs in it
+    issuing their first transfers one trip ahead, wherever they stand.
+
+    A batch loop's transfer for the next element, for the next trip: the
+    operand the counter selects -- a different member every trip -- is
+    fetched for the trip after once this trip is done with its buffer, and
+    the first trip's ahead of the loop, from the selection computed again
+    for those trips (`Clone`).  What every trip shares has left the loop by
+    now (`move`), so the first transfers of the body are the selected ones.
+    The rest is `_Loop`'s, which asks the same questions of a run as of a
+    batch loop and finds no element guard and no flags to answer them with.
+    """
+    out: List[Stmt] = []
+    rewritten = False
+    removed: set = set()
+    for s in body:
+        if _run(s):
+            try:
+                around = tuple(x for x in body if x is not s)
+                rewrite = _Loop(_trips(s, scratch), allocs, scratch, report,
+                                stages, around, run=True).wrap(distance)
+                before, loop, after = rewrite.run()
+            except Refusal as why:
+                if report is not None:
+                    report.append(f'- run: {why}')
+            else:
+                out.extend(before)
+                out.append(loop)
+                out.extend(after)
+                copied.extend(d for p in rewrite.plans for d in p.deps)
+                removed |= rewrite.removed
+                rewritten = True
+                continue
+        if s.regions and not _run(s):
+            regions = []
+            for r in s.regions:
+                inner, changed = _runs(r.body, allocs, scratch, distance,
+                                       stages, report, copied)
+                regions.append(replace(r, body=inner) if changed else r)
+                rewritten = rewritten or changed
+            if any(n is not r for n, r in zip(regions, s.regions)):
+                s = replace(s, regions=tuple(regions))
+        out.append(s)
+    if removed:
+        # The declarations of buffers given a second stage, which the loop
+        # now declares itself.
+        out = [x for x in out if id(x) not in removed]
+    return (tuple(out), True) if rewritten else (body, False)
 
 
 def _drop_unread(body: Tuple[Stmt, ...],
@@ -275,10 +374,14 @@ class _Loop(ElementLoop):
     ahead."""
 
     def __init__(self, loop: Stmt, allocs: Dict[int, Stmt], scratch, report,
-                 stages: int = 1, around: Sequence[Stmt] = ()):
+                 stages: int = 1, around: Sequence[Stmt] = (),
+                 run: bool = False):
         super().__init__(loop, scratch, report, around)
         self.allocs = allocs
         self.stages = stages
+        #: Whether this is a merged run's loop rather than a batch loop: what
+        #: it issues ahead is for the next trip, and the report says so.
+        self.run = run
 
     # -- planning ---------------------------------------------------------- #
 
@@ -293,11 +396,14 @@ class _Loop(ElementLoop):
                 plans.append(self._plan(t, alloc))
             except Refusal as why:
                 if self.report is not None:
-                    self.report.append(f'- {_name(t.dest, alloc)}: {why}')
+                    where = ' in a run' if self.run else ''
+                    self.report.append(f'- {_name(t.dest, alloc)}{where}: '
+                                       f'{why}')
         if not plans:
             raise Refusal('nothing to move')
         if self.report is not None:
-            self.report.extend(_line(p) for p in plans)
+            self.report.extend(_line(p) + (' in a run' if self.run else '')
+                               for p in plans)
         return _Rewrite(self, plans)
 
     def _plan(self, t: Transfer, alloc: Optional[Stmt]) -> _Plan:

@@ -371,8 +371,9 @@ declare('enable_wrap_loads',
             'element at the tail of the current iteration, after the last '
             'instruction that touches its buffer -- where '
             '`enable_move_loads` would put it in the loop unrolled once.  One '
-            'buffer copy, register and shared destinations alike; see '
-            'backend/pir/wrap.py.')
+            'buffer copy, register and shared destinations alike.  The same '
+            'within a merged run, for the operand its counter selects on the '
+            'next trip; see backend/pir/wrap.py.')
 
 declare('move_distance',
         default=1,

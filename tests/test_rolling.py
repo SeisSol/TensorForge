@@ -694,7 +694,9 @@ def test_the_loop_generates_and_verifies():
 def test_the_loop_form_is_one_body_and_a_counter():
     kernel = _built(True)
     assert kernel.count('for (int32_t batchIdv') == 1
-    assert 'Table = (batchIdv' in kernel
+    # selected by the counter -- the next trip's, where the operand is
+    # fetched a trip ahead (`wrap`)
+    assert 'Table = (' in kernel
 
 
 def test_the_registers_are_declared_outside_the_loop():
@@ -1400,14 +1402,18 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
     assert not bad, f'{len(bad)} of {len(expected)} differ, e.g. {bad[:3]}'
 
 
-def test_a_merged_loop_fences_its_head_against_its_tail():
-    """The staged operand at the head reuses the window the product at the
-    tail read the iteration before, and nothing appends a barrier to this
-    loop the way the generator does to a batch loop: the barrier placement
-    has to see the back edge (`pir.barriers`)."""
+@pytest.mark.parametrize('wrap', [False, True])
+def test_a_merged_loop_fences_its_head_against_its_tail(wrap):
+    """The staged operand reuses the window the product read the iteration
+    before, and nothing appends a barrier to this loop the way the generator
+    does to a batch loop: the barrier placement has to see the back edge
+    (`pir.barriers`).  Copied at the head, the copy waits for the reads at
+    the tail of the trip before; copied at the tail for the next trip
+    (`wrap`), it waits for this trip's reads, and the reads at the head wait
+    for it."""
     from tensorforge.backend.pir.core import Effect, MemSpace, Op
     gen = _with_option(_accumulate_then_read().descr_list(), arch='sm_70',
-                       merge_variants=True)
+                       merge_variants=True, enable_wrap_loads=wrap)
     loop, = [i for i in gen._sections[0].ir
              if type(i).__name__ == 'VariantLoop']
 
@@ -1419,11 +1425,22 @@ def test_a_merged_loop_fences_its_head_against_its_tail():
     run = next(st for st in stmts(gen._sections[0].body)
                if st.op == Op.FOR and st.attr('extern') == loop.counter)
     body = list(stmts(run.regions[0].body))
-    first_write = next(k for k, st in enumerate(body)
-                       if st.op not in (Op.ALLOC, Op.MARK) and any(
-                           a.space == MemSpace.SHARED and a.kind & Effect.WRITE
-                           for a in st.accesses))
-    assert any(st.op == Op.BARRIER for st in body[:first_write])
+
+    staged = {id(a.base) for st in body if st.op is Op.COPY_ASYNC
+              for a in st.accesses
+              if a.space == MemSpace.SHARED and a.kind & Effect.WRITE}
+
+    def touching(kind):
+        # the wait retires a copy; the copy is where the bytes are written
+        return [k for k, st in enumerate(body)
+                if st.op not in (Op.ALLOC, Op.MARK, Op.WAIT) and any(
+                    a.space == MemSpace.SHARED and a.kind & kind
+                    and id(a.base) in staged for a in st.accesses)]
+    barriers = [k for k, st in enumerate(body) if st.op == Op.BARRIER]
+    assert any(k < touching(Effect.WRITE)[0] for k in barriers)
+    if wrap:
+        assert touching(Effect.WRITE)[0] > touching(Effect.READ)[-1]
+        assert any(k < touching(Effect.READ)[0] for k in barriers)
 
 
 def test_the_probe_leaves_nothing_behind():
