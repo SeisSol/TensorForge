@@ -577,19 +577,20 @@ class Generator:
     self._launch_control_depth = context.get_user_options().launch_control_depth
 
     if prefer_launchcontrol:
-      # The queue answers with a CTA id nothing can predict, so `batchId1`,
-      # which every prefetch pass reads, is `batchId_start + stride` and names
-      # an element this block will never be handed.  Nothing crashes: the
-      # transfer lands in the buffer the next iteration reads, and every
-      # element after the first is computed from another element's operands.
-      # Refused rather than silently wrong, until the lookahead index comes
-      # out of the queue instead of out of the stride.
-      if context.get_user_options().enable_wrap_loads:
+      # The queue answers with a CTA id nothing can predict, so the element a
+      # transfer is moved ahead for is the one the queue answers next, read
+      # off it at the top of the iteration (`BatchLoop._queried_loop`).  At
+      # depth one that answer is asked for at the bottom of the iteration
+      # before, and reading it at the top would wait for it with no body in
+      # between.
+      if (context.get_user_options().enable_wrap_loads
+          and self._launch_control_depth < 2):
         raise GenerationError(
-            'enable_wrap_loads prefetches element `batchId1 = batchId_start + '
-            'stride`, which under launch_control is not the element the queue '
-            'hands out next; the two cannot be combined until the lookahead '
-            'index is read from the queue (needs launch_control_depth >= 2)')
+            'enable_wrap_loads under launch_control moves a transfer ahead for '
+            'the element the queue hands out next, which at '
+            'launch_control_depth 1 is asked for at the bottom of the '
+            'iteration before and known only there; it needs '
+            'launch_control_depth >= 2, or enable_wrap_loads=False')
 
   @property
   def built(self) -> 'Generator':

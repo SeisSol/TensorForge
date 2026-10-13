@@ -405,6 +405,38 @@ template <int Depth = 1> struct ClusterLaunchCursor {
     }
   }
 
+  /// The CTA id `next` hands out next, or -1 when the grid is exhausted --
+  /// without taking it, so that the element after this one is known at the
+  /// top of the iteration and its operands can be fetched while this one is
+  /// computed.  At `Depth` 2 the response asked for an iteration ago is read.
+  ///
+  /// Every thread waits for the response itself, and no rendezvous is needed
+  /// to read it: the slot is let go in `next`, behind its barrier.  A
+  /// response that comes back empty is passed over here, as `next` passes
+  /// it: the grid is drained, nothing is asked again in its slot, and a slot
+  /// nobody reposts needs no rendezvous to be passed.  So what this answers
+  /// is what the following `next` answers.
+  __device__ __forceinline__ int peek(ClusterLaunchQueue<Depth> &queue) {
+    namespace ptx = cuda::ptx;
+    while (outstanding > 0) {
+      const int slot = head;
+      while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta,
+                                            &queue.barrier[slot],
+                                            phase[slot])) {
+      }
+      if (ptx::clusterlaunchcontrol_query_cancel_is_canceled(
+              queue.response[slot])) {
+        return ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(
+            queue.response[slot]);
+      }
+      phase[slot] ^= 1u;
+      head = (head + 1) % Depth;
+      --outstanding;
+      refill = false;
+    }
+    return -1;
+  }
+
   /// The next CTA id, or -1 when the grid is exhausted.
   ///
   /// Block-uniform, which is the property the enclosing loop rests on: every

@@ -85,6 +85,10 @@ class ElementLoop:
         self.next = loop.attr('next')
         self.first = loop.attr('first')
         self.flag_word = loop.attr('flag_word')
+        #: Whether the loop's elements are a stride apart, so that one past
+        #: the next is computed (`successor`) -- a counted loop's.  A queried
+        #: loop knows the next element only as the queue answers it.
+        self.strided = loop.op is Op.FOR
         guards = [i for i, s in enumerate(region.body)
                   if s.op is Op.IF and s.attr('guard') == 'element']
         if len(guards) > 1:
@@ -202,7 +206,9 @@ class ElementLoop:
 
     def successor(self, index, hint: str) -> Tuple[List[Stmt], Value]:
         """`index` one stride on, clamped the way the loop clamps its own
-        successor: the element a transfer issued there is for."""
+        successor: the element a transfer issued there is for.  Only for a
+        loop whose elements are a stride apart (`strided`)."""
+        assert self.strided, 'a queried loop has no stride'
         b = self.scratch()
         _, count, stride = self.loop.loop_bounds
         ahead = b.op('add', SIZE, index, stride, hint=f'{hint}Ahead')

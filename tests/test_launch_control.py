@@ -35,6 +35,9 @@ of step, reusing the tile an iteration early.  With a flag mask making the
 rows disagree persistently it does hang.
 
 The numbers that decide the default are in the option's own declaration.
+
+The queue loop itself is built without `enable_wrap_loads`, which at depth
+one is refused; what the wrap makes of it at depth two is the last part.
 """
 
 from __future__ import annotations
@@ -94,7 +97,7 @@ def _depth_of(text, needle):
 # -- the mode is reachable at all ------------------------------------------ #
 
 def test_the_queue_is_emitted_when_asked_for():
-    src = _kernel(launch_control=True).get_kernel()
+    src = _kernel(launch_control=True, enable_wrap_loads=False).get_kernel()
     assert "ClusterLaunchQueue<1>" in src
     assert "ClusterLaunchCursor<1>" in src
     assert "while (true)" in src
@@ -119,7 +122,7 @@ def test_the_depth_reaches_the_type():
 
 def test_the_cursor_is_not_in_shared_memory():
     """Per-thread state; in shared memory the parity is a race, not a counter."""
-    src = _kernel(launch_control=True).get_kernel()
+    src = _kernel(launch_control=True, enable_wrap_loads=False).get_kernel()
     cursor = next(line for line in src.splitlines()
                   if "ClusterLaunchCursor" in line)
     assert "__shared__" not in cursor, (
@@ -132,7 +135,7 @@ def test_the_cursor_is_not_in_shared_memory():
 
 def test_the_handoff_sits_outside_the_element_guard():
     """The barrier it carries has to be reached by every row of the block."""
-    src = _kernel(launch_control=True).get_kernel()
+    src = _kernel(launch_control=True, enable_wrap_loads=False).get_kernel()
     guard = _depth_of(src, re.search(r"if \(\w*batchId0 < numElements0\)",
                                      src).group(0))
     handoff = _depth_of(src, ".next(launchQueue0)")
@@ -149,7 +152,7 @@ def test_no_loop_carried_barrier_is_appended_under_the_guard():
     appearing in the generated body would be inside the guard, which is where
     a barrier hangs the mode.
     """
-    src = _kernel(launch_control=True).get_kernel()
+    src = _kernel(launch_control=True, enable_wrap_loads=False).get_kernel()
     barriers = [line.strip() for line in src.splitlines()
                 if "__syncthreads()" in line]
     assert not barriers, (
@@ -196,18 +199,75 @@ def test_an_older_target_is_refused_rather_than_downgraded():
 
 
 @pytest.mark.parametrize("extra", [{}, {"enable_multibuffer": True}])
-def test_prefetching_the_stride_is_refused(extra):
-    """`batchId1 = batchId_start + stride` is not what the queue hands out.
-
-    The wrap reads the lookahead index, which the strided loop computes from
-    the stride.  Under the queue the next element is whatever CTA the
-    launcher cancels, so the transfer would fill the buffer the next
-    iteration reads with another element's operands -- no crash, wrong numbers
-    for every element after the first.  A second stage changes which buffer
-    is filled, not for which element.
+def test_prefetching_at_depth_one_is_refused(extra):
+    """The element a transfer is moved ahead for is the one the queue hands
+    out next, and at depth one that answer is asked for at the bottom of the
+    iteration before: read at the top, it would be waited for with no body
+    in between.  A second stage changes which buffer is filled, not when the
+    element is known.
     """
-    with pytest.raises(GenerationError, match="batchId1"):
+    with pytest.raises(GenerationError, match="launch_control_depth >= 2"):
         _kernel(launch_control=True, enable_wrap_loads=True, **extra)
+
+
+# -- the next element, read off the queue ---------------------------------- #
+
+def _lookahead(**extra):
+    return _kernel(launch_control=True, launch_control_depth=2,
+                   **extra).get_kernel()
+
+
+def test_at_depth_two_the_next_element_is_read_off_the_queue():
+    """`peek` at the top of the iteration answers what `next` answers at its
+    bottom; the transfer for the next element is addressed from it, and the
+    peel ahead of the loop from the first element."""
+    src = _lookahead()
+    lines = src.splitlines()
+    loop = next(i for i, l in enumerate(lines) if "while (true)" in l)
+    peek = next(i for i, l in enumerate(lines) if ".peek(launchQueue0)" in l)
+    guard = next(i for i, l in enumerate(lines) if "if (allowed)" in l)
+    handoff = next(i for i, l in enumerate(lines)
+                   if ".next(launchQueue0)" in l)
+    assert loop < peek < guard < handoff
+    ahead = re.search(r"(\w+_ahead) = launchCursor0\.peek", src).group(1)
+    following = re.search(rf"(\w+_batchId1) = \(\({ahead} >= 0\)", src)
+    assert following, "the next element is not taken from the queue's answer"
+    assert re.search(rf"wrap_glb_\w+ = &\w+\[{following.group(1)} \*", src)
+    peeled = [i for i, l in enumerate(lines) if re.search(r"peel_glb_\w+ =", l)]
+    assert peeled and max(peeled) < loop
+
+
+def test_the_size_and_the_mask_are_one_element_guard():
+    """The transfers of the element stand in one guard, which a pass looks
+    into; the flag is read only for an element in range."""
+    src = _lookahead()
+    assert re.search(r"const bool allowed = \w+_batchId0 < numElements0 && "
+                     r"\(flags0 == nullptr \|\| static_cast<bool>"
+                     r"\(flags0\[\w+_batchId0\]\)\);", src)
+    assert not re.search(r"if \(\w*batchId0 < numElements0\)", src)
+
+
+def test_the_handoff_stays_outside_the_element_guard_with_the_lookahead():
+    src = _lookahead()
+    guard = _depth_of(src, "if (allowed)")
+    assert _depth_of(src, ".next(launchQueue0)") == guard
+    assert _depth_of(src, ".peek(launchQueue0)") == guard
+
+
+def test_without_the_wrap_the_queue_loop_is_as_it_was():
+    """Nothing is moved ahead, so nothing is read ahead of the queue."""
+    src = _kernel(launch_control=True, launch_control_depth=2,
+                  enable_wrap_loads=False).get_kernel()
+    assert ".peek(" not in src
+    assert re.search(r"if \(\w*batchId0 < numElements0\)", src)
+
+
+def test_the_device_cursor_can_peek():
+    """What the generated loop calls exists, beside `next`."""
+    from pathlib import Path
+    header = (Path(__file__).resolve().parent.parent / "src" / "tensorforge" /
+              "include" / "tensorforge_device" / "cuda.h").read_text()
+    assert "int peek(ClusterLaunchQueue<Depth> &queue)" in header
 
 
 def test_a_grid_barrier_is_refused():
@@ -233,7 +293,8 @@ def test_a_grid_barrier_is_refused():
               GridBarrierDescr(),
               GemmDescr(False, False, a=d, b=c, c=e, alpha=1.0, beta=0.0)]
     ctx = Context(arch=BLACKWELL, backend="cuda", fp_type=dt,
-                  options=Options(launch_control=True))
+                  options=Options(launch_control=True,
+                                  enable_wrap_loads=False))
     gen = Generator(descrs, ctx)
     with pytest.raises(GenerationError, match="grid-wide barrier"):
         gen.generate()
@@ -283,7 +344,8 @@ def test_the_queue_loop_is_a_construct_the_passes_can_walk():
     """
     from tensorforge.backend.pir.core import Effect, MemSpace, Op, walk
 
-    loop = _the_loop(Op.WHILE, launch_control=True)
+    loop = _the_loop(Op.WHILE, launch_control=True,
+                      enable_wrap_loads=False)
     inner = [s for s, _ in walk(loop.regions[0].body)]
 
     guard = [s for s in inner if s.op == Op.IF]
@@ -313,7 +375,8 @@ def test_the_queue_loop_is_block_uniform_and_its_element_guard_is_not():
     from tensorforge.backend.pir.core import Op, Uniformity
     from tensorforge.backend.pir.passes import _entry_uniformity
 
-    loop = _the_loop(Op.WHILE, launch_control=True)
+    loop = _the_loop(Op.WHILE, launch_control=True,
+                      enable_wrap_loads=False)
     assert _entry_uniformity(loop) is Uniformity.BLOCK
 
     guard = next(s for s in loop.regions[0].body if s.op == Op.IF)
@@ -392,3 +455,68 @@ def test_an_exit_belongs_to_the_loop_it_leaves():
 
     diag = verify(builder.finish(), strict=False)
     assert any("directly in the region of a `while`" in d for d in diag), diag
+
+
+def _square(**options):
+    """`square_notrans` under the queue: a load into registers the wrap
+    moves ahead, and a copy into shared memory it leaves."""
+    import contextlib
+    import importlib.util
+    import io
+    from pathlib import Path
+
+    from tensorforge.reference import kernel_eval as ke
+    path = next((Path(__file__).resolve().parent / "cases").rglob(
+        "square_notrans.py"))
+    spec = importlib.util.spec_from_file_location("tf_lc__square", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ctx = Context(arch=BLACKWELL, backend="cuda",
+                  fp_type=getattr(mod, "DTYPE", None),
+                  options=Options(launch_control=True, **options))
+    gen = Generator(mod.descr_list(), ctx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen.get_kernel(), ke.launch_geometry(gen.get_launcher())
+
+
+def test_the_lookahead_computes_what_the_queue_loop_computes():
+    """On the host oracle, with the queue handing the block its CTAs out of
+    order -- the element after this one is not a stride on -- and a mask
+    that holds elements back: the transfer moved ahead for the element the
+    queue answers fills the buffer with that element's operands."""
+    from tensorforge.reference import kernel_eval as ke
+
+    def written(src, geometry):
+        lanes, mults = geometry
+        elements = 3 * mults - 1
+        flags = [1] * elements
+        flags[1] = 0
+        flags[mults + 2] = 0
+        races = []
+        mem = ke.evaluate_wave(src, lanes, seed=3, globals_only=True,
+                               mults=mults, block=True, races=races,
+                               elements=elements, launches=(2, 1),
+                               preset={"flags0": flags})
+        assert not races, races
+        signature = re.search(r"\bkernel_\w+\(([^)]*)\)", src).group(1)
+        outputs = {p.split()[-1] for p in signature.split(",")
+                   if "*" in p and "const" not in p}
+        return {k: v for k, v in mem.items() if k[0] in outputs}
+
+    plain, at = _square(enable_wrap_loads=False)
+    ahead, ahead_at = _square(launch_control_depth=2)
+    assert "wrap_glb_" in ahead and "wrap_glb_" not in plain
+    assert at == ahead_at
+    expected = written(plain, at)
+    assert expected and written(ahead, ahead_at) == expected
+
+
+def test_the_oracles_queue_answers_in_order_then_nothing():
+    from tensorforge.reference.kernel_eval import _LaunchCursor
+    cursor = _LaunchCursor((5, 3))
+    cursor.start(None)
+    assert cursor.peek(None) == 5 and cursor.peek(None) == 5
+    assert cursor.next(None) == 5
+    assert cursor.peek(None) == 3 and cursor.next(None) == 3
+    assert cursor.peek(None) == -1 and cursor.next(None) == -1

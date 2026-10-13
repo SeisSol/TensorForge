@@ -2449,6 +2449,14 @@ class _WhileHandle:
         self._extern = extern
         self.induction = builder.index(hint=hint, uniform=uniform,
                                        type_=index_type)
+        # What a pass that issues work for the next element reads off the
+        # loop, as off `_ForHandle`: the element after this one, set by the
+        # traversal where its body knows it (`next`); the first element,
+        # bound ahead of the loop (`first`); how an element's flag is read
+        # (`flag_word`).
+        self._next_index = None
+        self._peel_index = None
+        self._flag_word = None
 
     def __enter__(self) -> '_WhileHandle':
         self.builder.push((self.induction,), kind='while')
@@ -2461,6 +2469,12 @@ class _WhileHandle:
         attrs = ()
         if self._extern is not None:
             attrs = attrs + (('extern', self._extern),)
+        if self._next_index is not None:
+            attrs = attrs + (('next', self._next_index),)
+        if self._peel_index is not None:
+            attrs = attrs + (('first', self._peel_index),)
+        if self._flag_word is not None:
+            attrs = attrs + (('flag_word', self._flag_word),)
         self.builder.emit(Stmt(op=Op.WHILE, args=(self._init,),
                                regions=(region,), pure=False, movable=False,
                                attrs=attrs))

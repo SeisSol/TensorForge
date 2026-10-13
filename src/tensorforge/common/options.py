@@ -741,7 +741,12 @@ declare('launch_control',
             'becomes interesting for a configuration that already '
             'synchronizes block-wide, and for work whose cost varies per '
             'element -- not for the row-independent, uniform-cost kernels '
-            'this generator emits today.')
+            'this generator emits today.\n'
+            'With `enable_wrap_loads` a transfer is moved ahead for the element '
+            'the queue hands out next, read off it at the top of the '
+            'iteration, which needs `launch_control_depth` 2 or more.  A copy '
+            'into shared memory stays where it is: the queried loop carries '
+            'no completion across its back edge.')
 
 declare('launch_control_depth',
         default=1,

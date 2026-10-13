@@ -1633,6 +1633,48 @@ GROUPS = {
              '                           pointer_stage=False)', 1)),
     ]),
 
+    # The launch-control traversal reading the next element off the queue
+    # at the top: the transfer for it, the peel ahead of the loop, one guard
+    # for the size and the mask, the copies it cannot carry left where they
+    # are -- and the host oracle's queue and hand-off.
+    'lookahead': ('tests/test_launch_control.py', [
+        ('the transfer moved ahead for this element again',
+         sub(Path('src/tensorforge/backend/instructions/batch_loop.py'),
+             "        loop._next_index = builder.op('select', SIZE, valid, element, held,",
+             "        loop._next_index = builder.op('select', SIZE, valid, held, held,", 1)),
+        # Not the first element bound inside the loop's frame instead: under
+        # the generator the section binds it ahead of the loop, and both
+        # frames answer with that binding (`BatchLoop._prologue_element`).
+        ('the queue loop naming no first element for the peel',
+         sub(Path('src/tensorforge/backend/instructions/batch_loop.py'),
+             '        peel = self._peel_index(builder) if lookahead else None\n',
+             '        peel = None\n', 1)),
+        ('the size left out of the element guard',
+         sub(Path('src/tensorforge/backend/instructions/batch_loop.py'),
+             "                'const bool allowed', f'{{0}} < {self._num_elements()} && '\n"
+             "                f'{read}', BOOL, None, args=(loop.induction,),",
+             "                'const bool allowed', f'{read}', BOOL, None,\n"
+             "                args=(loop.induction,),", 1)),
+        ('a copy the queried loop cannot carry moved ahead',
+         sub(WRAP, '        if tokens and not self.strided:\n',
+             '        if False:\n', 1)),
+        ('the flags made to ride a queried loop',
+         sub(WRAP, '        carry = (l.flag_word is not None and l.guard_at is not None\n'
+                   '                 and l.strided)',
+             '        carry = (l.flag_word is not None and l.guard_at is not None)', 1)),
+        ('a queried loop with the wrap refused at depth two',
+         sub(GEN, '          and self._launch_control_depth < 2):',
+             '          and self._launch_control_depth < 3):', 1)),
+        ("the oracle's hand-off no barrier",
+         sub(ORACLE, "        r'|^cooperative_groups::this_grid\\(\\)\\.sync\\('\n"
+                     "        r'|.*\\blaunchCursor\\d+\\.next\\s*\\(')",
+             "        r'|^cooperative_groups::this_grid\\(\\)\\.sync\\(')", 1)),
+        ("the oracle's queue answering the element after next",
+         sub(ORACLE, '        return self.launches[self.at] if self.at < len(self.launches) else -1',
+             '        return (self.launches[self.at + 1]\n'
+             '                if self.at + 1 < len(self.launches) else -1)', 1)),
+    ]),
+
     # The cache hints for the element the loop reaches next.
     'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
                  'tests/test_prefetch_data.py', [

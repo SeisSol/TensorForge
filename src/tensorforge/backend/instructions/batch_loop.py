@@ -822,9 +822,14 @@ class BatchLoop(AbstractInstruction):
         queue = f'launchQueue{index}'
         lexic = self._context.target.lexic
 
+        # Ahead of the loop, where the section's binding of the first element
+        # answers rather than the loop's.
+        lookahead = self._context.get_user_options().enable_wrap_loads
+        peel = self._peel_index(builder) if lookahead else None
         with builder.while_(self._block_id(), hint=self._batch(0),
                             index_type=SIZE,
                             uniform=Uniformity.MULT) as loop:
+            loop._peel_index = peel
             self._induction = loop.induction
             # Only `batchId0`: this traversal binds no lookahead, because the
             # next element is whatever the queue answers and there is nothing
@@ -835,9 +840,80 @@ class BatchLoop(AbstractInstruction):
             try:
                 with BatchLoop.batch_indices(builder) as bound:
                     bound[self._batch(0)] = loop.induction
-                    self._queried_body(builder, loop, index, queue, lexic)
+                    if lookahead:
+                        self._queried_lookahead(builder, loop, index, queue,
+                                                lexic)
+                    else:
+                        self._queried_body(builder, loop, index, queue, lexic)
             finally:
                 self._induction = None
+
+    def _queried_lookahead(self, builder, loop, index, queue, lexic) -> None:
+        """The body of the queried traversal where a pass moves transfers
+        ahead for the next element (`pir.wrap`): that element is the one the
+        queue answers next, read off it at the top (`ClusterLaunchCursor.peek`,
+        two requests in flight at least -- the generator refuses less).
+
+        The loop names it (`next`) as a counted loop names its successor:
+        held where there is none -- past the last block, or a row past the
+        end -- at this element, or at element 0 where this one is past the
+        end too, so that what is fetched for it is an element that exists.
+        The first element, the section's start clamped into range, it names
+        as well (`_queried_loop`): a transfer peeled ahead of the loop fetches
+        for it.
+
+        The size check and the mask are one element guard, the guard a pass
+        finds the element's statements in: nested, the transfers would be
+        two constructs deep.  The flag is read only for an element in range,
+        as `&&` reads it.
+        """
+        from tensorforge.backend.pir.core import (INDEX, SIZE, BOOL, Access,
+                                                  Effect, MemSpace, Uniformity)
+        count = self._count(builder)
+        ahead = builder.call(
+            f'launchCursor{index}.peek', INDEX, queue, hint='ahead',
+            pure=False, movable=False, effect=Effect.READ,
+            accesses=(Access(Effect.READ, MemSpace.SHARED, queue),),
+            uniform=Uniformity.BLOCK, materialize=True)
+        rows = builder.op('mul', INDEX, lexic.block_dim_y, ahead,
+                          hint='aheadRow')
+        element = builder.op('add', SIZE, builder.thread_id('y'), rows,
+                             hint='aheadElement')
+        granted = builder.op('ge', BOOL, ahead, 0, hint='aheadGranted')
+        fits = builder.op('lt', BOOL, element, count, hint='aheadInBatch')
+        valid = builder.op('and', BOOL, granted, fits, hint='aheadValid')
+        inside = builder.op('lt', BOOL, loop.induction, count, hint='inrange')
+        held = builder.op('select', SIZE, inside, loop.induction, 0,
+                          hint='held')
+        loop._next_index = builder.op('select', SIZE, valid, element, held,
+                                      hint=self._batch(1), escapes=True)
+        loop._flag_word = self._flag_word()
+        cond = inside
+        if self._flags is not FlagMode.ABSENT:
+            flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+            read = f'static_cast<bool>({flags}[{{0}}])'
+            if self._flags is FlagMode.OPTIONAL:
+                read = f'({flags} == nullptr || {read})'
+            cond = builder.decl_expr(
+                'const bool allowed', f'{{0}} < {self._num_elements()} && '
+                f'{read}', BOOL, None, args=(loop.induction,),
+                hint='allowed', extern='allowed')
+        with builder.if_(cond, attrs=(('guard', 'element'),)):
+            self._emit_guarded(builder, list(self._region))
+        # As in `_queried_body`: outside the guard, which the rows of a
+        # block decide differently, since `next` carries a block barrier.
+        # It answers what `peek` answered, and lets the slot go.
+        nxt = builder.call(
+            f'launchCursor{index}.next', INDEX, queue,
+            hint='next', pure=False, movable=False,
+            effect=Effect.BARRIER,
+            accesses=(Access(Effect.READ | Effect.WRITE,
+                             MemSpace.SHARED, queue),),
+            uniform=Uniformity.BLOCK, materialize=True)
+        loop.exit_when(builder.op('lt', BOOL, nxt, 0, hint='drained'))
+        offset = builder.op('mul', INDEX, lexic.block_dim_y, nxt, hint='row')
+        loop.yield_(builder.op('add', SIZE, builder.thread_id('y'), offset,
+                               hint=self._batch(0)))
 
     def _queried_body(self, builder, loop, index, queue, lexic) -> None:
         """The body of the queried traversal, once its index is published."""

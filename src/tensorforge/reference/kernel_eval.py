@@ -31,7 +31,7 @@ import functools
 import hashlib
 import re
 import struct
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 _DECL = re.compile(
     # `alignas(N)` is a declaration specifier, not a statement of its own: a
@@ -52,6 +52,14 @@ _DECL = re.compile(
 _FOR = re.compile(r'^for\s*\((?:const\s+)?\w+\s+(?P<v>\w+)\s*=\s*(?P<a>.+?);'
                   r'\s*\w+\s*(?P<cmp><=?|>=?)\s*(?P<b>.+?);\s*(?P<step>.+?)\)$')
 _IF = re.compile(r'^if\s*\((?P<c>.*)\)$')
+_WHILE = re.compile(r'^while\s*\((?P<c>.*)\)$')
+#: The launch-control queue and the per-thread cursor through it
+#: (`ClusterLaunchQueue`, `ClusterLaunchCursor` in `cuda.h`).
+_LAUNCH_QUEUE = re.compile(r'^__shared__\s+tensorforge::ClusterLaunchQueue\s*<[^>]*>'
+                           r'\s*(?P<name>\w+)$')
+_LAUNCH_CURSOR = re.compile(r'^tensorforge::ClusterLaunchCursor\s*<[^>]*>'
+                            r'\s*(?P<name>\w+)$')
+_LAUNCH_START = re.compile(r'^(?P<name>\w+)\.start\s*\((?P<queue>\w+)\)$')
 #: A declaration whose type is a namespaced vector type.
 _VEC_DECL = re.compile(r'^tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>\s+\w+')
 
@@ -213,11 +221,13 @@ class Races:
     SHARED = 'shr'
 
     #: A barrier: everything the target spells as one for the lanes of a
-    #: multiplication or the block.
+    #: multiplication or the block -- the launch-control hand-off among
+    #: them, whose `next` lets a response slot go behind a `__syncthreads`.
     _BARRIER = re.compile(
         r'^(?:__syncthreads|__syncwarp|__builtin_amdgcn_s_barrier)\s*\('
         r'|^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.sync'
-        r'|^cooperative_groups::this_grid\(\)\.sync\(')
+        r'|^cooperative_groups::this_grid\(\)\.sync\('
+        r'|.*\blaunchCursor\d+\.next\s*\(')
     _COMMIT = re.compile(r'^__pipeline_commit\s*\(\s*\)$')
     _WAIT = re.compile(r'^__pipeline_wait_prior\s*\(\s*(\d+)\s*\)$')
 
@@ -400,6 +410,39 @@ class Vec(tuple):
     def __mul__(self, o): return self._zip(o, lambda a, b: a * b)
     def __truediv__(self, o): return self._zip(o, lambda a, b: a / b)
     def __neg__(self): return Vec(-a for a in self)
+
+
+class _Break(Exception):
+    """A `break`, carried to the loop it leaves; `lanes` are the lanes that
+    take it, where lanes run together."""
+
+    def __init__(self, lanes=None):
+        super().__init__('break')
+        self.lanes = lanes
+
+
+class _LaunchCursor:
+    """`ClusterLaunchCursor` on the host: the CTA ids the queue hands this
+    block, in order (`launches`), then -1.  Per thread, as on the device:
+    every lane advances its own, and they agree because they read one
+    script."""
+
+    def __init__(self, launches):
+        self.launches = tuple(launches)
+        self.at = 0
+
+    def start(self, queue) -> None:
+        self.at = 0
+
+    def peek(self, queue) -> int:
+        """What `next` hands out, without taking it."""
+        return self.launches[self.at] if self.at < len(self.launches) else -1
+
+    def next(self, queue) -> int:
+        cta = self.peek(queue)
+        if cta >= 0:
+            self.at += 1
+        return cta
 
 
 class Abort(Exception):
@@ -602,6 +645,8 @@ class Interp:
         self.budget = limit
         #: Which lane this is, for `Races`.
         self.lane = getattr(self.env.get('threadIdx'), 'x', 0)
+        #: The CTA ids a launch-control queue hands this block (`_LaunchCursor`).
+        self.launches: Tuple[int, ...] = ()
         #: Element size per pointer name, from the type in its declaration.
         #: An async copy is measured in bytes and the memory here is untyped,
         #: so this is the only place the two can be reconciled.
@@ -718,6 +763,17 @@ class Interp:
                     self.budget -= 1
                     if self.budget < 0:
                         raise Abort('budget exhausted')
+            elif kind == 'while':
+                while self.ev(node[1]):
+                    try:
+                        self.run(node[2])
+                    except _Break:
+                        break
+                    self.budget -= 1
+                    if self.budget < 0:
+                        raise Abort('budget exhausted')
+            elif kind == 'break':
+                raise _Break()
             elif kind == 'block':
                 self.run(node[1])
 
@@ -776,6 +832,19 @@ class Interp:
                 tracker.bulk = None
 
     def assign(self, stmt: str) -> None:
+        lq = _LAUNCH_QUEUE.match(stmt)
+        if lq:
+            # The response slots in shared memory, which only the cursor reads.
+            self.env[lq.group('name')] = lq.group('name')
+            return
+        lc = _LAUNCH_CURSOR.match(stmt)
+        if lc:
+            self.env[lc.group('name')] = _LaunchCursor(self.launches)
+            return
+        ls = _LAUNCH_START.match(stmt)
+        if ls and isinstance(self.env.get(ls.group('name')), _LaunchCursor):
+            self.env[ls.group('name')].start(self.ev(ls.group('queue')))
+            return
         bm = _BULK_ARM.match(stmt)
         if bm:
             barrier = self.env.get(bm.group('bar'))
@@ -973,6 +1042,19 @@ def parse(src: str) -> List:
                 out.append(('for', m.group('v'), m.group('a'), m.group('cmp'),
                             m.group('b'), m.group('step'), body))
                 continue
+            m = _WHILE.match(t)
+            if m:
+                if pos < len(lines) and lines[pos] == '{':
+                    pos += 1
+                    body = block()
+                else:
+                    body = [('expr', lines[pos].rstrip(';'))]
+                    pos += 1
+                out.append(('while', m.group('c'), body))
+                continue
+            if t.rstrip(';').strip() == 'break':
+                out.append(('break',))
+                continue
             out.append(('expr', t.rstrip(';')))
         return out
 
@@ -1089,6 +1171,30 @@ class Lockstep:
                         it.budget -= 1
                         if it.budget < 0:
                             raise Abort('budget exhausted')
+            elif kind == 'while':
+                # Left by a `break` every lane takes at once: the loops that
+                # break here -- the launch-control traversal -- leave on a
+                # condition every thread of the block reads alike.
+                while True:
+                    active = [it for it in lanes if it.ev(node[1])]
+                    if not active:
+                        break
+                    if len(active) != len(lanes):
+                        raise Abort('lanes disagree on whether to enter a '
+                                    'while loop')
+                    try:
+                        self.run(node[2], active)
+                    except _Break as left:
+                        if len(left.lanes) != len(active):
+                            raise Abort('a break some lanes of a loop take '
+                                        'and others do not')
+                        break
+                    for it in active:
+                        it.budget -= 1
+                        if it.budget < 0:
+                            raise Abort('budget exhausted')
+            elif kind == 'break':
+                raise _Break(lanes)
             elif kind == 'block':
                 self.run(node[1], lanes)
 
@@ -1120,7 +1226,8 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   preset: Optional[Dict[str, object]] = None,
                   mults: int = 1,
                   races: Optional[List[Race]] = None,
-                  elements: int = 1, block: bool = False) -> Dict:
+                  elements: int = 1, block: bool = False,
+                  launches: Sequence[int] = ()) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
     The difference from calling `evaluate` per lane is that the lanes share
@@ -1137,6 +1244,8 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     orders (`Races`).  `elements` is the element count the kernel is handed:
     with one block of one multiplication the batch loop then visits each of
     them in turn, which is what carries a write across its back edge.
+    `launches` are the CTA ids a launch-control queue hands the block after
+    its own, in order (`_LaunchCursor`).
 
     The lanes run are those of the block's first multiplication, unless
     `block` asks for all `mults` of them.  What the block does together
@@ -1167,6 +1276,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                     env[name] = Ptr(mem, name)
             interp = Interp(mem, env)
             interp.lane = tid + mult * lanes
+            interp.launches = tuple(launches)
             group.append(interp)
         groups.append(group)
     interps = [it for group in groups for it in group]

@@ -134,6 +134,15 @@ not the one: for a row the mask holds back on one trip and not the next it
 is another row's.  The mask is in that binding and not in a guard, so what
 is about the guard does not arise.
 
+*The queried loop* of launch control (`BatchLoop._queried_loop`) knows the
+element after this one as the queue answers it, read at the top of the
+iteration, and names it: a batch loop whose successor is no stride on
+(`ElementLoop.strided`).  A transfer into registers goes ahead for it as in a
+batch loop.  What needs the element after next stays as it was: the flags do
+not ride the loop, and no pointer is staged.  A copy into shared memory stays
+in its iteration, since its completion would have to be carried across the
+back edge, and the queried loop carries its element alone.
+
 *A loop whose trips are counted* (`ahead.counted`) is a loop of the same kind,
 its trips standing in for the elements.  A merged run's (`VariantLoop`) is the
 case in point: its counter selects a member of each varying operand per trip,
@@ -194,7 +203,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
 
     A batch loop is a `for` that names its successor index and its first
     element (`next`, `first`); a loop over groups of rows names its first
-    group, and the element each row is on (`element`).  A traversal that
+    group, and the element each row is on (`element`); the `while` of launch
+    control names the element the queue answers next.  A traversal that
     names no first element has no peel, and is left alone.
     """
     if distance < 1:
@@ -218,7 +228,7 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     for s in body:
         # A counted loop names its next trip once it is wrapped, and is not
         # a batch loop for that (`_runs`).
-        if (s.op is not Op.FOR or s.attr('next') is None
+        if (s.op not in (Op.FOR, Op.WHILE) or s.attr('next') is None
                 or s.attr('first') is None or id(s) in done):
             out.append(s)
             continue
@@ -547,6 +557,10 @@ class _Loop(ElementLoop):
 
         mine = {id(x) for x in walk_stmts(tuple(t.stmts))}
         tokens = t.tokens()
+        if tokens and not self.strided:
+            raise Refusal('its copies are retired across the back edge '
+                          'through what the loop carries, and a queried loop '
+                          'carries its element alone')
         wait = None
         if tokens:
             ids = {v.id for v in tokens}
@@ -803,7 +817,8 @@ class _Rewrite:
 
     def run(self):
         l = self.l
-        carry = l.flag_word is not None and l.guard_at is not None
+        carry = (l.flag_word is not None and l.guard_at is not None
+                 and l.strided)
         before: List[Stmt] = [p.alloc for p in self.plans
                               if p.alloc_moves and not p.rotate]
 
@@ -1011,7 +1026,7 @@ class _Rewrite:
         """
         l = self.l
         bindings: List[Stmt] = []
-        if l.pointer_stage:
+        if l.pointer_stage and l.strided:
             for p in self.plans:
                 if p.rotate and p.owns_pointer:
                     bindings += [s for s in p.deps
