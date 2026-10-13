@@ -279,8 +279,8 @@ def test_the_distance_is_how_many_transfers_wrap(distance, moved):
 
 
 def test_a_loop_that_names_no_first_element_is_left_alone():
-    """A traversal with nothing to peel for -- a group of rows driven in
-    lockstep -- names no first element, and the loop stays as it is."""
+    """A traversal that names no first element has nothing to peel for, and
+    the loop stays as it is."""
     sec = Section(first=False)
     assert sec.wrap() is sec.body
 

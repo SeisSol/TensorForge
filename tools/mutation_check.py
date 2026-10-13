@@ -1583,6 +1583,31 @@ GROUPS = {
              '        around = tuple(body)\n        regions = []', 1)),
     ]),
 
+    # A loop over groups of rows, one group ahead: from the group's index
+    # one stride on, each row's element bound again from it, the first group
+    # named by the loop and clamped into the batch.
+    'grouped': ('tests/test_group_wrap.py '
+                'tests/test_wrap_loads.py::test_a_loop_over_groups_of_rows_is_wrapped_a_group_ahead', [
+        ("the element one stride on taken for the group's index",
+         sub(WRAP, "            self.next_stmts, self.next = self.successor(self.k, 'groupNext')",
+             "            self.next = loop.attr('next')", 1)),
+        ('the element the group binds kept for the next group',
+         sub(WRAP, '            self.element = self.k\n            self.flag_word = None\n',
+             '            self.flag_word = None\n', 1)),
+        ("a group's pointer followed under the flag of the group's index",
+         sub(WRAP, '            self.element = self.k\n            self.flag_word = None\n',
+             '            self.element = self.k\n', 1)),
+        ('a loop over groups of rows naming no first group',
+         sub(Path('src/tensorforge/backend/instructions/batch_loop.py'),
+             '                         peel_index=self._first_group(writer, start),\n',
+             '', 1)),
+        ('the first group taken where it is past the end',
+         sub(Path('src/tensorforge/backend/instructions/batch_loop.py'),
+             "        first = writer.op('select', SIZE, inside, begin, 0,\n"
+             "                          hint=f'{self._group_batch()}First')",
+             '        first = begin', 1)),
+    ]),
+
     # The cache hints for the element the loop reaches next.
     'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
                  'tests/test_prefetch_data.py', [

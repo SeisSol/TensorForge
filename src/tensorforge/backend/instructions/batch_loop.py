@@ -579,6 +579,28 @@ class BatchLoop(AbstractInstruction):
             writer.pin(element)
         return element
 
+    def _first_group(self, writer, start: str):
+        """What a loop over groups of rows tells `wrap_loads` its peel should
+        fetch for: the group's first index, clamped to 0 where it is past the
+        end, as `prologue_index` clamps a row's.  Each row's element in it
+        the pass computes the way the body does, from the group's index.
+
+        Marked as escaping, as `_peel_index` marks its value, and only where
+        that pass runs.
+        """
+        if not self._context.get_user_options().enable_wrap_loads:
+            return None
+        from tensorforge.backend.pir.core import BOOL, SIZE, Uniformity
+        # The group's start, the same for every row of the group.
+        begin = writer.extern_value(start, SIZE, uniform=Uniformity.MULTGROUP,
+                                    hint=f'{self._group_batch()}_start')
+        inside = writer.op('lt', BOOL, begin, self._count(writer),
+                           hint='groupStartInBatch')
+        first = writer.op('select', SIZE, inside, begin, 0,
+                          hint=f'{self._group_batch()}First')
+        writer.pin(first)
+        return first
+
     def _emit_guarded(self, writer, guarded) -> None:
         """The part of the region that a mask, if there is one, may skip."""
         if AbstractInstruction._shared_body:
@@ -938,6 +960,7 @@ class BatchLoop(AbstractInstruction):
         with writer.for_(start, self._num_elements(), self._stride,
                          hint=self._group_batch(), index_type=SIZE,
                          uniform=Uniformity.MULTGROUP,
+                         peel_index=self._first_group(writer, start),
                          flag_word=self._flag_word()) as loop:
             group = loop.induction
             row = writer.op('add', SIZE, group, lane, hint='row')

@@ -128,6 +128,20 @@ def _scalar_bytes(stmt: str) -> Optional[int]:
 _PRESET_SLOTS = 4096
 
 
+def _fill(mem: 'Slot', preset: Dict) -> None:
+    """Write `preset` into `mem`: a value fills every slot of its array, a
+    sequence the first slots one by one -- a flag per element, say."""
+    for name, value in preset.items():
+        if isinstance(value, (list, tuple)):
+            for idx, one in enumerate(value):
+                mem.write(name, idx, one)
+            continue
+        # generously wide: the interpreter only ever reads slots the
+        # kernel addresses, so over-filling costs nothing
+        for idx in range(_PRESET_SLOTS):
+            mem.write(name, idx, value)
+
+
 class Slot:
     """Flat memory, addressed by ``(base, index)``."""
 
@@ -1071,7 +1085,7 @@ def launch_geometry(launcher: str) -> Tuple[int, int]:
 
 def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   globals_only: bool = False,
-                  preset: Optional[Dict[str, float]] = None,
+                  preset: Optional[Dict[str, object]] = None,
                   mults: int = 1,
                   races: Optional[List[Race]] = None,
                   elements: int = 1, block: bool = False) -> Dict:
@@ -1103,9 +1117,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     body = src[src.index('{'):]
     mem = Slot(seed)
     if preset:
-        for name, value in preset.items():
-            for idx in range(_PRESET_SLOTS):
-                mem.write(name, idx, value)
+        _fill(mem, preset)
     if races is not None:
         mem.tracker = Races()
     groups = []
@@ -1116,6 +1128,11 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                             mult=mult)
             for name in re.findall(r'\b(numElements\d+)\b', src):
                 env[name] = elements
+            # A mask the preset gives is one the kernel is handed; without
+            # one, the pointer is null and every element counts.
+            for name in preset or ():
+                if re.fullmatch(r'flags\d+', name):
+                    env[name] = Ptr(mem, name)
             interp = Interp(mem, env)
             interp.lane = tid + mult * lanes
             group.append(interp)
@@ -1132,11 +1149,12 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
 
 def evaluate(src: str, tid: int = 0, seed: int = 0,
              globals_only: bool = False,
-             preset: Optional[Dict[str, float]] = None) -> Dict:
+             preset: Optional[Dict[str, object]] = None) -> Dict:
     """Run one kernel body for one thread; return the resulting memory.
 
     ``preset`` maps a global array name to a value every one of its slots is
-    filled with before the run.  Unwritten slots otherwise take a
+    filled with before the run, or to a sequence of values for its first
+    slots, one each.  Unwritten slots otherwise take a
     pseudo-random value derived from their identity, which is what makes two
     runs comparable --- but it also means an input cannot be *chosen*.  Being
     able to zero one operand turns this into a reference-free sensitivity
@@ -1146,11 +1164,7 @@ def evaluate(src: str, tid: int = 0, seed: int = 0,
     body = src[src.index('{'):]
     mem = Slot(seed)
     if preset:
-        for name, value in preset.items():
-            # generously wide: the interpreter only ever reads slots the
-            # kernel addresses, so over-filling costs nothing
-            for idx in range(_PRESET_SLOTS):
-                mem.write(name, idx, value)
+        _fill(mem, preset)
     env = _base_env(src, mem, tid)
     interp = Interp(mem, env)
     interp.run(parse(body))

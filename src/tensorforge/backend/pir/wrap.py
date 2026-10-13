@@ -117,6 +117,17 @@ copy into shared memory keeps the tail, since a copy issued in one arm only
 would leave the two paths with different counts of groups in flight.  The
 second stage below is its way to the head.
 
+*A loop over groups of rows* -- the batch loop a group drives in lockstep,
+for a wave-wide instruction in the body -- binds each row's element from the
+group's index: the row where it has one, the group's own element where the
+mask holds it back.  Its transfers go one group ahead, from what they read
+computed again for the group's index one stride on, held at the last group,
+and in the peel for the first group, which the loop names (`first`): the
+row's element with it, as the body binds it.  The element one stride on is
+not the one: for a row the mask holds back on one trip and not the next it
+is another row's.  The mask is in that binding and not in a guard, so what
+is about the guard does not arise.
+
 *A loop whose trips are counted* (`ahead.counted`) is a loop of the same kind,
 its trips standing in for the elements.  A merged run's (`VariantLoop`) is the
 case in point: its counter selects a member of each varying operand per trip,
@@ -173,9 +184,9 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     whose loads a uniform predicate cannot hold back (`_Rewrite._guarded`).
 
     A batch loop is a `for` that names its successor index and its first
-    element (`next`, `first`).  A traversal that has no first element to
-    name has no peel -- a group of rows driven in lockstep is one -- and is
-    left alone.
+    element (`next`, `first`); a loop over groups of rows names its first
+    group, and the element each row is on (`element`).  A traversal that
+    names no first element has no peel, and is left alone.
     """
     if distance < 1:
         raise ValueError(f'move distance must be >= 1, got {distance}')
@@ -453,6 +464,21 @@ class _Loop(ElementLoop):
         #: or another counted loop: what it issues ahead is for the next
         #: trip, and the report says where.
         self.kind = kind
+        #: The statements that compute the index the tail's clones are
+        #: given, at the head of the body, where the loop does not name it.
+        self.next_stmts: List[Stmt] = []
+        if loop.attr('element') is not None:
+            # A loop over groups of rows binds each row's element from the
+            # group's index: the row where it has one, the group's own
+            # element where the mask holds it back.  The clones are for the
+            # next group and the first, and compute the row's element from
+            # the group's index the way the body does -- the element one
+            # stride on is another row's for a row held back this trip and
+            # not the next.  The mask is in that binding, so there is no
+            # flag of the loop's to read.
+            self.element = self.k
+            self.flag_word = None
+            self.next_stmts, self.next = self.successor(self.k, 'groupNext')
 
     # -- planning ---------------------------------------------------------- #
 
@@ -812,7 +838,7 @@ class _Rewrite:
             p.rotate and p.owns_pointer for p in self.plans)
         done_peel: set = set()
         done_tail: set = set()
-        heads: List[Stmt] = []
+        heads: List[Stmt] = list(l.next_stmts)
         tails_reg: List[Stmt] = []
         tails_shared: List[Stmt] = []
         # Issued early: in a body without an element guard anywhere behind

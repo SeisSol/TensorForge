@@ -186,33 +186,25 @@ def test_single_iteration_loop_is_left_alone(monkeypatch):
     assert 'peel_glb_' not in kernel
 
 
-def test_a_loop_over_groups_of_rows_is_not_wrapped(monkeypatch):
-    """A group traversed in lockstep emits no peel, so nothing may be wrapped.
-
-    `BatchLoop._gen_grouped` emits the region alone.  Wrapped, the transfer
-    would go to the tail for the next element and nothing would issue it for
-    the first: `local_flux` at 16 lanes on the MMA path would read an unfilled
-    window in its first iteration.  The same case on the FFMA path has no
-    group and is still wrapped, which is what shows the refusal is the group's
-    and not the case's.
-    """
+def test_a_loop_over_groups_of_rows_is_wrapped_a_group_ahead(monkeypatch):
+    """`local_flux` at 16 lanes on the MMA path traverses a group of rows,
+    the fragment product being the whole wave's: its transfer goes one group
+    ahead, from the next group's index, and the peel fetches for the first
+    group.  The same case on the FFMA path has no group and goes one element
+    ahead.  What the group's moved transfers compute is checked on the host
+    oracle in `test_group_wrap.py`."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     monkeypatch.setattr(nvidia, "ENABLED", True)
     grouped = _generate("local_flux.py", "cuda", "sm_120",
-                        enable_wrap_loads=True, lanes_per_mult=16)
+                        lanes_per_mult=16)
     assert re.search(r"for \(size_t \w*batchIdGroup0\b", grouped), (
         "expected the MMA path at 16 lanes to traverse a group of rows")
-    assert 'wrap_glb_' not in grouped
-
-    def body(kernel):
-        # the name hashes the options, and the options are written out
-        kernel = re.sub(r'kernel_[0-9a-f]+', 'kernel', kernel)
-        return re.sub(r'// options:.*', '', kernel)
-    assert body(grouped) == body(_generate("local_flux.py", "cuda", "sm_120",
-                                           lanes_per_mult=16))
+    assert 'wrap_glb_' in grouped and 'peel_glb_' in grouped
+    assert re.search(r"\w+_groupNext = ", grouped)
+    assert re.search(r"\w+_batchIdGroup0First = ", grouped)
     monkeypatch.setattr(nvidia, "ENABLED", False)
-    plain = _generate("local_flux.py", "cuda", "sm_120",
-                      enable_wrap_loads=True, lanes_per_mult=16)
+    plain = _generate("local_flux.py", "cuda", "sm_120", lanes_per_mult=16)
+    assert not re.search(r"batchIdGroup0\b", plain)
     assert 'wrap_glb_' in plain and 'peel_glb_' in plain
 
 
