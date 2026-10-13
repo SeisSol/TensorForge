@@ -67,6 +67,7 @@ SHARDS = Path('src/tensorforge/backend/pir/shards.py')
 LOAD = Path('src/tensorforge/backend/instructions/memory/load.py')
 PASSES = Path('src/tensorforge/backend/pir/passes.py')
 GEN = Path('src/tensorforge/generators/generator.py')
+PTR = Path('src/tensorforge/backend/instructions/ptr_manip.py')
 
 
 def _run_tests(target):
@@ -1098,6 +1099,19 @@ GROUPS = {
              '        if False or (', 1)),
         ('the wait moved with the transfer',
          sub(TRANSFERS, 'Op.WAIT, Op.COMMIT_ASYNC', 'Op.COMMIT_ASYNC')),
+        ('the reads a merged run shares lifted out of it',
+         sub(PASSES, "            elif loop.attr('rolled'):\n                # A merged run's loop keeps its reads.",
+             "            elif False:\n                # A merged run's loop keeps its reads.", 1)),
+    ]),
+
+    # A merged run's loop: the selection its counter makes, a value the
+    # bindings read.
+    'runs': ('tests/test_rolling.py::test_the_counter_selects_through_a_value', [
+        ('the select chain left a wall',
+         sub(PTR, '    self._value = (writer.uid, self._declare_chain(writer, decl, counter,\n'
+                  '                                                   datatype, stars))',
+             "    self._declare(writer, f'{decl} = ' + self._chain(\n"
+             "        lambda m: self._member(m, datatype, stars), self._variant) + ';')", 1)),
     ]),
 
     # What a target is, can and prefers.

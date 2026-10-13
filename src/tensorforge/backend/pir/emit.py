@@ -919,7 +919,9 @@ class Emitter:
     def _emit_stmt(self, s: Stmt, yield_to: Tuple[Optional[str], ...]) -> None:
         w = self.writer
         op = s.op
-        if op == Op.MARK:
+        if op == Op.MARK or (op == Op.RAWSTMT and not s.text and s.accesses):
+            # A statement that only says what is touched where it stands
+            # (`IRBuilder.touches`) writes nothing, like a mark.
             return
         self._record_code(op)
         self._record_mix(s)

@@ -56,6 +56,12 @@ class GetElementPtr(AbstractInstruction):
   #: where the name is not in scope at all.
   _VARIANT_HOLE = '\x00variantIndex\x00'
 
+  #: Stands in for a select chain the body made a value (`DeclareOperandTable`
+  #: `.value`): the binding reads it as an operand, so it is ordered after the
+  #: chain by the def-use edge, and a copy of the two for another iteration
+  #: reads the copy of the chain.
+  _TABLE_HOLE = '\x00operandTable\x00'
+
   def batch_index(self) -> str:
     """The name this binding's element index goes by: the loop's own.
 
@@ -127,7 +133,10 @@ class GetElementPtr(AbstractInstruction):
                                self.batch_index),
                               (self._VARIANT_HOLE, self.variant_value(writer)
                                if self._VARIANT_HOLE in escaped else None,
-                               lambda: str(self._variant))):
+                               lambda: str(self._variant)),
+                              (self._TABLE_HOLE, self._table.value(writer)
+                               if self._TABLE_HOLE in escaped else None,
+                               lambda: self._table.name)):
       if hole not in escaped:
         continue
       if value is None:
@@ -138,10 +147,13 @@ class GetElementPtr(AbstractInstruction):
     return escaped, tuple(args)
 
   def _as_text(self, rhs: str) -> str:
-    """The right-hand side with both holes spelled out, for an emitter that
+    """The right-hand side with its holes spelled out, for an emitter that
     takes no operands."""
-    return (rhs.replace(self._INDEX_HOLE, self.batch_index())
-            .replace(self._VARIANT_HOLE, str(self._variant)))
+    out = (rhs.replace(self._INDEX_HOLE, self.batch_index())
+           .replace(self._VARIANT_HOLE, str(self._variant)))
+    if self._table is not None:
+      out = out.replace(self._TABLE_HOLE, self._table.name)
+    return out
 
   def variant_value(self, writer):
     """The counter of the merged run this binding belongs to, as an operand.
@@ -174,6 +186,8 @@ class GetElementPtr(AbstractInstruction):
     """What the right-hand side reads the base pointer out of."""
     if self._table is None:
       return self._src.name
+    if self._table.form is TableForm.SELECT:
+      return self._TABLE_HOLE
     return self._table.access(self._VARIANT_HOLE)
 
   def _pointer_type(self, datatype, const_mod: str) -> str:
@@ -248,15 +262,14 @@ class GetElementPtr(AbstractInstruction):
       if self._src.obj.addressing == Addressing.SCALAR:
         # A table over scalars selects a value, and the binding is that value.
         self._emit_binding(writer, f'{datatype} {self._dest.name}',
-                           self._table.access(self._VARIANT_HOLE), scalar=True)
+                           self.source_name(), scalar=True)
         return
       lhs = self._declarator(datatype, 'const')
       # The table is declared generic -- its members may come from either
       # space and a select over them decays -- so the binding casts back into
       # the space it claims, as every other addressing mode does (`_coerce`).
       self._emit_binding(writer, lhs,
-                         self._coerce(datatype, 'const',
-                                      self._table.access(self._VARIANT_HOLE)))
+                         self._coerce(datatype, 'const', self.source_name()))
       return
 
     batch_obj = self._src.obj
@@ -514,11 +527,24 @@ class DeclareOperandTable(AbstractInstruction):
     self._variant = variant
     if self._form is TableForm.SELECT and variant is None:
       raise GenerationError('a select chain has to name the counter it reads')
+    #: `(builder uid, value)`: the chain, where the body being built made it
+    #: a value (`gen_ir`).
+    self._value = None
     self._is_ready = True
 
   @property
   def form(self) -> 'TableForm':
     return self._form
+
+  def value(self, writer):
+    """The pointer the chain selects, as a value of the body `writer` builds,
+    or None where it is text -- an array, a parameter, or a chain built where
+    the counter is no value."""
+    if self._value is None:
+      return None
+    owner, value = self._value
+    uid = getattr(writer, 'uid', None)
+    return value if uid is not None and owner == uid else None
 
   def loop_invariant(self) -> bool:
     """Whether this may be emitted once, ahead of the loop.
@@ -603,8 +629,9 @@ class DeclareOperandTable(AbstractInstruction):
     entries = ', '.join(m.name for m in self._members)
     return f'const {self.struct_name()} {self._name} = {{{{{entries}}}}};'
 
-  def _member(self, member, datatype, stars) -> str:
-    """A member as the table holds it: generic.
+  def _member(self, member, datatype, stars, name=None) -> str:
+    """A member as the table holds it: generic.  Spelled `name` where the
+    caller has a spelling of its own for it -- an operand's placeholder.
 
     Where the backend spells the address space in the pointer's type (AMD),
     a member is a space-qualified binding and the table is a plain pointer,
@@ -622,10 +649,11 @@ class DeclareOperandTable(AbstractInstruction):
       # A scalar's numbers are a zero-dimensional array: the value itself.
       value = values.item() if getattr(values, 'ndim', 1) == 0 else values[0]
       return spelling.literal(value)
+    name = member.name if name is None else name
     spaced = '<' in self._context.target.lexic.pointer_type(
         f'{datatype}', MemSpace.GLOBAL, readonly=True, restrict=True, const=True)
-    return (f'({self._qual()}{datatype} {stars}){member.name}'
-            if spaced and stars else member.name)
+    return (f'({self._qual()}{datatype} {stars}){name}'
+            if spaced and stars else name)
 
   def _accesses(self, writer):
     """What the loop touches through the table, said where it is built.
@@ -663,12 +691,98 @@ class DeclareOperandTable(AbstractInstruction):
                             f'{self._inner(stars)}{self._name}'
                             f'[{len(self._members)}] = {{{entries}}};')
       return
-    chain = self._member(self._members[-1], datatype, stars)
+    decl = f'{self._qual()}{datatype} {self._inner(stars)}{self._name}'
+    counter = (VariantLoop.counter_value(writer, self._variant)
+               if hasattr(writer, 'decl_expr') else None)
+    if counter is None:
+      self._declare(writer, f'{decl} = ' + self._chain(
+          lambda m: self._member(m, datatype, stars), self._variant) + ';')
+      return
+    self._value = (writer.uid, self._declare_chain(writer, decl, counter,
+                                                   datatype, stars))
+
+  def _chain(self, spell, counter: str) -> str:
+    """The conditionals that collapse to the member the counter names, with
+    the counter spelled `counter` and each member as `spell` has it."""
+    chain = spell(self._members[-1])
     for index in range(len(self._members) - 2, self._first - 1, -1):
-      chain = (f'({self._variant} == {index}) ? '
-               f'{self._member(self._members[index], datatype, stars)} : {chain}')
-    self._declare(writer, f'{self._qual()}{datatype} '
-                          f'{self._inner(stars)}{self._name} = {chain};')
+      chain = f'({counter} == {index}) ? {spell(self._members[index])} : {chain}'
+    return chain
+
+  def _declare_chain(self, writer, decl: str, counter, datatype, stars):
+    """The chain as a definition: a pointer -- a number, over scalars --
+    computed from the counter, which the bindings reading it take as an
+    operand; and, beside it, what the run touches through the members.
+
+    Text alone would be a statement that defines a name nothing else in the
+    IR can see, and so a wall (`Effect.UNKNOWN`): the bindings reading the
+    name could not be ordered after it otherwise.  As a value the order is
+    the def-use edge, and the chain is arithmetic: it selects an address
+    and reads nothing, so a pass may compute it again -- for the next trip,
+    with the counter it substitutes, which is why the counter is an operand
+    and not text.  So are the members, where the body has them as values:
+    computed again for the next element, the chain selects among that
+    element's bindings, and a member read through text alone would be the
+    one of the element it was built for.
+
+    What it does not say is what the reads and writes through the pointer
+    reach, since they name the stand-in: that is a statement of its own
+    (`IRBuilder.touches`, `_accesses`), which stays in the loop.  On the
+    chain, it would be lost to the analyses that ask -- they take a
+    declaration of a pointer for the address it is (`allocate._binds`) --
+    and it would make the chain something a pass cannot compute twice.
+    """
+    from tensorforge.backend.pir.core import BufferType, ScalarType
+    touched = self._accesses(writer)
+    if touched:
+      writer.touches(touched)
+    dtype = self._datatype or self._context.fp_type
+    if self._addressing == Addressing.SCALAR:
+      type_ = ScalarType(dtype)
+    else:
+      type_ = BufferType(dtype, (self._extent(),), MemSpace.GLOBAL,
+                         readonly=not self._writable)
+    args = [counter] if len(self._members) - self._first > 1 else []
+
+    def spell(member):
+      value = self._value_of(writer, member)
+      if value is None:
+        text = self._member(member, datatype, stars)
+        return text.replace('{', '{{').replace('}', '}}')
+      args.append(value)
+      return self._member(member, datatype, stars, f'{{{len(args) - 1}}}')
+    text = self._chain(spell, '{0}')
+    return writer.decl_expr(decl, text, type_, None, args=tuple(args),
+                            hint=self._name, extern=self._name)
+
+  @staticmethod
+  def _value_of(writer, member):
+    """`member` as a value of the body `writer` builds -- its binding, its
+    window, its number -- or None where it is text there."""
+    if member.stype == SymbolType.Data:
+      return None
+    if getattr(member.obj, 'addressing', None) == Addressing.SCALAR:
+      return member.pir_scalar(writer)
+    return member.pir_buffer(writer)
+
+  def _extent(self) -> int:
+    """How many elements a read through the selected pointer reaches: the
+    largest member's, as `GetElementPtr` types a binding."""
+    out = 1
+    for member in self._members:
+      obj = member.obj
+      if obj is None or member.stype == SymbolType.Data:
+        continue
+      if (getattr(obj, 'storage_order', None) is not None
+          or not getattr(obj, 'is_dense', lambda: True)()):
+        extent = int(obj.storage_volume())
+      else:
+        view = member.data_view
+        extent = 1
+        for dim in getattr(view, 'shape', None) or ():
+          extent *= int(dim)
+      out = max(out, extent)
+    return out
 
   def _declare(self, writer, line: str) -> None:
     if hasattr(writer, 'decl_expr'):
@@ -828,21 +942,16 @@ class VariantLoop(AbstractInstruction):
       table.gen_code(writer)
 
     if hasattr(writer, 'for_'):
-      # `extern` because the counter's name is the macro layer's: the select
-      # chains and every table access spell it out as text.
-      #
-      # The batch index needs no `extern`, and the difference between the two
-      # cases is worth stating.  An index reaches its readers as an operand
-      # because the loop hands the value to them; the counter reaches its
-      # readers through `DeclareOperandTable`, whose chain is a `RAWSTMT` --
-      # opaque and pinned, so nothing may hoist it past the loop header, but
-      # pinned is all it is.  Publishing a value for the counter is only worth
-      # doing together with the readers that would take it.
+      # `extern` because the counter's name is the macro layer's: a table
+      # built where the counter is no value (`For`, below) spells it as text.
       with writer.for_(self._start, self._count, 1, extern=self._counter,
                        unroll=self._unroll, rolled=True) as loop:
-        # The counter as a value, so that a table access reading it carries an
-        # edge back to the loop. Named in the text alone it would read as
-        # invariant, and `licm` would move the access ahead of the header.
+        # The counter as a value, which the select chains and the array
+        # accesses read as an operand: an edge back to the loop, so nothing
+        # takes them ahead of the header, and something to substitute for a
+        # pass that builds a trip's statements for another one.  Named in the
+        # text alone it would read as invariant, and `licm` would move the
+        # access ahead of the header.
         with self.counter_bound(writer, self._counter, loop.induction):
           self._emit_region(writer, per_iteration)
       return

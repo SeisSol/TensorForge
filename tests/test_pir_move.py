@@ -17,7 +17,7 @@ from tensorforge.backend.pir import verify
 from tensorforge.backend.pir.build import IRBuilder
 from tensorforge.backend.pir.core import (INDEX, SIZE, BufferType, Effect,
                                           MemSpace, Op, Participants,
-                                          Uniformity)
+                                          Uniformity, walk_stmts)
 from tensorforge.backend.pir.move import move_loads
 from tensorforge.common.basic_types import Datatype
 
@@ -311,3 +311,23 @@ def test_a_distance_below_one_is_refused():
     t.finish()
     with pytest.raises(ValueError):
         move_loads(t.body, distance=0)
+
+
+@pytest.mark.parametrize('rolled', [True, False])
+def test_a_merged_run_keeps_the_reads_it_shares_and_licm_lifts_others(
+        rolled):
+    """A read the trips share leaves an ordinary loop (`passes.licm`) and
+    stays in a merged run's: the run is rolled to keep its code one trip
+    long, and a read taken ahead of it is a register held across every trip
+    -- every element of a staged operand, at once.  What leaves the run is
+    the staging, a transfer at a time."""
+    from tensorforge.backend.pir.passes import licm
+    t = Body()
+    m0 = t.binding('m0')
+    with t.b.for_(0, 4, 1, rolled=rolled) as trip:
+        t.b.store(t.out, t.b.load(m0, 3, hint='shared'), trip.induction)
+    t.finish()
+    out = licm(t.body)
+    loop = next(s for s in out if s.op is Op.FOR)
+    inside = any(s.op is Op.LOAD for s in walk_stmts(loop.regions[0].body))
+    assert inside is rolled

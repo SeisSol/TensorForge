@@ -1815,6 +1815,28 @@ class IRBuilder:
                              text=text,
                              attrs=(('fmt', True),) if fmt else ())
 
+    def touches(self, accesses: Sequence[Access]) -> Stmt:
+        """A statement that emits nothing and touches `accesses`.
+
+        For what the statements around it reach through a name the IR does
+        not follow: a merged run's reads through the pointer its counter
+        selects name the stand-in, so what they reach -- the members -- is
+        said here, once a trip (`ptr_manip.DeclareOperandTable`).  An
+        analysis keyed by buffer then sees the members where the loop uses
+        them: the allocator keeps a member in shared memory live across the
+        loop, and the barrier placement orders the loop after what wrote one.
+
+        Its effect is what it touches and nothing else, so it stops only
+        what conflicts with that.  Pinned: what it says is true of where it
+        stands.
+        """
+        accesses = tuple(accesses)
+        kind = Effect.NONE
+        for a in accesses:
+            kind |= a.kind
+        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=False,
+                             effect=kind, accesses=accesses, text='')
+
     def decl_expr(self, decl: str, text: str, type_, base: Any, *,
                   kind: Effect = Effect.READ, space: Optional[MemSpace] = None,
                   args: Sequence[Operand] = (), hint: str = 'ptr',

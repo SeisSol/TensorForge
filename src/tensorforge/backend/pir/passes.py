@@ -1295,6 +1295,15 @@ def _split_invariant(loop: Stmt) -> Tuple[List[Stmt], Tuple[Stmt, ...]]:
                 invariant = False
             elif body_effect & Effect.UNKNOWN:
                 invariant = False
+            elif loop.attr('rolled'):
+                # A merged run's loop keeps its reads.  It is rolled so that
+                # the code is one trip long, and a read taken ahead of it is
+                # a register held across every trip -- and what a trip shares
+                # with the others is most of what it reads: every element of
+                # an operand staged in shared memory, read where the products
+                # need it, would be held at once.  What leaves such a loop is
+                # the staging, a transfer at a time (`move`).
+                invariant = False
             else:
                 for a in s.accesses:
                     if any(accesses_conflict(a, w) for w in body_writes):

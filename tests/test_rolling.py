@@ -706,6 +706,42 @@ def test_the_registers_are_declared_outside_the_loop():
     assert allocs and all(i < header for i in allocs)
 
 
+def _merged_build(descrs, arch='sm_86', backend='cuda', **options):
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+    gen = Generator(descrs, Context(arch=arch, backend=backend, fp_type=DTYPE,
+                                    options=Options(**options)))
+    gen._emit_loops = True
+    gen.generate()
+    return gen
+
+
+def test_the_counter_selects_through_a_value():
+    """The select chain is a definition the bindings read, with the counter
+    as its operand: no wall in the body, and something to substitute for a
+    pass that builds a trip's statements for another one."""
+    from tensorforge.backend.pir.core import Effect, Op, walk_stmts
+    gen = _merged_build(roll(accumulation()))
+    loop = next(s for s in walk_stmts(gen._sections[0].body)
+                if s.op is Op.FOR and s.attr('rolled'))
+    body = loop.regions[0].body
+    assert not any(s.effect & Effect.UNKNOWN for s in walk_stmts(body))
+
+    def named(suffix):
+        return next(s for s in body if s.op is Op.RAWEXPR
+                    and str(s.attr('extern', '')).endswith(suffix))
+    defs = {t.id: s for s in walk_stmts(body) for t in s.target}
+
+    def of_the_counter(v):
+        if v is loop.regions[0].args[0]:
+            return True
+        s = defs.get(getattr(v, 'id', None))
+        return s is not None and any(of_the_counter(a) for a in s.operands())
+    chain = named('v0Table')
+    assert of_the_counter(chain.args[0])
+    assert chain.target[0] in named('glb_v0').args
+
+
 def _loop_region():
     from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
