@@ -685,6 +685,13 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                           parts=TF32_SPLIT_TERMS if dpas else 1)
 
 
+def widths(threads, accumulator, ctx):
+    """None offered (`MatrixPaths.widths`): `Options.matrix_columns` is read
+    by CDNA's lane-batched tiles alone, and the atom here is the count's
+    (`atom_for`)."""
+    return ()
+
+
 def strategies(shape, ctx):
     """What this target can emit for this shape.
 

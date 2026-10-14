@@ -5,8 +5,8 @@
 
 `multilinear.py` enters through what its dispatch asks of every vendor
 module -- `strategies`, `plan`, `convergence`, `prepared_order` and
-`matmul` -- and nothing else.  The modules below are layered in
-dependency order:
+`matmul` -- and the tuner through `widths`, and nothing else.  The modules
+below are layered in dependency order:
 
 * `arch`     -- which family a target is
 * `caps`     -- what its runtime defines
@@ -56,7 +56,7 @@ from .codegen import hfma, matmul32, matmulemu, matmuldpp
 from .exchange_codegen import exchange_op, exchange_ops, matmul_exchange
 from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
                      candidates, choose, issues, offers, rank,
-                     spare_products)
+                     spare_products, widths)
 from .emitters import fmadpp, fmadpp4, fmadpp8, fmadpp16, fmascalar
 from .relayout import (BROADCAST, MOVDPP16, RELAYOUTS, RUNGS,
                        TRANSPOSE4X4, Relayout, find_relayout, reach,
@@ -78,7 +78,7 @@ __all__ = [
     'DEFINED_SPLITS', 'emu_tile_for', 'matmulemu', 'EMULATION',
     'EXCHANGE', 'Scheme', 'Fit', 'exchange_op', 'exchange_ops',
     'matmul_exchange', 'emu_tiles', 'candidates', 'issues',
-    'rank', 'spare_products',
+    'rank', 'spare_products', 'widths',
     'NOT_MODELED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',

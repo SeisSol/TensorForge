@@ -147,16 +147,42 @@ def choose(threads, accumulator, ctx, columns: int = 0, lead: int = 0,
     preference between mappings and reads `ORDER`; which entry within it is a
     count over the shape, because an entry wider than the output wastes the
     difference in every issue and one narrower than it needs several.
+
+    A width the caller asks for (`Options.matrix_columns`) goes ahead of the
+    count wherever the scheme has an entry of it.  The count prices the
+    instruction and not what feeds it: a narrow tile reads the lead operand
+    once per block of columns (`codegen.matmul32`), which is what binds where
+    the loads do, and only the kernel as a whole says whether they do.
     """
     legal = offers(threads, accumulator, ctx)
+    asked = asked_width(ctx)
     for scheme in ORDER:
         if scheme not in legal:
             continue
         fits = rank(candidates(scheme, threads, accumulator, ctx),
                     columns, lead, depth)
+        if asked:
+            fits = (tuple(f for f in fits if f.width == asked)
+                    + tuple(f for f in fits if f.width != asked))
         if fits:
             return fits[0]
     return None
+
+
+def asked_width(ctx) -> int:
+    """The width `Options.matrix_columns` asks for; 0, the count's, where
+    nothing asks -- a caller whose context carries no options among them."""
+    options = getattr(ctx, 'get_user_options', None)
+    return int(options().matrix_columns or 0) if options is not None else 0
+
+
+def widths(threads, accumulator, ctx) -> Tuple[int, ...]:
+    """The output widths the lane-batched scheme may run here, narrowest
+    first: what `Options.matrix_columns` chooses among."""
+    if Scheme.LANE_BATCHED not in offers(threads, accumulator, ctx):
+        return ()
+    return tuple(sorted({fit.width for fit in candidates(
+        Scheme.LANE_BATCHED, threads, accumulator, ctx)}))
 
 
 def boundary(fit: Fit, n: int) -> int:

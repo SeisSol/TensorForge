@@ -122,6 +122,9 @@ class Preferences:
     tune_matrix_path: bool = False
     #: staging the batch-constant operands,
     tune_preload_globals: bool = False
+    #: several elements of the batch in one multiplication
+    #: (`Options.stack_elements`), under the compiled scorer,
+    tune_stack: bool = False
     #: lane counts down to the vector unit rather than to `lanes.MIN_LANES`,
     lanes_down_to_wave: bool = False
     #: and a lead width of two only where a lane holds one pair per column.
@@ -168,6 +171,15 @@ PREFERENCES = {
                                atomic_accumulation=True,
                                broadcast_without_staging=True),
         preload_globals=True,
+        # A stack fills the lane-batched tiles one element leaves half
+        # empty: over SeisSol's F32 kernels on gfx942 the static model and
+        # clang put it 22 to 39 % ahead per configuration (geomean), and
+        # 23 % behind over the corpus, whose products are mostly square --
+        # an answer per kernel, and one that takes the compiler's registers
+        # to give (`tuning.simple_space`).  A model and a compiler; nothing
+        # has timed it on a CDNA part.  On sm_86 the model sees nothing to
+        # gain.
+        tune_stack=True,
         # hipcc spilled every gfx942 build that needed two pairs -- 16 lanes
         # at 35 and 56 rows, 32 at 80 and 120: 512 registers and 2 to 8 KB of
         # scratch, where the model saw 200 -- and none that needed one.

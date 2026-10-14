@@ -242,7 +242,46 @@ def space(descrs, context: Context) -> List[Knob]:
         knobs.append(Knob('tensor_cores', lambda c: (False, True)))
         knobs.append(Knob('mma_prefetch',
                           lambda c: ((1, 2) if c.get('tensor_cores') else (None,))))
+    if _stackable(descrs):
+        knobs.append(Knob('stack_elements', lambda c: (1, 2)))
+    widths = _matrix_widths(descrs, context)
+    if any(widths(Candidate(lanes=g)) for g in geometries):
+        knobs.append(Knob('matrix_columns',
+                          lambda c: (0,) + widths(c) if widths(c) else ()))
     return knobs
+
+
+def _stackable(descrs) -> bool:
+    """Whether the list builds in stacks of two at all: what `stacking.stack`
+    refuses, it refuses by name.  What it cannot see -- a traversal that does
+    not take a stack, `launch_control`'s -- fails the build, and a build that
+    fails has no score."""
+    from tensorforge.common.exceptions import GenerationError
+    from tensorforge.generators import stacking
+    try:
+        stacking.stack(list(descrs), 2)
+    except GenerationError:
+        return False
+    return True
+
+
+def _matrix_widths(descrs, context: Context):
+    """`widths(candidate)`: the output widths the target's matrix instruction
+    may cover at the candidate's lanes (`MatrixPaths.widths`) where there are
+    two or more to choose from, and none otherwise -- also where nothing is a
+    contraction."""
+    from tensorforge.backend.instructions.compute.paths import matrix_paths
+    module = matrix_paths(context.target)
+    if module is None or not contraction_lengths(descrs):
+        return lambda c: ()
+    deduced = lane_config.deduce(_flat(descrs), context)
+
+    def widths(candidate):
+        lanes = candidate.lanes or deduced
+        found = tuple(module.widths(lanes.num_threads, context.fp_type,
+                                    context))
+        return found if len(found) > 1 else ()
+    return widths
 
 
 def _wider(base, rows: int, hw) -> List[LaneConfig]:
@@ -291,9 +330,12 @@ def _wider(base, rows: int, hw) -> List[LaneConfig]:
     return out
 
 
-def simple_space(descrs, context: Context) -> List[Knob]:
+def simple_space(descrs, context: Context,
+                 mode: Optional[str] = None) -> List[Knob]:
     """The knobs `Options.autotune` turns: only those whose every value is
-    safe to ship without the caller knowing.
+    safe to ship without the caller knowing.  `mode` is the scorer that will
+    rank them -- `Options.autotune`, unless `compiled` found no compiler and
+    the ranking is static after all (`autotune`).
 
     Lane counts are the powers of two from the deduced one down to
     `lanes.MIN_LANES` -- the geometries measured on every target; the
@@ -303,7 +345,11 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     elsewhere it is two scalar FMAs, and at 35 rows on GB200 it was 70 %
     slower.  Merging where something repeats, and rolling by the largest
     divisor up to 32.  Not `prepare_operands`: the host packs for it.  Not
-    the matrix path, whose default is per vendor and not yet measured.
+    the matrix path, whose default is per vendor and not yet measured.  On
+    AMD and under the compiled scorer, a stack of two elements
+    (`Options.stack_elements`) and the width of the matrix instruction
+    (`Options.matrix_columns`): the caller passes the same arguments to
+    either, and gets the same products.
 
     `preload_globals` on Intel, where it is measured and where the answer is
     per kernel rather than per vendor.  Under the explicit-vector lowering
@@ -315,6 +361,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     the vendor default stands: nobody has taken the measurement.
     """
     from tensorforge.common.basic_types import Datatype
+    mode = context.get_user_options().autotune if mode is None else mode
     flat = _flat(descrs)
     if any(isinstance(d, ElementwiseDescr) for d in flat):
         return []
@@ -358,7 +405,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
     # register would be the same work at full occupancy.  Nothing does either
     # today.
     explicit = context.target.explicit_simd
-    if explicit and context.get_user_options().autotune != 'compiled':
+    if explicit and mode != 'compiled':
         # Nothing else can rank these.  The modelled footprint counts the
         # bytes of the tile and those barely move -- half a percent between
         # sixteen lanes and 32 on `o6d:localFluxAll`, where the clock is
@@ -379,7 +426,7 @@ def simple_space(descrs, context: Context) -> List[Knob]:
             if t & (t - 1):
                 break
             t //= 2
-        if context.get_user_options().autotune == 'compiled':
+        if mode == 'compiled':
             geometries += _wider(base, rows, hw)
     if (context.fp_type == Datatype.F32
             and context.target.packed_fma_width(Datatype.F32) == 2
@@ -395,6 +442,35 @@ def simple_space(descrs, context: Context) -> List[Knob]:
                        if g.num_threads <= rows
                        and (not one_pair or 2 * g.num_threads >= rows)]
     knobs = [Knob('lanes', lambda c, g=tuple(geometries): g)] if len(geometries) > 1 else []
+    # Two elements of the batch in one multiplication, where a single element
+    # leaves the target's matrix instruction half empty
+    # (`Preferences.tune_stack`) and the list stacks at all; and the width of
+    # the matrix instruction, where the target has several for a product.  The
+    # count of passes takes the narrowest unless the columns fill the wider
+    # one, and the wider one reads the lead operand a quarter as often --
+    # ahead where the loads bind and behind where the arithmetic does, which
+    # the kernel's busiest pipe decides and no count of one product can
+    # (`Options.matrix_columns`).  The bound is per element (`pipeline.of`), so
+    # a stack is weighed against a plain build in the same unit; each width is
+    # a choice of its own, the count's mix of them being the origin, and the
+    # stack only its other side.
+    #
+    # Under the compiled scorer alone, which sees what they cost in
+    # registers.  A stack holds twice an element's operands in a lane and the
+    # wide tile gathers its accumulator back, and the fitted estimate
+    # (`register_estimate`) follows neither: ranked statically over SeisSol's
+    # kernels on gfx942, the walk took stacks at order 8 that clang then
+    # spilled to scratch -- `localFluxAll` from nothing to 1728 bytes a lane,
+    # `volume` from nothing to 624.  The compiled scorer ranks residency ahead
+    # of the bound, which on gfx942 often takes the walk to eight lanes and,
+    # past the margin (`_worth_it`), back to the default: a stack it keeps has
+    # won on both.
+    if mode == 'compiled':
+        if context.target.prefs.tune_stack and _stackable(descrs):
+            knobs.append(Knob('stack_elements', lambda c: (2,)))
+        widths = _matrix_widths(descrs, context)
+        if any(widths(Candidate(lanes=g)) for g in geometries or [base]):
+            knobs.append(Knob('matrix_columns', widths))
     if _mergeable(descrs, context):
         knobs.append(Knob('merge_variants', lambda c: (False, True)))
     # Unrolled, rolled by the largest divisor, and rolled by two.  The first
@@ -496,12 +572,13 @@ def preferred(pref: preferences.Preference, descrs,
 
 
 def enumerate_space(knobs: Sequence[Knob], origin: Candidate) -> Iterable[Candidate]:
-    """Every point, conditional knobs included.  For a small space."""
+    """Every point, conditional knobs included.  For a small space.  A knob
+    with no values at a point leaves it as it is, as None does."""
     def expand(i, cand):
         if i == len(knobs):
             yield cand
             return
-        for v in knobs[i].values(cand):
+        for v in knobs[i].values(cand) or (None,):
             yield from expand(i + 1, cand if v is None else cand.set(knobs[i].name, v))
     yield from expand(0, origin)
 
@@ -595,7 +672,9 @@ def static_score(result: Build):
     and not the granularity.
 
     Then multiplications resident per SM -- blocks times the multiplications a
-    block holds, since eight lanes put four times as many in a block as 32.
+    block holds, since eight lanes put four times as many in a block as 32 --
+    counted in elements, which is what a stack holds two of
+    (`Options.stack_elements`).
 
     Only then how far the body is past the instruction cache
     (`_icache_over`), which is where measuring puts it (2026-09-17,
@@ -631,7 +710,7 @@ def static_score(result: Build):
     issue = _least_cycles(gen, lanes, wave, spill_bytes=float(over),
                           resident=resident,
                           hw=result.context.target.hw)
-    return (over > 0, issue, -resident,
+    return (over > 0, issue, -resident * _stack_of(gen),
             _icache_over(result), _granule(gen.metrics.peak_pressure or 0),
             len(gen.get_kernel() or ''))
 
@@ -683,8 +762,16 @@ def _least_cycles(gen, lanes: int, wave: int, spill_bytes: float = 0.0,
     from tensorforge.analysis import pipeline
     b = pipeline.of(gen, spill_bytes=spill_bytes)
     cycles = (b.cycles if b is not None
-              else (gen.metrics.emitted_work or 0) * lanes / wave)
+              else (gen.metrics.emitted_work or 0) * lanes / wave
+              / _stack_of(gen))
     return cycles * _shortfall(lanes, wave, resident, hw)
+
+
+def _stack_of(gen) -> int:
+    """The elements one multiplication of `gen` computes
+    (`Options.stack_elements`); the figures per multiplication are divided by
+    it, as `pipeline.of` divides its own."""
+    return max(1, int(getattr(gen, 'stack', 1) or 1))
 
 
 def _shortfall(lanes: int, wave: int, resident: int, hw) -> float:
@@ -859,8 +946,9 @@ class CompiledScore:
     *traffic*, written into the same tables as every other access, so that
     how much is spilled is weighed against what it buys: whether anything
     spills, then code past the instruction cache, then multiplications
-    resident per SM under shared memory, threads *and* registers, then the
-    busiest pipe's clocks with the spilling in them.
+    resident per SM under shared memory, threads *and* registers (in
+    elements, two to a stack), then the busiest pipe's clocks with the
+    spilling in them.
 
     Which of those the clock agrees with is measured, not argued.  Over the
     72 (device, kernel) groups of the benchmark corpus that carry three or
@@ -962,8 +1050,10 @@ class CompiledScore:
             # `o6d:localFluxAll` spills 10688 B at 32 lanes and none at
             # sixteen and wants the move (99.58 -> 46.08).
             return (report.spill_bytes > 0, -lanes, _icache_over(result),
-                    -resident, issue)
-        return (report.spill_bytes > 0, _icache_over(result), -resident, issue)
+                    -resident * _stack_of(result.generator), issue)
+        # Residency in elements: a stack is one multiplication of two.
+        return (report.spill_bytes > 0, _icache_over(result),
+                -resident * _stack_of(result.generator), issue)
 
 
 class MeasuredScore:
@@ -998,8 +1088,11 @@ class MeasuredScore:
             return None
         efficiency = 1.0
         if gen.resident_blocks:
+            # The rounds are counted in multiplications, and one of a stacked
+            # build takes a stack of the batch.
+            stacks = -(-self.batch // _stack_of(gen))
             efficiency = pipeline.persistent_efficiency(
-                self.batch, gen.launch_config().mults_per_block,
+                stacks, gen.launch_config().mults_per_block,
                 gen.resident_blocks, self.sms)
         return pipeline.least_seconds(b, self.batch, self.sms,
                                       self.clock_ghz, efficiency)
@@ -1212,16 +1305,7 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
                       f'({pref.evidence}) does not build here; ranking instead')
     if mode == 'prefer':
         return None
-    knobs = simple_space(descrs, context)
-    origin = start(descrs, context)
-    for name, value in (fixed or {}).items():
-        origin = origin.set(name, value)
-    knobs = [knob for knob in knobs if knob.name not in (fixed or {})]
-    first = build(descr_factory, context, origin, generate)
-    if not first.ok:
-        return None
-    if not knobs:
-        return origin
+    # The scorer first: the space depends on which one ranks it.
     if mode == 'compiled':
         scorer = CompiledScore()
         if not scorer.available(context):
@@ -1233,6 +1317,16 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     else:
         raise ValueError(f'autotune: unknown mode {mode!r}; off, prefer, '
                          f'static or compiled')
+    knobs = simple_space(descrs, context, mode=mode)
+    origin = start(descrs, context)
+    for name, value in (fixed or {}).items():
+        origin = origin.set(name, value)
+    knobs = [knob for knob in knobs if knob.name not in (fixed or {})]
+    first = build(descr_factory, context, origin, generate)
+    if not first.ok:
+        return None
+    if not knobs:
+        return origin
     _load(cache)
     key = _key(first, mode)
     if key in _PICKS:

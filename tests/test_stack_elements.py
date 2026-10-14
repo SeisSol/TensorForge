@@ -299,3 +299,58 @@ def test_what_does_not_stack_is_refused_by_name():
                        beta=0.0)]
     # a factor passed by value is the batch's, and stays as it is
     assert stacking.stack(rank0, 2)[0].ops[2] is rank0[0].ops[2]
+
+
+def _built(descrs, arch='gfx942', backend='hip', **options):
+    gen = Generator(descrs, Context(arch=arch, backend=backend,
+                                    fp_type=Datatype.F32,
+                                    options=Options(**options)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen
+
+
+def test_the_bound_is_per_element_of_the_batch():
+    """A stacked build counts its figures for the whole stack, and
+    `pipeline.of` divides them by it -- so that the tuner weighs a stack
+    against a plain build in one unit, and a margin read off the bound means
+    the same for both (`tuning._worth_it`)."""
+    from tensorforge.analysis import pipeline
+    gen = _built(_gemm(), stack_elements=2)
+    assert gen.stack == 2
+    built = gen.built
+    whole = pipeline.bound(built.metrics.issue_mix, built.metrics.memory_bytes,
+                           built._context.target.hw,
+                           max(1, built._num_threads or 1),
+                           built._num_active_threads or None)
+    per = pipeline.of(gen)
+    assert per.cycles == pytest.approx(whole.cycles / 2)
+    assert per.binding == whole.binding
+    assert per.per_resource == pytest.approx(
+        {name: v / 2 for name, v in whole.per_resource.items()})
+    plain = _built(_gemm())
+    assert plain.stack == 1
+    assert pipeline.of(plain).cycles == pytest.approx(pipeline.bound(
+        plain.metrics.issue_mix, plain.metrics.memory_bytes,
+        plain.built._context.target.hw, max(1, plain.built._num_threads or 1),
+        plain.built._num_active_threads or None).cycles)
+
+
+def test_a_persistent_grid_counts_its_rounds_in_stacks():
+    """The least time a measurement could take (`MeasuredScore.least`): the
+    grid walks the batch a multiplication -- a stack -- per slot, so a batch
+    of two rounds of elements and two more is two rounds of stacks, not
+    three."""
+    from tensorforge.analysis import pipeline
+    from tensorforge.generators import tuning
+    gen = _built(_gemm(), stack_elements=2)
+    slots = gen.launch_config().mults_per_block * gen.resident_blocks
+    batch = 2 * slots + 2
+    score = tuning.MeasuredScore(lambda result: None, sms=1, clock_ghz=1.0,
+                                 batch=batch)
+    result = tuning.Build(tuning.Candidate(), generator=gen,
+                          context=gen.built._context)
+    bound = pipeline.of(gen, conservative=True)
+    efficiency = (slots + 1) / (2 * slots)
+    assert score.least(result) == pytest.approx(
+        pipeline.least_seconds(bound, batch, 1, 1.0, efficiency))

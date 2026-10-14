@@ -429,6 +429,9 @@ class Generator:
     # operand on other axes, an accumulation, a factor -- is rewritten here,
     # whichever frontend stated it.
     gemm_list = legalize(gemm_list)
+    #: The list before the stack rewrites it: what `Options.autotune` builds
+    #: its candidates from, since the stack is one of the knobs it turns.
+    self._unstacked: List[OperationDescription] = gemm_list
     #: How many consecutive elements one multiplication computes
     #: (`Options.stack_elements`).  The list is rewritten for it here, ahead
     #: of everything that reads it, so the builders see the wider operands
@@ -647,6 +650,13 @@ class Generator:
     return self.built._resident_blocks()
 
   @property
+  def stack(self) -> int:
+    """How many elements of the batch one multiplication of the build
+    computes (`Options.stack_elements`): what a figure per multiplication is
+    divided by to be one per element."""
+    return self.built._stack
+
+  @property
   def lanes(self) -> Optional[LaneConfig]:
     """The geometry the build settled on, or None before `generate`: with
     none asked for, what the deduction or the tuner arrived at.  Beside the
@@ -758,7 +768,9 @@ class Generator:
     opts = self._context.get_user_options()
     if opts.autotune in ('', 'off') or not self._may_tune:
       return None
-    given = self._given
+    # Unstacked: a candidate states its own stack, and a list stacked for
+    # this generator's would be stacked whatever the candidate says.
+    given = self._unstacked
     fixed = {}
     if self._lanes is not None:
       fixed['lanes'] = self._lanes
@@ -766,6 +778,11 @@ class Generator:
       asked = lane_config.requested(given, self._context)
       if asked is not None:
         fixed['lanes'] = asked
+    # A stack or a matrix width the caller asked for is a decision as an
+    # explicit geometry is, and pinned the same way.
+    for name in ('stack_elements', 'matrix_columns'):
+      if name in self._context.get_asked_options().asked():
+        fixed[name] = getattr(opts, name)
     pick = tuning.autotune(lambda: copy.deepcopy(given), self._context,
                            mode=opts.autotune, budget=opts.autotune_budget,
                            cache=opts.autotune_cache or None,

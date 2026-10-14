@@ -75,6 +75,9 @@ ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 PIPE = Path('src/tensorforge/backend/pir/pipeline.py')
 STACKING = Path('src/tensorforge/generators/stacking.py')
 BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
+TUNING = Path('src/tensorforge/generators/tuning.py')
+BOUND = Path('src/tensorforge/analysis/pipeline.py')
+TILING = PKG / 'tiling.py'
 
 
 def _run_tests(target):
@@ -1871,6 +1874,46 @@ GROUPS = {
          sub(STACKING, "    return ReductionDescr(self.view(d.dest), self.view(d.var), list(d.dims),",
              "    return ReductionDescr(self.view(d.dest), self.view(d.var),\n"
              "                          list(d.dims) + [d.var.bbox.rank()],", 1)),
+    ]),
+
+    # The stack and the width of the matrix instruction as the tuner's knobs,
+    # and the bound per element they are weighed by.
+    'tune': ('tests/test_autotune.py tests/test_matrix_columns.py '
+             'tests/test_stack_elements.py', [
+        ('a stacked build\'s bound left per stack',
+         sub(BOUND, "    if b is None or stack == 1:\n        return b",
+             "    if True:\n        return b", 1)),
+        ('the rounds of a persistent grid counted in elements',
+         sub(TUNING, "            stacks = -(-self.batch // _stack_of(gen))",
+             "            stacks = self.batch", 1)),
+        ('an asked width left to the count',
+         sub(TILING, "        if asked:\n            fits = (",
+             "        if False:\n            fits = (", 1)),
+        ('the stack not offered',
+         sub(TUNING, "            knobs.append(Knob('stack_elements', lambda c: (2,)))",
+             "            pass", 1)),
+        ('the width not offered',
+         sub(TUNING, "            knobs.append(Knob('matrix_columns', widths))",
+             "            pass", 1)),
+        ('the stack and the width offered to the static scorer',
+         sub(TUNING, "    if mode == 'compiled':\n        if context.target.prefs.tune_stack",
+             "    if True:\n        if context.target.prefs.tune_stack", 1)),
+        ('the space built for the scorer asked for, not the one that ranks',
+         sub(TUNING, "    knobs = simple_space(descrs, context, mode=mode)",
+             "    knobs = simple_space(descrs, context)", 1)),
+        ('the residency counted in multiplications',
+         sub(TUNING, "    return (over > 0, issue, -resident * _stack_of(gen),",
+             "    return (over > 0, issue, -resident,", 1)),
+        ('a list that does not stack offered the stack',
+         sub(TUNING, "    except GenerationError:\n        return False\n    return True",
+             "    except GenerationError:\n        return True\n    return True", 1)),
+        ('the candidates built from the stacked list',
+         sub(GEN, "    given = self._unstacked\n", "    given = self._given\n", 1)),
+        ('an asked stack turned anyway',
+         sub(GEN, "        fixed[name] = getattr(opts, name)", "        pass", 1)),
+        ('a knob without values ending the enumeration',
+         sub(TUNING, "        for v in knobs[i].values(cand) or (None,):",
+             "        for v in knobs[i].values(cand):", 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

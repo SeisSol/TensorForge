@@ -463,6 +463,13 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     return fragment_order(shape, atom, WAVE)
 
 
+def widths(threads, accumulator, ctx):
+    """None offered (`MatrixPaths.widths`): `Options.matrix_columns` is read
+    by CDNA's lane-batched tiles alone, and the entry here is the count's
+    (`instr_for`)."""
+    return ()
+
+
 def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
            atom, threads):
     """One `B` fragment read where it lies, with the column range guarded.

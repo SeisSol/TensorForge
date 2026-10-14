@@ -197,7 +197,8 @@ class MatrixPaths(Protocol):
     `primitives.intel` -- and every question the dispatch in
     `MultilinearInstruction` asks goes to the same one, so that what gets
     emitted and what gets reserved for it cannot be answered by two tables
-    that then disagree.
+    that then disagree.  So does the tuner's (`widths`), for the same reason:
+    a width it offers is one the emitter then takes.
     """
 
     #: The order the target takes the legal arrangements in.  Preference
@@ -231,6 +232,12 @@ class MatrixPaths(Protocol):
                        threads=32) -> Any:
         """The order this target would read a two-dimensional A operand in,
         or None (`MultilinearInstruction._offer_order`)."""
+
+    def widths(self, threads: int, accumulator, ctx) -> Tuple[int, ...]:
+        """The output columns one issue of the matrix instruction may cover
+        for a contraction at `threads` lanes accumulating in `accumulator`,
+        narrowest first: what `Options.matrix_columns` chooses among, and
+        what `generators.tuning` offers it."""
 
 
 # -- laying the arrangements out over the output --------------------------- #

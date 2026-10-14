@@ -337,3 +337,151 @@ def test_the_scalar_file_is_judged_on_its_own():
     silent = _fake('sm_120', 'cuda', 32, 4, 400)
     silent.generator.metrics.peak_uniform_pressure = 150 * 4
     assert tuning._over_scalar_budget(silent) == 0, 'no file, no judgement'
+
+
+def _narrow_product(columns=9, dest=None):
+    """C[56 x 9] = A[56 x 56] B[56 x 9]: an operator the batch shares against
+    an element's own -- the product a single element leaves CDNA's matrix
+    instruction half empty in."""
+    from tensorforge.common.basic_types import Addressing, Datatype
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+
+    def view(shape, addressing, alias):
+        return SubTensor(Tensor(shape, addressing, BoundingBox([0, 0], shape),
+                                alias=alias, datatype=Datatype.F32))
+    return [GemmDescr(trans_a=False, trans_b=False,
+                      a=view([56, 56], Addressing.NONE, 'A'),
+                      b=view([56, columns], Addressing.STRIDED, 'B'),
+                      c=view([56, columns], dest or Addressing.STRIDED, 'C'),
+                      alpha=1.0, beta=0.0)]
+
+
+def test_amd_turns_the_stack_and_the_width_under_the_compiled_scorer():
+    """Where one element leaves the matrix instruction half empty
+    (`Preferences.tune_stack`), the stack is a knob, and so is the tile
+    width where the target has several (`MatrixPaths.widths`); each only on
+    its other side, the origin being the default.  Under the compiled scorer
+    alone, which sees what they cost in registers; NVIDIA has neither."""
+    from tensorforge.common.basic_types import Datatype
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    descrs = _narrow_product()
+    origin = tuning.start(descrs, ctx)
+    knobs = {k.name: list(k.values(origin))
+             for k in tuning.simple_space(descrs, ctx, mode='compiled')}
+    assert knobs['stack_elements'] == [2]
+    assert knobs['matrix_columns'] == [4, 16]
+    static = {k.name for k in tuning.simple_space(descrs, ctx, mode='static')}
+    assert not {'stack_elements', 'matrix_columns'} & static
+    assert not {'stack_elements', 'matrix_columns'} & set(_simple('sm_100'))
+    full = {k.name: list(k.values(origin))
+            for k in tuning.space(descrs, ctx)}
+    assert full['stack_elements'] == [1, 2]
+    assert full['matrix_columns'] == [0, 4, 16]
+
+
+def test_a_compiled_walk_without_a_compiler_turns_what_a_static_one_does(
+        monkeypatch):
+    """`compiled` falls back on the static scorer where no compiler is found,
+    and the space follows the scorer that ranks it, not the one asked for."""
+    from tensorforge.common.basic_types import Datatype
+    seen = {}
+
+    def watching(descr_factory, context, scorer, knobs=None, **rest):
+        seen['knobs'] = {k.name for k in knobs}
+        return tuning.Outcome(rest['origin'], None, [])
+
+    monkeypatch.setattr(tuning, 'coordinate', watching)
+    monkeypatch.setattr(tuning.CompiledScore, 'available',
+                        lambda self, context: False)
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32,
+                  options=Options(autotune='compiled'))
+    with pytest.warns(UserWarning, match='ranking statically'):
+        tuning.autotune(_narrow_product, ctx, mode='compiled',
+                        generate=Generator.trial)
+    assert seen['knobs'] and 'stack_elements' not in seen['knobs']
+
+
+def test_a_list_that_does_not_stack_is_not_offered_the_stack():
+    """What `stacking.stack` refuses by name -- here a destination the batch
+    shares -- is not a candidate at all."""
+    from tensorforge.common.basic_types import Addressing, Datatype
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    descrs = _narrow_product(dest=Addressing.NONE)
+    assert 'stack_elements' not in {
+        k.name for k in tuning.simple_space(descrs, ctx, mode='compiled')}
+
+
+def test_the_walk_takes_the_stack_where_it_is_worth_it_per_element():
+    """The bound is per element (`pipeline.of`), so the stack is weighed in
+    the unit the plain build is: on the narrow product the static model puts
+    it at 256 clocks an element against 457 for the plain build, and a walk
+    over the knob takes it.  The static scorer stands in for the compiled
+    one, which needs a compiler: what is held is the unit."""
+    from tensorforge.common.basic_types import Datatype
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    knobs = [k for k in tuning.simple_space(_narrow_product(), ctx,
+                                            mode='compiled')
+             if k.name == 'stack_elements']
+    out = tuning.coordinate(_narrow_product, ctx, tuning.static_score,
+                            knobs=knobs, generate=Generator.trial)
+    assert out.best.get('stack_elements') == 2
+
+
+def test_residency_is_counted_in_elements():
+    """A stacked multiplication holds two elements, so the residency the
+    scorers rank by after the bound counts them (`static_score`)."""
+    from tensorforge.common.basic_types import Datatype
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    for stack in (1, 2):
+        result = tuning.build(_narrow_product, ctx,
+                              tuning.Candidate().set('stack_elements', stack),
+                              Generator.trial)
+        _, _, resident = tuning._geometry(result)
+        blocks = tuning._register_blocks(result)
+        if blocks is not None:
+            mults = result.generator.launch_config().mults_per_block
+            resident = min(resident, blocks * mults)
+        assert resident > 0
+        assert tuning.static_score(result)[2] == -resident * stack
+
+
+@pytest.mark.parametrize('asked', [{'stack_elements': 1},
+                                   {'matrix_columns': 4},
+                                   {'stack_elements': 2, 'matrix_columns': 16}])
+def test_an_asked_stack_or_width_is_pinned(monkeypatch, asked):
+    """A stack or a width the caller asks for is a decision, as an explicit
+    geometry is: pinned in the origin and out of the space."""
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.generators import stacking
+    seen = {}
+
+    def watching(factory, context, mode='static', budget=None, cache=None,
+                 fixed=None, *, generate):
+        seen['fixed'] = fixed
+        seen['stacked'] = [stacking.factor(v.tensor) for d in factory()
+                           for op in d.operations() for v in op.reads()]
+        return None
+
+    monkeypatch.setattr(tuning, 'autotune', watching)
+    gen = Generator(_narrow_product(),
+                    Context(arch='gfx942', backend='hip', fp_type=Datatype.F32,
+                            options=Options(autotune='static', **asked)))
+    gen.generate()
+    assert seen['fixed'] == asked
+    # and the candidates come from the list unstacked, whatever this
+    # generator's own stack: a candidate states its own
+    assert set(seen['stacked']) == {1}
+
+
+def test_a_knob_with_nothing_to_offer_leaves_the_point_as_it_is():
+    """`enumerate_space` over a knob without values at a point: the point,
+    not nothing -- the width of the matrix instruction has no values at a
+    lane count no wide tile fits."""
+    origin = tuning.Candidate()
+    knobs = [tuning.Knob('k_roll', lambda c: (0, 2)),
+             tuning.Knob('matrix_columns', lambda c: ())]
+    points = list(tuning.enumerate_space(knobs, origin))
+    assert [p.get('k_roll') for p in points] == [0, 2]
+    assert all(p.get('matrix_columns') is None for p in points)

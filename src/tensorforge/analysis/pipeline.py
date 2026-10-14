@@ -331,16 +331,27 @@ def of(generator, conservative: bool = False,
     builds at 255 registers with spills.  What the compiler reports is the
     figure with the addressing and the schedule in it, and only
     `tuning.CompiledScore` has one.
+
+    Per element of the batch, whatever a multiplication computes: a build
+    that stacks elements (`Options.stack_elements`) counts every figure for
+    the whole stack, the spilling a compiler reports for it included, and is
+    divided by the stack here -- so that a stacked build and a plain one are
+    compared in the same unit.
     """
     built = generator.built
     hw = built._context.target.hw
     stream = (stream_bytes(built._given) if dram_bytes_per_clock
               else None)
     metrics = built.metrics
-    return bound(metrics.issue_mix, metrics.memory_bytes, hw,
-                 max(1, built._num_threads or 1),
-                 built._num_active_threads or None, conservative,
-                 stream, dram_bytes_per_clock, spill_bytes)
+    b = bound(metrics.issue_mix, metrics.memory_bytes, hw,
+              max(1, built._num_threads or 1),
+              built._num_active_threads or None, conservative,
+              stream, dram_bytes_per_clock, spill_bytes)
+    stack = max(1, int(getattr(built, '_stack', 1) or 1))
+    if b is None or stack == 1:
+        return b
+    return Bound(b.cycles / stack, b.binding,
+                 {name: v / stack for name, v in b.per_resource.items()})
 
 
 def prunable(least: float, incumbent: float) -> bool:

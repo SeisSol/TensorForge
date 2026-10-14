@@ -944,8 +944,11 @@ declare('autotune',
             'spills; falls back to `static` where none is found), both of which '
             'take a matching preference first.  Only what is safe to ship unasked is '
             'turned: the lane count, a lead width of two where the target has '
-            'a packed FP32 FMA, merging, and rolling -- not preparing operands, '
-            'which the host has to pack for, and not the matrix path.  Not part '
+            'a packed FP32 FMA, merging, rolling, and under `compiled` on AMD a '
+            'stack of two elements and the width of the matrix instruction, '
+            'whose register cost the static model does not see -- not preparing '
+            'operands, which the host has to pack for, and not the matrix path.  '
+            'A stack or a width the caller asks for stays as asked.  Not part '
             'of the kernel\'s identity: what it picks is, through the options '
             'and the geometry it builds with.')
 
@@ -1014,6 +1017,22 @@ declare('mma_prefetch_across',
             'cold.  Across made `mmaos` 10 % faster on GB200 and the merged '
             '`mmaosm` 7 % slower -- same instructions, L1 hits 95.2 % against '
             '93.1 % -- so it is a question per kernel, not a constant.')
+
+declare('matrix_columns',
+        default=0,
+        parse=parse_int,
+        doc='Output columns one issue of the matrix instruction covers, where '
+            'the target has entries of several widths for a product: CDNA\'s '
+            'lane-batched F32 tiles, 4 and 16.  0 leaves it to the count of '
+            'passes (`compute.ranking`), which takes the narrowest unless the '
+            'columns fill the wider one as well; a width takes the entry of '
+            'that width for every product it serves, and the count for the '
+            'rest.  The count does not see what a narrow tile reads again: '
+            'the lead operand once per block of columns, four times as often '
+            'at 4 as at 16.  The static model on gfx942 puts the wide tile '
+            '49 to 63 % ahead at order 8 of SeisSol\'s elastic kernels, where '
+            'loads bind, and 55 to 98 % behind at order 4, where the '
+            'arithmetic does -- a question per kernel (`generators.tuning`).')
 
 declare('full_lane_tails',
         default=True,
