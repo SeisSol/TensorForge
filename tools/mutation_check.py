@@ -98,12 +98,32 @@ def _run_tests(target):
     # them as uncaught.
     path = [str(Path('src').resolve())] + [
         p for p in [os.environ.get('PYTHONPATH')] if p]
+    # The lock is this run's own while the tests run: `tests/conftest.py`
+    # refuses a tree a killed run left broken, and tells this run from one by
+    # `TF_MUTATION_RUN`.
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
-               PYTHONPATH=os.pathsep.join(path))
+               PYTHONPATH=os.pathsep.join(path), TF_MUTATION_RUN='1')
     return subprocess.run(
         [sys.executable, '-B', '-m', 'pytest', *target.split(), '-q', '-x',
          '--no-header'],
         capture_output=True, text=True, env=env)
+
+
+#: What pytest's exit status says about a mutation: tests ran and one failed
+#: (1), or the mutated tree did not even collect (2) -- either way the suite
+#: notices.  Everything else ran no test that could: a usage error (4), no
+#: test collected (5), an internal error (3).  Those are reported, and not
+#: counted as caught: a refusal exits nonzero exactly as a failure does.
+CAUGHT = (1, 2)
+
+
+def verdict(returncode: int) -> str:
+    """`caught`, `missed` (the tests passed), or what kept them from running."""
+    if returncode in CAUGHT:
+        return 'caught'
+    if returncode == 0:
+        return 'missed'
+    return f'not run (pytest exit {returncode})'
 
 
 def sub(path, old, new, count=0):
@@ -2420,9 +2440,9 @@ def run(group, target, mutations):
             LOCK.write_text('\n'.join(str(p) for p in originals))
             path.write_text(text)
             r = _run_tests(target)
-            ok = r.returncode != 0
-            caught += ok
-            print(f'  {name:56s} {"caught" if ok else "*** MISSED ***"}')
+            said = verdict(r.returncode)
+            caught += said == 'caught'
+            print(f'  {name:56s} {said if said == "caught" else "*** " + said.upper() + " ***"}')
             for p, t in originals.items():
                 p.write_text(t)
             originals.clear()

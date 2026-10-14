@@ -122,6 +122,11 @@ def pytest_addoption(parser):
 # which is exactly when it matters.
 MUTATION_LOCK = Path(__file__).resolve().parents[1] / ".mutation-in-progress"
 
+#: Set by `tools/mutation_check.py` in the environment of the tests it runs
+#: on a tree it broke on purpose: the lock is then held by a run that is
+#: alive, and those tests are the point of it.
+MUTATION_RUN = "TF_MUTATION_RUN"
+
 
 def pytest_collection(session):
     """Refuse to run on a tree a killed mutation run left broken.
@@ -135,8 +140,12 @@ def pytest_collection(session):
 
     Refusing is right rather than restoring silently: the tree may also hold
     edits made since, and guessing which is which is not this hook's job.
+
+    The harness's own tests run while the lock is held, and are told apart
+    by `MUTATION_RUN`: refused, they would test nothing, and a refusal exits
+    nonzero just as a failure does.
     """
-    if not MUTATION_LOCK.exists():
+    if not MUTATION_LOCK.exists() or os.environ.get(MUTATION_RUN):
         return
     paths = [p for p in MUTATION_LOCK.read_text().split("\n") if p]
     raise pytest.UsageError(
