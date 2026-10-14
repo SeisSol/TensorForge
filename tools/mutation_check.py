@@ -70,7 +70,9 @@ GEN = Path('src/tensorforge/generators/generator.py')
 PTR = Path('src/tensorforge/backend/instructions/ptr_manip.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py')
+TRIPS = Path('src/tensorforge/backend/pir/trips.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
+PIPE = Path('src/tensorforge/backend/pir/pipeline.py')
 
 
 def _run_tests(target):
@@ -147,6 +149,26 @@ def resub(path, pattern, repl, count=1):
                 f'mutation did not apply to {path}: the code has moved, so '
                 f'this check is no longer testing anything')
         return path, out
+    return make
+
+
+def subs(path, *pairs):
+    """Several `sub`s of one file as one mutation, each applied once and in
+    order: a defect that is two edits apart."""
+    def make():
+        if not path.exists():
+            raise AssertionError(
+                f'{path} does not exist: the file has moved, so this check is '
+                f'no longer testing anything')
+        text = path.read_text()
+        for old, new in pairs:
+            out = text.replace(old, new, 1)
+            if out == text:
+                raise AssertionError(
+                    f'mutation did not apply to {path}: the code has moved, '
+                    f'so this check is no longer testing anything')
+            text = out
+        return path, text
     return make
 
 GROUPS = {
@@ -1631,8 +1653,8 @@ GROUPS = {
         ('a table of pointers read as one array',
          sub(ORACLE, "        env.setdefault(name, PtrTable(mem, name))\n", '', 1)),
         ('the option not reaching the wrap',
-         sub(ABSTR, '                           pointer_stage=options.pointer_stage)',
-             '                           pointer_stage=False)', 1)),
+         sub(ABSTR, '                           pointer_stage=options.pointer_stage,',
+             '                           pointer_stage=False,', 1)),
     ]),
 
     # The launch-control traversal reading the next element off the queue
@@ -1737,6 +1759,39 @@ GROUPS = {
         ('the shorter state carried on behind the loop',
          sub(ASYNCMEM, '    if settled:\n        # The longer of the two states',
              '    if False:\n        # The longer of the two states', 1)),
+    ]),
+
+    # What a trip of a counted loop reads in place, read into registers a
+    # trip ahead.
+    'trips': ('tests/test_trip_reads.py', [
+        ('a loop unrolled whole gathered',
+         sub(TRIPS, "        if counted(s) and s.attr('unroll') is not True:",
+             '        if counted(s):', 1)),
+        ('a load all lanes read alike taken into a register array',
+         sub(TRIPS, '        if value.uniformity is not Uniformity.LANE:',
+             '        if False:', 1)),
+        ('a load from a buffer the loop writes taken',
+         sub(TRIPS, '        if unknown or any(_key(a.base) in written for a in x.accesses):',
+             '        if False:', 1)),
+        ('an index the loop loads computed again for the next trip',
+         sub(TRIPS, '        if d is None or not glue(d):\n            return None',
+             '        if d is None:\n            return None', 1)),
+        ('the slots read where the loads stood',
+         subs(TRIPS,
+              ('    declare: List[Stmt] = []\n',
+               '    declare: List[Stmt] = []\n    placed = {}\n'),
+              ('            head.extend(built[:-1])\n'
+               '            head.append(replace(built[-1], target=(x.target[0],)))\n',
+               '            placed[id(x)] = tuple(built[:-1]) + (\n'
+               '                replace(built[-1], target=(x.target[0],)),)\n'),
+              ('    rest = [x for x in stmts if id(x) not in moved]\n',
+               '    rest = [y for x in stmts for y in placed.get(id(x), ())\n'
+               '            or ((x,) if id(x) not in moved else ())]\n'))),
+        ('the reads gathered without the wrap that fills them',
+         sub(PIPE, '        if self._trip_reads and not pc.explicit_simd:',
+             '        if False:', 1)),
+        ('a trip gathered however many loads it reads',
+         sub(TRIPS, '    if len(found) > TRIP_SLOTS:', '    if False:', 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

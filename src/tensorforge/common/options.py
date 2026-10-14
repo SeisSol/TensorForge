@@ -427,6 +427,17 @@ declare('pointer_stage',
             'next.  Elsewhere the read at the head has the body ahead of the '
             'transfer as cover, and nothing changes.  See backend/pir/wrap.py.')
 
+declare('trip_reads',
+        default=False,
+        parse=parse_bool,
+        doc='In a loop whose trips are counted -- a reduction `k_roll` rolls, '
+            'typically -- read what a trip reads from global memory in place '
+            'into a register array at the head of the trip instead, a slot '
+            'per load, which `enable_wrap_loads` then fills a trip ahead.  '
+            'Read in place, the operator\'s element is a load the products of '
+            'the trip take at once; filled a trip ahead, it is there.  It '
+            'costs a register per load of a trip.  See backend/pir/trips.py.')
+
 declare('issue_cover',
         default=512,
         parse=parse_int,

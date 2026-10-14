@@ -471,7 +471,8 @@ class AbstractInstruction(ABC):
                            report=report, pipeline=pipeline,
                            early=options.wrap_early,
                            cover=options.issue_cover,
-                           pointer_stage=options.pointer_stage)
+                           pointer_stage=options.pointer_stage,
+                           trip_reads=options.trip_reads)
     if options.enable_prefetch or options.prefetch_data:
       prefetch = pir.Prefetch(builder.scratch,
                               pointers=options.enable_prefetch,

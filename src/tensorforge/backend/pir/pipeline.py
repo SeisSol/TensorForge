@@ -38,6 +38,7 @@ from .move import cap_cover, move_loads
 from .transfers import memory_path
 from .prefetch import prefetch_hints
 from .shards import shard_loads
+from .trips import trip_reads
 from .wrap import wrap_loads
 from .passes import (converge_crosslane, cse, dce, flatten_scopes, fold,
                      if_convert, licm, load_cse, verify)
@@ -209,6 +210,11 @@ class WrapLoads(Pass):
     built with, `stages` is how many copies of a shared buffer a moved
     transfer may have, and `report` collects what moved and why the rest did
     not.
+
+    `trip_reads` first makes transfers of what the trips of a counted loop
+    read from global memory in place (`trips.trip_reads`), for the wrap to
+    issue a trip ahead.  Not under the explicit vector, whose loads are
+    vectors a slot does not hold.
     """
 
     name = 'wrap'
@@ -219,7 +225,7 @@ class WrapLoads(Pass):
     def __init__(self, scratch, distance: int = 1, stages: int = 1,
                  report: Optional[List[str]] = None, pipeline=memory_path,
                  early: bool = False, cover: int = 0,
-                 pointer_stage: bool = False):
+                 pointer_stage: bool = False, trip_reads: bool = False):
         self._scratch = scratch
         self._distance = distance
         self._stages = stages
@@ -228,8 +234,11 @@ class WrapLoads(Pass):
         self._early = early
         self._cover = cover
         self._pointer_stage = pointer_stage
+        self._trip_reads = trip_reads
 
     def run(self, pc: BodyContext) -> None:
+        if self._trip_reads and not pc.explicit_simd:
+            pc.body = trip_reads(pc.body, self._scratch, report=self._report)
         pc.body = wrap_loads(pc.body, self._scratch, distance=self._distance,
                              stages=self._stages, report=self._report,
                              pipeline=self._pipeline, early=self._early,
