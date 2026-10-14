@@ -87,10 +87,10 @@ class AbstractThreadBlockPolicy:
 
     Where there is a barrier, the block is sized so that the strongest barrier
     the target can spell is exactly the set that has to meet.  A target with a
-    sub-block rendezvous can separate one multiplication from the next, so
-    nothing is capped; without one, the smallest separable set is the group of
-    multiplications that fills a whole number of waves, and the block is sized
-    to hold one of those.
+    sub-block rendezvous can separate one multiplication from the next, as
+    many of them as it has rendezvous for (`Target.separable_mults`); without
+    one, the smallest separable set is the group of multiplications that fills
+    a whole number of waves, and the block is sized to hold one of those.
 
     `None` is no cap, which is different from a cap of one.
     """
@@ -103,7 +103,7 @@ class AbstractThreadBlockPolicy:
     if self._num_threads == wave:
       return None
     if target.sync_mult(self._num_threads):
-      return None
+      return target.separable_mults(self._num_threads)
     return mults_per_group(self._num_threads, wave)
 
   def set_has_barrier(self, has_barrier: bool) -> None:
@@ -2839,13 +2839,19 @@ class Generator:
 
   def _stage_group(self) -> int:
     """Multiplications per block under `stage_members`: `stage_group`,
-    rounded up to whole waves."""
-    wave = self._context.target.hw.vec_unit_length
+    rounded up to whole waves, and down to the multiplications the block can
+    tell apart by their barriers (`Target.separable_mults`)."""
+    target = self._context.target
+    wave = target.hw.vec_unit_length
     base = (wave // self._num_threads if self._num_threads < wave
             else mults_per_group(self._num_threads, wave))
     base = max(1, base)
     want = max(1, int(self._context.get_user_options().stage_group))
-    return -(-want // base) * base
+    group = -(-want // base) * base
+    limit = target.separable_mults(self._num_threads)
+    if limit is not None and group > limit:
+      group = max(base, limit - limit % base)
+    return group
 
   def _mults_for(self, global_size: int, size_per_mult: int,
                  stages: bool = False):

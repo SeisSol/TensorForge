@@ -376,6 +376,23 @@ class Target:
                     and smallest_sub_group(sizes, num_threads) == num_threads)
         return False
 
+    def separable_mults(self, num_threads: int) -> Optional[int]:
+        """How many multiplications of `num_threads` one block can hold
+        apart with the rendezvous `sync_mult` grants, or None for any number.
+
+        A count where the rendezvous is a resource each multiplication takes
+        one of.  CUDA above a wave: `barrier.sync id, count` with the id the
+        multiplication's own, `threadIdx.y + 1` (`CudaLexic.sync_mult`), and
+        a CTA has sixteen barriers of which `__syncthreads()` takes the first.
+        A sixteenth multiplication would ask for barrier 16, which does not
+        exist.  Below a wave each multiplication is a mask of the warp's lanes
+        and nothing runs out.
+        """
+        if (self.backend == 'cuda' and num_threads > self.hw.vec_unit_length
+                and self.sync_mult(num_threads)):
+            return self.lexic.NAMED_BARRIERS - 1
+        return None
+
     def exchange_reach(self, num_threads: int) -> int:
         """How many lanes one cross-lane exchange reaches -- a shuffle, a
         broadcast, a reduction -- for a multiplication of `num_threads`.

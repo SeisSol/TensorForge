@@ -437,9 +437,15 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       return False
     if self._swizzle_cap(writer) != 16:
       return False
-    cursor = writer.bulk_channel(self._dest.name,
-                                 leader=f'{self._linear_idx()} == 0',
-                                 threads=self._num_threads)
+    # Behind the arming, the multiplication's own barrier, spelled as every
+    # other barrier of the multiplication is: a named one does not exist for
+    # every width (`Target.sync_mult`).
+    from ..sync_block import SyncThreads
+    cursor = writer.bulk_channel(
+        self._dest.name, leader=f'{self._linear_idx()} == 0',
+        participants=SyncThreads(self._context,
+                                 self._num_threads).participants(),
+        threads=self._num_threads)
     if cursor is None:
       return False
     # The claim a copy of the same bytes in hops leaves on the image.

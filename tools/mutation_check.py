@@ -1700,6 +1700,24 @@ GROUPS = {
              '        pass', 1)),
     ]),
 
+    # A block holds no more multiplications than it has barriers for, and
+    # the barrier behind a bulk copy's arming is the multiplication's own.
+    'barrierbudget': ('tests/test_barrier_scope.py tests/test_stage_members.py', [
+        ('no limit on the named barriers',
+         sub(TARGET, '            return self.lexic.NAMED_BARRIERS - 1\n',
+             '            return None\n', 1)),
+        ('the stage group past the named barriers',
+         sub(GEN, '    if limit is not None and group > limit:\n',
+             '    if False:\n', 1)),
+        ("the bulk copy's barrier a multiplication's at any width",
+         sub(LOAD, '        participants=SyncThreads(self._context,\n'
+                   '                                 self._num_threads).participants(),\n',
+             '', 1)),
+        ('a barrier of one multiplication spelled where it has none',
+         sub(EMIT, '            if sync_mult is not None and not sync_mult(threads):',
+             '            if False:', 1)),
+    ]),
+
     # The cache hints for the element the loop reaches next.
     'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
                  'tests/test_prefetch_data.py', [

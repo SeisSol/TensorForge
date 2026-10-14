@@ -108,7 +108,7 @@ class CudaLexic(Lexic):
     # Two multiplications sharing an id rendezvous with each other, which is a
     # deadlock the moment they run the body a different number of times -- so
     # the id has to be per multiplication, and `mults_per_block` is capped to
-    # the resources by the thread-block policy.
+    # the resources by the thread-block policy (`Target.separable_mults`).
     return (f'asm volatile("barrier.sync %0, %1;" :: '
             f'"r"({self.thread_idx_y} + 1), "r"({num_threads}) : "memory");')
 

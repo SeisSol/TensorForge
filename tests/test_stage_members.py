@@ -56,3 +56,40 @@ def test_without_it_members_are_read_from_global():
     src = _kernel_at('local_flux', 'gfx942', merge_variants=True)
     assert not STAGED.search(src)
     assert not BINDING.search(src)
+
+
+def test_the_group_stays_within_the_named_barriers():
+    """On CUDA a multiplication wider than a warp meets on a named barrier
+    of its own, `threadIdx.y + 1`, and a CTA has fifteen of them besides the
+    block's: a group of sixteen would have its last multiplication ask for
+    barrier 16, which does not exist.  So the group is held to fifteen."""
+    import contextlib
+    import importlib.util
+    import io
+    import json
+    import warnings
+    from pathlib import Path
+
+    from tensorforge.common.context import Context
+    from tensorforge.common.options import Options
+    from tensorforge.generators.generator import Generator
+
+    path = next((Path(__file__).resolve().parent / 'cases').rglob(
+        'local_flux.py'))
+    spec = importlib.util.spec_from_file_location('tf_stage__' + path.stem,
+                                                  path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        ctx = Context(arch='sm_86', backend='cuda', fp_type=case.DTYPE,
+                      options=Options(merge_variants=True, stage_members=True,
+                                      stage_group=16, lanes_per_mult=64))
+        gen = Generator(case.descr_list(), ctx)
+        gen.generate()
+    src = gen.get_kernel()
+    assert STAGED.search(src), 'no member staged; nothing to test'
+    launch = json.loads(re.search(r'tensorforge-meta: (\{.*\})',
+                                  src).group(1))['launch']
+    assert launch['threads_per_mult'] == 64 and 'barrier.sync' in src
+    assert launch['block'][1] == 15, launch

@@ -604,6 +604,15 @@ class Emitter:
         if who == 'grid':
             return lex.sync_grid()
         if who == 'mult' and threads is not None and self._hw() is not None:
+            target = self._target()
+            sync_mult = getattr(target, 'sync_mult', None)
+            if sync_mult is not None and not sync_mult(threads):
+                # Spelled anyway, it would be a rendezvous of the wrong
+                # threads: a count of 48 that no warp boundary falls on, an
+                # id that two interleaved multiplications share.
+                raise IRError(f'a barrier of one multiplication of {threads} '
+                              f'threads, which this target cannot meet on '
+                              f'its own (`Target.sync_mult`)')
             return lex.sync_mult(threads, self._hw())
         # `multgroup` and `block` alike: the block is sized to hold one group
         # wherever a group is what has to meet, so the block barrier is the

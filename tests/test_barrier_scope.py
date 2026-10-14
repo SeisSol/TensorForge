@@ -336,3 +336,72 @@ def test_a_fold_over_a_partial_wave_is_refused():
 
     with pytest.raises(InternalError, match="partial wave"):
         _fold(48)
+
+
+def test_a_block_holds_no_more_multiplications_than_named_barriers(
+        monkeypatch):
+    """A named barrier per multiplication, `threadIdx.y + 1`, and fifteen
+    of them besides the one `__syncthreads()` takes: however many threads the
+    block may have, a sixteenth multiplication would ask for barrier 16."""
+    import dataclasses
+    from tensorforge.common import target as target_module
+    from tensorforge.generators.generator import RegmaxBlockPolicy
+
+    ctx = Context(arch="sm_86", backend="cuda", fp_type=Datatype.F32)
+    wave = ctx.target.hw.vec_unit_length
+    assert ctx.target.separable_mults(2 * wave) == 15
+    assert ctx.target.separable_mults(wave) is None, (
+        "the wave barrier takes no named barrier")
+    assert ctx.target.separable_mults(wave // 2) is None, (
+        "a mask per multiplication runs out of nothing")
+    hip = Context(arch="gfx942", backend="hip", fp_type=Datatype.F32)
+    assert hip.target.separable_mults(64) is None
+
+    wide = dataclasses.replace(target_module.PREFERENCES['nvidia'],
+                               unstaged_block_threads=4096)
+    monkeypatch.setitem(target_module.PREFERENCES, 'nvidia', wide)
+    policy = RegmaxBlockPolicy(ctx, global_mem=0, mem_size_per_mult=0,
+                               num_threads=2 * wave)
+    assert policy.get_num_mults_per_block() > 15, (
+        "without a barrier nothing caps the block, and the test needs that")
+    policy.set_has_barrier(True)
+    assert policy.get_num_mults_per_block() == 15
+
+
+def test_the_barrier_behind_a_bulk_copys_arming_is_the_multiplications(
+        context):
+    """Spelled as every other barrier of the multiplication: the wave's at
+    its width, a named one above it."""
+    import contextlib, importlib.util, io, re
+    from pathlib import Path
+    from tensorforge.common.options import Options
+    from tensorforge.generators.generator import Generator
+
+    path = next((Path(__file__).resolve().parent / 'cases').rglob(
+        'aligned_operands.py'))
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for lanes, spelled in ((32, r'__syncwarp\(\);'),
+                           (64, r'barrier\.sync.*"r"\(64\)')):
+        ctx = Context(arch="sm_90", backend="cuda",
+                      fp_type=getattr(mod, 'DTYPE', None),
+                      options=Options(bulk_copies=True,
+                                      lanes_per_mult=lanes))
+        gen = Generator(mod.descr_list(), ctx)
+        with contextlib.redirect_stdout(io.StringIO()):
+            gen.generate()
+        lines = gen.get_kernel().splitlines()
+        arm = next(i for i, l in enumerate(lines) if 'bulk_arm(' in l)
+        assert re.search(spelled, lines[arm + 1]), (lanes, lines[arm + 1])
+
+
+def test_a_multiplication_the_target_cannot_meet_alone_has_no_barrier(
+        context):
+    """A count no warp boundary falls on is no rendezvous: the emitter
+    refuses it rather than spelling one."""
+    from tensorforge.backend.pir.core import IRError, Participants
+
+    wave = context.target.hw.vec_unit_length
+    with pytest.raises(IRError):
+        _sync_text(context, Participants.MULT, wave + wave // 2)
