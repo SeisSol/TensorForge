@@ -695,10 +695,19 @@ def dce(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
         s = work.pop()
         if id(s) in dead or _dce_protected(s) or not unread(s):
             continue
-        dead.add(id(s))
         # Everything the statement read loses a reader -- including the reads
-        # inside a region that goes with it.
+        # inside a region that goes with it.  What is inside goes with it, and
+        # loses its reads once: a statement in there that died on its own
+        # before has counted them off already, and one that would die on its
+        # own after -- the load whose only reader was the region's `yield` --
+        # must not count them off again.  Counted twice, a value it shares
+        # with a statement elsewhere, as the lane index `cse` merges across
+        # the branches of predicated loads, loses that statement's read too,
+        # and its producer goes while that statement still reads it.
         for inner in walk_stmts((s,)):
+            if inner is not s and id(inner) in dead:
+                continue
+            dead.add(id(inner))
             for v in inner.operands():
                 left = counts.get(v.id, 1) - 1
                 counts[v.id] = left
