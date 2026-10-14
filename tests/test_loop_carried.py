@@ -17,6 +17,11 @@ the previous, and a drain afterwards.
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
+from pathlib import Path
+
 import pytest
 
 from tensorforge.backend.pir import emit, optimize, verify, walk
@@ -26,7 +31,11 @@ from tensorforge.backend.pir.core import (TOKEN, BufferType, Effect, IRError,
                                           MemSpace, Op, ScalarType)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
+from tensorforge.common.context import Context
+from tensorforge.common.options import Options
 from tensorforge.common.target import Target
+from tensorforge.generators.generator import Generator
+from tensorforge.reference import kernel_eval
 from harness.placement import placed
 
 
@@ -116,6 +125,82 @@ def test_a_group_that_changes_places_with_the_carried_one_is_no_steady_state():
         'the wait in the loop lets a group stay in flight, which on every '
         'trip but the first is the one it waits for')
     assert any('not in steady state' in d for d in diag), diag
+
+
+def test_a_group_a_younger_wait_retires_early_keeps_its_count():
+    """The next iteration's copy issued at the head, the carried one waited
+    for right behind; then a copy of the iteration's own, waited for at once,
+    which retires the next iteration's group as well -- `wait_prior` retires
+    every group older than the one it waits for.  So the iteration leaves one
+    group fewer in flight than it found.
+
+    A steady state all the same: in an iteration that finds the carried group
+    retired, the wait at the head counts the same group after it, the copy
+    just issued, and waits for nothing.  Counted as a pipeline out of balance
+    instead, that wait drains the copy issued for the next iteration."""
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    lds = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
+    own = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='o')
+    glb = b.alloc(Datatype.F32, (1024,), MemSpace.GLOBAL, hint='g')
+    lane = b.thread_id('x')
+    t0 = b.copy_async(lds, glb, dst_index=(lane,), src_index=(lane,))
+    with b.for_(0, 8, 1, inits=(t0,), types=(TOKEN,)) as f:
+        nxt = b.op('add', f.induction.type, f.induction, 1, hint='nk')
+        t1 = b.copy_async(lds, glb, dst_index=(lane,), src_index=(nxt,))
+        b.wait(f.iter_args[0])
+        t2 = b.copy_async(own, glb, dst_index=(lane,), src_index=(lane,))
+        b.wait(t2)
+        f.yield_(t1)
+    b.wait(f.results[0])
+    body = b.finish()
+    verify(body)
+
+    scheduled, diag = schedule_async(optimize(body))
+    assert not diag, diag
+    waits = [s for s, _ in walk(scheduled) if s.op is Op.WAIT]
+    assert [w.attr('prior') for w in waits] == [1, 0, 0], (
+        'the head keeps the copy for the next iteration in flight; the '
+        "iteration's own and the drain behind the loop wait for everything")
+
+
+def _flux(**options):
+    """`local_flux` for sm_86, and the lanes its launcher starts."""
+    path = next((Path(__file__).parent / 'cases').rglob('local_flux.py'))
+    spec = importlib.util.spec_from_file_location('tf_carried_flux', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    gen = Generator(mod.descr_list(),
+                    Context(arch='sm_86', backend='cuda',
+                            fp_type=getattr(mod, 'DTYPE', None),
+                            options=Options(**options)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    lanes, _ = kernel_eval.launch_geometry(gen.get_launcher())
+    return gen.get_kernel(), lanes
+
+
+def test_a_staged_flux_keeps_the_next_elements_copy_in_flight():
+    """`local_flux` with a second stage is that loop: its element's own
+    staged copy, waited for in the body, retires the next element's group,
+    and a masked element leaves it in flight.  The wait at the head of the
+    batch loop lets the copy just issued for the next element run on, and
+    the kernel computes what it computes with one stage -- over three
+    elements, the middle one masked, so that an iteration starts from either
+    state -- with no read of a slot still in flight."""
+    staged, lanes = _flux(enable_multibuffer=True)
+    plain, _ = _flux()
+    loop = staged[staged.index('< numElements0;'):]
+    head = loop[:loop.index('if (allowed) {')]
+    assert '__pipeline_wait_prior(1);' in head, head
+    preset = {'flags0': [1, 0, 1]}
+    races = []
+    got = kernel_eval.evaluate_wave(staged, lanes, seed=5, globals_only=True,
+                                    races=races, elements=3, preset=preset)
+    assert races == [], races
+    want = kernel_eval.evaluate_wave(plain, lanes, seed=5, globals_only=True,
+                                     elements=3, preset=preset)
+    assert got.keys() == want.keys()
+    assert max(abs(got[k] - want[k]) for k in want) < 1e-5
 
 
 def test_a_loop_carries_a_rolling_pointer():

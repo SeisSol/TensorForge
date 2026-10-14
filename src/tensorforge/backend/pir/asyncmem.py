@@ -553,6 +553,9 @@ def _sched_for(s: Stmt, state: _State, diag: List[str]) -> Stmt:
     # a count right for the first trip that waits for nothing on the others.
     balanced = (trial.known and entry.known
                 and _carried(trial, s).same(entry))
+    settled = (not balanced and trial.known and entry.known
+               and _settles(trial, entry, s))
+    balanced = balanced or settled
 
     if not balanced:
         # Not a steady state (or opaque): redo conservatively, every wait in
@@ -569,6 +572,13 @@ def _sched_for(s: Stmt, state: _State, diag: List[str]) -> Stmt:
     # Map the yielded tokens onto the loop results for the enclosing scope.
     exit_state = trial.copy()
     yielded = region.yielded
+    if settled:
+        # The longer of the two states an iteration may leave: the one it
+        # found, its carried units the ones it yields.  A wait behind the
+        # loop counts the same units after the one it names in either.
+        exit_state = entry.copy()
+        _remap(exit_state, {arg.id: y.id for arg, y in zip(s.iter_args, yielded)
+                            if isinstance(arg.type, TokenType) and _is_token(y)})
     back: Dict[int, int] = {}
     for res, y in zip(s.target, yielded):
         if isinstance(res.type, TokenType) and _is_token(y):
@@ -592,6 +602,28 @@ def _carried(trial: _State, loop: Stmt) -> _State:
                                                 loop.regions[0].yielded)
                  if isinstance(arg.type, TokenType) and _is_token(y)})
     return end
+
+
+def _settles(trial: _State, entry: _State, loop: Stmt) -> bool:
+    """Whether an iteration leaves in flight what it found short of units
+    older than everything it leaves: the group of a transfer the loop carries
+    across its back edge, retired early by the wait for a group issued after
+    it -- `wait_prior` retires every group older than the one it waits for.
+
+    Such an iteration is in a steady state all the same.  A wait counts the
+    units issued after the one it names (`_sched_wait`), and in an iteration
+    that found the older ones retired those are the same units: the count is
+    right there too, and where the unit it names is retired already the wait
+    waits for nothing.  So the counts derived from the longer state hold for
+    every iteration, whichever of the two it starts from -- where a full
+    drain would wait, at the head of the body, for the copy just issued
+    there for the next element.
+    """
+    found, left = entry.outstanding, _carried(trial, loop).outstanding
+    if len(left) >= len(found):
+        return False
+    return ([(u.tokens, u.cls) for u in found[len(found) - len(left):]]
+            == [(u.tokens, u.cls) for u in left])
 
 
 def _sched_if(s: Stmt, state: _State, diag: List[str]) -> Stmt:

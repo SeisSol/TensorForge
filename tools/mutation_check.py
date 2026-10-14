@@ -70,6 +70,7 @@ GEN = Path('src/tensorforge/generators/generator.py')
 PTR = Path('src/tensorforge/backend/instructions/ptr_manip.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py')
+ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 
 
 def _run_tests(target):
@@ -1725,6 +1726,17 @@ GROUPS = {
         ('a steady state told by how many groups are in flight',
          sub(ASYNCMEM, '                and _carried(trial, s).same(entry))',
              '                and len(trial.outstanding) == len(entry.outstanding))', 1)),
+    ]),
+
+    # A carried copy retired early by a younger wait leaves the loop's
+    # pipeline steady.
+    'steady': ('tests/test_loop_carried.py', [
+        ('an iteration that leaves a carried group retired out of balance',
+         sub(ASYNCMEM, '               and _settles(trial, entry, s))',
+             '               and False)', 1)),
+        ('the shorter state carried on behind the loop',
+         sub(ASYNCMEM, '    if settled:\n        # The longer of the two states',
+             '    if False:\n        # The longer of the two states', 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.
