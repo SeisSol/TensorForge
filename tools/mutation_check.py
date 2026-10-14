@@ -68,6 +68,7 @@ LOAD = Path('src/tensorforge/backend/instructions/memory/load.py')
 PASSES = Path('src/tensorforge/backend/pir/passes.py')
 GEN = Path('src/tensorforge/generators/generator.py')
 PTR = Path('src/tensorforge/backend/instructions/ptr_manip.py')
+ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py')
 
 
@@ -1716,6 +1717,14 @@ GROUPS = {
         ('a barrier of one multiplication spelled where it has none',
          sub(EMIT, '            if sync_mult is not None and not sync_mult(threads):',
              '            if False:', 1)),
+    ]),
+
+    # Groups that change places across a loop's back edge are no steady
+    # state.
+    'swap': ('tests/test_loop_carried.py', [
+        ('a steady state told by how many groups are in flight',
+         sub(ASYNCMEM, '                and _carried(trial, s).same(entry))',
+             '                and len(trial.outstanding) == len(entry.outstanding))', 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

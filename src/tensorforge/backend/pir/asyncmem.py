@@ -545,8 +545,14 @@ def _sched_for(s: Stmt, state: _State, diag: List[str]) -> Stmt:
     inner_diag: List[str] = []
     inner = _sched(region.body, trial, inner_diag)
 
-    balanced = (trial.known and entry.known and
-                len(trial.outstanding) == len(entry.outstanding))
+    # A steady state is the same units in flight in the same order, the
+    # carried ones under the names the next iteration finds them by: a wait
+    # counts the units issued after the one it names, and a group the loop
+    # carries that changes places with one issued ahead of the loop -- the
+    # older of the two on the first trip, the younger on every other -- has
+    # a count right for the first trip that waits for nothing on the others.
+    balanced = (trial.known and entry.known
+                and _carried(trial, s).same(entry))
 
     if not balanced:
         # Not a steady state (or opaque): redo conservatively, every wait in
@@ -575,6 +581,17 @@ def _sched_for(s: Stmt, state: _State, diag: List[str]) -> Stmt:
     state.known = exit_state.known
 
     return replace(s, regions=(replace(region, body=inner),))
+
+
+def _carried(trial: _State, loop: Stmt) -> _State:
+    """`trial`, what an iteration of `loop` leaves in flight, with the units
+    it yields under the names of the loop-carried tokens the next iteration
+    finds them by."""
+    end = trial.copy()
+    _remap(end, {y.id: arg.id for arg, y in zip(loop.iter_args,
+                                                loop.regions[0].yielded)
+                 if isinstance(arg.type, TokenType) and _is_token(y)})
+    return end
 
 
 def _sched_if(s: Stmt, state: _State, diag: List[str]) -> Stmt:

@@ -87,6 +87,37 @@ def test_a_loop_carries_an_async_token():
     assert 'token' not in src.lower(), src
 
 
+def test_a_group_that_changes_places_with_the_carried_one_is_no_steady_state():
+    """A copy issued ahead of the loop behind the carried one and waited for
+    behind the loop: on the first trip the carried group is the older of the
+    two, on every other the younger.  A wait that counts one group after the
+    carried one is right on the first trip and waits for nothing on the
+    others, and the read behind it reads a slot in flight."""
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    lds = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s')
+    other = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='o')
+    glb = b.alloc(Datatype.F32, (1024,), MemSpace.GLOBAL, hint='g')
+    lane = b.thread_id('x')
+    t0 = b.copy_async(lds, glb, dst_index=(lane,), src_index=(lane,))
+    ahead = b.copy_async(other, glb, dst_index=(lane,), src_index=(lane,))
+    with b.for_(0, 8, 1, inits=(t0,), types=(TOKEN,)) as f:
+        b.wait(f.iter_args[0])
+        b.store(glb, b.load(lds, lane, hint='x'), f.induction)
+        nxt = b.op('add', f.induction.type, f.induction, 1, hint='nk')
+        f.yield_(b.copy_async(lds, glb, dst_index=(lane,), src_index=(nxt,)))
+    b.wait(f.results[0])
+    b.wait(ahead)
+    body = b.finish()
+    verify(body)
+
+    scheduled, diag = schedule_async(optimize(body))
+    waits = [s for s, _ in walk(scheduled) if s.op is Op.WAIT]
+    assert waits[0].attr('prior') == 0, (
+        'the wait in the loop lets a group stay in flight, which on every '
+        'trip but the first is the one it waits for')
+    assert any('not in steady state' in d for d in diag), diag
+
+
 def test_a_loop_carries_a_rolling_pointer():
     """The second thing such a batch loop carries.
 
