@@ -2692,8 +2692,19 @@ class Generator:
     # exactly that -- and in the emitted text it would put the declaration
     # inside the braces its users sit outside of.
     from tensorforge.backend.instructions.allocate import RegisterAlloc
-    allocations = [i for i in region if isinstance(i, RegisterAlloc)]
-    region = [i for i in region if not isinstance(i, RegisterAlloc)]
+    # Each with the instruction it stood ahead of, which is where a trip has
+    # to set it back (below).
+    allocations, follows, waiting, kept = [], {}, [], []
+    for instr in region:
+      if isinstance(instr, RegisterAlloc):
+        allocations.append(instr)
+        waiting.append(instr)
+        continue
+      for alloc in waiting:
+        follows[id(alloc)] = instr
+      waiting = []
+      kept.append(instr)
+    region = kept
     # A preload at the end is a value memory holds, so nothing rides the back
     # edge.  Kept as (key, init, result): pairing a filtered key list with the
     # pairs afterwards would lose step as soon as one key is not carried.
@@ -2735,6 +2746,7 @@ class Generator:
                                        covered=entry.covered,
                                        shift=entry.shift, atomic=entry.atomic,
                                        promise=entry.promise)
+    region = self._reset_temporaries(region, allocations, follows, carried)
     carried = tuple((init, init) for _, init, _ in carried)
 
     # A destination that *varies* has to be stored inside the loop, and one
@@ -2762,6 +2774,38 @@ class Generator:
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,
                     start=0 if resident else 1, carried=tuple(carried)))
+
+  def _reset_temporaries(self, region, allocations, follows, carried):
+    """Set the accumulators the body allocated back where their allocations
+    stood, now that the allocations go ahead of the loop.
+
+    A multiplication assigns its result by adding its terms onto the zeros of
+    the register array it allocates, so declared once ahead of the loop that
+    array would start every trip with what the trip before left: the
+    temporary `t0 = I A(i)` of `localFluxAll` held the sum over the faces so
+    far, and the kernel came out as wrong as the first face is small.  Only
+    the arrays a multiplication of the body adds onto, and none the loop
+    carries -- those start where the trip before stopped by design -- nor one
+    a load fills, which a reset would keep from leaving the loop.
+    """
+    from tensorforge.backend.instructions.allocate import RegisterReset
+    from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
+    accumulated = {id(sym) for instr in region
+                   if isinstance(instr, MultilinearInstruction)
+                   for sym in instr.defs()}
+    chained = {id(sym) for _, init, result in carried for sym in (init, result)}
+    resets = {}
+    for alloc in allocations:
+      ahead = follows.get(id(alloc))
+      if (alloc.init_value is None or ahead is None
+          or id(alloc.dest) not in accumulated or id(alloc.dest) in chained):
+        continue
+      resets.setdefault(id(ahead), []).append(
+          RegisterReset(self._context, alloc.dest, alloc.init_value))
+    if not resets:
+      return region
+    return [out for instr in region
+            for out in (*resets.get(id(instr), ()), instr)]
 
   def _establish(self, body, builders, keys) -> bool:
     """Make every destination in `keys` resident ahead of a merged run, as

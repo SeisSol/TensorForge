@@ -6,7 +6,7 @@ from tensorforge.common.context import Context
 from tensorforge.backend.symbol import Symbol
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.writer import Writer
-from tensorforge.backend.pir.core import Effect, MemSpace
+from tensorforge.backend.pir.core import Effect, MemSpace, ScalarType
 from .abstract_instruction import AbstractInstruction
 
 
@@ -73,8 +73,60 @@ class RegisterAlloc(AbstractInstruction):
         writer(f'{datatype} {self._dest.obj.name}'
                f'[{self._dest.obj.size}]{init_values_list};')
 
+  @property
+  def dest(self) -> Symbol:
+    return self._dest
+
+  @property
+  def init_value(self) -> Union[float, None]:
+    return self._init_value
+
   def __str__(self) -> str:
     return f'{self._dest.obj.name} = alloc_regs [{self._dest.obj.size}];'
+
+
+class RegisterReset(AbstractInstruction):
+  """Set a register array back to the value it was allocated with.
+
+  A register array starts as its initial value, and a multiplication that
+  assigns its result adds its terms onto the zeros of the array it allocated.
+  A merged run declares the registers of its body once, ahead of its loop
+  (`Generator._emit_variant_loop`), so the place in the body where such an
+  allocation stood has to set the array back on every trip; else each trip
+  adds onto what the one before left, and a temporary computed afresh from
+  each member -- `t0 = I A(i)` of SeisSol's `localFluxAll` -- holds the sum
+  over the members so far.
+  """
+
+  def __init__(self, context: Context, dest: Symbol, init_value: Union[float, int, bool]):
+    super(RegisterReset, self).__init__(context)
+    self._dest = dest
+    self._init_value = init_value
+    self._is_ready = True
+    dest.add_user(self)
+
+  def get_operands(self):
+    return []
+
+  def defs(self):
+    return (self._dest,)
+
+  def gen_ir(self, writer: Writer):
+    size = self._dest.obj.size
+    if size <= 0:
+      return
+    datatype = self._context.fp_type if self._dest.obj.datatype is None else self._dest.obj.datatype
+    buffer = self._dest.pir_buffer(writer) if hasattr(writer, 'store') else None
+    if buffer is not None:
+      value = writer.const(self._init_value, ScalarType(datatype))
+      for index in range(size):
+        writer.store(buffer, value, index)
+    else:
+      writer(f'for (int i = 0; i < {size}; ++i) {{ '
+             f'{self._dest.obj.name}[i] = {datatype.literal(self._init_value)}; }}')
+
+  def __str__(self) -> str:
+    return f'{self._dest.obj.name} = {self._init_value} [{self._dest.obj.size}];'
 
 class ShrMemAlloc(AbstractInstruction):
   def __init__(self,

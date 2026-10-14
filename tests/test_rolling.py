@@ -1355,6 +1355,8 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('accumulation', True, {}),
     ('read_first', False, {}),
     ('staged', False, {'stage_members': True}),
+    ('scratch', False, {}),
+    ('scratch', True, {}),
 ])
 def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                                                               options):
@@ -1364,7 +1366,11 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
     built beside the loop where it cannot be (`read_first`; a destination
     written in slices is checked against numpy above).  `staged` keeps the
     staging of what every iteration shares in the loop -- a barrier stands
-    there -- and reads it again behind the loop."""
+    there -- and reads it again behind the loop.  `scratch` assigns a
+    temporary afresh on every iteration and adds it onto the destination, as
+    SeisSol's `localFluxAll` does (`t = I A(i)`, `Q += P(i) t`): the registers
+    of the temporary are allocated ahead of the loop, and every trip has to
+    start it from zeros again (`Generator._reset_temporaries`)."""
     from dataclasses import replace
 
     import numpy as np
@@ -1379,6 +1385,15 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                          make('Q', [24, 5]), add=True) for i in range(4)]
         if shape == 'read_first':
             return _read_first()
+        if shape == 'scratch':
+            out = []
+            for i in range(4):
+                scratch = make(f'scratch{i}', [24, 5], is_tmp=True)
+                out.append(gemm(make('I', [24, 5]), make(f'A{i}', [5, 5]),
+                                scratch))
+                out.append(gemm(make(f'P{i}', [24, 24]), scratch,
+                                make('Q', [24, 5]), add=True))
+            return out
         return _staged()
 
     base = target.PREFERENCES['nvidia']
