@@ -38,7 +38,7 @@ from .move import cap_cover, move_loads
 from .transfers import memory_path
 from .prefetch import prefetch_hints
 from .shards import shard_loads
-from .trips import trip_reads
+from .trips import trip_reads, trip_shards
 from .wrap import wrap_loads
 from .passes import (converge_crosslane, cse, dce, flatten_scopes, fold,
                      if_convert, licm, load_cse, verify)
@@ -214,7 +214,9 @@ class WrapLoads(Pass):
     `trip_reads` first makes transfers of what the trips of a counted loop
     read from global memory in place (`trips.trip_reads`), for the wrap to
     issue a trip ahead.  Not under the explicit vector, whose loads are
-    vectors a slot does not hold.
+    vectors a slot does not hold.  `trip_shards`, where given, is what
+    `trips.trip_shards` takes besides the body, which copies such reads into
+    shared memory a shard a trip ahead of that.
     """
 
     name = 'wrap'
@@ -225,7 +227,8 @@ class WrapLoads(Pass):
     def __init__(self, scratch, distance: int = 1, stages: int = 1,
                  report: Optional[List[str]] = None, pipeline=memory_path,
                  early: bool = False, cover: int = 0,
-                 pointer_stage: bool = False, trip_reads: bool = False):
+                 pointer_stage: bool = False, trip_reads: bool = False,
+                 trip_shards: Optional[dict] = None):
         self._scratch = scratch
         self._distance = distance
         self._stages = stages
@@ -235,8 +238,12 @@ class WrapLoads(Pass):
         self._cover = cover
         self._pointer_stage = pointer_stage
         self._trip_reads = trip_reads
+        self._trip_shards = trip_shards
 
     def run(self, pc: BodyContext) -> None:
+        if self._trip_shards is not None and not pc.explicit_simd:
+            pc.body = trip_shards(pc.body, self._scratch, report=self._report,
+                                  **self._trip_shards)
         if self._trip_reads and not pc.explicit_simd:
             pc.body = trip_reads(pc.body, self._scratch, report=self._report)
         pc.body = wrap_loads(pc.body, self._scratch, distance=self._distance,

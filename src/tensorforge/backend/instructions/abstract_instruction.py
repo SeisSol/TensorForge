@@ -405,7 +405,7 @@ class AbstractInstruction(ABC):
 
   @classmethod
   def optimized_body(cls, context, names, fill, arena=None, place=None,
-                     barriers=None, metrics=None, shards=None):
+                     barriers=None, metrics=None, shards=None, trips=None):
     """`fill(builder)` as one body, through the pipeline, ready to emit.
 
     The half of `build_shared_body` that needs no writer: `names` is the
@@ -423,7 +423,9 @@ class AbstractInstruction(ABC):
     `shards` is what `pir.ShardLoads` takes besides the body, where the
     batch-constant operands are held in shared memory a shard at a time --
     with a `report` list, where it has one, that ends up holding what the
-    pass reported for the body returned.
+    pass reported for the body returned.  `trips` is what `trips.trip_shards`
+    takes besides the body, where a counted loop's reads are copied into the
+    multiplication's shared memory a shard a trip (`Options.trip_shards`).
     """
     def attempt():
       builder = cls._body_builder(context, names, arena)
@@ -437,7 +439,8 @@ class AbstractInstruction(ABC):
         context, attempt,
         lambda builder, body: cls._optimize_shared_body(context, builder, body,
                                                         place, barriers,
-                                                        metrics, shards))
+                                                        metrics, shards,
+                                                        trips))
     return body
 
   @staticmethod
@@ -447,7 +450,7 @@ class AbstractInstruction(ABC):
 
   @staticmethod
   def _optimize_shared_body(context, builder, body, place=None, barriers=None,
-                            metrics=None, shards=None):
+                            metrics=None, shards=None, trips=None):
     """A shared body through the pipeline, with the transfers issued ahead
     where that is asked for: within their statement list, and across the
     batch loop's back edge.
@@ -472,7 +475,8 @@ class AbstractInstruction(ABC):
                            early=options.wrap_early,
                            cover=options.issue_cover,
                            pointer_stage=options.pointer_stage,
-                           trip_reads=options.trip_reads)
+                           trip_reads=options.trip_reads,
+                           trip_shards=trips)
     if options.enable_prefetch or options.prefetch_data:
       prefetch = pir.Prefetch(builder.scratch,
                               pointers=options.enable_prefetch,

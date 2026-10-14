@@ -1794,6 +1794,36 @@ GROUPS = {
          sub(TRIPS, '    if len(found) > TRIP_SLOTS:', '    if False:', 1)),
     ]),
 
+    # What a trip of a counted loop reads in place, copied into the
+    # multiplication's shared memory a shard a trip.
+    'tripshards': ('tests/test_trip_shards.py', [
+        # Not the target's gate in `Generator._trip_spec` (asynchronous
+        # staging and a copy path): where it says no, a later check does as
+        # well -- sm_70 has no copy size, and gfx942 builds no shard with the
+        # gate or without, at 32 and 64 lanes and with the operators read in
+        # place -- so taking it out changes no build there is to test.
+        ('a predicate the lanes decide left out of the span',
+         sub(TRIPS, "            if reach <= {'x', counter.id}:",
+             '            if False:', 1)),
+        ('a run that does not move by a step taken',
+         sub(TRIPS, '        if lo != first + k * step or hi - lo + 1 != count:',
+             '        if False:', 1)),
+        ('the lanes past the run copying past it',
+         sub(TRIPS, "            within = (copy.op('min', INDEX, at, count - 1, hint='hop')\n"
+                    "                      if (hop + 1) * threads > count else at)",
+             '            within = at', 1)),
+        ('the shards taken behind the register array',
+         subs(PIPE,
+              ('        if self._trip_shards is not None and not pc.explicit_simd:\n'
+               '            pc.body = trip_shards(pc.body, self._scratch, report=self._report,\n'
+               '                                  **self._trip_shards)\n', ''),
+              ('            pc.body = trip_reads(pc.body, self._scratch, report=self._report)\n',
+               '            pc.body = trip_reads(pc.body, self._scratch, report=self._report)\n'
+               '        if self._trip_shards is not None and not pc.explicit_simd:\n'
+               '            pc.body = trip_shards(pc.body, self._scratch, report=self._report,\n'
+               '                                  **self._trip_shards)\n'))),
+    ]),
+
     # The cache hints for the element the loop reaches next.
     'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
                  'tests/test_prefetch_data.py', [

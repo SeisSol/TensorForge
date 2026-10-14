@@ -438,6 +438,21 @@ declare('trip_reads',
             'the trip take at once; filled a trip ahead, it is there.  It '
             'costs a register per load of a trip.  See backend/pir/trips.py.')
 
+declare('trip_shards',
+        default=False,
+        parse=parse_bool,
+        doc='In a loop whose trips are counted -- a reduction `k_roll` rolls, '
+            'typically -- copy what a trip reads from global memory in place '
+            'into shared memory of the multiplication\'s own, the run of the '
+            'operand the trip\'s lanes read, with the asynchronous copy, and '
+            'read it there; `enable_wrap_loads` issues the copy a trip ahead, '
+            'and with `enable_multibuffer` into a second stage at the head of '
+            'the trip before.  No block barrier: the window is the '
+            'multiplication\'s, and so is the barrier between the copy and the '
+            'reads.  Where the target has the copy (`Target.async_staging`); '
+            'ahead of `trip_reads`, which takes what is left.  See '
+            'backend/pir/trips.py.')
+
 declare('issue_cover',
         default=512,
         parse=parse_int,

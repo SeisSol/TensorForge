@@ -1572,8 +1572,28 @@ class Generator:
         self._context, self._names,
         lambda body: self._emit_section(body, index, section),
         arena=obj.name, place=place, barriers=self._barriers(section),
-        metrics=self._metrics, shards=self._shard_spec(section))
+        metrics=self._metrics, shards=self._shard_spec(section),
+        trips=self._trip_spec())
     return body, place.layout
+
+  def _trip_spec(self) -> Optional[dict]:
+    """What `trips.trip_shards` takes besides the body, where
+    `Options.trip_shards` asks for it: the lanes a multiplication spans,
+    which copy a trip's shard between them -- where the target has the
+    asynchronous copy, and the lane is `threadIdx.x`: the lanes of one
+    multiplication a run of them, which a layout that interleaves the
+    multiplications of a group does not give."""
+    if not self._context.get_user_options().trip_shards:
+      return None
+    target = self._context.target
+    if not target.async_staging() or not target.async_copy_path():
+      return None
+    if self._context.fp_type.size() not in target.copy_async_sizes():
+      return None
+    split = MultLayout(self._num_threads, target.hw.vec_unit_length)
+    if not (split.contiguous or split.whole_waves):
+      return None
+    return dict(threads=self._num_threads)
 
   def _shard_spec(self, section) -> Optional[dict]:
     """What `pir.ShardLoads` takes besides the body, where the placement
