@@ -1675,6 +1675,31 @@ GROUPS = {
              '                if self.at + 1 < len(self.launches) else -1)', 1)),
     ]),
 
+    # Whom a barrier meets, in the host oracle: a warp's lanes, the warps of
+    # one named barrier, or the block -- and everyone it waits for arriving.
+    'barrierreach': ('tests/test_races.py tests/test_rank0_operands.py', [
+        ('a warp barrier meeting every lane that executes it',
+         sub(ORACLE, "        if reach[0] == 'block':\n"
+                     "            return [(lanes, self.interps)]\n",
+             "        if reach[0] in ('block', 'warp'):\n"
+             "            return [(lanes, self.interps)]\n", 1)),
+        ('a lane that skips a barrier never missed',
+         sub(ORACLE, '                if missing:\n'
+                     '                    tracker.arrival(missing[0], len(present))',
+             '                if False:\n'
+             '                    tracker.arrival(missing[0], len(present))', 1)),
+        ('a count the warps do not fill never noticed',
+         sub(ORACLE, '                if counted != len(warps) * warp:',
+             '                if False:', 1)),
+        ("a warp barrier's mask read as the whole warp",
+         sub(ORACLE, "            mask_of = (lambda it: int(it.ev(reach[1])) & 0xffffffff) \\\n"
+                     "                if reach[1] else (lambda it: 0xffffffff)",
+             "            mask_of = (lambda it: 0xffffffff)", 1)),
+        ('an operand passed by value read as a pointer',
+         sub(ORACLE, '        env.setdefault(name, mem.read(name, 0))',
+             '        pass', 1)),
+    ]),
+
     # The cache hints for the element the loop reaches next.
     'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
                  'tests/test_prefetch_data.py', [

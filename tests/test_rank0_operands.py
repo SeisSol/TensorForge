@@ -161,3 +161,18 @@ def test_a_pointwise_operation_broadcasts_it():
     got = np.array([[mem.get((out.name, i + j * M), np.nan) for j in range(N)]
                     for i in range(M)])
     assert np.max(np.abs(got - want)) < 1e-4 * np.max(np.abs(want))
+
+
+def test_the_oracle_takes_an_operand_passed_by_value_for_its_number():
+    """A scalar the whole batch shares is a parameter by value, and its
+    number is what its one slot holds -- not a pointer to it."""
+    src = ('__global__ void kernel_k(const float m2, float * m0, '
+           'size_t numElements0) {\n'
+           '  {\n'
+           '    float v1 = m2;\n'
+           '    m0[threadIdx.x] = v1 * 2.0f;\n'
+           '  }\n'
+           '}\n')
+    mem = kernel_eval.evaluate_wave(src, 4, seed=3)
+    want = kernel_eval.Slot(3).read('m2', 0) * 2.0
+    assert all(abs(mem[('m0', i)] - want) < 1e-12 for i in range(4)), mem

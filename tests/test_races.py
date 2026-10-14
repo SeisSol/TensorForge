@@ -131,3 +131,96 @@ def test_a_retired_copy_is_ordered_for_its_own_lane_only():
     races.lane = 1
     races.read(7)
     assert [r.kind for r in races.found] == ['RAW']
+
+
+# --------------------------------------------------------------------------- #
+# whom a barrier meets
+# --------------------------------------------------------------------------- #
+
+def test_each_spelling_says_whom_it_meets():
+    races = ke.Races()
+    assert races.reach('__syncthreads()') == ('block',)
+    assert races.reach('__syncwarp()') == ('warp', None)
+    assert races.reach('__syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16))') \
+        == ('warp', '0x0000ffffu << (threadIdx.y % 2 * 16)')
+    assert races.reach('asm volatile("barrier.sync %0, %1;" :: '
+                       '"r"(threadIdx.y + 1), "r"(64) : "memory")') \
+        == ('named', 'threadIdx.y + 1', '64')
+    assert races.reach('asm volatile("bar.sync 1, 64;")') \
+        == ('named', '1', '64')
+
+
+@pytest.mark.parametrize('lanes', [64, 96])
+@pytest.mark.parametrize('name', ['chain_three', 'accumulate_then_read',
+                                  'temp_dead_slice_reassign'])
+def test_a_multiplication_wider_than_a_warp_is_ordered(name, lanes):
+    """Its barrier is a named one, met by the warps of the multiplication
+    and nobody else, and every lane of it reaches each."""
+    src, (got, _) = _kernel(name, lanes_per_mult=lanes)
+    assert got == lanes and 'barrier.sync' in src
+    assert _races(src, got, elements=3) == []
+
+
+def test_the_multiplications_of_a_warp_meet_on_their_own_masks():
+    """Two multiplications share a warp and each barrier names its own half:
+    run together, each reaches the barrier it waits at, and nothing races."""
+    src, (lanes, mults) = _kernel('chain_three', lanes_per_mult=16)
+    assert lanes == 16 and mults > 1 and '__syncwarp(0x' in src
+    found = []
+    ke.evaluate_wave(src, lanes, seed=3, races=found, elements=2,
+                     mults=mults, block=True)
+    assert found == []
+
+
+def test_a_multiplication_meets_on_its_own_half_where_the_other_has_none():
+    """Where the batch ends at the first multiplication of a warp, the second
+    has no element and skips the body: the barrier the first reaches names
+    its own half, and it waits for nobody beyond it."""
+    src, (lanes, mults) = _kernel('chain_three', lanes_per_mult=16)
+    assert lanes == 16 and mults > 1 and '__syncwarp(0x' in src
+    found = []
+    ke.evaluate_wave(src, lanes, seed=3, races=found, elements=1,
+                     mults=mults, block=True)
+    assert found == []
+
+
+def _wide(name='chain_three', lanes=64):
+    src, (got, _) = _kernel(name, lanes_per_mult=lanes)
+    lines = src.split('\n')
+    named = [k for k, line in enumerate(lines) if 'barrier.sync' in line]
+    assert named, 'no named barrier in a multiplication wider than a warp'
+    return lines, named, got
+
+
+def test_a_barrier_some_lanes_of_the_multiplication_skip_is_reported():
+    """Under a lane guard the lockstep run goes on without the lanes outside;
+    the hardware would wait for them."""
+    lines, named, lanes = _wide()
+    k = named[0]
+    guarded = lines[:k] + ['if (threadIdx.x < 40) {', lines[k], '}'] \
+        + lines[k + 1:]
+    found = _races('\n'.join(guarded), lanes)
+    arrivals = [r for r in found if r.kind == 'ARRIVAL']
+    assert arrivals and arrivals[0].lane == 40 and arrivals[0].other == 40, \
+        found
+    assert 'does not reach' in str(arrivals[0])
+
+
+def test_a_count_its_warps_do_not_fill_is_reported():
+    lines, named, lanes = _wide()
+    half = [line.replace(f'"r"({lanes})', f'"r"({lanes // 2})')
+            for line in lines]
+    found = _races('\n'.join(half), lanes)
+    assert [r.kind for r in found if r.kind == 'COUNT'], found
+
+
+def test_a_warp_barrier_does_not_order_the_warps_of_one_multiplication():
+    """`__syncwarp` executed by all 64 lanes is two rendezvous, one per warp:
+    what one warp stages, the other reads unordered."""
+    lines, named, lanes = _wide()
+    warp = [('__syncwarp();' if k in named else line)
+            for k, line in enumerate(lines)]
+    found = _races('\n'.join(warp), lanes)
+    across = [r for r in found if r.kind in ('RAW', 'WAR', 'WAW')
+              and (r.lane < 32) != (r.other < 32)]
+    assert across, found

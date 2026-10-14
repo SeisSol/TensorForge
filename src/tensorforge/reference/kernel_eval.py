@@ -177,13 +177,22 @@ class Slot:
 
 
 class Race(NamedTuple):
-    """Two accesses to one slot of shared memory with nothing ordering them.
+    """Two accesses to one slot of shared memory with nothing ordering them,
+    or a barrier that not everyone it waits for reaches.
 
     `kind` is what the later access does against the earlier one: `RAW`, a
     read of what another lane wrote; `WAR`, a write over what another lane
     read; `WAW`, two lanes writing one slot; `FLIGHT`, an access to a slot an
     asynchronous copy is still landing in, by any lane, the issuing one
     included -- the copy is only done at the wait that retires it.
+
+    `ARRIVAL` and `COUNT` are a barrier's, and `slot` is -1 for both.
+    `ARRIVAL`: `lane` is one the barrier waits for and that does not execute
+    it there, `other` how many lanes do.  On the hardware that is a hang, or
+    a rendezvous paired with the wrong one -- the lanes that skipped it meet
+    the others at their next barrier, and from there on every barrier orders
+    the wrong accesses.  `COUNT`: a counted barrier whose count, `other`, is
+    not the threads of the warps its lanes are in, `lane` of them.
     """
     kind: str
     slot: int
@@ -192,6 +201,12 @@ class Race(NamedTuple):
     statement: str
 
     def __str__(self) -> str:
+        if self.kind == 'ARRIVAL':
+            return (f'ARRIVAL: lane {self.lane} does not reach '
+                    f'`{self.statement}`, which {self.other} lanes wait at')
+        if self.kind == 'COUNT':
+            return (f'COUNT: `{self.statement}` counts {self.other} threads, '
+                    f'and the warps of its lanes hold {self.lane}')
         return (f'{self.kind} on shared slot {self.slot}: lane {self.lane} '
                 f'against lane {self.other} at `{self.statement}`')
 
@@ -215,6 +230,16 @@ class Races:
     Only the lanes the run drives are seen -- one multiplication, on one
     block -- so what is checked is the multiplication's own synchronization,
     which is all a barrier this generator places has to provide.
+
+    A barrier orders the lanes it meets, and which those are is in its
+    spelling (`reach`): `__syncwarp` meets the lanes of one warp its mask
+    names, `barrier.sync id, count` the warps that arrive at barrier `id` --
+    one multiplication's, the id being the multiplication's own -- and
+    `__syncthreads` the block.  So two lanes of a multiplication wider than a
+    warp are not ordered by a `__syncwarp`, however many of them execute it
+    together here.  And every lane the barrier meets has to execute it: the
+    lockstep run goes on without the ones a branch or a loop left behind,
+    the hardware waits for them (`ARRIVAL`).
     """
 
     #: The base the shared arena is modeled under (`_base_env`).
@@ -230,6 +255,56 @@ class Races:
         r'|.*\blaunchCursor\d+\.next\s*\(')
     _COMMIT = re.compile(r'^__pipeline_commit\s*\(\s*\)$')
     _WAIT = re.compile(r'^__pipeline_wait_prior\s*\(\s*(\d+)\s*\)$')
+    #: The two barriers narrower than the block: a warp's, with its mask,
+    #: and a counted one, with its operands -- `%n` naming the n-th input.
+    _WARP_BARRIER = re.compile(r'^__syncwarp\s*\((?P<mask>.*)\)$')
+    _NAMED_BARRIER = re.compile(
+        r'^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.sync(?:\.aligned)?\s+'
+        r'(?P<ops>[^";]*);?"\s*(?::\s*:\s*(?P<inputs>.*?))?\s*'
+        r'(?::\s*"memory"\s*)?\)$')
+    _INPUT = re.compile(r'"\w+"\s*\(')
+    #: Lanes per warp, which a warp barrier's mask counts in.
+    WARP = 32
+
+    @classmethod
+    def _inputs(cls, text: str) -> List[str]:
+        """The expressions of an asm statement's input operands, in order."""
+        out = []
+        for m in cls._INPUT.finditer(text or ''):
+            depth, k = 1, m.end()
+            while depth and k < len(text):
+                depth += {'(': 1, ')': -1}.get(text[k], 0)
+                k += 1
+            out.append(text[m.end():k - 1].strip())
+        return out
+
+    def reach(self, stmt: str) -> Tuple:
+        """Whom the barrier `stmt` meets: `('warp', mask)`, the lanes of the
+        warp whose bits `mask` sets, all of them for no mask; `('named', id,
+        count)`, the lanes whose barrier `id` is this one, `count` of them;
+        or `('block',)`.  The operands are expressions, each lane's own."""
+        m = self._WARP_BARRIER.match(stmt)
+        if m:
+            return ('warp', m.group('mask').strip() or None)
+        m = self._NAMED_BARRIER.match(stmt)
+        if m:
+            inputs = self._inputs(m.group('inputs'))
+            ops = [o.strip() for o in m.group('ops').split(',')]
+            resolved = [inputs[int(o[1:])] if re.fullmatch(r'%\d+', o) else o
+                        for o in ops]
+            return ('named', resolved[0],
+                    resolved[1] if len(resolved) > 1 else None)
+        return ('block',)
+
+    def arrival(self, lane: int, present: int) -> None:
+        """`lane` is waited for at the barrier being executed and does not
+        execute it; `present` lanes do."""
+        self._report('ARRIVAL', -1, present, lane=lane)
+
+    def count(self, threads: int, counted: int) -> None:
+        """The barrier being executed counts `counted` threads, where the
+        warps of the lanes it meets hold `threads`."""
+        self._report('COUNT', -1, counted, lane=threads)
 
     def __init__(self, limit: int = 64):
         self.time = 0
@@ -309,12 +384,14 @@ class Races:
     def _ordered(self, lane: int, other: int, when: int) -> bool:
         return lane == other or self._met.get((lane, other), -1) > when
 
-    def _report(self, kind: str, slot: int, other: int) -> None:
-        key = (kind, self.statement, self.lane, other)
+    def _report(self, kind: str, slot: int, other: int,
+                lane: Optional[int] = None) -> None:
+        lane = self.lane if lane is None else lane
+        key = (kind, self.statement, lane, other)
         if key in self._seen or len(self.found) >= self.limit:
             return
         self._seen.add(key)
-        self.found.append(Race(kind, slot, self.lane, other, self.statement))
+        self.found.append(Race(kind, slot, lane, other, self.statement))
 
     def read(self, slot: int) -> None:
         if self._bulk_read(slot):
@@ -455,8 +532,10 @@ def _py(expr: str) -> str:
     e = re.sub(r'\b(\d+)_i32\b', r'\1', e)
     e = re.sub(r'(\d)[fF]\b', r'\1', e)
     # An integer suffix says which type the literal has, which Python's
-    # integers do not care about: `0u` is the `0` a `size_t` select holds.
-    e = re.sub(r'\b(\d+)(?:[uU][lL]{0,2}|[lL]{1,2}[uU]?)\b', r'\1', e)
+    # integers do not care about: `0u` is the `0` a `size_t` select holds,
+    # and `0x0000ffffu` the mask of a warp barrier.
+    e = re.sub(r'\b(0[xX][0-9a-fA-F]+|\d+)(?:[uU][lL]{0,2}|[lL]{1,2}[uU]?)\b',
+               r'\1', e)
     e = re.sub(r'\b(?:static_cast|reinterpret_cast|const_cast)\s*<[^>]*>\s*', '', e)
     # the C-style cast to a memory-space pointer a global window is bound
     # through: `(tensorforge::SpacePtrRestrict<double, ...>)&m0[...]`
@@ -1082,6 +1161,12 @@ def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
     for name in re.findall(r'\*\s*(?:const\s*)?\*\s*(?:__restrict__\s*)?(m\d+)\b',
                            src):
         env.setdefault(name, PtrTable(mem, name))
+    # An operand passed by value -- a scalar the whole batch shares -- is the
+    # number its one slot holds.
+    head = src[:src.index('{')] if '{' in src else ''
+    for name in re.findall(r'[(,]\s*(?:const\s+)?(?:float|double|__float128)'
+                           r'\s+(m\d+)\s*(?=[,)])', head):
+        env.setdefault(name, mem.read(name, 0))
     for name in re.findall(r'\b(m\d+)\b', src):
         env.setdefault(name, Ptr(mem, name))
     for name in re.findall(r'\b(\w*_extraOffset)\b', src):
@@ -1125,7 +1210,11 @@ class Lockstep:
         tracker.tick(stmt)
         kind = tracker.statement_kind(stmt)
         if kind == 'barrier':
-            tracker.barrier([it.lane for it in lanes])
+            for present, waited in self._meetings(stmt, lanes):
+                tracker.barrier([it.lane for it in present])
+                missing = [it.lane for it in waited if it not in present]
+                if missing:
+                    tracker.arrival(missing[0], len(present))
         for it in lanes:
             tracker.lane = it.lane
             if kind == 'commit':
@@ -1133,6 +1222,49 @@ class Lockstep:
             elif kind == 'wait':
                 tracker.wait(it.lane, stmt)
             it.assign(stmt)
+
+    def _meetings(self, stmt: str, lanes: List['Interp']):
+        """The rendezvous one barrier statement is, as `(present, waited)`
+        pairs: the lanes executing it that meet one another there, and every
+        lane of the run that has to be among them (`Races.reach`).
+
+        A lane's warp is its thread index in the block over the warp size,
+        which is where the run places it (`evaluate_wave`): the lanes of one
+        multiplication, and the multiplications one after another.
+        """
+        reach = self.tracker.reach(stmt)
+        warp = Races.WARP
+        if reach[0] == 'block':
+            return [(lanes, self.interps)]
+        out = []
+        if reach[0] == 'warp':
+            mask_of = (lambda it: int(it.ev(reach[1])) & 0xffffffff) \
+                if reach[1] else (lambda it: 0xffffffff)
+            keys = {}
+            for it in lanes:
+                keys.setdefault((it.lane // warp, mask_of(it)), []).append(it)
+            for (w, mask), present in keys.items():
+                waited = [it for it in self.interps if it.lane // warp == w
+                          and mask >> (it.lane % warp) & 1]
+                out.append((present, waited))
+            return out
+        _, ident, count = reach
+        keys = {}
+        for it in lanes:
+            keys.setdefault(int(it.ev(ident)), []).append(it)
+        for key, present in keys.items():
+            waited = [it for it in self.interps if int(it.ev(ident)) == key]
+            if count is not None:
+                # The barrier counts warps as they arrive, a warp's worth of
+                # threads each, so a count the lanes of the id do not fill
+                # completes early -- ordering only the warps it counted -- or
+                # never.
+                warps = {it.lane // warp for it in waited}
+                counted = int(present[0].ev(count))
+                if counted != len(warps) * warp:
+                    self.tracker.count(len(warps) * warp, counted)
+            out.append((present, waited))
+        return out
 
     def run(self, block: List, lanes: Optional[List['Interp']] = None) -> None:
         lanes = self.interps if lanes is None else lanes
