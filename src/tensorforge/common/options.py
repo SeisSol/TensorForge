@@ -466,8 +466,9 @@ declare('stack_elements',
             'reached through its own pointer; where the batch ends inside a '
             'stack, or a flag masks an element, nothing is written for it.  '
             'It costs registers and shared memory in proportion.  1 or 2; '
-            'contractions only, without guards, and not under '
-            '`launch_control`.  See generators/stacking.py.')
+            'contractions, pointwise operations and reductions, without '
+            'guards, and not under `launch_control`.  See '
+            'generators/stacking.py.')
 
 declare('issue_cover',
         default=512,

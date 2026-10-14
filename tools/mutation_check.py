@@ -1864,6 +1864,13 @@ GROUPS = {
         ('the first stack clamped by the element count',
          sub(GEN, "    count = body.extern_value(stacking.count(index, self._stack), SIZE,",
              "    count = body.extern_value(stacking.count(index, 1), SIZE,", 1)),
+        ('an operand the batch shares read by a pointwise stack as if stacked',
+         sub(STACKING, "        target.append(list(range(rank)))\n        broadcast = True",
+             "        target.append(list(range(rank + 1)))\n        broadcast = True", 1)),
+        ('the stack reduced with the axes a reduction names',
+         sub(STACKING, "    return ReductionDescr(self.view(d.dest), self.view(d.var), list(d.dims),",
+             "    return ReductionDescr(self.view(d.dest), self.view(d.var),\n"
+             "                          list(d.dims) + [d.var.bbox.rank()],", 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

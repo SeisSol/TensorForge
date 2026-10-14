@@ -32,11 +32,15 @@ the addressing's business:
 * a write runs under its element's mask, so a stack the batch ends inside,
   or an element its flag masks, writes nothing for it (`Symbol.store`).
 
+A pointwise operation and a reduction take the stack as one more axis of
+their images (`_Stacker.elementwise`, `_Stacker.reduction`).
+
 What is not stacked is refused here, by name, rather than built wrong: an
-operation other than a contraction, a guard (a condition an element owns
-would have to hold per element of the stack), an operand an element owns
-without axes, sparse or in a storage order of its own, and a destination the
-batch shares.
+operation other than a contraction, a pointwise operation or a reduction, a
+guard (a condition an element owns would have to hold per element of the
+stack), an operand an element owns without axes, sparse or in a storage
+order of its own, a destination the batch shares, and a full reduction into
+a buffer of one.
 """
 
 from typing import Dict, List
@@ -46,8 +50,9 @@ from tensorforge.common.exceptions import GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 
-from .descriptions import (BarrierDescription, MultilinearDescr,
-                           OperationDescription, RegionDescription)
+from .descriptions import (BarrierDescription, ElementwiseDescr,
+                           MultilinearDescr, OperationDescription,
+                           ReductionDescr, RegionDescription)
 
 #: The stacks a multiplication may compute.  Two elements is what a 16-wide
 #: matrix instruction or a packed pair of lanes takes at once, and the
@@ -163,14 +168,20 @@ class _Stacker:
   def descr(self, d: OperationDescription) -> OperationDescription:
     if isinstance(d, (BarrierDescription, RegionDescription)):
       return d
-    if not isinstance(d, MultilinearDescr):
-      raise self.refuse(f'{type(d).__name__} `{d}` is not a contraction')
+    if not isinstance(d, (MultilinearDescr, ElementwiseDescr,
+                          ReductionDescr)):
+      raise self.refuse(f'{type(d).__name__} `{d}` is no operation a stack '
+                        f'takes')
     if d.guarded():
       raise self.refuse(f'`{d}` runs under a guard, which an element decides '
                         f'for itself')
     if not per_element(d.dest.tensor):
       raise self.refuse(f'`{d}` writes {d.dest.tensor.alias}, which the batch '
                         f'shares')
+    if isinstance(d, ElementwiseDescr):
+      return self.elementwise(d)
+    if isinstance(d, ReductionDescr):
+      return self.reduction(d)
     # The stack is a new index of the destination, its last; every operand
     # an element owns carries it there too, and an operand the batch shares
     # does not -- it is read the same for each element of the stack.
@@ -187,3 +198,48 @@ class _Stacker:
         permute.append(list(perm))
     add = d.add if d.add_dims is None else list(d.add_dims) + [rank]
     return MultilinearDescr(self.view(d.dest), ops, target, permute, add=add)
+
+  def elementwise(self, d: ElementwiseDescr) -> ElementwiseDescr:
+    """A pointwise operation over a stack: what an element owns carries the
+    stack, the destination's last axis; an operand the batch shares is read
+    alike for each element of it -- on the destination's other axes, which
+    `legalize` copies it onto -- and one without axes, or a number, at every
+    point as before."""
+    rank = d.dest.bbox.rank()
+    srcs, target, broadcast = [], [], False
+    for src in d.srcs:
+      tensor = getattr(src, 'tensor', None)
+      if tensor is None:
+        srcs.append(src)
+        target.append(None)
+      elif per_element(tensor):
+        srcs.append(self.view(src))
+        target.append(list(range(rank + 1)))
+      elif src.bbox.rank() == 0:
+        srcs.append(src)
+        target.append([])
+      else:
+        srcs.append(src)
+        target.append(list(range(rank)))
+        broadcast = True
+    return ElementwiseDescr(d.op, self.view(d.dest), srcs,
+                            strict_match=d.strict_match,
+                            prefer_align=d.prefer_align,
+                            target=target if broadcast else None)
+
+  def reduction(self, d: ReductionDescr) -> ReductionDescr:
+    """A reduction over a stack: the stack is an axis the reduction keeps,
+    the last of the operand and of the destination alike."""
+    if not per_element(d.var.tensor):
+      raise self.refuse(f'`{d}` reduces {d.var.tensor.alias}, which the batch '
+                        f'shares, into {d.dest.tensor.alias}, which an element '
+                        f'owns')
+    kept = [d.var.bbox.size(i) for i in range(d.var.bbox.rank())
+            if i not in d.dims]
+    if list(d.dest.bbox.sizes()) != kept:
+      # A full reduction into a buffer of one: stacked, the buffer of one
+      # would be a buffer of `k` with one more axis than the stack keeps.
+      raise self.refuse(f'`{d}` lands in a destination shaped otherwise than '
+                        f'what it keeps')
+    return ReductionDescr(self.view(d.dest), self.view(d.var), list(d.dims),
+                          d.op, prefer_align=d.prefer_align)

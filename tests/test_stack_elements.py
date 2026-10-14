@@ -31,7 +31,8 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.common.options import Options
 from tensorforge.generators import stacking
-from tensorforge.generators.descriptions import GemmDescr
+from tensorforge.common.operation import Operation
+from tensorforge.generators.descriptions import ElementwiseDescr, GemmDescr
 from tensorforge.generators.generator import Generator
 from tensorforge.reference import kernel_eval
 
@@ -51,12 +52,15 @@ def _module(name):
 
 
 def _build(name, arch='sm_86', backend='cuda', **options):
-    """The case's kernel, its launcher and the lanes the launcher starts."""
+    """The case's kernel and its launcher."""
     mod = _module(name)
-    gen = Generator(mod.descr_list(),
-                    Context(arch=arch, backend=backend,
-                            fp_type=getattr(mod, 'DTYPE', None),
-                            options=Options(**options)))
+    return _generate(mod.descr_list(), getattr(mod, 'DTYPE', None), arch,
+                     backend, **options)
+
+
+def _generate(descrs, fp, arch='sm_86', backend='cuda', **options):
+    gen = Generator(descrs, Context(arch=arch, backend=backend, fp_type=fp,
+                                    options=Options(**options)))
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
     return gen.get_kernel(), gen.get_launcher()
@@ -75,6 +79,27 @@ def _run(kernel, launcher, flags=MASKS[0], races=None):
     return kernel_eval.evaluate_wave(kernel, lanes, seed=5, globals_only=True,
                                      races=races, elements=len(flags),
                                      preset=preset)
+
+
+def _by_alias(kernel, launcher, flags, races=None):
+    """`_run`, its memory keyed by the operands' aliases: two builds that name
+    the kernel's parameters in another order -- one reads an operand the
+    batch shares through a copy the other does not make -- are handed the
+    same numbers for the same operand, the ones the oracle's memory would
+    hold for it under its alias."""
+    meta = json.loads(re.search(r'tensorforge-meta: (\{.*\})', kernel).group(1))
+    names = {o['alias']: o['name'] for o in meta['operands']}
+    initial = kernel_eval.Slot(5)
+    preset = {name: [initial.read(alias, i) for i in range(4 * 256)]
+              for alias, name in names.items()}
+    if 'flags0' in kernel:
+        preset['flags0'] = list(flags)
+    lanes, _ = kernel_eval.launch_geometry(launcher)
+    memory = kernel_eval.evaluate_wave(kernel, lanes, seed=5, globals_only=True,
+                                       races=races, elements=len(flags),
+                                       preset=preset)
+    alias = {name: a for a, name in names.items()}
+    return {(alias.get(name, name), i): v for (name, i), v in memory.items()}
 
 
 def _differ(got, want):
@@ -99,6 +124,10 @@ def _differ(got, want):
     # strided accumulations each over fewer rows, and a narrow write back
     'accumulate_narrowing_chain',
     'narrow_write_after_wide_read',
+    # pointwise operations and reductions, beside contractions
+    'elementwise_sliced_max',
+    'mixed_ml_then_red',
+    'reduction_sum_axis1',
 ])
 def test_a_stack_computes_what_its_elements_compute(name):
     stacked, stacked_launcher = _build(name, stack_elements=2)
@@ -108,6 +137,30 @@ def test_a_stack_computes_what_its_elements_compute(name):
         got = _run(stacked, stacked_launcher, flags, races=races)
         want = _run(plain, plain_launcher, flags)
         assert races == [], (flags, races)
+        assert _differ(got, want) == [], flags
+
+
+def test_an_operand_the_batch_shares_is_read_alike_by_a_stack():
+    """A pointwise operation reads an operand the batch shares on fewer axes
+    than its stacked destination has: the same for each element of the
+    stack."""
+    def t(alias, addressing):
+        return SubTensor(Tensor([16, 16], addressing,
+                                BoundingBox([0, 0], [16, 16]), alias=alias,
+                                datatype=Datatype.F32))
+
+    def descrs():
+        return [ElementwiseDescr(Operation.ADD, t('C', Addressing.STRIDED),
+                                 [t('A', Addressing.STRIDED),
+                                  t('K', Addressing.NONE)])]
+    stacked = _generate(descrs(), Datatype.F32, stack_elements=2)
+    plain = _generate(descrs(), Datatype.F32)
+    for flags in MASKS:
+        races = []
+        got = _by_alias(*stacked, flags, races=races)
+        want = _by_alias(*plain, flags)
+        assert races == [], (flags, races)
+        assert [k for k in got if k[0] == 'C'], 'the result is written'
         assert _differ(got, want) == [], flags
 
 

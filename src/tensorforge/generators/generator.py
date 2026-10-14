@@ -435,7 +435,12 @@ class Generator:
     #: and nothing else; the traversal and the addressing take the stack
     #: from this.
     self._stack: int = int(context.get_user_options().stack_elements)
-    gemm_list = stacking.stack(gemm_list, self._stack)
+    stacked = stacking.stack(gemm_list, self._stack)
+    if stacked is not gemm_list:
+      # An operand the batch shares, read by a pointwise operation over a
+      # stack, is read on fewer axes than the destination has -- a form
+      # `legalize` takes apart.
+      gemm_list = legalize(stacked)
     #: The list this generator builds (`descr_list`).
     self._descr_list: List[OperationDescription] = gemm_list
     #: The list as the caller handed it, before merging rewrites it -- what
