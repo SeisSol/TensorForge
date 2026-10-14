@@ -30,6 +30,7 @@ from tensorforge.common.exceptions import InternalError
 
 from tensorforge.backend import elementmask
 from tensorforge.backend.pir.core import Uniformity
+from tensorforge.generators import stacking
 from .abstract_instruction import AbstractInstruction
 
 
@@ -53,7 +54,8 @@ class BatchLoop(AbstractInstruction):
                  flags: FlagMode = FlagMode.OPTIONAL,
                  queue_depth: int = 1,
                  group_size: int = 1,
-                 narrow_group: bool = False):
+                 narrow_group: bool = False,
+                 stack: int = 1):
         super().__init__(context)
         self._section_index = section_index
         self._mode = mode
@@ -95,6 +97,11 @@ class BatchLoop(AbstractInstruction):
         # wave-collective instruction (`convergence_scope`), which needs the
         # rows of one wave in step and nothing of the rest of the block.
         self._narrow_group = bool(narrow_group)
+        # How many consecutive elements a trip computes
+        # (`Options.stack_elements`): the index is a stack's, and each element
+        # of the stack has a mask of its own, bound at the top of the trip
+        # (`_stack_actives`).
+        self._stack = max(1, int(stack))
         self._is_ready = True
 
     # -- structure ------------------------------------------------------- #
@@ -169,7 +176,7 @@ class BatchLoop(AbstractInstruction):
         the result is the mask, which every global write runs under.
         """
         raw = f'{self._group_batch()} + {self._lane()}'
-        cond = f'{raw} < {self._num_elements()}'
+        cond = f'{raw} < {self._stacks()}'
         if self._flags is not FlagMode.ABSENT:
             flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
             read = f'static_cast<bool>({flags}[{raw}])'
@@ -387,6 +394,13 @@ class BatchLoop(AbstractInstruction):
     def _num_elements(self) -> str:
         return f'{GeneralLexicon.NUM_ELEMENTS}{self._section_index}'
 
+    def _stacks(self) -> str:
+        """The trips the loop makes over the batch, as text: the element
+        count, or the stacks it makes where a trip computes several elements
+        (`stacking.count`).  What the index is compared against; an element of
+        a stack is compared against the element count (`_stack_actives`)."""
+        return stacking.count(self._section_index, self._stack)
+
     def _count(self, writer):
         """The element count, as a value where the body can hold one.
 
@@ -401,9 +415,9 @@ class BatchLoop(AbstractInstruction):
         builder, which is the traversals spelled as text.
         """
         if not hasattr(writer, 'extern_value'):
-            return self._num_elements()
+            return self._stacks()
         from tensorforge.backend.pir.core import SIZE, Uniformity
-        return writer.extern_value(self._num_elements(), SIZE,
+        return writer.extern_value(self._stacks(), SIZE,
                                    uniform=Uniformity.GRID)
 
     def _block_id(self, block: Optional[str] = None) -> str:
@@ -416,7 +430,7 @@ class BatchLoop(AbstractInstruction):
         return f'({lexic.thread_idx_y} + {lexic.block_dim_y} * ({block}))'
 
     def _size_guard(self) -> str:
-        return f'{self._batch(0)} < {self._num_elements()}'
+        return f'{self._batch(0)} < {self._stacks()}'
 
     def _flag_guard(self, writer):
         """The per-element mask, as one definition where the IR can hold it.
@@ -436,6 +450,15 @@ class BatchLoop(AbstractInstruction):
         read = f'static_cast<bool>({flags}[{{0}}])'
         if self._flags is FlagMode.OPTIONAL:
             read = f'{flags} == nullptr ? true : {read}'
+        if self._actives is not None:
+            # A stack is visited where any of its elements is: each element's
+            # mask has read its flag already, and the writes of the ones that
+            # are masked run under their own (`Symbol.store`).
+            from tensorforge.backend.pir.core import BOOL
+            either = ' || '.join(f'{{{e}}}' for e in range(self._stack))
+            return writer.decl_expr(
+                'const bool allowed', either, BOOL, None,
+                args=tuple(self._actives), hint='allowed', extern='allowed')
         if hasattr(writer, 'decl_expr') and self._induction is not None:
             from tensorforge.backend.pir.core import BOOL, Effect, MemSpace
             return writer.decl_expr(
@@ -479,7 +502,7 @@ class BatchLoop(AbstractInstruction):
             for n in range(1, self._lookahead + 1):
                 prev = self._batch(n - 1)
                 writer(f'const auto {self._batch(n)} = '
-                       f'{prev} + {self._stride} < {self._num_elements()} ? '
+                       f'{prev} + {self._stride} < {self._stacks()} ? '
                        f'{prev} + {self._stride} : {prev};')
             return
         from tensorforge.backend.pir.core import SIZE, BOOL
@@ -547,9 +570,85 @@ class BatchLoop(AbstractInstruction):
             return None
         flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
         read = f'{flags}[{{0}}]'
+        if self._stack > 1:
+            # A stack's word: whether any of its elements is flagged.  Read
+            # only for the elements in the batch, as the masks read theirs.
+            k, n = self._stack, self._num_elements()
+            read = ' || '.join(
+                [f'{flags}[{k} * {{0}}]']
+                + [f'({k} * {{0}} + {e} < {n} && {flags}[{k} * {{0}} + {e}])'
+                   for e in range(1, k)])
+            read = f'({read})'
         if self._flags is FlagMode.OPTIONAL:
             read = f'{flags} == nullptr ? 1 : {read}'
         return read
+
+    #: The masks of the stack's elements while its trip is built, or None
+    #: where a trip computes one element (`_stack_actives`).
+    _actives = None
+
+    def _active_name(self, e: int) -> str:
+        return f'{GeneralLexicon.BATCH_ID_NAME}Stack{self._section_index}_{e}'
+
+    def _stack_actives(self, writer, stack) -> list:
+        """Whether each element of `stack` is one to write: in the batch, and
+        not masked by its flag.
+
+        The writes run under these (`Symbol.store`), and only the writes:
+        every element of a stack is read and computed, where one that does
+        not exist reads its stack's first element instead
+        (`ptr_manip.GetElementPtr`), which is in the batch whenever the stack
+        is.  Named, because the guard a write runs under is spelled as text.
+        The flag is read only for an element in the batch, as `&&` reads it.
+        """
+        from tensorforge.backend.pir.core import BOOL, Effect, MemSpace
+        k, n = self._stack, self._num_elements()
+        out = []
+        for e in range(k):
+            element = f'{k} * {{0}} + {e}'
+            cond = f'{element} < {n}'
+            kind, space = Effect.NONE, None
+            if self._flags is not FlagMode.ABSENT:
+                flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+                read = f'static_cast<bool>({flags}[{element}])'
+                if self._flags is FlagMode.OPTIONAL:
+                    read = f'({flags} == nullptr || {read})'
+                cond = f'{cond} && {read}'
+                kind, space = Effect.READ, MemSpace.GLOBAL
+            out.append(writer.decl_expr(
+                f'const bool {self._active_name(e)}', cond, BOOL, None,
+                kind=kind, space=space, args=(stack,),
+                hint=self._active_name(e), extern=self._active_name(e)))
+        return out
+
+    @contextmanager
+    def _stacked(self, writer, stack, bound: dict, actives=None):
+        """Build the trip with the masks of its stack's elements bound
+        (`_stack_actives`) and published: by name to the element pointers,
+        which pick the element they read through them (`GetElementPtr`), and
+        to the writes, which run under them (`elementmask.stacked`).  Nothing
+        where a trip computes one element."""
+        if self._stack == 1:
+            yield
+            return
+        if actives is None:
+            actives = self._stack_actives(writer, stack)
+        for e, value in enumerate(actives):
+            bound[stacking.mask_key(e)] = value
+        self._actives = actives
+        try:
+            with elementmask.stacked(
+                    actives, [self._active_name(e) for e in range(self._stack)]):
+                yield
+        finally:
+            self._actives = None
+
+    def _refuse_stack(self, why: str) -> None:
+        if self._stack > 1:
+            from tensorforge.common.exceptions import GenerationError
+            raise GenerationError(
+                f'stack_elements = {self._stack}: {why} -- a stack of elements '
+                f'is visited by the grid-stride loop built as IR')
 
     def _prologue_element(self, writer):
         """The element the peel fetches: `prologue_index`, bound before the loop.
@@ -684,6 +783,8 @@ class BatchLoop(AbstractInstruction):
         if self._grouped():
             self._gen_grouped(writer)
             return
+        if self._mode is not LoopMode.PERSISTENT:
+            self._refuse_stack(f'a {self._mode.value} traversal')
         if self._mode is LoopMode.PERSISTENT:
             # TODO: OMP target
             # TODO: maybe iterate over adjacent elements? (for indirect pointers)
@@ -724,12 +825,14 @@ class BatchLoop(AbstractInstruction):
                             # ahead and has no way to know how the traversal
                             # clamps.
                             loop._next_index = self._first_lookahead
-                            self._emit_body(writer)
+                            with self._stacked(writer, loop.induction, bound):
+                                self._emit_body(writer)
                     finally:
                         self._induction = None
                 return
+            self._refuse_stack('a traversal spelled as text')
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
-                            f'{self._batch(0)} < {self._num_elements()}; '
+                            f'{self._batch(0)} < {self._stacks()}; '
                             f'{self._batch(0)} += {self._stride}'):
                 self._lookahead_bindings(writer)
                 self._emit_body(writer)
@@ -969,6 +1072,7 @@ class BatchLoop(AbstractInstruction):
                 and hasattr(writer, 'for_')):
             self._gen_grouped_ir(writer)
             return
+        self._refuse_stack('a group of rows traversed as text')
         self._declare_lane(writer)
         self._declare_windows_early(writer, list(self._region))
         # The group takes every trip together, which is the point of driving
@@ -977,7 +1081,7 @@ class BatchLoop(AbstractInstruction):
         if self._mode is LoopMode.PERSISTENT:
             with writer.For(f'size_t {self._group_batch()} = '
                             f'{self._group_start()}; '
-                            f'{self._group_batch()} < {self._num_elements()}; '
+                            f'{self._group_batch()} < {self._stacks()}; '
                             f'{self._group_batch()} += {self._stride}',
                             uniform=uniform):
                 mask = self._declare_row_element(writer)
@@ -987,7 +1091,7 @@ class BatchLoop(AbstractInstruction):
                     self._emit_guarded(writer, list(self._region))
             return
         writer(f'const size_t {self._group_batch()} = {self._group_start()};')
-        with writer.If(f'{self._group_batch()} < {self._num_elements()}',
+        with writer.If(f'{self._group_batch()} < {self._stacks()}',
                        uniform=uniform):
             mask = self._declare_row_element(writer)
             with self._spelled_indices(writer), \
@@ -1033,7 +1137,7 @@ class BatchLoop(AbstractInstruction):
         start = (f'({lexic.thread_idx_y} - {lexic.thread_idx_y} % '
                  f'{self._group_size}) + {lexic.block_dim_y} * '
                  f'({lexic.block_idx_x})')
-        with writer.for_(start, self._num_elements(), self._stride,
+        with writer.for_(start, self._stacks(), self._stride,
                          hint=self._group_batch(), index_type=SIZE,
                          uniform=Uniformity.MULTGROUP,
                          peel_index=self._first_group(writer, start),
@@ -1053,9 +1157,18 @@ class BatchLoop(AbstractInstruction):
                     read = f'({flags} == nullptr || {read})'
                 cond = f'{cond} && {read}'
                 kind, space = Effect.READ, MemSpace.GLOBAL
+            args = (row,)
+            actives = None
+            if self._stack > 1:
+                # The row's stack is one to compute where any of its elements
+                # is; each element's mask is the row's own, a row past the end
+                # having none.
+                actives = self._stack_actives(writer, row)
+                cond = ' || '.join(f'{{{e}}}' for e in range(self._stack))
+                kind, space, args = Effect.NONE, None, tuple(actives)
             active = writer.decl_expr(f'const bool {self._active()}', cond,
                                       BOOL, None, kind=kind, space=space,
-                                      args=(row,), hint=self._active(),
+                                      args=args, hint=self._active(),
                                       extern=self._active())
             batch = writer.op('select', SIZE, active, row, group,
                               hint=self._batch(0))
@@ -1075,7 +1188,8 @@ class BatchLoop(AbstractInstruction):
                     fence = lexic.loop_body_fence()
                     if fence:
                         writer(fence, accesses=())
-                    with elementmask.element_mask(active, self._active()):
+                    with elementmask.element_mask(active, self._active()), \
+                            self._stacked(writer, batch, bound, actives):
                         self._emit_guarded(writer, list(self._region))
             finally:
                 self._induction = None

@@ -30,7 +30,7 @@ from .core import (INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Participants, Effect, IRError, LaneAxis, MemSpace, Op,
                    Operand, Region, RegisterLayout, ScalarType, Stmt,
                    TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
-                   base_space, Uniformity, SIZE)
+                   base_space, Uniformity, SIZE, StackedAddress)
 from .transfers import tagged
 
 
@@ -1126,6 +1126,7 @@ class IRBuilder:
         here leaves the whole chain untracked --- and the vendor emitters
         check operand layouts against what their intrinsics require.
         """
+        base, indices = self._unstacked(base, indices)
         if len(indices) == 1:
             base = self._global_binding(base)
         if space is None:
@@ -1201,6 +1202,7 @@ class IRBuilder:
         at the call site, because baked in it would keep global stores off
         this path -- a caller that asks the lexic for a finished statement has
         nothing structured left to emit."""
+        base, indices = self._unstacked(base, indices)
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
@@ -2040,6 +2042,17 @@ class IRBuilder:
                                        else space, root),),
                       text=text, attrs=attrs + extra)
         return v
+
+    def _unstacked(self, base: Any, indices: Tuple[Operand, ...]):
+        """An access to an element of a stacked operand, as the access through
+        that element's pointer (`StackedAddress`); any other as it is."""
+        if not any(isinstance(i, StackedAddress) for i in indices):
+            return base, indices
+        if len(indices) != 1 or not hasattr(base, 'stacked_binding'):
+            raise IRError(f'{base}: an element of a stack is addressed by one '
+                          f'index into its operand, not {indices}')
+        at = indices[0]
+        return base.stacked_binding(self, at.element), (at.address,)
 
     def _global_binding(self, base: Any) -> Any:
         """The pointer this body bound for `base`, where `base` is an operand

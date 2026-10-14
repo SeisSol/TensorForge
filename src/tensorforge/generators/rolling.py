@@ -375,6 +375,10 @@ def _stand_in(view, name: str):
     # for all.  The order is not copied: `_offer_order` decides it later, for
     # the stand-in and its members together.
     clone.storage_parts = getattr(source, 'storage_parts', 1)
+    # And a stack of elements as its members hold it (`stacking.factor`):
+    # its last axis picks a pointer, where it would otherwise be an offset.
+    if getattr(source, 'stack', 1) > 1:
+      clone.stack = source.stack
     clone.is_variant = True
     return SubTensor(clone, view.bbox, list(view.offset),
                      getattr(view, 'sliced', False))

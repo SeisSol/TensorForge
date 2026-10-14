@@ -13,6 +13,7 @@ from tensorforge.common.exceptions import GenerationError, InternalError
 from .writer import Writer
 from . import elementmask
 from tensorforge.backend.pir.core import (BOOL, INDEX, SCALAR_LAYOUT, Effect,
+                                          StackedAddress,
                                           LaneAxis, RegisterLayout, ScalarType)
 
 from tensorforge.common.matrix.spp import BoundingBoxSPP
@@ -1279,10 +1280,83 @@ class Symbol:
     #: number and belongs on the other field, where the addressing is.  One
     #: field for both would make the reader guess which kind it holds.
     self._pir_scalar = None
+    #: The pointers of a stacked operand, one per element of the stack
+    #: (`Options.stack_elements`), with the builder that made them and the
+    #: type they are declared as: `(owner, values, pointer type)`.  Kept
+    #: apart from the buffer, which stays unset for such an operand: an
+    #: access that names the buffer would read the first element for every
+    #: one, so it finds none and fails where it stands instead
+    #: (`stacked_binding`).
+    self._pir_stack = None
     self._users = []
 
   def set_pir_buffer(self, builder, value) -> None:
     self._pir_buffer = (self._builder_uid(builder), value)
+
+  def stack(self) -> int:
+    """How many elements of the batch this operand holds side by side on
+    its last axis (`stacking.factor`), where it is the binding of one in
+    global memory; 1 otherwise -- an image in shared memory or the registers
+    holds the stack as an axis like any other."""
+    if self.stype != SymbolType.Global:
+      return 1
+    return int(getattr(self.obj, 'stack', 1) or 1)
+
+  def set_pir_stack(self, builder, values, pointer_type: str,
+                    names) -> None:
+    self._pir_stack = (self._builder_uid(builder), tuple(values), pointer_type)
+    self._stack_choices = {}
+    #: What the text spells each pointer by: the name it is declared as.
+    self._stack_names = {v.id: n for v, n in zip(values, names)}
+
+  def stacked_spelling(self, binding) -> str:
+    """The name a pointer of the stack (`stacked_binding`) is declared as,
+    for an access spelled as text."""
+    return self._stack_names[binding.id]
+
+  def pir_stack(self, builder):
+    """The pointers of the stack's elements, if they belong to the body
+    currently being built."""
+    if self._pir_stack is None:
+      return None
+    owner, values, _ = self._pir_stack
+    uid = self._builder_uid(builder)
+    return values if uid is not None and owner == uid else None
+
+  def stacked_binding(self, builder, element):
+    """The pointer an access to element `element` of the stack goes through.
+
+    A constant element is its pointer.  An element only the run time knows
+    -- the stack's axis walked by a loop -- selects among them, once per
+    body and element value: two accesses of one element share the choice.
+    """
+    values = self.pir_stack(builder)
+    if values is None:
+      raise InternalError(
+          f'{self.name}: element {element} of a stack is accessed in a body '
+          f'that binds no pointers for the stack')
+    if isinstance(element, (int, np.integer)):
+      return values[int(element)]
+    key = (self._builder_uid(builder), getattr(element, 'id', element))
+    chosen = self._stack_choices.get(key)
+    if chosen is not None:
+      return chosen
+    from tensorforge.backend.pir.core import Effect
+    # `e == 0 ? p0 : e == 1 ? p1 : ...`, the last one taken for any other.
+    chain = ' : '.join([f'{{0}} == {e} ? {{{e + 1}}}'
+                        for e in range(len(values) - 1)]
+                       + [f'{{{len(values)}}}'])
+    name = f'{self.name}_se{len(self._stack_choices)}'
+    # Recorded against what the pointers are recorded against, the operand:
+    # a window that claimed an identity of its own would let a write through
+    # one pointer reorder past a read through the choice.
+    chosen = builder.decl_expr(
+        f'{self._pir_stack[2]} {name}', chain, values[0].type,
+        builder.alias_root(values[0]), args=(element, *values), hint=name,
+        extern=name, kind=Effect.READ)
+    self._stack_choices[key] = chosen
+    self._stack_names[chosen.id] = name
+    return chosen
 
   def set_pir_scalar(self, builder, value) -> None:
     self._pir_scalar = (self._builder_uid(builder), value)
@@ -1698,10 +1772,16 @@ class Symbol:
         v = arith('mul', v, stride, lambda x, y: x * y)
       return v
 
+    element = None
     if self.stype in (SymbolType.Global, SymbolType.Batch, SymbolType.SharedMem):
-      parts = [term(var, off, st) for var, off, st in
-               zip(index, self.data_view.get_dim_offsets(),
-                   self.data_view.get_dim_strides())]
+      triples = list(zip(index, self.data_view.get_dim_offsets(),
+                         self.data_view.get_dim_strides()))
+      if self.stack() > 1:
+        # The stack's index picks the element's pointer, and is not part of
+        # the address in its memory (`StackedAddress`).
+        var, off, _ = triples.pop()
+        element = term(var, off, 1)
+      parts = [term(var, off, st) for var, off, st in triples]
     elif self.stype in (SymbolType.Register, SymbolType.Scratch):
       parts = []
       stride = 1
@@ -1763,11 +1843,11 @@ class Symbol:
       parts = ([p for p in parts if not isinstance(p, (int, np.integer))]
                + [addend]
                + [p for p in parts if isinstance(p, (int, np.integer))])
-    if not parts:
-      return 0
-    total = parts[0]
+    total = parts[0] if parts else 0
     for p in parts[1:]:
       total = arith('add', total, p, lambda x, y: x + y)
+    if element is not None:
+      return StackedAddress(total, element)
     return total
 
   def address_value(self, writer, context: Context,
@@ -1788,6 +1868,11 @@ class Symbol:
     return self.build_address(writer, context, index, shift=shift)
 
   def access_address(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
+    if self.stack() > 1:
+      # An address alone does not reach an element of a stack: the pointer
+      # it goes through depends on the element (`access`, `StackedAddress`).
+      raise InternalError(
+          f'{self.name}: the address into a stacked operand asked for alone')
     if writer is not None:
       # the result's name goes into raw text, so pin it against DCE and folding
       v = writer.pin(self.build_address(writer, context, index))
@@ -1862,6 +1947,22 @@ class Symbol:
 
   def access(self, context: Context, index: List[Union[str, int, Immediate, Variable, LeadIndex]], writer=None, out=None):
     name = self.name
+    if self.stack() > 1:
+      # Through the pointer of the element the stack's index names, which the
+      # text names; the statement takes it as an operand, so that it is
+      # ordered behind the pointer's definition.
+      if writer is None:
+        raise InternalError(f'{self.name}: a stacked operand addressed as text '
+                            f'outside a body')
+      at = self.build_address(writer, context, index)
+      binding = self.stacked_binding(writer, at.element)
+      address = writer.pin(at.address) if not isinstance(
+          at.address, (int, np.integer)) else at.address
+      if out is not None:
+        out.append(binding)
+        if not isinstance(address, (int, np.integer)):
+          out.append(address)
+      return f'{self.stacked_spelling(binding)}[{address}]'
     if self.stype == SymbolType.Global or self.stype == SymbolType.Batch or self.stype == SymbolType.SharedMem or self.stype == SymbolType.Register or self.stype == SymbolType.Scratch:
       return f'{name}[{self.access_address(context, index, writer, out)}]'
     if self.stype == SymbolType.Scalar:
@@ -3103,6 +3204,8 @@ class Symbol:
     # address chain in the output next to the one `address_value` produces.
     mask_name = (elementmask.active()[1]
                  if self.stype == SymbolType.Global else None)
+    if self.stack() > 1:
+      mask_name = self._stack_mask(context, index)
 
     # One fixed element of a register dimension -- the peeled last row of an
     # odd extent at a lead width of two -- written by the lane that owns it.
@@ -3255,6 +3358,24 @@ class Symbol:
       # is not a value overwritten later but a contribution counted twice.
       with guard:
         writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+
+  def _stack_mask(self, context, index) -> str:
+    """The mask a write of a stacked operand runs under: its element's
+    (`elementmask.stacked`), the one the stack's index names."""
+    _, names = elementmask.stack_masks()
+    if names is None:
+      raise InternalError(f'{self.name}: a stacked operand written outside '
+                          f'the trip of a stack')
+    var = index[-1]
+    lower = self.data_view.get_dim_offsets()[-1]
+    if isinstance(var, (int, np.integer)):
+      return names[int(var) - lower]
+    text = var if isinstance(var, str) else var.write(context)
+    if lower:
+      text = f'({text} - {lower})'
+    return '(' + ' : '.join([f'{text} == {e} ? {name}'
+                             for e, name in enumerate(names[:-1])]
+                            + [names[-1]]) + ')'
 
   def add_user(self, user):
     self._users.append(user)

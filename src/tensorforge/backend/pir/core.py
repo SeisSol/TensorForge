@@ -825,6 +825,29 @@ class Value:
 Operand = Union[Value, int, float, str]
 
 
+class StackedAddress:
+    """An address into one element of a stacked operand
+    (`Options.stack_elements`): the element of the stack, which picks the
+    pointer the access goes through, and the address in that element's
+    memory.
+
+    What `Symbol.build_address` answers for such an operand in place of a
+    plain address, and what `IRBuilder.load` and `store` take apart: the
+    element is not an offset -- two elements' memory is two allocations --
+    so it cannot be added to the address like the other indices.  Anything
+    else that is handed one fails where it stands rather than reading the
+    first element for every one: it is not an operand.
+    """
+    __slots__ = ('address', 'element')
+
+    def __init__(self, address, element):
+        self.address = address
+        self.element = element
+
+    def __repr__(self) -> str:
+        return f'StackedAddress({self.address!r}, element={self.element!r})'
+
+
 def value_operands(xs) -> Tuple[Value, ...]:
     return tuple(x for x in xs if isinstance(x, Value))
 

@@ -453,6 +453,22 @@ declare('trip_shards',
             'ahead of `trip_reads`, which takes what is left.  See '
             'backend/pir/trips.py.')
 
+declare('stack_elements',
+        default=1,
+        parse=parse_int,
+        doc='How many consecutive elements of the batch one multiplication '
+            'computes together.  Every operand an element owns gains a last '
+            'axis of that extent and the ones the batch shares stay as they '
+            'are, so a product against a shared operator comes out that many '
+            'times wider: 56x9 by 9x9 becomes 56x9x2 by 9x9, a shape that '
+            'fills a matrix instruction one element leaves half empty.  The '
+            'batch loop visits a stack of elements per trip, each element '
+            'reached through its own pointer; where the batch ends inside a '
+            'stack, or a flag masks an element, nothing is written for it.  '
+            'It costs registers and shared memory in proportion.  1 or 2; '
+            'contractions only, without guards, and not under '
+            '`launch_control`.  See generators/stacking.py.')
+
 declare('issue_cover',
         default=512,
         parse=parse_int,

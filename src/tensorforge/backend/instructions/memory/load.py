@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 from typing import List, Union
 import math
+import numpy as np
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
 from tensorforge.backend.symbol import RELAXED, Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, add_offset
@@ -402,7 +403,19 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       if len(self._dst_shape) > 0 and self._dst_shape[0] != self._read_shape[0]:
         linscale = (self._read_shape[0], self._dst_shape[0])
 
-      if not (structured_issue and self._write_bulk(writer, index, linscale)):
+      k = self._src.stack()
+      if k > 1:
+        # A stacked operand is an element's memory per element of the stack,
+        # each behind a pointer of its own (`Symbol.stacked_binding`): one
+        # transfer each, the image's last index naming the element.
+        if self._loop_indices and self._loop_indices[-1] == len(index) - 1:
+          raise InternalError(f'{self._dest.name}: the stack of '
+                              f'{self._src.name} walked by a loop')
+        for e in range(k):
+          self._write_datatransfer(writer, 0, 0, index[:-1] + [e],
+                                   self._loadsize // k, allow_nontemporal,
+                                   linscale)
+      elif not (structured_issue and self._write_bulk(writer, index, linscale)):
         self._write_datatransfer(writer, 0, 0, index, self._loadsize,
                                  allow_nontemporal, linscale)
 
@@ -424,6 +437,8 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     thread of the multiplication issues it and every thread waits for it.
     """
     if not getattr(self._context.get_user_options(), 'bulk_copies', False):
+      return False
+    if self._src.stack() > 1:
       return False
     if not self._context.target.bulk_copy_path() or self._explicit_simd():
       return False
@@ -648,6 +663,11 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     """
     span = self._lane_span() if lanes is None else lanes
     if end > start:
+      src_buf = self._source_buffer(writer, index)
+      # The name the text spells the source by: an element of a stack goes
+      # by its pointer's.
+      src_name = (self._src.name if self._src.stack() == 1
+                  else self._src.stacked_spelling(src_buf))
       if increment > 1:
         vectortype = self._context.target.lexic.get_fptype(self._dest.get_fptype(), increment)
         typeprefix = f'*({vectortype}*)&'
@@ -675,7 +695,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         self._dest._record_linear_layout(dst_offset, increment,
                                          self._lane_span(), writer)
         dst_buf = self._destination_buffer(writer)
-        src_buf = self._src.pir_buffer(writer)
         def write_load(lhs, rhs, _d=dst_buf, _s=src_buf, _n=increment,
                        _z=zfill):
           self._tokens.append(writer.copy_async(
@@ -707,7 +726,6 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         self._dest._record_linear_layout(dst_offset, increment,
                                          self._lane_span(), writer)
         dst_buf = self._dest.pir_buffer(writer)
-        src_buf = self._src.pir_buffer(writer)
         # What each end proves for an access this wide (`_hop_claim`).
         src_claim = self._hop_claim(self._src, src_offset, increment)
         dst_claim = self._hop_claim(self._dest, dst_offset, increment)
@@ -751,13 +769,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           linear = f'{increment} * {self._linear_idx()} + i * {self._num_threads}'
           dst_index, src_index = indexwrapper(linear), linear
           dest_access_index = self._dest.access_address(self._context, index, writer)
-          src_access_index = self._src.access_address(self._context, index, writer)
+          src_access_index = self._source_address(writer, index)
           if structured:
             write_load(f'{dst_offset} + {dest_access_index} + {dst_index}',
                        f'{src_offset} + {src_access_index} + {src_index}')
           else:
             lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {dst_index}]'
-            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {src_index}]'
+            rhs = f'{typeprefix}{src_name}[{src_offset} + {src_access_index} + {src_index}]'
             write_load(lhs, rhs)
       else:
         # load using manual loop unrolling
@@ -765,13 +783,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           linear = f'{increment} * {self._linear_idx()} + {counter * self._num_threads}'
           dst_index, src_index = indexwrapper(linear), linear
           dest_access_index = self._dest.access_address(self._context, index, writer)
-          src_access_index = self._src.access_address(self._context, index, writer)
+          src_access_index = self._source_address(writer, index)
           if structured:
             write_load(f'{dst_offset} + {dest_access_index} + {dst_index}',
                        f'{src_offset} + {src_access_index} + {src_index}')
           else:
             lhs = f'{typeprefix}{self._dest.name}[{dst_offset} + {dest_access_index} + {dst_index}]'
-            rhs = f'{typeprefix}{self._src.name}[{src_offset} + {src_access_index} + {src_index}]'
+            rhs = f'{typeprefix}{src_name}[{src_offset} + {src_access_index} + {src_index}]'
             write_load(lhs, rhs)
 
   def tokens_for(self, writer):
@@ -793,9 +811,32 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     """
     if not hasattr(writer, 'copy_async'):
       return False
-    if self._src.pir_buffer(writer) is None:
+    if self._src.stack() > 1:
+      if self._src.pir_stack(writer) is None:
+        return False
+    elif self._src.pir_buffer(writer) is None:
       return False
     return self._destination_buffer(writer) is not None
+
+  def _source_buffer(self, writer, index):
+    """What a hop reads at `index` through: the operand's binding, or for
+    an element of a stack that element's pointer
+    (`Symbol.stacked_binding`)."""
+    if self._src.stack() == 1:
+      return self._src.pir_buffer(writer)
+    at = self._src.build_address(writer, self._context, index)
+    return self._src.stacked_binding(writer, at.element)
+
+  def _source_address(self, writer, index) -> str:
+    """The address a hop reads at `index`, as text, as the hops splice it:
+    into the operand, or for an element of a stack into the element's
+    memory."""
+    if self._src.stack() == 1:
+      return self._src.access_address(self._context, index, writer)
+    address = self._src.build_address(writer, self._context, index).address
+    if not isinstance(address, (int, np.integer)):
+      address = writer.pin(address)
+    return str(address)
 
   # `_swizzle` needs `_structured_copy`'s answer before this body has bound
   # anything, and cannot have it: the question is asked from inside

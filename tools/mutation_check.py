@@ -73,6 +73,8 @@ MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py
 TRIPS = Path('src/tensorforge/backend/pir/trips.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 PIPE = Path('src/tensorforge/backend/pir/pipeline.py')
+STACKING = Path('src/tensorforge/generators/stacking.py')
+BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
 
 
 def _run_tests(target):
@@ -1822,6 +1824,46 @@ GROUPS = {
                '        if self._trip_shards is not None and not pc.explicit_simd:\n'
                '            pc.body = trip_shards(pc.body, self._scratch, report=self._report,\n'
                '                                  **self._trip_shards)\n'))),
+    ]),
+
+    # Several consecutive elements of the batch in one multiplication.
+    'stack': ('tests/test_stack_elements.py', [
+        ('the stacks counted rounding down',
+         sub(STACKING, "  return f'(({name} + {k - 1}) / {k})'",
+             "  return f'({name} / {k})'", 1)),
+        ('an element one past the batch taken for one in it',
+         sub(BATCHLOOP, "            cond = f'{element} < {n}'",
+             "            cond = f'{element} <= {n}'", 1)),
+        ('the flag of an element of the stack left unread',
+         sub(BATCHLOOP, "                cond = f'{cond} && {read}'\n"
+                        "                kind, space = Effect.READ, MemSpace.GLOBAL\n"
+                        "            out.append(",
+             "                kind, space = Effect.READ, MemSpace.GLOBAL\n"
+             "            out.append(", 1)),
+        ('a stack visited for its first element alone',
+         sub(BATCHLOOP, "            either = ' || '.join(f'{{{e}}}' for e in range(self._stack))",
+             "            either = '{0}'", 1)),
+        ('every element of the stack through the first one\'s pointer',
+         sub(PTR, "      element = f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'",
+             "      element = f'({k} * {{0}})'", 1)),
+        ('the stack\'s index added to the address instead of picking the pointer',
+         sub(SYM, "      if self.stack() > 1:\n        # The stack's index picks",
+             "      if False:\n        # The stack's index picks", 1)),
+        ('every write held to the first element\'s mask',
+         sub(SYM, "    if isinstance(var, (int, np.integer)):\n"
+                  "      return names[int(var) - lower]",
+             "    if True:\n      return names[0]", 1)),
+        ('a stacked operand copied into shared memory as one run',
+         sub(LOAD, "      k = self._src.stack()\n      if k > 1:",
+             "      k = self._src.stack()\n      if False:", 1)),
+        ('a merged run\'s members read through one element\'s pointers',
+         sub(PTR, "        args.append(pointers[_e])", "        args.append(pointers[0])", 1)),
+        ('the grid sized by the elements',
+         sub(GEN, "    stacks = stacking.count(0, self._stack)\n",
+             "    stacks = stacking.count(0, 1)\n", 1)),
+        ('the first stack clamped by the element count',
+         sub(GEN, "    count = body.extern_value(stacking.count(index, self._stack), SIZE,",
+             "    count = body.extern_value(stacking.count(index, 1), SIZE,", 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

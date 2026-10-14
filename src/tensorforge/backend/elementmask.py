@@ -46,3 +46,32 @@ def element_mask(value: Any, name: str):
 def active() -> Tuple[Optional[Any], Optional[str]]:
     """The innermost mask, or `(None, None)` outside any."""
     return _STACK[-1] if _STACK else (None, None)
+
+
+#: Innermost last.  Each entry is `(values, names)`, one per element of a
+#: stack (`Options.stack_elements`).
+_STACKED: list = []
+
+
+@contextmanager
+def stacked(values, names):
+  """Run a region with every global write predicated on its own element's
+  mask, where a multiplication computes a stack of elements.
+
+  A write of a stacked operand writes one element of the stack, the one its
+  last index names, and runs under that element's mask: an element past the
+  end of the batch, or one its flag masks, is computed -- its stack's first
+  element read in its place -- and written nowhere.  Reads are untouched for
+  the reason `element_mask` gives.
+  """
+  _STACKED.append((tuple(values), tuple(names)))
+  try:
+    yield
+  finally:
+    _STACKED.pop()
+
+
+def stack_masks() -> Tuple[Optional[tuple], Optional[tuple]]:
+  """The innermost stack's masks, `(values, names)`, or `(None, None)`
+  outside any."""
+  return _STACKED[-1] if _STACKED else (None, None)

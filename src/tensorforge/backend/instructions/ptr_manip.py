@@ -14,6 +14,7 @@ from tensorforge.common.exceptions import (GenerationError,
 from tensorforge.backend.pir.core import Access, Effect, Qual
 from tensorforge.backend.pir.core import MemSpace
 from tensorforge.backend.symbol import SymbolType, passed_by_value
+from tensorforge.generators import stacking
 
 class GetElementPtr(AbstractInstruction):
   def __init__(self,
@@ -190,7 +191,8 @@ class GetElementPtr(AbstractInstruction):
       return self._TABLE_HOLE
     return self._table.access(self._VARIANT_HOLE)
 
-  def _pointer_type(self, datatype, const_mod: str) -> str:
+  def _pointer_type(self, datatype, const_mod: str,
+                    restrict: bool = True) -> str:
     """The type of this binding, as the backend spells a pointer into global.
 
     One place for all four addressing modes, and the reason is not tidiness:
@@ -226,7 +228,7 @@ class GetElementPtr(AbstractInstruction):
       space = MemSpace.GLOBAL
     return self._context.target.lexic.pointer_type(
         f'{datatype}', space, readonly=readonly,
-        restrict=True, const=bool(const_mod))
+        restrict=restrict, const=bool(const_mod))
 
   def _declarator(self, datatype, const_mod: str) -> str:
     return f'{self._pointer_type(datatype, const_mod)} {self._dest.name}'
@@ -253,6 +255,9 @@ class GetElementPtr(AbstractInstruction):
 
   def gen_ir(self, writer):
 
+    if self._table is not None and stacking.factor(self._src.obj) > 1:
+      self._gen_stacked_table(writer)
+      return
     if self._table is not None:
       # The table's members are the bindings the prologue already made, so
       # they carry the element offset.  Offsetting again would apply it twice;
@@ -274,6 +279,10 @@ class GetElementPtr(AbstractInstruction):
 
     batch_obj = self._src.obj
     batch_addressing = batch_obj.addressing
+
+    if stacking.factor(batch_obj) > 1:
+      self._gen_stacked(writer)
+      return
 
     if self._include_extra_offset:
       extra_offset = f' + {get_extra_offset_name(self._src)}'
@@ -318,6 +327,105 @@ class GetElementPtr(AbstractInstruction):
 
     self._emit_binding(writer, lhs, rhs,
                        scalar=batch_addressing == Addressing.SCALAR)
+
+  def _gen_stacked_table(self, writer) -> None:
+    """The stand-in of a merged run over stacked members: a pointer per
+    element of the stack, each the table's chain for that element
+    (`DeclareOperandTable._declare_chains`)."""
+    chains = self._table.value(writer)
+    if not isinstance(chains, tuple):
+      raise InternalError(f'{self._dest.name}: a stacked stand-in over a '
+                          f'table that holds no chain per element')
+    from tensorforge.backend.pir.core import BufferType
+    obj = self._src.obj
+    datatype = self._fp_as_str if obj.datatype is None else obj.datatype
+    readonly = not self._table.writable
+    values = []
+    for e, chain in enumerate(chains):
+      name = f'{self._dest.name}_s{e}'
+      values.append(writer.decl_expr(
+          f'{self._pointer_type(datatype, "const", readonly)} {name}',
+          self._coerce(datatype, 'const', '{0}'),
+          BufferType(self._dest.get_fptype(), chain.type.shape, MemSpace.GLOBAL,
+                     readonly=readonly),
+          self._src, args=(chain,), kind=Effect.READ, hint=name, extern=name,
+          alias_root=self._src))
+    self._dest.set_pir_stack(writer, values,
+                             self._pointer_type(datatype, 'const', readonly),
+                             [f'{self._dest.name}_s{e}'
+                              for e in range(len(values))])
+
+  def _gen_stacked(self, writer) -> None:
+    """A pointer per element of the stack (`Options.stack_elements`).
+
+    An element owns its memory, and under `Addressing.PTR_BASED` two
+    elements' memory is two allocations: there is no stride from one to the
+    other, so the stack's last axis picks a pointer rather than adding to an
+    address (`Symbol.stacked_binding`).  Each pointer is the element's own
+    where the element is one to write (`BatchLoop._stack_actives`), and
+    otherwise the first such element's of the stack -- an element past the
+    end of the batch has no pointer to read, and one its flag masks a
+    pointer nothing promises is valid -- or the stack's first element's where
+    there is none, which is in the batch.  Strided addressing reads the same
+    elements, for uniformity: the stride would reach an element past the end.
+
+    The stack's index and the masks are operands, so a pass that moves a
+    transfer to another stack (`pir.ahead.Clone`) computes these again for
+    it as it does a single element's pointer.
+    """
+    from .batch_loop import BatchLoop
+    obj = self._src.obj
+    k = stacking.factor(obj)
+    if not hasattr(writer, 'decl_expr'):
+      raise InternalError(f'{self._dest.name}: a stack of elements is bound in '
+                          f'a body built as IR')
+    stack = self.batch_value(writer)
+    bound = BatchLoop.indices_in(writer) or {}
+    actives = [bound.get(stacking.mask_key(e)) for e in range(k)]
+    if stack is None or any(a is None for a in actives):
+      raise InternalError(f'{self._dest.name}: a stack of elements is bound '
+                          f'where its loop binds no masks for it')
+    datatype = self._fp_as_str if obj.datatype is None else obj.datatype
+    extra = (f' + {get_extra_offset_name(self._src)}'
+             if self._include_extra_offset else '')
+    # `{0}` the stack's index, `{1 + e}` element `e`'s mask.
+    first = ' : '.join([f'{{{1 + e}}} ? {k} * {{0}} + {e}' for e in range(k)]
+                       + [f'{k} * {{0}}'])
+    volume = obj.storage_volume() // k
+    from tensorforge.backend.pir.core import BufferType
+    values = []
+    for e in range(k):
+      element = f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'
+      if obj.addressing == Addressing.PTR_BASED:
+        source = self._context.target.lexic.batch_source(self._src.name)
+        rhs = f'&{source}[{element}][{obj.get_offset_to_first_element()}{extra}]'
+      elif obj.addressing == Addressing.STRIDED:
+        rhs = (f'&{self._src.name}[{element} * {volume} + '
+               f'{obj.get_offset_to_first_element()}{extra}]')
+      else:
+        raise InternalError(f'{self._src.name}: stacked, and the batch shares '
+                            f'it ({obj.addressing})')
+      name = f'{self._dest.name}_s{e}'
+      readonly = obj.direction == DataFlowDirection.SOURCE
+      lhs = f'{self._pointer_type(datatype, "const", readonly)} {name}'
+      rhs = self._coerce(datatype, 'const', rhs)
+      values.append(writer.decl_expr(
+          lhs, rhs, BufferType(self._dest.get_fptype(),
+                               (self._extent() // k,), MemSpace.GLOBAL,
+                               readonly=readonly),
+          self._src, args=(stack, *actives), kind=Effect.READ, hint=name,
+          extern=name, alias_root=self._src,
+          attrs=(('element_pointer', True),)
+          if self.dereferences_the_batch() else (),
+          quals=(Qual.RESTRICT,) if readonly else ()))
+    # Not `restrict` where the operand is written: the pointers of an element
+    # the stack lacks are its first element's, so two of them reach the same
+    # memory, and one writes through it (as `_emit_binding` says of a clone).
+    self._dest.set_pir_stack(
+        writer, values,
+        self._pointer_type(datatype, 'const',
+                           obj.direction == DataFlowDirection.SOURCE),
+        [f'{self._dest.name}_s{e}' for e in range(k)])
 
   def _emit_binding(self, writer, lhs: str, rhs: str,
                     scalar: bool = False) -> None:
@@ -685,6 +793,11 @@ class DeclareOperandTable(AbstractInstruction):
       return
     datatype = self._datatype or self._fp_as_str
     stars = Addressing.addr2ptr_type(self._addressing)
+    if self._form is not TableForm.SELECT and any(m.stack() > 1
+                                                  for m in self._members):
+      raise GenerationError(
+          f'operand table {self._name}: a stack of elements is reached through '
+          f'a select chain per element, not an array')
     if self._form is TableForm.ARRAY:
       entries = ', '.join(self._member(m, datatype, stars) for m in self._members)
       self._declare(writer, f'{self._qual()}{datatype} '
@@ -736,6 +849,9 @@ class DeclareOperandTable(AbstractInstruction):
     touched = self._accesses(writer)
     if touched:
       writer.touches(touched)
+    stack = max((m.stack() for m in self._members), default=1)
+    if stack > 1:
+      return self._declare_chains(writer, decl, counter, datatype, stars, stack)
     dtype = self._datatype or self._context.fp_type
     if self._addressing == Addressing.SCALAR:
       type_ = ScalarType(dtype)
@@ -754,6 +870,39 @@ class DeclareOperandTable(AbstractInstruction):
     text = self._chain(spell, '{0}')
     return writer.decl_expr(decl, text, type_, None, args=tuple(args),
                             hint=self._name, extern=self._name)
+
+  def _declare_chains(self, writer, decl: str, counter, datatype, stars,
+                      stack: int):
+    """A chain per element of a stack (`Options.stack_elements`): over the
+    members' pointers for that element, `_declare_chain` each.  The tuple of
+    them is the table's value, and the stand-in's binding takes one each
+    (`GetElementPtr._gen_stacked_table`)."""
+    from tensorforge.backend.pir.core import BufferType
+    if any(m.stack() != stack for m in self._members):
+      raise GenerationError(
+          f'operand table {self._name}: members stacked differently, or not '
+          f'at all, beside stacked ones')
+    dtype = self._datatype or self._context.fp_type
+    values = []
+    for e in range(stack):
+      args = [counter] if len(self._members) - self._first > 1 else []
+
+      def spell(member, _e=e):
+        pointers = member.pir_stack(writer)
+        if pointers is None:
+          raise InternalError(
+              f'operand table {self._name}: {member.name} has no pointers for '
+              f'its stack in this body')
+        args.append(pointers[_e])
+        return self._member(member, datatype, stars, f'{{{len(args) - 1}}}')
+      text = self._chain(spell, '{0}')
+      name = f'{self._name}_s{e}'
+      type_ = BufferType(dtype, (self._extent() // stack,), MemSpace.GLOBAL,
+                         readonly=not self._writable)
+      values.append(writer.decl_expr(decl[:-len(self._name)] + name, text,
+                                     type_, None, args=tuple(args), hint=name,
+                                     extern=name))
+    return tuple(values)
 
   @staticmethod
   def _value_of(writer, member):

@@ -22,6 +22,7 @@ from tensorforge.generators import lanes as lane_config
 from tensorforge.generators import tuning
 from tensorforge.generators.lanes import LaneConfig
 from tensorforge.generators.legalize import legalize
+from tensorforge.generators import stacking
 from tensorforge.backend.temporaries import Temporaries
 from tensorforge.backend.symbol import Symbol, SymbolType, passed_by_value
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
@@ -428,6 +429,13 @@ class Generator:
     # operand on other axes, an accumulation, a factor -- is rewritten here,
     # whichever frontend stated it.
     gemm_list = legalize(gemm_list)
+    #: How many consecutive elements one multiplication computes
+    #: (`Options.stack_elements`).  The list is rewritten for it here, ahead
+    #: of everything that reads it, so the builders see the wider operands
+    #: and nothing else; the traversal and the addressing take the stack
+    #: from this.
+    self._stack: int = int(context.get_user_options().stack_elements)
+    gemm_list = stacking.stack(gemm_list, self._stack)
     #: The list this generator builds (`descr_list`).
     self._descr_list: List[OperationDescription] = gemm_list
     #: The list as the caller handed it, before merging rewrites it -- what
@@ -990,7 +998,8 @@ class Generator:
                          queue_depth=self._launch_control_depth,
                          group_size=self._group_size(index, start),
                          narrow_group=self._num_threads
-                         < self._context.target.hw.vec_unit_length)
+                         < self._context.target.hw.vec_unit_length,
+                         stack=self._stack)
 
         self._section.stream = list(self._section.global_ir) + [loop]
 
@@ -1693,7 +1702,10 @@ class Generator:
     from tensorforge.backend.pir.core import BOOL, SIZE, Uniformity
     name = GeneralLexicon.BATCH_ID_NAME
     start_text, stride = self._section_traversal(index)
-    count = body.extern_value(f'{GeneralLexicon.NUM_ELEMENTS}{index}', SIZE,
+    # In stacks where the multiplication computes several elements at once:
+    # the traversal's index is a stack's, and one past the last stack is
+    # past the batch (`stacking.count`).
+    count = body.extern_value(stacking.count(index, self._stack), SIZE,
                               uniform=Uniformity.GRID)
     # The launch geometry's spelling, bound where it is read and declared
     # nowhere.  `threadIdx.y` is in it: every thread of one multiplication
@@ -1919,6 +1931,11 @@ class Generator:
     mults_per_block = launch.mults_per_block
     coop = launch.cooperative
     block_x, block_y, block_z = launch.block
+    # What a multiplication takes on is a stack of elements
+    # (`Options.stack_elements`), so the grid is sized by the stacks.
+    stacks = stacking.count(0, self._stack)
+    if self._stack > 1:
+      stacks = f'static_cast<size_t>{stacks}'
     with writer.Block(self._launch_config_proto(with_defaults=False)):
       for i in range(len(self._sections)):
         writer(f'(void){GeneralLexicon.NUM_ELEMENTS}{i};')
@@ -1962,7 +1979,7 @@ class Generator:
               f'cooperative launch over resident workers; {how}. Use the '
               f'grid-stride traversal for a section that synchronizes '
               f'across the grid.')
-        num_blocks = f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) / {mults_per_block}'
+        num_blocks = f'({stacks} + {mults_per_block} - 1) / {mults_per_block}'
       else:
         # Bounded by what the device holds, or covering the batch in one round
         # where the target runs a looping block slowly (`Target.bounds_grid`).
@@ -1973,9 +1990,9 @@ class Generator:
         if coop:
           num_blocks = 'gridsize'
         elif bounded:
-          num_blocks = f'std::min(gridsize, {GeneralLexicon.NUM_ELEMENTS}0)'
+          num_blocks = f'std::min(gridsize, {stacks})'
         else:
-          num_blocks = (f'({GeneralLexicon.NUM_ELEMENTS}0 + {mults_per_block} - 1) '
+          num_blocks = (f'({stacks} + {mults_per_block} - 1) '
                         f'/ {mults_per_block}')
       writer('tensorforge::LaunchConfig config{};')
       writer(f'config.grid[0] = {num_blocks};')
@@ -3136,6 +3153,11 @@ class Generator:
       # key is part of the source every kernel is named after.
       if getattr(obj, 'passed_by_value', False):
         row['residence'] = str(obj.residence)
+      # The elements of the batch its last axis holds side by side
+      # (`Options.stack_elements`): what the caller passes is still elements
+      # of the shape without that axis.
+      if stacking.factor(obj) > 1:
+        row['stack'] = stacking.factor(obj)
       # The kernel takes the description's numbers for it, and the pointer
       # the caller still passes is not read (`argument_constants`).
       if getattr(symbol, 'embedded', None) is not None:
