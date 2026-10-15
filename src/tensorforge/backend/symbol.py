@@ -1633,6 +1633,20 @@ class Symbol:
     alone, with the remaining axes handed back *at* their corner and
     contributing zero.
 
+    A vector read changes none of that arithmetic.  At width `w` a lane
+    holds rows `w*l ..` rather than row `l`, and `w` consecutive rows are
+    `w` consecutive slots whatever the packing -- so the offset is the same
+    expression and only the lane bounds divide by `w`.  What it does need is
+    that the runs are whole granules of `w` (`Packing.granule`): a lane
+    whose rows straddle an end would have to be masked inside its own
+    vector, and the predicate is per lane.
+
+    A *divisor* of the granule, not the granule itself.  The lead loop peels
+    the components no whole vector covers, so a ragged extent's last body
+    reads one row to a lane where the earlier ones read four; the run ends
+    are still multiples of four and therefore of one, so the narrower read
+    is served by the same packing and its bounds simply divide by less.
+
     The rows a column does not hold have no slot.  Their lanes read the
     neighbouring column's numbers, which are not zero, so the access is held
     off them -- `first` below the run, `valid` above it, the two fields a
@@ -1670,10 +1684,12 @@ class Symbol:
     if lead is None:
       raise InternalError(f'{self.name}: packed rows need a lead index')
     li, shift = lead
-    if li.width != 1 or li._value is not None:
+    grain = int(packing.granule)
+    wide = int(li.width)
+    if li._value is not None or wide < 1 or grain % wide:
       raise InternalError(
-          f'{self.name}: packed rows are read one to a lane at a named slot; '
-          f'this read is {li!r}')
+          f'{self.name}: a packing at granule {grain} is read a divisor of '
+          f'{grain} rows to a lane at a named slot; this read is {li!r}')
     base = li.nonlead()
     if not isinstance(base, (int, np.integer)):
       raise InternalError(
@@ -1707,11 +1723,19 @@ class Symbol:
           f'{self.name}: packed column {column} of {packing.columns}')
     start = packing.starts[column]
     length = packing.lengths[column]
-    # Lane `l` of this read holds box row `origin + l`.  The run it has to
-    # fall inside turns into the two lane bounds directly.
-    origin = block * int(base) + shift - lower[0]
-    head = min(max(start - origin, 0), block)
-    tail = min(max(start + length - origin, 0), block)
+    # Lane `l` of this read holds box rows `origin + grain*l ..` -- and the
+    # run it has to fall inside is a whole number of granules, so each
+    # lane's rows are all in or all out and the two lane bounds say which.
+    # They can only say that while the window itself starts on a granule;
+    # otherwise a lane straddles an end and no per-lane predicate expresses
+    # it, which is why this refuses rather than round.
+    origin = wide * block * int(base) + shift - lower[0]
+    if wide > 1 and origin % wide:
+      raise InternalError(
+          f'{self.name}: a read at width {wide} starts at row {origin}, '
+          f'inside a lane\'s own run of rows')
+    head = min(max(-(-(start - origin) // wide), 0), block)
+    tail = min(max(-(-(start + length - origin) // wide), 0), block)
     if li.first:
       head = max(head, li.first)
     if li.valid is not None:
@@ -1727,7 +1751,7 @@ class Symbol:
       return self._bitset_index(writer, index, packing, column, block,
                                 li._stride, origin, li.valid, li.first,
                                 lower)
-    lead_index = LeadIndex(base, block, li._stride,
+    lead_index = LeadIndex(base, block, li._stride, width=wide,
                            offset=shift + packing.offsets[column] - start,
                            valid=valid, pad=False, first=first)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
@@ -3268,11 +3292,32 @@ class Symbol:
         # the data read the order's padding, inside the buffer.  So does the
         # section's verbatim copy of the operand in shared memory, which holds
         # the storage as the host laid it out (`verbatim`).
+        #
+        # `valid` is deliberately *not* a reason to decline, and was until
+        # 2025-10-15.  Declining does not fall back to something slower, it
+        # falls back to something wrong: the logical address of a buffer the
+        # host wrote in another order.  With `prepare_operands` on,
+        # `known_zero_rows` read its ragged last slot at `lane + 32` of a
+        # 40-row column in a buffer that is 64 wide and interleaved -- three
+        # corpus kernels off by a factor of 80, under an option that is off
+        # by default and so never ran here.  The padding those lanes reach
+        # is stored and is zero, which is the whole reason the tail needs no
+        # predicate; `_interleaved_load` says so in its own docstring.
         in_order = (self.stype in (SymbolType.Global, SymbolType.Batch)
                     or (self.stype is SymbolType.SharedMem
                         and getattr(self, 'verbatim', False)))
+        if (getattr(self.obj, 'simt_interleave', None) is not None
+                and in_order and first):
+          # The other half: a window's head reads the lanes *before* it, and
+          # those are another row of the same column rather than padding, so
+          # no stored zero stands in for them.  Refused rather than read at
+          # the logical address, which is the failure above.
+          raise InternalError(
+              f'{self.name}: a window head of {first} lanes over an operand '
+              f'stored in the SIMT interleave; the lanes before the window '
+              f'hold another row, not the padding a tail reads')
         if (bc_lane is None and w == 1 and not part and parts == 1
-                and valid is None and not first and shift is None
+                and shift is None
                 and getattr(self.obj, 'simt_interleave', None) is not None
                 and in_order):
           interleaved = self._interleaved_load(

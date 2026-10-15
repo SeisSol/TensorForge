@@ -860,6 +860,23 @@ class YatetoFrontend:
   #: it, once it has been built and therefore has a name.
   _sink = None
 
+  #: The kernel that last re-encoded an operand and has not had its
+  #: arrangement collected, or `None`.
+  #:
+  #: On the class, because yateto makes one of these per kernel, and the
+  #: thing being watched spans two of them: a caller that never calls
+  #: `layout_offerings` is only visible at the *next* kernel.
+  #:
+  #: Why it is watched at all.  Re-encoding an operand moves work onto
+  #: whoever fills the buffer, and yateto deliberately keeps the asking out
+  #: of its interface version -- a caller that does not ask gets the
+  #: arrangement the tensor gives itself, "which degrades to the right
+  #: thing".  That holds while re-encoding is something a caller turns on.
+  #: As a default it stops holding: a caller that does not ask would get a
+  #: kernel reading an order nobody wrote, which is wrong numbers and not a
+  #: slower kernel.  So the one thing this cannot do silently is pass.
+  _unclaimed = None
+
   @classmethod
   @contextmanager
   def capture(cls, sink):
@@ -944,6 +961,7 @@ class YatetoFrontend:
     what those slots hold is arithmetic on a cell's value, and until
     something computes it there is nothing to offer.
     """
+    type(self)._unclaimed = None
     if self._emitter is None:
       return {}
     offerings = {}
@@ -989,4 +1007,45 @@ class YatetoFrontend:
     if self._emitter is None:
       raise NotImplementedError(
         'generate() before a kernel arrived: there is nothing to build.')
+    self._claim_check()
     self._emitter.generate(cpp, cache)
+    if self._rearranged():
+      # Armed for the *next* kernel to check: the arrangement is collected
+      # after this returns, so now is too early to tell.
+      type(self)._unclaimed = self._emitter.base_name or '<unnamed>'
+
+  def _rearranged(self) -> bool:
+    """Whether this kernel reads an operand in an order of its own.
+
+    The same condition `layout_offerings` lists one under, asked without
+    materialising the numbers -- and without clearing the flag, which that
+    one does.
+    """
+    if self._emitter is None:
+      return False
+    return any(tensor.addressing is Addressing.NONE
+               and getattr(tensor, 'storage_order', None) is not None
+               and tensor.storage_values() is not None
+               for tensor in self._emitter.tensors().values())
+
+  def _claim_check(self):
+    """Stop if the last kernel's arrangement was never collected.
+
+    One kernel late, which is as early as it can be known, and early enough:
+    a build generates many.  Raising rather than falling back, because the
+    fallback would be a kernel whose numbers are wrong in a way nothing
+    downstream can see -- the buffer has the right size and the right
+    values, in the wrong order.
+    """
+    pending = type(self)._unclaimed
+    if pending is None:
+      return
+    type(self)._unclaimed = None
+    raise RuntimeError(
+      f'{type(self).__name__}: kernel {pending} re-encoded a batch-constant '
+      f'operand and nothing collected layout_offerings(), so whoever fills '
+      f'that buffer will write it in the tensor\'s own order and the kernel '
+      f'will read it in another. Either use a yateto that collects the '
+      f'arrangement (`ExportFactory.layoutOfferings`), or turn the '
+      f're-encoding off: TF_OPTIONS=prepare_operands=0, or '
+      f'Options(prepare_operands=False).')

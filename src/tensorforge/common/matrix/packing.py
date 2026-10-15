@@ -62,21 +62,45 @@ class Packing:
     """
 
     __slots__ = ('kind', 'rows', 'columns', 'starts', 'lengths', 'offsets',
-                 'words', 'elements')
+                 'words', 'elements', 'granule')
 
     def __init__(self, kind: str, rows: int, columns: int,
                  starts: Sequence[int], lengths: Sequence[int],
                  offsets: Sequence[int],
-                 words: Union[Sequence[int], None] = None):
+                 words: Union[Sequence[int], None] = None,
+                 granule: int = 1):
         if kind not in KINDS:
             raise ValueError(f'unknown packing {kind!r}; one of {KINDS}')
         self.kind = kind
+        #: Rows one lane holds adjacent, which every run and every offset is
+        #: a whole number of.
+        #:
+        #: One where a lane holds a single row.  More where the read is a
+        #: vector (`Options.lead_vectorize`, AMD's width-2 DPP): then a
+        #: lane's `granule` rows have to be `granule` adjacent slots *and*
+        #: lie on the same side of the run's ends, since the predicate that
+        #: holds the access off is per lane and cannot mask inside one.
+        #: Rounding the runs out to it is what buys that, and it is cheap --
+        #: over the SeisSol operators the run form gives up 40.3 % at one,
+        #: 38.7 % at two and 34.1 % at four.
+        self.granule = int(granule)
+        if self.granule < 1:
+            raise ValueError('a granule is at least one row')
+        if kind == 'bits' and self.granule != 1:
+            raise ValueError(
+                'a bitset slot is a population count, so a lane\'s adjacent '
+                'rows are not adjacent slots; it has no granule but one')
         self.rows = int(rows)
         self.columns = int(columns)
         self.starts = tuple(int(x) for x in starts)
         self.lengths = tuple(int(x) for x in lengths)
         self.offsets = tuple(int(x) for x in offsets)
         self.words = None if words is None else tuple(int(x) for x in words)
+        if any(x % self.granule for x in self.starts + self.lengths
+               + self.offsets):
+            raise ValueError(
+                f'a packing at granule {self.granule} has every start, '
+                f'length and offset a whole number of it')
         if not (len(self.starts) == len(self.lengths) == len(self.offsets)
                 == self.columns):
             raise ValueError('a packing says start, length and offset for '
@@ -142,8 +166,9 @@ class Packing:
         return tuple(out)
 
     def __repr__(self):
+        grain = '' if self.granule == 1 else f', granule {self.granule}'
         return (f'Packing({self.kind!r}, {self.rows}x{self.columns}, '
-                f'{self.elements} slots)')
+                f'{self.elements} slots{grain})')
 
     def __eq__(self, other):
         return (isinstance(other, Packing) and self.kind == other.kind
@@ -151,11 +176,12 @@ class Packing:
                 and self.starts == other.starts
                 and self.lengths == other.lengths
                 and self.offsets == other.offsets
-                and self.words == other.words)
+                and self.words == other.words
+                and self.granule == other.granule)
 
     def __hash__(self):
         return hash((self.kind, self.rows, self.columns, self.starts,
-                     self.lengths, self.offsets, self.words))
+                     self.lengths, self.offsets, self.words, self.granule))
 
 
 def _mask(tensor) -> Union[np.ndarray, None]:
@@ -190,17 +216,18 @@ def _mask(tensor) -> Union[np.ndarray, None]:
     return mask
 
 
-def pack(tensor, kind: str) -> Union[Packing, None]:
+def pack(tensor, kind: str, granule: int = 1) -> Union[Packing, None]:
     """How ``tensor`` would be stored under ``kind``, or `None`.
 
     `None` where the form saves nothing -- a packing that stores the whole box
     is the box, and offering it would only put an order and a predicate on
     reads that do not need them.
     """
-    return pack_union((tensor,), kind)
+    return pack_union((tensor,), kind, granule)
 
 
-def pack_union(tensors: Sequence, kind: str) -> Union[Packing, None]:
+def pack_union(tensors: Sequence, kind: str,
+               granule: int = 1) -> Union[Packing, None]:
     """One packing for several operands at once, holding every cell any of
     them fills.
 
@@ -218,11 +245,19 @@ def pack_union(tensors: Sequence, kind: str) -> Union[Packing, None]:
     """
     if kind not in KINDS:
         raise ValueError(f'unknown packing {kind!r}; one of {KINDS}')
+    granule = int(granule)
+    if granule < 1:
+        raise ValueError('a granule is at least one row')
+    if kind == 'bits' and granule > 1:
+        # Not a missing case: the slot of a row is how many non-zeros lie
+        # below it, so two adjacent rows are two adjacent slots only where
+        # both are stored.  A vector read has no form here.
+        return None
     tensors = tuple(tensors)
     # Asked repeatedly and answered from the operand alone: the generator
     # weighs all three forms against the block's shared memory before it
     # offers one, and does it again on every rebuild of the section.
-    cache = None
+    cache, key = None, (kind, granule)
     if len(tensors) == 1:
         cache = getattr(tensors[0], '_packings', None)
         if cache is None:
@@ -231,12 +266,12 @@ def pack_union(tensors: Sequence, kind: str) -> Union[Packing, None]:
                 tensors[0]._packings = cache
             except AttributeError:
                 cache = None
-        elif kind in cache:
-            return cache[kind]
+        elif key in cache:
+            return cache[key]
     masks = [_mask(t) for t in tensors]
     def nothing():
         if cache is not None:
-            cache[kind] = None
+            cache[key] = None
         return None
     if not masks or any(m is None for m in masks):
         return nothing()
@@ -248,23 +283,30 @@ def pack_union(tensors: Sequence, kind: str) -> Union[Packing, None]:
     if not mask.any():
         return nothing()
     rows, columns = mask.shape
+    def run_of(nz):
+        """The rows `nz` spans, rounded out to whole granules."""
+        if not len(nz):
+            return 0, 0
+        start = (int(nz[0]) // granule) * granule
+        stop = -(-(int(nz[-1]) + 1) // granule) * granule
+        return start, stop - start
+
     if kind == 'rows':
-        used = np.flatnonzero(mask.any(axis=1))
-        first, span = int(used[0]), int(used[-1] - used[0] + 1)
+        first, span = run_of(np.flatnonzero(mask.any(axis=1)))
         packing = Packing('rows', rows, columns, [first] * columns,
                           [span] * columns,
-                          [span * c for c in range(columns)])
+                          [span * c for c in range(columns)],
+                          granule=granule)
     elif kind == 'runs':
         starts, lengths, offsets, at = [], [], [], 0
         for c in range(columns):
-            nz = np.flatnonzero(mask[:, c])
-            start = int(nz[0]) if len(nz) else 0
-            length = int(nz[-1] - nz[0] + 1) if len(nz) else 0
+            start, length = run_of(np.flatnonzero(mask[:, c]))
             starts.append(start)
             lengths.append(length)
             offsets.append(at)
             at += length
-        packing = Packing('runs', rows, columns, starts, lengths, offsets)
+        packing = Packing('runs', rows, columns, starts, lengths, offsets,
+                          granule=granule)
     else:
         starts, lengths, offsets, words, at = [], [], [], [], 0
         for c in range(columns):
@@ -283,5 +325,5 @@ def pack_union(tensors: Sequence, kind: str) -> Union[Packing, None]:
                           words)
     found = packing if packing.elements < rows * columns else None
     if cache is not None:
-        cache[kind] = found
+        cache[key] = found
     return found

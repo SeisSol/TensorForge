@@ -2278,6 +2278,11 @@ class Generator:
     what the form *would* cost and `_settle_storage` checks what it does;
     an estimate that proves optimistic costs a rebuild, which is the loop
     it already sits in.
+
+    At one row to a lane, which is the other thing not known yet: a wide
+    lead rounds the runs out and the form comes out a few per cent larger
+    (`Packing.granule`).  Optimistic in the same direction and for the same
+    reason, and caught in the same place.
     """
     kind = self._context.get_user_options().pack_operands
     if kind == 'off' or getattr(obj, 'storage_order', None) is not None:

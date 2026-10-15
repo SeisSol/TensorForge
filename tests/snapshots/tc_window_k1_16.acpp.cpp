@@ -1,5 +1,5 @@
 // === base name ===
-kernel_9f6a9081ad5ed62c
+kernel_2a1d938700f1fe95
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_9f6a9081ad5ed62c = {{16, 16, 1}, 16, 16, 1, 16, 1024, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_9f6a9081ad5ed62c(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_9f6a9081ad5ed62c(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_2a1d938700f1fe95 = {{16, 16, 1}, 16, 16, 1, 16, 1024, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_2a1d938700f1fe95(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_2a1d938700f1fe95(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_9f6a9081ad5ed62c(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_2a1d938700f1fe95(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (16, 16, 1);
@@ -73,21 +73,21 @@ tensorforge::LaunchConfig launch_config_kernel_9f6a9081ad5ed62c(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_9f6a9081ad5ed62c(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_9f6a9081ad5ed62c(numElements0, streamPtr);
+void launcher_kernel_2a1d938700f1fe95(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_2a1d938700f1fe95(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_9f6a9081ad5ed62c(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, flags0);
+  kernel_kernel_2a1d938700f1fe95(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
+inline void kernel_kernel_2a1d938700f1fe95(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
     sycl::accessor<float, 1, sycl::access::mode::read_write, sycl::access::target::local> totalShrMem (256, cgh); {
       cgh.parallel_for(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, [=](sycl::nd_item<3> item)  {
@@ -104,66 +104,68 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
         // tensorforge-meta: {"fp":"float","launch":{"active_threads":16,"block":[16,16,1],"cooperative":false,"lead_width":1,"mults_per_block":16,"persistent":true,"sections":[{"barrier":false,"mults_per_block":16,"shared_elements":256}],"shared_bytes":1024,"shared_elements":256,"threads_per_mult":16},"loops":[],"operands":[{"addressing":"strided","alias":"C","bbox":[[0,0],[16,9]],"name":"m0","ordered":false,"parts":1,"shape":[16,9],"variant":false},{"addressing":"none","alias":"A","bbox":[[0,1],[16,17]],"name":"m1","ordered":false,"parts":1,"shape":[16,20],"variant":false},{"addressing":"strided","alias":"B","bbox":[[1,0],[17,9]],"name":"m2","ordered":false,"parts":1,"shape":[20,9],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[16,9]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[16,9]},"kind":"multilinear","ops":[{"addressing":"none","bbox":[[0,1],[16,17]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[16,20]},{"addressing":"strided","bbox":[[1,0],[17,9]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[20,9]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"version":"0.0.1"}
         {
           float* localShrMem0 = &totalShrMem[16 * item.get_local_id(1) + 0];
+          size_t v3_batchId1 = ((item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))) < numElements0) ? (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))) : 0u;
           const float *const __restrict__ glb_m1 = &m1[0];
+          float r0[18]{};
+          const uint32_t flagWordFirst = flags0 == nullptr ? 1 : flags0[v3_batchId1];
+          size_t v939_flagSecondAhead = v3_batchId1 + (item.get_group_range(2) * item.get_group().get_local_range(1));
+          const uint32_t flagWordSecond = flags0 == nullptr ? 1 : flags0[((v939_flagSecondAhead < numElements0) ? v939_flagSecondAhead : v3_batchId1)];
+          const float *const __restrict__ peel_glb_m2 = &m2[v3_batchId1 * 144 + 0 + m2_extraOffset];
+          int32_t v947_lead = item.get_local_id(2) % 16;
+          bool v948_g = v947_lead >= 1;
+          bool v949_g = v947_lead < 1;
+          // r0 = load{g>r}(peel_glb_m2);
+          if (v948_g) {
+            int32_t v970_a = v947_lead - 1;
+            #pragma unroll
+            for (int32_t v971_i1 = 0; v971_i1 < 9; ++v971_i1) {
+              float v974_data = peel_glb_m2[(v970_a + (v971_i1 * 16))];
+              r0[(v971_i1 * 2)] = v974_data;
+            }
+          }
+          if (v949_g) {
+            int32_t v978_a = (v947_lead + 16_i32) - 1;
+            #pragma unroll
+            for (int32_t v979_i1 = 0; v979_i1 < 9; ++v979_i1) {
+              float v982_data = peel_glb_m2[(v978_a + (v979_i1 * 16))];
+              r0[(1 + (v979_i1 * 2))] = v982_data;
+            }
+          }
+          uint32_t v943_flagWord = flagWordFirst;
+          uint32_t v944_flagWordNext = flagWordSecond;
           for (size_t v8_batchId0 = (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))); v8_batchId0 < numElements0; v8_batchId0 += (item.get_group_range(2) * item.get_group().get_local_range(1))) {
             size_t v9_ahead1 = v8_batchId0 + (item.get_group_range(2) * item.get_group().get_local_range(1));
             size_t v11_batchId1 = (v9_ahead1 < numElements0) ? v9_ahead1 : v8_batchId0;
-            const bool allowed = flags0 == nullptr ? true : static_cast<bool>(flags0[v8_batchId0]);
+            const float *const __restrict__ wrap_glb_m2 = &m2[v11_batchId1 * 144 + 0 + m2_extraOffset];
+            size_t v1002_flagAheadAhead = v11_batchId1 + (item.get_group_range(2) * item.get_group().get_local_range(1));
+            const uint32_t flagWordAhead = flags0 == nullptr ? 1 : flags0[((v1002_flagAheadAhead < numElements0) ? v1002_flagAheadAhead : v11_batchId1)];
+            const bool allowed = static_cast<bool>(v943_flagWord);
             if (allowed) {
               float *const __restrict__ glb_m0 = &m0[v8_batchId0 * 144 + 0 + m0_extraOffset];
-              const float *const __restrict__ glb_m2 = &m2[v8_batchId0 * 144 + 0 + m2_extraOffset];
-              float r0[18]{};
-              // r0 = load{g>r}(glb_m2);
-              int32_t v21_lead = item.get_local_id(2) % 16;
-              if (v21_lead >= 1) {
-                int32_t v26_a = v21_lead - 1;
-                #pragma unroll
-                for (int32_t v23_i1 = 0; v23_i1 < 9; ++v23_i1) {
-                  float v29_data = glb_m2[(v26_a + (v23_i1 * 16))];
-                  r0[(v23_i1 * 2)] = v29_data;
-                }
-              }
-              if (v21_lead < 1) {
-                int32_t v36_a = (v21_lead + 16_i32) - 1;
-                #pragma unroll
-                for (int32_t v33_i1 = 0; v33_i1 < 9; ++v33_i1) {
-                  float v39_data = glb_m2[(v36_a + (v33_i1 * 16))];
-                  r0[(1 + (v33_i1 * 2))] = v39_data;
-                }
-              }
               float r1[9]{};
               // ir1 = +(glb_m1 * r0)
               // [(0, 16), (0, 9)] [(1, 17)]
               float ir1[9]{};
-              float v47_data = glb_m1[v21_lead];
+              float v47_data = glb_m1[v947_lead];
               float v48_data = r0[0];
-              float v51_data = ir1[0];
-              ir1[0] = (v51_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[0] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v54_data = r0[2];
-              float v57_data = ir1[1];
-              ir1[1] = (v57_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v54_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[1] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v54_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v60_data = r0[4];
-              float v63_data = ir1[2];
-              ir1[2] = (v63_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v60_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[2] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v60_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v66_data = r0[6];
-              float v69_data = ir1[3];
-              ir1[3] = (v69_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v66_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[3] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v66_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v72_data = r0[8];
-              float v75_data = ir1[4];
-              ir1[4] = (v75_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v72_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[4] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v72_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v78_data = r0[10];
-              float v81_data = ir1[5];
-              ir1[5] = (v81_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v78_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[5] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v78_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v84_data = r0[12];
-              float v87_data = ir1[6];
-              ir1[6] = (v87_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v84_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[6] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v84_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v90_data = r0[14];
-              float v93_data = ir1[7];
-              ir1[7] = (v93_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
+              ir1[7] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
               float v96_data = r0[16];
-              float v99_data = ir1[8];
-              ir1[8] = (v99_data + (v47_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1)))));
-              float v102_data = glb_m1[(v21_lead + 16)];
+              ir1[8] = (v47_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (1))));
+              float v102_data = glb_m1[(v947_lead + 16)];
               float v106_data = ir1[0];
               ir1[0] = (v106_data + (v102_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (2)))));
               float v112_data = ir1[1];
@@ -182,7 +184,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v148_data + (v102_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (2)))));
               float v154_data = ir1[8];
               ir1[8] = (v154_data + (v102_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (2)))));
-              float v157_data = glb_m1[(v21_lead + 32)];
+              float v157_data = glb_m1[(v947_lead + 32)];
               float v161_data = ir1[0];
               ir1[0] = (v161_data + (v157_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (3)))));
               float v167_data = ir1[1];
@@ -201,7 +203,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v203_data + (v157_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (3)))));
               float v209_data = ir1[8];
               ir1[8] = (v209_data + (v157_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (3)))));
-              float v212_data = glb_m1[(v21_lead + 48)];
+              float v212_data = glb_m1[(v947_lead + 48)];
               float v216_data = ir1[0];
               ir1[0] = (v216_data + (v212_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (4)))));
               float v222_data = ir1[1];
@@ -220,7 +222,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v258_data + (v212_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (4)))));
               float v264_data = ir1[8];
               ir1[8] = (v264_data + (v212_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (4)))));
-              float v267_data = glb_m1[(v21_lead + 64)];
+              float v267_data = glb_m1[(v947_lead + 64)];
               float v271_data = ir1[0];
               ir1[0] = (v271_data + (v267_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (5)))));
               float v277_data = ir1[1];
@@ -239,7 +241,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v313_data + (v267_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (5)))));
               float v319_data = ir1[8];
               ir1[8] = (v319_data + (v267_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (5)))));
-              float v322_data = glb_m1[(v21_lead + 80)];
+              float v322_data = glb_m1[(v947_lead + 80)];
               float v326_data = ir1[0];
               ir1[0] = (v326_data + (v322_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (6)))));
               float v332_data = ir1[1];
@@ -258,7 +260,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v368_data + (v322_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (6)))));
               float v374_data = ir1[8];
               ir1[8] = (v374_data + (v322_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (6)))));
-              float v377_data = glb_m1[(v21_lead + 96)];
+              float v377_data = glb_m1[(v947_lead + 96)];
               float v381_data = ir1[0];
               ir1[0] = (v381_data + (v377_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (7)))));
               float v387_data = ir1[1];
@@ -277,7 +279,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v423_data + (v377_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (7)))));
               float v429_data = ir1[8];
               ir1[8] = (v429_data + (v377_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (7)))));
-              float v432_data = glb_m1[(v21_lead + 112)];
+              float v432_data = glb_m1[(v947_lead + 112)];
               float v436_data = ir1[0];
               ir1[0] = (v436_data + (v432_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (8)))));
               float v442_data = ir1[1];
@@ -296,7 +298,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v478_data + (v432_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (8)))));
               float v484_data = ir1[8];
               ir1[8] = (v484_data + (v432_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (8)))));
-              float v487_data = glb_m1[(v21_lead + 128)];
+              float v487_data = glb_m1[(v947_lead + 128)];
               float v491_data = ir1[0];
               ir1[0] = (v491_data + (v487_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (9)))));
               float v497_data = ir1[1];
@@ -315,7 +317,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v533_data + (v487_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (9)))));
               float v539_data = ir1[8];
               ir1[8] = (v539_data + (v487_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (9)))));
-              float v542_data = glb_m1[(v21_lead + 144)];
+              float v542_data = glb_m1[(v947_lead + 144)];
               float v546_data = ir1[0];
               ir1[0] = (v546_data + (v542_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (10)))));
               float v552_data = ir1[1];
@@ -334,7 +336,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v588_data + (v542_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (10)))));
               float v594_data = ir1[8];
               ir1[8] = (v594_data + (v542_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (10)))));
-              float v597_data = glb_m1[(v21_lead + 160)];
+              float v597_data = glb_m1[(v947_lead + 160)];
               float v601_data = ir1[0];
               ir1[0] = (v601_data + (v597_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (11)))));
               float v607_data = ir1[1];
@@ -353,7 +355,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v643_data + (v597_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (11)))));
               float v649_data = ir1[8];
               ir1[8] = (v649_data + (v597_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (11)))));
-              float v652_data = glb_m1[(v21_lead + 176)];
+              float v652_data = glb_m1[(v947_lead + 176)];
               float v656_data = ir1[0];
               ir1[0] = (v656_data + (v652_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (12)))));
               float v662_data = ir1[1];
@@ -372,7 +374,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v698_data + (v652_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (12)))));
               float v704_data = ir1[8];
               ir1[8] = (v704_data + (v652_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (12)))));
-              float v707_data = glb_m1[(v21_lead + 192)];
+              float v707_data = glb_m1[(v947_lead + 192)];
               float v711_data = ir1[0];
               ir1[0] = (v711_data + (v707_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (13)))));
               float v717_data = ir1[1];
@@ -391,7 +393,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v753_data + (v707_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (13)))));
               float v759_data = ir1[8];
               ir1[8] = (v759_data + (v707_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (13)))));
-              float v762_data = glb_m1[(v21_lead + 208)];
+              float v762_data = glb_m1[(v947_lead + 208)];
               float v766_data = ir1[0];
               ir1[0] = (v766_data + (v762_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (14)))));
               float v772_data = ir1[1];
@@ -410,7 +412,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v808_data + (v762_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (14)))));
               float v814_data = ir1[8];
               ir1[8] = (v814_data + (v762_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (14)))));
-              float v817_data = glb_m1[(v21_lead + 224)];
+              float v817_data = glb_m1[(v947_lead + 224)];
               float v821_data = ir1[0];
               ir1[0] = (v821_data + (v817_data * (sycl::select_from_group(item.get_sub_group(), v48_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (15)))));
               float v827_data = ir1[1];
@@ -429,7 +431,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               ir1[7] = (v863_data + (v817_data * (sycl::select_from_group(item.get_sub_group(), v90_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (15)))));
               float v869_data = ir1[8];
               ir1[8] = (v869_data + (v817_data * (sycl::select_from_group(item.get_sub_group(), v96_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (15)))));
-              float v872_data = glb_m1[(v21_lead + 240)];
+              float v872_data = glb_m1[(v947_lead + 240)];
               float v873_data = r0[1];
               float v876_data = ir1[0];
               ir1[0] = (v876_data + (v872_data * (sycl::select_from_group(item.get_sub_group(), v873_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (0)))));
@@ -455,6 +457,23 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               float v918_data = ir1[7];
               ir1[7] = (v918_data + (v872_data * (sycl::select_from_group(item.get_sub_group(), v915_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (0)))));
               float v921_data = r0[17];
+              // r0 = load{g>r}(wrap_glb_m2);
+              if (v948_g) {
+                int32_t v985_a = v947_lead - 1;
+                #pragma unroll
+                for (int32_t v986_i1 = 0; v986_i1 < 9; ++v986_i1) {
+                  float v989_data = wrap_glb_m2[(v985_a + (v986_i1 * 16))];
+                  r0[(v986_i1 * 2)] = v989_data;
+                }
+              }
+              if (v949_g) {
+                int32_t v993_a = (v947_lead + 16_i32) - 1;
+                #pragma unroll
+                for (int32_t v994_i1 = 0; v994_i1 < 9; ++v994_i1) {
+                  float v997_data = wrap_glb_m2[(v993_a + (v994_i1 * 16))];
+                  r0[(1 + (v994_i1 * 2))] = v997_data;
+                }
+              }
               float v924_data = ir1[8];
               ir1[8] = (v924_data + (v872_data * (sycl::select_from_group(item.get_sub_group(), v921_data, (item.get_sub_group().get_local_linear_id() / 16) * 16 + (0)))));
               // r1 = ir1
@@ -470,7 +489,7 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               // glb_m0 = store{r>g}(r1);
               #pragma unroll
               for (int32_t v930_i0 = 0; v930_i0 < 1; ++v930_i0) {
-                int32_t v935_lead = v21_lead + (v930_i0 * 16);
+                int32_t v935_lead = v947_lead + (v930_i0 * 16);
                 #pragma unroll
                 for (int32_t v931_i1 = 0; v931_i1 < 9; ++v931_i1) {
                   float v933_data = r1[(v930_i0 + v931_i1)];
@@ -479,6 +498,27 @@ inline void kernel_kernel_9f6a9081ad5ed62c(sycl::queue *stream, sycl::range<3> g
               }
               sycl::group_barrier(item.get_sub_group());
             }
+            else {
+              // r0 = load{g>r}(wrap_glb_m2);
+              if (v948_g) {
+                int32_t v955_a = v947_lead - 1;
+                #pragma unroll
+                for (int32_t v956_i1 = 0; v956_i1 < 9; ++v956_i1) {
+                  float v959_data = wrap_glb_m2[(v955_a + (v956_i1 * 16))];
+                  r0[(v956_i1 * 2)] = v959_data;
+                }
+              }
+              if (v949_g) {
+                int32_t v963_a = (v947_lead + 16_i32) - 1;
+                #pragma unroll
+                for (int32_t v964_i1 = 0; v964_i1 < 9; ++v964_i1) {
+                  float v967_data = wrap_glb_m2[(v963_a + (v964_i1 * 16))];
+                  r0[(1 + (v964_i1 * 2))] = v967_data;
+                }
+              }
+            }
+            v943_flagWord = v944_flagWordNext;
+            v944_flagWordNext = flagWordAhead;
           }
         }
       });

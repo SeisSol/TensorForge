@@ -213,6 +213,12 @@ CONFIGS: Dict[str, Config] = {
     # give up.
     'pack-fit': Config('pack-fit', Options(pack_operands='fit',
                                            preload_globals=True)),
+    # `prepare_operands` on its own, against the target's own defaults for
+    # everything else.  The existing `prepare` row pairs it with
+    # `no-preload`, which answers a different question: that one asks
+    # whether preparing replaces staging, this one whether preparing is
+    # worth having at all -- which is what a default would be deciding.
+    'prepare-only': Config('prepare-only', Options(prepare_operands=True)),
 }
 
 

@@ -983,18 +983,33 @@ class MultilinearInstruction(ComputeInstruction):
         if not self._ops or len(self._ns) == 0:
             return
         plan = self._plan()
+        # Three offers, one operand.  The SIMT interleave and the vendor's
+        # fragment order *grow* the buffer -- padding slots, a k-quad order
+        # of SeisSol's operators is 33 % larger than the box at 32 lanes --
+        # and buy a wide load with it; a packing shrinks it by 40 % and
+        # buys room.  They are not comparable, so which goes first is a
+        # policy and is stated here rather than falling out of the order
+        # the code happens to be in: a named form is an instruction and
+        # takes the operand, while `auto` and `fit` leave the measured win
+        # in place and pack only what it declines.
+        named = self._context.get_user_options().pack_operands not in (
+            'off', 'auto', 'fit')
+        if named:
+            self._offer_packing(pack_level)
+            if getattr(self._ops[0].symbol.obj, 'packing', None) is not None:
+                return
         if plan[0].strategy is Strategy.GENERIC:
             self._offer_simt_order(settling=True)
-            # Second, and only where the interleave declined: the two are
-            # different answers to the same question -- how the operand lies
-            # in memory -- and the interleave *grows* it with padding where
-            # this takes padding away.
             self._offer_packing(pack_level)
             return
         depth = math.prod(mx - mi for mi, mx in self._ks)
         self._offer_order(_vendor_module(self._context),
                           self._ops[0].symbol.obj,
                           self._ns[0][1] - self._ns[0][0], depth)
+        if plan[0].strategy is Strategy.DPP:
+            # The DPP chain reads `A` by coordinate, so a packing addresses
+            # it exactly as it does the nest's.
+            self._offer_packing(pack_level)
 
     def _offer_simt_order(self, settling=False):
         """Let a batch-constant `A` be stored so a lane reads its rows in vectors.
@@ -1142,12 +1157,17 @@ class MultilinearInstruction(ComputeInstruction):
         """Whether this multiplication reads `A` the way a packing addresses
         it (`Symbol._packed_index`).
 
-        As its own lead operand, at width 1 over its lanes, with the row index
-        the lead dimension of a generic nest -- the conditions of
+        As its own lead operand, with the row index the lead dimension of a
+        generic nest or of AMD's DPP chain -- the conditions of
         `_reads_interleavable`, minus the one it has that this does not need:
         the rows need not start on a slot, because a packing is addressed by
         an offset on the lane and not by whole groups, and requiring the
         alignment is precisely what would throw the saving away.
+
+        A lane that holds several adjacent rows (`Options.lead_vectorize`,
+        AMD's width-2 DPP) is served by a packing whose runs are whole
+        granules of that width, which the offer asks for below; what the
+        read then needs on top is that its own window starts on one.
 
         What it has instead is the column.  A packed slot is `off_c + r -
         start_c`, and `off_c` and `start_c` are the column's own numbers, so
@@ -1158,22 +1178,25 @@ class MultilinearInstruction(ComputeInstruction):
         tables in memory, and the reason the tables are the next step rather
         than this one.
         """
-        if (_explicit_simd(self._context) or self._lead_width != 1
-                or not self._ops or self._ops[0].symbol is not sym):
+        if (_explicit_simd(self._context) or not self._ops
+                or self._ops[0].symbol is not sym):
             return False
         if self._opdim_to_nks[0] != ['n0', 'k0'] or 0 not in self._lead_dims:
             return False
-        if self._num_threads < 1:
+        if self._num_threads < 1 or self._lead_width < 1:
             return False
-        if self._plan()[0].strategy is not Strategy.GENERIC:
-            # The generic nest and nothing else.  The matrix paths read
-            # fragments of an order they prepared themselves, and AMD's DPP
-            # chain reads `A` four rows to a lane in one vector -- a packed
-            # span cannot hand it four adjacent rows unless the span and
-            # every column offset are multiples of the width, so packing
-            # there is a trade against the wide load and not a free saving.
-            # `_packed_index` refuses such a read rather than address it
-            # wrongly, which is what this keeps it from having to do.
+        if self._eff_offset(0, 0) % self._lead_width:
+            # A window that starts inside a lane's own run of rows: the
+            # predicate that holds the access off is per lane and cannot
+            # mask within one (`Symbol._packed_index` refuses it).
+            return False
+        if self._plan()[0].strategy not in (Strategy.GENERIC, Strategy.DPP):
+            # The nest and AMD's DPP chain, both of which read `A` by
+            # coordinate -- which is what a packing changes the address of
+            # and nothing else.  The matrix paths are out: they read
+            # fragments of an order they prepared for themselves, and a
+            # packed operand has no fragments, only the same cells with the
+            # empty ones left out.
             return False
         return not self._reduction_is_rolled()
 
@@ -1279,11 +1302,13 @@ class MultilinearInstruction(ComputeInstruction):
         # is read back the same way, so it is not a second opinion about the
         # order; anything else that reads the operand has to address it as
         # this does.
+        grain = int(self._lead_width)
         if any(user is not self
                and not (getattr(user, '_verbatim', False)
                         and user.get_dest() is sym)
                and not (isinstance(user, MultilinearInstruction)
                         and user._num_threads == threads
+                        and user._lead_width == grain
                         and user._reads_packable(sym, a_obj))
                for user in sym.get_user_list()):
             return
@@ -1308,10 +1333,11 @@ class MultilinearInstruction(ComputeInstruction):
         # (`packing.pack_union`).
         chosen = None
         for name in kinds:
-            if name == 'bits' and not self._bitset_fits(a_obj, shape[0],
-                                                        threads):
+            if name == 'bits' and (grain != 1
+                                   or not self._bitset_fits(a_obj, shape[0],
+                                                            threads)):
                 continue
-            chosen = packing_mod.pack_union(members, name)
+            chosen = packing_mod.pack_union(members, name, grain)
             if chosen is not None:
                 break
         if chosen is None:
@@ -1919,6 +1945,15 @@ class MultilinearInstruction(ComputeInstruction):
                         # An interleaved operand is ordered for the nest's
                         # lanes, not for a fragment: read by coordinate.
                         and getattr(a_obj, 'simt_interleave', None) is None
+                        # Nor is a packed one.  It is the same `(row,
+                        # column)` operand with the empty cells left out,
+                        # so its slots are not fragments and there is no
+                        # quad to read: `Symbol._packed_index` gives the
+                        # address, and the path reads it by coordinate like
+                        # any other operand.  Offered here, `quad_width`
+                        # would make every read four steps wide over a
+                        # buffer that has no such run.
+                        and getattr(a_obj, 'packing', None) is None
                         else None),
                 A_zero=A_zero if width == 1 else None,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,

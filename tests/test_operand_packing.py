@@ -144,6 +144,63 @@ def test_members_of_different_shapes_pack_to_nothing():
                        _tensor(np.ones((9, 2)))], "rows") is None
 
 
+# ---------------------------------------------------------------------------
+# A lane that holds several rows
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("granule", [2, 4])
+@pytest.mark.parametrize("kind", ["rows", "runs"])
+def test_a_granule_rounds_the_runs_out_to_whole_lane_vectors(kind, granule):
+    """A lane's `granule` rows have to be on one side of a run's end, since
+    the predicate that holds the access off cannot mask inside a lane."""
+    p = pack(_tensor(_band(runs=[(1, 6), (9, 26), (31, 33), (2, 34),
+                                 (5, 7), (13, 30), (7, 7), (11, 29)])),
+             kind, granule)
+    assert p.granule == granule
+    for start, length, offset in zip(p.starts, p.lengths, p.offsets):
+        assert start % granule == 0
+        assert length % granule == 0
+        assert offset % granule == 0
+
+
+@pytest.mark.parametrize("granule", [2, 4])
+def test_a_granule_still_holds_every_value(granule):
+    values = _band(runs=[(1, 6), (9, 26), (31, 33), (2, 34),
+                         (5, 7), (13, 30), (7, 7), (11, 29)])
+    p = pack(_tensor(values), "runs", granule)
+    held = set(p.order())
+    for cell in range(values.size):
+        r, c = cell % values.shape[0], cell // values.shape[0]
+        if values[r, c] != 0:
+            assert cell in held
+
+
+def test_a_granule_costs_little():
+    """Measured over the operators and stated here so a change shows: the
+    run form gives up 40.3 % at one row a lane, 38.7 % at two, 34.1 % at
+    four -- a reason to keep the wide read rather than to drop it."""
+    values = _band(rows=64, cols=8,
+                   runs=[(1, 6), (9, 26), (31, 33), (2, 61),
+                         (45, 50), (7, 22), (37, 38), (13, 54)])
+    t = _tensor(values)
+    sizes = [pack(t, "runs", g).elements for g in (1, 2, 4)]
+    assert sizes[0] < sizes[1] < sizes[2] < values.size
+
+
+def test_a_bitset_has_no_granule_but_one():
+    """Its slot is a count, so two adjacent rows are two adjacent slots only
+    where both are stored -- there is no vector form, and saying so is
+    better than rounding into a wrong address."""
+    assert pack(_tensor(_band()), "bits", 2) is None
+    with pytest.raises(ValueError):
+        Packing("bits", 8, 1, [0], [8], [0], words=[0xff], granule=2)
+
+
+def test_a_packing_refuses_a_granule_its_numbers_do_not_fit():
+    with pytest.raises(ValueError):
+        Packing("runs", 16, 2, [1, 0], [4, 4], [0, 4], granule=2)
+
+
 def test_a_packing_refuses_a_kind_it_does_not_know():
     with pytest.raises(ValueError):
         pack(_tensor(_band()), "columns")
@@ -228,6 +285,44 @@ def test_a_bitset_is_not_offered_where_a_lane_slot_outruns_the_word():
                    runs=[(2, 40)] * 6)
     _, t = _generated(values, "bits")
     assert t.packing is None
+
+
+def test_a_wide_lead_is_packed_at_its_own_width():
+    """`lead_vectorize` gives a lane four adjacent rows, and the packing
+    hands it four adjacent slots by rounding its runs to four."""
+    values = np.zeros((64, 8))
+    rng = np.random.default_rng(31)
+    for c, (lo, hi) in enumerate(((1, 6), (9, 26), (31, 33), (2, 61),
+                                  (45, 50), (7, 22), (37, 38), (13, 54))):
+        values[lo:hi + 1, c] = rng.uniform(0.5, 1.5, size=hi + 1 - lo)
+    rows, cols = values.shape
+    a = SubTensor(Tensor([rows, cols], Addressing.NONE,
+                         BoundingBox([0, 0], [rows, cols]), alias="A",
+                         datatype=Datatype.F32, data=values, alignment=16))
+    b = SubTensor(Tensor([cols, 6], Addressing.STRIDED,
+                         BoundingBox([0, 0], [cols, 6]), alias="B",
+                         datatype=Datatype.F32, alignment=16))
+    c = SubTensor(Tensor([rows, 6], Addressing.STRIDED,
+                         BoundingBox([0, 0], [rows, 6]), alias="C",
+                         datatype=Datatype.F32, alignment=16))
+    gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
+                    Context(arch="sm_120", backend="cuda",
+                            fp_type=Datatype.F32,
+                            options=Options(pack_operands="runs",
+                                            lead_vectorize=True)))
+    gen.generate()
+    assert a.tensor.packing is not None
+    assert a.tensor.packing.granule > 1
+    assert a.tensor.storage_elements() == a.tensor.packing.elements
+
+
+def test_a_named_form_takes_the_operand_from_the_fragment_order():
+    """The two are not comparable -- one buys a wide load with padding, the
+    other buys room -- so naming a form is an instruction and `auto` is
+    not."""
+    values = _band(rows=24, cols=7)
+    _, named = _generated(values, "runs", prepare_operands=True)
+    assert named.packing is not None and named.packing.kind == "runs"
 
 
 def test_fit_takes_the_loosest_form_that_leaves_room():

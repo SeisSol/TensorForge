@@ -761,20 +761,31 @@ declare('stage_group',
             'many share one staged copy.  Rounded up to whole waves.')
 
 declare('prepare_operands',
-        default=False,
+        default=True,
         parse=parse_bool,
         doc='Let the backend re-encode a batch-constant operand for the '
             'instruction that reads it -- store it in fragment order, split it '
             'into parts, or both.\n'
-            'A question and not a vendor rule because preparing an operand '
-            'moves work onto whoever fills the buffer: a host that cannot run '
-            'the packer cannot use the kernel, and only the caller knows '
-            'whether it can.  What preparing *means* is the primitive\'s '
-            'business; this only says whether it may.\n'
-            'Off by default.  On `local_flux` at batch 8192 the fragment order '
-            'alone was worth 16%, and 27% with the TF32 split on top -- but '
-            'only `Addressing.NONE` operands are eligible at all, so a case '
-            'with none of them pays the question with nothing.\n'
+            'What preparing *means* is the primitive\'s business; this only '
+            'says whether it may.  On `local_flux` at batch 8192 the fragment '
+            'order alone was worth 16%, and 27% with the TF32 split on top.  '
+            'Only `Addressing.NONE` operands are eligible at all, and only '
+            'where a path asks: over SeisSol\'s 119 kernels it arranges eight '
+            'operands on CDNA, for 3.7% more stored, and none at all on '
+            'sm_120 or on RDNA, where neither the matrix path nor the SIMT '
+            'interleave takes.  So on most targets this costs nothing and '
+            'changes nothing.\n'
+            'On by default, and what that turns over is worth stating.  '
+            'Preparing moves work onto whoever fills the buffer: the kernel '
+            'reads the order `layout_offerings()` describes, and a caller '
+            'that never collects it writes the tensor\'s own order into a '
+            'buffer the kernel reads as another -- the right size, the right '
+            'numbers, the wrong places.  yateto keeps that collection out of '
+            'its interface version on purpose, so a caller that does not '
+            'collect is not detectable before the fact.  What makes the '
+            'default honest is that it is detectable *after* one kernel, and '
+            '`YatetoFrontend` stops there rather than going on '
+            '(`_claim_check`).\n'
             'On the FMA path it stores such an operand in the SIMT interleave '
             '(`Tensor.simt_interleave`): each lane\'s rows side by side in '
             '16-byte groups, read with one aligned vector load.  Offered where '
@@ -821,10 +832,23 @@ declare('pack_operands',
             'the offer declines instead (`_reads_packable`); SeisSol does '
             'not reach that, since its reductions are far short of '
             '`k_unroll_max`.\n'
-            'Offered on the generic nest only.  The matrix paths read '
-            'fragments of an order they prepared themselves, and AMD\'s DPP '
-            'chain reads four rows to a lane in one vector, which a packed '
-            'span cannot serve without giving up the wide load.')
+            'Offered where `A` is read by coordinate: the generic nest and '
+            "AMD's DPP chain.  The matrix paths are out, because they read "
+            'fragments of an order they prepared for themselves and a '
+            'packed operand has no fragments.\n'
+            'A lane that holds several adjacent rows (`lead_vectorize`, '
+            "AMD's width-2 DPP) is served too: `rows` and `runs` round "
+            'their runs out to whole groups of that width, which over the '
+            'SeisSol operators gives up 40.3 % at one row a lane, 38.7 % at '
+            'two and 34.1 % at four.  `bits` has no such form -- its slot '
+            'is a population count, so two adjacent rows are two adjacent '
+            'slots only where both are stored.\n'
+            'Against the orders that *grow* the buffer -- the SIMT '
+            'interleave and the vendor fragment order, which buy a wide '
+            "load with padding (a k-quad order of SeisSol's operators is "
+            '33 % larger than the box at 32 lanes) -- a named form here '
+            'takes the operand and `auto`/`fit` leave the measured win in '
+            'place, packing only what it declines.')
 
 declare('launch_control',
         default=False,
