@@ -30,7 +30,9 @@ from .core import (ANY_EFFECT, BOOL, INDEX, SIZE, TOKEN, Access, BufferType, Eff
 from .asyncmem import (check_tokens, place_commits, schedule_async,
                        strip_commits)
 from .build import IRBuilder, access_of
-from .passes import cluster_loads, flatten_scopes, if_convert, pressure, cse, dce, fold, licm, load_cse, substitute, verify
+from .passes import (check_barrier_budget, cluster_loads, flatten_scopes,
+                     if_convert, pressure, cse, dce, fold, licm, load_cse,
+                     substitute, verify)
 from .barriers import Arena
 from .pipeline import (BodyContext, MoveLoads, PlaceBarriers, PlaceBuffers,
                        Prefetch, ShardLoads, WrapLoads, optimize,
@@ -41,7 +43,8 @@ __all__ = [
     'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'Arena', 'BodyContext', 'BufferType', 'Effect',
     'Emitter', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region',
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
-    'accesses_conflict', 'check_tokens', 'collect_accesses', 'collect_effect',
+    'accesses_conflict', 'check_barrier_budget', 'check_tokens',
+    'collect_accesses', 'collect_effect',
     'cse', 'dce', 'cluster_loads', 'flatten_scopes', 'if_convert', 'pressure', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
     'free_values', 'licm', 'load_cse', 'may_alias', 'optimize', 'place_commits',
     'schedule_async', 'standard_pipeline', 'strip_commits',

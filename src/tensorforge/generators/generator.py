@@ -1474,6 +1474,7 @@ class Generator:
         self._restore(placed[1])
     body, _ = placed
     self._check_layout(body, index)
+    self._check_barriers(body, index)
     self._section.body = self._with_arena(self._section, body)
     return True
 
@@ -1564,6 +1565,19 @@ class Generator:
           f'section {index}: the shared-memory layout overlaps buffers that '
           f'are occupied together:\n'
           + '\n'.join(f'  {v}' for v in violations[:8]))
+
+  def _check_barriers(self, body, index: int) -> None:
+    """Refuse a block of more multiplications than the target meets apart,
+    where the body holds a barrier of one multiplication
+    (`pir.check_barrier_budget`): the block the launch will have against the
+    barriers that ended up in the body, rather than the prediction it was
+    sized from."""
+    found = pir.check_barrier_budget(
+        body, self._section.shr_mem_obj.get_mults_per_block(),
+        self._context.target.separable_mults(self._num_threads))
+    if found:
+      raise GenerationError(f'section {index} cannot be emitted: '
+                            + '; '.join(found))
 
   def _launch_read(self, section) -> tuple:
     """What the body built for `section` read of the launch, as far as the

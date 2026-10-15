@@ -1765,6 +1765,20 @@ GROUPS = {
         ('a barrier of one multiplication spelled where it has none',
          sub(EMIT, '            if sync_mult is not None and not sync_mult(threads):',
              '            if False:', 1)),
+        ('the finished body not weighed against the block',
+         sub(GEN, '    self._check_barriers(body, index)\n', '', 1)),
+        ('a block of any size taken for one the target meets apart',
+         sub(PASSES, '    if separable is None or mults_per_block <= separable:\n'
+                     '        return []\n',
+             '    return []\n', 1)),
+        ("a block barrier taken for a multiplication's",
+         sub(PASSES, "        if s.op == Op.BARRIER and s.attr('participants') == Participants.MULT:",
+             '        if s.op == Op.BARRIER:', 1)),
+        ('a barrier inside a loop not seen',
+         sub(PASSES, '    for s in walk_stmts(body):\n'
+                     "        if s.op == Op.BARRIER and s.attr('participants')",
+             '    for s in body:\n'
+             "        if s.op == Op.BARRIER and s.attr('participants')", 1)),
     ]),
 
     # Groups that change places across a loop's back edge are no steady

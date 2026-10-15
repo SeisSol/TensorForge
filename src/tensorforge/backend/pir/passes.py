@@ -20,7 +20,7 @@ from tensorforge.common.basic_types import Datatype
 
 from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
-                   Region, ScalarType, Stmt, TokenType, Value,
+                   Participants, Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
                    def_use, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens
@@ -149,6 +149,31 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
 
 
 _NAMED = re.compile(r'\bv(\d+)_\w*\b')
+
+
+def check_barrier_budget(body: Tuple[Stmt, ...], mults_per_block: int,
+                         separable: Optional[int]) -> List[str]:
+    """Whether the block tells its multiplications apart at the barriers of
+    a finished body.
+
+    Where the target meets one multiplication on a rendezvous of its own --
+    a named barrier on CUDA, numbered by the multiplication -- a block holds
+    as many multiplications as it has rendezvous (`separable`,
+    `Target.separable_mults`, None for no limit), and one more waits at a
+    barrier that does not exist.  The thread-block policy sizes the block to
+    that count from a prediction, whether the section will hold a barrier at
+    all; this weighs the count against the barriers the body holds.
+    """
+    if separable is None or mults_per_block <= separable:
+        return []
+    for s in walk_stmts(body):
+        if s.op == Op.BARRIER and s.attr('participants') == Participants.MULT:
+            return [f'a barrier of one multiplication in a block of '
+                    f'{mults_per_block} multiplications, where the target '
+                    f'meets {separable} apart (`Target.separable_mults`): '
+                    f'the multiplications past them wait at a barrier that '
+                    f'does not exist']
+    return []
 
 
 def _check_dangling_names(body: Tuple[Stmt, ...]) -> List[str]:

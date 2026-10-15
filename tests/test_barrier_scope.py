@@ -368,6 +368,66 @@ def test_a_block_holds_no_more_multiplications_than_named_barriers(
     assert policy.get_num_mults_per_block() == 15
 
 
+def test_the_verifier_weighs_the_block_against_the_barriers_in_the_body():
+    """A barrier of one multiplication, at any depth, in a block of more
+    multiplications than the target meets apart; a block barrier is no such
+    resource, and a target without a limit has none to exceed."""
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.core import Participants
+
+    def body(participants):
+        b = pir.IRBuilder(fptype=Datatype.F32)
+        with b.for_(0, 4, 1):
+            b.barrier(participants, threads=64)
+        return tuple(b.finish())
+
+    mult, block = body(Participants.MULT), body(Participants.BLOCK)
+    assert pir.check_barrier_budget(mult, 15, 15) == []
+    found = pir.check_barrier_budget(mult, 16, 15)
+    assert len(found) == 1 and '16 multiplications' in found[0], found
+    assert pir.check_barrier_budget(mult, 16, None) == []
+    assert pir.check_barrier_budget(block, 16, 15) == []
+
+
+def test_a_block_sized_past_its_named_barriers_is_refused(monkeypatch):
+    """Without the policy's cap the block of 64-lane multiplications on
+    sm_86 holds more than fifteen, and the kernel has named barriers: the
+    check on the finished body refuses it, rather than letting the sixteenth
+    multiplication wait at barrier 16."""
+    import contextlib, dataclasses, importlib.util, io
+    from pathlib import Path
+    from tensorforge.common import target as target_module
+    from tensorforge.common.exceptions import GenerationError
+    from tensorforge.common.options import Options
+    from tensorforge.generators import generator as generator_module
+
+    path = next((Path(__file__).resolve().parent / 'cases').rglob(
+        'aligned_operands.py'))
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    wide = dataclasses.replace(target_module.PREFERENCES['nvidia'],
+                               unstaged_block_threads=4096)
+    monkeypatch.setitem(target_module.PREFERENCES, 'nvidia', wide)
+
+    def build():
+        ctx = Context(arch="sm_86", backend="cuda",
+                      fp_type=getattr(mod, 'DTYPE', None),
+                      options=Options(lanes_per_mult=64))
+        gen = generator_module.Generator(mod.descr_list(), ctx)
+        with contextlib.redirect_stdout(io.StringIO()):
+            gen.generate()
+        return gen
+
+    gen = build()
+    assert gen._sections[0].shr_mem_obj.get_mults_per_block() == 15
+    assert 'barrier.sync' in gen.get_kernel()
+    monkeypatch.setattr(generator_module.AbstractThreadBlockPolicy,
+                        '_barrier_cap', lambda self: None)
+    with pytest.raises(GenerationError, match='does not exist'):
+        build()
+
+
 def test_the_barrier_behind_a_bulk_copys_arming_is_the_multiplications(
         context):
     """Spelled as every other barrier of the multiplication: the wave's at
