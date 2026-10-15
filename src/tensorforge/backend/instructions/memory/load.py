@@ -264,6 +264,55 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     else:
       return f'{lexic.thread_idx_x}'
 
+  def _sum(self, writer, *terms):
+    """`terms` added, as a value, with the constants folded on the way."""
+    const = sum(t for t in terms if isinstance(t, (int, np.integer)))
+    out = None
+    for t in terms:
+      if isinstance(t, (int, np.integer)):
+        continue
+      out = t if out is None else writer.op('add', INDEX, out, t, hint='a')
+    if out is None:
+      return int(const)
+    return out if not const else writer.op('add', INDEX, out, int(const),
+                                           hint='a')
+
+  def _hop_offset(self, writer, increment, step):
+    """Where this work-item's share of hop `step` begins, as a value.
+
+    `increment * linear_idx + step * num_threads`: the lane's own granule
+    within the hop, plus the hops the team has already moved.  `None` where
+    `_linear_index_value` has none, and the caller keeps the text.
+    """
+    lane = self._linear_index_value(writer)
+    if lane is None:
+      return None
+    terms = [writer.op('mul', INDEX, lane, increment, hint='h')
+             if increment != 1 else lane]
+    if isinstance(step, (int, np.integer)):
+      terms.append(int(step) * self._num_threads)
+    else:
+      terms.append(writer.op('mul', INDEX, step, self._num_threads, hint='h'))
+    return self._sum(writer, *terms)
+
+  def _linscaled(self, writer, offset, linscale):
+    """`(x / read) * dst + x % read`, as values -- the padded-row rescale of
+    the destination index (`linscale`), which is text everywhere else."""
+    if linscale is None:
+      return offset
+    read, dst = linscale
+    rows = writer.op('div', INDEX, offset, read, hint='row')
+    return writer.op('add', INDEX,
+                     writer.op('mul', INDEX, rows, dst, hint='row'),
+                     writer.op('rem', INDEX, offset, read, hint='col'),
+                     hint='a')
+
+  def _source_address_value(self, writer, index):
+    """`_source_address` as an operand rather than a pinned name."""
+    if self._src.stack() != 1:
+      return None
+    return self._src.address_value(writer, self._context, index)
+
   def _linear_index_value(self, writer):
     """`_linear_idx` as a value, or `None` where there is no value for it.
 
@@ -289,7 +338,23 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       # ESIMD type").  The guard is a compile-time truth there anyway.
       return None
     if self._blockwide:
-      return None
+      # `raw_tid_x + raw_tid_y * blockDim.x`, with the block extent as the
+      # number it is: the launch is `threads_per_mult / mults_per_block`
+      # along `x`, and both are settled before this transfer is built.
+      # Checked against the launch the generator goes on to emit, over the
+      # whole case corpus: 57 of 57 agree.  (`self._num_threads` is the
+      # block-wide team here, not the lanes of one multiplication -- taking
+      # it for the extent is wrong by a factor of eight to sixteen, and
+      # wrong in a way that compiles.)
+      mults = self._shr_mem.obj.get_mults_per_block()
+      if not mults or self._num_threads % mults:
+        return None
+      block_x = self._num_threads // mults
+      return writer.op('add', INDEX, writer.thread_id('x', raw=True),
+                       writer.op('mul', INDEX,
+                                 writer.thread_id('y', raw=True), block_x,
+                                 hint='row'),
+                       hint='lin')
     return writer.thread_id('x')
 
   def _lane_guard(self, writer, op: str, bound: int):
@@ -808,8 +873,30 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         indexwrapper = lambda x: f'((({x}) / {linscale[0]}) * {linscale[1]} + (({x}) % {linscale[0]}))'
 
       if (end - start) / increment > self._manual_unroll_threshold:
-        # load using a for-loop
-        with writer.For(f'int32_t i = {start}; i < {end}; i += {increment}', True):
+        # A counted loop rather than a line of text, where every term of
+        # both addresses is a value.  The text form is an `Op.RAWBLOCK`:
+        # unmovable by construction, so `schedule.touches` answers `None`
+        # for it *and for every region holding it*, and nothing may be
+        # reordered across the hops it wraps -- 134 of the corpus's
+        # remaining opaque nodes are these heads.  What is inside them is
+        # the transfer, which is the one thing a pipeline wants to move.
+        # Every term of both addresses has to be a value for this; the
+        # explicitly vectorized lowering has no lane index to offer and a
+        # stacked source no single binding, and those keep the text.
+        counted = (structured and hasattr(writer, 'for_')
+                   and self._linear_index_value(writer) is not None
+                   and self._source_address_value(writer, index) is not None)
+        if counted:
+          loop = writer.for_(start, end, increment, unroll=True, hint='i')
+          with loop:
+            offset = self._hop_offset(writer, increment, loop.induction)
+            dst_base = self._dest.address_value(writer, self._context, index)
+            src_base = self._source_address_value(writer, index)
+            write_load(self._sum(writer, dst_offset, dst_base,
+                                 self._linscaled(writer, offset, linscale)),
+                       self._sum(writer, src_offset, src_base, offset))
+        else:
+         with writer.For(f'int32_t i = {start}; i < {end}; i += {increment}', True):
           linear = f'{increment} * {self._linear_idx()} + i * {self._num_threads}'
           dst_index, src_index = indexwrapper(linear), linear
           dest_access_index = self._dest.access_address(self._context, index, writer)

@@ -720,7 +720,7 @@ class IRBuilder:
                     return value
         return value
 
-    def thread_id(self, axis: str = 'x') -> Value:
+    def thread_id(self, axis: str = 'x', raw: bool = False) -> Value:
         """The thread index along `axis`.
 
         `x` is the lane, the narrowest thing there is.  `y` and `z` are not:
@@ -737,13 +737,19 @@ class IRBuilder:
         level = Uniformity.LANE if axis == 'x' else Uniformity.MULT
         # Same key shape as `call`, so that the two cannot both hold a
         # `thread_idx_x` under different names.
-        key = _cons_key(Op.CALL, INDEX, (),
-                        extra=(f'thread_idx_{axis}', None, level))
+        # `raw` asks for the *hardware* axis.  Where a multiplication spans
+        # waves the lane is derived from the two (`Generator._lane_mapping`)
+        # and several threads of a block share one lane number, so a
+        # block-wide index -- which has to be unique over the block -- is
+        # the only caller that wants this one.
+        callee = f'{"raw_" if raw else ""}thread_idx_{axis}'
+        key = _cons_key(Op.CALL, INDEX, (), extra=(callee, None, level))
         shared = self._shared(key)
         if shared is not None:
             return shared
-        v = self.value(INDEX, hint=f'tid{axis}', uniform=level)
-        self._emit_op(Op.CALL, (v,), (), attrs=(('callee', f'thread_idx_{axis}'),))
+        v = self.value(INDEX, hint=f'{"raw" if raw else ""}tid{axis}',
+                       uniform=level)
+        self._emit_op(Op.CALL, (v,), (), attrs=(('callee', callee),))
         self._share(key, v)
         return v
 

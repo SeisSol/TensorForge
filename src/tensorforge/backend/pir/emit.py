@@ -379,7 +379,8 @@ class Emitter:
             if s.attr('assign'):
                 return None, []
             callee = s.attr('callee') or ''
-            if callee.startswith(('thread_idx_', 'extern_')):
+            if callee.startswith(('thread_idx_', 'raw_thread_idx_',
+                                  'extern_')):
                 return None, []
             if _NO_CODE_CALL.search(callee):
                 return None, []
@@ -644,12 +645,22 @@ class Emitter:
         # group's own and there is nothing narrower to reach for.
         return lex.sync_block()
 
-    def _thread_idx(self, axis: str) -> str:
+    def _thread_idx(self, axis: str, raw: bool = False) -> str:
+        """The target's spelling of this axis.
+
+        `raw` takes the hardware one where the lexic keeps it apart: the
+        lane mapping replaces `thread_idx_x` with a derived expression
+        wherever a multiplication spans waves, and a block-wide index wants
+        the thread, not the lane.  Falls back to the logical spelling,
+        which is the same thing on every target that does not derive one.
+        """
         lex = self._lexic()
         if lex is not None:
-            attr = getattr(lex, f'thread_idx_{axis}', None)
-            if attr is not None:
-                return str(attr)
+            for name in ((f'raw_thread_idx_{axis}',) if raw else ()) + (
+                    f'thread_idx_{axis}',):
+                attr = getattr(lex, name, None)
+                if attr is not None:
+                    return str(attr)
         return f'threadIdx.{axis}'
 
     # -- addressing -------------------------------------------------------- #
@@ -1310,9 +1321,11 @@ class Emitter:
 
         if op == Op.CALL:
             callee = s.attr('callee')
-            if callee is not None and callee.startswith('thread_idx_'):
+            if callee is not None and callee.startswith(('thread_idx_',
+                                                          'raw_thread_idx_')):
                 v = s.target[0]
-                self.bind(v, self._thread_idx(callee[-1]))
+                self.bind(v, self._thread_idx(callee[-1],
+                                              callee.startswith('raw_')))
                 return
             if callee is not None and callee.startswith('extern_'):
                 # Bound, not declared: the macro layer already emits the name

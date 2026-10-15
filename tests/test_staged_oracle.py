@@ -227,4 +227,8 @@ def test_a_cascade_case_drops_lanes_in_its_tail():
     no kernel in the corpus would have both happen to the same transfer.
     """
     _, src, _ = _build('wide_cascade_tail')
-    assert re.search(r'if \(threadIdx\.x < \d+\)', src)
+    # Either spelling of the same predicate: the guard is a region whose
+    # condition is a value, so the comparison is named above the `if`
+    # rather than written into its head.  What this test is about is that
+    # the bound is compared against the lane at all.
+    assert re.search(r'(?:if \()?\bthreadIdx\.x < \d+\)?', src)
