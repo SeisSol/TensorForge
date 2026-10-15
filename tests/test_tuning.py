@@ -195,7 +195,16 @@ def test_the_searches_build_with_what_they_are_handed():
 
 def test_rolling_a_reduction_does_not_change_its_work():
     """A rolled loop is written once and runs its trip count; counted once, a
-    roll by 28 would make `local_flux` look like a 28th of its arithmetic."""
+    roll by 28 would make `local_flux` look like a 28th of its arithmetic.
+
+    Up to the identities the unrolled form folds and the rolled one cannot.
+    The first fold into a zeroed accumulator is an assignment where `fold`
+    can see that nothing has written the slot, and inside a loop body --
+    walked once, run many times -- it cannot (`pir.passes.fold`).  That is
+    tens of statements against thousands; the trip count is a factor of 28,
+    so a bound of a few percent still fails loudly for what this test is
+    about.
+    """
     mod = _case("local_flux.py")
 
     def work(**opts):
@@ -205,4 +214,5 @@ def test_rolling_a_reduction_does_not_change_its_work():
         gen.generate()
         return gen.metrics.emitted_work
 
-    assert work(k_roll=28) == work()
+    rolled, flat = work(k_roll=28), work()
+    assert flat <= rolled <= flat * 1.02

@@ -1162,8 +1162,20 @@ _FLOATS = frozenset({Datatype.F16, Datatype.BF16, Datatype.F32, Datatype.F64,
 
 
 def _zero_like(type_):
-    """Zero in the type's own flavor, so the constant renders as the literal
-    the surrounding arithmetic expects rather than as an `int` beside it."""
+    """Zero in the type's own flavor, or `None` where this cannot write one.
+
+    The flavor matters because the constant lands in arithmetic that is
+    typed: a `float` buffer's zero has to render as `0.0f` and not as `0`.
+
+    A *vector* value is refused rather than given a scalar zero.  One zero
+    where a lane-wide one belongs is not a narrower constant, it is a
+    missing splat -- `a * b + 0.0` over a four-wide value is an expression
+    the reference evaluator rejects outright and a target may or may not
+    broadcast.  Splatting it here would mean inventing the width's spelling
+    in a pass that has no target, so the fold simply does not apply.
+    """
+    if getattr(type_, 'length', None) is not None:
+        return None
     return 0.0 if getattr(type_, 'base', None) in _FLOATS else 0
 
 
@@ -1346,11 +1358,13 @@ def _fold_body(body: Tuple[Stmt, ...], consts: Dict[int, Any]):
             base = _sole_base(s, Effect.READ)
             where = (_const_index(s.args[1:], consts)
                      if base in untouched else None)
-            if where is not None and where not in untouched[base]:
+            zero = (_zero_like(s.target[0].type)
+                    if where is not None and where not in untouched[base]
+                    else None)
+            if zero is not None:
                 # Still holding the zero the allocation wrote.  Replaced
                 # rather than forwarded, so that `dce` takes the load away
                 # and the identity below takes the addition with it.
-                zero = _zero_like(s.target[0].type)
                 consts[s.target[0].id] = zero
                 out.append(replace(s, op=Op.CONST, args=(), accesses=(),
                                    effect=Effect.NONE, pure=True,

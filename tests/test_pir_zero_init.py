@@ -65,6 +65,26 @@ def test_a_slot_already_written_is_not_zero_any_more():
     assert len(_ops(body, 'add')) == 1, 'only the first fold is an identity'
 
 
+def test_a_vector_slot_is_not_given_a_scalar_zero():
+    """One zero where a lane-wide one belongs is a missing splat.
+
+    `a * b + 0.0` over a four-wide value is not a narrower constant: the
+    reference evaluator rejects it outright ("vector op with a scalar"),
+    and a target may or may not broadcast it.  Writing the splat here would
+    mean inventing the width's spelling in a pass that has no target, so
+    the fold does not apply to a vector at all.
+    """
+    b = IRBuilder(arena='shrMem')
+    acc = b.alloc(Datatype.F32, (4,), MemSpace.REGISTER, hint='acc', init='{}')
+    src = b.alloc(Datatype.F32, (4,), MemSpace.REGISTER, hint='src')
+    wide = ScalarType(Datatype.F32, 2)
+    x = b.load(src, 0, type_=wide, space=MemSpace.REGISTER)
+    prev = b.load(acc, 0, type_=wide, space=MemSpace.REGISTER)
+    b.store(acc, b.op('add', wide, prev, x), 0, space=MemSpace.REGISTER)
+    body = passes.dce(passes.fold(b.finish()))
+    assert len(_ops(body, 'add')) == 1, 'a vector zero must not be folded away'
+
+
 def test_a_shared_accumulator_keeps_its_addition():
     """Another lane may have written it, and this body cannot see that."""
     b, _ = _accumulator(space=MemSpace.SHARED)
