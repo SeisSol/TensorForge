@@ -241,6 +241,10 @@ template <typename T> T min(T x, T y) { return x < y ? x : y; }
 template <typename T> T max(T x, T y) { return x < y ? y : x; }
 template <typename T> T fmin(T x, T y) { return y < x ? y : x; }
 template <typename T> T fmax(T x, T y) { return x < y ? y : x; }
+// SYCL 2020's integer functions, of which the generator reaches one: the
+// population count a bitset packing addresses a slot with
+// (`Symbol._bitset_index`).
+template <typename T> T popcount(T x) { return x; }
 
 } // namespace sycl
 

@@ -55,6 +55,11 @@ class Operation(Enum):
   SHR = 1100
   SHL = 1101
   SHRS = 1102
+  #: Bits set in an integer.  Every target has the instruction; it is
+  #: here rather than written at the one site that needs it because the
+  #: spelling differs (`__popc`, `sycl::popcount`, `std::popcount`) and
+  #: picking it is what a lexic is for.
+  POPCOUNT = 1104
   EQ = 2000
   NEQ = 2001
   LT = 2002

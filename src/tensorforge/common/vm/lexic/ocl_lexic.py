@@ -2,8 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 from .lexic import Lexic
+from tensorforge.common.operation import Operation
 
 class OpenCLLexic(Lexic):
+  #: OpenCL C's own integer functions; `popcount` is the one the generator
+  #: reaches, for a bitset-packed operand's slot (`Symbol._bitset_index`).
+  INTEGER_MATH = {Operation.POPCOUNT: 'popcount({0})'}
+
   def __init__(self, backend, underlying_hardware):
     super().__init__(underlying_hardware)
     self._backend = backend

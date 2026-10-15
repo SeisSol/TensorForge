@@ -81,6 +81,9 @@ _BIN = {
     'shl': lambda a, b: a << b, 'shr': lambda a, b: a >> b,
 }
 
+#: The same for the one-operand ops `_BIN` cannot hold.
+_UN = {'neg': lambda a: -a, 'popcount': lambda a: int(a).bit_count()}
+
 #: The thread's indices, by the axis they are leaves for.
 _THREAD = {'thread_idx_x': 'x', 'thread_idx_y': 'y'}
 
@@ -126,7 +129,8 @@ class _Indices:
             if not isinstance(s.attr('value'), (bool, int)):
                 raise _NotStatic(f'const {s.attr("value")!r}')
             found = frozenset()
-        elif (s.op in _BIN or s.op in ('select', 'neg')) and s.predicate is None:
+        elif ((s.op in _BIN or s.op in _UN or s.op == 'select')
+              and s.predicate is None):
             found = frozenset().union(*(self.leaves(a) for a in s.args))
         else:
             raise _NotStatic(s.op)
@@ -152,8 +156,8 @@ class _Indices:
             cond, a, b = s.args
             out = self.evaluate(a if self.evaluate(cond, env, memo) else b,
                                 env, memo)
-        elif s.op == 'neg':
-            out = -self.evaluate(s.args[0], env, memo)
+        elif s.op in _UN:
+            out = int(_UN[s.op](self.evaluate(s.args[0], env, memo)))
         else:
             a, b = s.args
             out = int(_BIN[s.op](self.evaluate(a, env, memo),

@@ -146,7 +146,10 @@ class TargetLexic(Lexic):
     return name
 
   def get_headers(self):
-    headers = ['cstdlib', 'stdexcept', 'omp.h', 'cmath']
+    # `<bit>` for `std::popcount`, which a bitset-packed operand addresses
+    # its slots with (`Symbol._bitset_index`); the rest is what `MATH` and
+    # the launcher name.
+    headers = ['cstdlib', 'stdexcept', 'omp.h', 'cmath', 'bit']
     if self._backend == 'targetdart':
       headers += ['unordered_map']
     return headers
@@ -160,6 +163,7 @@ class TargetLexic(Lexic):
   #: `max` of `<algorithm>`, which take two of one type.
   MATH = STD_MATH
   INTEGER_MATH = {
+    Operation.POPCOUNT: 'std::popcount(static_cast<unsigned>({0}))',
     Operation.MIN: 'std::min({t}({0}), {t}({1}))',
     Operation.MAX: 'std::max({t}({0}), {t}({1}))',
     Operation.ABS: 'std::abs({0})',

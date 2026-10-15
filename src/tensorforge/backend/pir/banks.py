@@ -59,6 +59,11 @@ _BIN = {'lt': operator.lt, 'le': operator.le, 'gt': operator.gt,
         'bitxor': operator.xor, 'shl': operator.lshift,
         'shr': operator.rshift}
 
+#: The one-operand ops.  `neg` is deliberately absent: it was never
+#: evaluated here, and adding it would change which addresses this
+#: pass can read and so which buffers get a swizzle.
+_UN = {'popcount': lambda a: int(a).bit_count()}
+
 
 class NotStatic(Exception):
     """The address depends on something that is not the lane or a constant."""
@@ -134,6 +139,9 @@ def evaluate(operand, tid: int, defs: Dict[int, Stmt], depth: int = 0):
         if isinstance(value, int):
             return value
         raise NotStatic(f'const {value!r}')
+    g = _UN.get(name)
+    if g is not None and len(stmt.args) == 1:
+        return g(evaluate(stmt.args[0], tid, defs, depth + 1))
     f = _BIN.get(name)
     if f is None or len(stmt.args) != 2:
         raise NotStatic(name)

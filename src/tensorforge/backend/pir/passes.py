@@ -31,7 +31,8 @@ from .transfers import tagged
 # Verifier
 # --------------------------------------------------------------------------- #
 
-_INTEGER_ONLY = frozenset({'bitand', 'bitor', 'bitxor', 'shl', 'shr', 'rem'})
+_INTEGER_ONLY = frozenset({'bitand', 'bitor', 'bitxor', 'shl', 'shr', 'rem',
+                          'popcount'})
 _FLOAT_TYPES = frozenset({Datatype.F16, Datatype.F32, Datatype.F64})
 
 
@@ -1080,6 +1081,7 @@ def _load_cse_body(body: Tuple[Stmt, ...], available: '_Avail'):
 _FOLDABLE: Dict[str, Any] = {
     'neg': lambda a: -a,
     'abs': lambda a: abs(a),
+    'popcount': lambda a: int(a).bit_count(),
     'add': lambda a, b: a + b,
     'sub': lambda a, b: a - b,
     'mul': lambda a, b: a * b,

@@ -599,6 +599,7 @@ class SyclLexic(Lexic):
       (Operation.ATANH, 'atanh'))},
   }
   INTEGER_MATH = {
+    Operation.POPCOUNT: 'sycl::popcount({0})',
     Operation.MIN: 'sycl::min({t}({0}), {t}({1}))',
     Operation.MAX: 'sycl::max({t}({0}), {t}({1}))',
     Operation.ABS: 'sycl::abs({0})',

@@ -77,6 +77,10 @@ _INFIX = {
 # against whichever overloads the headers of a translation unit declare.
 _LEXIC_BINOP = {'min': Operation.MIN, 'max': Operation.MAX}
 
+# The same, for the one-operand ops: the lexic is asked with an empty
+# second operand, which is how `Lexic.get_operation` spells a unary one.
+_LEXIC_UNOP = {'popcount': Operation.POPCOUNT}
+
 
 #: The operations `BuildMetrics.record_work` counts, where the result is a
 #: floating point value: the arithmetic a lane geometry changes the amount of.
@@ -577,6 +581,17 @@ class Emitter:
             return f'{op}({", ".join(args)})'
         base = getattr(v.type, 'base', None)
         return lex.get_operation(_LEXIC_BINOP[op], base, args[0], args[1])
+
+    def _lexic_unop(self, op: str, v: Value, args: Sequence[str]) -> str:
+        """A one-operand op the lexic names, by result dtype.
+
+        `_lexic_binop`'s sibling, and its fallback for the same reason.
+        """
+        lex = self._lexic()
+        if lex is None:
+            return f'{op}({args[0]})'
+        base = getattr(v.type, 'base', None)
+        return lex.get_operation(_LEXIC_UNOP[op], base, args[0], '')
 
     def _math(self, s: Stmt, args: Sequence[str]) -> str:
         """An `Op.MATH` over operands spelled `args`, as the lexic writes its
@@ -1435,6 +1450,8 @@ class Emitter:
                 expr = f'-{args[0]}'
             elif op in _LEXIC_BINOP and len(args) == 2:
                 expr = self._lexic_binop(op, v, args)
+            elif op in _LEXIC_UNOP and len(args) == 1:
+                expr = self._lexic_unop(op, v, args)
             else:
                 # Spelling an unrecognized name as a call is a guess at what
                 # the op meant, and one that C++ resolves against whichever

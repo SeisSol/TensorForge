@@ -196,6 +196,7 @@ class CudaLexic(Lexic):
   #: `std::min`, a host function nvcc lets device code call only under
   #: `--expt-relaxed-constexpr`.
   INTEGER_MATH = {
+    Operation.POPCOUNT: '__popc({0})',
     Operation.MIN: 'min({0}, {1})',
     Operation.MAX: 'max({0}, {1})',
     Operation.ABS: 'abs({0})',

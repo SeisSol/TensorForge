@@ -940,6 +940,7 @@ class Op:
         'add', 'sub', 'mul', 'div', 'rem', 'neg', 'fma', 'select',
         'min', 'max',
         'and', 'or', 'bitand', 'bitor', 'bitxor', 'shl', 'shr',
+        'popcount',
         'lt', 'le', 'gt', 'ge', 'eq', 'ne',
     })
 
