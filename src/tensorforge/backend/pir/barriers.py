@@ -77,6 +77,13 @@ _ANYWHERE = (None, None, None)
 #: The buffer a statement touches that does not say which: any of them.
 _OPAQUE = ('opaque',)
 
+# `Effect` is an `IntFlag`, and a test on one goes through `enum.Flag` --
+# two orders of magnitude slower than on an int (`core._M_WRITES`).  The
+# walks below test a statement once for every state they carry to it.
+_M_BARRIER = int(Effect.BARRIER)
+_M_READ = int(Effect.READ)
+_M_WRITES = int(Effect.WRITE | Effect.ATOMIC)
+
 
 @dataclass(frozen=True)
 class Arena:
@@ -136,6 +143,12 @@ class _State:
 
     def is_empty(self) -> bool:
         return not (self.writes or self.cleared or self.reads)
+
+    def frozen(self) -> Tuple:
+        """The state as a value: what the walks of `_Pass` key what they
+        found by."""
+        return (frozenset(self.writes.items()), frozenset(self.cleared.items()),
+                frozenset(self.reads.items()))
 
     def merge(self, other: '_State') -> '_State':
         writes = dict(self.writes)
@@ -208,17 +221,28 @@ def _may_skip(s: Stmt) -> bool:
 
 
 class _Pass:
+    """The walks over one body.
+
+    They come back to a statement once for every state they carry to it,
+    and to a construct once for every placement it is part of: a barrier
+    inside it weighed against one in front of it, and each round of the
+    fixed point around a loop it stands in -- mostly under a state they
+    arrived with before.  So what a statement reads and writes is worked out
+    once, and what a construct comes to under a state is kept: each of these
+    is a function of the statement and the state alone.  The statements are
+    kept with what was found for them, so that no other object takes their
+    `id` while the walks run.
+    """
+
     def __init__(self, extents, identity, handoff, make_barrier, arrival):
         self.extents = extents
         self.identity = identity
         self.handoff = handoff
         self.make_barrier = make_barrier
         self.arrival = arrival
-        #: Hazards inside a block no barrier may be placed in, which nothing
-        #: inside it fences either -- counted rather than raised: the pass has
-        #: nothing to add there, and whether the block's author meant its
-        #: lanes to meet some other way is not something it can see.
-        self.unfenced = 0
+        self._accesses: Dict[int, Tuple] = {}
+        self._entries: Dict[Tuple, Tuple] = {}
+        self._placed: Dict[Tuple, Tuple] = {}
 
     # -- what a statement does ------------------------------------------- #
 
@@ -238,6 +262,12 @@ class _Pass:
 
         A statement that does not say what it touches reads and writes any
         buffer of the multiplication."""
+        hit = self._accesses.get(id(s))
+        if hit is None:
+            hit = self._accesses[id(s)] = (s, self._find_accesses(s))
+        return hit[1]
+
+    def _find_accesses(self, s: Stmt):
         reads, writes = [], []
         if s.op in (Op.ALLOC, Op.MARK) or _binds(s):
             return reads, writes
@@ -254,9 +284,9 @@ class _Pass:
                 continue
             ext = self.extent(a.base)
             entry = (key, ext, ext[0] or MULT)
-            if a.kind & (Effect.WRITE | Effect.ATOMIC):
+            if int(a.kind) & _M_WRITES:
                 writes.append(entry)
-            elif a.kind & Effect.READ:
+            elif int(a.kind) & _M_READ:
                 reads.append(entry)
         return reads, writes
 
@@ -310,7 +340,7 @@ class _Pass:
 
     def transfer(self, s: Stmt, state: _State) -> _State:
         """`state` past a statement without regions."""
-        if s.effect & Effect.BARRIER:
+        if int(s.effect) & _M_BARRIER:
             return state.fence(_scope_of(s))
         if s.op == Op.MARK:
             if s.attr('mark') != 'cleared':
@@ -346,6 +376,13 @@ class _Pass:
         ahead of any barrier inside that settles it: `(needed, handoff,
         block)`.  Only what came before counts -- a hazard among the
         statements inside is the inside's to meet."""
+        key = (id(s), state.frozen())
+        hit = self._entries.get(key)
+        if hit is None:
+            hit = self._entries[key] = (s, self._entry_conflict(s, state))
+        return hit[1]
+
+    def _entry_conflict(self, s: Stmt, state: _State):
         found = [False, False, False]
 
         def visit(body, st) -> Optional[_State]:
@@ -361,7 +398,7 @@ class _Pass:
                     for o in outs[1:]:
                         st = st.merge(o)
                     continue
-                if inner.effect & Effect.BARRIER:
+                if int(inner.effect) & _M_BARRIER:
                     st = st.fence(_scope_of(inner))
                     if st.is_empty():
                         return None
@@ -379,9 +416,17 @@ class _Pass:
 
     # -- a construct nobody may place a barrier in ------------------------ #
 
-    def summary(self, s: Stmt, state: _State) -> _State:
+    def summary(self, s: Stmt,
+                state: _State) -> Tuple[_State, FrozenSet[int]]:
         """`state` past `s`, in order and with a loop's body walked twice, so
-        that what it carries around its back edge is in the answer."""
+        that what it carries around its back edge is in the answer.
+
+        And the accesses inside that meet an earlier one, which nothing there
+        fences, by `id` -- collected rather than raised: the pass has nothing
+        to add there, and whether the block's author meant its lanes to meet
+        some other way is not something it can see."""
+        unfenced = set()
+
         def visit(body, st):
             for inner in body:
                 if inner.regions:
@@ -396,25 +441,29 @@ class _Pass:
                         merged = merged.merge(o)
                     st = merged.merge(st) if _may_skip(inner) else merged
                     continue
-                if not inner.effect & Effect.BARRIER:
+                if not int(inner.effect) & _M_BARRIER:
                     if self.conflict(inner, st)[0]:
-                        self.unfenced += 1
+                        unfenced.add(id(inner))
                 st = self.transfer(inner, st)
             return st
-        return visit((s,), state)
+        return visit((s,), state), frozenset(unfenced)
 
     # -- placement -------------------------------------------------------- #
 
-    def place(self, body: Tuple[Stmt, ...], state: _State,
-              level: Uniformity) -> Tuple[Tuple[Stmt, ...], _State]:
+    def place(self, body: Tuple[Stmt, ...], state: _State, level: Uniformity
+              ) -> Tuple[Tuple[Stmt, ...], _State, FrozenSet[int]]:
+        """`body` with its barriers, the state past it, and the accesses in
+        it nothing fences (`summary`) -- those of the placement taken, where
+        two are weighed."""
         from .passes import _entry_uniformity
         out: List[Stmt] = []
+        unfenced: FrozenSet[int] = frozenset()
         for s in body:
             if s.op == Op.YIELD:
                 out.append(s)
                 continue
             if not s.regions:
-                if not s.effect & Effect.BARRIER:
+                if not int(s.effect) & _M_BARRIER:
                     needed, handoff, block = self.conflict(s, state)
                     if needed:
                         stmt, state = self.barrier(handoff, block, state)
@@ -428,61 +477,83 @@ class _Pass:
                 if needed:
                     stmt, state = self.barrier(handoff, block, state)
                     out.append(stmt)
-                state = self.summary(s, state)
+                state, missed = self.summary(s, state)
+                unfenced |= missed
                 out.append(s)
                 continue
             if not needed:
-                s, state = self.place_region(s, state, inner)
+                s, state, missed = self.place_region(s, state, inner)
+                unfenced |= missed
                 out.append(s)
                 continue
             # Met inside, by a barrier the construct needs there anyway --
             # what an iteration leaves for the next one is fenced at the same
             # place the entry is -- or in front of it, once, where meeting it
             # inside would take a barrier of its own.
-            inside, after = self.place_region(s, state, inner)
+            inside, after, missed_inside = self.place_region(s, state, inner)
             stmt, fenced = self.barrier(handoff, block, state)
-            outside, behind = self.place_region(s, fenced, inner)
+            outside, behind, missed_outside = self.place_region(s, fenced,
+                                                                inner)
             if _count(inside) <= _count(outside):
                 out.append(inside)
                 state = after
+                unfenced |= missed_inside
                 continue
             out.extend((stmt, outside))
             state = behind
-        return tuple(out), state
+            unfenced |= missed_outside
+        return tuple(out), state, unfenced
 
-    def place_region(self, s: Stmt, state: _State,
-                     level: Uniformity) -> Tuple[Stmt, _State]:
+    def place_region(self, s: Stmt, state: _State, level: Uniformity
+                     ) -> Tuple[Stmt, _State, FrozenSet[int]]:
+        key = (id(s), state.frozen(), level)
+        hit = self._placed.get(key)
+        if hit is None:
+            hit = self._placed[key] = (s, self._place_region(s, state, level))
+        return hit[1]
+
+    def _place_region(self, s: Stmt, state: _State, level: Uniformity
+                      ) -> Tuple[Stmt, _State, FrozenSet[int]]:
         regions = []
         ends: List[_State] = []
+        unfenced: FrozenSet[int] = frozenset()
         for r in s.regions:
             if not _loops(s):
-                body, end = self.place(r.body, state.copy(), level)
+                body, end, missed = self.place(r.body, state.copy(), level)
                 regions.append(replace(r, body=body))
                 ends.append(end)
+                unfenced |= missed
                 continue
             # Around the back edge: what an iteration leaves outstanding at
             # its end is outstanding at the beginning of the next one.
             carried = _State.empty()
             for _ in range(8):
-                body, end = self.place(r.body, state.merge(carried), level)
+                body, end, missed = self.place(r.body, state.merge(carried),
+                                               level)
                 if carried.covers(end):
                     break
                 carried = carried.merge(end)
             regions.append(replace(r, body=body))
             ends.append(end)
+            unfenced |= missed
         merged = ends[0]
         for e in ends[1:]:
             merged = merged.merge(e)
         if _may_skip(s):
             merged = merged.merge(state)
-        return replace(s, regions=tuple(regions)), merged
+        return replace(s, regions=tuple(regions)), merged, unfenced
 
 
 def _count(s: Stmt) -> int:
-    """Barriers in the regions of `s`."""
-    inside = tuple(x for r in s.regions for x in r.body)
-    return sum(1 for inner in walk_stmts(inside)
-               if inner.effect & Effect.BARRIER)
+    """Statements in the regions of `s`, at any depth, that are barriers."""
+    n = 0
+    for r in s.regions:
+        for inner in r.body:
+            if int(inner.effect) & _M_BARRIER:
+                n += 1
+            if inner.regions:
+                n += _count(inner)
+    return n
 
 
 def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
@@ -505,9 +576,9 @@ def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
             identity[s.target[0].id] = ('o', id(s.attr('identity')))
     work = _Pass(arena.extents(body), identity,
                  {('o', id(h)) for h in handoff}, make_barrier, arrival)
-    out, _ = work.place(tuple(body), _State.empty(), Uniformity.GRID)
-    if report is not None and work.unfenced:
-        report.append(f'{work.unfenced} access(es) to shared memory meet an '
+    out, _, unfenced = work.place(tuple(body), _State.empty(), Uniformity.GRID)
+    if report is not None and unfenced:
+        report.append(f'{len(unfenced)} access(es) to shared memory meet an '
                       f'earlier one inside a block no barrier may be placed '
                       f'in, and nothing there fences them')
     return out

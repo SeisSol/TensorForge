@@ -275,3 +275,71 @@ def test_an_index_computation_is_no_access():
     lane = b.thread_id('x')
     b.op('add', INDEX, lane, 1, hint='a')
     assert _barriers(_place(b.finish())) == []
+
+
+def test_a_hazard_where_no_barrier_may_stand_is_reported_once_per_access():
+    """Inside a guard on the lane no barrier may stand, so what meets an
+    earlier access there is reported rather than fenced: the read of what
+    another lane stored, and -- around the back edge of the loop -- the store
+    over what an earlier iteration read.  Each once, however often the walks
+    pass it."""
+    b = _builder()
+    lane = b.thread_id('x')
+    buf = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='buf', offset=0)
+    with b.if_(b.op('lt', BOOL, lane, 8, hint='g')):
+        with b.for_(0, 4, 1):
+            b.store(buf, b.const(1.0), lane)
+            b.load(buf, lane, hint='d')
+    report = []
+    place_barriers(tuple(b.finish()), arena=ARENA, make_barrier=_make,
+                   arrival=Uniformity.MULT, report=report)
+    assert report == ['2 access(es) to shared memory meet an earlier one '
+                      'inside a block no barrier may be placed in, and '
+                      'nothing there fences them']
+
+
+def test_what_meets_a_loop_on_its_way_in_is_met_in_front_of_it():
+    """A store outstanding at a nest of loops that only read: one barrier in
+    front of the nest rather than one in every iteration.  Weighing the two
+    places the outer loop under the store and under the barrier, and the
+    inner one under each of those -- each placement for its own state."""
+    b = _builder()
+    lane = b.thread_id('x')
+    buf = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='buf', offset=0)
+    b.store(buf, b.const(1.0), lane)
+    with b.for_(0, 4, 1):
+        with b.for_(0, 2, 1):
+            b.load(buf, lane, hint='d')
+    ops = _ops(_place(b.finish()))
+    assert [depth for depth, op in ops if op == Op.BARRIER] == [0], ops
+
+
+def test_a_guard_in_a_loop_is_met_in_front_of_the_loop():
+    """The read sits under a guard on the lane, where no barrier may stand,
+    so meeting the store inside the loop puts one in front of the guard in
+    every iteration; in front of the loop it is one.  The guard is weighed
+    under both states, and has nothing to meet under the second."""
+    b = _builder()
+    lane = b.thread_id('x')
+    buf = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='buf', offset=0)
+    b.store(buf, b.const(1.0), lane)
+    with b.for_(0, 4, 1):
+        with b.if_(b.op('lt', BOOL, lane, 8, hint='g')):
+            b.load(buf, lane, hint='d')
+    ops = _ops(_place(b.finish()))
+    assert [depth for depth, op in ops if op == Op.BARRIER] == [0], ops
+
+
+def test_what_a_loop_clears_again_waits_for_its_last_iteration():
+    """Around the back edge alone: within an iteration the clearing store
+    follows nothing, but the next iteration's clearing store follows this
+    one's zeros, so a barrier stands in the body."""
+    b = _builder()
+    lane = b.thread_id('x')
+    buf = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='buf', offset=0)
+    with b.for_(0, 4, 1):
+        b.mark('clears', buf)
+        b.store(buf, b.const(0.0), lane)
+        b.mark('cleared', buf)
+    ops = _ops(_place(b.finish()))
+    assert [depth for depth, op in ops if op == Op.BARRIER] == [1], ops

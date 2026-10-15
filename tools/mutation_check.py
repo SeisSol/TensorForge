@@ -1936,6 +1936,23 @@ GROUPS = {
              "        for v in knobs[i].values(cand):", 1)),
     ]),
 
+    # Barrier placement keeps what it found for a statement and a state; a
+    # memo keyed by less than both answers for another one.
+    'barrierwalks': ('tests/test_pir_barriers.py tests/test_ternary.py', [
+        ('a construct placed once whatever the state it arrives with',
+         sub(BARRIERS, '        key = (id(s), state.frozen(), level)\n',
+             '        key = (id(s), level)\n', 1)),
+        ('the hazards on the way into a construct found once whatever the state',
+         sub(BARRIERS, '        key = (id(s), state.frozen())\n',
+             '        key = id(s)\n', 1)),
+        ("one statement's accesses taken for every other's",
+         sub(BARRIERS, '        hit = self._accesses.get(id(s))\n',
+             '        hit = next(iter(self._accesses.values()), None)\n', 1)),
+        ('an access no barrier reaches counted at every pass',
+         sub(BARRIERS, '                        unfenced.add(id(inner))\n',
+             '                        unfenced.add(len(unfenced))\n', 1)),
+    ]),
+
     # The cache hints for the element the loop reaches next.
     'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
                  'tests/test_prefetch_data.py', [
@@ -2344,8 +2361,8 @@ GROUPS = {
         ('the back edge not followed',
          sub(BARRIERS, '            for _ in range(8):', '            for _ in range(1):', 1)),
         ('a barrier already there not counted',
-         sub(BARRIERS, '        if s.effect & Effect.BARRIER:\n            return state.fence(_scope_of(s))',
-             '        if s.effect & Effect.BARRIER:\n            return state', 1)),
+         sub(BARRIERS, '        if int(s.effect) & _M_BARRIER:\n            return state.fence(_scope_of(s))',
+             '        if int(s.effect) & _M_BARRIER:\n            return state', 1)),
         ('a barrier put inside a block some lanes skip',
          sub(BARRIERS, '            if inner < self.arrival:\n                if needed:',
              '            if False:\n                if needed:', 1)),
