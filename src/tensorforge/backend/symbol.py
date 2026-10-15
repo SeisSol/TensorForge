@@ -1300,7 +1300,22 @@ class Symbol:
     self._users = []
 
   def set_pir_buffer(self, builder, value) -> None:
-    self._pir_buffer = (self._builder_uid(builder), value)
+    """This operand is reached through `value` in `builder`'s body.
+
+    Recorded on the *builder*, under the name the buffer is declared as.
+    An operand has more than one symbol -- a view of it, a slice of it, the
+    binding itself -- and kept here it would be found by whichever one
+    happened to be handed the value: 84 of the corpus's staging transfers
+    fell back to raw text because the symbol that asked was not the symbol
+    that was told.  The name is what the generated code already uses as a
+    buffer's identity, so two symbols sharing it share the storage.
+    """
+    bind = getattr(builder, 'bind_buffer', None)
+    if bind is not None:
+      bind(self.name, value)
+    else:
+      # A plain `Writer` has no bodies and no values; nothing to record.
+      self._pir_buffer = None
 
   def stack(self) -> int:
     """How many elements of the batch this operand holds side by side on
@@ -1392,12 +1407,15 @@ class Symbol:
     return getattr(builder, 'uid', None)
 
   def pir_buffer(self, builder):
-    """The value, if it belongs to the body currently being built."""
-    if self._pir_buffer is None:
-      return None
-    owner, value = self._pir_buffer
-    uid = self._builder_uid(builder)
-    return value if uid is not None and owner == uid else None
+    """The value, if it belongs to the body currently being built.
+
+    The body answers, which is what makes the answer right: a value lives
+    in one SSA graph, and a builder that did not declare this buffer has no
+    entry for it.  That is the same guarantee the owner token gave, without
+    a token to keep in step.
+    """
+    bound = getattr(builder, 'bound_buffer', None)
+    return bound(self.name) if bound is not None else None
 
   def swizzled(self, builder, width: int = 1) -> bool:
     """Would this buffer's permutation refuse a `width`-wide access?
@@ -3224,9 +3242,18 @@ class Symbol:
     # body: `local_flux` at 35 rows and width two would read 2312 B for
     # ptxas's 213 registers, 2160 B of it arrays counted whole for one element
     # each.
+    #
+    # A value *without axes* qualifies for the same reason: it has no lead
+    # dimension to resolve because it has no dimensions, it sits in slot
+    # zero of every lane, and `address_value` says so.  Having nothing to
+    # resolve is not the same as having something unresolvable.  That is
+    # what a cross-lane reduction writes, and it wrote it as text --
+    # `r1[0] = reduction<..>(..)`, beside a structured read of the same
+    # buffer two lines down.
     named = (not structured and not atomic
              and self.stype in (SymbolType.Register, SymbolType.Scratch)
-             and isinstance(lead, (int, np.integer))
+             and (isinstance(lead, (int, np.integer))
+                  or (not self.lead_dims and not index))
              and isinstance(variable, _Value) and hasattr(writer, 'store'))
 
     if not structured and self._memory_valid(index) is not None:

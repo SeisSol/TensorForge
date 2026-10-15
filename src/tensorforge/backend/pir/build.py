@@ -200,6 +200,19 @@ class IRBuilder:
                  alloc: Any = None, arena: Optional[str] = None):
         IRBuilder._next_uid += 1
         self.uid = IRBuilder._next_uid
+        #: The buffer each operand is reached through *in this body*, by the
+        #: name it is declared under.  Here and not on the `Symbol`, which
+        #: is the whole point: an operand has several symbols -- a view, a
+        #: slice, the binding itself -- and a lookup kept on one of them is
+        #: found by that one alone.  The name is what the generated code
+        #: already uses as the identity of a buffer, so two symbols sharing
+        #: it are the same storage by construction.
+        #:
+        #: The builder needs no place in the key because it *is* the key: a
+        #: value belongs to one body's SSA graph, and a body that did not
+        #: declare it simply has no entry.  That was what the owner token
+        #: checked, and a dict per builder checks it by existing.
+        self._bound: Dict[Any, Any] = {}
         #: value id -> the buffer its accesses belong to (see `decl_expr`)
         self._view_root = {}
         # -1 so the first value is v0, matching writer.VarAlloc: a mechanism
@@ -280,8 +293,22 @@ class IRBuilder:
         """A builder for statements a pass splices into this body once it is
         built.  Its values are numbered from this body's, so they are new in
         it, and it builds against the same context."""
-        return IRBuilder(fptype=self._fptype, context=self.context, alloc=self,
-                         arena=self._arena)
+        out = IRBuilder(fptype=self._fptype, context=self.context, alloc=self,
+                        arena=self._arena)
+        # What it splices lands in this body, so this body's buffers are its
+        # buffers -- shared, not copied, since a binding made in either is
+        # reachable from both once the two are one statement list.
+        out._bound = self._bound
+        return out
+
+    def bind_buffer(self, name, value) -> None:
+        """`name` is reached through `value` in this body (`Symbol`)."""
+        if name is not None:
+            self._bound[name] = value
+
+    def bound_buffer(self, name):
+        """The value `name` is reached through here, or `None`."""
+        return self._bound.get(name) if name is not None else None
 
     def varalloc(self, prefix: str = 'v') -> Value:
         """Drop-in for ``Writer.varalloc``.
@@ -1903,14 +1930,22 @@ class IRBuilder:
                       attrs=(('crosslane', True),) if crosslane else ())
         return v
 
+    # Both movable, which is not a cosmetic question.  `schedule.touches`
+    # answers `None` for a statement that refuses to move *and for every
+    # region holding one*, and `can_reorder` then refuses to cross it: an
+    # immovable blank line is a wall for the scheduler, and a loop body with
+    # one in it is a wall whole.  The case corpus had 839 of them, 74 % of
+    # everything `tools/ir_opacity.py` called blocking -- for statements
+    # that emit nothing.
+
     def new_line(self) -> Stmt:
         # Writer.new_line() is __call__(''), which writes no line but *does*
         # flush the pending block head -- keep the side effect.
-        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=False,
+        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=True,
                              effect=Effect.NONE, text='')
 
     def Emptyline(self) -> Stmt:
-        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=False,
+        return self._emit_op(Op.RAWSTMT, (), (), pure=False, movable=True,
                              effect=Effect.NONE, text='',
                              attrs=(('bare_newline', True),))
 

@@ -9,6 +9,7 @@ from . import AbstractShrMemWrite, MemoryInstruction
 from tensorforge.backend.symbol import RELAXED, Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
+from tensorforge.backend.pir.core import BOOL, INDEX
 from tensorforge.common.context import Context
 from tensorforge.backend.data_types import RegMemObject
 from .hints import cache_hint, readers
@@ -262,6 +263,42 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       return f'({tid_x} + {tid_y} * {dim_x})'
     else:
       return f'{lexic.thread_idx_x}'
+
+  def _linear_index_value(self, writer):
+    """`_linear_idx` as a value, or `None` where there is no value for it.
+
+    The guards of a ragged transfer compare against this, and a guard
+    spelled as text is an `Op.RAWBLOCK`: unmovable by construction, so
+    `schedule.touches` answers `None` for it *and for every region holding
+    it*, and nothing may be reordered across the hop it wraps.  119 of the
+    corpus's remaining opaque nodes are these four comparisons.
+
+    `None` for the block-wide spelling, which reads the *raw* hardware axes
+    and the block dimension -- `thread_id` gives the logical ones, which
+    differ wherever a multiplication spans waves, and there is no value for
+    the other two yet.  The caller keeps the text there rather than
+    comparing against a different number.
+    """
+    if not hasattr(writer, 'if_'):
+      return None
+    if self._explicit_simd():
+      # Text there.  One work-item holds the whole vector, so the index is
+      # the constant zero -- and a constant has no lane distribution, which
+      # is exactly what the explicitly vectorized lowering requires of every
+      # value it types ("no tracked distribution and cannot be given an
+      # ESIMD type").  The guard is a compile-time truth there anyway.
+      return None
+    if self._blockwide:
+      return None
+    return writer.thread_id('x')
+
+  def _lane_guard(self, writer, op: str, bound: int):
+    """`_linear_idx() <op> bound` as a region, structured where it can be."""
+    value = self._linear_index_value(writer)
+    if value is None:
+      text = {'lt': '<', 'eq': '=='}[op]
+      return writer.If(f'{self._linear_idx()} {text} {bound}')
+    return writer.if_(writer.op(op, BOOL, value, bound, hint='g'))
 
   def _get_bounding_box_dense(self):
     # The parts belong to the *global* tensor: the staging tile below is
@@ -550,14 +587,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       if rest:
         whole, part = divmod(rest, wide)
         if whole:
-          with writer.If(f'{self._linear_idx()} < {whole}'):
+          with self._lane_guard(writer, 'lt', whole):
             self._write_hop(writer, src_offset, dst_offset, index, pos,
                             pos + wide, wide, nontemporal, linscale)
         if part:
           # The one lane whose access straddles the end: `part` elements of
           # source and the rest zeroed, in an access that is still sixteen
           # bytes and still bypasses L1.
-          with writer.If(f'{self._linear_idx()} == {whole}'):
+          with self._lane_guard(writer, 'eq', whole):
             self._write_hop(writer, src_offset, dst_offset, index, pos,
                             pos + wide, wide, nontemporal, linscale,
                             zfill=wide - part)
@@ -583,7 +620,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         # token has no C++ representation, so nothing is scoped inside it that
         # the wait needs to name.  With the linear index as a Value, the guard
         # would be the copy's predicate instead.
-        with writer.If(f'{self._linear_idx()} < {rest}'):
+        with self._lane_guard(writer, 'lt', rest):
           self._write_hop(writer, src_offset, dst_offset, index, pos, pos+1, 1, nontemporal, linscale)
 
   def _write_tail_vector(self, writer, src_offset, dst_offset, index, pos,
@@ -618,7 +655,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       # zero and `j` is only ever zero.  So the address the hop builds is the
       # one this chunk wants, and only its *width* has to be narrowed.
       if self._blockwide:
-        with writer.If(f'{lexic.thread_idx_y} == {j}'):
+        # The multiplication's own index, which `thread_id` answers as a
+        # value: `y` is not the lane, so the raw-axis caveat of
+        # `_linear_index_value` does not apply here.
+        guard = (writer.if_(writer.op('eq', BOOL, writer.thread_id('y'), j,
+                                      hint='g'))
+                 if hasattr(writer, 'if_') and not self._explicit_simd()
+                 else writer.If(f'{lexic.thread_idx_y} == {j}'))
+        with guard:
           self._write_hop(writer, src_offset, dst_offset, index, pos, pos + 1,
                           1, nontemporal, linscale, lanes=width)
       else:

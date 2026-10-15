@@ -89,6 +89,41 @@ def test_a_register_store_takes_its_address_as_an_operand(backend, arch):
     assert not through_copy, f'stores addressing through a copy: {through_copy}'
 
 
+def test_a_value_without_axes_is_stored_structurally_too():
+    """A cross-lane reduction writes one value per lane and no index at all.
+
+    `Symbol.store` resolves the lead index to decide whether the address may
+    be an operand, and a value without axes has none to resolve -- so it fell
+    through to the text path and named its buffer in a raw statement, beside
+    a structured read of the same buffer two lines down.  Having nothing to
+    resolve is not the same as having something unresolvable: the value sits
+    in slot zero of every lane.
+
+    What that cost was the register model, which has to take an array named
+    in raw text as live for the whole body, and the buffer's name, which the
+    allocation then has to be forced to match.
+    """
+    from tensorforge.backend import pir as pirmod
+    from tensorforge.backend.pir.core import Op, walk_stmts
+
+    seen = []
+    original = pirmod.emit
+
+    def watch(body, writer, context=None, metrics=None):
+        for s in walk_stmts(body):
+            if s.op == Op.STORE and 'r1' in str(s.args[0]):
+                seen.append('store')
+        return original(body, writer, context, metrics)
+
+    pirmod.emit = watch
+    try:
+        _generate("red_scalar_then_ew", "cuda", "sm_120")
+    finally:
+        pirmod.emit = original
+
+    assert 'store' in seen, 'the reduction still writes its result as text'
+
+
 @pytest.mark.parametrize("case_name", ["chain_three", "accumulate_then_read"])
 def test_one_address_serves_every_access_at_that_index(case_name):
     """`ir1[v1348_a]` read and `r1[v1348_a]` written, computed once.
