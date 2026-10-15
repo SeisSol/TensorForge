@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from tensorforge.common.context import Context
+from tensorforge.common.options import Options
 from tensorforge.generators.generator import Generator
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
@@ -66,8 +67,12 @@ _DIFF_LINES = 60
 def _render(case, backend: str, arch: str) -> str:
     """The full generated surface for one case on one target, or the failure."""
     try:
+        # A case that needs an option turned says so, as it does for the
+        # end-to-end run (`harness.runner`); recorded without them the
+        # snapshot would be of a kernel the case does not test.
         ctx = Context(arch=arch, backend=backend,
-                      fp_type=getattr(case, "DTYPE", None))
+                      fp_type=getattr(case, "DTYPE", None),
+                      options=Options(**getattr(case, "OPTIONS", {})))
         gen = Generator(case.descr_list(), ctx,
                         attrs=getattr(case, "ATTRS", None))
         gen.generate()

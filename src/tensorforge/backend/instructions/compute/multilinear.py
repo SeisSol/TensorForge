@@ -15,6 +15,8 @@ from tensorforge.backend.pir.core import INDEX, MemSpace
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 
 from tensorforge.common.matrix.tensor import Tensor
+from tensorforge.common.matrix import packing as packing_mod
+from tensorforge.common.matrix.packing import KINDS
 
 from .matmul import MatmulOperands
 from .paths import matrix_paths
@@ -964,7 +966,7 @@ class MultilinearInstruction(ComputeInstruction):
             n *= mx - mi
         return n
 
-    def settle_storage(self) -> None:
+    def settle_storage(self, pack_level: int = 0) -> None:
         """Offer `A` its storage order now, before anything is sized from it.
 
         The offer is made where the operation is emitted, and that is too late
@@ -983,6 +985,11 @@ class MultilinearInstruction(ComputeInstruction):
         plan = self._plan()
         if plan[0].strategy is Strategy.GENERIC:
             self._offer_simt_order(settling=True)
+            # Second, and only where the interleave declined: the two are
+            # different answers to the same question -- how the operand lies
+            # in memory -- and the interleave *grows* it with padding where
+            # this takes padding away.
+            self._offer_packing(pack_level)
             return
         depth = math.prod(mx - mi for mi, mx in self._ks)
         self._offer_order(_vendor_module(self._context),
@@ -1130,6 +1137,198 @@ class MultilinearInstruction(ComputeInstruction):
                 or self._eff_offset(0, 0) % threads):
             return False
         return self._plan()[0].strategy is Strategy.GENERIC
+
+    def _reads_packable(self, sym, a_obj) -> bool:
+        """Whether this multiplication reads `A` the way a packing addresses
+        it (`Symbol._packed_index`).
+
+        As its own lead operand, at width 1 over its lanes, with the row index
+        the lead dimension of a generic nest -- the conditions of
+        `_reads_interleavable`, minus the one it has that this does not need:
+        the rows need not start on a slot, because a packing is addressed by
+        an offset on the lane and not by whole groups, and requiring the
+        alignment is precisely what would throw the saving away.
+
+        What it has instead is the column.  A packed slot is `off_c + r -
+        start_c`, and `off_c` and `start_c` are the column's own numbers, so
+        the column has to be one at build time: an unrolled reduction gives
+        it as an integer, a rolled one as a loop variable, and the second has
+        nowhere to read the pair from yet.  So a rolled reduction refuses --
+        which is the same restriction that would be lifted by putting the two
+        tables in memory, and the reason the tables are the next step rather
+        than this one.
+        """
+        if (_explicit_simd(self._context) or self._lead_width != 1
+                or not self._ops or self._ops[0].symbol is not sym):
+            return False
+        if self._opdim_to_nks[0] != ['n0', 'k0'] or 0 not in self._lead_dims:
+            return False
+        if self._num_threads < 1:
+            return False
+        if self._plan()[0].strategy is not Strategy.GENERIC:
+            # The generic nest and nothing else.  The matrix paths read
+            # fragments of an order they prepared themselves, and AMD's DPP
+            # chain reads `A` four rows to a lane in one vector -- a packed
+            # span cannot hand it four adjacent rows unless the span and
+            # every column offset are multiples of the width, so packing
+            # there is a trade against the wide load and not a free saving.
+            # `_packed_index` refuses such a read rather than address it
+            # wrongly, which is what this keeps it from having to do.
+            return False
+        return not self._reduction_is_rolled()
+
+    def _bitset_fits(self, a_obj, rows: int, threads: int) -> bool:
+        """Whether every row a lane slot reaches fits in one 32-bit word.
+
+        A bitset slot is a population count below the lane's own row, and the
+        shift that masks it is undefined at 32 (`Symbol._bitset_index`
+        refuses there).  The highest row any lane reaches is the last slot's
+        last lane, which is what this counts -- not the row count, which for
+        a 33-row operand over 32 lanes would say yes to a read of row 63.
+
+        That count holds only while a slot starts on a multiple of the lane
+        count, so this asks for what the other two forms deliberately do not:
+        the box's own start and the read's offset in whole slots.  Without
+        them lane 0 begins inside a slot and the last lane runs `rows +
+        threads - 2` rows up -- 56 for a 24-row operand over 32 lanes, which
+        is where the shift stops being defined.
+        """
+        if threads < 1 or rows < 1:
+            return False
+        if (int(a_obj.get_bbox().lower()[0]) % threads
+                or self._eff_offset(0, 0) % threads):
+            return False
+        return threads * -(-rows // threads) <= 32
+
+    def _reduction_is_rolled(self) -> bool:
+        """Whether the innermost reduction will be a real loop.
+
+        The same question `gen_code_inner` answers when it builds the loop
+        stack, asked before there is one: settling the storage happens first,
+        and an offer that assumed an unrolled reduction would be wrong by the
+        time the body is written.
+
+        `k_roll` being zero is not the answer: `k_unroll_max` rolls a long
+        reduction unasked, and `_roll_count` is where the two meet.  Reading
+        the option instead of asking it is what made a 230-step reduction
+        look unrolled, and the packed read then wanted a column the loop
+        does not have at build time.
+        """
+        if not self._ks:
+            return False
+        opts = self._context.get_user_options()
+        i = len(self._ks) - 1
+        if -i - 1 in self._lead_dims:
+            return False
+        dimmin, dimmax = self._ks[i]
+        step = self._k_width if self._k_width > 1 else 1
+        roll = _roll_count(dimmin, dimmax, step, opts.k_roll,
+                           opts.k_unroll_max)
+        return self._rollable(i, dimmin, dimmax, step, roll)
+
+    def _offer_packing(self, level: int = 0):
+        """Let a batch-constant `A` be stored without the box cells its own
+        numbers never fill.
+
+        The bounding box is the smallest rectangle around the non-zeros, and
+        a rectangle around a triangle is half padding: SeisSol's operators
+        hold 11545 numbers in 20627 cells.  The padding is read, multiplied
+        by zero and added, and -- the reason this is worth a storage decision
+        rather than an arithmetic one -- it is *stored*, which is what
+        decides whether an operand fits in shared memory.
+
+        Three forms (`matrix.packing`), and the option names which: `rows`
+        drops the rows no column fills, `runs` stores each column between its
+        own ends, `bits` stores the non-zeros alone.  `auto` takes the
+        smallest one the reads can address, which today is `runs` -- the
+        bitset needs a population count in the address and is offered only
+        when asked for by name.
+
+        The conditions of `_offer_simt_order`, for the same reasons: the
+        order is the tensor's and not this operation's, so every reader has
+        to address it the same way or none may; a stand-in's members are
+        stored alike or not at all; and an operand already carrying an order
+        keeps it.  Unlike the interleave this needs the operand's *numbers*,
+        since what it discards is what they say is absent -- without them
+        `nonzero_pattern` reports the whole box present and the packing
+        saves nothing, which `pack` returns as `None`.
+        """
+        kind = self._context.get_user_options().pack_operands
+        if kind == 'off' or not self._ops:
+            return
+        if kind == 'fit':
+            # The loosest form first, a tighter one only once the generator
+            # has found that the block's images do not fit and asked again
+            # (`Generator._settle_storage`).  `rows` carries no table and no
+            # population count, so where it is enough it is what the operand
+            # should be stored as.
+            kind = KINDS[min(int(level), len(KINDS) - 1)]
+        sym = self._ops[0].symbol
+        a_obj = getattr(sym, 'obj', None)
+        if not isinstance(a_obj, Tensor):
+            return
+        variant = getattr(a_obj, 'is_variant', False)
+        members = (tuple(getattr(a_obj, 'variant_members', ())) if variant
+                   else (a_obj,))
+        if not members or a_obj.addressing is not Addressing.NONE:
+            return
+        if not self._reads_packable(sym, a_obj):
+            return
+        threads = self._num_threads
+        # A verbatim copy into shared memory moves the storage as it lies and
+        # is read back the same way, so it is not a second opinion about the
+        # order; anything else that reads the operand has to address it as
+        # this does.
+        if any(user is not self
+               and not (getattr(user, '_verbatim', False)
+                        and user.get_dest() is sym)
+               and not (isinstance(user, MultilinearInstruction)
+                        and user._num_threads == threads
+                        and user._reads_packable(sym, a_obj))
+               for user in sym.get_user_list()):
+            return
+        shape = tuple(int(x) for x in a_obj.get_actual_shape())
+        lower = list(a_obj.get_bbox().lower())
+        for member in members:
+            if (member.addressing is not Addressing.NONE
+                    or not member.is_dense()
+                    or not member.has_values()
+                    or member.storage_parts != 1
+                    or (member.storage_order is not None
+                        and member.packing is None)
+                    or member.simt_interleave is not None
+                    or member.slot_major is not None
+                    or tuple(int(x) for x in member.get_actual_shape()) != shape
+                    or list(member.get_bbox().lower()) != lower):
+                return
+        kinds = (('bits', 'runs', 'rows') if kind == 'auto' else (kind,))
+        # One packing over all the members at once, not one apiece: a
+        # stand-in's body addresses whichever member the counter names, so
+        # two members packed differently would read one another's slots
+        # (`packing.pack_union`).
+        chosen = None
+        for name in kinds:
+            if name == 'bits' and not self._bitset_fits(a_obj, shape[0],
+                                                        threads):
+                continue
+            chosen = packing_mod.pack_union(members, name)
+            if chosen is not None:
+                break
+        if chosen is None:
+            return
+        if all(member.packing == chosen for member in members):
+            return
+        order = chosen.order()
+        for member in members:
+            # Cleared first: the setter checks an order against the box, and
+            # a retry at a tighter form is replacing one packing with
+            # another rather than adding to it.
+            member.storage_order = None
+            member.packing = None
+            member.storage_order = order
+            member.packing = chosen
+        if variant:
+            a_obj.packing = chosen
 
     def _offer_order(self, module, a_obj, lead, depth):
         """Let the target store `A` in the order it will read it.

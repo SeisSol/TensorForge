@@ -16,6 +16,7 @@ import numpy as np
 
 from tensorforge.common.basic_types import Addressing
 from tensorforge.common.context import Context
+from tensorforge.common.options import Options
 from tensorforge.generators.generator import Generator
 from tensorforge.reference.descriptors import multilinear_reference
 
@@ -116,7 +117,10 @@ def run_case(case, target: Target, cache_root: Path,
     rtol, atol = getattr(case, "TOL", (1e-5, 1e-5))
 
     descr_list = case.descr_list()
-    ctx = Context(arch=target.arch, backend=target.backend, fp_type=dt)
+    # A case that needs an option turned says so (`OPTIONS`); everything
+    # else takes the target's defaults, which is what most cases test.
+    ctx = Context(arch=target.arch, backend=target.backend, fp_type=dt,
+                  options=Options(**getattr(case, "OPTIONS", {})))
     gen = Generator(descr_list, ctx, attrs=getattr(case, "ATTRS", None))
     gen.generate()
 

@@ -102,6 +102,16 @@ class Tensor:
         #: holds, for the host; this says how the kernel addresses it
         #: (`Symbol._slot_major_index`).
         self.slot_major = None
+        #: The `matrix.packing.Packing` `storage_order` leaves out the box's
+        #: empty cells by, or `None` where the box is stored whole.
+        #:
+        #: The third sibling of `simt_interleave` and `slot_major`, and the
+        #: one that makes the storage *smaller* rather than merely different:
+        #: the order says which cell a slot holds, this says which slot a cell
+        #: is in -- and, for the cells in no slot at all, that a read of them
+        #: is a lane the access is held off (`Symbol._packed_index`).  Set
+        #: with the order, by `MultilinearInstruction._offer_packing`.
+        self.packing = None
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         #: `nonzero_pattern`'s answer once derived; the derivation walks
@@ -478,6 +488,7 @@ class Tensor:
         twin.storage_order = self.storage_order
         twin.simt_interleave = self.simt_interleave
         twin.slot_major = self.slot_major
+        twin.packing = self.packing
         return twin
 
     def get_actual_shape(self):
@@ -509,6 +520,7 @@ class Tensor:
         is_similar &= self.storage_parts == other.storage_parts
         is_similar &= self.storage_planar == other.storage_planar
         is_similar &= self.storage_order == other.storage_order
+        is_similar &= self.packing == other.packing
         return is_similar
 
     def is_same(self, other):
@@ -522,6 +534,7 @@ class Tensor:
         parts = f' /{self.storage_parts}' if self.storage_parts != 1 else ''
         parts += ' planar' if self.storage_planar and self.storage_parts != 1 else ''
         parts += ' ordered' if self.storage_order is not None else ''
+        parts += f' {self.packing.kind}-packed' if self.packing is not None else ''
         return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}{parts}'
 
     @property

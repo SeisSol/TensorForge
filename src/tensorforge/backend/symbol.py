@@ -367,8 +367,35 @@ class LeadIndex:
 
   # TODO: make nonlead a variable
   def __init__(self, nonlead, block, stride, value=None, width=1,
-               offset=0, valid=None, pad=False, first=0):
+               offset=0, valid=None, pad=False, first=0, vaddr=None,
+               present=None):
     self._nonlead = nonlead
+    #: A boolean value saying, per lane, whether this element is there at
+    #: all, or None when every lane's is.
+    #:
+    #: The third of the three fields that hold an access to a share of the
+    #: lanes, and the one a pair of bounds cannot express: `valid` and
+    #: `first` cut a contiguous range, and a bitset packing leaves out rows
+    #: *inside* its range.  `_valid_access` ands all three into the one
+    #: predicate the read carries.
+    self._present = present
+    #: This axis's element address outright, as a value, or None where it is
+    #: `lane + nonlead * block` as usual.
+    #:
+    #: Not a shift: the lane term is *inside* it, which is the whole reason
+    #: it cannot be one.  A bitset packing stores the non-zeros alone, so the
+    #: slot of a row is a population count of the lane's own row
+    #: (`Symbol._bitset_index`) -- an arbitrary gather, not an offset on a
+    #: regular one -- and adding a lane to it would address `2 * lane`
+    #: elements in.
+    #:
+    #: What survives is the *layout*: the block and the stride still say
+    #: which lane holds which element of the dimension, and every consumer
+    #: reads that from `layout()`, which this does not touch.  That is why
+    #: this is a field on a lead index rather than an index of its own.
+    #: `_offset` still applies on top, and the slot view refuses, since
+    #: dividing an address into slots is what only a constant allows.
+    self._vaddr = vaddr
     #: The lanes past `valid` land on the destination's padding and may be
     #: written -- with zeros (`Symbol.store`).  See `StoreRegToGlb._pad_writable`.
     self._pad = bool(pad) and valid is not None
@@ -454,6 +481,10 @@ class LeadIndex:
     return self._valid
 
   @property
+  def present(self):
+    return self._present
+
+  @property
   def pad(self) -> bool:
     return self._pad
 
@@ -463,7 +494,11 @@ class LeadIndex:
 
   def _key(self):
     return (self._nonlead, self._block, self._stride, self._value,
-            self._width, self._offset, self._valid, self._pad, self._first)
+            self._width, self._offset, self._valid, self._pad, self._first,
+            None if self._vaddr is None else getattr(self._vaddr, 'id',
+                                                     self._vaddr),
+            None if self._present is None else getattr(self._present, 'id',
+                                                       self._present))
 
   def __eq__(self, other):
     # Structural, including `nonlead`: this is value equality of the *index*,
@@ -483,6 +518,8 @@ class LeadIndex:
     ok = '' if self._valid is None else f', valid={self._valid}'
     ok += ', pad' if self._pad else ''
     ok += f', first={self._first}' if self._first else ''
+    ok += f', vaddr={self._vaddr!r}' if self._vaddr is not None else ''
+    ok += ', present' if self._present is not None else ''
     return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
             f'stride={self._stride}{tail}{wide}{off}{ok})')
 
@@ -503,6 +540,11 @@ class LeadIndex:
              else f'{self._nonlead} * {self._width}')
     else:
       return None
+    if self._vaddr is not None:
+      # Spelled as text the address would be a variable name, and this
+      # returns a string nobody can bind one in.  `build` has the writer and
+      # is the path a packed read takes.
+      return None
     # Elements, so the shift goes on as it stands.  The slot view below
     # deliberately does not apply it: there it would need dividing, and the
     # register paths do that themselves off `unwrap_lead`.
@@ -513,7 +555,8 @@ class LeadIndex:
 
   def with_offset(self, offset):
     return LeadIndex(self._nonlead, self._block, self._stride, self._value,
-                     self._width, offset, self._valid, self._pad, self._first)
+                     self._width, offset, self._valid, self._pad, self._first,
+                     self._vaddr, self._present)
 
   def nonlead(self):
     return self._nonlead
@@ -536,6 +579,11 @@ class LeadIndex:
     whose lead dimension is longer than `threads * w` -- 120 over 32 lanes is
     the first, and it is an ordinary order-5 shape.
     """
+    if self._vaddr is not None:
+      raise InternalError(
+          'a computed address has no slot view: dividing it by the block is '
+          'what only a constant allows, and a register array is addressed in '
+          'slots')
     nl = self._nonlead if self._value is None else self._value
     if self._width == 1:
       return nl
@@ -557,6 +605,9 @@ class LeadIndex:
     # appears the moment a lane holds two, which is exactly what register
     # blocking does -- the destination would be written at eight of sixteen
     # rows per column and one column too far.
+    if self._vaddr is not None:
+      # Already the element, lane and all; only the slicing offset is left.
+      return self._shift(writer, self._vaddr)
     nl = self._nonlead if self._value is None else self._value
     if self._block > 1:
       # The lane's share of this dimension, asked of the builder rather than
@@ -1570,6 +1621,173 @@ class Symbol:
                              pad=li.pad)
     return [lead_index, lower[1]]
 
+  def _packed_index(self, writer, index):
+    """A read of a packed operand (`Tensor.packing`), as the slot it is in
+    storage and the lanes that slot exists for.
+
+    The packing stores column `c` as the run of rows `[start_c, start_c +
+    len_c)`, beginning at slot `off_c`, so box cell `(r, c)` is at
+    `off_c + r - start_c`: the row plus a constant, which is a change of the
+    lead index's slicing offset and nothing else.  The constant absorbs the
+    box's lower corner on every axis, so what comes back is the lead index
+    alone, with the remaining axes handed back *at* their corner and
+    contributing zero.
+
+    The rows a column does not hold have no slot.  Their lanes read the
+    neighbouring column's numbers, which are not zero, so the access is held
+    off them -- `first` below the run, `valid` above it, the two fields a
+    full-lane tail already uses and `_valid_access` already lowers to a
+    predicate with a zero default.  That is what makes this form smaller than
+    the box rather than merely differently shaped, and it is why
+    `_memory_first` must not drop the head here as it does for a window.
+
+    A `bits` packing shares everything above the address itself: the run
+    bounds, the column, the lane the row belongs to.  Where it differs -- the
+    slot is a population count of the row and not the row plus a constant,
+    so the lane term does not survive into an offset -- `_bitset_index`
+    takes over.
+
+    Refuses loudly rather than read the wrong slot.  The offer is made only
+    where none of this can arise (`MultilinearInstruction._offer_packing`),
+    so reaching a refusal means the two disagree, which is worth stopping
+    for.
+    """
+    packing = self.obj.packing
+    view = self.data_view
+    if view is None:
+      raise InternalError(f'{self.name}: a packed read needs a view')
+    lower = [int(x) for x in view.get_dim_offsets()]
+    strides = [int(x) for x in view.get_dim_strides()]
+    if len(index) != len(lower):
+      raise InternalError(
+          f'{self.name}: a packed read indexes {len(index)} of '
+          f'{len(lower)} axes')
+    if strides[0] != 1 or view.elem_parts != 1 or view.part_plane:
+      raise InternalError(
+          f'{self.name}: a packed operand has rows of stride one and one '
+          f'scalar per element; this one is {view}')
+    lead = unwrap_lead(index[0])
+    if lead is None:
+      raise InternalError(f'{self.name}: packed rows need a lead index')
+    li, shift = lead
+    if li.width != 1 or li._value is not None:
+      raise InternalError(
+          f'{self.name}: packed rows are read one to a lane at a named slot; '
+          f'this read is {li!r}')
+    base = li.nonlead()
+    if not isinstance(base, (int, np.integer)):
+      raise InternalError(
+          f'{self.name}: a packed read needs its slot as a number, not '
+          f'{base!r}')
+    block = li._block
+    # The column, as the packing numbers them: the non-lead axes flattened in
+    # F-order over the box, which is the unit `Packing` is built in.
+    column, extent = 0, 1
+    sizes = [int(x) for x in view.shape]
+    for d in range(1, len(index)):
+      value = index[d]
+      shifted = 0
+      while isinstance(value, VarOffset):
+        shifted += value.offset
+        value = value.variable
+      if isinstance(value, Immediate):
+        value = value._value
+      if isinstance(value, LeadIndex):
+        raise InternalError(
+            f'{self.name}: a packed operand splits its rows over the lanes, '
+            f'not its columns')
+      if not isinstance(value, (int, np.integer)):
+        raise InternalError(
+            f'{self.name}: a packed read needs its column as a number; axis '
+            f'{d} is {value!r}')
+      column += (int(value) + shifted - lower[d]) * extent
+      extent *= sizes[d]
+    if not 0 <= column < packing.columns:
+      raise InternalError(
+          f'{self.name}: packed column {column} of {packing.columns}')
+    start = packing.starts[column]
+    length = packing.lengths[column]
+    # Lane `l` of this read holds box row `origin + l`.  The run it has to
+    # fall inside turns into the two lane bounds directly.
+    origin = block * int(base) + shift - lower[0]
+    head = min(max(start - origin, 0), block)
+    tail = min(max(start + length - origin, 0), block)
+    if li.first:
+      head = max(head, li.first)
+    if li.valid is not None:
+      tail = min(tail, li.valid)
+    valid = None if tail >= block else tail
+    first = 0 if head <= 0 else head
+    if packing.kind == 'bits':
+      # The run bounds are implied by the bitset and are left out: `present`
+      # is false on every lane outside the run as well as on the holes
+      # inside it, so adding them would be two comparisons saying what the
+      # third already says.  A full-lane tail's own `valid` is not implied
+      # and stays.
+      return self._bitset_index(writer, index, packing, column, block,
+                                li._stride, origin, li.valid, li.first,
+                                lower)
+    lead_index = LeadIndex(base, block, li._stride,
+                           offset=shift + packing.offsets[column] - start,
+                           valid=valid, pad=False, first=first)
+    return [lead_index] + [lower[d] for d in range(1, len(index))]
+
+  def _bitset_index(self, writer, index, packing, column, block, stride,
+                    origin, valid, first, lower):
+    """The same, where only the non-zeros are stored.
+
+    Column `c` holds the rows its word names, in order, from slot `off_c`, so
+    the slot of row `r` is `off_c` plus the ones below `r`:
+    `popcount(word_c & ((1 << r) - 1))`.  That is a count and not a sum, so
+    the lane term does not survive into a constant and the address has to be
+    given outright (`LeadIndex._vaddr`); the block and the stride are
+    untouched, because which lane holds which row has not changed -- only
+    where the row is in memory.
+
+    Six integer operations a read, and every one of them loop-invariant: the
+    row is the lane plus a slot the batch does not enter into, so `licm`
+    lifts the lot out of the batch loop and leaves one set per column and
+    slot -- ten for `kDivM`, against the 150 cells its bitset leaves out.
+
+    `present` is the other half, and the one thing a pair of lane bounds
+    cannot say: a row inside the column's span may still be absent.  So the
+    bounds are dropped here and this carries the whole predicate.
+
+    Everything is counted in `int32_t`, which bounds the form: the shift is
+    undefined at 32, so the rows a lane slot reaches have to fit in one word.
+    `_offer_packing` checks it, and this refuses rather than emit a shift
+    the standard says nothing about.
+    """
+    word = packing.words[column]
+    builder = writer
+    if not hasattr(builder, 'op') or not hasattr(builder, 'lane_offset'):
+      raise InternalError(
+          f'{self.name}: a bitset read is built, not spelled; this one is '
+          f'written by {type(builder).__name__}')
+    highest = int(origin) + block - 1
+    if not 0 <= int(origin) or highest > 31:
+      raise InternalError(
+          f'{self.name}: a bitset read reaches row {highest}, past the 31 a '
+          f'32-bit word holds')
+    row = builder.lane_offset(block, stride, hint='lane')
+    if origin:
+      row = builder.op('add', INDEX, row, int(origin), hint='row')
+    below = builder.op('shl', INDEX, 1, row, hint='bit')
+    mask = builder.op('sub', INDEX, below, 1, hint='bit')
+    kept = builder.op('bitand', INDEX, int(word), mask, hint='bit')
+    rank = builder.op('popcount', INDEX, kept, hint='rank')
+    # The bit itself, from the same row: `(word >> r) & 1`, which needs no
+    # second mask and shares the row with the count above.
+    bit = builder.op('bitand', INDEX,
+                     builder.op('shr', INDEX, int(word), row, hint='bit'),
+                     1, hint='bit')
+    held = builder.op('ne', BOOL, bit, 0, hint='g')
+    lead_index = LeadIndex(0, block, stride,
+                           offset=int(packing.offsets[column]),
+                           vaddr=rank, valid=valid, pad=False,
+                           first=int(first or 0), present=held)
+    return [lead_index] + [lower[d] for d in range(1, len(index))]
+
   def _wide_claim(self, index, width: int, part=0):
     """The alignment a `width`-wide access at `index` can prove, or `RELAXED`.
 
@@ -1621,6 +1839,11 @@ class Symbol:
       lead = unwrap_lead(idx)
       if lead is not None:
         li, shift = lead
+        if li._vaddr is not None:
+          # A computed address is a number this cannot see, so nothing about
+          # it is provable; a wide access over it would claim an alignment it
+          # has no argument for.
+          return RELAXED
         if li.width == width:
           if ((shift - lower) * stride) % width:
             return RELAXED
@@ -2660,6 +2883,23 @@ class Symbol:
         return lead[0].valid
     return None
 
+  def _memory_present(self, index):
+    """The per-lane presence predicate of a memory access, or None.
+
+    `_memory_valid`'s sibling for the one thing a pair of bounds cannot say:
+    a bitset packing leaves out rows inside its own span, so which lanes hold
+    an element is a boolean and not a count.  Memory only, for the same
+    reason: a register image has every lane's slot.
+    """
+    if self.stype not in (SymbolType.Global, SymbolType.Batch,
+                          SymbolType.SharedMem):
+      return None
+    for i in index:
+      lead = unwrap_lead(i)
+      if lead is not None and lead[0].present is not None:
+        return lead[0].present
+    return None
+
   def _memory_first(self, index):
     """How many lanes, from the base, a window's head holds a memory access
     off (`LeadIndex.first`), or 0.
@@ -2682,6 +2922,13 @@ class Symbol:
         break
     if not first:
       return 0
+    if getattr(self.obj, 'packing', None) is not None:
+      # Not a window head here but a row the packing does not store, and the
+      # element before it is the previous column's number rather than a
+      # neighbouring row's.  Reading it whole would multiply by that number
+      # where the operand is zero, so the head stays whatever the address
+      # happens to be.
+      return first
     origin = self._lane_origin(index)
     return 0 if origin is not None and origin >= 0 else first
 
@@ -2699,7 +2946,8 @@ class Symbol:
       lead = unwrap_lead(idx)
       if lead is not None:
         li, shift = lead
-        if not isinstance(li.nonlead(), (int, np.integer)):
+        if (not isinstance(li.nonlead(), (int, np.integer))
+                or li._vaddr is not None):
           return None
         pos = li.lead() + shift
       else:
@@ -2730,16 +2978,22 @@ class Symbol:
     attribute where the lowering spells a narrower transfer: a read of the
     lanes from `first` on into a zeroed vector.
     """
-    if valid is None and not first:
+    present = self._memory_present(index)
+    if valid is None and not first and present is None:
       return {}
     if getattr(writer, '_explicit_simd', lambda: False)():
+      if present is not None:
+        raise InternalError(
+            f'{self.name}: a bitset packing holds the access off lanes '
+            f'inside the transfer, which a narrower one cannot say')
       held = {'valid': valid} if valid is not None else {}
       return {**held, 'head': first} if first else held
     lead = None
     for i in index:
       unwrapped = unwrap_lead(i)
       if unwrapped is not None and (unwrapped[0].valid is not None
-                                    or unwrapped[0].first):
+                                    or unwrapped[0].first
+                                    or unwrapped[0].present is not None):
         lead = unwrapped[0]
         break
     lane = writer.lane_index(lead._block, lead._stride, hint='lead')
@@ -2754,6 +3008,9 @@ class Symbol:
       below = writer.op('lt', BOOL, lane, valid, hint='g')
       held = below if held is None else writer.op('and', BOOL, held, below,
                                                   hint='g')
+    if present is not None:
+      held = present if held is None else writer.op('and', BOOL, held,
+                                                    present, hint='g')
     return {'predicate': held}
 
   def _memory_pad(self, index):
@@ -2946,6 +3203,18 @@ class Symbol:
               bc_index[dim] = LeadIndex(
                   w * ((value // w) // block) + value % w, block, 1)
       read_index = bc_index if bc_index is not None else index
+
+      # Before anything reads a predicate off the index: the packing is what
+      # *puts* one there, and `_memory_valid`/`_memory_first` below would
+      # otherwise answer about the read as it was written rather than as it
+      # is addressed.  Only where the buffer holds the packed slots -- global
+      # memory, and an image copied verbatim from it; a loader that
+      # re-expanded the operand by coordinate wrote the whole box.
+      if (getattr(self.obj, 'packing', None) is not None
+              and (self.stype in (SymbolType.Global, SymbolType.Batch)
+                   or (self.stype is SymbolType.SharedMem
+                       and getattr(self, 'verbatim', False)))):
+        read_index = self._packed_index(writer, read_index)
 
       if variable is None and self.stype in (
               SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,

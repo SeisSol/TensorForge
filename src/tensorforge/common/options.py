@@ -781,6 +781,51 @@ declare('prepare_operands',
             'the rows fill the lanes -- `local_flux` at 8 lanes, where it cut '
             'the global loads of the rolled merged kernel and made it 4 % faster.')
 
+declare('pack_operands',
+        default='off',
+        env='TF_PACK_OPERANDS',
+        doc='Store a batch-constant operand without the bounding-box cells '
+            'its own numbers never fill, and hold a read of them off the '
+            'lanes concerned (`matrix.packing`).\n'
+            'The box is the smallest *rectangle* around the non-zeros, and '
+            "for SeisSol's operators that is a third larger than the "
+            'non-zeros themselves: 20627 cells hold 11545 numbers.  Three '
+            'forms, in increasing order of what addressing them costs: '
+            '`rows` drops the rows no column fills at all (13963 cells, one '
+            'pair of numbers for the whole operand and no table); `runs` '
+            'stores each column between its own first and last non-zero '
+            '(12341, a start and an offset per column, still the row plus a '
+            'constant); `bits` stores the non-zeros alone (11545, a bitset '
+            'per column and a masked population count on every read).  '
+            '`auto` takes the smallest form the reads can address, and '
+            '`fit` the loosest one that still lets the block stage what it '
+            'wanted to -- `rows` first, and a tighter form only where the '
+            'images would otherwise not fit shared memory, which is what '
+            'the saving is for.\n'
+            'Off by default because it moves work onto whoever fills the '
+            'buffer, exactly as `prepare_operands` does -- the host writes '
+            'the slots the kernel reads, through the layout offering -- and '
+            'because a packed read carries a lane predicate that an '
+            'unpacked one does not.\n'
+            'Rounding the span to the lane count instead, so the predicate '
+            'could be dropped, loses the whole gain and then some: at 32 '
+            'lanes it comes out 25 % *larger* than the box, because a span '
+            'of 25 rows rounds back up to 32.  So the predicate is the '
+            'point and not an accident of the form.\n'
+            'The per-column numbers never become data.  A packed slot is '
+            "the column's start and offset applied to the row, and the "
+            'column of an unrolled reduction is known when the read is '
+            'built -- so they are immediates, and there is no table to put '
+            'in a constant cache or to fetch.  Where the column is a loop '
+            'variable the pair would have to be read from somewhere, and '
+            'the offer declines instead (`_reads_packable`); SeisSol does '
+            'not reach that, since its reductions are far short of '
+            '`k_unroll_max`.\n'
+            'Offered on the generic nest only.  The matrix paths read '
+            'fragments of an order they prepared themselves, and AMD\'s DPP '
+            'chain reads four rows to a lane in one vector, which a packed '
+            'span cannot serve without giving up the wide load.')
+
 declare('launch_control',
         default=False,
         parse=parse_bool,

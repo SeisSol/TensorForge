@@ -9,6 +9,8 @@ from tensorforge.generators.descriptions import OperationDescription, Multilinea
 from tensorforge.generators.rolling import ForDescr, roll
 from tensorforge.common.context import Context
 from tensorforge.common.metrics import BuildMetrics
+from tensorforge.common.matrix.packing import (KINDS as PACK_KINDS,
+                                               pack as pack_operand)
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, Residence
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.generators.kernel_params import KernelParam
@@ -584,6 +586,11 @@ class Generator:
     self._preload_partial = (prefer_preload
                              and context.get_user_options().preload_partial)
     self._preload_drop = 0
+    #: How far `pack_operands='fit'` has had to tighten, as an index into
+    #: `matrix.packing.KINDS`.  Raised a step per attempt whose images did
+    #: not fit (`_tighten_packing`), and reset with the rest of the section's
+    #: state when the next one starts.
+    self._pack_level = 0
     self._preloaded = set()
     self._preload_left = set()
     #: The launch every section runs under, once the sections are built.
@@ -995,6 +1002,7 @@ class Generator:
 
     for codesection, lastbarrier in zip(descrlist, barrier):
       self._preload_drop = 0
+      self._pack_level = 0
       # Two attempts, with the operators preloaded and without -- or, under
       # `preload_partial`, one more per operator dropped.  Each failed attempt
       # either drops one or gives up preloading, and an attempt without it
@@ -1052,7 +1060,13 @@ class Generator:
         # wherever they do not fit.
         while scopecnt < self._scopes.get_num_scopes():
           self._scopes.remove_scope()
-        if self._preload_partial and len(self._preloaded) > 1:
+        if self._tighten_packing():
+          # A smaller operator before a dropped one: `pack_operands='fit'`
+          # asks for the loosest form that still fits, so the answer to
+          # "they do not fit" is the next form down -- and only once there
+          # is none left does an operator have to go.
+          pass
+        elif self._preload_partial and len(self._preloaded) > 1:
           # One operator fewer rather than none.
           self._preload_drop += 1
         else:
@@ -1205,7 +1219,7 @@ class Generator:
     def walk(instrs):
       for instr in instrs:
         if hasattr(instr, 'settle_storage'):
-          instr.settle_storage()
+          instr.settle_storage(self._pack_level)
         for region in instr.regions():
           walk(region)
     walk(self._section.stream)
@@ -2254,14 +2268,91 @@ class Generator:
           f'takes {total} bytes of arguments, more than the '
           f'{hw.max_argument_size} {hw.model} admits')
 
+  def _pack_estimate(self, obj, level=None) -> int:
+    """Elements `obj` would occupy once packed, before the offer is made.
+
+    A static answer, from the operand's numbers alone (`matrix.packing`),
+    and deliberately so: the offer needs the instruction stream -- the lane
+    count, the plan, who else reads the operand -- and the prologue that
+    sizes the images runs before there is one.  So the prologue works with
+    what the form *would* cost and `_settle_storage` checks what it does;
+    an estimate that proves optimistic costs a rebuild, which is the loop
+    it already sits in.
+    """
+    kind = self._context.get_user_options().pack_operands
+    if kind == 'off' or getattr(obj, 'storage_order', None) is not None:
+      return int(obj.storage_elements())
+    if kind == 'fit':
+      kinds = (PACK_KINDS[min(self._pack_level if level is None else level,
+                              len(PACK_KINDS) - 1)],)
+    elif kind == 'auto':
+      kinds = tuple(reversed(PACK_KINDS))
+    else:
+      kinds = (kind,)
+    for name in kinds:
+      try:
+        found = pack_operand(obj, name)
+      except ValueError:
+        return int(obj.storage_elements())
+      if found is not None:
+        return found.elements
+    return int(obj.storage_elements())
+
+  def _pack_saving(self, obj) -> int:
+    """Elements packing takes off `obj`, in the unit `shmem_load` counts."""
+    return max(0, int(obj.storage_elements()) - self._pack_estimate(obj))
+
+  def _choose_pack_level(self, candidates, cap) -> None:
+    """Under `pack_operands='fit'`, the loosest form that still lets the
+    block stage every candidate.
+
+    The preference the option names, decided in the one place where both
+    halves are known: what the forms cost is the operands' business and what
+    there is room for is the block's.  The tightest form where none fits, so
+    that a block that cannot stage everything at least stages as much as it
+    can -- `preload_partial` then takes the first fit of *that*.
+    """
+    if self._context.get_user_options().pack_operands != 'fit':
+      return
+    size = self._context.fp_type.size()
+    for level in range(len(PACK_KINDS)):
+      total = sum(self._pack_estimate(symbol.obj, level)
+                  for symbol in candidates)
+      if total * size < cap:
+        self._pack_level = level
+        return
+    self._pack_level = len(PACK_KINDS) - 1
+
+  def _tighten_packing(self) -> bool:
+    """Ask for the next tighter packing, or say there is none.
+
+    `pack_operands='fit'` names a preference and not a form: the loosest one
+    that lets the block stage what it wanted to.  Which that is cannot be
+    known when the offer is made -- the images are sized from the operands
+    and the block's limit is checked after -- so it is found by trying, and
+    this is the step between two tries.  Every other setting names a form
+    outright and has nothing to tighten.
+    """
+    if self._context.get_user_options().pack_operands != 'fit':
+      return False
+    if not self._section.preload or self._pack_level >= len(PACK_KINDS) - 1:
+      return False
+    self._pack_level += 1
+    return True
+
   def _preload_selection(self, candidates, cap):
     """The operands `preload_partial` stages: first fit, in the order the
     kernel declares them, under the block's shared memory in bytes -- less
-    the last `_preload_drop` of those, which a retry has dropped again."""
+    the last `_preload_drop` of those, which a retry has dropped again.
+
+    At the packed size, not the dense one: what is being decided is how much
+    room the images take, and `_choose_pack_level` has just said which form
+    they will be stored in."""
     size = self._context.fp_type.size()
     chosen, used = [], 0
     for symbol in candidates:
-      need = int(symbol.obj.storage_volume()) * size
+      need = (self._pack_estimate(symbol.obj) * symbol.obj.storage_parts
+              * size)
       if used + need < cap:
         chosen.append(symbol)
         used += need
@@ -2315,6 +2406,12 @@ class Generator:
       # lives where kernel arguments do, and `preload_roles` may leave the
       # operands read along the lead index in global memory.
       candidates = [symbol for symbol in memory if self._preload_admits(symbol)]
+      # Which packing, before the images are sized from it: the operands are
+      # packed where the operations are settled, which is after this, so a
+      # cap checked against the dense size would refuse to stage what the
+      # packed form fits comfortably.  `_choose_pack_level` answers it from
+      # the operands alone, which is all `matrix.packing` needs.
+      self._choose_pack_level(candidates, shmem_cap)
       chosen = (self._preload_selection(candidates, shmem_cap)
                 if self._preload_partial else candidates)
       for symbol in chosen:
@@ -2329,7 +2426,9 @@ class Generator:
       # preloaded operators (local_flux at b = 120, 225 KB) would pass a 64 KB
       # cap on gfx942 -- and FP64 at b = 56 (98 KB) with it -- and the launch
       # would ask for more LDS than the device has.
-      if chosen and shmem_load * self._context.fp_type.size() < shmem_cap:
+      staged = shmem_load - sum(self._pack_saving(symbol.obj)
+                                for symbol in chosen)
+      if chosen and staged * self._context.fp_type.size() < shmem_cap:
         # Waited for before the barrier that publishes them.  A barrier orders
         # the threads, not the copies they issued: without the waits the
         # block would go past `__syncthreads()` with the transfers still in

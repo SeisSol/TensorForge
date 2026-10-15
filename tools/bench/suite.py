@@ -195,6 +195,24 @@ CONFIGS: Dict[str, Config] = {
     # before the ratio: a kernel with no bulk copy in it is the same binary
     # twice and belongs in the comparison as a control, not as a result.
     'bulk': Config('bulk', Options(bulk_copies=True)),
+    # Storing a batch-constant operand without the box cells its numbers
+    # never fill.  Three entries because the three forms differ in what a
+    # read costs and not only in how much they save: `rows` is a shorter
+    # stride and a lane predicate, `runs` the same with a start per column,
+    # and `bits` a masked population count on every read.  The corpus
+    # figures are 20627 cells against 13963, 12341 and 11545, so the
+    # question the measurement settles is whether the last two points of
+    # that are worth the arithmetic.
+    'pack-rows': Config('pack-rows', Options(pack_operands='rows')),
+    'pack-runs': Config('pack-runs', Options(pack_operands='runs')),
+    'pack-bits': Config('pack-bits', Options(pack_operands='bits')),
+    # The same against preloading, which is what the saving is *for*: an
+    # operand that does not fit in shared memory is read from global on
+    # every element.  `fit` picks the loosest form that leaves room, so this
+    # row says what the preference is worth where `preload` alone has to
+    # give up.
+    'pack-fit': Config('pack-fit', Options(pack_operands='fit',
+                                           preload_globals=True)),
 }
 
 

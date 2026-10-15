@@ -929,10 +929,16 @@ class YatetoFrontend:
 
     Asked after `generate`, which is when the instructions have decided.
     Where one of them settled on a storage order -- a fragment image, a
-    vectorisable run of slots -- the operand is no longer the bounding box in
-    F-order, and whoever fills the buffer has to write it the way the kernel
-    reads it. So the numbers go back in that order, and what stores them
-    stores them as they come.
+    vectorisable run of slots, a packing (`matrix.packing`) -- the operand is
+    no longer the bounding box in F-order, and whoever fills the buffer has
+    to write it the way the kernel reads it. So the numbers go back in that
+    order, and what stores them stores them as they come.
+
+    A packing makes the buffer *shorter* than the box, which is the one thing
+    about this list that is not merely a permutation: the cells it leaves out
+    are the ones the operand's own numbers say are zero, and the kernel holds
+    its reads of them off the lanes concerned.  Nothing here says so -- the
+    length is the statement, and `data` is as long as the kernel's buffer.
 
     Silent about an operand whose elements are spread over several slots:
     what those slots hold is arithmetic on a cell's value, and until
