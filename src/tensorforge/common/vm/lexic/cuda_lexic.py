@@ -270,6 +270,29 @@ class CudaLexic(Lexic):
     reached when `Target.native_atomic` agreed for this width, so the overload
     it names exists.
     """
+    if length == 1 and datatype in (Datatype.F32, Datatype.F64):
+      # The state space, named.  `atomicAdd` takes a *generic* pointer, and
+      # where the compiler cannot prove which space it points into it emits
+      # the whole decision tree: a `QSPC` address-space query, a global
+      # reduction, and a shared path spelled as a compare-and-swap spin loop.
+      # SeisSol's destinations are `Addressing.PTR_BASED` -- the pointer is
+      # loaded out of an array -- so the proof never succeeds, and
+      # `localFluxAll` carried eighteen queries and nine CAS loops for nine
+      # accumulated elements: 991 instructions in the steady-state loop body
+      # against 775 with the space named, and 4.4 % of its runtime.
+      #
+      # Casting the *binding* does not help, which is the difference from
+      # AMD: there `__builtin_amdgcn_global_atomic_fadd_f32` carries the
+      # space in the name, and clang has address-space-qualified pointer
+      # types to carry it in. CUDA C++ has neither, and a round trip through
+      # `__cvta_generic_to_global` at the binding is lost again by the time
+      # the access is emitted -- measured, the queries stayed. So the
+      # assurance is restated here, at the one access that needs it.
+      wide = datatype == Datatype.F64
+      reg, ptx = ('d', 'f64') if wide else ('f', 'f32')
+      return (f'asm volatile("red.global.add.{ptx} [%0], %1;" :: '
+              f'"l"(__cvta_generic_to_global(&{access})), '
+              f'"{reg}"({variable}) : "memory");')
     if length == 1:
       return f'atomicAdd(&{access}, {variable});'
     vec = f'float{length}' if datatype == Datatype.F32 else f'{datatype}{length}'

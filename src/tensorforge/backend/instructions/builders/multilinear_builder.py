@@ -13,6 +13,7 @@ from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.backend.instructions.builders.operation_builder import OperationBuilder
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
+from dataclasses import replace
 from tensorforge.backend.placement import (Placement, ResultPlacement,
                                            choose_operand_placement,
                                            choose_result_placement,
@@ -28,7 +29,15 @@ class MultilinearBuilder(OperationBuilder):
     #: What this hardware prefers among the placements that are legal.  Only
     #: preferences: nothing here can make a correct kernel incorrect, and the
     #: legality half is asked separately at each decision.
-    self._policy = self._context.target.prefs.placement
+    #:
+    #: `atomic_accumulation` is the one a caller may overrule
+    #: (`Options.atomic_accumulation`), so that the vendor's answer and the
+    #: other one can be built in one run and measured against each other
+    #: rather than across two source trees.
+    self._policy = replace(
+        self._context.target.prefs.placement,
+        atomic_accumulation=bool(
+            self._context.get_user_options().atomic_accumulation))
 
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.

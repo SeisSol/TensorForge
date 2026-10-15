@@ -552,6 +552,26 @@ declare('hint_outputs',
             'only reader of its source, and a store where nothing reads the '
             'destination but transfers (a `+=` destination\'s own preload).')
 
+declare('atomic_accumulation',
+        rule=lambda target: target.prefs.placement.atomic_accumulation,
+        parse=parse_bool,
+        doc='Let an accumulating result reach global memory as an atomic add '
+            'rather than as a read, an add and a store.\n'
+            'The vendor table decides by default -- AMD yes, NVIDIA no -- and '
+            'the option exists so the two can be compared in one run.  What a '
+            'comparison has to watch on NVIDIA: the atomic removes the '
+            "destination *read*, which can free the load-moving pass to wrap "
+            'an operand it left alone before, so the configurations differ in '
+            'two things and not one.  `atomicAdd` with the result dropped is '
+            'the non-returning `REDG`, and a lane mask costs nothing (it is '
+            'predication); in a cache-resident microbenchmark the reduction '
+            'beat the read-modify-write by 37 %, and at the bandwidth limit '
+            'the two are equal because the write allocates the line either '
+            'way.\n'
+            'Only ever a preference: `result_is_atomic` still asks whether '
+            'the target has the instruction, and an accumulation that is '
+            'written in slices goes out normally whatever this says.')
+
 declare('preload_globals',
         rule=lambda target: target.prefs.preload_globals,
         parse=parse_bool,
