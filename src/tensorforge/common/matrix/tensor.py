@@ -235,11 +235,43 @@ class Tensor:
                 f'Tensor {self.alias}: storage order holds a cell twice; a '
                 f'slot may share an element with no other slot')
         if len(seen) != cells:
-            missing = cells - len(seen)
-            raise GenerationError(
-                f'Tensor {self.alias}: storage order drops {missing} of '
-                f'{cells} cells; an order reorders, it does not discard')
+            # An order *may* discard, but only what is provably not there.
+            # A dropped cell has no slot, so a read of it would address
+            # another cell's -- which is why the dropped ones have to be the
+            # ones nothing reads, and the only statement about that which
+            # does not depend on the emitted code is the operand's own
+            # numbers (`nonzero_pattern`).
+            #
+            # Without numbers there is nothing to prove and nothing may go:
+            # `nonzero_pattern` falls back to the storage pattern there, so
+            # every stored cell counts as present and the rule below refuses
+            # exactly as it used to.
+            kept = set(seen)
+            held = [c for c in range(cells)
+                    if c not in kept and not self._box_cell_is_zero(c)]
+            if held:
+                raise GenerationError(
+                    f'Tensor {self.alias}: storage order drops '
+                    f'{len(held)} of {cells} cells that carry a value '
+                    f'(first: {held[:4]}); an order may discard a cell only '
+                    f'where the operand\'s own numbers say it is zero')
         self._storage_order = order
+
+    def _box_cell_is_zero(self, cell: int) -> bool:
+        """Is the bounding box's `cell`-th slot, in F-order, a known zero?
+
+        The unit `storage_order` and `storage_map` speak -- a position in
+        the box, not a coordinate of the tensor -- so the box's lower corner
+        is what separates the two.
+        """
+        box = tuple(self.get_actual_shape())
+        lower = tuple(self.bbox.lower())
+        idx, rest = [], int(cell)
+        for extent in box:
+            idx.append(rest % extent)
+            rest //= extent
+        return not self.nonzero_pattern.is_nz(
+            tuple(i + lo for i, lo in zip(idx, lower)))
 
     def has_values(self):
         return self.data is not None

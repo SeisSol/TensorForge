@@ -24,6 +24,7 @@ import pytest
 
 from tensorforge.backend.symbol import DataView
 from tensorforge.common.basic_types import Addressing, Datatype
+from tensorforge.common.exceptions import GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.spp import MaskSPP
 from tensorforge.common.matrix.tensor import Tensor
@@ -53,6 +54,42 @@ def test_the_trivial_convention_is_the_default():
     assert _dense().storage_parts == 1
     assert DataView(shape=[8, 4], permute=None).elem_parts == 1
     assert DataView(shape=[8, 4], permute=None).get_dim_strides() == [1, 8]
+
+
+def test_an_order_may_discard_a_cell_the_numbers_say_is_zero():
+    """A compressed image is an order that is shorter than the box.
+
+    Shorter by exactly the cells the operand's own numbers make zero: a
+    dropped cell has no slot, so a read of it would address another cell's,
+    and the only statement about what is never read that does not depend on
+    the emitted code is `nonzero_pattern`.
+    """
+    data = np.zeros((4, 3))
+    data[0, 0] = data[1, 0] = data[3, 2] = 1.0
+    t = Tensor([4, 3], Addressing.NONE, BoundingBox([0, 0], [4, 3]),
+               alias='K', data=data, datatype=Datatype.F32)
+
+    # F-order cells: (0,0)=0, (1,0)=1, (3,2)=11
+    t.storage_order = (0, 1, 11)
+    assert t.storage_elements() == 3
+    assert list(t.storage_values()) == [1.0, 1.0, 1.0]
+
+
+def test_an_order_may_not_discard_a_cell_that_carries_a_value():
+    data = np.zeros((4, 3))
+    data[0, 0] = data[2, 1] = 1.0
+    t = Tensor([4, 3], Addressing.NONE, BoundingBox([0, 0], [4, 3]),
+               alias='K', data=data, datatype=Datatype.F32)
+    with pytest.raises(GenerationError, match='carry a value'):
+        t.storage_order = (0,)            # drops (2,1), which is 1.0
+
+
+def test_without_numbers_an_order_still_may_not_discard():
+    """Nothing to prove, so nothing may go -- the rule as it was."""
+    t = Tensor([4, 3], Addressing.NONE, BoundingBox([0, 0], [4, 3]),
+               alias='K', datatype=Datatype.F32)
+    with pytest.raises(GenerationError, match='carry a value'):
+        t.storage_order = tuple(range(11))
 
 
 def test_a_decomposed_element_scales_every_stride_once():
