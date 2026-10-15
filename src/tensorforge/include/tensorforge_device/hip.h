@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "base.h"
+#include "hip_wave.h"
 
 namespace tensorforge {
 

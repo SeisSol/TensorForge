@@ -144,6 +144,14 @@ class HipLexic(CudaLexic):
     # counts is how many waves have to arrive.
     return self.sync_block()
 
+  def first_lane(self, value, lanes, ctype=None):
+    if self._underlying_hardware != 'amd':
+      return super().first_lane(value, lanes, ctype)
+    # The lane count goes with the value: `hip.h` reads the first lane only
+    # where it is a whole number of the waves the compile builds.
+    targs = f'{lanes}, {ctype}' if ctype else f'{lanes}'
+    return f'tensorforge::wave_uniform<{targs}>({value})'
+
   def handoff_fence(self):
     """A fence at wavefront scope: no instruction on any AMD target (the
     memory model orders a wave's own accesses), but a statement LLVM will not

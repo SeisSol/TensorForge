@@ -223,6 +223,15 @@ class Lexic(ABC):
     """
     return ''
 
+  def first_lane(self, value: str, lanes: int, ctype: str = None) -> str:
+    """`value`, which every lane of `lanes` consecutive ones holds alike, as
+    the first lane's: what tells the compiler so.  Reached only where the
+    target can say it (`Target.reads_first_lane`).  `ctype` names the type
+    where the spelling of `value` has none of its own."""
+    raise NotImplementedError(
+        f'{type(self).__name__} has no spelling for a value uniform across '
+        f'the wave')
+
   def handoff_fence(self):
     """What orders one lane's store before the other lanes' load, where the
     rendezvous itself is spelled as nothing -- or None where it is not.

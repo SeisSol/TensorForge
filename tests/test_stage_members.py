@@ -41,8 +41,11 @@ def test_the_current_member_is_copied_by_the_block_between_barriers(arch):
     assert '__syncthreads();' in body[copy:]
     # every multiplication of the block on the same trips: one group of 8 --
     # spelled in the loop start where it is IR (a multiplication narrower
-    # than the wave) and through `batchIdLane0` where it is text
-    assert 'threadIdx.y % 8' in src
+    # than the wave) and through `batchIdLane0` where it is text, by the row
+    # read as the wave's where a multiplication is a whole one
+    # (`wave_uniform_rows`)
+    row = 'tfMult' if arch == 'gfx1150' else 'threadIdx.y'
+    assert f'{row} % 8' in src
 
 
 def test_a_smaller_group_is_asked_for_by_stage_group():

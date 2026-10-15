@@ -311,6 +311,22 @@ class Target:
 
     # -- cross-lane --------------------------------------------------------- #
 
+    def reads_first_lane(self) -> bool:
+        """Whether the target can tell its compiler that a value is the same
+        on every lane of a wave (`Lexic.first_lane`).
+
+        An AMD wave holds such a value once, in a scalar register, and
+        computes with it on the scalar unit: an element index from it is a
+        scalar loop counter, and an address from it a base the vector loads
+        take as it is.  The compiler proves it of what derives from the block
+        and the grid, and not of the row of the block, `threadIdx.y` -- the
+        same on every lane of a wave wherever a multiplication is a whole
+        number of waves, which the compiler cannot see without the width of
+        the block.  `readfirstlane` reads the first active lane's copy, which
+        is every lane's where they hold it alike.
+        """
+        return self.hw.vendor == 'amd' and self.backend == 'hip'
+
     def sync_mult(self, num_threads: int) -> bool:
         """Whether a rendezvous of exactly the `num_threads` threads of one
         multiplication exists, narrower than the whole block.

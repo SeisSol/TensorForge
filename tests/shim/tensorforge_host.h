@@ -221,6 +221,11 @@ template <int Row> void fmacdpp16(float2 &c, float2 a, float2 b);
 template <std::size_t Block, std::size_t Subblock, std::size_t Lane, typename T>
 T broadcast(T value);
 
+// The row, or an address formed from it, read as the wave's where every lane
+// of `Lanes` holds it alike.  Explicit `T` for the row, whose HIP spelling is
+// a coordinate proxy rather than an integer.
+template <int Lanes, typename T> T wave_uniform(T value);
+
 // The operator tag is a type, so `Operation` and `ReductionOperation` have to
 // be here too -- a `reduction` declared over an opaque `typename Op` would
 // accept `ReductionOperation<float, Operation::Nonsense>` and report nothing.

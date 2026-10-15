@@ -551,6 +551,9 @@ def _py(expr: str) -> str:
     # the C-style cast to a memory-space pointer a global window is bound
     # through: `(tensorforge::SpacePtrRestrict<double, ...>)&m0[...]`
     e = re.sub(r'\(\s*tensorforge::\w+<[^()]*>\s*(?:const\s*)?\)\s*', '', e)
+    # `wave_uniform<Lanes>(v)` reads the first lane's copy of a value every
+    # lane of the wave holds alike, which is this lane's own: the value.
+    e = re.sub(r'\btensorforge::wave_uniform\s*<[^<>()]*>\s*\(', '(', e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__builtin_nontemporal_load\s*\(\s*&', 'DEREF(', e)

@@ -1269,6 +1269,23 @@ declare('lanes_per_mult',
             'eight lanes made `local_flux` 10 % faster and `chain_three` four '
             'times slower, because it spilled -- see `lanes.narrower`.')
 
+declare('wave_uniform_rows',
+        default=True,
+        parse=parse_bool,
+        doc='Read the row of the block once, as the wave\'s, where every '
+            'multiplication is a whole number of waves, and the element '
+            'pointers addressed from it as well (AMD; `Lexic.first_lane`).  '
+            'The compiler cannot tell that `threadIdx.y` is the same on every '
+            'lane of a wave, since it does not know the block; told, it keeps '
+            'the element index, the flags read and the base of every load of '
+            'an element on the scalar unit.  Static ISA over the 117 kernels of '
+            'SeisSol elastic o4/o6/o8, viscoelastic o6 and poroelastic o4 in '
+            'single precision: 11 % fewer instructions in the median on '
+            'gfx1150, where 32 lanes are a wave, and 5 % with '
+            '`lanes_per_mult=64` on gfx942.  Where several multiplications '
+            'share a wave nothing changes.  A switch to compare against, '
+            'pending hardware numbers.')
+
 declare('lead_vectorize',
         default=False,
         env='TF_LEAD_VEC',

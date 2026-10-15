@@ -266,6 +266,24 @@ class GetElementPtr(AbstractInstruction):
     """
     return getattr(self._src.obj, 'addressing', None) == Addressing.PTR_BASED
 
+  def _element_pointer(self, address: str) -> str:
+    """`&m[batchId][off]`, read as the wave's where the build reads the row
+    so (`Generator._wave_uniform_row`).
+
+    The row makes the index the same on every lane of a wave, and the
+    address of the slot with it -- but the slot is read from memory, and the
+    compiler loads it with a vector load where it cannot prove the array
+    unwritten.  The pointer then lands in vector registers, and a load that
+    could take it as its base gets a copy into a scalar register in front of
+    it, again before every load of the element.  Read once as the wave's, it
+    is in a scalar register from the start.
+    """
+    lexic = self._context.target.lexic
+    lanes = getattr(lexic, 'wave_row_lanes', None)
+    if not lanes:
+      return address
+    return lexic.first_lane(address, lanes)
+
   def source_name(self) -> str:
     """What the right-hand side reads the base pointer out of."""
     if self._table is None:
@@ -424,7 +442,8 @@ class GetElementPtr(AbstractInstruction):
       sub_offset = f'{batch_obj.get_offset_to_first_element()}'
       address = f'{main_offset}][{sub_offset}{extra_offset}'
       source = self._context.target.lexic.batch_source(self.source_name())
-      rhs = self._coerce(datatype, const_mod, f'&{source}[{address}]')
+      rhs = self._coerce(datatype, const_mod,
+                         self._element_pointer(f'&{source}[{address}]'))
       lhs = self._declarator(datatype, const_mod)
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'
@@ -509,7 +528,8 @@ class GetElementPtr(AbstractInstruction):
       element = f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'
       if obj.addressing == Addressing.PTR_BASED:
         source = self._context.target.lexic.batch_source(self._src.name)
-        rhs = f'&{source}[{element}][{obj.get_offset_to_first_element()}{extra}]'
+        rhs = self._element_pointer(
+            f'&{source}[{element}][{obj.get_offset_to_first_element()}{extra}]')
       elif obj.addressing == Addressing.STRIDED:
         rhs = (f'&{self._src.name}[{element} * {volume} + '
                f'{obj.get_offset_to_first_element()}{extra}]')

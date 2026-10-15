@@ -35,7 +35,7 @@ HEADERS = {
 
 #: Each shim, and the headers it stands in for.
 SHIMS = {
-    "tensorforge_host.h": ("base.h", "cuda.h", "hip.h"),
+    "tensorforge_host.h": ("base.h", "cuda.h", "hip.h", "hip_wave.h"),
     "tensorforge_sycl.h": ("base.h", "isycl.h"),
 }
 

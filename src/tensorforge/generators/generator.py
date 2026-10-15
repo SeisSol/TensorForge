@@ -498,6 +498,9 @@ class Generator:
     self._num_threads: int = 0
     self._num_active_threads: int = 0
     self._lead_width: int = 1
+    #: The hardware's spelling of the row, while `_lane_mapping` binds the
+    #: lexic's to the multiplication read as the wave's.
+    self._row_source: Optional[str] = None
     #: An explicit lane geometry, or None to take the one the descriptors ask
     #: for.  Overriding it is how a caller says "build this with 64 lanes
     #: instead" -- the thing a search over configurations needs and a constant
@@ -1399,6 +1402,23 @@ class Generator:
       return LoopMode.LAUNCHCTRL
     return LoopMode.SINGLE
 
+  def _declare_wave_row(self, writer) -> None:
+    """Emit the multiplication `_lane_mapping` binds the row to where it reads
+    it as the wave's (`_wave_uniform_row`).
+
+    Ahead of the arena (`_with_arena`), which is the first thing to address
+    by it: a multiplication's window starts at the row times its share.
+    """
+    lexic = self._context.target.lexic
+    layout = MultLayout(self._num_threads,
+                        self._context.target.hw.vec_unit_length)
+    if not self._wave_uniform_row(layout):
+      return
+    row = lexic.first_lane(self._row_source, self._num_threads, 'unsigned')
+    # A name the lexic now spells, read by text everywhere in the section;
+    # it touches no memory the body models.
+    writer(f'const unsigned {MULT_NAME} = {row};', accesses=())
+
   def _declare_lane_mapping(self, writer) -> None:
     """Emit the three values `_lane_mapping` binds the spellings to.
 
@@ -1722,10 +1742,12 @@ class Generator:
     """`body` behind the declarations of the arena it addresses, which are
     the one thing in it that depends on the launch: the block's arena is as
     large as the block, and a multiplication's starts where the
-    multiplications before it end."""
+    multiplications before it end.  Ahead of them, the row they are addressed
+    by, where it is read as the wave's (`_declare_wave_row`)."""
     from tensorforge.backend.instructions.allocate import ShrMemAlloc
     builder = pir.IRBuilder(fptype=self._context.fp_type,
                             context=self._context, alloc=self._names)
+    self._declare_wave_row(builder)
     for instr in section.stream:
       if isinstance(instr, ShrMemAlloc):
         instr.gen_ir(builder)
@@ -1821,12 +1843,28 @@ class Generator:
     second = body.op('select', SIZE, inside, ahead, first, hint=f'{name}2')
     return {f'{name}_start': start, f'{name}1': first, f'{name}2': second}
 
+  def _wave_uniform_row(self, layout: MultLayout) -> bool:
+    """Whether this build reads the row of the block as the wave's
+    (`wave_uniform_rows`).
+
+    Where every multiplication is a whole number of waves, each wave holds
+    one row, and the target can say so (`Target.reads_first_lane`).  Where
+    several share a wave the row differs between them, and only their group
+    is alike across it.
+    """
+    return (layout.whole_waves
+            and self._context.target.reads_first_lane()
+            and self._context.get_user_options().wave_uniform_rows)
+
   @contextmanager
   def _lane_mapping(self):
     """Bind the lane and multiplication spellings for the whole build.
 
     Where a multiplication is a run of lanes inside one wave, `threadIdx.x`
-    *is* the lane and `threadIdx.y` the multiplication, and this binds nothing.
+    *is* the lane and `threadIdx.y` the multiplication, and this binds nothing
+    -- except where it is a whole number of waves: the multiplication is then
+    `threadIdx.y` read once as the wave's (`_wave_uniform_row`), and every
+    reader takes that.
 
     Where it is not -- 48 lanes over a 32-wide wave -- the two cannot both be
     an axis of the launch geometry.  Laying the multiplication along `x` would
@@ -1860,7 +1898,23 @@ class Generator:
         # A run of lanes inside one wave, or a whole number of waves: either
         # way every wave holds one shape already, and `threadIdx.x` is the
         # lane.
-        yield layout
+        if not self._wave_uniform_row(layout):
+            yield layout
+            return
+        # A whole number of waves: `threadIdx.y` is the same on every lane of
+        # one, and read once as the wave's it is the same to the compiler.
+        # Every reader asks the lexic, the block-wide loader numbering its
+        # threads too -- the value is the hardware's, held once.  The lanes go
+        # with the binding, for the element pointers (`GetElementPtr`).
+        saved = (lexic.thread_idx_y, lexic.raw_thread_idx_y)
+        self._row_source = lexic.thread_idx_y
+        lexic.thread_idx_y = lexic.raw_thread_idx_y = MULT_NAME
+        lexic.wave_row_lanes = self._num_threads
+        try:
+            yield layout
+        finally:
+            lexic.thread_idx_y, lexic.raw_thread_idx_y = saved
+            lexic.wave_row_lanes = None
         return
     saved = (lexic.thread_idx_x, lexic.thread_idx_y, lexic.block_dim_y)
     lexic.thread_idx_x, lexic.thread_idx_y = LANE_NAME, MULT_NAME

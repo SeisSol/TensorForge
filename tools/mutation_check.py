@@ -60,6 +60,8 @@ MOVE = Path('src/tensorforge/backend/pir/move.py')
 TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 TARGET = Path('src/tensorforge/common/target.py')
 LEXIC = Path('src/tensorforge/common/vm/lexic/lexic.py')
+HIP_LEXIC = Path('src/tensorforge/common/vm/lexic/hip_lexic.py')
+HIP_WAVE = Path('src/tensorforge/include/tensorforge_device/hip_wave.h')
 SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
 LEGALIZE = Path('src/tensorforge/generators/legalize.py')
 ORACLE = Path('src/tensorforge/reference/kernel_eval.py')
@@ -1965,6 +1967,50 @@ GROUPS = {
         ('an access no barrier reaches counted at every pass',
          sub(BARRIERS, '                        unfenced.add(id(inner))\n',
              '                        unfenced.add(len(unfenced))\n', 1)),
+    ]),
+
+    # The row of the block read once as the wave's, where every
+    # multiplication is a whole number of waves, and the element pointers
+    # with it; the compile reads the first lane only of its own whole waves.
+    'waveuniform': ('tests/test_wave_uniform.py', [
+        ('the row read as the wave\'s where multiplications share it',
+         sub(GEN, '    return (layout.whole_waves\n',
+             '    return ((layout.whole_waves or layout.contiguous)\n', 1)),
+        ('a target without readfirstlane asked for it',
+         sub(TARGET, "        return self.hw.vendor == 'amd' and self.backend == 'hip'",
+             '        return True', 1)),
+        ('the switch ignored',
+         sub(GEN, '            and self._context.get_user_options().wave_uniform_rows)',
+             '            and True)', 1)),
+        ('the row declared behind the arena that addresses by it',
+         subs(GEN, ('    self._declare_wave_row(builder)\n', ''),
+              ('    return tuple(builder.finish()) + tuple(body)',
+               '    self._declare_wave_row(builder)\n'
+               '    return tuple(builder.finish()) + tuple(body)'))),
+        ('the row declared with the wave\'s lanes',
+         sub(GEN, "lexic.first_lane(self._row_source, self._num_threads, 'unsigned')",
+             "lexic.first_lane(self._row_source, 64, 'unsigned')", 1)),
+        ('the block-wide loader numbering threads by the hardware row',
+         sub(GEN, '        lexic.thread_idx_y = lexic.raw_thread_idx_y = MULT_NAME\n',
+             '        lexic.thread_idx_y = MULT_NAME\n', 1)),
+        ('the element pointers left per lane',
+         sub(PTR, '    if not lanes:\n      return address\n',
+             '    return address\n', 1)),
+        ('the row spelled without its type',
+         sub(HIP_LEXIC, "    targs = f'{lanes}, {ctype}' if ctype else f'{lanes}'",
+             "    targs = f'{lanes}'", 1)),
+        ('the first lane read whatever the wave',
+         sub(HIP_WAVE, '  if constexpr (Lanes % WaveSize != 0) {',
+             '  if constexpr (false) {', 1)),
+        ('gfx10 and later taken for wave64',
+         sub(HIP_WAVE, 'inline constexpr int WaveSize = 32;',
+             'inline constexpr int WaveSize = 64;', 1)),
+        ('a compile for another width let through',
+         sub(HIP_WAVE, 'static_assert(__AMDGCN_WAVEFRONT_SIZE == WaveSize,',
+             'static_assert(true || __AMDGCN_WAVEFRONT_SIZE == WaveSize,', 1)),
+        ('the oracle reading the call as an unknown one',
+         sub(ORACLE, "    e = re.sub(r'\\btensorforge::wave_uniform\\s*<[^<>()]*>\\s*\\(', '(', e)\n",
+             '', 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.
