@@ -1199,6 +1199,11 @@ class Loop:
         inner([Variable(str(loop.induction), Datatype.I32, loop.induction)])
 
 
+def _explicit_simd_writer(writer) -> bool:
+  """Whether this body is lowered as an explicit vector."""
+  return bool(getattr(writer, '_explicit_simd', lambda: False)())
+
+
 def write_loops(context: Context, writer: Writer, loops: List[Loop], inner):
   def write_loops_inner(context: Context, writer: Writer, loops: List[Loop], inner, varlist):
     if len(loops) == 0:
@@ -3253,7 +3258,14 @@ class Symbol:
     named = (not structured and not atomic
              and self.stype in (SymbolType.Register, SymbolType.Scratch)
              and (isinstance(lead, (int, np.integer))
-                  or (not self.lead_dims and not index))
+                  or (not self.lead_dims and not index
+                      # Not under an explicit vector.  There a structured
+                      # store lowers to `simd<>::copy_to`, and the value
+                      # without axes is a *scalar* -- the result of a
+                      # horizontal fold, `hmax`, which has no such method.
+                      # It renders and does not compile, which only
+                      # `test_wrapped_syntax` catches.
+                      and not _explicit_simd_writer(writer)))
              and isinstance(variable, _Value) and hasattr(writer, 'store'))
 
     if not structured and self._memory_valid(index) is not None:
