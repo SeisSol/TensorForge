@@ -187,8 +187,12 @@ def test_intel_has_a_native_f64_add_on_pvc_only():
 # --------------------------------------------------------------------------- #
 
 LEXIC_CASES = [
-    ("sm_90", "cuda", Datatype.F32, "atomicAdd"),
-    ("sm_90", "cuda", Datatype.F64, "atomicAdd"),
+    # CUDA names the global space at the access rather than handing
+    # `atomicAdd` a generic pointer it cannot place: see
+    # `CudaLexic.atomic_store`.  The vector overloads keep `atomicAdd`,
+    # which `test_a_vector_atomic_keeps_the_intrinsic` covers.
+    ("sm_90", "cuda", Datatype.F32, "red.global.add.f32"),
+    ("sm_90", "cuda", Datatype.F64, "red.global.add.f64"),
     ("gfx90a", "hip", Datatype.F32, "__builtin_amdgcn_global_atomic_fadd_f32"),
     ("gfx90a", "hip", Datatype.F64, "__builtin_amdgcn_global_atomic_fadd_f64"),
     ("gfx908", "hip", Datatype.F32, "__hip_atomic_fetch_add"),
@@ -245,7 +249,10 @@ def test_hip_targeting_nvidia_does_not_emit_amd_builtins():
     stmt = ctx.target.lexic.atomic_store(ctx, "glb[i]", "value", None,
                                                  Datatype.F32)
     assert 'amdgcn' not in stmt
-    assert 'atomicAdd' in stmt
+    # Whatever CUDA offers, which is the PTX form: the pointer HIP hands
+    # over on an NVIDIA target is as generic as the one CUDA does, and
+    # hipcc compiles that source through the same NVPTX back end.
+    assert 'red.global.add' in stmt or 'atomicAdd' in stmt
 
 
 def test_explicit_simd_declines_whatever_the_hardware_can_do():

@@ -63,14 +63,25 @@ _LAUNCH_START = re.compile(r'^(?P<name>\w+)\.start\s*\((?P<queue>\w+)\)$')
 #: A declaration whose type is a namespaced vector type.
 _VEC_DECL = re.compile(r'^tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>\s+\w+')
 
-#: The three spellings an atomic accumulation reaches memory through.  All of
-#: them are `dest[i] += value` here; what differs between them is which
+#: The spellings an atomic accumulation reaches memory through.  All of them
+#: are `dest[i] += value` here; what differs between them is which
 #: instruction the vendor's compiler picks, which is not a question the host
 #: can answer or needs to.
 _ATOMIC_ADD = re.compile(
     r'^(?:atomicAdd|atomicAdd_block|__builtin_amdgcn_global_atomic_fadd_f(?:32|64)'
     r'|__hip_atomic_fetch_add)\s*\(\s*&(?P<base>\w+)\s*\[(?P<idx>.*)\]\s*,'
     r'\s*(?P<val>.*?)\s*(?:,\s*__ATOMIC_\w+\s*,\s*__HIP_MEMORY_SCOPE_\w+\s*)?\)$')
+
+#: And the fourth, which is not a call: CUDA has no intrinsic that names the
+#: global space, so `cuda_lexic.atomic_store` restates it in PTX at the
+#: access (`red.global.add`) to keep the compiler off the generic decision
+#: tree.  Without this the oracle sees no write at all and reports an empty
+#: result rather than a wrong one -- which is how it was found.
+_ATOMIC_ADD_ASM = re.compile(
+    r'^asm\s+volatile\s*\(\s*"red\.global\.add\.\w+\s*\[%0\],\s*%1;"\s*'
+    r'::\s*"l"\s*\(\s*__cvta_generic_to_global\s*\(\s*&\s*(?P<base>\w+)\s*'
+    r'\[(?P<idx>.*?)\]\s*\)\s*\)\s*,\s*"[df]"\s*\(\s*(?P<val>.*?)\s*\)'
+    r'\s*:\s*"memory"\s*\)$')
 #: `*(SomeVecType*)&name[expr] = value`, captured for the interpreter
 _VEC_STORE = re.compile(
     r'^\*\s*\(([^()]*?)\s*\*\)\s*&\s*(\w+)\s*\[(.+?)\]\s*=\s*(.+?);?$')
@@ -1006,7 +1017,13 @@ class Interp:
             raise Abort(f'async copy not modeled: {stmt!r}')
         if (('pipeline' in stmt or '::' in stmt)
                 and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt
-                and 'std::' not in stmt):
+                and 'std::' not in stmt
+                # `::` is also what separates an inline asm's empty output
+                # list from its inputs, and `red.global.add` is written that
+                # way.  Swallowed here, the accumulation it performs would
+                # simply not happen on the host: the oracle reported no
+                # write to the destination at all rather than a wrong one.
+                and not _ATOMIC_ADD_ASM.match(stmt)):
             # The commit and the wait of the pipeline primitives, the grid
             # barrier: statements with no effect on the values compared here.
             # A declaration whose *type* is namespaced is not one of those --
@@ -1042,7 +1059,7 @@ class Interp:
             return
         if stmt.startswith('using namespace '):
             return
-        am = _ATOMIC_ADD.match(stmt)
+        am = _ATOMIC_ADD.match(stmt) or _ATOMIC_ADD_ASM.match(stmt)
         if am:
             # `dest[i] += value`, and every lane that reaches this statement
             # performs one.  That is the whole content of an atomic here: the
