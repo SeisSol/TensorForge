@@ -70,15 +70,63 @@ def test_a_dpp_fma_is_arithmetic_and_a_matrix_builtin_is_a_matrix_op():
 
 def test_rolling_a_reduction_keeps_what_is_issued_and_shrinks_the_code():
     """Issued follows the trip counts, copies the code: rolling moves only
-    the second -- and adds the loop's counter, test and branch."""
+    the second -- and adds the loop's counter, test and branch.
+
+    Up to the identities the unrolled form folds and the rolled one cannot:
+    the first fold into a zeroed accumulator is an assignment where `fold`
+    can see that nothing has written the slot, and inside a loop body --
+    walked once, run many times -- it cannot (`passes.fold`).  Seventy-two
+    statements here against nine thousand, so the figures are still the same
+    figure; an invariant written as equality would say the two differ in
+    what they compute, which they do not.
+    """
     unrolled = _built('local_flux', 'sm_120', 'cuda', merge_variants=False)
     rolled = _built('local_flux', 'sm_120', 'cuda', merge_variants=False,
                     k_roll=8)
     fp = lambda g, i: g.metrics.issue_mix['fp'][i]
-    assert fp(rolled, 0) == fp(unrolled, 0)
+    assert fp(unrolled, 0) <= fp(rolled, 0) <= fp(unrolled, 0) * 1.02
     assert fp(rolled, 1) < fp(unrolled, 1)
     assert (rolled.metrics.issue_mix['branch'][0]
             > unrolled.metrics.issue_mix['branch'][0])
+
+
+def test_executed_flops_counts_the_lanes_the_kernel_runs_on():
+    """The third figure beside what the operation needs and what a dense
+    implementation of it performs: what the built kernel performs.
+
+    It is above the other two and has to be -- the destination is padded to
+    the lanes, and the arithmetic on the padding is arithmetic the machine
+    does.  Measured against `ncu` on sm_120 it is an upper bound, exact for
+    `gpu_localFluxAll` and up to 53 % over where a guarded tail reaches
+    fewer lanes than its bounds claim.
+    """
+    from tensorforge.analysis.cost import list_cost
+
+    gen = _built('local_flux', 'sm_120', 'cuda')
+    built = pipeline.executed_flops(gen)
+    assert built is not None and built > 0
+    assert gen.metrics.emitted_flops_exact
+
+    cost = list_cost(gen._given, batch=1)
+    assert built >= cost.flops >= cost.nonzero_flops
+
+    # Per lane and scaled by them, so a build at half the lanes performs the
+    # same arithmetic for the element: the figure is of the element, not of
+    # the wave.
+    assert pipeline.executed_flops(gen) == (
+        round(gen.metrics.emitted_flops * gen.built._num_threads))
+
+
+def test_a_guarded_tail_is_not_charged_to_every_lane():
+    """A statement under a lane guard issues once and does its arithmetic on
+    the lanes the bounds admit.  Charging the whole wave for it would report
+    arithmetic no thread performs -- and it is what separated the count from
+    `ncu` by a factor of two on `derivativeTaylorExpansion`."""
+    gen = _built('local_flux', 'sm_120', 'cuda')
+    # Fractional only because a guard's share is: an integer count would mean
+    # the lane scale had been dropped somewhere.
+    assert gen.metrics.emitted_flops <= gen.metrics.emitted_work * 2
+    assert gen.metrics.emitted_flops > 0
 
 
 def test_the_bound_names_its_pipe_and_is_the_largest_of_them():

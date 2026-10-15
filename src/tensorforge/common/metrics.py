@@ -53,6 +53,22 @@ class BuildMetrics:
         #: Arithmetic operations written out (`record_work`).
         self.emitted_work: Optional[int] = None
 
+        #: The *flops* those operations perform, per element and lane
+        #: (`record_work`'s `flops`).  Not `emitted_work` again: that one
+        #: counts operations, because what a lane geometry changes is how
+        #: many of them issue, and an `fma` is one operation.  This one
+        #: counts what the arithmetic is worth -- two for an `fma`, one for
+        #: an add or a multiply, times the lanes of a packed value -- which
+        #: is the figure a hardware counter reports and a roofline divides
+        #: by.  Times the lanes of a multiplication it is flops per element.
+        self.emitted_flops: Optional[int] = None
+
+        #: Whether `emitted_flops` counted everything it saw.  A matrix
+        #: instruction is one statement over a whole tile and the emitter is
+        #: not told the tile, so a build that reaches one says so rather than
+        #: reporting a figure that is short by the bulk of its arithmetic.
+        self.emitted_flops_exact: bool = True
+
         #: Instructions laid down, in the units `pir.emit` counts
         #: (`record_code`).
         self.code_units: Optional[int] = None
@@ -102,7 +118,8 @@ class BuildMetrics:
                                     or uniform > self.peak_uniform_pressure):
             self.peak_uniform_pressure = uniform
 
-    def record_work(self, value: int = 1) -> None:
+    def record_work(self, value: int = 1,
+                    flops: Optional[int] = None) -> None:
         """Count arithmetic the emitter wrote out.
 
         What a lane geometry changes and neither the register model nor
@@ -111,8 +128,17 @@ class BuildMetrics:
         that reaches either issues fewer of these.  Counted per kernel, so a
         *rolled* reduction (`Options.k_roll`) counts its body once however
         many times it runs -- the same caveat the line estimate carries.
+
+        `flops` is what those operations are worth, which is a different
+        number and wanted for a different reason -- `emitted_flops`.  `None`
+        means the caller cannot say, which is not the same as zero: the
+        figure is then marked inexact rather than quietly left short.
         """
         self.emitted_work = (self.emitted_work or 0) + value
+        if flops is None:
+            self.emitted_flops_exact = False
+        else:
+            self.emitted_flops = (self.emitted_flops or 0) + flops
 
     def record_code(self, value: int = 1) -> None:
         """Count instructions the emitter laid down (`code_units`).

@@ -221,6 +221,58 @@ def instructions_per_element(issue_mix: Dict[str, list], hw, lanes: int,
             for category, (issued, _copies) in issue_mix.items()}
 
 
+def executed_flops(generator) -> Optional[int]:
+    """Floating-point operations the generated kernel performs, per element.
+
+    The third of three figures and the only one taken from the program that
+    runs.  `analysis.cost` has the other two -- what the operation needs
+    (`nonzero_flops`) and what a dense implementation of it performs
+    (`flops`) -- and both are of the *operation*: they count the destination
+    box, where a kernel computes whatever its lanes cover.  A destination
+    twenty rows wide on thirty-two lanes does a little over half its
+    arithmetic on rows nobody reads, and nothing in a descriptor says so.
+
+    The emitter counts per lane (`BuildMetrics.emitted_flops`), so the lanes
+    of a multiplication bring it to the element -- and the hardware counter
+    to compare it with counts threads too (`ncu`'s
+    `smsp__sass_thread_inst_executed_op_*_pred_on`, with an `ffma` worth
+    two).
+
+    **An upper bound, tight where the tail is not guarded.**  Against ncu on
+    sm_120, elastic order 4, batch 4096 -- the count here over the measured
+    one:
+
+    | `gpu_localFluxAll` | 1.000 |
+    | `gpu_volume` | 1.067 |
+    | `gpu_neighboringFlux[0]` | 1.093 |
+    | `gpu_derivative` | 1.141 |
+    | `gpu_derivativeTaylorExpansion` | 1.531 |
+
+    Never below one, which is what makes it a bound: everything counted is
+    written into the kernel, and what separates it from the measurement is
+    arithmetic that reaches fewer lanes than the guard it sits under claims,
+    or none.  So an efficiency taken against it is a floor, and a roofline
+    plotting it is reporting at least that much arithmetic -- which is why
+    `tools/bench` records it beside the other two rather than dividing by it.
+
+    `None` where the build reached a statement whose arithmetic the emitter
+    was not told -- a matrix instruction is one statement over a whole tile.
+    A figure short by the bulk of the arithmetic is worse than none, because
+    a rate divided by it looks like efficiency.
+    """
+    built = getattr(generator, 'built', None)
+    metrics = getattr(built, 'metrics', None) if built is not None else None
+    if metrics is None or metrics.emitted_flops is None:
+        return None
+    if not getattr(metrics, 'emitted_flops_exact', True):
+        return None
+    lanes = max(1, getattr(built, '_num_threads', 1) or 1)
+    # A build that stacks elements counts the whole stack, as everything
+    # else here does (`of`), and is divided by it for the same reason.
+    stack = max(1, int(getattr(built, '_stack', 1) or 1))
+    return int(round(metrics.emitted_flops * lanes / stack))
+
+
 def stream_bytes(descr_list) -> float:
     """Bytes one element has to bring through DRAM at least: its own tensors
     read and written once each, the union of what the descriptors touch

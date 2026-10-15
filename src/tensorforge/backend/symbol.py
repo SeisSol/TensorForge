@@ -1036,8 +1036,17 @@ class LeadLoop:
       upper = writer.op('lt', BOOL, lead, hi, hint='g')
       cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
                                                   hint='g')
-    return writer.if_(cond, attrs=(('neutral', self.neutral),)
-                      if self.neutral is not None else ())
+    # How many of the lanes run what is inside, for the emitter's flop
+    # count: a guarded tail does its arithmetic on the lanes the bounds
+    # admit, and a counter that charged the whole wave for it would report
+    # arithmetic no thread performs.  Stated here because this is where the
+    # bounds are numbers; by the time the condition is an SSA value, what it
+    # means is gone.
+    attrs = (('lanes_active', ((hi if hi is not None else self.threads)
+                               - (lo or 0), self.threads)),)
+    if self.neutral is not None:
+      attrs += (('neutral', self.neutral),)
+    return writer.if_(cond, attrs=attrs)
 
   def write(self, context: Context, writer: Writer, inner):
     # A slot is `threads * width` elements wide, so every division that turns

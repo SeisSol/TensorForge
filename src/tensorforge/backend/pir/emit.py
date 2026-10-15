@@ -86,6 +86,14 @@ _LEXIC_BINOP = {'min': Operation.MIN, 'max': Operation.MAX}
 _WORK_OPS = frozenset({'add', 'sub', 'mul', 'div', 'fma', 'neg'})
 
 
+#: What one of those operations is worth in flops, per lane of the value.
+#: The same reading `analysis.cost` takes, so the two figures are comparable:
+#: an `fma` is the two it fuses, a division is a sequence whose length is the
+#: target's business and is counted as a transcendental there rather than as
+#: arithmetic here, and a negation folds into whatever reads it.
+_WORK_FLOPS = {'add': 1, 'sub': 1, 'mul': 1, 'fma': 2, 'div': 0, 'neg': 0}
+
+
 #: The floating-point members of `Datatype`, which is what makes an operation
 #: arithmetic here rather than addressing.
 _WORK_TYPES = frozenset({Datatype.F16, Datatype.BF16, Datatype.F32,
@@ -223,6 +231,13 @@ class Emitter:
         #: product of the trip counts of the loops around it that have
         #: constant bounds (`_emit_for`).
         self._work_scale = 1
+        #: The share of the lanes that run what is being emitted: one
+        #: outside a lane guard, and the guard's own share inside one
+        #: (`Symbol._guard` states it).  Scales the flop count and nothing
+        #: else -- a statement under a guard still occupies the instruction
+        #: stream and still issues, it just does its arithmetic on fewer
+        #: lanes, and that is the only figure of the three that changes.
+        self._lane_scale = 1.0
         #: How many copies of the statement being written the compiler lays
         #: down: the product of the unroll factors of the loops around it
         #: (`_code_copies`).  Not `_work_scale`: a loop rolled by `k_roll` runs
@@ -245,7 +260,7 @@ class Emitter:
         self._inline: set = set()
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
-    def _record_work(self) -> None:
+    def _record_work(self, op: Optional[str] = None, value=None) -> None:
         # Times the trip counts of the loops around it: a loop the compiler
         # unrolls, or one rolled by `k_roll`, is written once and runs its
         # count.  Counted once, rolling a reduction by ten would make a kernel
@@ -253,9 +268,19 @@ class Emitter:
         # count would roll everything it could.  A loop without constant
         # bounds -- the batch loop -- counts once, so the figure stays per
         # element.
+        #
+        # `op` and `value` say what the operation is worth; a caller that
+        # passes neither -- the matrix instruction, whose tile the emitter is
+        # not told -- leaves the flop figure inexact rather than short.
         record = getattr(self.metrics, 'record_work', None)
-        if record is not None:
-            record(self._work_scale)
+        if record is None:
+            return
+        flops = None
+        if op is not None:
+            width = getattr(getattr(value, 'type', None), 'length', None)
+            flops = (_WORK_FLOPS.get(op, 0) * (width or 1)
+                     * self._work_scale * self._lane_scale)
+        record(self._work_scale, flops)
 
     def _record_code(self, op) -> None:
         """What a statement puts into the instruction stream
@@ -1377,8 +1402,11 @@ class Emitter:
             if _counts_as_work(op, v):
                 # One operation, whatever it holds: at a lead width of two the
                 # value is a pair and this is one packed FMA for two elements,
-                # which is the difference the count exists to show.
-                self._record_work()
+                # which is the difference the count exists to show.  Its
+                # *flops* are the other half of that difference, so the value
+                # goes along -- the pair performs twice the arithmetic of the
+                # scalar in the same single operation.
+                self._record_work(op, v)
             args = [self.operand(a) for a in s.args]
             if op in _INFIX and len(args) == 2:
                 expr = self._infix(op, v, args)
@@ -1504,11 +1532,27 @@ class Emitter:
             w(f'{self.ctype(res.type, res)} {nm};')
             targets.append(nm)
 
+        # A lane guard says how many lanes take each arm; anything else is
+        # taken by all of them or by none, and the count stands.
+        active = s.attr('lanes_active')
+        share = (active[0] / active[1]
+                 if active and active[1] else None)
+        outer = self._lane_scale
         with w.If(_unwrap(self.operand(s.cond))):
-            self._emit_body(s.regions[0].body, tuple(targets))
+            if share is not None:
+                self._lane_scale = outer * share
+            try:
+                self._emit_body(s.regions[0].body, tuple(targets))
+            finally:
+                self._lane_scale = outer
         if len(s.regions) > 1:
             with w.Block('else'):
-                self._emit_body(s.regions[1].body, tuple(targets))
+                if share is not None:
+                    self._lane_scale = outer * max(0.0, 1.0 - share)
+                try:
+                    self._emit_body(s.regions[1].body, tuple(targets))
+                finally:
+                    self._lane_scale = outer
 
 
 def emit(body: Tuple[Stmt, ...], writer, context: Any = None,
