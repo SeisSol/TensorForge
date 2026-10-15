@@ -79,11 +79,20 @@ def test_the_figures_are_the_builds_and_not_a_probes():
 
 def test_rolling_the_reduction_makes_the_body_smaller():
     """What `k_roll` is for: a loop is written once however long it runs,
-    while the arithmetic it does -- `emitted_work` -- stays the same."""
+    while the arithmetic it does -- `emitted_work` -- stays the same.
+
+    Up to the identities the unrolled form folds and the rolled one cannot:
+    the first fold into a zeroed accumulator is an assignment where `fold`
+    can see that nothing has written the slot, and in a loop body -- walked
+    once, run many times -- it cannot (`pir.passes.fold`).  Bounded rather
+    than equal, and tightly: what this test is about is a trip count, so a
+    few percent still fails loudly.
+    """
     unrolled, _, _ = generated()
     rolled, _, _ = generated(k_roll=4)
     assert rolled.metrics.code_units < unrolled.metrics.code_units
-    assert rolled.metrics.emitted_work == unrolled.metrics.emitted_work
+    flat, round_ = unrolled.metrics.emitted_work, rolled.metrics.emitted_work
+    assert flat <= round_ <= flat * 1.02
 
 
 class TestWeighed:
