@@ -20,6 +20,7 @@ import importlib.util
 import io
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tensorforge.analysis.cost import Cost, descr_cost, list_cost
@@ -220,6 +221,64 @@ def test_sparsity_is_recorded_and_not_applied():
     banded = {t.name: t for t in cost.tensors}["B"]
     assert banded.density < 1.0
     assert cost.flops == _cost_of("square_notrans.py").flops
+
+
+def test_a_stored_zero_is_not_a_structural_zero():
+    """A tensor has two patterns and they disagree.
+
+    `spp` says which entries are *stored* and where; an operator stored dense
+    over its bounding box occupies every cell of it and is still mostly zero.
+    Conflating the two would force a choice between addressing the operand
+    wrongly and counting it wrongly, so the derived pattern refuses to give
+    an address at all.
+    """
+    data = np.zeros((4, 3))
+    data[0, 0] = data[1, 1] = data[3, 2] = 1.0
+    t = Tensor([4, 3], Addressing.STRIDED, BoundingBox([0, 0], [4, 3]),
+               alias="K", data=data, datatype=Datatype.F32)
+
+    assert t.is_dense() and t.spp.count_nz() == 12     # stored dense
+    assert t.nonzero_pattern.count_nz() == 3           # and mostly zero
+    assert t.nonzero_density() == 0.25
+    assert t.storage_elements() == 12                  # the buffer is unchanged
+    with pytest.raises(NotImplementedError):
+        t.nonzero_pattern.linear_index((0, 0))
+
+
+def test_an_operand_without_numbers_keeps_the_storage_pattern():
+    """Nothing to derive from, so nothing is claimed.
+
+    An operand whose entries arrive at run time may hold anything the shape
+    admits, and a count that assumed otherwise would be an invention rather
+    than a bound.
+    """
+    t = _tensor("A", [4, 3])
+    assert t.nonzero_pattern is t.spp
+    assert t.nonzero_density() == 1.0
+
+
+def test_a_constant_operands_zeros_leave_the_nonzero_count():
+    """The dense count stands and the non-zero count drops.
+
+    Both are wanted: `flops` is what a dense implementation performs and what
+    the generator emits today, `nonzero_flops` what the operation needs.  Here
+    `B` is 4x4 with only its diagonal occupied, so the contraction has one
+    live `k` per output element instead of four -- 16 multiplications against
+    64, and no additions at all, because every output point is reached once.
+    """
+    diag = np.diag(np.ones(4))
+    a = SubTensor(_tensor("A", [4, 4]))
+    b = SubTensor(Tensor([4, 4], Addressing.NONE,
+                         BoundingBox([0, 0], [4, 4]), alias="B",
+                         data=diag, datatype=Datatype.F32))
+    c = SubTensor(_tensor("C", [4, 4]))
+    cost = descr_cost(MultilinearDescr(c, [a, b], [[0, -1], [-1, 1]],
+                                       [[0, 1], [0, 1]]))
+
+    assert cost.mults == 64 and cost.adds == 48 and cost.flops == 112
+    assert cost.nonzero_mults == 16 and cost.nonzero_adds == 0
+    assert cost.nonzero_flops == 16
+    assert cost.nonzero_exact
 
 
 # -- corpus ----------------------------------------------------------------- #

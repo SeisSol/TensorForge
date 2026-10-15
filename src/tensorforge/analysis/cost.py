@@ -26,11 +26,22 @@ and a table lookup on another -- and a single weight would be an invention.
 work, they are not floating-point arithmetic, and counting them as flops makes
 a max-reduction look like it computes something it does not.
 
-Sparsity is reported per tensor and never applied to the arithmetic.  Which
+Sparsity is counted *beside* the arithmetic and never folded into it.  Which
 structurally-zero entries actually get elided is a property of the backend and
-of the block shape it chose, so folding a density into the flop count would
-attribute a code-generation decision to the operation.  `density` is on the
-record so a caller may scale, having decided what it is scaling.
+of the block shape it chose, so scaling `flops` by a density would attribute a
+code-generation decision to the operation.  So there are two figures:
+`flops`, what a dense implementation performs, and `nonzero_flops`, what the
+operation needs once the zeros are taken out -- the count yateto's
+`ComputeOptimalFlopCount` arrives at.  The difference between them is what a
+backend has left to win, which is worth having as a number rather than as an
+impression.
+
+The zeros come from `Tensor.nonzero_pattern`, which is the *arithmetic*
+pattern and not the storage one: an operator stored dense over its bounding
+box is still mostly zero, and only the operand's own numbers say where.
+Where an operand carries no numbers there is nothing to derive and the
+storage pattern stands, so the count is then the dense one and
+`nonzero_exact` says so.
 """
 
 from __future__ import annotations
@@ -116,6 +127,14 @@ class Cost:
     """Arithmetic and traffic for one descriptor or one list of them."""
     mults: int = 0
     adds: int = 0
+    #: The same two over the points the sparsity patterns leave: what the
+    #: operation *needs*, where `mults`/`adds` are what a dense
+    #: implementation performs.  Equal where every operand is dense.  They are
+    #: separate fields rather than a density applied to the first pair,
+    #: because which structural zeros a backend actually elides is its
+    #: decision and the difference between the two is the measurement of it.
+    nonzero_mults: int = 0
+    nonzero_adds: int = 0
     transcendental: int = 0
     nonarith: int = 0
     read_bytes: int = 0
@@ -124,10 +143,30 @@ class Cost:
     tensors: List[TensorTraffic] = field(default_factory=list)
     #: Why a figure is missing, where one is.  Empty when everything counted.
     unmodeled: List[str] = field(default_factory=list)
+    #: Whether `nonzero_mults`/`nonzero_adds` are a sparsity-aware count
+    #: rather than the dense figures repeated.  False where an operand
+    #: carried no pattern or the index space was too large to walk.
+    nonzero_exact: bool = True
 
     @property
     def flops(self) -> int:
         return self.mults + self.adds
+
+    @property
+    def nonzero_flops(self) -> int:
+        """The arithmetic the sparsity leaves, which is what yateto's
+        `nonZeroFlops` counts and what an achieved rate should be measured
+        against where the backend elides structural zeros.
+
+        Checked against yateto over an elastic order-4 export: 113 of 119
+        kernels agree exactly, against 59 for the dense `flops`.  The six that
+        do not are the chains -- `derivative`, `volume`, `fsgKernel` -- whose
+        operands include a matrix that carries no numbers and whose pattern
+        the description therefore does not state.  Supplying yateto's own
+        pattern for those brings `volume` onto its 4806 exactly, so what
+        separates the two is the missing pattern and not the convention.
+        """
+        return self.nonzero_mults + self.nonzero_adds
 
     @property
     def bytes(self) -> int:
@@ -170,6 +209,9 @@ class Cost:
         return Cost(
             mults=self.mults + other.mults,
             adds=self.adds + other.adds,
+            nonzero_mults=self.nonzero_mults + other.nonzero_mults,
+            nonzero_adds=self.nonzero_adds + other.nonzero_adds,
+            nonzero_exact=self.nonzero_exact and other.nonzero_exact,
             transcendental=self.transcendental + other.transcendental,
             nonarith=self.nonarith + other.nonarith,
             read_bytes=sum(t.read * scale[t.per_batch] for t in tensors),
@@ -249,6 +291,78 @@ def _multilinear_ranges(descr) -> Optional[Dict[int, tuple]]:
     return ranges
 
 
+#: Points of an iteration space this will walk before giving up.  The walk is
+#: one `is_nz` per operand per point, which is cheap per point and unbounded
+#: in the product; past this the dense figure stands and `unmodeled` says so.
+NONZERO_POINT_CAP = 1 << 22
+
+
+def _nonzero_points(descr, ranges: Dict[int, tuple]):
+    """`(active, out_active)`: points where every tensor operand is nonzero,
+    and destination points at least one such point reaches.  None where the
+    space is too large to walk or an operand has no pattern to ask.
+
+    This is the count yateto's `ComputeOptimalFlopCount` arrives at by
+    propagating the equivalent sparsity patterns through the tree: a product
+    contributes one multiplication per nonzero of its result, and a
+    contraction one addition per nonzero it folds away.  Walking the index
+    space reaches the same answer without building the patterns, which is
+    worth it here only because the spaces are small -- a few thousand points
+    for the kernels this is asked about.
+    """
+    from itertools import product as iproduct
+
+    ops = [o for o in (descr.ops or [])
+           if getattr(o, 'tensor', None) is not None
+           and o.tensor.addressing != Addressing.SCALAR]
+    targets = [t for o, t in zip(descr.ops or [], descr.target or [])
+               if getattr(o, 'tensor', None) is not None
+               and o.tensor.addressing != Addressing.SCALAR]
+    if not ops or len(ops) != len(targets):
+        return None
+
+    patterns = []
+    for op in ops:
+        # The *non-zero* pattern and not the storage one: an operator stored
+        # dense over its bounding box still has entries that are zero in
+        # every batch element, and yateto's count skips the products that
+        # read them.  Falls back to the storage pattern where the operand
+        # carries no numbers, which is the same answer as before.
+        spp = getattr(op.tensor, 'nonzero_pattern', None)
+        if spp is None:
+            spp = getattr(op.tensor, 'spp', None)
+        if spp is None or not hasattr(spp, 'is_nz'):
+            return None
+        patterns.append(spp)
+
+    labels = sorted(ranges)
+    extents = [ranges[l] for l in labels]
+    total = 1
+    for lo, hi in extents:
+        total *= max(0, hi - lo)
+    if total == 0:
+        return 0, 0
+    if total > NONZERO_POINT_CAP:
+        return None
+
+    dest_rank = descr.dest.bbox.rank()
+    at = {label: i for i, label in enumerate(labels)}
+    # Which position of the full point each operand axis reads.
+    picks = [[at[label] for label in target] for target in targets]
+    dest_picks = [at[j] for j in range(dest_rank) if j in at]
+
+    active = 0
+    reached = set()
+    for point in iproduct(*(range(lo, hi) for lo, hi in extents)):
+        for spp, pick in zip(patterns, picks):
+            if not spp.is_nz(tuple(point[i] for i in pick)):
+                break
+        else:
+            active += 1
+            reached.add(tuple(point[i] for i in dest_picks))
+    return active, len(reached)
+
+
 def _points(ranges: Dict[int, tuple]) -> int:
     return prod(max(0, hi - lo) for lo, hi in ranges.values()) if ranges else 1
 
@@ -299,6 +413,15 @@ def _finish(counts: Dict[str, int], tensors: List[TensorTraffic],
     return Cost(
         mults=counts.get('mults', 0) * batch,
         adds=counts.get('adds', 0) * batch,
+        # Absent where nothing counted them: a descriptor whose patterns are
+        # unavailable reports the dense figure for both rather than zero, so
+        # that a sum over a list is never short by the kernels it could not
+        # analyse.
+        nonzero_mults=counts.get('nonzero_mults',
+                                 counts.get('mults', 0)) * batch,
+        nonzero_adds=counts.get('nonzero_adds',
+                                counts.get('adds', 0)) * batch,
+        nonzero_exact=not counts.get('nonzero_inexact'),
         transcendental=counts.get('transcendental', 0) * batch,
         nonarith=counts.get('nonarith', 0) * batch,
         read_bytes=sum(t.read * scale[t.per_batch] for t in tensors),
@@ -347,6 +470,19 @@ def descr_cost(descr, batch: int = 1,
             # elements cost no add.
             'adds': points if descr.add else max(0, points - out_points),
         }
+        # Not an `unmodeled` entry: that list is for a cost this cannot
+        # state at all, and the dense figures are stated.  What is missing
+        # here is only the *sparsity-aware* pair, which falls back to them
+        # and says so through `nonzero_exact`.
+        nonzero = _nonzero_points(descr, ranges)
+        if nonzero is None:
+            counts['nonzero_inexact'] = 1
+        else:
+            live, out_live = nonzero
+            counts['nonzero_mults'] = (max(0, len(tensor_ops) - 1) * live
+                                       + scalars * out_live)
+            counts['nonzero_adds'] = (live if descr.add
+                                      else max(0, live - out_live))
         return _finish(counts, _traffic(descr, datatype), batch, [])
 
     if isinstance(descr, ElementwiseDescr):

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from .spp import SparsityPattern, FullSPP
+from .spp import SparsityPattern, FullSPP, NonzeroSPP
 from .boundingbox import BoundingBox
 from .prepare import TF32_PARTS, split_tf32
 from functools import reduce
@@ -104,6 +104,9 @@ class Tensor:
         self.slot_major = None
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
+        #: `nonzero_pattern`'s answer once derived; the derivation walks
+        #: the index space and the cost model asks per point.
+        self._nonzero_pattern = None
         self.spp = spp
         self.datatype = datatype
         self.alignment = alignment
@@ -489,6 +492,45 @@ class Tensor:
         parts += ' ordered' if self.storage_order is not None else ''
         return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}{parts}'
 
+    @property
+    def nonzero_pattern(self):
+        """Which entries the arithmetic has to touch.
+
+        Not the same question as ``spp``, which says which entries are
+        *stored* and where.  A tensor carrying its own numbers answers this
+        one better than its storage can: an operator stored dense over its
+        bounding box is still mostly zero, and a product reading one of those
+        zeros contributes nothing to any batch element.
+
+        Derived and not described, so that it cannot disagree with the data
+        -- and so that every frontend gets it, not just the one that happened
+        to be taught to pass a pattern.  Without data there is nothing to
+        derive and the storage pattern is the honest answer: an entry that is
+        stored may hold anything.
+
+        Read by the cost model, which counts what the operation needs rather
+        than what the emitted code does.  Nothing addressing an operand may
+        read it; ``NonzeroSPP`` refuses to be asked.
+        """
+        if self._nonzero_pattern is None:
+            if self.data is None:
+                self._nonzero_pattern = self.spp
+            elif self.spp.count_nz() == self.get_real_volume():
+                # everything is stored, so the numbers are the whole answer
+                self._nonzero_pattern = NonzeroSPP(self.data != 0)
+            else:
+                stored = np.fromiter(
+                    (self.spp.is_nz(idx) for idx in _c_order(self.shape)),
+                    dtype=bool, count=int(self.get_real_volume()))
+                mask = (self.data != 0) & stored.reshape(self.shape)
+                self._nonzero_pattern = NonzeroSPP(mask)
+        return self._nonzero_pattern
+
+    def nonzero_density(self):
+        """What share of the stored entries can be non-zero."""
+        stored = self.spp.count_nz()
+        return self.nonzero_pattern.count_nz() / stored if stored else 1.0
+
     def density(self):
         return self.spp.count_nz() / self.get_real_volume()
 
@@ -500,6 +542,16 @@ class Tensor:
 
     def __repr__(self):
         return self.gen_descr()
+
+def _c_order(shape):
+    """Every index of ``shape``, last axis fastest -- `ndarray`'s own order,
+    so a run built from it reshapes back onto the data without a transpose."""
+    if not shape:
+        yield ()
+        return
+    for head in range(shape[0]):
+        for rest in _c_order(shape[1:]):
+            yield (head,) + rest
 
 def _f_order(shape):
     """Every index of ``shape``, first axis fastest."""

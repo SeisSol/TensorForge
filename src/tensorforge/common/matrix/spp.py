@@ -100,3 +100,42 @@ class ListSPP(SparsityPattern):
             return preindex - 1 if preindex > 0 else None
         else:
             return None
+
+
+class NonzeroSPP(SparsityPattern):
+    """Which entries of a tensor can be non-zero, as against which are stored.
+
+    The other patterns in this file answer the *storage* question: an entry
+    they admit occupies a slot, and `linear_index` says which.  This one
+    answers the arithmetic question instead -- an operand densely stored over
+    its bounding box still has entries that are zero in every batch element,
+    and a product reading one of them contributes nothing.
+
+    The two are separate because a tensor has both at once and they disagree:
+    SeisSol's `kDivMT` is stored dense over a 40x53 box and 14 % of it is
+    non-zero.  Keeping them in one field would force a choice between
+    addressing the operand wrongly and counting it wrongly.
+
+    `linear_index` is refused rather than answered, because every sensible
+    answer is a trap: numbering the non-zeros would address a densely stored
+    operand as though the zeros had been squeezed out, and deferring to the
+    storage pattern would hand out an address this object has no business
+    knowing.
+    """
+
+    def __init__(self, mask):
+        #: Truth per entry, in the tensor's own index space.
+        self.mask = np.asarray(mask, dtype=bool)
+
+    def is_nz(self, index):
+        index = tuple(index)
+        return bool(all(i < s for i, s in zip(index, self.mask.shape))
+                    and self.mask[index])
+
+    def count_nz(self):
+        return int(np.count_nonzero(self.mask))
+
+    def linear_index(self, tupleindex):
+        raise NotImplementedError(
+            'a non-zero pattern says which entries matter, not where they '
+            'live; ask the tensor\'s storage pattern for an address')
