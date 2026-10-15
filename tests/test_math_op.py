@@ -220,6 +220,16 @@ def _function(template: str) -> str:
 FLOATING_POINT = {Operation.ABS: 'fabs', Operation.MIN: 'fmin',
                   Operation.MAX: 'fmax'}
 
+#: Where the libraries legitimately disagree on the name.  CUDA's
+#: population count is an intrinsic called `__popc` and there is no
+#: `popcount` to use instead, so the shared-name rule cannot hold for it.
+#: Written out per library rather than exempted, because what the rule is
+#: for -- a typo in one table being a name no other has -- still applies
+#: once the expected name is stated.
+PER_LIBRARY = {Operation.POPCOUNT: {'CudaLexic': '__popc',
+                                    'SyclLexic': 'popcount',
+                                    'TargetLexic': 'popcount'}}
+
 
 @pytest.mark.parametrize('tables,names', [
     ('MATH', FLOATING_POINT), ('INTEGER_MATH', {})])
@@ -227,11 +237,17 @@ def test_a_function_is_the_same_function_in_every_library(tables, names):
     """An operation every library has is the same function in each: a typo
     in one table -- `logp1` for `log1p` -- is a name no other table has, and
     an `fmin` in one where another has `min` is another answer for a NaN."""
-    libraries = [getattr(lexic, tables)
-                 for lexic in (CudaLexic, SyclLexic, TargetLexic)]
+    lexics = (CudaLexic, SyclLexic, TargetLexic)
+    libraries = [getattr(lexic, tables) for lexic in lexics]
     shared = set.intersection(*map(set, libraries))
     assert shared, 'the libraries share no function'
     for op in sorted(shared, key=lambda o: o.value):
+        apart = PER_LIBRARY.get(op)
+        if apart is not None:
+            for lexic, table in zip(lexics, libraries):
+                assert _function(table[op]) == apart[lexic.__name__], (
+                    f'{op} in {lexic.__name__}: {table[op]}')
+            continue
         spelled = {_function(table[op]) for table in libraries}
         expected = names.get(op, op.name.lower())
         assert spelled == {expected}, f'{op}: {sorted(spelled)}'

@@ -76,8 +76,13 @@ def test_the_kernel_reads_the_operators_only_as_aligned_vectors(monkeypatch):
     assert not re.search(r"= glb_m[0468]\[", src)
 
 
-def test_nothing_is_prepared_unless_asked(monkeypatch):
-    _, operators = _generate(monkeypatch, "lanes_per_mult=8")
+def test_nothing_is_prepared_where_it_is_turned_off(monkeypatch):
+    """`prepare_operands` is on by default, so the statement worth making
+    is the other one: turned off, no operand is re-encoded.  The packing is
+    off here too, because it is a second kind of order and would answer
+    `storage_map` as well -- what this is about is the interleave."""
+    _, operators = _generate(
+        monkeypatch, "lanes_per_mult=8,prepare_operands=0,pack_operands=off")
     assert all(a.storage_map() is None for a in operators)
     assert all(a.simt_interleave is None for a in operators)
 
@@ -105,7 +110,8 @@ def test_one_row_a_lane_keeps_the_plain_layout():
     group would be padding in every load -- three floats in four for
     `localFluxAll`'s 32-row `fMrT` at 32 lanes.  Its 64-row `rDivM` are two
     rows a lane, and take a pair."""
-    _, operators = _seissol("localFluxAll", options={"prepare_operands": True})
+    _, operators = _seissol("localFluxAll", options={"prepare_operands": True,
+                                                    "pack_operands": "off"})
     rows = {a.name: int(a.get_actual_shape()[0]) for a in operators}
     assert {32, 64} <= set(rows.values())
     for a in operators:
@@ -151,7 +157,7 @@ def test_every_reader_of_an_operator_shares_its_interleave():
     for a in operators:
         assert a.simt_interleave is not None, a.alias
         assert list(a.get_bbox().lower()) == [0, 1]
-    plain, _ = _seissol("derivative")
+    plain, _ = _seissol("derivative", options={"prepare_operands": False})
     vectors = lambda text: len(re.findall(r"VectorT<float, [24]>", text))
     assert vectors(src) > vectors(plain)
 

@@ -88,8 +88,12 @@ def test_the_copies_are_waited_for_before_the_barrier(arch):
 
 
 def test_a_split_operator_is_copied_whole():
-    """Two parts of 56x56 scalars each: 6272 per image, not 3136."""
-    gen, descrs = _generate("sm_100", parts=2)
+    """Two parts of 56x56 scalars each: 6272 per image, not 3136.
+
+    Unprepared: a fragment order pads the 56x56 to 3584 slots and the
+    images grow to 7168, which is the next test and a different
+    statement."""
+    gen, descrs = _generate("sm_100", parts=2, prepare_operands=False)
     kernel = gen.get_kernel()
     images = _images(kernel)
     assert sorted(images.values()) == [0, 6272, 12544, 18816]

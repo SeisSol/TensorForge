@@ -194,8 +194,8 @@ def _candidates(loop: Stmt, what: str, report: Optional[List[str]]
             continue
         value = x.target[0]
         base = x.args[0]
-        if not isinstance(value.type, ScalarType) or value.type.is_vector:
-            why.append('a vector')
+        if not isinstance(value.type, ScalarType):
+            why.append('not a scalar value')
             continue
         if value.uniformity is not Uniformity.LANE:
             why.append('the lanes read one element')
@@ -231,19 +231,29 @@ def _gather(loop: Stmt, scratch,
         return None
     region = loop.regions[0]
     stmts = region.body
-    # One array per element type, since a slot is one element.
+    # One array per value type, since a slot is one value -- and a value
+    # may be a vector: an operand stored in the SIMT interleave is read a
+    # group of rows at a time (`Symbol._interleaved_load`), which used to
+    # put every such read out of reach of this pass.  Keyed on the whole
+    # type and not on its base, so that a group's slots are all one width
+    # and the stride below is one number.
     by_type: Dict[object, List[Tuple[Stmt, List[Stmt]]]] = {}
     for x, deps in found:
-        by_type.setdefault(x.target[0].type.base, []).append((x, deps))
+        by_type.setdefault(x.target[0].type, []).append((x, deps))
     declare: List[Stmt] = []
     moved = {id(d) for _, deps in found for d in deps}
     moved |= {id(x) for x, _ in found}
     head: List[Stmt] = [d for d in stmts if id(d) in moved
                         and not any(d is x for x, _ in found)]
     for elem, group in by_type.items():
+        # The array is scalars either way, as every register array here is;
+        # a vector slot is `width` of them and the slot index scales.  The
+        # emitter then writes the cast it writes for any wide register
+        # access, and a slot of width one is the same expression as before.
+        width = elem.length or 1
         b = scratch()
-        buf = b.alloc(elem, (len(group),), MemSpace.REGISTER, hint='trip',
-                      init='{}')
+        buf = b.alloc(elem.base, (len(group) * width,), MemSpace.REGISTER,
+                      hint='trip', init='{}')
         declare.extend(b.finish())
         fill = scratch()
         fill.mark('defines', buf)
@@ -253,7 +263,7 @@ def _gather(loop: Stmt, scratch,
                                  uniform=value.uniformity,
                                  layout=value.layout)
             fill.emit(replace(x, target=(fetched,)))
-            fill.store(buf, fetched, fill.const(slot, INDEX))
+            fill.store(buf, fetched, fill.const(slot * width, INDEX))
         head.extend(fill.finish())
         # The slots are read right behind the fill, each into the value its
         # load produced, so that what read the load reads the slot.  All of
@@ -262,8 +272,8 @@ def _gather(loop: Stmt, scratch,
         # fill has the whole trip ahead of it.
         for slot, (x, _) in enumerate(group):
             read = scratch()
-            read.load(buf, read.const(slot, INDEX), type_=x.target[0].type,
-                      hint='trip')
+            read.load(buf, read.const(slot * width, INDEX),
+                      type_=x.target[0].type, hint='trip')
             built = read.finish()
             head.extend(built[:-1])
             head.append(replace(built[-1], target=(x.target[0],)))

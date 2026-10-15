@@ -233,9 +233,13 @@ def _generated(values, kind, arch="sm_120", backend="cuda", **options):
     return gen, a.tensor
 
 
-def test_the_default_leaves_every_operand_whole():
+def test_off_offers_no_packing():
+    """Not "no order": `prepare_operands` may still arrange the operand for
+    the instruction that reads it, which is a different question and has
+    its own switch."""
     _, t = _generated(_band(), "off")
-    assert t.packing is None and t.storage_order is None
+    assert t.packing is None
+    assert t.storage_elements() == t.get_actual_volume() or t.simt_interleave
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -314,6 +318,44 @@ def test_a_wide_lead_is_packed_at_its_own_width():
     assert a.tensor.packing is not None
     assert a.tensor.packing.granule > 1
     assert a.tensor.storage_elements() == a.tensor.packing.elements
+
+
+def test_a_rolled_reduction_takes_a_uniform_form_and_only_that():
+    """The column is a loop variable then, so the slot has to be affine in
+    it: `rows` is, `runs` with unequal columns is not."""
+    rng = np.random.default_rng(53)
+    rows, cols = 64, 96
+    even = np.zeros((rows, cols))
+    even[7:46, :] = rng.uniform(0.5, 1.5, size=(39, cols))
+    odd = np.zeros((rows, cols))
+    for c in range(cols):
+        lo = 3 + (c % 11)
+        odd[lo:lo + 20, c] = rng.uniform(0.5, 1.5, size=20)
+
+    def built(values, kind):
+        a = SubTensor(Tensor([rows, cols], Addressing.NONE,
+                             BoundingBox([0, 0], [rows, cols]), alias="A",
+                             datatype=Datatype.F32, data=values))
+        b = SubTensor(Tensor([cols, 6], Addressing.STRIDED,
+                             BoundingBox([0, 0], [cols, 6]), alias="B",
+                             datatype=Datatype.F32))
+        c = SubTensor(Tensor([rows, 6], Addressing.STRIDED,
+                             BoundingBox([0, 0], [rows, 6]), alias="C",
+                             datatype=Datatype.F32))
+        gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
+                        Context(arch="sm_120", backend="cuda",
+                                fp_type=Datatype.F32,
+                                options=Options(pack_operands=kind, k_roll=4)))
+        gen.generate()
+        return gen, a.tensor
+
+    gen, t = built(even, "rows")
+    assert t.packing is not None and t.packing.uniform
+    # the column term is the span, formed inside the loop
+    assert f"* {t.packing.lengths[0]}" in gen.get_kernel()
+
+    _, t = built(odd, "runs")
+    assert t.packing is None
 
 
 def test_a_named_form_takes_the_operand_from_the_fragment_order():

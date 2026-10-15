@@ -10,7 +10,7 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List, Tuple
-from tensorforge.common.basic_types import Addressing
+from tensorforge.common.basic_types import Addressing, Residence
 from tensorforge.backend.pir.core import INDEX, MemSpace
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 
@@ -1058,7 +1058,9 @@ class MultilinearInstruction(ComputeInstruction):
         members = (tuple(getattr(a_obj, 'variant_members', ())) if variant
                    else (a_obj,))
         if (not members or a_obj.addressing is not Addressing.NONE
-                or not a_obj.is_dense()):
+                or not a_obj.is_dense()
+                or any(getattr(m, 'residence', Residence.MEMORY)
+                       is not Residence.MEMORY for m in members)):
             return
         shape = tuple(int(x) for x in a_obj.get_actual_shape())
         if len(shape) != 2 or not self._reads_interleavable(sym, a_obj):
@@ -1076,6 +1078,14 @@ class MultilinearInstruction(ComputeInstruction):
                for user in sym.get_user_list()):
             return
         rows, cols = shape
+        # `Tensor.alignment` is deliberately not consulted.  It describes
+        # the layout the frontend gave the operand, and preparing *replaces*
+        # that layout: what the kernel reads is a buffer the host writes
+        # from the offering, aligned as a fresh allocation is.  The offering
+        # has no field to ask for it with -- yateto refuses one it does not
+        # know by name (`ExportFactory._grantOffering`) -- so it is an
+        # agreement between the two sides rather than a request, and this is
+        # where it is written down.
         widest = 16 // a_obj.datatype.size()
         if widest < 2 or threads < 1:
             return
@@ -1171,12 +1181,11 @@ class MultilinearInstruction(ComputeInstruction):
 
         What it has instead is the column.  A packed slot is `off_c + r -
         start_c`, and `off_c` and `start_c` are the column's own numbers, so
-        the column has to be one at build time: an unrolled reduction gives
-        it as an integer, a rolled one as a loop variable, and the second has
-        nowhere to read the pair from yet.  So a rolled reduction refuses --
-        which is the same restriction that would be lifted by putting the two
-        tables in memory, and the reason the tables are the next step rather
-        than this one.
+        an unrolled reduction gives them as integers and a rolled one does
+        not.  That is a restriction on the *form* and not on the read, and
+        `_offer_packing` applies it there: a rolled reduction may have a
+        uniform packing, whose slot is affine in the column and needs no
+        per-column number at all, and may not have any other.
         """
         if (_explicit_simd(self._context) or not self._ops
                 or self._ops[0].symbol is not sym):
@@ -1198,7 +1207,7 @@ class MultilinearInstruction(ComputeInstruction):
             # packed operand has no fragments, only the same cells with the
             # empty ones left out.
             return False
-        return not self._reduction_is_rolled()
+        return True
 
     def _bitset_fits(self, a_obj, rows: int, threads: int) -> bool:
         """Whether every row a lane slot reaches fits in one 32-bit word.
@@ -1293,7 +1302,9 @@ class MultilinearInstruction(ComputeInstruction):
         variant = getattr(a_obj, 'is_variant', False)
         members = (tuple(getattr(a_obj, 'variant_members', ())) if variant
                    else (a_obj,))
-        if not members or a_obj.addressing is not Addressing.NONE:
+        if (not members or a_obj.addressing is not Addressing.NONE
+                or any(getattr(m, 'residence', Residence.MEMORY)
+                       is not Residence.MEMORY for m in members)):
             return
         if not self._reads_packable(sym, a_obj):
             return
@@ -1327,6 +1338,12 @@ class MultilinearInstruction(ComputeInstruction):
                     or list(member.get_bbox().lower()) != lower):
                 return
         kinds = (('bits', 'runs', 'rows') if kind == 'auto' else (kind,))
+        # A rolled reduction hands the column over as a loop variable, so
+        # only a form whose slot is affine in it can be addressed
+        # (`Symbol._uniform_packed_index`).  Checked on the packing rather
+        # than on the kind, because `runs` is uniform whenever the columns
+        # happen to agree and there is no reason to refuse that.
+        rolled = self._reduction_is_rolled()
         # One packing over all the members at once, not one apiece: a
         # stand-in's body addresses whichever member the counter names, so
         # two members packed differently would read one another's slots
@@ -1338,6 +1355,9 @@ class MultilinearInstruction(ComputeInstruction):
                                                             threads)):
                 continue
             chosen = packing_mod.pack_union(members, name, grain)
+            if chosen is not None and rolled and not chosen.uniform:
+                chosen = None
+                continue
             if chosen is not None:
                 break
         if chosen is None:
@@ -1390,6 +1410,13 @@ class MultilinearInstruction(ComputeInstruction):
         if self._lead_width != 1:
             # A packed lead operand is read as vectors of rows, and an order
             # stated for single rows would be read by coordinate -- wrongly.
+            return
+        if getattr(a_obj, 'residence', Residence.MEMORY) is not Residence.MEMORY:
+            # An operand whose numbers are in the instruction stream or in a
+            # kernel argument has no buffer, and every one of these orders is
+            # a statement about a buffer.  Offered one, the matrix path asks
+            # for a slot, the read declines for want of an address, and the
+            # accessor hands `extract` the nothing it got back.
             return
         if not isinstance(a_obj, Tensor) or a_obj.storage_order is not None:
             # Only a tensor has a storage convention.  A register-resident

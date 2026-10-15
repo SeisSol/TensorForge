@@ -793,7 +793,7 @@ declare('prepare_operands',
             'the global loads of the rolled merged kernel and made it 4 % faster.')
 
 declare('pack_operands',
-        default='off',
+        default='fit',
         env='TF_PACK_OPERANDS',
         doc='Store a batch-constant operand without the bounding-box cells '
             'its own numbers never fill, and hold a read of them off the '
@@ -813,11 +813,23 @@ declare('pack_operands',
             'wanted to -- `rows` first, and a tighter form only where the '
             'images would otherwise not fit shared memory, which is what '
             'the saving is for.\n'
-            'Off by default because it moves work onto whoever fills the '
-            'buffer, exactly as `prepare_operands` does -- the host writes '
-            'the slots the kernel reads, through the layout offering -- and '
-            'because a packed read carries a lane predicate that an '
-            'unpacked one does not.\n'
+            "`fit` by default, which is the unpadded form everywhere there "
+            'is room and a tighter one only where the block would otherwise '
+            'not stage what it wanted to.  It moves work onto whoever fills '
+            'the buffer -- the host writes the slots the kernel reads, '
+            'through the layout offering -- but that is the contract '
+            '`prepare_operands` already imposes, so this adds no promise '
+            'the caller was not making.\n'
+            'Free, measured against a control row that builds the same '
+            'kernel twice so the run can say what it is worth: on sm_120 '
+            '`rows` came out -0.62 % where the control came out -0.63 %, '
+            'and on gfx1150 +0.01 % against +0.09 %.  What does move is '
+            'register pressure -- 1154 VGPRs to 1025 over sixteen gfx1150 '
+            'kernels -- and the third of the operand storage that is the '
+            'point.  `bits` is the one form that costs: +3.7 % against the '
+            'control on sm_120, +15 % registers and 88 bytes of spill, '
+            'which is why `fit` reaches it last and `auto` is not the '
+            'default.\n'
             'Rounding the span to the lane count instead, so the predicate '
             'could be dropped, loses the whole gain and then some: at 32 '
             'lanes it comes out 25 % *larger* than the box, because a span '

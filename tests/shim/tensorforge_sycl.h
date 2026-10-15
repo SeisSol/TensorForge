@@ -96,12 +96,21 @@ public:
 
 // -- vectors ---------------------------------------------------------------
 //
-// A plain aggregate: the generator only ever bit-casts through these
-// (`*(sycl::vec<float,4>*)&p[i] = *(sycl::vec<float,4>*)&q[j]`), so element
-// access is not part of the contract and is deliberately not provided.
+// A plain aggregate with the subscript SYCL 2020 gives it.  Most of the
+// generated uses are bit-casts through the whole value
+// (`*(sycl::vec<float,4>*)&p[i] = *(sycl::vec<float,4>*)&q[j]`), but an
+// operand stored in the SIMT interleave is read a group at a time and one
+// row taken out of it (`Symbol._interleaved_load`), and that is an
+// element access.
 
 template <typename T, int N> struct vec {
   T data[N > 0 ? N : 1];
+  // SYCL 2020 gives `vec` a subscript, and the generated code uses it to
+  // take one row out of the group an interleaved operand is read in
+  // (`Symbol._interleaved_load`).  Absent here until the reads that take
+  // it became reachable by default.
+  T &operator[](int i) { return data[i]; }
+  const T &operator[](int i) const { return data[i]; }
 };
 
 // -- accessors -------------------------------------------------------------

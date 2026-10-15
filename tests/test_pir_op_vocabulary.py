@@ -51,9 +51,11 @@ def test_every_arithmetic_name_has_a_spelling():
     emitter rather than restated here: a copy would agree at the moment it was
     written and never afterwards.
     """
-    from tensorforge.backend.pir.emit import _INFIX, _LEXIC_BINOP
+    from tensorforge.backend.pir.emit import (_INFIX, _LEXIC_BINOP,
+                                              _LEXIC_UNOP)
 
-    spellable = set(_INFIX) | set(_LEXIC_BINOP) | {'fma', 'select', 'neg'}
+    spellable = (set(_INFIX) | set(_LEXIC_BINOP) | set(_LEXIC_UNOP)
+                 | {'fma', 'select', 'neg'})
     assert set(Op.ARITH) == spellable, (
         f'buildable but not spellable: {sorted(set(Op.ARITH) - spellable)}; '
         f'spellable but not buildable: {sorted(spellable - set(Op.ARITH))}')

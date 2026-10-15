@@ -157,6 +157,14 @@ constexpr std::size_t ConstantMemspace = 4;
 template <typename T, std::size_t Space> using SpacePtr = T *;
 template <typename T, std::size_t Space> using SpacePtrRestrict = T *__restrict;
 
+// `x * y + z` in one rounding per component.  Which instruction that is
+// belongs to the target -- sm_100 reaches a paired FMA only through
+// `__ffma2_rn`, and nothing else has one -- so the real headers differ and
+// only the signature is checkable here.  Declared over the whole value
+// rather than over `VectorT<T, N>`, which is an alias and not a deducible
+// context.
+template <typename V> V fma(V x, V y, V z);
+
 template <typename T>
 void transpose4x4b32(T &w1, T &w2, T &w3, T &w4, T v1, T v2, T v3, T v4);
 

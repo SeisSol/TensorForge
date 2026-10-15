@@ -275,7 +275,11 @@ def test_every_lead_slot_is_multiplied():
     every slot: column 0 at rows 0, 16, 32 and 48.
     """
     import re
-    src = _kernel('local_flux', 'esimd', tensor_cores=True, lanes_per_mult=16)
+    # Unprepared: the rows below are coordinates, and a prepared operator is
+    # read by slot instead.  `test_a_prepared_operator_is_read_in_runs` is
+    # the other side of that.
+    src = _kernel('local_flux', 'esimd', tensor_cores=True, lanes_per_mult=16,
+                  prepare_operands=False)
     slots, faces = 4, 4
     assert src.count('intel_xmx::dpas<') == (
         faces * slots * (2 * 7 + 2 * 2) * intel.TF32_TERMS)
@@ -362,7 +366,7 @@ def test_a_prepared_operator_is_read_in_runs():
     # baseline preparing wins nothing, and the assertion would be measuring
     # two changes at once.
     plain, _ = _prepared('local_flux', lanes_per_mult=16,
-                         preload_globals=False)
+                         preload_globals=False, prepare_operands=False)
     assert 3 * src.count('copy_from') < plain.count('copy_from')
 
 
@@ -420,7 +424,7 @@ def test_every_reader_of_an_operator_shares_its_order():
         assert op.slot_major is not None, op.alias
         assert list(op.get_bbox().lower()) == [0, 1]
     # Preload held fixed: see `test_a_prepared_operator_is_read_in_runs`.
-    plain, _ = generate(preload_globals=False)
+    plain, _ = generate(preload_globals=False, prepare_operands=False)
     assert 3 * src.count('copy_from') < plain.count('copy_from')
 
 

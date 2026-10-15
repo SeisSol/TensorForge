@@ -39,7 +39,7 @@ PAIR_MOVE = re.compile(
     r'VectorT<float, 2> v\d+_bc = tensorforge::movdpp16<\d+>')
 
 
-def _kernel(name, arch, width=1):
+def _kernel(name, arch, width=1, **options):
     path = next(CASES.rglob(f'{name}.py'))
     spec = importlib.util.spec_from_file_location('tf_pdpp__' + name, path)
     case = importlib.util.module_from_spec(spec)
@@ -47,7 +47,7 @@ def _kernel(name, arch, width=1):
     with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
         warnings.simplefilter('ignore')
         ctx = Context(arch=arch, backend='hip', fp_type=case.DTYPE,
-                      options=Options(lead_vectorize=width > 1))
+                      options=Options(lead_vectorize=width > 1, **options))
         lanes = None
         if width > 1:
             lanes = dataclasses.replace(
@@ -126,11 +126,19 @@ def test_the_order_follows_the_size_of_the_a_image():
     image across columns: `local_flux` holds 112 values a lane (two slots,
     56 steps) over nine fused columns on gfx1150 and walks rows.  On gfx942
     the matrix core takes eight of the columns, and the one left over reads
-    each value once in either order, so it keeps the columns."""
+    each value once in either order, so it keeps the columns.
+
+    The sizes above are the operand as the frontend described it.  Prepared,
+    the image is the k-quad order's -- a third larger at 32 lanes -- and the
+    rule weighs that instead, which on gfx942 is enough to tip it to the
+    rows.  That is the rule working on another input, not another rule, so
+    the arrangement it was written about is the one pinned here."""
     from tensorforge.backend.instructions.compute.primitives.amd import codegen
     assert codegen.FUSED_ORDER == 'auto'
-    assert 'tensorforge::pin(' in _kernel('local_flux', 'gfx1150')
-    assert 'tensorforge::pin(' not in _kernel('local_flux', 'gfx942')
+    assert 'tensorforge::pin(' in _kernel('local_flux', 'gfx1150',
+                                          prepare_operands=False)
+    assert 'tensorforge::pin(' not in _kernel('local_flux', 'gfx942',
+                                              prepare_operands=False)
 
 
 def test_the_order_weighs_what_the_columns_would_hold():

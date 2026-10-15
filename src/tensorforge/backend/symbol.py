@@ -1621,7 +1621,7 @@ class Symbol:
                              pad=li.pad)
     return [lead_index, lower[1]]
 
-  def _packed_index(self, writer, index):
+  def _packed_index(self, writer, context, index):
     """A read of a packed operand (`Tensor.packing`), as the slot it is in
     storage and the lanes that slot exists for.
 
@@ -1698,7 +1698,7 @@ class Symbol:
     block = li._block
     # The column, as the packing numbers them: the non-lead axes flattened in
     # F-order over the box, which is the unit `Packing` is built in.
-    column, extent = 0, 1
+    column, extent, computed = 0, 1, None
     sizes = [int(x) for x in view.shape]
     for d in range(1, len(index)):
       value = index[d]
@@ -1713,14 +1713,33 @@ class Symbol:
             f'{self.name}: a packed operand splits its rows over the lanes, '
             f'not its columns')
       if not isinstance(value, (int, np.integer)):
-        raise InternalError(
-            f'{self.name}: a packed read needs its column as a number; axis '
-            f'{d} is {value!r}')
+        # A rolled reduction hands its column over as a loop variable, and
+        # then there is no per-column number to fold into the address.  A
+        # uniform packing needs none: every column starts at the same row
+        # and is the same length, so the slot is `span * c + r - start` --
+        # affine in the column, and the predicate does not mention it at
+        # all.  Anything else does, and says so.
+        if not packing.uniform or computed is not None:
+          raise InternalError(
+              f'{self.name}: a {packing.kind} packing is read at a column '
+              f'the kernel computes; only a uniform one is addressable '
+              f'there, and axis {d} is {value!r}')
+        term = value.build(writer, context) if hasattr(value, 'build') else value
+        if shifted - lower[d]:
+          term = writer.op('add', INDEX, term, shifted - lower[d], hint='c')
+        if extent != 1:
+          term = writer.op('mul', INDEX, term, extent, hint='c')
+        computed = term
+        extent *= sizes[d]
+        continue
       column += (int(value) + shifted - lower[d]) * extent
       extent *= sizes[d]
-    if not 0 <= column < packing.columns:
+    if computed is None and not 0 <= column < packing.columns:
       raise InternalError(
           f'{self.name}: packed column {column} of {packing.columns}')
+    if computed is not None:
+      return self._uniform_packed_index(writer, index, packing, computed,
+                                        column, li, shift, lower)
     start = packing.starts[column]
     length = packing.lengths[column]
     # Lane `l` of this read holds box rows `origin + grain*l ..` -- and the
@@ -1754,6 +1773,60 @@ class Symbol:
     lead_index = LeadIndex(base, block, li._stride, width=wide,
                            offset=shift + packing.offsets[column] - start,
                            valid=valid, pad=False, first=first)
+    return [lead_index] + [lower[d] for d in range(1, len(index))]
+
+  def _uniform_packed_index(self, writer, index, packing, computed, column,
+                            li, shift, lower):
+    """A packed read whose column the kernel computes rather than knows.
+
+    What a rolled reduction leaves: the column arrives as a loop variable,
+    so the per-column numbers cannot be immediates.  A *uniform* packing
+    has none to fold -- every column starts at the same row and runs the
+    same length, and its slot offset is `span * c` -- so the address is
+    `span*c + r - start` and the lane bounds do not mention the column at
+    all.  `Packing.uniform` is that condition, and the caller has checked
+    it; `runs` with unequal columns and `bits` are refused there, because
+    for them the slot is not affine in the column and the pair would have
+    to be read from a table this does not have.
+
+    The address is handed over computed (`LeadIndex._vaddr`), as a bitset
+    read's is, since the lane term and the column term are one sum and
+    neither is an integer.  What that costs is the alignment claim: a wide
+    access over a computed address proves nothing, although `span` is a
+    whole number of granules and the product would be provable.  Legal, and
+    one step short.
+    """
+    wide = int(li.width)
+    block = li._block
+    start, span = packing.starts[0], packing.lengths[0]
+    if column:
+      computed = writer.op('add', INDEX, computed, int(column), hint='c')
+    base = li.nonlead()
+    origin = wide * block * int(base) + shift - lower[0]
+    if wide > 1 and origin % wide:
+      raise InternalError(
+          f'{self.name}: a read at width {wide} starts at row {origin}, '
+          f'inside a lane\'s own run of rows')
+    head = min(max(-(-(start - origin) // wide), 0), block)
+    tail = min(max(-(-(start + span - origin) // wide), 0), block)
+    if li.first:
+      head = max(head, li.first)
+    if li.valid is not None:
+      tail = min(tail, li.valid)
+    # The row this lane holds, in the box, and the column's slot base on
+    # top of it.  `offset` keeps what is still an integer.
+    row = writer.lane_offset(block, li._stride, hint='lane')
+    if wide > 1:
+      row = writer.op('mul', INDEX, row, wide, hint='row')
+    if block * int(base):
+      row = writer.op('add', INDEX, row, wide * block * int(base), hint='row')
+    addr = writer.op('add', INDEX, row,
+                     writer.op('mul', INDEX, computed, span, hint='c'),
+                     hint='slot')
+    lead_index = LeadIndex(0, block, li._stride, width=wide, vaddr=addr,
+                           offset=shift - start,
+                           valid=None if tail >= block else tail,
+                           pad=False, first=0 if head <= 0 else head)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
 
   def _bitset_index(self, writer, index, packing, column, block, stride,
@@ -3238,7 +3311,7 @@ class Symbol:
               and (self.stype in (SymbolType.Global, SymbolType.Batch)
                    or (self.stype is SymbolType.SharedMem
                        and getattr(self, 'verbatim', False)))):
-        read_index = self._packed_index(writer, read_index)
+        read_index = self._packed_index(writer, context, read_index)
 
       if variable is None and self.stype in (
               SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,

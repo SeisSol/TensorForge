@@ -82,7 +82,8 @@ def test_what_an_access_claims(stype, alignment, dtype, offset, width, claim):
 # The copies of a build
 # --------------------------------------------------------------------------- #
 
-def _generate(descr, arch, backend, monkeypatch, attrs=None, dtype=None):
+def _generate(descr, arch, backend, monkeypatch, attrs=None, dtype=None,
+              **options):
     """The kernel, and the bodies it was emitted from."""
     bodies = []
     emit = pir.emit
@@ -92,7 +93,8 @@ def _generate(descr, arch, backend, monkeypatch, attrs=None, dtype=None):
         return emit(body, writer, context, metrics)
 
     monkeypatch.setattr(pir, 'emit', keep)
-    ctx = Context(arch=arch, backend=backend, fp_type=dtype, options=Options())
+    ctx = Context(arch=arch, backend=backend, fp_type=dtype,
+                  options=Options(**options))
     gen = Generator(descr, ctx, attrs=attrs)
     with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
         warnings.simplefilter('ignore')
@@ -181,7 +183,12 @@ def test_a_lowering_without_the_relaxed_type_claims_what_is_proved(alignment,
     acpp/gfx942 the promise bounds the width -- four floats an access where
     sixteen bytes are promised, one where nothing is -- and no access claims
     `relaxed`."""
+    # Unprepared: what bounds the width here is the promise the operand's
+    # own layout makes, and a prepared one is read out of a buffer the host
+    # writes for us instead -- aligned by agreement, whatever the layout it
+    # replaces promised (`_offer_simt_order`).
     src, bodies = _generate(_operator(alignment), 'gfx942', 'acpp',
-                            monkeypatch, dtype=Datatype.F32)
+                            monkeypatch, dtype=Datatype.F32,
+                            prepare_operands=False)
     assert all(s.attr('align') not in (None, RELAXED) for s in _wide(bodies))
     assert ('*(sycl::vec<float, 4>*)&' in src) == (alignment == 16)

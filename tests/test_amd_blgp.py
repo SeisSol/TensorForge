@@ -37,6 +37,17 @@ def _blgps(src):
     return [int(m.group(3)) for m in MFMA.finditer(src)]
 
 
+#: The multiplication a lane belongs to, scaled by whatever a step of the
+#: lead operand is worth in the order it is stored in: a row stride where
+#: the operand lies as the frontend described it, two slots where it is in
+#: k-quads (`prepare_operands`).  The number is the storage's business and
+#: is deliberately not pinned here -- what these tests are about is that
+#: the `p`-th multiplication reads step `k + p` at all.
+def _step_of_the_p_th(src, mults):
+    import re as _re
+    return _re.search(rf'\(threadIdx\.y % {mults}\) \* \d+', src)
+
+
 #: A step of the lead operand taken out of the lanes of one of the two
 #: multiplications of a wave.
 WAVE_BROADCAST = re.compile(r'tensorforge::broadcast<64, 32, ([01])>')
@@ -68,8 +79,15 @@ def test_the_chain_beside_takes_its_steps_from_the_same_load():
     """With the operators in global memory, the ninth column's DPP chain
     reads through the MFMAs' load and takes each step out of its
     multiplication's lanes -- rather than loading every step again at
-    addresses the MFMAs do not use."""
-    src = _kernel_at('local_flux', 'gfx942', preload_globals=False)
+    addresses the MFMAs do not use.
+
+    Unprepared, which is the arrangement this mechanism is for: in a k-quad
+    order the chain reads through `_quad_reader` instead and the wave
+    broadcast does not appear, which reaches the same end by other means
+    (682 global reads of `A` become 234) and is a different statement.
+    """
+    src = _kernel_at('local_flux', 'gfx942', preload_globals=False,
+                     prepare_operands=False)
     steps = WAVE_BROADCAST.findall(src)
     assert steps.count('0') == steps.count('1') > 0
 
@@ -79,7 +97,8 @@ def test_from_shared_memory_the_chain_reads_its_steps_itself():
     chain's own reads come two to a `ds_read2`.  Unmerged, as `_kernel_at`
     builds it: merged, the operators are read through a table from global
     memory and nothing is staged in LDS."""
-    src = _kernel_at('local_flux', 'gfx942', lead_vectorize=False)
+    src = _kernel_at('local_flux', 'gfx942', lead_vectorize=False,
+                     prepare_operands=False)
     assert not WAVE_BROADCAST.search(src)
 
 
@@ -120,7 +139,7 @@ def test_a_batch_constant_operator_is_read_once_per_wave(arch):
     blgps = _blgps(src)
     assert blgps.count(1) == blgps.count(2) > 0
     assert set(blgps) <= {0, 1, 2}
-    assert '(threadIdx.y % 2) * 56' in src, 'the p-th reads step k + p'
+    assert _step_of_the_p_th(src, 2), 'the p-th reads step k + p'
     assert 'batchIdGroup0' in src
     assert '__builtin_amdgcn_sched_barrier(0);' in src
 
@@ -133,7 +152,7 @@ def test_four_multiplications_take_a_quarter_of_the_wave_each():
     assert blgps.count(4) == blgps.count(5) == blgps.count(6) \
         == blgps.count(7) > 0
     assert set(blgps) <= {0, 4, 5, 6, 7}
-    assert '(threadIdx.y % 4) * 56' in src
+    assert _step_of_the_p_th(src, 4), 'the p-th reads step k + p'
     assert 'batchIdGroup0' in src
 
 

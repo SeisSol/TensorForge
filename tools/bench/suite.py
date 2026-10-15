@@ -219,6 +219,14 @@ CONFIGS: Dict[str, Config] = {
     # whether preparing replaces staging, this one whether preparing is
     # worth having at all -- which is what a default would be deciding.
     'prepare-only': Config('prepare-only', Options(prepare_operands=True)),
+    # A second `baseline` under another name, and the only row here that is
+    # not a question about the generator.  It builds the same kernel on
+    # every target, so the gap between the two is the machine moving under
+    # the measurement and nothing else -- which is worth a row, because a
+    # run that cannot say that has been read wrongly here before: on an
+    # integrated part sharing its package with a busy CPU, two identical
+    # kernels came out 48 % apart.
+    'control': Config('control', Options()),
 }
 
 

@@ -44,6 +44,13 @@ def _build(case, target='cuda/sm_86', **options):
     spec = importlib.util.spec_from_file_location('tf_trips__' + case, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # Unprepared, which is what these are about.  A re-encoded operand is
+    # read through its own accessor, and the trip machinery holds a
+    # *coordinate* read in registers -- the two do not combine today:
+    # `local_flux` at `k_roll=2` has 28 trip slots without `prepare_operands`
+    # and none with it.  Worth knowing, and not worth hiding inside a test
+    # that is about something else.
+    options.setdefault('prepare_operands', False)
     backend, arch = target.split('/')
     ctx = Context(arch=arch, backend=backend,
                   fp_type=getattr(mod, 'DTYPE', None),

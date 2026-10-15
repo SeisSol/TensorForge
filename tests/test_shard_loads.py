@@ -156,8 +156,12 @@ def test_every_thread_of_the_block_copies_its_share(stem):
     by the block the body was first built for: a block wider than its
     stride copies an element twice, a narrower one leaves some out."""
     src, (lanes, mults) = _build(stem, preload_shards=True)
-    flat = re.search(r'int32_t (v\d+_flat) = threadIdx\.x \+ \(threadIdx\.y '
-                     r'\* (\d+)\);', src)
+    # Named and then used, or declared in the loop head -- an operand stored
+    # in one contiguous run is copied by a single `for` and needs no name of
+    # its own, where one shaped like the box is copied in guarded pieces.
+    # What the two have to agree on is the step, which is what this is about.
+    flat = re.search(r'int32_t (v\d+_(?:flat|s)) = \(?threadIdx\.x \+ '
+                     r'\(threadIdx\.y \* (\d+)\)\)?', src)
     assert flat and int(flat.group(2)) == lanes
     steps = re.findall(rf'{flat.group(1)} < (\d+); v\d+_s \+= (\d+)\)', src)
     guards = re.findall(rf'if \({flat.group(1)} < (\d+)\)', src)

@@ -82,10 +82,15 @@ def test_spmd_keeps_only_the_memory_to_the_tail():
     folded to `lane < 24 ? p[i] : 0`, and the updates of the accumulator's
     padding lanes unguarded -- so the scheduler can look across them."""
     mod = _module('local_flux')
+    # Unprepared, because the predicate below is what a tail does to a read
+    # of the operand *as the frontend described it*.  Stored in the SIMT
+    # interleave the tail needs none: the lanes past the data reach the
+    # order's own padding, which is stored and is zero
+    # (`Symbol._interleaved_load`).
     off = _kernel(mod.descr_list(), backend='cuda', arch='sm_100',
-                  full_lane_tails=False)
+                  full_lane_tails=False, prepare_operands=False)
     on = _kernel(mod.descr_list(), backend='cuda', arch='sm_100',
-                 full_lane_tails=True)
+                 full_lane_tails=True, prepare_operands=False)
     guarded = re.compile(r'if \(v\d+_g\)')
     assert len(guarded.findall(on)) < len(guarded.findall(off)) / 10
     assert re.search(r'v\d+_g \? \(glb_m0\[', on), 'the read keeps its lanes'
