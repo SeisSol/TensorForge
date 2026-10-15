@@ -100,12 +100,14 @@ def _macros(backend: str) -> str:
             "#define DEV_MALLOC(p, n)       (void)cudaMalloc(&(p), (n))\n"
             "#define DEV_FREE(p)            (void)cudaFree((p))\n"
             "#define DEV_MEMCPY_H2D(d,h,n)  (void)cudaMemcpy((d),(h),(n),cudaMemcpyHostToDevice)\n"
+            "#define DEV_MEMCPY_D2H(h,d,n)  (void)cudaMemcpy((h),(d),(n),cudaMemcpyDeviceToHost)\n"
             "#define DEV_STREAM_PTR(s)      ((void*)(s))\n")
     if backend == "hip":
         return (
             "#define DEV_MALLOC(p, n)       (void)hipMalloc(&(p), (n))\n"
             "#define DEV_FREE(p)            (void)hipFree((p))\n"
             "#define DEV_MEMCPY_H2D(d,h,n)  (void)hipMemcpy((d),(h),(n),hipMemcpyHostToDevice)\n"
+            "#define DEV_MEMCPY_D2H(h,d,n)  (void)hipMemcpy((h),(d),(n),hipMemcpyDeviceToHost)\n"
             "#define DEV_STREAM_PTR(s)      ((void*)(s))\n")
     # SYCL: allocations need the queue, which the driver hands over before any
     # setup call. A TU-local pointer keeps the macros nullary in the queue the
@@ -116,6 +118,7 @@ def _macros(backend: str) -> str:
         "sycl::malloc_device((n), *tfb_queue)); } while(0)\n"
         "#define DEV_FREE(p)            sycl::free((p), *tfb_queue)\n"
         "#define DEV_MEMCPY_H2D(d,h,n)  tfb_queue->memcpy((d),(h),(n)).wait()\n"
+        "#define DEV_MEMCPY_D2H(h,d,n)  tfb_queue->memcpy((h),(d),(n)).wait()\n"
         "#define DEV_STREAM_PTR(s)      ((void*)(s))\n")
 
 
@@ -155,7 +158,7 @@ def emit_workload_tu(generator, backend: str, name: str,
     tag = slug(name)
     lang = "sycl" if backend in ("oneapi", "acpp", "esimd", "sycl") else backend
 
-    decls, allocs, fills, frees = [], [], [], []
+    decls, allocs, fills, frees, sums = [], [], [], [], []
     for op in ops:
         if op.is_scalar:
             continue
@@ -170,6 +173,20 @@ def emit_workload_tu(generator, backend: str, name: str,
                 else f"(size_t){per}u * batch * {elem}")
         decls.append(f"static {op.ctype}* d_{op.kernel_name} = nullptr;")
         allocs.append(f"    DEV_MALLOC(d_{op.kernel_name}, {span});")
+        if op.is_sink:
+            # Weighted, so that a kernel writing the right values in the wrong
+            # places is not the same number as one writing them in the right
+            # ones -- which a plain sum would make it.
+            sums.append(
+                f"  {{ const size_t n = ({span}) / {elem};\n"
+                f"    void* h = std::malloc({span});\n"
+                f"    if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
+                f"std::exit(2); }}\n"
+                f"    DEV_MEMCPY_D2H(h, d_{op.kernel_name}, {span});\n"
+                f"    const {op.ctype}* p = (const {op.ctype}*)h;\n"
+                f"    for (size_t i = 0; i < n; ++i)\n"
+                f"      acc += (double)p[i] * (double)((i % 1021u) + 1u);\n"
+                f"    std::free(h); }}")
         if op.addressing == "pointer_based":
             # The pointers are *contiguous and in order*: element i lives at
             # `slab + i * per`, exactly where a STRIDED operand would put it.
@@ -249,6 +266,13 @@ extern "C" void tfb_launch_{tag}(void* stream, size_t batch) {{
 extern "C" void tfb_teardown_{tag}() {{
   using namespace tfb_{tag};
 {chr(10).join(frees)}
+}}
+
+extern "C" double tfb_checksum_{tag}(size_t batch) {{
+  using namespace tfb_{tag};
+  double acc = 0.0;
+{chr(10).join(sums) if sums else "  (void)batch;"}
+  return acc;
 }}
 
 extern "C" const char* tfb_symbol_{tag}() {{
@@ -357,6 +381,7 @@ struct TfbWorkload {
   void (*launch)(void*, size_t);
   void (*teardown)();
   const char* (*symbol)();
+  double (*checksum)(size_t);
 };
 
 %(decls)s
@@ -368,7 +393,7 @@ static const size_t tfb_count = sizeof(tfb_table) / sizeof(tfb_table[0]);
 
 static void usage() {
   std::fprintf(stderr,
-      "usage: driver <time|profile|list> [workload|all] [batch] "
+      "usage: driver <time|profile|check|list> [workload|all] [batch] "
       "[iters] [warmup] [device]\n");
   std::exit(2);
 }
@@ -453,7 +478,7 @@ int main(int argc, char** argv) {
                   tfb_table[i].name, tfb_table[i].symbol());
     return 0;
   }
-  if (mode != "time" && mode != "profile") usage();
+  if (mode != "time" && mode != "profile" && mode != "check") usage();
   if (argc < 3) usage();
 
   const std::string which = argv[2];
@@ -470,6 +495,22 @@ int main(int argc, char** argv) {
   bool ran = false;
   for (size_t i = 0; i < tfb_count; ++i) {
     if (which != "all" && which != tfb_table[i].name) continue;
+    if (mode == "check") {
+      /* One launch, then the sinks read back and reduced.  Not a reference
+         comparison -- the driver has no oracle -- but enough to tell two
+         builds of one workload apart, which is what an experiment on a
+         patched kernel needs and what the timing modes cannot give. */
+      const TfbWorkload& w = tfb_table[i];
+      w.setup(batch);
+      w.launch(DEV_STREAM_PTR(stream), batch);
+      DEV_STREAM_SYNC(stream);
+      std::printf("{\"workload\": \"%%s\", \"batch\": %%zu, "
+                  "\"checksum\": %%.17g}\n",
+                  w.name, batch, w.checksum(batch));
+      w.teardown();
+      ran = true;
+      continue;
+    }
     run_one(tfb_table[i], mode == "time", batch, iters, warmup, stream);
     ran = true;
   }
@@ -505,10 +546,12 @@ def emit_driver(names: Sequence[str], backend: str) -> str:
             f'extern "C" void tfb_setup_{tag}(size_t);\n'
             f'extern "C" void tfb_launch_{tag}(void*, size_t);\n'
             f'extern "C" void tfb_teardown_{tag}();\n'
-            f'extern "C" const char* tfb_symbol_{tag}();')
+            f'extern "C" const char* tfb_symbol_{tag}();\n'
+            f'extern "C" double tfb_checksum_{tag}(size_t);')
         escaped = name.replace('\\', '\\\\').replace('"', '\\"')
         table.append(f'  {{"{escaped}", tfb_setup_{tag}, tfb_launch_{tag}, '
-                     f'tfb_teardown_{tag}, tfb_symbol_{tag}}},')
+                     f'tfb_teardown_{tag}, tfb_symbol_{tag}, '
+                     f'tfb_checksum_{tag}}},')
 
     return preamble + (_DRIVER_BODY % {
         "decls": "\n".join(decls),

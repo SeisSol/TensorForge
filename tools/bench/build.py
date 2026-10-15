@@ -52,6 +52,7 @@ for extra in (ROOT / 'src', ROOT / 'tests', ROOT / 'tools'):
 from harness import driver_bench                                # noqa: E402
 from tensorforge import toolchain                               # noqa: E402
 from tensorforge.analysis.cost import list_cost                 # noqa: E402
+from tensorforge.analysis.pipeline import executed_flops        # noqa: E402
 from tensorforge.common.context import Context, Options         # noqa: E402
 from tensorforge.generators import lanes                        # noqa: E402
 from tensorforge.generators.generator import Generator          # noqa: E402
@@ -133,6 +134,12 @@ class WorkloadBuild:
     #: Registers, spills, occupancy -- whatever the toolchain volunteered.
     static: Dict[str, int] = field(default_factory=dict)
     cost: Optional[object] = None
+    #: Flops the built kernel performs per element, counted off the emitted
+    #: program rather than off the operation (`analysis.pipeline`).  `None`
+    #: where the emitter could not say.  The third figure beside `cost.flops`
+    #: and `cost.nonzero_flops`, and the only one that includes the lanes a
+    #: padded destination computes on and nobody reads.
+    executed_flops: Optional[int] = None
     lanes: Optional[int] = None
     error: str = ''
 
@@ -209,6 +216,7 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
     record.lanes = gen.lanes.num_threads
     record.cost = list_cost(workload.descrs(), batch=1,
                             datatype=unit.datatype)
+    record.executed_flops = executed_flops(gen)
     return src, record
 
 
@@ -349,8 +357,25 @@ def build(unit: BuildUnit, cache: Path = CACHE,
     driver_path.write_text(
         driver_bench.emit_driver([r.name for r in records if r.ok],
                                  unit.target.backend))
-    link = [cc, *compiler.link_flags(unit.target.arch), '-I', str(INCLUDE),
-            str(driver_path), *objects, str(INCLUDE / compiler.aux),
+
+    # The driver and the auxiliary are compiled first and the link is given
+    # objects only.  Mixing the two kinds on one command line is what a
+    # language flag is applied across: `hipcc` puts `-x hip` in front of every
+    # input it is handed, so the workload objects arrived at the frontend as
+    # HIP source and clang reported `chain_five_multiplies.o:1:103: source
+    # file is not valid UTF-8`.  Separating the steps needs no per-compiler
+    # exception -- there is no language left to get wrong at a pure link.
+    for src in (driver_path, INCLUDE / compiler.aux):
+        obj = out / f'{src.stem}.o'
+        ok, message = _compile_one(cc, compiler, unit.target.arch, src, obj)
+        if not ok:
+            (out / 'link.log').write_text(f'{src.name}: {message}')
+            return UnitBuild(unit, None, records,
+                             f'{src.name} failed to compile; '
+                             f'see {out / "link.log"}')
+        objects.append(str(obj))
+
+    link = [cc, *compiler.link_flags(unit.target.arch), *objects,
             '-o', str(exe)]
     proc = subprocess.run(link, capture_output=True, text=True, check=False)
     if proc.returncode != 0:

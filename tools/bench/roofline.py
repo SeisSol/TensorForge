@@ -559,6 +559,16 @@ def main() -> int:
     if args.ceiling_only or args.bench is None:
         print(json.dumps(asdict(ceiling), indent=2))
         print(f'ridge: {ceiling.ridge:.2f} flop/byte')
+        if args.out:
+            # The ceiling is a property of the machine, so it is measured once
+            # and joined into every plot (`plot.py --roofline-json`).  Writing
+            # it only alongside a placed set of points meant an evaluation
+            # over a dozen captures either re-measured the machine a dozen
+            # times or drew its charts without a roof.
+            args.out.mkdir(parents=True, exist_ok=True)
+            (args.out / 'roofline.json').write_text(
+                json.dumps({'ceiling': asdict(ceiling)}, indent=2))
+            print(f'written: {args.out / "roofline.json"}')
         return 0
 
     blob = json.loads(args.bench.read_text())

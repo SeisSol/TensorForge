@@ -421,11 +421,45 @@ fill="#222" transform="rotate(-90 16 {(self.T + self.H - self.B) / 2:.0f})">\
 # Series
 # ----------------------------------------------------------------------
 
+#: What a series is keyed by beyond the workload, decided once per file from
+#: what actually varies in it (`distinguish`).  A module global because
+#: `series_key` is called from a dozen places that have one row and no view of
+#: the run, and threading the set through all of them would say the same thing
+#: twelve times.
+_EXTRA_KEYS: Tuple[str, ...] = ()
+
+
+def distinguish(rows: Sequence[Dict]) -> None:
+    """Fix the fields a curve is separated by, for this file.
+
+    The configuration always separates.  The *target* and the *datatype* do so
+    only where the rows disagree about them -- a run over two devices used to
+    produce one curve per workload with both devices' points on it, sorted by
+    batch, so the line zig-zagged between an RTX 5070 and an 890M and read as
+    a scaling collapse.  Where only one target is present the key stays short,
+    because a legend repeating the same arch on every entry is noise.
+    """
+    global _EXTRA_KEYS
+    extra = []
+    if len({(r.get('backend'), r.get('arch')) for r in rows}) > 1:
+        extra.append('target')
+    if len({r.get('datatype') for r in rows}) > 1:
+        extra.append('datatype')
+    _EXTRA_KEYS = tuple(extra)
+
+
 def series_key(row: Dict) -> str:
-    """One curve per workload *and* configuration -- see the docstring on why
-    they are not averaged together."""
+    """One curve per workload, configuration, and whatever else varies -- see
+    the docstring on why they are not averaged together."""
+    parts = []
     config = row.get('config') or ''
-    return f"{row['workload']}" + (f' [{config}]' if config and config != 'default' else '')
+    if config and config != 'default':
+        parts.append(config)
+    if 'target' in _EXTRA_KEYS:
+        parts.append(f"{row.get('backend')}-{row.get('arch')}")
+    if 'datatype' in _EXTRA_KEYS:
+        parts.append(str(row.get('datatype', '')).lower())
+    return f"{row['workload']}" + (f' [{" ".join(parts)}]' if parts else '')
 
 
 def by_series(rows: Sequence[Dict]) -> Dict[str, List[Dict]]:
@@ -1072,6 +1106,11 @@ def main() -> int:
     if not runs[0].rows:
         print(f'{runs[0].path}: no usable rows', file=sys.stderr)
         return 2
+
+    # Over every run at once: a comparison of two files must key its curves
+    # the same way in both, or `compare` would pair a CUDA series with a HIP
+    # one of the same name.
+    distinguish([r for run in runs for r in run.rows])
 
     profile = None
     if args.profile:

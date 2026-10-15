@@ -132,7 +132,12 @@ def run_binary(exe: Path, workload: str, batch: int, iters: int, warmup: int,
 
 def measure(unit_build: bench_build.UnitBuild, device: Device,
             workloads: List[suite_mod.Workload], args) -> List[Dict]:
-    """Every surviving workload at every batch, joined with its cost."""
+    """Every surviving workload at every batch, joined with its cost.
+
+    The rows come back *without* their timings: `time_rows` fills those in,
+    once every unit has been built, so that the configurations can be
+    measured against each other rather than one after the other.
+    """
     by_name = {w.name: w for w in workloads}
     rows: List[Dict] = []
     for record in unit_build.workloads:
@@ -159,24 +164,84 @@ def measure(unit_build: bench_build.UnitBuild, device: Device,
                              datatype=unit_build.unit.datatype)
             row = {**base, 'batch': batch,
                    'flops': cost.flops, 'bytes': cost.bytes,
+                   # What the operation needs once the structural zeros are
+                   # taken out, beside what a dense implementation performs.
+                   # Recorded and not divided by: the generator emits the
+                   # dense figure today, so a rate against this one would
+                   # report work nobody does.  The pair is what says how much
+                   # the sparsity is worth.
+                   'nonzero_flops': cost.nonzero_flops,
+                   'nonzero_exact': cost.nonzero_exact,
+                   # And what the built kernel performs, which is above both:
+                   # a destination twenty rows wide computes on thirty-two
+                   # lanes.  Recorded, not divided by -- see the manifest.
+                   'executed_flops': (record.executed_flops * batch
+                                      if record.executed_flops else None),
                    'transcendental': cost.transcendental,
                    'intensity': cost.intensity}
-            timing = run_binary(unit_build.exe, record.name, batch,
-                                args.iters, args.warmup, device, args.timeout)
-            row.update(timing)
-            # Achieved rates use the device clock where there is one and the
-            # wall clock where there is not, and say which -- dividing a
-            # compulsory byte count by a time that includes launch overhead
-            # gives a bandwidth no memory system ever delivered.
-            nanos = timing.get('event_ns') or timing.get('wall_ns')
-            row['rate_clock'] = ('event' if timing.get('event_ns')
-                                 else 'wall' if timing.get('wall_ns') else None)
-            if nanos:
-                row['gflops'] = cost.flops / nanos
-                row['gbytes'] = cost.bytes / nanos
-                row['ns_per_element'] = nanos / batch
+            row['_run'] = (unit_build.exe, record.name, batch, device)
+            row['_cost'] = cost
             rows.append(row)
     return rows
+
+
+def time_rows(rows: List[Dict], args) -> None:
+    """Fill in the timings: several passes over *all* rows, keeping the best.
+
+    A pass is a round over every row rather than a repetition of one.  The
+    device's clock moves between processes and the runner starts one process
+    per measurement: the same binary timed six times over
+    `elastic-o4s:localFluxAll` spanned 6.3 % while a single process's own
+    min-to-p90 stayed under 1 %.  Two configurations timed one after the
+    other therefore differ by the clock as much as by the code -- which is
+    how two builds of a *byte-identical* kernel came out 7.5 % apart and the
+    difference was read as a result.
+
+    Interleaving spreads the drift over every row instead of over the order
+    they happen to be built in, and the minimum is what the machine did on
+    the pass where it was not throttled.  The spread across passes is kept
+    beside it, because a difference smaller than that is not a difference.
+    """
+    jobs = [row for row in rows if '_run' in row]
+    for pass_no in range(max(1, args.repeat)):
+        for row in jobs:
+            exe, name, batch, device = row['_run']
+            timing = run_binary(exe, name, batch, args.iters, args.warmup,
+                                device, args.timeout)
+            row.setdefault('_samples', []).append(timing)
+        if args.verbose and args.repeat > 1:
+            print(f'  pass {pass_no + 1}/{args.repeat} done', file=sys.stderr)
+
+    for row in jobs:
+        samples = row.pop('_samples', [])
+        cost = row.pop('_cost')
+        row.pop('_run')
+        good = [t for t in samples if not t.get('error')]
+        if not good:
+            row.update(samples[0] if samples else
+                       {'error': 'no measurement attempted'})
+            continue
+
+        def clock(t):
+            return t.get('event_ns') or t.get('wall_ns') or float('inf')
+
+        best = min(good, key=clock)
+        row.update(best)
+        row['passes'] = len(good)
+        if len(good) > 1:
+            lo, hi = clock(best), max(clock(t) for t in good)
+            row['pass_spread'] = (hi / lo - 1.0) if lo else None
+        # Achieved rates use the device clock where there is one and the
+        # wall clock where there is not, and say which -- dividing a
+        # compulsory byte count by a time that includes launch overhead
+        # gives a bandwidth no memory system ever delivered.
+        nanos = best.get('event_ns') or best.get('wall_ns')
+        row['rate_clock'] = ('event' if best.get('event_ns')
+                             else 'wall' if best.get('wall_ns') else None)
+        if nanos:
+            row['gflops'] = cost.flops / nanos
+            row['gbytes'] = cost.bytes / nanos
+            row['ns_per_element'] = nanos / row['batch']
 
 
 def report(rows: List[Dict], verbose: bool) -> None:
@@ -184,19 +249,39 @@ def report(rows: List[Dict], verbose: bool) -> None:
     good = [r for r in rows if not r.get('error')]
 
     if good:
-        head = (f'{"workload":30s} {"cfg":12s} {"batch":>8s} {"wall ns":>10s} '
-                f'{"dev ns":>10s} {"ns/elem":>8s} {"GFLOP/s":>9s} '
-                f'{"GB/s":>8s} {"AI":>6s}')
+        # The target and the datatype are columns only where they vary.  A run
+        # on two devices printed `chain_five_multiplies baseline 4096` twice
+        # with different numbers and nothing saying which was which; a run on
+        # one device does not need the column and reads worse with it.
+        def variant(row: Dict) -> str:
+            parts = []
+            if len({(r['backend'], r['arch']) for r in good}) > 1:
+                parts.append(f'{row["backend"]}-{row["arch"]}')
+            if len({r['datatype'] for r in good}) > 1:
+                parts.append(row['datatype'].lower())
+            return ' '.join(parts)
+
+        width = max((len(variant(r)) for r in good), default=0)
+        column = f'{"target":{width}s} ' if width else ''
+        spread = any(r.get('pass_spread') is not None for r in good)
+        head = (f'{"workload":30s} {column}{"cfg":12s} {"batch":>8s} '
+                f'{"wall ns":>10s} {"dev ns":>10s} {"ns/elem":>8s} '
+                f'{"GFLOP/s":>9s} {"GB/s":>8s} {"AI":>6s}'
+                + (f' {"+/-":>6s}' if spread else ''))
         print(head)
         print('-' * len(head))
-        for r in sorted(good, key=lambda r: (r['workload'], r['config'],
-                                             r['batch'])):
-            print(f'{r["workload"][:30]:30s} {r["config"][:12]:12s} '
+        for r in sorted(good, key=lambda r: (r['workload'], variant(r),
+                                             r['config'], r['batch'])):
+            cell = f'{variant(r):{width}s} ' if width else ''
+            print(f'{r["workload"][:30]:30s} {cell}{r["config"][:12]:12s} '
                   f'{r["batch"]:8d} {r.get("wall_ns", 0):10.1f} '
                   f'{(r.get("event_ns") or float("nan")):10.1f} '
                   f'{r.get("ns_per_element", 0):8.4f} '
                   f'{r.get("gflops", 0):9.1f} {r.get("gbytes", 0):8.1f} '
-                  f'{(r.get("intensity") or 0):6.2f}')
+                  f'{(r.get("intensity") or 0):6.2f}'
+                  + (f' {r["pass_spread"] * 100:5.1f}%'
+                     if spread and r.get('pass_spread') is not None
+                     else '       ' if spread else ''))
 
     if errors:
         print(f'\n{len(errors)} workloads produced no number:')
@@ -226,6 +311,10 @@ def main() -> int:
     ap.add_argument('--batches', default=None,
                     help='comma-separated batch sizes, overriding the suite')
     ap.add_argument('--iters', type=int, default=200)
+    ap.add_argument('--repeat', type=int, default=3,
+                    help='passes over every row; the best is kept and the '
+                         'spread across passes reported (1 to time each row '
+                         'once, as before)')
     ap.add_argument('--warmup', type=int, default=10)
     ap.add_argument('--timeout', type=float, default=300.0)
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
@@ -281,6 +370,9 @@ def main() -> int:
                     'error': record.error,
                     'flops_per_element': (record.cost.flops
                                           if record.cost else None),
+                    'nonzero_flops_per_element': (record.cost.nonzero_flops
+                                                  if record.cost else None),
+                    'executed_flops_per_element': record.executed_flops,
                     'bytes_per_element': (record.cost.bytes
                                           if record.cost else None),
                 })
@@ -290,6 +382,7 @@ def main() -> int:
                                 list(unit.workloads), args))
 
     if not args.build_only:
+        time_rows(rows, args)
         report(rows, args.verbose)
 
     if args.out:
@@ -301,6 +394,7 @@ def main() -> int:
                 'started': started,
                 'elapsed_s': time.time() - started,
                 'iters': args.iters, 'warmup': args.warmup,
+                'repeat': args.repeat,
                 'devices': [asdict(d) for d in devices],
             },
             'manifest': manifest,

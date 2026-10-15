@@ -20,6 +20,7 @@ the thing timed.
 
 | | |
 |---|---|
+| `evaluate.py` | **all of the below, in one command, with a manifest** |
 | `suite.py` | what to measure: workloads, batches, configurations |
 | `suites/` | suite definitions |
 | `build.py` | one binary per configuration, with measurement flags |
@@ -27,6 +28,20 @@ the thing timed.
 | `profile.py` | the vendor profilers, over the same binary |
 | `roofline.py` | measured machine ceilings, and the kernels under them |
 | `plot.py` | charts over what the two runs wrote |
+
+```bash
+python3 tools/bench/evaluate.py --out eval/                  # measure and plot
+python3 tools/bench/evaluate.py --out eval/ --export --profile
+```
+
+`evaluate.py` runs the exporter, the timing run, the ceiling, the profiler and
+the charts in the order they depend on each other, and writes
+`evaluation.json`: what ran, what was skipped and why, and the versions
+involved. The manifest is the reason to do it in one command rather than four
+-- a directory of SVGs says what a kernel did, not which generator built it,
+which device ran it, or whether the ceiling beside it came from the same
+machine, and an evaluation nobody can reconstruct is a picture rather than a
+measurement. A step that fails is recorded and the rest goes on.
 
 The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
 correctness driver and sharing its operand collection and its launcher call —
@@ -85,6 +100,21 @@ The digest earns something in return: it is a content key over the generated
 source, so the same symbol in two runs is the same kernel, and two different
 kernels cannot collide onto one name. Comparing runs is a join, not a guess.
 
+## Why a configuration is measured against another in one run
+
+The device's clock moves between processes, and the runner starts one process
+per measurement. On an sm_120 laptop part the same binary timed six times over
+`localFluxAll` spanned 6.3 %, while one process's own min-to-p90 stayed under
+1 % -- so two configurations timed one after the other differ by the clock as
+much as by the code. Two builds of a *byte-identical* kernel came out 7.5 %
+apart that way, and the difference was read as a result.
+
+`--repeat` (3 by default) therefore makes a pass over *every* row before
+starting the next, and keeps the best; interleaving spreads the drift over all
+of them instead of over the order they were built in. The spread across passes
+is reported in the `+/-` column, and a difference smaller than it is not a
+difference. The same two identical kernels now agree to 0.04 %.
+
 ## Reading the output
 
 The launcher sizes its grid `min(occupancy_gridsize, numElements0)`, so below
@@ -102,6 +132,38 @@ launcher submits internally and does not return its event; the driver takes
 it from the in-order queue instead (`sycl_ext_oneapi_in_order_queue_events`,
 queue built with `enable_profiling`). Where the extension is missing, the
 device clock is reported absent rather than as a zero.
+
+## Three flop counts, and which one a rate is against
+
+A row carries three, because "how many floating-point operations is this
+kernel" has three answers and they differ by more than a factor of three:
+
+| field | what it counts | `gpu_localFluxAll`, elastic o4 |
+|---|---|---|
+| `nonzero_flops` | what the operation needs, structural zeros taken out | 25 092 |
+| `flops` | what a dense implementation performs | 40 680 |
+| `executed_flops` | what the built kernel performs | 90 576 |
+
+The first two come from `analysis.cost` and are of the *operation*: they count
+the destination box. `nonzero_flops` matches yateto's `nonZeroFlops` exactly
+for 113 of 119 kernels of an elastic order-4 export, so it is the figure to
+quote as the science's arithmetic. The third comes from the emitted program
+(`analysis.pipeline.executed_flops`) and is the only one that knows a
+destination twenty rows wide is computed on thirty-two lanes.
+
+`gflops` divides by `flops`, which is the middle one and the conservative
+reading of "what this implementation is for". Dividing by `nonzero_flops`
+would credit the kernel for sparsity it does not exploit; dividing by
+`executed_flops` would credit it for padding. Both are recorded so a plot can
+say which it meant -- and their ratio is the two things worth improving, named
+separately.
+
+`executed_flops` is an upper bound rather than an identity. Against `ncu`'s
+`smsp__sass_thread_inst_executed_op_{fadd,fmul,ffma}_pred_on` on sm_120 it is
+exact for `gpu_localFluxAll`, 7-14 % over for `volume`, `neighboringFlux` and
+`derivative`, and 53 % over for `derivativeTaylorExpansion`: what it cannot
+see is arithmetic that reaches fewer lanes than the guard it sits under
+claims.
 
 ## Profiling
 

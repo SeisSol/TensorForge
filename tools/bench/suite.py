@@ -186,6 +186,15 @@ CONFIGS: Dict[str, Config] = {
     'launchctrl': Config('launchctrl', Options(launch_control=True)),
     'launchctrl2': Config('launchctrl2', Options(launch_control=True,
                                                  launch_control_depth=2)),
+    # The tensor memory accelerator against `cp.async`, which is the
+    # measurement `Options.bulk_copies` defers ("off until measured").  One
+    # thread issues the window as one `cp.async.bulk` completing on an
+    # mbarrier, where `cp.async` has every thread move sixteen bytes and count
+    # groups.  Only a minority of windows qualify -- on an elastic order-4
+    # capture, 15 kernels of 119 and two copies each -- so read the row count
+    # before the ratio: a kernel with no bulk copy in it is the same binary
+    # twice and belongs in the comparison as a control, not as a result.
+    'bulk': Config('bulk', Options(bulk_copies=True)),
 }
 
 
@@ -230,8 +239,24 @@ def from_cases(pattern: str = '*', root: Optional[Path] = None
             origin=f'cases/{path.relative_to(root)}'))
     return out
 
+#: What a capture's `config.precision` means.  SeisSol spells it the way its
+#: own command line does.
+PRECISION = {'s': Datatype.F32, 'd': Datatype.F64}
+
+
+def dump_datatype(blob: dict) -> Optional[Datatype]:
+    """The precision a capture was generated at, where it says.
+
+    A capture from `tools/seissol_export.py` carries the whole configuration it
+    came from, precision included, and the kernels in it are that precision's:
+    an order-6 double run is a different machine problem from the same run in
+    single, not the same one measured twice.
+    """
+    return PRECISION.get((blob.get('config') or {}).get('precision'))
+
+
 def from_dump(path: Path, pattern: str = '*',
-              datatype: Datatype = Datatype.F32) -> List[Workload]:
+              datatype: Optional[Datatype] = None) -> List[Workload]:
     """Workloads from a `tools/host/dump_descriptors.py` capture.
 
     The real corpus: what yateto handed the backend on an actual SeisSol
@@ -242,14 +267,24 @@ def from_dump(path: Path, pattern: str = '*',
     what makes a chain a chain -- rebuilding each descriptor's operands
     independently would give the generator two tensors where the kernel has
     one, and no temporary would ever be recognized as such.
+
+    The precision comes from the capture unless the caller names one.  It used
+    to be `F32` whatever the capture said, so every `-d-` export in
+    `tools/bench/data` was built and timed in single -- and a suite that then
+    asked for `DATATYPES = (F64,)` got units with no workload in them at all,
+    because `expand` admits a workload only where its own datatype matches.
+    That is the shape the missing double kernels had.
     """
     blob = json.loads(Path(path).read_text())
+    datatype = datatype or dump_datatype(blob) or Datatype.F32
 
     out: List[Workload] = []
 
     if 'descriptions' in blob:
         # use yateto descriptors directly
         for symbol, description in sorted(blob['descriptions'].items()):
+            if not fnmatch.fnmatch(symbol, pattern):
+                continue
             def factory(description=description):
                 return DescriptionReader(arch=None).read(description)[0]
             out.append(Workload(name=symbol, descrs=factory, datatype=datatype,

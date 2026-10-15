@@ -84,6 +84,12 @@ class Metric:
     expr: str
     scale: float = 1.0
     note: str = ''
+    #: Other spellings of the same quantity, tried in order where the
+    #: installed tool does not offer `expr`.  A vendor renaming a counter
+    #: between releases is the normal case, and the old name is usually
+    #: still *accepted* while reporting nothing -- so the choice has to be
+    #: made against what the tool says it has, not against what it swallows.
+    alternatives: Tuple[str, ...] = ()
 
 
 #: The normalized set.  Deliberately short; see the module docstring.
@@ -122,7 +128,10 @@ class Collection:
 #: row per kernel per metric -- which is why one reader serves both.  Matched
 #: case-insensitively and by substring, because the exact heading has changed
 #: between releases of each while the shape has not.
-_KERNEL_COLUMNS = ('kernel name', 'kernel_name', 'kernel')
+#: `name` for rocprofv3's kernel summary, whose column is called exactly
+#: that -- without it the duration was read from no file and the table
+#: reported a kernel that took no time beside traffic figures that were right.
+_KERNEL_COLUMNS = ('kernel name', 'kernel_name', 'kernel', 'name')
 _METRIC_COLUMNS = ('metric name', 'counter_name', 'metric')
 _VALUE_COLUMNS = ('metric value', 'counter_value', 'value')
 
@@ -180,10 +189,67 @@ def read_long_csv(text: str) -> Tuple[Dict[str, Dict[str, float]], str]:
     return out, note
 
 
+def read_wide_csv(text: str) -> Tuple[Dict[str, Dict[str, float]], str]:
+    """The same, from a *wide* CSV: one row per launch, one column per metric.
+
+    Which shape a profiler writes is a property of its version, not of a flag
+    anyone chose: `ncu --csv --page raw` emitted the long form for years and
+    emits this one now, so the reader has to take both.  Columns whose header
+    is not a metric -- the process, the stream, the device -- are carried into
+    `vendor` like any other and simply never match a requested name.
+    """
+    rows = list(csv.reader(io.StringIO(text)))
+    header_at = next((i for i, r in enumerate(rows[:40])
+                      if _pick(r, _KERNEL_COLUMNS) is not None
+                      and len(r) > 3), None)
+    if header_at is None:
+        return {}, 'no header row naming a kernel'
+    header = [h.strip() for h in rows[header_at]]
+    k_at = _pick(header, _KERNEL_COLUMNS)
+
+    out: Dict[str, Dict[str, float]] = {}
+    for row in rows[header_at + 1:]:
+        if len(row) != len(header) or not row[k_at].strip():
+            continue        # the units row, and anything ragged
+        kernel = row[k_at].strip()
+        values = out.setdefault(kernel, {})
+        for name, cell in zip(header, row):
+            cell = cell.strip().replace(',', '')
+            if not cell or name == header[k_at]:
+                continue
+            try:
+                value = float(cell)
+            except ValueError:
+                continue
+            # Several launches of one kernel: the last one wins, as the long
+            # reader's repeated rows do.
+            values[name] = value
+    if not any(out.values()):
+        return {}, 'no numeric columns in the wide CSV'
+    return out, ''
+
+
+def read_metric_csv(text: str) -> Tuple[Dict[str, Dict[str, float]], str]:
+    """Whichever shape the file is in."""
+    per_kernel, note = read_long_csv(text)
+    if per_kernel:
+        return per_kernel, note
+    return read_wide_csv(text)
+
+
 def normalize(per_kernel: Dict[str, Dict[str, float]],
               metrics: Sequence[Metric]) -> List[Dict]:
-    """Vendor metric names to the common set, keeping the rest verbatim."""
+    """Vendor metric names to the common set, keeping the rest verbatim.
+
+    Alternative spellings map too.  `validate` falls back to one where the
+    installed profiler does not offer the preferred name, so a table keyed by
+    `expr` alone would drop exactly the column that fallback went to collect
+    -- silently, because an absent key reads the same as an absent metric.
+    """
     by_expr = {m.expr: m for m in metrics}
+    for m in metrics:
+        for alt in m.alternatives:
+            by_expr.setdefault(alt, m)
     out = []
     for kernel, values in sorted(per_kernel.items()):
         row: Dict[str, object] = {'kernel': kernel, 'vendor': dict(values)}
@@ -356,6 +422,12 @@ class NsightCompute(Profiler):
         return [args + [str(exe), 'profile', workload, str(batch), str(iters),
                         str(warmup), '0']]
 
+    #: Families `--query-metrics` never lists because they are not hardware
+    #: counters.  They are collected perfectly well; checking them against
+    #: that list reported `launch__grid_size` as missing on a driver that
+    #: returns it.
+    NOT_COUNTERS = ('launch__',)
+
     def validate(self, metrics):
         exe = self.binary()
         if exe is None:
@@ -365,16 +437,30 @@ class NsightCompute(Profiler):
         if proc.returncode != 0 or not proc.stdout.strip():
             return list(metrics), []
         known = proc.stdout
-        good = [m for m in metrics if m.expr.split('.')[0] in known]
-        dropped = [f'{m.expr}: not offered by this ncu'
-                   for m in metrics if m not in good]
+
+        def offered(expr):
+            return expr.split('.')[0] in known
+
+        good, dropped = [], []
+        for m in metrics:
+            if m.expr.startswith(self.NOT_COUNTERS) or offered(m.expr):
+                good.append(m)
+                continue
+            # The name moved between releases; take the first spelling this
+            # installation has rather than reporting the metric as absent.
+            alt = next((a for a in m.alternatives if offered(a)), None)
+            if alt is not None:
+                good.append(replace(m, expr=alt))
+                dropped.append(f'{m.expr}: not offered, using {alt}')
+            else:
+                dropped.append(f'{m.expr}: not offered by this ncu')
         return good, dropped
 
     def collect(self, outdir, metrics):
         path = outdir / 'ncu.csv'
         if not path.exists():
             return [], [], 'ncu wrote no CSV'
-        per_kernel, note = read_long_csv(path.read_text())
+        per_kernel, note = read_metric_csv(path.read_text())
         return normalize(per_kernel, metrics), [str(path)], note
 
 
@@ -394,46 +480,110 @@ class RocprofV3(Profiler):
 
     def commands(self, exe, workload, batch, iters, warmup, symbol, outdir,
                  metrics):
-        args = [self.invocation(), '--kernel-trace', '--stats',
-                '--output-format', 'csv', '-d', str(outdir), '-o', 'rocprof']
-        if metrics:
-            args += ['--pmc', *[m.expr for m in metrics]]
-        if symbol:
-            args += ['--kernel-include-regex', symbol]
-        # 1-based and inclusive: the first `warmup` dispatches are skipped.
-        args += ['--kernel-iteration-range', f'{warmup + 1}-{warmup + iters}']
-        return [args + ['--', str(exe), 'profile', workload, str(batch),
-                        str(iters), str(warmup), '0']]
+        # One command per pass.  `validate` decides how the metrics are
+        # grouped: one group where they fit together, one per counter where
+        # the agent's slots do not hold them at once.
+        groups = getattr(self, '_passes', None) or ([list(metrics)] if metrics
+                                                    else [[]])
+        out = []
+        for i, group in enumerate(groups):
+            tag = 'rocprof' if len(groups) == 1 else f'rocprof{i}'
+            args = [self.invocation(), '--kernel-trace', '--stats',
+                    '--output-format', 'csv', '-d', str(outdir), '-o', tag]
+            if group:
+                args += ['--pmc', *[m.expr for m in group]]
+            if symbol:
+                args += ['--kernel-include-regex', symbol]
+            # 1-based and inclusive: the first `warmup` dispatches are skipped.
+            args += ['--kernel-iteration-range',
+                     f'{warmup + 1}-{warmup + iters}']
+            out.append(args + ['--', str(exe), 'profile', workload, str(batch),
+                               str(iters), str(warmup), '0'])
+        return out
 
     def validate(self, metrics):
+        """What this agent can collect, and in how many passes.
+
+        `pmc-check` answers for a *set*, and a rejection says the set does not
+        fit the hardware's counter slots -- not that the counters are absent.
+        On gfx1150 the three defaults are each collectable alone and none of
+        them together, so asking once and believing the answer reported
+        "0 of 3 accepted" for an agent that has all three.
+
+        So a rejected set is re-asked one metric at a time, and what survives
+        is collected in one pass per metric (`commands` splits them).  That
+        costs a run of the application per counter, which is the price the
+        hardware sets; reporting the counters as missing does not avoid it,
+        it just loses them.
+        """
+        # The kernel summary's columns are not counters: they cost no pass
+        # and `pmc-check` does not know them.
+        summary = [m for m in metrics if m.expr in self.SUMMARY_COLUMNS]
+        metrics = [m for m in metrics if m not in summary]
+
         exe = shutil.which('rocprofv3-avail')
         if exe is None or not metrics:
-            return list(metrics), []
-        proc = subprocess.run(
-            [exe, 'pmc-check', *[m.expr for m in metrics]],
-            capture_output=True, text=True, check=False)
-        if proc.returncode == 0:
-            return list(metrics), []
-        # The check reports which entries it could not satisfy; anything it
-        # names is dropped and the rest is still worth collecting.
-        text = (proc.stdout + proc.stderr)
-        good = [m for m in metrics if m.expr not in text]
-        dropped = [f'{m.expr}: rejected by rocprofv3-avail pmc-check'
+            self._passes = [list(metrics)] if metrics else []
+            return summary + list(metrics), []
+
+        def fits(subset):
+            proc = subprocess.run(
+                [exe, 'pmc-check', *[m.expr for m in subset]],
+                capture_output=True, text=True, check=False)
+            # `pmc-check` says "Fatal error: ... not collected on agent" and
+            # still exits 0, so the text decides rather than the status.
+            text = proc.stdout + proc.stderr
+            return proc.returncode == 0 and 'not collected' not in text
+
+        if fits(metrics):
+            self._passes = [list(metrics)]
+            return summary + list(metrics), []
+
+        good = [m for m in metrics if fits([m])]
+        dropped = [f'{m.expr}: not collectable on this agent'
                    for m in metrics if m not in good]
+        if good and len(good) > 1:
+            dropped.append(
+                f'the {len(good)} counters do not fit one pass; '
+                f'collecting them in {len(good)} passes')
+        self._passes = [[m] for m in good] if len(good) > 1 else (
+            [good] if good else [])
         if not good:
-            dropped.append('pmc-check rejected the whole set; '
+            dropped.append('no default counter is collectable here; '
                            'run `rocprofv3-avail list --pmc` on this agent')
-        return good, dropped
+        return summary + good, dropped
+
+    #: What rocprofv3 writes beside the counters.  Reading them as counter
+    #: files produced a line of "no header row carrying a metric and a value
+    #: column" per file per pass -- twelve notes saying nothing, for files
+    #: that were never counter files.
+    COUNTERS = '_counter_collection.csv'
+    TIMING = '_kernel_stats.csv'
+    #: Columns of the kernel summary, which is written by every pass.
+    SUMMARY_COLUMNS = ('AverageNs', 'TotalDurationNs', 'MinNs', 'MaxNs')
 
     def collect(self, outdir, metrics):
         raw, rows, notes = [], {}, []
-        for path in sorted(outdir.rglob('*.csv')):
+        for path in sorted(outdir.rglob('*' + self.COUNTERS)):
             raw.append(str(path))
             per_kernel, note = read_long_csv(path.read_text())
             if note:
                 notes.append(f'{path.name}: {note}')
             for kernel, values in per_kernel.items():
                 rows.setdefault(kernel, {}).update(values)
+
+        # The duration is not a counter and is not in the counter file: it is
+        # in the kernel summary, which every pass writes.  Without it the
+        # table showed a kernel that took no time and achieved no FLOP/s,
+        # beside traffic figures that were right.
+        for path in sorted(outdir.rglob('*' + self.TIMING)):
+            raw.append(str(path))
+            per_kernel, _ = read_wide_csv(path.read_text())
+            for kernel, values in per_kernel.items():
+                if 'AverageNs' in values:
+                    rows.setdefault(kernel, {}).setdefault(
+                        'AverageNs', values['AverageNs'])
+
         if not rows:
             return [], raw, 'rocprofv3 wrote no counter rows'
         return normalize(rows, metrics), raw, '; '.join(notes)
@@ -534,8 +684,14 @@ class Vtune(Profiler):
 PROFILERS: Dict[str, Profiler] = {
     'ncu': NsightCompute('ncu', 'TF_NCU', 'ncu', (
         Metric('duration_ns', 'gpu__time_duration.sum'),
-        Metric('dram_read_bytes', 'dram__bytes_read.sum'),
-        Metric('dram_write_bytes', 'dram__bytes_write.sum'),
+        # `dram__bytes_op_read` on current Nsight, `dram__bytes_read` on
+        # older ones.  The wrong one is *accepted* and reports `n/a`, which
+        # is why `validate` picks between them rather than letting the run
+        # produce an empty traffic column.
+        Metric('dram_read_bytes', 'dram__bytes_op_read.sum',
+               alternatives=('dram__bytes_read.sum',)),
+        Metric('dram_write_bytes', 'dram__bytes_op_write.sum',
+               alternatives=('dram__bytes_write.sum',)),
         Metric('l2_bytes', 'lts__t_bytes.sum'),
         Metric('occupancy',
                'sm__warps_active.avg.pct_of_peak_sustained_active',
@@ -544,6 +700,9 @@ PROFILERS: Dict[str, Profiler] = {
         Metric('block_size', 'launch__block_size'),
     )),
     'rocprofv3': RocprofV3('rocprofv3', 'TF_ROCPROFV3', 'rocprofv3', (
+        # From the kernel summary rather than the counter file, which is why
+        # it is not subject to `pmc-check` and costs no pass of its own.
+        Metric('duration_ns', 'AverageNs'),
         Metric('dram_read_bytes', 'FETCH_SIZE', scale=1024.0,
                note='ROCm reports kilobytes'),
         Metric('dram_write_bytes', 'WRITE_SIZE', scale=1024.0,
@@ -613,6 +772,15 @@ def profile_unit(unit_build: bench_build.UnitBuild,
             env['CUDA_VISIBLE_DEVICES'] = str(device.index)
         elif device.vendor == 'amd':
             env['HIP_VISIBLE_DEVICES'] = str(device.index)
+        # The profilers format their CSV in the caller's locale: under a
+        # German one `ncu` writes `121.985.536` for the byte count and
+        # `16,39` for the percentage, which a reader taking `.` for a decimal
+        # point turns into nothing at all -- the traffic column came out
+        # empty and the amplification read 0.00.  Asked for in the
+        # environment rather than repaired in the parser, because a thousands
+        # separator that is also a decimal point cannot be undone afterwards.
+        env['LC_ALL'] = 'C'
+        env['LANG'] = 'C'
         log = []
         for step, command in enumerate(commands):
             try:
