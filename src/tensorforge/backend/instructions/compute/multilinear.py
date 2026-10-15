@@ -983,18 +983,32 @@ class MultilinearInstruction(ComputeInstruction):
         if not self._ops or len(self._ns) == 0:
             return
         plan = self._plan()
-        # Three offers, one operand.  The SIMT interleave and the vendor's
-        # fragment order *grow* the buffer -- padding slots, a k-quad order
-        # of SeisSol's operators is 33 % larger than the box at 32 lanes --
-        # and buy a wide load with it; a packing shrinks it by 40 % and
-        # buys room.  They are not comparable, so which goes first is a
-        # policy and is stated here rather than falling out of the order
-        # the code happens to be in: a named form is an instruction and
-        # takes the operand, while `auto` and `fit` leave the measured win
-        # in place and pack only what it declines.
-        named = self._context.get_user_options().pack_operands not in (
-            'off', 'auto', 'fit')
-        if named:
+        # Three offers, one operand, and which goes first is a policy --
+        # stated here rather than falling out of the order the code happens
+        # to be in.
+        #
+        # The SIMT interleave and the vendor's fragment order *grow* the
+        # buffer and buy a wide load with it; a packing shrinks it.  How
+        # far apart the two are depends on the order, and at the orders
+        # that matter it is not close: over `elastic-linearck`, the
+        # interleave takes 15 of 118 constant operands at order 3 and 79 at
+        # order 8, and the stored total goes from +10.0 % to +17.4 % of the
+        # box where a packing puts it at -31.6 % and -23.7 %.  Through the
+        # generator at order 8 the interleave takes every operand of the
+        # six largest kernels and they come out 22.5 % larger; at order 3
+        # it takes almost none and they come out 32 % smaller.
+        #
+        # So the default goes to the packing, and the interleave keeps what
+        # a caller asks for: `prepare_operands` passed explicitly, or a
+        # packing that declines because there is nothing to leave out.  Its
+        # own measured win -- `local_flux` at 8 lanes, merged and rolled,
+        # -31.4 % -- is one configuration and not a rule, and a caller who
+        # is in it says so.
+        opts = self._context.get_user_options()
+        asked = self._context.get_asked_options().asked()
+        packing_first = (opts.pack_operands != 'off'
+                         and 'prepare_operands' not in asked)
+        if packing_first:
             self._offer_packing(pack_level)
             if getattr(self._ops[0].symbol.obj, 'packing', None) is not None:
                 return
