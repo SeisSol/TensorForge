@@ -487,7 +487,9 @@ def view_flopmix(fieldset: Field) -> Optional[str]:
                note='The bar is what the operation needs; the first segment '
                     'above it is what a dense implementation adds, and the '
                     'rest is the lanes a narrow destination leaves idle. '
-                    'Per element at the largest launch.')
+                    'Per element at the largest launch. The issued count is '
+                    'an upper bound (up to 1.53x the hardware figure), so '
+                    'the needed fraction is a floor.')
     c.fit([0, len(names)], [0.0, 1.0], y_from_zero=True)
     c.axes(xticks=[], ytick_label=lambda v: f'{v:.0%}')
     c.rule(1.0, 'issued', '#777')

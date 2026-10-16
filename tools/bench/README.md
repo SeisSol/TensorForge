@@ -187,6 +187,13 @@ third of its roof and one at two thirds. Both axes move together: a point
 placed at the dense intensity and drawn at the issued rate is on neither
 roofline.
 
+What the default costs is worth stating: `executed_flops` is counted off the
+emitted program and measured against ncu it is **never below** the hardware
+figure and up to 1.53x above it (`derivativeTaylorExpansion`, where arithmetic
+reaches fewer lanes than its guard claims; exact on `localFluxAll`, 1.07 on
+`volume`, 1.14 on `derivative`). So a fraction of the roof on this basis is a
+ceiling, and the needed-over-issued fraction in `flopmix` is a floor.
+
 `nonzero` is the one to ask for when the question is science per second rather
 than silicon per second, and `dense` reproduces what these charts drew before.
 Where the analysis pass could not count a body, `executed_flops` is missing and

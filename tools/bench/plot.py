@@ -547,6 +547,13 @@ def by_series(rows: Sequence[Dict]) -> Dict[str, List[Dict]]:
 #: dense figure the same point sits 2.2x too low on `gpu_localFluxAll`
 #: (90 576 executed against 40 680 dense), which is the difference between
 #: a kernel at a third of its roof and one at two thirds.
+#:
+#: What it costs: the count is an *upper* bound.  Measured against ncu it
+#: is never below the hardware figure and up to 1.53x above it
+#: (`derivativeTaylorExpansion`, where arithmetic reaches fewer lanes than
+#: its guard claims), so a fraction of the roof taken on this basis is a
+#: ceiling rather than a floor.  Exact on `gpu_localFluxAll`, 1.07 on
+#: `volume`, 1.14 on `derivative`.
 _FLOP_BASIS = 'executed'
 
 #: The row field each basis reads, and what it means.
@@ -850,7 +857,13 @@ def view_roofline(run: Run, roof: Roof) -> Optional[str]:
                f'achieved FLOP/s ({flop_basis()})',
                xlog=True, ylog=True, legend_width=190,
                note=f'{run.device}; roofs {roof.source}. Flops are what '
-                    f'{FLOP_LABEL[flop_basis()]}. Compulsory intensity is '
+                    f'{FLOP_LABEL[flop_basis()]}'
+                    + (', which is an upper bound -- up to 1.53x the '
+                       'hardware figure where arithmetic reaches fewer '
+                       'lanes than its guard claims, so the fraction of '
+                       'the roof is a ceiling'
+                       if flop_basis() == 'executed' else '')
+                    + f'. Compulsory intensity is '
                     f'what the description implies, not what the kernel '
                     f'paid: see the measured roofline where a profile '
                     f'exists.' + fallback_note(rows))
