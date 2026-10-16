@@ -1302,13 +1302,7 @@ class MultilinearInstruction(ComputeInstruction):
         kind = self._context.get_user_options().pack_operands
         if kind == 'off' or not self._ops:
             return
-        if kind == 'fit':
-            # The loosest form first, a tighter one only once the generator
-            # has found that the block's images do not fit and asked again
-            # (`Generator._settle_storage`).  `rows` carries no table and no
-            # population count, so where it is enough it is what the operand
-            # should be stored as.
-            kind = KINDS[min(int(level), len(KINDS) - 1)]
+        fit = kind == 'fit'
         sym = self._ops[0].symbol
         a_obj = getattr(sym, 'obj', None)
         if not isinstance(a_obj, Tensor):
@@ -1351,13 +1345,29 @@ class MultilinearInstruction(ComputeInstruction):
                     or tuple(int(x) for x in member.get_actual_shape()) != shape
                     or list(member.get_bbox().lower()) != lower):
                 return
-        kinds = (('bits', 'runs', 'rows') if kind == 'auto' else (kind,))
+        # The forms to try, tightest first, falling through to the looser
+        # ones where a tighter is refused rather than merely unprofitable
+        # (`packing.fit_kinds` says why that matters).
+        kinds = (packing_mod.fit_kinds(level) if fit
+                 else tuple(reversed(KINDS)) if kind == 'auto'
+                 else (kind,))
         # A rolled reduction hands the column over as a loop variable, so
         # only a form whose slot is affine in it can be addressed
         # (`Symbol._uniform_packed_index`).  Checked on the packing rather
         # than on the kind, because `runs` is uniform whenever the columns
         # happen to agree and there is no reason to refuse that.
-        rolled = self._reduction_is_rolled()
+        #
+        # Asked of *every* reader and not only of this one.  The order is
+        # the tensor's: an operand offered a form here is read in that form
+        # by each of them, and one whose own reduction rolls would meet a
+        # column it cannot fold into an address.  SeisSol's order-8
+        # derivative is the case -- one unrolled reader offering `runs` to
+        # five readers of which the later ones roll.
+        rolled = any(
+            user._reduction_is_rolled()
+            for user in (self,) + tuple(
+                u for u in sym.get_user_list()
+                if isinstance(u, MultilinearInstruction) and u is not self))
         # One packing over all the members at once, not one apiece: a
         # stand-in's body addresses whichever member the counter names, so
         # two members packed differently would read one another's slots

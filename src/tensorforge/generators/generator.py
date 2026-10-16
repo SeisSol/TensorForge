@@ -9,7 +9,7 @@ from tensorforge.generators.descriptions import OperationDescription, Multilinea
 from tensorforge.generators.rolling import ForDescr, roll
 from tensorforge.common.context import Context
 from tensorforge.common.metrics import BuildMetrics
-from tensorforge.common.matrix.packing import (KINDS as PACK_KINDS,
+from tensorforge.common.matrix.packing import (FIT_LEVELS, fit_kinds,
                                                pack as pack_operand)
 from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, Residence
 from tensorforge.common.helper import get_extra_offset_name
@@ -586,10 +586,12 @@ class Generator:
     self._preload_partial = (prefer_preload
                              and context.get_user_options().preload_partial)
     self._preload_drop = 0
-    #: How far `pack_operands='fit'` has had to tighten, as an index into
-    #: `matrix.packing.KINDS`.  Raised a step per attempt whose images did
-    #: not fit (`_tighten_packing`), and reset with the rest of the section's
-    #: state when the next one starts.
+    #: How far `pack_operands='fit'` has had to tighten
+    #: (`matrix.packing.fit_kinds`).  Raised a step per attempt whose images
+    #: did not fit (`_tighten_packing`), and reset with the rest of the
+    #: section's state when the next one starts.  Zero already offers `runs`
+    #: before `rows`; what a level buys on top is the bitset, which is the
+    #: one form that costs something.
     self._pack_level = 0
     self._preloaded = set()
     self._preload_left = set()
@@ -2288,10 +2290,9 @@ class Generator:
     if kind == 'off' or getattr(obj, 'storage_order', None) is not None:
       return int(obj.storage_elements())
     if kind == 'fit':
-      kinds = (PACK_KINDS[min(self._pack_level if level is None else level,
-                              len(PACK_KINDS) - 1)],)
+      kinds = fit_kinds(self._pack_level if level is None else level)
     elif kind == 'auto':
-      kinds = tuple(reversed(PACK_KINDS))
+      kinds = tuple(reversed(('rows', 'runs', 'bits')))
     else:
       kinds = (kind,)
     for name in kinds:
@@ -2320,13 +2321,13 @@ class Generator:
     if self._context.get_user_options().pack_operands != 'fit':
       return
     size = self._context.fp_type.size()
-    for level in range(len(PACK_KINDS)):
+    for level in range(FIT_LEVELS + 1):
       total = sum(self._pack_estimate(symbol.obj, level)
                   for symbol in candidates)
       if total * size < cap:
         self._pack_level = level
         return
-    self._pack_level = len(PACK_KINDS) - 1
+    self._pack_level = FIT_LEVELS
 
   def _tighten_packing(self) -> bool:
     """Ask for the next tighter packing, or say there is none.
@@ -2340,7 +2341,7 @@ class Generator:
     """
     if self._context.get_user_options().pack_operands != 'fit':
       return False
-    if not self._section.preload or self._pack_level >= len(PACK_KINDS) - 1:
+    if not self._section.preload or self._pack_level >= FIT_LEVELS:
       return False
     self._pack_level += 1
     return True

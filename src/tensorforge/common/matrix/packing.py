@@ -46,6 +46,30 @@ import numpy as np
 #: The three kinds, in the order they compress.
 KINDS = ('rows', 'runs', 'bits')
 
+#: What `Options.pack_operands='fit'` tries at a given tightening level: the
+#: level's own form first and then every looser one.
+#:
+#: A list and not a single form, because a form can be *refused* rather than
+#: merely unprofitable -- a rolled reduction takes none whose slot is not
+#: affine in the column, and a bitset needs the rows of a lane slot to fit
+#: one 32-bit word.  Offered a single form, `fit` would leave such an operand
+#: unpacked where a looser one would have served: at order 8, where the
+#: reduction rolls, naming `runs` stores *more* than naming `rows` for
+#: exactly that reason.
+#:
+#: Level 0 is `runs`, not `rows`.  `runs` costs nothing measurable -- on
+#: sm_120 it came out -0.71 % against a control of -0.63 % -- and over
+#: `elastic-linearck` at order 6 it stores 12027 elements where `rows`
+#: stores 17766.  `bits` is a level further out because it is the one form
+#: that does cost: +3.7 % against the same control, and +15 % registers.
+def fit_kinds(level: int = 0) -> Tuple[str, ...]:
+    top = min(1 + max(int(level), 0), len(KINDS) - 1)
+    return tuple(reversed(KINDS[:top + 1]))
+
+
+#: How far `fit` can be tightened, as `_choose_pack_level` counts.
+FIT_LEVELS = len(KINDS) - 1
+
 
 class Packing:
     """Which slot of the stored buffer holds box cell ``(row, column)``.

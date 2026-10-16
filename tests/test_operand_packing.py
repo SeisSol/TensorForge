@@ -367,11 +367,43 @@ def test_a_named_form_takes_the_operand_from_the_fragment_order():
     assert named.packing is not None and named.packing.kind == "runs"
 
 
-def test_fit_takes_the_loosest_form_that_leaves_room():
-    """`fit` names a preference, not a form: with room to spare it stops at
-    `rows`, which carries no table and no population count."""
+def test_fit_stops_short_of_the_form_that_costs():
+    """`fit` names a preference, not a form.  It starts at `runs`, which is
+    free -- on sm_120 it timed -0.71 % against a control of -0.63 % -- and
+    reaches `bits` only under room pressure, that being the one form with a
+    price: +3.7 % against the same control and +15 % registers."""
     _, t = _generated(_band(rows=24, cols=7), "fit", preload_globals=True)
-    assert t.packing is not None and t.packing.kind == "rows"
+    assert t.packing is not None and t.packing.kind == "runs"
+
+
+def test_fit_falls_through_to_a_looser_form_where_a_tighter_is_refused():
+    """A form can be refused rather than merely unprofitable: a rolled
+    reduction takes none whose slot is not affine in the column.  Offered
+    one form only, `fit` would leave such an operand unpacked -- which is
+    worse than the looser form it skipped."""
+    rows, cols = 64, 96
+    rng = np.random.default_rng(83)
+    values = np.zeros((rows, cols))
+    for c in range(cols):                      # per-column runs: not uniform
+        lo = 3 + (c % 11)
+        values[lo:lo + 20, c] = rng.uniform(0.5, 1.5, size=20)
+    a = SubTensor(Tensor([rows, cols], Addressing.NONE,
+                         BoundingBox([0, 0], [rows, cols]), alias="A",
+                         datatype=Datatype.F32, data=values))
+    b = SubTensor(Tensor([cols, 6], Addressing.STRIDED,
+                         BoundingBox([0, 0], [cols, 6]), alias="B",
+                         datatype=Datatype.F32))
+    c = SubTensor(Tensor([rows, 6], Addressing.STRIDED,
+                         BoundingBox([0, 0], [rows, 6]), alias="C",
+                         datatype=Datatype.F32))
+    gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
+                    Context(arch="sm_120", backend="cuda",
+                            fp_type=Datatype.F32,
+                            options=Options(pack_operands="fit", k_roll=4)))
+    gen.generate()
+    # `runs` is refused here and `rows` is not, so `rows` is what it takes
+    assert a.tensor.packing is not None
+    assert a.tensor.packing.kind == "rows"
 
 
 def test_fit_tightens_until_the_images_fit():
