@@ -20,6 +20,9 @@
 #define __forceinline__ inline
 #define __shared__
 #define __launch_bounds__(...)
+// Where a kernel argument resides, which on the host is nowhere in
+// particular (`MemSpace.PARAM`, `CudaLexic.storage_class`).
+#define __grid_constant__
 
 struct dim3 {
   unsigned x, y, z;
@@ -42,6 +45,21 @@ constexpr std::int64_t operator""_i64(unsigned long long value) {
   return static_cast<std::int64_t>(value);
 }
 } // namespace literals
+
+/// The struct an operand or a table passed by value is a parameter of
+/// (`KernelParam.numbers`, `ValueParam`).  A struct and not an array so
+/// that it stays a value; here it only has to index.
+template <typename T, std::size_t N> struct ValueArray {
+  T v[N];
+  const T &operator[](std::size_t i) const { return v[i]; }
+  static ValueArray from(const T *values) {
+    ValueArray out{};
+    for (std::size_t i = 0; i < N; ++i) {
+      out.v[i] = values[i];
+    }
+    return out;
+  }
+};
 } // namespace tensorforge
 
 // --------------------------------------------------------------------------
