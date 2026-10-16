@@ -285,3 +285,53 @@ def test_both_renderings_draw_the_same_things():
         1 for p in page.prims if isinstance(p, pdfout.PCircle))
     assert svg.count('<polyline') == sum(
         1 for p in page.prims if isinstance(p, pdfout.PPoly))
+
+
+# ----------------------------------------------------------------------
+# Which flop count
+# ----------------------------------------------------------------------
+
+def test_the_table_keeps_the_three_counts_apart(tmp_path):
+    """Reconciling them into one column is how a reader comes to divide a
+    rate by the wrong numerator."""
+    rows = [dict(_row('k', 'baseline', 'sm_120', 10, 100.0, flops=1000.0),
+                 nonzero_flops=620.0, executed_flops=2200.0)]
+    _write(tmp_path, 'elastic-3-s-s1', rows,
+           {'arch': 'sm_120', 'flops_per_s': 1e13, 'bytes_per_s': 1e12})
+    made = compare.view_kernels(compare.collect([tmp_path]))
+    assert made
+    _, markup = made
+    for cell in ('<td>62</td>', '<td>100</td>', '<td>220</td>', '<td>28%</td>'):
+        assert cell in markup, markup
+
+
+def test_the_flop_mix_is_a_chart_of_its_own(tmp_path):
+    """A roofline drawn honestly about the machine says nothing about how
+    much of that arithmetic anybody wanted."""
+    rows = [dict(_row('k', 'baseline', 'sm_120', 10, 100.0, flops=1000.0),
+                 nonzero_flops=620.0, executed_flops=2000.0)]
+    _write(tmp_path, 'elastic-3-s-s1', rows)
+    svg = compare.view_flopmix(compare.collect([tmp_path]))
+    assert svg and 'needs 31.0% of what it issues' in svg
+
+
+def test_a_run_without_the_issued_count_has_no_mix_to_draw(tmp_path):
+    _write(tmp_path, 'elastic-3-s-s1',
+           [_row('k', 'baseline', 'sm_120', 10, 100.0)])
+    assert compare.view_flopmix(compare.collect([tmp_path])) is None
+
+
+def test_the_intensity_follows_the_basis(tmp_path):
+    """Both axes of a roofline move together, so the ridge a kernel is
+    placed against is the one for the count it is drawn at."""
+    rows = [dict(_row('k', 'baseline', 'sm_120', 10, 100.0, flops=1000.0,
+                      byts=100.0), executed_flops=2000.0)]
+    _write(tmp_path, 'elastic-3-s-s1', rows)
+    point = compare.collect([tmp_path]).points[0]
+    try:
+        plot.set_flop_basis('executed')
+        assert point.intensity == 20.0
+        plot.set_flop_basis('dense')
+        assert point.intensity == 10.0
+    finally:
+        plot.set_flop_basis('executed')

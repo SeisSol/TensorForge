@@ -534,18 +534,101 @@ def by_series(rows: Sequence[Dict]) -> Dict[str, List[Dict]]:
     return out
 
 
+#: Which of the three flop counts a rate and an intensity are against
+#: (`README.md`, "Three flop counts").  A module global, set once per
+#: invocation, because `rate` is called from a dozen places that have one
+#: row and no view of the run -- the same reason `_EXTRA_KEYS` is one.
+#:
+#: `executed` is the default and the roofline is why.  The question a roof
+#: asks is whether the machine's arithmetic is the limit, and the machine
+#: issues what the *built kernel* performs: a destination twenty rows wide
+#: computes on thirty-two lanes, and the multiply-add that fills the other
+#: twelve is issued, retired and counted by the profiler.  Against the
+#: dense figure the same point sits 2.2x too low on `gpu_localFluxAll`
+#: (90 576 executed against 40 680 dense), which is the difference between
+#: a kernel at a third of its roof and one at two thirds.
+_FLOP_BASIS = 'executed'
+
+#: The row field each basis reads, and what it means.
+FLOP_FIELD = {'executed': 'executed_flops',
+              'dense': 'flops',
+              'nonzero': 'nonzero_flops'}
+
+FLOP_LABEL = {'executed': 'issued by the kernel',
+              'dense': 'a dense implementation performs',
+              'nonzero': 'the operation needs'}
+
+
+def set_flop_basis(name: str) -> None:
+    if name not in FLOP_FIELD:
+        raise KeyError(f'{name}: the flop basis is one of '
+                       f'{", ".join(sorted(FLOP_FIELD))}')
+    global _FLOP_BASIS
+    _FLOP_BASIS = name
+
+
+def flop_basis() -> str:
+    return _FLOP_BASIS
+
+
+def flops_of(row: Dict, basis: Optional[str] = None) -> Optional[float]:
+    """The flop count on the chosen basis, or the dense one where the
+    chosen one was not recorded.
+
+    Falling back rather than dropping the row: `executed_flops` comes from
+    the analysis pass and is `None` where it could not count a body, and a
+    kernel vanishing from a roofline because of that is worse than a
+    kernel drawn on the count beside it.  The views that care say how many
+    fell back (`fallback_note`).
+    """
+    value = row.get(FLOP_FIELD[basis or _FLOP_BASIS])
+    if value:
+        return float(value)
+    return float(row['flops']) if row.get('flops') else None
+
+
+def on_dense(rows: Sequence[Dict], basis: Optional[str] = None) -> int:
+    """How many of `rows` had to fall back to the dense count."""
+    field = FLOP_FIELD[basis or _FLOP_BASIS]
+    return sum(1 for r in rows if not r.get(field) and r.get('flops'))
+
+
+def fallback_note(rows: Sequence[Dict], basis: Optional[str] = None) -> str:
+    n = on_dense(rows, basis)
+    return (f' {n} of {len(rows)} points carry no '
+            f'{FLOP_FIELD[basis or _FLOP_BASIS]} and are drawn on the dense '
+            f'count.' if n else '')
+
+
+def intensity_of(row: Dict, basis: Optional[str] = None) -> Optional[float]:
+    """Flops per compulsory byte, on the same basis as the rate.
+
+    The two have to agree: a point placed at the dense intensity and drawn
+    at the issued rate is on neither roofline.  `run.py` stores the dense
+    pair as `intensity`, which is what this reproduces for `dense`.
+    """
+    f = flops_of(row, basis)
+    b = row.get('bytes')
+    return f / b if f and b else None
+
+
 def rate(row: Dict, what: str) -> Optional[float]:
     """The quantity a view is plotting, from whichever field carries it.
 
-    `gflops` and `gbytes` are written by `run.py`; recomputing them from
-    `flops` and the clock is the same arithmetic and disagrees when the run
-    used a different clock, so the stored figure wins where it exists.
+    `gbytes` is written by `run.py`; recomputing it from `bytes` and the
+    clock is the same arithmetic and disagrees when the run used a
+    different clock, so the stored figure wins where it exists.  The
+    stored `gflops` is against the *dense* count, so it wins on that basis
+    and on no other -- there is nothing stored for the other two, and
+    taking the dense figure for them would label an axis with a number
+    from a different numerator.
     """
     nanos = row.get('event_ns') or row.get('wall_ns')
     if what == 'gflops':
-        if row.get('gflops'):
+        if _FLOP_BASIS == 'dense' and row.get('gflops'):
             return float(row['gflops'])
-        return row['flops'] / nanos if (nanos and row.get('flops')) else None
+        f = flops_of(row)
+        return f / nanos if (nanos and f) else None
     if what == 'gbytes':
         if row.get('gbytes'):
             return float(row['gbytes'])
@@ -563,6 +646,14 @@ RATE_LABEL = {'gflops': 'GFLOP/s', 'gbytes': 'GB/s (compulsory)',
               'ns_per_element': 'ns per element', 'ns': 'kernel ns'}
 
 
+def rate_label(what: str) -> str:
+    """The axis name, saying which flop count it is against -- a GFLOP/s
+    that does not say is three different numbers."""
+    if what == 'gflops':
+        return f'GFLOP/s ({_FLOP_BASIS})'
+    return RATE_LABEL[what]
+
+
 # ----------------------------------------------------------------------
 # Views over the timing run alone
 # ----------------------------------------------------------------------
@@ -578,8 +669,8 @@ def view_scaling(run: Run, what: str = 'gflops') -> Optional[str]:
     groups = by_series(run.rows)
     if not any(len(v) > 1 for v in groups.values()):
         return None                    # one batch: nothing to plot against
-    c = Canvas(f'{RATE_LABEL[what]} against launch size — {run.label}',
-               'elements per launch', RATE_LABEL[what], xlog=True,
+    c = Canvas(f'{rate_label(what)} against launch size — {run.label}',
+               'elements per launch', rate_label(what), xlog=True,
                legend_width=190,
                note=f'{run.device}; a curve still rising at the right edge '
                     f'has not saturated.')
@@ -593,7 +684,7 @@ def view_scaling(run: Run, what: str = 'gflops') -> Optional[str]:
     for i, (name, rows) in enumerate(sorted(groups.items())):
         pts = [(r.get('batch'), rate(r, what)) for r in rows]
         tips = [f'{name} @ {_fmt(r.get("batch") or 0)}: '
-                f'{rate(r, what) or 0:.2f} {RATE_LABEL[what]}' for r in rows]
+                f'{rate(r, what) or 0:.2f} {rate_label(what)}' for r in rows]
         c.line(pts, PALETTE[i % len(PALETTE)], name,
                mark=series_style(i)[1], tips=tips)
     return c.render()
@@ -665,13 +756,13 @@ def view_compare(runs: Sequence[Run], what: str = 'ns_per_element',
 
     lower_is_better = what in ('ns_per_element', 'ns')
     c = Canvas(f'{runs[0].label} against ' + ', '.join(r.label for r in runs[1:])
-               + f' — {RATE_LABEL[what]}',
+               + f' — {rate_label(what)}',
                '', f'ratio to {runs[0].label}',
                width=max(760, 54 * len(common) + 180),
                tilted_labels=True, legend_width=150,
                note=f'{runs[0].device}; above 1 is faster than '
                     f'{runs[0].label}. '
-                    + ('Lower ' + RATE_LABEL[what] + ' is better, so the bar '
+                    + ('Lower ' + rate_label(what) + ' is better, so the bar '
                        'is the reference over the candidate.'
                        if lower_is_better else
                        'Higher is better, so the bar is the candidate over '
@@ -751,16 +842,19 @@ def _roof_frame(c: Canvas, roof: Roof, xs: Sequence[float],
 
 def view_roofline(run: Run, roof: Roof) -> Optional[str]:
     """Every measured point under the two ceilings, at compulsory intensity."""
-    rows = [r for r in run.rows if r.get('intensity') and rate(r, 'gflops')]
+    rows = [r for r in run.rows if intensity_of(r) and rate(r, 'gflops')]
     if not rows:
         return None
     c = Canvas(f'Roofline — {run.label}', 'arithmetic intensity '
-               '(flop/byte, compulsory)', 'achieved FLOP/s',
+               f'(flop/byte, compulsory, {flop_basis()})',
+               f'achieved FLOP/s ({flop_basis()})',
                xlog=True, ylog=True, legend_width=190,
-               note=f'{run.device}; roofs {roof.source}. Compulsory intensity '
-                    f'is what the description implies, not what the kernel '
-                    f'paid: see the measured roofline where a profile exists.')
-    xs = [r['intensity'] for r in rows]
+               note=f'{run.device}; roofs {roof.source}. Flops are what '
+                    f'{FLOP_LABEL[flop_basis()]}. Compulsory intensity is '
+                    f'what the description implies, not what the kernel '
+                    f'paid: see the measured roofline where a profile '
+                    f'exists.' + fallback_note(rows))
+    xs = [intensity_of(r) for r in rows]
     ys = [rate(r, 'gflops') * 1e9 for r in rows]
     _roof_frame(c, roof, xs, ys)
     groups = by_series(rows)
@@ -768,8 +862,8 @@ def view_roofline(run: Run, roof: Roof) -> Optional[str]:
         color = PALETTE[i % len(PALETTE)]
         for r in rs:
             achieved = rate(r, 'gflops') * 1e9
-            frac = achieved / roof.bound(r['intensity'])
-            c._mark(c.px(r['intensity']), c.py(achieved), color,
+            frac = achieved / roof.bound(intensity_of(r))
+            c._mark(c.px(intensity_of(r)), c.py(achieved), color,
                     series_style(i)[1],
                     f'{name} @ {_fmt(r.get("batch") or 0)}: '
                     f'{achieved / 1e9:.1f} GFLOP/s, {frac * 100:.0f} % of roof')
@@ -794,15 +888,15 @@ def view_trajectory(run: Run, roof: Roof) -> Optional[str]:
                note=f'{run.device}; one path per kernel, smallest batch at '
                     f'the bottom. Still rising at the top means the launch '
                     f'never saturated.')
-    xs = [r['intensity'] for rs in groups.values() for r in rs
-          if r.get('intensity')]
+    xs = [intensity_of(r) for rs in groups.values() for r in rs
+          if intensity_of(r)]
     ys = [rate(r, 'gflops') * 1e9 for rs in groups.values() for r in rs
           if rate(r, 'gflops')]
     if not xs:
         return None
     _roof_frame(c, roof, xs, ys)
     for i, (name, rs) in enumerate(sorted(groups.items())):
-        pts = [(r.get('intensity'),
+        pts = [(intensity_of(r),
                 (rate(r, 'gflops') or 0) * 1e9 or None) for r in rs]
         tips = [f'{name} @ {_fmt(r.get("batch") or 0)}: '
                 f'{(rate(r, "gflops") or 0):.1f} GFLOP/s' for r in rs]
@@ -818,7 +912,7 @@ def view_efficiency(run: Run, roof: Roof) -> Optional[str]:
     form that compares kernels of different intensity against each other.
     """
     groups = {k: v for k, v in by_series(run.rows).items()
-              if len(v) > 1 and all(r.get('intensity') for r in v)}
+              if len(v) > 1 and all(intensity_of(r) for r in v)}
     if not groups:
         return None
     c = Canvas(f'Fraction of the roof — {run.label}', 'elements per launch',
@@ -834,7 +928,7 @@ def view_efficiency(run: Run, roof: Roof) -> Optional[str]:
         for r in rs:
             g = rate(r, 'gflops')
             if g:
-                fr.append(g * 1e9 / roof.bound(r['intensity']) * 100)
+                fr.append(g * 1e9 / roof.bound(intensity_of(r)) * 100)
     if not xs or not fr:
         return None
     c.fit(xs, fr + [100.0], y_from_zero=True)
@@ -845,7 +939,7 @@ def view_efficiency(run: Run, roof: Roof) -> Optional[str]:
         pts, tips = [], []
         for r in rs:
             g = rate(r, 'gflops')
-            v = g * 1e9 / roof.bound(r['intensity']) * 100 if g else None
+            v = g * 1e9 / roof.bound(intensity_of(r)) * 100 if g else None
             pts.append((r.get('batch'), v))
             tips.append(f'{name} @ {_fmt(r.get("batch") or 0)}: '
                         f'{v or 0:.1f} % of roof')
@@ -962,17 +1056,21 @@ def view_measured_roofline(run: Run, roof: Roof,
     for row in run.rows:
         rows = profile.get(row['workload'])
         g = rate(row, 'gflops')
-        if not rows or not g or not row.get('intensity') or not row.get('flops'):
+        compulsory, f = intensity_of(row), flops_of(row)
+        if not rows or not g or not compulsory or not f:
             continue
         measured = _measured_bytes(hottest(rows))
         if not measured:
             continue
-        arrows.append((series_key(row), row['intensity'],
-                       row['flops'] / measured, g * 1e9))
+        # Both intensities on the chosen basis: the move the arrow draws is
+        # the *bytes* changing, and a numerator that changed with them
+        # would hide it.
+        arrows.append((series_key(row), compulsory, f / measured, g * 1e9))
     if not arrows:
         return None
     c = Canvas(f'Compulsory against measured intensity — {run.label}',
-               'arithmetic intensity (flop/byte)', 'achieved FLOP/s',
+               f'arithmetic intensity (flop/byte, {flop_basis()})',
+               f'achieved FLOP/s ({flop_basis()})',
                xlog=True, ylog=True, legend_width=190,
                note=f'{run.device}; roofs {roof.source}. Hollow is what the '
                     f'description implies, filled is what crossed the memory '
@@ -1152,11 +1250,18 @@ def main() -> int:
                          '(default: the largest both runs have)')
     ap.add_argument('--out', type=Path, default=Path('bench-plots'),
                     help='directory for the SVGs and index.html')
+    ap.add_argument('--flops', default='executed', choices=sorted(FLOP_FIELD),
+                    help='which of the three flop counts a FLOP/s and an '
+                         'arithmetic intensity are against: what the kernel '
+                         'issues (default, and what a profiler reports), '
+                         'what a dense implementation performs, or what the '
+                         'operation needs')
     ap.add_argument('--pdf', action='store_true',
                     help='also write every chart as a page of report.pdf, '
                          'and one PDF per chart beside its SVG')
     args = ap.parse_args()
 
+    set_flop_basis(args.flops)
     labels = args.label or []
     runs = []
     for i, path in enumerate(args.bench):

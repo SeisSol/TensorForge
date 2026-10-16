@@ -143,6 +143,7 @@ data is already there and possibly from several machines.
 | `bandwidth-peak` | a ceiling with the bus | how much of its own memory bus does each machine deliver? |
 | `intensity` | ceilings | is each kernel memory- or compute-bound, on each machine, and by how far? |
 | `kernels` | | what each kernel needs and carries — the numbers the charts divide by |
+| `flopmix` | `executed_flops` | how much of the arithmetic the kernel issues does the operation need? |
 | `configs` | 2+ configurations | does a configuration help everywhere, or only on one kernel? |
 | `order` | 2+ orders | how does the cost move as the discretisation order grows? |
 | `archs` | 2+ machines | the same kernel on each machine, as it ran |
@@ -164,6 +165,37 @@ part and a data-centre one spans two orders of magnitude, which is why its
 axis is logarithmic. `portability` divides each machine's own ceiling out and
 ranks what was *made* of them, which is the number a generator is answerable
 for.
+
+## Which flop count a chart is against
+
+There are three (below), they differ by 3.6x on `gpu_localFluxAll`, and a
+GFLOP/s that does not say which it means is three different numbers. So every
+chart says, in its axis, and `--flops` chooses:
+
+```bash
+python3 tools/bench/plot.py out/bench.json --flops executed   # the default
+./compareall.sh eval/ -- --flops nonzero
+```
+
+**`executed` is the default, and the roofline is why.** The question a roof
+asks is whether the machine's arithmetic is the limit, and the machine issues
+what the *built kernel* performs: a destination twenty rows wide computes on
+thirty-two lanes, and the multiply-add filling the other twelve is issued,
+retired and counted by the profiler. Against the dense figure the same point
+sits 2.2x too low on `gpu_localFluxAll` — the difference between a kernel at a
+third of its roof and one at two thirds. Both axes move together: a point
+placed at the dense intensity and drawn at the issued rate is on neither
+roofline.
+
+`nonzero` is the one to ask for when the question is science per second rather
+than silicon per second, and `dense` reproduces what these charts drew before.
+Where the analysis pass could not count a body, `executed_flops` is missing and
+that point falls back to the dense count rather than vanishing from the
+chart — the note says how many did.
+
+What the three counts do *not* appear as is one number: `flopmix` draws all
+three, because the gap between them is the generator's business and a roofline
+drawn honestly about the machine says nothing about it.
 
 ## Everything as a PDF
 
@@ -208,7 +240,7 @@ kernel" has three answers and they differ by more than a factor of three:
 |---|---|---|
 | `nonzero_flops` | what the operation needs, structural zeros taken out | 25 092 |
 | `flops` | what a dense implementation performs | 40 680 |
-| `executed_flops` | what the built kernel performs | 90 576 |
+| `executed_flops` | what the built kernel performs, and what a profiler counts | 90 576 |
 
 The first two come from `analysis.cost` and are of the *operation*: they count
 the destination box. `nonzero_flops` matches yateto's `nonZeroFlops` exactly

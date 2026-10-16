@@ -76,12 +76,46 @@ def test_a_row_that_failed_is_not_a_data_point(tmp_path):
     assert [r["workload"] for r in plot.load_run(path).rows] == ["k"]
 
 
-def test_the_stored_rate_wins_over_recomputing_it():
-    """`run.py` divides by whichever clock the run was told to use.  A chart
-    that recomputes from `flops` and `event_ns` disagrees with the table the
-    same file prints, which is worse than either figure alone."""
+def test_the_stored_rate_wins_on_the_basis_it_was_stored_for():
+    """`run.py` divides by whichever clock the run was told to use, and a
+    chart that recomputes from `flops` and `event_ns` disagrees with the
+    table the same file prints.  What it stored is the *dense* count, so it
+    wins there and nowhere else: the other two bases have nothing stored,
+    and taking this figure for them would label the axis with a number
+    from a different numerator."""
     r = row(gflops=1234.0)
-    assert plot.rate(r, "gflops") == 1234.0
+    try:
+        plot.set_flop_basis("dense")
+        assert plot.rate(r, "gflops") == 1234.0
+        plot.set_flop_basis("executed")
+        assert plot.rate(r, "gflops") != 1234.0
+    finally:
+        plot.set_flop_basis("executed")
+
+
+def test_the_roofline_is_drawn_on_what_the_kernel_issues():
+    """Which is what a profiler reports, and the only count against which
+    "is this kernel allowed to go faster" is a fair question: a dense
+    figure puts `gpu_localFluxAll` 2.2x too low."""
+    r = row(flops=1000.0, executed_flops=2200.0, bytes=100.0)
+    plot.set_flop_basis("executed")
+    assert plot.flops_of(r) == 2200.0
+    assert plot.intensity_of(r) == 22.0
+    plot.set_flop_basis("dense")
+    assert plot.flops_of(r) == 1000.0
+    assert plot.intensity_of(r) == 10.0
+    plot.set_flop_basis("executed")
+
+
+def test_a_row_the_analysis_could_not_count_falls_back_and_says_so():
+    """Dropping it would take the kernel out of the roofline altogether,
+    which is worse than drawing it on the count beside it."""
+    counted = row(flops=1000.0, executed_flops=2200.0)
+    uncounted = row(flops=1000.0)
+    assert plot.flops_of(uncounted) == 1000.0
+    assert plot.on_dense([counted, uncounted]) == 1
+    assert "1 of 2" in plot.fallback_note([counted, uncounted])
+    assert plot.fallback_note([counted]) == ""
 
 
 def test_a_row_with_no_clock_is_left_out_rather_than_drawn_at_zero():
@@ -213,8 +247,10 @@ def test_the_comparison_points_the_right_way_for_a_cost():
 
 def test_the_comparison_points_the_right_way_for_a_rate():
     """Higher GFLOP/s is better, so the candidate over the reference."""
-    slow = run([row(gflops=1000.0)], label="slow")
-    fast = run([row(gflops=2000.0)], label="fast")
+    slow = run([row(gflops=1000.0, executed_flops=1000.0 * 1000.0)],
+               label="slow")
+    fast = run([row(gflops=2000.0, executed_flops=2000.0 * 1000.0)],
+               label="fast")
     svg = plot.view_compare([slow, fast], "gflops")
     titles = [e.text for e in ET.fromstring(svg).iter()
               if e.tag.endswith("title")]

@@ -70,8 +70,10 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from pdfout import Page, PText, write_pdf, table_page          # noqa: E402
-from plot import (Canvas, MARKS, PALETTE, RATE_LABEL, _fmt, _results,
-                  index_html, rate, series_style)                            # noqa: E402
+from plot import (Canvas, FLOP_FIELD, FLOP_LABEL, MARKS, PALETTE, RATE_LABEL,
+                  _fmt, _results, flop_basis, flops_of, index_html,
+                  intensity_of, rate, rate_label, series_style,
+                  set_flop_basis)                            # noqa: E402
 
 #: Magnitude against a midpoint of 1: two hues and a neutral grey between
 #: them, never a hue at the middle (a rainbow midpoint reads as a third
@@ -130,10 +132,10 @@ class Point:
 
     @property
     def intensity(self) -> Optional[float]:
-        """Flops per compulsory byte -- a property of the operation, which
-        is why it is the same on every machine and the ridge is not."""
-        f, b = self.row.get('flops'), self.row.get('bytes')
-        return f / b if f and b else None
+        """Flops per compulsory byte, on the basis the charts are drawn
+        against -- a property of the operation, which is why it is the
+        same on every machine and the ridge is not."""
+        return intensity_of(self.row)
 
 
 @dataclass
@@ -455,6 +457,63 @@ def view_intensity(fieldset: Field) -> Optional[str]:
     return c.render()
 
 
+def view_flopmix(fieldset: Field) -> Optional[str]:
+    """What the kernel issues, against what the operation needs.
+
+    Three counts and two gaps.  The first gap is the sparsity a dense
+    implementation pays for and the generator partly avoids; the second is
+    the lanes: a destination twenty rows wide computes on thirty-two, and
+    the multiply-add that fills the other twelve is issued, retired and
+    counted by the profiler.  A roofline drawn on the issued count is
+    honest about the machine and says nothing about this, which is why it
+    is a chart of its own.
+
+    Drawn as a fraction of the issued count, so kernels of wildly
+    different size compare: the bar is what the operation needs and the
+    space above it is arithmetic spent on nothing.
+    """
+    points = fieldset.largest_batch(fieldset.points)
+    by_workload: Dict[str, Point] = {}
+    for p in points:
+        if p.row.get('executed_flops') and p.row.get('nonzero_flops'):
+            by_workload.setdefault(p.workload, p)
+    if not by_workload:
+        return None
+    names = sorted(by_workload)
+    c = Canvas('How much of the issued arithmetic is needed', '',
+               'fraction of what the kernel issues',
+               width=max(760, 54 * len(names) + 200), legend_width=170,
+               tilted_labels=True,
+               note='The bar is what the operation needs; the first segment '
+                    'above it is what a dense implementation adds, and the '
+                    'rest is the lanes a narrow destination leaves idle. '
+                    'Per element at the largest launch.')
+    c.fit([0, len(names)], [0.0, 1.0], y_from_zero=True)
+    c.axes(xticks=[], ytick_label=lambda v: f'{v:.0%}')
+    c.rule(1.0, 'issued', '#777')
+    step = (c.W - c.L - c.R) / max(len(names), 1)
+    for i, w in enumerate(names):
+        p = by_workload[w]
+        issued = float(p.row['executed_flops'])
+        needed = float(p.row['nonzero_flops']) / issued
+        dense = min(float(p.row.get('flops') or 0) / issued, 1.0)
+        x = c.L + step * (i + 0.22)
+        c.bar(x, step * 0.56, needed, PALETTE[0],
+              f'{w}: needs {needed:.1%} of what it issues')
+        if dense > needed:
+            c.bar(x, step * 0.56, dense, PALETTE[1],
+                  f'{w}: a dense implementation would perform {dense:.1%}',
+                  y_base=needed)
+        if dense < 1.0:
+            c.bar(x, step * 0.56, 1.0, PALETTE[4],
+                  f'{w}: the lanes add the rest, to {issued:,.0f} flop',
+                  y_base=dense)
+        c.tilted_label(c.L + step * (i + 0.5), w)
+    c.legend.extend([('needed', PALETTE[0]), ('dense adds', PALETTE[1]),
+                     ('idle lanes add', PALETTE[4])])
+    return c.render()
+
+
 def view_kernels(fieldset: Field) -> Optional[Tuple[Page, str]]:
     """What each kernel is, as a table: the numbers the charts divide by.
 
@@ -471,20 +530,25 @@ def view_kernels(fieldset: Field) -> Optional[Tuple[Page, str]]:
     by_workload: Dict[str, Point] = {}
     for p in points:
         by_workload.setdefault(p.workload, p)
-    headers = ['kernel', 'flop/element', 'byte/element', 'flop/byte',
-               'nonzero flops'] + [f'bound on {a}' for a in archs]
+    headers = ['kernel', 'needed', 'dense', 'issued', 'useful',
+               'byte/element', f'flop/byte ({flop_basis()})'] + [
+                   f'bound on {a}' for a in archs]
     rows = []
     for w in sorted(by_workload):
         p = by_workload[w]
         batch = p.batch or 1
-        f, b = p.row.get('flops'), p.row.get('bytes')
-        nz = p.row.get('nonzero_flops')
+        b = p.row.get('bytes')
+        needed = p.row.get('nonzero_flops')
+        dense = p.row.get('flops')
+        issued = p.row.get('executed_flops')
         inten = p.intensity
         cells = [w,
-                 f'{f / batch:,.0f}' if f else '—',
+                 f'{needed / batch:,.0f}' if needed else '—',
+                 f'{dense / batch:,.0f}' if dense else '—',
+                 f'{issued / batch:,.0f}' if issued else '—',
+                 f'{needed / issued:.0%}' if needed and issued else '—',
                  f'{b / batch:,.0f}' if b else '—',
-                 f'{inten:.2f}' if inten else '—',
-                 f'{nz / f:.0%}' if nz and f else '—']
+                 f'{inten:.2f}' if inten else '—']
         for a in archs:
             ridge = fieldset.ceilings[a].ridge
             if not inten or not ridge:
@@ -494,9 +558,13 @@ def view_kernels(fieldset: Field) -> Optional[Tuple[Page, str]]:
             cells.append(('memory' if r < 1 else 'compute')
                          + f' {max(r, 1 / r):.1f}x')
         rows.append(cells)
-    note = ('Per element at the largest launch. "nonzero flops" is what the '
-            'operation needs once the structural zeros are taken out, '
-            'against what a dense implementation performs. "bound" is the '
+    note = ('Per element at the largest launch. The three counts are kept '
+            'apart because they are three things: "needed" is the operation '
+            'with its structural zeros taken out, "dense" is what a dense '
+            'implementation performs, and "issued" is what the built kernel '
+            'performs -- a destination twenty rows wide computes on '
+            'thirty-two lanes. "useful" is needed over issued, which is the '
+            'arithmetic the generator spends to nothing. "bound" is the '
             'intensity against that machine\'s measured ridge, and the '
             'factor is how far from the corner.')
     return table_page('Kernels', headers, rows, note)
@@ -534,7 +602,7 @@ def view_configs(fieldset: Field, what: str = 'ns_per_element',
         return None
     lower_better = what in LOWER_IS_BETTER
     colors, marks = _colors(others), _marks(others)
-    c = Canvas(f'Configurations against {ref} — {RATE_LABEL[what]}',
+    c = Canvas(f'Configurations against {ref} — {rate_label(what)}',
                '', f'ratio to {ref}', ylog=True,
                width=max(760, 46 * len(names) + 220), legend_width=190,
                tilted_labels=True,
@@ -606,8 +674,8 @@ def view_order(fieldset: Field, what: str = 'ns_per_element',
     where = f' on {arch}' if arch else ''
     pooled = (arch is None
               and len({p.arch for p in points}) > 1)
-    c = Canvas(f'Cost against order{where} — {RATE_LABEL[what]}',
-               'discretisation order', RATE_LABEL[what], ylog=True,
+    c = Canvas(f'Cost against order{where} — {rate_label(what)}',
+               'discretisation order', rate_label(what), ylog=True,
                width=760, legend_width=200,
                note='One point per order at the largest launch; a gap is a '
                     'configuration that was not run rather than a zero.'
@@ -645,8 +713,8 @@ def view_archs(fieldset: Field, what: str = 'gflops') -> Optional[str]:
     if not names:
         return None
     colors = _colors(archs)
-    c = Canvas(f'Each machine on each kernel — {RATE_LABEL[what]}', '',
-               RATE_LABEL[what], ylog=True,
+    c = Canvas(f'Each machine on each kernel — {rate_label(what)}', '',
+               rate_label(what), ylog=True,
                width=max(760, 60 * len(names) + 220), legend_width=190,
                tilted_labels=True,
                note='At the largest launch each ran. Logarithmic, because a '
@@ -779,6 +847,9 @@ def build(fieldset: Field, what: str, reference: Optional[str],
     add_chart('intensity', view_intensity(fieldset),
               'no ceilings, so there is no ridge to place a kernel against')
     add_table('kernels', view_kernels(fieldset), 'no runs')
+    add_chart('flopmix', view_flopmix(fieldset),
+              'the runs carry no executed_flops -- the analysis pass could '
+              'not count the bodies')
     add_chart('configs', view_configs(fieldset, what, reference),
               'one configuration only -- the comparison needs two')
     if per_arch_order:
@@ -813,11 +884,16 @@ def main() -> int:
     ap.add_argument('--per-arch-order', action='store_true',
                     help='also one order chart per machine, not only the '
                          'pooled one')
+    ap.add_argument('--flops', default='executed', choices=sorted(FLOP_FIELD),
+                    help='which of the three flop counts a FLOP/s and an '
+                         'intensity are against (default: what the kernel '
+                         'issues, which is what a profiler reports)')
     ap.add_argument('--pdf', action='store_true', default=True,
                     help='write report.pdf (on by default)')
     ap.add_argument('--no-pdf', dest='pdf', action='store_false')
     args = ap.parse_args()
 
+    set_flop_basis(args.flops)
     fieldset = collect(args.paths)
     if not fieldset.points:
         print('no usable rows under ' + ', '.join(str(p) for p in args.paths),
