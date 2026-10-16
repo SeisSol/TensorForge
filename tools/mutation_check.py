@@ -2015,6 +2015,37 @@ GROUPS = {
              '', 1)),
     ]),
 
+    # The collectives of `hip.h` by the width of the wave.  The tests compile
+    # the header for the device and need a HIP installation's headers
+    # (`TF_HIP_INCLUDE`); without them they skip, and every mutation here
+    # reads as missed.
+    'wavewidth': ('tests/test_wave_width.py', [
+        ('readlane for 64 lanes whatever the wave',
+         sub(HIP, '  } else if constexpr (Block == WaveSize && Subblock == 1) {\n'
+                  '    // One lane for the whole wave',
+             '  } else if constexpr (Block == 64 && Subblock == 1) {\n'
+             '    // One lane for the whole wave', 1)),
+        ('readlane for a block narrower than the wave',
+         sub(HIP, '  } else if constexpr (Block == WaveSize && Subblock == 1) {\n'
+                  '    // One lane for the whole wave',
+             '  } else if constexpr (Subblock == 1 && Block >= 32) {\n'
+             '    // One lane for the whole wave', 1)),
+        ('a broadcast past the wave let through',
+         sub(HIP, 'static_assert(Block <= WaveSize, "a broadcast reaches',
+             'static_assert(true || Block <= WaveSize, "a broadcast reaches', 1)),
+        ('a swap past the wave let through',
+         sub(HIP, 'static_assert(Block <= WaveSize, "a swap reaches',
+             'static_assert(true || Block <= WaveSize, "a swap reaches', 1)),
+        ('the ballot bit counted from threadIdx.x',
+         sub(HIP, '  const auto lane = static_cast<unsigned>(__lane_id());',
+             '  const auto lane = static_cast<unsigned>(threadIdx.x);', 1)),
+        ('the butterfly reached by a boolean too',
+         sub(HIP, '    return ballotReduction<Op, Block, Subblock>(value);\n'
+                  '  } else {\n',
+             '    return ballotReduction<Op, Block, Subblock>(value);\n'
+             '  }\n  {\n', 1)),
+    ]),
+
     # The arrays of pointers and the flags promised unwritten and unaliased
     # in the kernel's prototype, the launcher's left as the interface has it.
     'restrictarrays': ('tests/test_restrict_arrays.py', [

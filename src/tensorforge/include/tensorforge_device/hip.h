@@ -226,15 +226,22 @@ __device__ __forceinline__ T broadcast_warp(T value, int lane) {
   return readlane(value, lane);
 }
 
+/// Lane `Lane * Subblock + p % Subblock` of every `Block` consecutive lanes,
+/// read by lane `p` of them.  Within one wave: the instructions that move a
+/// value between lanes end there, and the generator refuses a multiplication
+/// wider than the wave (`primitives.amd.codegen`).  Which instruction depends
+/// on the block -- `readlane` where it is the whole wave, the DPP, swizzle and
+/// permute forms for a row or a half of 32 lanes, which work alike in a wave
+/// of either width -- and on what the architecture has.
 template <std::size_t Block, std::size_t Subblock, std::size_t Lane, typename T>
 __device__ __forceinline__ T broadcast(T value) {
   static_assert(Block % Subblock == 0, "");
   static_assert(Lane * Subblock < Block, "");
+  static_assert(Block <= WaveSize, "a broadcast reaches the lanes of one wave");
   if constexpr (Block == Subblock) {
     return value;
-  } else if constexpr (Block == 64 && Subblock == 1) {
-    return broadcast_warp(value, Lane);
-  } else if constexpr (Block == 32 && Subblock == 1 && AsmVersion >= 10000) {
+  } else if constexpr (Block == WaveSize && Subblock == 1) {
+    // One lane for the whole wave: a scalar read and a scalar operand.
     return broadcast_warp(value, Lane);
   } else if constexpr (Block == 32 && Subblock == 16 && AsmVersion >= 10000) {
     constexpr uint64_t LaneBcst = 0xfedcba9876543210_u64;
@@ -267,7 +274,8 @@ __device__ __forceinline__ T broadcast(T value) {
   } else if constexpr (Block < 64) {
     return swizzle_bcst<Block, Subblock, Lane>(value);
   } else {
-    const auto blockoffset = Block == 64 ? 0 : (__lane_id() / Block) * Block;
+    const auto blockoffset =
+        Block == WaveSize ? 0 : (__lane_id() / Block) * Block;
     const auto subblockvar = __lane_id() % Subblock;
     return bpermute(value, Lane * Subblock + subblockvar + blockoffset);
   }
@@ -339,6 +347,7 @@ __device__ __forceinline__ auto permlane16(T value) -> T {
 /// `Block`.
 template <std::size_t Block, typename T>
 __device__ __forceinline__ T swap(T value) {
+  static_assert(Block <= WaveSize, "a swap reaches the lanes of one wave");
   if constexpr (Block == 1) {
     return value;
   } else if constexpr (Block == 64) {
@@ -818,8 +827,12 @@ constexpr unsigned long long groupMask() {
 template <typename Op, std::size_t Block, std::size_t Subblock>
 __device__ __forceinline__ bool ballotReduction(bool value) {
   const auto ballot = __ballot(value ? 1 : 0);
-  const auto thread = (threadIdx.x / Block) * Block;
-  const auto subthread = Subblock == 1 ? 0 : (threadIdx.x % Subblock);
+  // The ballot has a bit per lane of the wave, and a lane's is its place in
+  // the wave rather than in its multiplication: two multiplications of 32
+  // lanes in a wave of 64 both count `threadIdx.x` from 0.
+  const auto lane = static_cast<unsigned>(__lane_id());
+  const auto thread = (lane / Block) * Block;
+  const auto subthread = Subblock == 1 ? 0 : (lane % Subblock);
 
   // Every lane of the group, and in 64 bits.  A single lane,
   // `(1 << subthread) << thread`, would reduce the And test to "is my own bit
@@ -843,28 +856,31 @@ __device__ __forceinline__ T reduction(const T &value) {
   if constexpr (Block == Subblock) {
     return value;
   } else if constexpr (std::is_same_v<T, bool> && Op::Op == Operation::And &&
-                       Block == 64 && Subblock == 1) {
+                       Block == WaveSize && Subblock == 1) {
     return __all(value ? 1 : 0) != 0;
   } else if constexpr (std::is_same_v<T, bool> && Op::Op == Operation::Or &&
-                       Block == 64 && Subblock == 1) {
+                       Block == WaveSize && Subblock == 1) {
     return __any(value ? 1 : 0) != 0;
   } else if constexpr (std::is_same_v<T, bool>) {
     return ballotReduction<Op, Block, Subblock>(value);
+  } else {
+    // `swap<N>` exchanges the two halves of an N-sized group.  Once each
+    // Subblock-sized group holds a uniform value, exchanging across
+    // `2*Subblock` pairs each group with its neighbor, which is the butterfly
+    // step -- so the width has to grow with the recursion; `swap<Block>` would
+    // repeat the same full-width exchange at every level.
+    //
+    // This reads any lane of the neighboring group, and the group is uniform,
+    // so it cannot tell which lane it got, nor one map of `swap` from another.
+    //
+    // A branch of its own: a `bool` moves through no lane instruction, which
+    // take whole 32-bit words, and has its answer in the ballot above.
+    const auto other = swap<(Subblock << 1)>(value);
+    const auto result = Op::applyOperation(value, other);
+    // Argument order is <Op, Block, Subblock, T>: passing `T` where `Block`
+    // is declared does not compile once this branch is reached.
+    return reduction<Op, Block, (Subblock << 1), T>(result);
   }
-
-  // `swap<N>` exchanges the two halves of an N-sized group.  Once each
-  // Subblock-sized group holds a uniform value, exchanging across
-  // `2*Subblock` pairs each group with its neighbor, which is the butterfly
-  // step -- so the width has to grow with the recursion; `swap<Block>` would
-  // repeat the same full-width exchange at every level.
-  //
-  // This reads any lane of the neighboring group, and the group is uniform,
-  // so it cannot tell which lane it got, nor one map of `swap` from another.
-  const auto other = swap<(Subblock << 1)>(value);
-  const auto result = Op::applyOperation(value, other);
-  // Argument order is <Op, Block, Subblock, T>: passing `T` where `Block` is
-  // declared does not compile once this branch is reached.
-  return reduction<Op, Block, (Subblock << 1), T>(result);
 }
 
 constexpr std::size_t GlobalMemspace = 1;
