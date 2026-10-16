@@ -67,6 +67,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from pdfout import (Page, PCircle, PLine, PPolygon, PPoly, PRect, PText,
+                    Prim, _wrap, write_pdf)
+
 # ----------------------------------------------------------------------
 # Reading what the other tools wrote
 # ----------------------------------------------------------------------
@@ -139,6 +142,24 @@ PALETTE = ('#2f6fb2', '#b2452f', '#3f8f4f', '#8a5fb0',
 MARKS = ('circle', 'square', 'triangle', 'diamond')
 
 
+def series_style(i: int) -> Tuple[str, str]:
+    """The colour and the mark for curve `i`.
+
+    Both channels, and the mark varies *within* the palette rather than
+    only once it wraps.  Eight hues cannot all stay apart under
+    deuteranopia -- the validator puts the closest adjacent pair of this
+    set at a few units of Delta E, where eight is the floor that secondary
+    encoding makes legal -- so a reader who cannot separate two of them
+    separates a circle from a triangle instead.
+
+    The pair stays unique for 32 curves: the mark advances with the index
+    inside a block of eight *and* with the block, so curve 0 and curve 8
+    share a colour and differ in shape.
+    """
+    return PALETTE[i % len(PALETTE)], MARKS[(i % len(PALETTE)
+                                             + i // len(PALETTE)) % len(MARKS)]
+
+
 def _fmt(value: float) -> str:
     """A number a reader can say out loud."""
     a = abs(value)
@@ -155,6 +176,11 @@ def _fmt(value: float) -> str:
     if a >= 1:
         return f'{value:.3g}'
     return f'{value:.2g}'
+
+
+#: The canvas most recently rendered (`Canvas.render`), which is how a view
+#: that returns SVG still yields a PDF page.
+_LAST_CANVAS: Optional['Canvas'] = None
 
 
 class Canvas:
@@ -177,25 +203,41 @@ class Canvas:
         self.xlabel, self.ylabel = xlabel, ylabel
         self.xlog, self.ylog = xlog, ylog
         self.W = width + legend_width
-        self.H = height + (58 if tilted_labels else 0)
+        # The note is wrapped to the drawing and the sheet grows for it.
+        # Written on one line it ran off the right edge of every chart
+        # whose note said more than a dozen words, and a note nobody can
+        # read is a note nobody wrote.
+        self._note_lines = _wrap(
+            note, max(int((width - 96) / 5.2), 40)) if note else []
+        extra = 12 * max(len(self._note_lines) - 1, 0)
+        self.H = height + (58 if tilted_labels else 0) + extra
         self.L, self.T = 74, 46
         self.R = 22 + legend_width
-        self.B = 62 + (58 if tilted_labels else 0)
+        # The bottom margin grows with the note as the sheet does, so the
+        # wrapped lines land below the axis label instead of across it.
+        self.B = 62 + (58 if tilted_labels else 0) + extra
         self.legend_width = legend_width
         self.tilted = tilted_labels
+        #: What was drawn, as primitives.  `body` is the same list spelled
+        #: as SVG and is appended to in step (`_emit`), so a caller that
+        #: puts a string in it directly still draws -- into the SVG only,
+        #: which is why nothing in this file does that any more.
+        self.prims: List[Prim] = []
         self.body: List[str] = []
         self.legend: List[Tuple[str, str]] = []
         self.x0 = self.x1 = self.y0 = self.y1 = 0.0
+
+    def _emit(self, prim: Prim) -> None:
+        self.prims.append(prim)
+        self.body.append(prim.to_svg())
 
     def tilted_label(self, x: float, text: str) -> None:
         """A name under a bar, written at an angle so that neighbours do not
         collide.  Anchored at its end so the text runs away from the axis
         rather than through it."""
         y = self.H - self.B + 13
-        self.body.append(
-            f'<text x="{x:.1f}" y="{y}" text-anchor="end" fill="#555" '
-            f'font-size="9" transform="rotate(-45 {x:.1f} {y})">'
-            f'{html.escape(text[:30])}</text>')
+        self._emit(PText(x, y, text[:30], anchor='end', fill='#555', size=9,
+                         rotate=-45))
 
     # -- scales ---------------------------------------------------------
 
@@ -281,20 +323,14 @@ class Canvas:
               else self._linear_ticks(self.y0, self.y1))
         for x in xs:
             px = self.px(x)
-            self.body.append(
-                f'<line x1="{px:.1f}" y1="{self.T}" x2="{px:.1f}" '
-                f'y2="{self.H - self.B}" stroke="#eee"/>')
-            self.body.append(
-                f'<text x="{px:.1f}" y="{self.H - self.B + 15}" '
-                f'text-anchor="middle" fill="#444">{html.escape(fx(x))}</text>')
+            self._emit(PLine(px, self.T, px, self.H - self.B, '#eee'))
+            self._emit(PText(px, self.H - self.B + 15, fx(x),
+                             anchor='middle', fill='#444'))
         for y in ys:
             py = self.py(y)
-            self.body.append(
-                f'<line x1="{self.L}" y1="{py:.1f}" x2="{self.W - self.R}" '
-                f'y2="{py:.1f}" stroke="#eee"/>')
-            self.body.append(
-                f'<text x="{self.L - 8}" y="{py + 3.5:.1f}" text-anchor="end" '
-                f'fill="#444">{html.escape(fy(y))}</text>')
+            self._emit(PLine(self.L, py, self.W - self.R, py, '#eee'))
+            self._emit(PText(self.L - 8, py + 3.5, fy(y), anchor='end',
+                             fill='#444'))
 
     # -- marks ----------------------------------------------------------
 
@@ -306,14 +342,14 @@ class Canvas:
         A `None` in either coordinate breaks the line: see the module
         docstring on why a gap is left open.
         """
-        run: List[str] = []
+        run: List[Tuple[float, float]] = []
         for i, (x, y) in enumerate(points):
             if x is None or y is None:
                 if len(run) > 1:
                     self._polyline(run, color, dashed)
                 run = []
                 continue
-            run.append(f'{self.px(x):.1f},{self.py(y):.1f}')
+            run.append((self.px(x), self.py(y)))
             tip = tips[i] if tips and i < len(tips) else f'{_fmt(x)}, {_fmt(y)}'
             self._mark(self.px(x), self.py(y), color, mark, tip)
         if len(run) > 1:
@@ -321,58 +357,80 @@ class Canvas:
         if label:
             self.legend.append((label, color))
 
-    def _polyline(self, run: Sequence[str], color: str, dashed: bool) -> None:
-        dash = ' stroke-dasharray="5 4"' if dashed else ''
-        self.body.append(
-            f'<polyline points="{" ".join(run)}" fill="none" stroke="{color}" '
-            f'stroke-width="1.8" stroke-linejoin="round"{dash}/>')
+    def _polyline(self, run: Sequence[Tuple[float, float]], color: str,
+                  dashed: bool) -> None:
+        self._emit(PPoly(list(run), color, 1.8, '5 4' if dashed else ''))
 
     def _mark(self, px: float, py: float, color: str, kind: str,
               tip: str) -> None:
-        t = f'<title>{html.escape(tip)}</title>'
         if kind == 'square':
-            shape = (f'<rect x="{px - 3.2:.1f}" y="{py - 3.2:.1f}" width="6.4" '
-                     f'height="6.4" fill="{color}">{t}</rect>')
+            self._emit(PRect(px - 3.2, py - 3.2, 6.4, 6.4, color, tip=tip))
         elif kind == 'triangle':
-            shape = (f'<polygon points="{px:.1f},{py - 4:.1f} '
-                     f'{px - 3.7:.1f},{py + 2.6:.1f} {px + 3.7:.1f},'
-                     f'{py + 2.6:.1f}" fill="{color}">{t}</polygon>')
+            self._emit(PPolygon([(px, py - 4), (px - 3.7, py + 2.6),
+                                 (px + 3.7, py + 2.6)], color, tip))
         elif kind == 'diamond':
-            shape = (f'<polygon points="{px:.1f},{py - 4.2:.1f} '
-                     f'{px + 4.2:.1f},{py:.1f} {px:.1f},{py + 4.2:.1f} '
-                     f'{px - 4.2:.1f},{py:.1f}" fill="{color}">{t}</polygon>')
+            self._emit(PPolygon([(px, py - 4.2), (px + 4.2, py),
+                                 (px, py + 4.2), (px - 4.2, py)], color, tip))
         else:
-            shape = (f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3.4" '
-                     f'fill="{color}">{t}</circle>')
-        self.body.append(shape)
+            self._emit(PCircle(px, py, 3.4, color, tip=tip))
 
     def bar(self, x: float, w: float, y: float, color: str, tip: str,
             y_base: Optional[float] = None) -> None:
         base = self.py(self.y0 if y_base is None else y_base)
         top = self.py(y)
-        self.body.append(
-            f'<rect x="{x:.1f}" y="{min(top, base):.1f}" width="{w:.1f}" '
-            f'height="{abs(base - top):.1f}" fill="{color}" opacity="0.85">'
-            f'<title>{html.escape(tip)}</title></rect>')
+        self._emit(PRect(x, min(top, base), w, abs(base - top), color,
+                         opacity=0.85, tip=tip))
 
     def rule(self, y: float, text: str, color: str = '#999') -> None:
         py = self.py(y)
-        self.body.append(
-            f'<line x1="{self.L}" y1="{py:.1f}" x2="{self.W - self.R}" '
-            f'y2="{py:.1f}" stroke="{color}" stroke-dasharray="4 3"/>')
-        self.body.append(
-            f'<text x="{self.L + 6}" y="{py - 4:.1f}" '
-            f'fill="{color}">{html.escape(text)}</text>')
+        self._emit(PLine(self.L, py, self.W - self.R, py, color, dash='4 3'))
+        self._emit(PText(self.L + 6, py - 4, text, fill=color))
 
     def text(self, x: float, y: float, s: str, anchor: str = 'start',
              fill: str = '#444', size: int = 11) -> None:
-        self.body.append(
-            f'<text x="{x:.1f}" y="{y:.1f}" text-anchor="{anchor}" '
-            f'fill="{fill}" font-size="{size}">{html.escape(s)}</text>')
+        self._emit(PText(x, y, s, anchor=anchor, fill=fill, size=size))
+
+    # -- the three shapes the views used to spell in SVG themselves ------
+
+    def segment(self, x1: float, y1: float, x2: float, y2: float,
+                color: str, width: float = 1.0, opacity: float = 1.0,
+                tip: str = '', dashed: bool = False) -> None:
+        """A straight line between two points *already in pixels*: a
+        whisker, a ridge, an arrow from one intensity to another."""
+        self._emit(PLine(x1, y1, x2, y2, color, width,
+                         '4 3' if dashed else '', opacity, tip))
+
+    def path(self, points: Sequence[Tuple[float, float]], color: str,
+             width: float = 2.0) -> None:
+        """A polyline in pixels -- the roof, which is a function of the
+        axes rather than of the data."""
+        self._emit(PPoly(list(points), color, width))
+
+    def ring(self, px: float, py: float, r: float, color: str,
+             tip: str = '') -> None:
+        """A hollow mark, for the end of a pair that the filled one
+        begins."""
+        self._emit(PCircle(px, py, r, '#ffffff', stroke=color, tip=tip))
 
     # -- output ---------------------------------------------------------
 
-    def render(self) -> str:
+    def _chrome(self) -> List[Prim]:
+        """The frame, the labels and the legend, as primitives.
+
+        Built here rather than written into the SVG at the end, because the
+        PDF needs the same furniture and a second spelling of it is a second
+        thing to keep in step.
+        """
+        out: List[Prim] = [PRect(0, 0, self.W, self.H, '#ffffff')]
+        out.append(PText(self.L, 22, self.title, fill='#111', size=14))
+        out.append(PLine(self.L, self.H - self.B, self.W - self.R,
+                         self.H - self.B, '#333'))
+        out.append(PLine(self.L, self.T, self.L, self.H - self.B, '#333'))
+        out.append(PText((self.L + self.W - self.R) / 2, self.H - self.B + 34,
+                         self.xlabel, anchor='middle', fill='#222'))
+        mid = (self.T + self.H - self.B) / 2
+        out.append(PText(16, mid, self.ylabel, anchor='middle', fill='#222',
+                         rotate=-90))
         fits = max(int((self.H - self.T - 24) // 14), 1)
         entries = list(self.legend)
         more = ''
@@ -380,41 +438,46 @@ class Canvas:
             more = f'+{len(entries) - fits + 1} more, hover the marks'
             entries = entries[:fits - 1]
         x = self.W - self.legend_width + 8 if self.legend_width else self.L + 8
-        legend = []
         for i, (label, color) in enumerate(entries):
             y = self.T + 10 + i * 14
-            legend.append(
-                f'<rect x="{x}" y="{y - 8}" width="8" height="8" '
-                f'fill="{color}"/>'
-                f'<text x="{x + 12}" y="{y}" fill="#333" font-size="10">'
-                f'{html.escape(label[:28])}</text>')
+            out.append(PRect(x, y - 8, 8, 8, color))
+            out.append(PText(x + 12, y, label[:28], fill='#333', size=10))
         if more:
-            legend.append(
-                f'<text x="{x}" y="{self.T + 10 + len(entries) * 14}" '
-                f'fill="#888" font-size="10">{html.escape(more)}</text>')
-        note = (f'<text x="{self.L}" y="{self.H - 10}" fill="#777" '
-                f'font-size="10">{html.escape(self.note)}</text>'
-                if self.note else '')
+            out.append(PText(x, self.T + 10 + len(entries) * 14, more,
+                             fill='#888', size=10))
+        for i, line in enumerate(self._note_lines):
+            out.append(PText(
+                self.L, self.H - 10 - 12 * (len(self._note_lines) - 1 - i),
+                line, fill='#777', size=10))
+        return out
+
+    def render(self) -> str:
+        """The chart as SVG: the background and title first, the data, then
+        the furniture, so that an axis label is never covered by a mark.
+
+        The canvas registers itself as the one most recently rendered, so
+        that `build_charts` can collect a PDF page per view without every
+        view changing what it returns.
+        """
+        global _LAST_CANVAS
+        _LAST_CANVAS = self
+        chrome = self._chrome()
+        head, tail = chrome[:2], chrome[2:]
         return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{self.W}" \
 height="{self.H}" viewBox="0 0 {self.W} {self.H}" font-family="sans-serif" \
 font-size="11">
-<rect width="{self.W}" height="{self.H}" fill="white"/>
-<text x="{self.L}" y="22" font-size="14" fill="#111">\
-{html.escape(self.title)}</text>
+{chr(10).join(p.to_svg() for p in head)}
 {chr(10).join(self.body)}
-<line x1="{self.L}" y1="{self.H - self.B}" x2="{self.W - self.R}" \
-y2="{self.H - self.B}" stroke="#333"/>
-<line x1="{self.L}" y1="{self.T}" x2="{self.L}" y2="{self.H - self.B}" \
-stroke="#333"/>
-<text x="{(self.L + self.W - self.R) / 2:.0f}" y="{self.H - self.B + 34}" \
-text-anchor="middle" fill="#222">{html.escape(self.xlabel)}</text>
-<text x="16" y="{(self.T + self.H - self.B) / 2:.0f}" text-anchor="middle" \
-fill="#222" transform="rotate(-90 16 {(self.T + self.H - self.B) / 2:.0f})">\
-{html.escape(self.ylabel)}</text>
-{chr(10).join(legend)}
-{note}
+{chr(10).join(p.to_svg() for p in tail)}
 </svg>
 '''
+
+    def to_page(self, title: str = '') -> Page:
+        """The same chart as one page of a PDF (`pdfout.write_pdf`)."""
+        chrome = self._chrome()
+        return Page(self.W, self.H,
+                    list(chrome[:2]) + list(self.prims) + list(chrome[2:]),
+                    title or self.title)
 
 
 # ----------------------------------------------------------------------
@@ -532,7 +595,7 @@ def view_scaling(run: Run, what: str = 'gflops') -> Optional[str]:
         tips = [f'{name} @ {_fmt(r.get("batch") or 0)}: '
                 f'{rate(r, what) or 0:.2f} {RATE_LABEL[what]}' for r in rows]
         c.line(pts, PALETTE[i % len(PALETTE)], name,
-               mark=MARKS[(i // len(PALETTE)) % len(MARKS)], tips=tips)
+               mark=series_style(i)[1], tips=tips)
     return c.render()
 
 
@@ -564,16 +627,11 @@ def view_spread(run: Run) -> Optional[str]:
         lo, mid = r['event_ns_min'], r['event_ns_p50']
         hi = r.get('event_ns_p90') or mid
         color = PALETTE[i % len(PALETTE)]
-        c.body.append(
-            f'<line x1="{x:.1f}" y1="{c.py(lo):.1f}" x2="{x:.1f}" '
-            f'y2="{c.py(hi):.1f}" stroke="{color}" stroke-width="7" '
-            f'opacity="0.45"><title>{html.escape(series_key(r))} @ '
-            f'{_fmt(r.get("batch") or 0)}: min {lo:.0f}, p50 {mid:.0f}, '
-            f'p90 {hi:.0f} ns ({(hi - lo) / mid * 100:.1f} % spread)</title>'
-            f'</line>')
-        c.body.append(
-            f'<line x1="{x - 6:.1f}" y1="{c.py(mid):.1f}" x2="{x + 6:.1f}" '
-            f'y2="{c.py(mid):.1f}" stroke="{color}" stroke-width="2"/>')
+        c.segment(x, c.py(lo), x, c.py(hi), color, width=7, opacity=0.45,
+                  tip=f'{series_key(r)} @ {_fmt(r.get("batch") or 0)}: '
+                      f'min {lo:.0f}, p50 {mid:.0f}, p90 {hi:.0f} ns '
+                      f'({(hi - lo) / mid * 100:.1f} % spread)')
+        c.segment(x - 6, c.py(mid), x + 6, c.py(mid), color, width=2)
         c.tilted_label(x, f'{r["workload"]} @ {_fmt(r.get("batch") or 0)}')
     return c.render()
 
@@ -683,14 +741,10 @@ def _roof_frame(c: Canvas, roof: Roof, xs: Sequence[float],
     c.fit(list(xs) + [roof.ridge / 8, roof.ridge * 8],
           list(ys) + [roof.flops_per_s * 1.4, roof.flops_per_s / 500])
     c.axes()
-    pts = ' '.join(f'{c.px(x):.1f},{c.py(roof.bound(x)):.1f}'
-                   for x in (c.x0, roof.ridge, c.x1))
-    c.body.append(f'<polyline points="{pts}" fill="none" stroke="#222" '
-                  f'stroke-width="2"/>')
-    c.body.append(
-        f'<line x1="{c.px(roof.ridge):.1f}" y1="{c.T}" '
-        f'x2="{c.px(roof.ridge):.1f}" y2="{c.H - c.B}" stroke="#bbb" '
-        f'stroke-dasharray="4 3"/>')
+    c.path([(c.px(x), c.py(roof.bound(x)))
+            for x in (c.x0, roof.ridge, c.x1)], '#222')
+    c.segment(c.px(roof.ridge), c.T, c.px(roof.ridge), c.H - c.B, '#bbb',
+              dashed=True)
     c.text(c.px(roof.ridge) + 4, c.T + 12,
            f'ridge {roof.ridge:.1f} flop/byte', fill='#888')
 
@@ -716,7 +770,7 @@ def view_roofline(run: Run, roof: Roof) -> Optional[str]:
             achieved = rate(r, 'gflops') * 1e9
             frac = achieved / roof.bound(r['intensity'])
             c._mark(c.px(r['intensity']), c.py(achieved), color,
-                    MARKS[(i // len(PALETTE)) % len(MARKS)],
+                    series_style(i)[1],
                     f'{name} @ {_fmt(r.get("batch") or 0)}: '
                     f'{achieved / 1e9:.1f} GFLOP/s, {frac * 100:.0f} % of roof')
         c.legend.append((name, color))
@@ -753,7 +807,7 @@ def view_trajectory(run: Run, roof: Roof) -> Optional[str]:
         tips = [f'{name} @ {_fmt(r.get("batch") or 0)}: '
                 f'{(rate(r, "gflops") or 0):.1f} GFLOP/s' for r in rs]
         c.line(pts, PALETTE[i % len(PALETTE)], name,
-               mark=MARKS[(i // len(PALETTE)) % len(MARKS)], tips=tips)
+               mark=series_style(i)[1], tips=tips)
     return c.render()
 
 
@@ -796,7 +850,7 @@ def view_efficiency(run: Run, roof: Roof) -> Optional[str]:
             tips.append(f'{name} @ {_fmt(r.get("batch") or 0)}: '
                         f'{v or 0:.1f} % of roof')
         c.line(pts, PALETTE[i % len(PALETTE)], name,
-               mark=MARKS[(i // len(PALETTE)) % len(MARKS)], tips=tips)
+               mark=series_style(i)[1], tips=tips)
     return c.render()
 
 
@@ -886,7 +940,7 @@ def view_occupancy(run: Run, profile: Dict[str, List[Dict]]) -> Optional[str]:
     for i, (name, occ, g) in enumerate(sorted(pts)):
         color = PALETTE[i % len(PALETTE)]
         c._mark(c.px(occ), c.py(g), color,
-                MARKS[(i // len(PALETTE)) % len(MARKS)],
+                series_style(i)[1],
                 f'{name}: {g:.1f} GFLOP/s at {occ:.1f} % occupancy')
         c.legend.append((name, color))
     return c.render()
@@ -929,15 +983,10 @@ def view_measured_roofline(run: Run, roof: Roof,
     for i, (name, compulsory, measured, achieved) in enumerate(sorted(arrows)):
         color = PALETTE[i % len(PALETTE)]
         y = c.py(achieved)
-        c.body.append(
-            f'<line x1="{c.px(compulsory):.1f}" y1="{y:.1f}" '
-            f'x2="{c.px(measured):.1f}" y2="{y:.1f}" stroke="{color}" '
-            f'stroke-width="1.2" opacity="0.7"/>')
-        c.body.append(
-            f'<circle cx="{c.px(compulsory):.1f}" cy="{y:.1f}" r="3.6" '
-            f'fill="white" stroke="{color}" stroke-width="1.6">'
-            f'<title>{html.escape(name)}: compulsory {compulsory:.2f} '
-            f'flop/byte</title></circle>')
+        c.segment(c.px(compulsory), y, c.px(measured), y, color,
+                  width=1.2, opacity=0.7)
+        c.ring(c.px(compulsory), y, 3.6, color,
+               f'{name}: compulsory {compulsory:.2f} flop/byte')
         c._mark(c.px(measured), y, color, 'circle',
                 f'{name}: measured {measured:.2f} flop/byte, '
                 f'{achieved / 1e9:.1f} GFLOP/s '
@@ -976,6 +1025,9 @@ def index_html(charts: Sequence[Tuple[str, str, str]], title: str) -> str:
 
 #: The question each view answers, shown above it on the index page.  Kept
 #: here rather than in the functions so that the page reads as one document.
+#: One PDF page per view that had data, filled by `build_charts`.
+PAGES: List[Page] = []
+
 QUESTIONS = {
     'scaling': 'Where does the rate stop rising with the launch size? A ratio '
                'taken from a curve that is still climbing is a ratio at an '
@@ -1003,12 +1055,19 @@ QUESTIONS = {
 def build_charts(runs: Sequence[Run], roof: Optional[Roof],
                  profile: Optional[Dict[str, List[Dict]]],
                  batch: Optional[int]) -> Tuple[List[Tuple[str, str, str]], List[str]]:
+    # The views return SVG, which is what the index page wants; the PDF
+    # wants the canvas they drew on.  `Canvas.render` records the last one
+    # per view (`_LAST_PAGE`) rather than every view changing its return
+    # type, which would touch ten functions to serve one output.
     charts: List[Tuple[str, str, str]] = []
     skipped: List[str] = []
+    PAGES.clear()
 
     def add(name: str, svg: Optional[str], why: str = '') -> None:
         if svg:
             charts.append((name, QUESTIONS.get(name, ''), svg))
+            if _LAST_CANVAS is not None:
+                PAGES.append(_LAST_CANVAS.to_page(name))
         else:
             skipped.append(f'{name}: {why or "no data for it in this run"}')
 
@@ -1093,6 +1152,9 @@ def main() -> int:
                          '(default: the largest both runs have)')
     ap.add_argument('--out', type=Path, default=Path('bench-plots'),
                     help='directory for the SVGs and index.html')
+    ap.add_argument('--pdf', action='store_true',
+                    help='also write every chart as a page of report.pdf, '
+                         'and one PDF per chart beside its SVG')
     args = ap.parse_args()
 
     labels = args.label or []
@@ -1123,16 +1185,22 @@ def main() -> int:
     charts, skipped = build_charts(runs, roof, profile, args.batch)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    for name, _, svg in charts:
-        (args.out / f'{name}.svg').write_text(svg)
     title = (f'{runs[0].label} — {runs[0].device}'
              + (f' against {", ".join(r.label for r in runs[1:])}'
                 if len(runs) > 1 else ''))
+    for name, _, svg in charts:
+        (args.out / f'{name}.svg').write_text(svg)
+    if args.pdf and PAGES:
+        write_pdf(PAGES, args.out / 'report.pdf', title)
+        for page in PAGES:
+            write_pdf([page], args.out / f'{page.title}.pdf', page.title)
     (args.out / 'index.html').write_text(index_html(charts, title))
 
     for name, _, _ in charts:
         print(f'written: {args.out / (name + ".svg")}')
     print(f'written: {args.out / "index.html"}')
+    if args.pdf and PAGES:
+        print(f'written: {args.out / "report.pdf"} ({len(PAGES)} pages)')
     for note in skipped:
         print(f'skipped {note}')
     return 0
