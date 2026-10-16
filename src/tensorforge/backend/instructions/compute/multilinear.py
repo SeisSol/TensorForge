@@ -1771,13 +1771,30 @@ class MultilinearInstruction(ComputeInstruction):
             # At lead width `w` a slot is `threads * w` elements, and that is
             # the unit every lead and contraction index below divides by.  At
             # width one the span is the thread count.  A packed operand whose
-            # lead or contraction does not start on a whole vector (or a lead
-            # that does not start on a slot) goes to the nest, which peels.
+            # lead or contraction does not start on a whole vector, or a lead
+            # that does not start on a slot, goes to the nest, which peels.
             width = self._lead_width
             span = self._num_threads * width
             ks00 = self._ks[0][0] if len(self._ks) > 0 else 0
             if width > 1 and (self._ns[0][0] % span or ks00 % width
                               or ks00 >= span):
+                return False
+            # How many slots the window *touches*, against how many `M`
+            # counts.  `M` is `ceil(extent / span)` and `unwindI` puts the
+            # window at slot `start // span`, so a start inside a slot is
+            # rounded away twice: a 32-row window at row 9 over 32 lanes
+            # touches two slots and is emitted as one, with its first nine
+            # rows read from before the buffer and its last nine never
+            # computed -- which the destination then stored from registers
+            # nothing had assigned.  A window that *fits* inside one slot
+            # is not affected and stays here, which is why this counts
+            # rather than asking whether the start is on a slot: the lane
+            # bounds clip such a window and always did.  At width above one
+            # the condition above is the stronger one and this adds
+            # nothing.
+            lo, hi = self._ns[0]
+            if hi > lo and ((hi - 1) // span - lo // span + 1
+                            != -(-(hi - lo) // span)):
                 return False
             M *= -(-(self._ns[0][1] - self._ns[0][0]) // span)
             Mx = (self._ns[0][1] - self._ns[0][0])

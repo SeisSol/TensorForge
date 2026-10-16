@@ -2008,8 +2008,16 @@ class Symbol:
                      builder.op('shr', INDEX, int(word), row, hint='bit'),
                      1, hint='bit')
     held = builder.op('ne', BOOL, bit, 0, hint='g')
+    # `lower[0]` is added back because the caller's `term` subtracts it from
+    # every axis, and this axis is a *count*: the slot of row `r` is
+    # `off_c + popcount(..)` outright, with nothing of the view's lower
+    # corner in it -- that corner is already inside `origin`, which is where
+    # the row came from.  `_uniform_packed_index` keeps it out of the
+    # address instead and lets the subtraction stand, which is the same
+    # arithmetic from the other side; here there is no term to keep it out
+    # of.
     lead_index = LeadIndex(0, block, stride,
-                           offset=int(packing.offsets[column]),
+                           offset=int(packing.offsets[column]) + lower[0],
                            vaddr=rank, valid=valid, pad=False,
                            first=int(first or 0), present=held)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
