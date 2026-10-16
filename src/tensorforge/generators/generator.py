@@ -11,7 +11,7 @@ from tensorforge.common.context import Context
 from tensorforge.common.metrics import BuildMetrics
 from tensorforge.common.matrix.packing import (FIT_LEVELS, fit_kinds,
                                                pack as pack_operand)
-from tensorforge.common.basic_types import Addressing, FlagMode, GeneralLexicon, Residence
+from tensorforge.common.basic_types import Addressing, Datatype, FlagMode, GeneralLexicon, Residence
 from tensorforge.common.helper import get_extra_offset_name
 from tensorforge.generators.kernel_params import KernelParam
 from tensorforge.backend.data_types import ShrMemObject
@@ -1218,10 +1218,12 @@ class Generator:
     Whether the images still fit the block, against the same limit the
     prologue checked them against when they were smaller.
     """
+    room = self._param_room()
+
     def walk(instrs):
       for instr in instrs:
         if hasattr(instr, 'settle_storage'):
-          instr.settle_storage(self._pack_level)
+          instr.settle_storage(self._pack_level, room)
         for region in instr.regions():
           walk(region)
     walk(self._section.stream)
@@ -1821,9 +1823,10 @@ class Generator:
     # Ahead of the signature that names them, and ahead of the launcher that
     # builds one: both sit in this translation unit, and the kernel comes
     # first in it.
-    for definition in self.param_table_types():
+    definitions = self.param_table_types() + self.packing_table_definitions()
+    for definition in definitions:
       writer(definition)
-    if self._param_tables:
+    if definitions:
       writer.new_line()
     with self._generate_kernel_proto(writer):
       # Integer constants carry the suffixes of `base.h`, which live in
@@ -2247,6 +2250,33 @@ class Generator:
                          for d, t in enumerate(target or ())):
           rolled.add(id(tensor))
     return seen - rolled
+
+  def _param_room(self):
+    """What a packing's column table may still take of the kernel's
+    arguments (`Options.pack_tables`), and which tables have taken some.
+
+    The same space `_settle_residence` budgets an operand passed by value
+    against, and the same allowance for the pointers and sizes that are not
+    settled yet -- but asked here, because a table is granted while the
+    storage is settled and the residence was settled before that.  Narrow
+    on purpose: 4 kB on sm_86 and gfx942, 2 kB on PVC, which three tables
+    of a 96-column operator would be over on their own.
+
+    A table that does not fit is not an error and does not change the form:
+    it goes into the generated file at namespace scope instead
+    (`packing_table_definitions`), where it costs no argument space and no
+    shared memory.  `given` maps a table's name onto where it went, which
+    is what keeps a second reader of the same operand from being charged
+    for the table the first one was granted.
+    """
+    scope = list(self._scopes.get_global_scope().values())
+    hw = self._context.target.hw
+    spent = sum(int(s.obj.storage_volume())
+                * (s.obj.datatype or self._context.fp_type).size()
+                for s in scope if passed_by_value(s))
+    return {'left': max(hw.max_argument_size - 16 * len(scope) - 256 - spent,
+                        0),
+            'given': {}}
 
   def _check_arguments(self, params):
     """Refuse operands passed by value where the kernel cannot take them."""
@@ -3270,6 +3300,36 @@ class Generator:
     """The by-value types the signature names, for whoever writes the file."""
     return [table.struct_definition() for table in self._param_tables]
 
+  def _packing_tables(self, symbol_list):
+    """`(name, tensor)` for every packing table of this kernel, once each.
+
+    Over every symbol and not only the ones that become parameters: a
+    stand-in has none -- its members are a table of pointers -- and the
+    numbers are the stand-in's, since its members share one packing.  The
+    name is what deduplicates, because that is what the reads spell.
+    """
+    seen = set()
+    for symbol in symbol_list:
+      name = getattr(symbol.obj, 'packing_table', None)
+      if name is None or name in seen:
+        continue
+      seen.add(name)
+      yield name, symbol.obj
+
+  def packing_table_definitions(self) -> List[str]:
+    """The column tables that did not fit the kernel's arguments, as
+    namespace-scope arrays, for whoever writes the file.
+
+    Beside `param_table_types` and for the same reason: the kernel names
+    them and the file has to have them first.
+    """
+    lexic = self._context.target.lexic
+    return [lexic.module_constant(str(Datatype.I32), name,
+                                  obj.packing.columns_table())
+            for name, obj in self._packing_tables(
+                self._scopes.get_global_scope().values())
+            if not getattr(obj, 'packing_table_param', True)]
+
   def _write_kernel_meta_data(self, writer):
     writer(f'// generated with TensorForge. Version: {get_version()}')
     # What was asked for, so that a file found on its own says which of several
@@ -3418,6 +3478,17 @@ class Generator:
       if symbol.obj.addressing not in (Addressing.SCALAR, Addressing.NONE):
         params.append(KernelParam.size(get_extra_offset_name(symbol)))
     self._check_arguments(params)
+
+    # The per-column numbers of a packing read at a column the kernel
+    # computes (`Options.pack_tables`).  Not tied to the operand's own
+    # parameter: a stand-in has none -- its members are a table of pointers
+    # and it is skipped above -- and the numbers are the stand-in's, since
+    # its members share one packing.  So the scan is over every symbol and
+    # the name is what deduplicates.
+    for name, obj in self._packing_tables(symbol_list):
+      if getattr(obj, 'packing_table_param', True):
+        params.append(KernelParam.numbers(
+            name, Datatype.I32, obj.packing.columns_table()))
 
     for i, section in enumerate(self._sections):
       params.append(KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}'))

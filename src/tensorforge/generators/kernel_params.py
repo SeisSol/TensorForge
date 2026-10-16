@@ -137,6 +137,26 @@ class KernelParam:
                           values=getattr(symbol, 'embedded', None))
 
     @classmethod
+    def numbers(cls, name: str, datatype, values) -> 'ValueParam':
+        """Numbers the generator puts in param space itself.
+
+        A packing's column table is the case: the kernel reads it at a column
+        it computes, so the numbers cannot be immediates, and they are the
+        same for every lane and every launch, so they want the space kernel
+        arguments already live in -- `__grid_constant__` on CUDA, the kernarg
+        segment on AMD, where a uniform index into one is a scalar load.  Not
+        `__constant__`: that is a separate allocation the launcher would have
+        to fill, and a bank the kernel then shares with nothing.
+
+        The interface does not learn about it.  The launcher declares the
+        array as a local and hands it over, so a caller written against the
+        kernel before the table existed calls it unchanged.
+        """
+        return ValueParam(name, datatype, MemSpace.PARAM, readonly=True,
+                          count=len(values), values=tuple(values),
+                          interface=False)
+
+    @classmethod
     def host_only(cls, symbol, datatype) -> 'HostOnlyParam':
         """The pointer a caller passes for an operand the kernel has as literals."""
         return HostOnlyParam(symbol.name, datatype, MemSpace.GLOBAL,
@@ -203,6 +223,11 @@ class ValueParam(KernelParam):
     #: description (`argument_constants`): the launcher passes those, and the
     #: caller's pointer -- the interface does not change -- is not read.
     values: Optional[tuple] = None
+    #: Whether a caller passes anything for this.  False where the numbers are
+    #: TensorForge's own rather than an operand's -- a packing's column table
+    #: -- which no interface mentions and no caller could fill.  The kernel
+    #: parameter stays, because param space is the point.
+    interface: bool = True
 
     def type_name(self) -> str:
         return f'tensorforge::ValueArray<{self.datatype}, {self.count}>'
@@ -211,9 +236,11 @@ class ValueParam(KernelParam):
         return self.count * self.datatype.size()
 
     def declaration(self, lexic, with_default: bool = False,
-                    host: bool = False) -> str:
+                    host: bool = False) -> Optional[str]:
         tail = self.default if with_default else ''
         if host:
+            if not self.interface:
+                return None
             return f'const {self.datatype} *{self.name}{tail}'
         storage = lexic.storage_class(MemSpace.PARAM)
         storage = f'{storage} ' if storage else ''
@@ -221,14 +248,40 @@ class ValueParam(KernelParam):
 
     def binding(self, lexic) -> Optional[str]:
         if self.values is not None:
-            numbers = ', '.join(self.datatype.literal(v) for v in self.values)
+            numbers = ', '.join(self._spell(v) for v in self.values)
+            # `(void)name` only where there is a name to be unused: a caller
+            # passes nothing for a table the generator invented.
+            unused = f' (void){self.name};' if self.interface else ''
             return (f'static const {self.type_name()} {self.name}Arg'
-                    f'{{{{{numbers}}}}}; (void){self.name};')
+                    f'{{{{{numbers}}}}};{unused}')
         return (f'const auto {self.name}Arg = '
                 f'{self.type_name()}::from({self.name});')
 
-    def argument(self, lexic=None) -> str:
-        return self.name if lexic is None else f'{self.name}Arg'
+    def _spell(self, value) -> str:
+        """One number, as the *launcher* spells it.
+
+        Not `Datatype.literal`, for integers: its suffixes are the
+        generator's own (`base.h`), they live in `tensorforge::literals`,
+        and the launcher is outside the namespace the kernel body opens
+        with a using-directive.  Inside a braced initializer the element
+        type is named by the type being initialized, so the suffix says
+        nothing the declaration does not -- which is why dropping it here
+        is a spelling and not a conversion.
+
+        A floating-point literal keeps its suffix: there `f` is the
+        difference between a `float` and a `double` narrowed to one, and a
+        narrowing in a braced initializer is an error rather than a
+        rounding.
+        """
+        if self.datatype in (Datatype.I8, Datatype.I16, Datatype.I32,
+                             Datatype.I64):
+            return str(int(value))
+        return self.datatype.literal(value)
+
+    def argument(self, lexic=None) -> Optional[str]:
+        if lexic is None:
+            return self.name if self.interface else None
+        return f'{self.name}Arg'
 
 
 @dataclass(frozen=True)

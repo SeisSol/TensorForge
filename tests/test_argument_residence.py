@@ -27,6 +27,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.spp import ListSPP
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import GemmDescr
+from tensorforge.generators.kernel_params import KernelParam
 from tensorforge.generators.generator import Generator
 from tensorforge.reference import kernel_eval
 
@@ -313,3 +314,63 @@ class TestEmbedded:
         rows = {row['alias']: row for row in meta(generator)['operands']}
         assert rows['K'].get('embedded') is True
         assert 'embedded' not in rows['X']
+
+
+class TestNumbersTheGeneratorPutsInParamSpace:
+    """`KernelParam.numbers`: a packing's column table (`pack_tables`).
+
+    The same space as `Residence.ARGUMENT` and the same struct, with one
+    difference that is the whole point of a separate constructor -- nobody
+    passes it.  The numbers are the generator's, so the interface neither
+    gains a parameter nor could fill one, and the launcher declares the
+    array itself.
+    """
+
+    PARAM = KernelParam.numbers('tab', Datatype.I32, (3, 0, 14))
+
+    def lexic(self, backend, arch):
+        return Context(arch=arch, backend=backend, fp_type=Datatype.F32,
+                       options=Options()).target.lexic
+
+    def test_cuda_says_where_it_lives(self):
+        lexic = self.lexic('cuda', 'sm_120')
+        assert (self.PARAM.declaration(lexic) ==
+                '__grid_constant__ const tensorforge::ValueArray<int32_t, 3> '
+                'tab')
+
+    @pytest.mark.parametrize('backend,arch',
+                             [('hip', 'gfx942'), ('hip', 'gfx1150'),
+                              ('acpp', 'pvc'), ('oneapi', 'pvc'),
+                              ('esimd', 'pvc')])
+    def test_the_others_need_no_annotation(self, backend, arch):
+        """HIP kernel arguments are already in the constant address space,
+        and a SYCL kernel's are captured into the payload by value."""
+        assert (self.PARAM.declaration(self.lexic(backend, arch)) ==
+                'const tensorforge::ValueArray<int32_t, 3> tab')
+
+    @pytest.mark.parametrize('backend,arch',
+                             [('cuda', 'sm_120'), ('hip', 'gfx942'),
+                              ('acpp', 'pvc'), ('esimd', 'pvc')])
+    def test_no_caller_passes_it(self, backend, arch):
+        lexic = self.lexic(backend, arch)
+        assert self.PARAM.declaration(lexic, host=True) is None
+        assert self.PARAM.argument() is None
+        assert self.PARAM.argument(lexic) == 'tabArg'
+
+    def test_the_launcher_declares_it_without_the_suffixes(self):
+        """The suffixes of `base.h` live in `tensorforge::literals`, which
+        the kernel body opens with a using-directive and the launcher does
+        not.  In a braced initializer the element type is named by the type
+        being initialized, so there is nothing for them to say."""
+        binding = self.PARAM.binding(self.lexic('cuda', 'sm_120'))
+        assert binding == ('static const tensorforge::ValueArray<int32_t, 3> '
+                           'tabArg{{3, 0, 14}};')
+        assert '_i32' not in binding
+
+    def test_a_float_keeps_its_suffix(self):
+        """There `f` is the difference between a `float` and a `double`
+        narrowed to one, and a narrowing in a braced initializer is an
+        error."""
+        param = KernelParam.numbers('t', Datatype.F32, (0.1,))
+        assert '0.1f' in param.binding(
+            self.lexic('cuda', 'sm_120'))

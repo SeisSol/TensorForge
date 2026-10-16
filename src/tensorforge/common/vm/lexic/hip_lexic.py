@@ -18,6 +18,13 @@ class HipLexic(CudaLexic):
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
 
+  def module_constant(self, elem: str, name: str, values) -> str:
+    # A uniform index into a module constant is an `s_load` out of the
+    # scalar cache, which is the same read the kernarg segment gives.
+    numbers = ', '.join(str(int(v)) for v in values)
+    return (f'__device__ const {elem} {name}[{len(values)}] = '
+            f'{{{numbers}}};')
+
   def storage_class(self, space):
     # Nothing, and not by omission: HIP kernel arguments already live in the
     # constant address space, and a uniform index into one is a scalar load.

@@ -176,6 +176,58 @@ class Packing:
             return -1
         return self.offsets[column] + (word & ((1 << row) - 1)).bit_count()
 
+    @property
+    def needs_table(self) -> bool:
+        """Whether addressing this form needs its per-column numbers at run
+        time rather than folded into the instruction.
+
+        False where the slot is affine in the column -- `uniform` -- because
+        then `span * c` is arithmetic and no number has to be looked up.
+        True otherwise, and then a column the kernel computes is only
+        addressable with the table `columns_table` lays out.
+        """
+        return not self.uniform
+
+    @property
+    def table_stride(self) -> int:
+        """How many numbers a column contributes to `columns_table`."""
+        return 2 if self.kind == 'bits' else 3
+
+    def columns_table(self) -> Tuple[int, ...]:
+        """The per-column numbers a computed column needs, column by column.
+
+        For a run: `(start, offset, stop)` -- the slot is `offset + r -
+        start` and the lane is in the run where `start <= r < stop`.  For a
+        bitset: `(offset, word)` -- the slot is `offset + popcount(word &
+        ((1 << r) - 1))` and the predicate is the bit itself, so the run
+        bounds say nothing the word does not.
+
+        Interleaved rather than separate arrays, so that a column's numbers
+        are one contiguous run: the reader wants them together, and they are
+        the same on every lane, which is one broadcast from the space kernel
+        arguments live in.
+
+        `stop` and not `length`, because that is what the predicate compares
+        against; the reader would otherwise add the two back together on
+        every read.
+        """
+        out = []
+        for c in range(self.columns):
+            if self.kind == 'bits':
+                # The word is a bit pattern and the table carries `int32_t`,
+                # so a column holding row 31 is a number no `int32_t` has.
+                # Reinterpreted rather than widened: every operation the
+                # read performs on it -- the mask, the population count, the
+                # shift of its own bit down -- reads bits and not a value,
+                # and the type is what carries them.
+                word = self.words[c]
+                out.extend((self.offsets[c],
+                            word - (1 << 32) if word >= (1 << 31) else word))
+            else:
+                out.extend((self.starts[c], self.offsets[c],
+                            self.starts[c] + self.lengths[c]))
+        return tuple(out)
+
     def order(self) -> Tuple[int, ...]:
         """`Tensor.storage_order` for this packing: the box cell each slot
         holds, in F-order over ``(rows, columns)``."""

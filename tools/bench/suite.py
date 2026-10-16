@@ -219,6 +219,18 @@ CONFIGS: Dict[str, Config] = {
     # whether preparing replaces staging, this one whether preparing is
     # worth having at all -- which is what a default would be deciding.
     'prepare-only': Config('prepare-only', Options(prepare_operands=True)),
+    # Where a packing's column table lives when a rolled reduction needs one
+    # (`Options.pack_tables`).  The two homes are not obviously ranked: the
+    # argument space is a constant bank read with `LDC`, free and broadcast,
+    # but it is 4 kB on sm_86 and 2 kB on PVC; a namespace-scope array is
+    # read with `LDG` through L1, bounded by nothing and uniform, and the
+    # read is hoisted out of everything but the reduction loop.  `auto`
+    # takes the first and falls back to the second, which is only the right
+    # order if the first is actually cheaper.
+    'pack-param': Config('pack-param', Options(pack_operands='runs',
+                                               pack_tables='param')),
+    'pack-module': Config('pack-module', Options(pack_operands='runs',
+                                                 pack_tables='module')),
     # A second `baseline` under another name, and the only row here that is
     # not a question about the generator.  It builds the same kernel on
     # every target, so the gap between the two is the machine moving under

@@ -112,6 +112,23 @@ class Tensor:
         #: is a lane the access is held off (`Symbol._packed_index`).  Set
         #: with the order, by `MultilinearInstruction._offer_packing`.
         self.packing = None
+        #: The name of the kernel parameter holding the packing's per-column
+        #: numbers, or `None` where no read needs them.
+        #:
+        #: A read at a column the *kernel computes* -- a rolled reduction --
+        #: cannot have those numbers as immediates, and a non-uniform packing
+        #: has one set per column.  They go into param space rather than into
+        #: the code: `KernelParam.numbers` says why that is the one space
+        #: worth putting them in.  Set beside `packing`, by
+        #: `MultilinearInstruction._offer_packing`, and read by
+        #: `Symbol._tabled_packed_index`.
+        self.packing_table = None
+        #: Whether that table rides in the kernel's arguments.  False where
+        #: it did not fit them and is a namespace-scope array in the
+        #: generated file instead (`Lexic.module_constant`) -- the same
+        #: numbers, read the same way, out of the module rather than the
+        #: argument space.
+        self.packing_table_param = True
         self.direction: Union[DataFlowDirection, None] = None
         self.data = data
         #: `nonzero_pattern`'s answer once derived; the derivation walks
@@ -489,6 +506,8 @@ class Tensor:
         twin.simt_interleave = self.simt_interleave
         twin.slot_major = self.slot_major
         twin.packing = self.packing
+        twin.packing_table = self.packing_table
+        twin.packing_table_param = self.packing_table_param
         return twin
 
     def get_actual_shape(self):

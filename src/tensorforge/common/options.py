@@ -835,15 +835,19 @@ declare('pack_operands',
             'lanes it comes out 25 % *larger* than the box, because a span '
             'of 25 rows rounds back up to 32.  So the predicate is the '
             'point and not an accident of the form.\n'
-            'The per-column numbers never become data.  A packed slot is '
-            "the column's start and offset applied to the row, and the "
+            'The per-column numbers are usually not data.  A packed slot '
+            "is the column's start and offset applied to the row, and the "
             'column of an unrolled reduction is known when the read is '
-            'built -- so they are immediates, and there is no table to put '
-            'in a constant cache or to fetch.  Where the column is a loop '
-            'variable the pair would have to be read from somewhere, and '
-            'the offer declines instead (`_reads_packable`); SeisSol does '
-            'not reach that, since its reductions are far short of '
-            '`k_unroll_max`.\n'
+            'built -- so they are immediates, and nothing is fetched.  '
+            'Where the column is a loop variable they have to be read from '
+            'somewhere, and `pack_tables` is where: a kernel parameter, '
+            'which is the one place a uniform index is already a broadcast. '
+            'Without it such a reader holds every reader of the operand to '
+            'a form that needs no numbers, which in practice is `rows` -- '
+            "worth 20 points of SeisSol's order-8 operand storage (-17.1 % "
+            'against the box, -37.3 % with the table) and 11 at order 7.  '
+            'Below order 7 nothing reaches it: the reductions are short of '
+            '`k_unroll_max` and roll only when asked.\n'
             'Offered where `A` is read by coordinate: the generic nest and '
             "AMD's DPP chain.  The matrix paths are out, because they read "
             'fragments of an order they prepared for themselves and a '
@@ -861,6 +865,45 @@ declare('pack_operands',
             '33 % larger than the box at 32 lanes) -- a named form here '
             'takes the operand and `auto`/`fit` leave the measured win in '
             'place, packing only what it declines.')
+
+declare('pack_tables',
+        default='auto',
+        parse=parse_str,
+        env='TF_PACK_TABLES',
+        doc='Let a packed operand be read at a column the kernel computes, '
+            'by putting the per-column numbers in a kernel parameter.\n'
+            'A rolled reduction hands its column over as a loop variable, '
+            "so a packing's start, offset and length cannot be immediates "
+            'in the address.  A uniform packing needs none of them -- its '
+            'slot is affine in the column -- and anything else needs them '
+            'read at run time or not at all; without this the offer falls '
+            'back to the next looser form, which for a rolled reader has '
+            'always meant `rows`.\n'
+            'Param space, not a constant bank: one copy for the whole '
+            'grid, read-only, broadcast to the lanes, and already '
+            "allocated.  `__grid_constant__` on CUDA, the kernarg segment "
+            'on AMD, where a column every lane agrees on makes it a scalar '
+            'load.  Not `__constant__`, which is a second allocation the '
+            'launcher would have to fill, and not a function-local array, '
+            'whose dynamic index lands in per-thread memory '
+            '(`TableForm`).\n'
+            'The interface does not learn about it: the launcher declares '
+            'the array as a local and passes it, so a caller written '
+            'against the kernel before the table existed calls it '
+            'unchanged.\n'
+            'That space is small where it is smallest -- 4 kB on sm_86 and '
+            'gfx942, 2 kB on PVC -- and three tables of a 96-column '
+            'operator come to 3.4 kB, so `auto` puts a table that no '
+            'longer fits at namespace scope in the generated file instead '
+            '(`module`), which costs no argument space, no shared memory '
+            'and no interface.  On sm_86 that is exactly the order-8 '
+            "derivative's third operator: without the fallback it drops "
+            'back to `rows` and the config comes out at -35.0 % against '
+            'the box instead of -37.3 %.  `param` and `module` name one '
+            'home for every table; `off` goes back to the looser form.\n'
+            "SeisSol's order-8 derivative is what reaches this -- five "
+            'readers of one operand, of which the later ones roll, so one '
+            'rolled reader held seven operands at `rows` for all of them.')
 
 declare('launch_control',
         default=False,

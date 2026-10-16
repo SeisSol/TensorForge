@@ -81,6 +81,25 @@ class Lexic(ABC):
     """
     return ''
 
+  def module_constant(self, elem: str, name: str, values) -> str:
+    """Numbers the generator puts in the translation unit, at namespace
+    scope, for the kernel to index at run time.
+
+    The overflow route of `Options.pack_tables`: the kernel's arguments are
+    4 kB on sm_86 and gfx942 and 2 kB on PVC, and a packing's column table
+    that does not fit them has to live somewhere that is not the argument
+    space.  Here, which costs no argument space, no shared memory and no
+    interface -- nobody fills it, because the numbers are in the file.
+
+    `constexpr` is the portable spelling and the one SYCL needs: a device
+    kernel may read a namespace-scope object only where it is constant, and
+    a lambda does not capture one.  CUDA and HIP say `__device__ const`
+    instead, which is unconditional where `constexpr` wants a flag to have
+    its address taken.
+    """
+    numbers = ', '.join(str(int(v)) for v in values)
+    return f'constexpr {elem} {name}[{len(values)}] = {{{numbers}}};'
+
   def pointer_type(self, elem: str, space=None, readonly: bool = False,
                    restrict: bool = False, const: bool = False,
                    depth: int = 1) -> str:

@@ -966,7 +966,7 @@ class MultilinearInstruction(ComputeInstruction):
             n *= mx - mi
         return n
 
-    def settle_storage(self, pack_level: int = 0) -> None:
+    def settle_storage(self, pack_level: int = 0, param_room=None) -> None:
         """Offer `A` its storage order now, before anything is sized from it.
 
         The offer is made where the operation is emitted, and that is too late
@@ -982,6 +982,10 @@ class MultilinearInstruction(ComputeInstruction):
         """
         if not self._ops or len(self._ns) == 0:
             return
+        #: What a column table may still take of the kernel's arguments,
+        #: shared with every other offer of this walk
+        #: (`Generator._param_room`).
+        self._param_room = param_room
         plan = self._plan()
         # Three offers, one operand, and which goes first is a policy --
         # stated here rather than falling out of the order the code happens
@@ -1199,7 +1203,9 @@ class MultilinearInstruction(ComputeInstruction):
         not.  That is a restriction on the *form* and not on the read, and
         `_offer_packing` applies it there: a rolled reduction may have a
         uniform packing, whose slot is affine in the column and needs no
-        per-column number at all, and may not have any other.
+        per-column number at all; any other form needs the numbers read at
+        run time, which is `Options.pack_tables`, and without that it may
+        not have one.
         """
         if (_explicit_simd(self._context) or not self._ops
                 or self._ops[0].symbol is not sym):
@@ -1368,6 +1374,18 @@ class MultilinearInstruction(ComputeInstruction):
             for user in (self,) + tuple(
                 u for u in sym.get_user_list()
                 if isinstance(u, MultilinearInstruction) and u is not self))
+        # With `pack_tables` the per-column numbers are read at run time
+        # instead, so a rolled reader no longer holds every reader to the
+        # forms that need none (`Symbol._tabled_packed_index`).  The value
+        # names the home: the kernel's arguments, the generated file, or
+        # `auto` -- the arguments while they have room.
+        home = str(self._context.get_user_options().pack_tables)
+        if home not in ('off', 'param', 'module', 'auto'):
+            raise GenerationError(
+                f'pack_tables={home!r}: a column table lives in the '
+                f'arguments (param), in the generated file (module), or '
+                f'nowhere (off); auto takes the first that has room')
+        tables = home != 'off'
         # One packing over all the members at once, not one apiece: a
         # stand-in's body addresses whichever member the counter names, so
         # two members packed differently would read one another's slots
@@ -1379,13 +1397,33 @@ class MultilinearInstruction(ComputeInstruction):
                                                             threads)):
                 continue
             chosen = packing_mod.pack_union(members, name, grain)
-            if chosen is not None and rolled and not chosen.uniform:
+            if (chosen is not None and rolled and not chosen.uniform
+                    and not tables):
                 chosen = None
                 continue
             if chosen is not None:
                 break
         if chosen is None:
             return
+        # One table for the operand, named after the symbol the readers
+        # reach it through -- a stand-in's members share a packing, so they
+        # share the numbers that address it.  Only where a reader actually
+        # computes its column: otherwise every number is an immediate and
+        # the parameter would be read by nothing.
+        table = (self._table_name(sym)
+                 if rolled and chosen.needs_table else None)
+        # Where it lives: the arguments while they have room, and the
+        # generated file once they do not.  Not a question about the form --
+        # the numbers are the same either way, and so is the read.
+        #
+        # Claimed before the offer can turn out to be a repeat, because the
+        # room is what the *other* operands are then budgeted against: a
+        # second walk over the stream re-offers some operands and not
+        # others (`Generator._settle_storage` retries at a tighter level),
+        # and one that keeps the table it was granted still holds the
+        # argument space it was granted with.
+        in_param = table is not None and self._claim_table(chosen, table,
+                                                           home)
         if all(member.packing == chosen for member in members):
             return
         order = chosen.order()
@@ -1397,8 +1435,54 @@ class MultilinearInstruction(ComputeInstruction):
             member.packing = None
             member.storage_order = order
             member.packing = chosen
+            member.packing_table = table
+            member.packing_table_param = in_param
         if variant:
             a_obj.packing = chosen
+            a_obj.packing_table = table
+            a_obj.packing_table_param = in_param
+
+    def _table_name(self, sym) -> str:
+        return f'{sym.name}_pack'
+
+    def _claim_table(self, packing, name: str, home: str = 'auto') -> bool:
+        """Take the table's bytes out of what the kernel's arguments have
+        left, and say whether they had them.
+
+        The argument space is small where it is smallest -- 4 kB on sm_86
+        and gfx942, 2 kB on PVC -- and three tables of a 96-column operator
+        come to 3.4 kB between them, so this is a real bound: on sm_86 the
+        order-8 derivative's third operator is exactly the one that does not
+        fit.  What it decides is the table's *home* and not the operand's
+        form; a table turned away from the arguments is a namespace-scope
+        array in the generated file (`Lexic.module_constant`), which the
+        kernel indexes with the same expression.
+
+        Charged once per operand: a second reader is granted the table the
+        first one was granted, not a second copy of it.  Without a room to
+        ask -- an offer made outside `Generator._settle_storage`, which is
+        the only caller that knows what the arguments have left -- the
+        arguments are assumed to have room, which is what they had before
+        there was a bound at all.
+
+        `home` overrides the question: `param` and `module` each name one
+        home for every table and are there to be measured against each
+        other, since which of the two is cheaper is not obvious from the
+        spelling.
+        """
+        if home == 'module':
+            return False
+        room = getattr(self, '_param_room', None)
+        if room is None or home == 'param':
+            return True
+        if name in room['given']:
+            return room['given'][name]
+        need = 4 * len(packing.columns_table())
+        fits = need <= room['left']
+        room['given'][name] = fits
+        if fits:
+            room['left'] -= need
+        return fits
 
     def _offer_order(self, module, a_obj, lead, depth):
         """Let the target store `A` in the order it will read it.

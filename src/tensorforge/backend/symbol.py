@@ -1718,12 +1718,18 @@ class Symbol:
         # uniform packing needs none: every column starts at the same row
         # and is the same length, so the slot is `span * c + r - start` --
         # affine in the column, and the predicate does not mention it at
-        # all.  Anything else does, and says so.
-        if not packing.uniform or computed is not None:
+        # all.  Anything else needs its numbers at run time, which is what
+        # `Tensor.packing_table` is; without one there is nothing to read.
+        #
+        # One computed axis, whichever route: two would be a product of
+        # loop variables, and the column a table is indexed by is a single
+        # number.
+        if computed is not None or not (packing.uniform
+                                        or self.obj.packing_table):
           raise InternalError(
               f'{self.name}: a {packing.kind} packing is read at a column '
-              f'the kernel computes; only a uniform one is addressable '
-              f'there, and axis {d} is {value!r}')
+              f'the kernel computes; that needs a uniform packing or a '
+              f'column table, and axis {d} is {value!r}')
         term = value.build(writer, context) if hasattr(value, 'build') else value
         if shifted - lower[d]:
           term = writer.op('add', INDEX, term, shifted - lower[d], hint='c')
@@ -1738,8 +1744,11 @@ class Symbol:
       raise InternalError(
           f'{self.name}: packed column {column} of {packing.columns}')
     if computed is not None:
-      return self._uniform_packed_index(writer, index, packing, computed,
-                                        column, li, shift, lower)
+      if packing.uniform:
+        return self._uniform_packed_index(writer, index, packing, computed,
+                                          column, li, shift, lower)
+      return self._tabled_packed_index(writer, index, packing, computed,
+                                       column, li, shift, lower)
     start = packing.starts[column]
     length = packing.lengths[column]
     # Lane `l` of this read holds box rows `origin + grain*l ..` -- and the
@@ -1827,6 +1836,126 @@ class Symbol:
                            offset=shift - start,
                            valid=None if tail >= block else tail,
                            pad=False, first=0 if head <= 0 else head)
+    return [lead_index] + [lower[d] for d in range(1, len(index))]
+
+  def _tabled_packed_index(self, writer, index, packing, computed, column,
+                           li, shift, lower):
+    """A packed read whose column the kernel computes and whose packing is
+    not affine in it.
+
+    What a rolled reduction leaves where `_uniform_packed_index` does not
+    apply: the columns disagree, so the slot base and the run bounds are a
+    set of numbers per column, and the one the read wants is picked by a
+    loop variable.  They cannot be immediates for the same reason the
+    address cannot be a constant.
+
+    So they are read from a table (`Packing.columns_table`), by name: this
+    spells `tab[i]` and `Options.pack_tables` decides what `tab` is.  Where
+    the kernel's arguments have room it is one of them
+    (`KernelParam.numbers`) -- one copy for the grid, read-only, indexed by
+    a value every lane agrees on, which is the constant bank on NVIDIA and
+    a scalar load into an SGPR on AMD.  Where they do not, it is a
+    namespace-scope array in the generated file
+    (`Lexic.module_constant`), read the same way out of the module.  Not a
+    *local* array either way, whose index the compiler cannot fold and
+    which therefore lands in per-thread memory.
+
+    Three numbers for a run -- `start`, `offset`, `stop` -- and the address
+    is `offset + r - start`, the same expression the constant-column form
+    folds into the lead index's offset, with two of its terms now values.
+    Two for a bitset -- `offset` and the word -- and the address is the
+    population count the word gives, as `_bitset_index` computes it.
+
+    The predicate is the other half, and the reason the run bounds are in
+    the table at all: with `start` a value the lane bounds cannot be
+    integers, so what held the access off the rows a column does not hold
+    becomes a comparison -- `start <= r < stop`, per lane, which is exactly
+    what `LeadIndex._present` lowers.  A bitset's is the bit, as ever.
+
+    Whole granules again (`Packing.granule`), so a lane's rows are all in
+    the run or all out and the comparison on its first row answers for the
+    rest.
+    """
+    wide = int(li.width)
+    block = li._block
+    base = li.nonlead()
+    origin = wide * block * int(base) + shift - lower[0]
+    if wide > 1 and origin % wide:
+      raise InternalError(
+          f'{self.name}: a read at width {wide} starts at row {origin}, '
+          f"inside a lane's own run of rows")
+    if li._present is not None:
+      raise InternalError(
+          f'{self.name}: a tabled packed read carries the whole predicate '
+          f'and this one arrives with {li._present!r}')
+    if column:
+      computed = writer.op('add', INDEX, computed, int(column), hint='c')
+    table = self.obj.packing_table
+    step = int(packing.table_stride)
+    slot = (computed if step == 1
+            else writer.op('mul', INDEX, computed, step, hint='c'))
+
+    def entry(i: int, hint: str):
+      at = slot if not i else writer.op('add', INDEX, slot, i, hint='c')
+      return writer.rawexpr(f'{table}[{{0}}]', at, type_=INDEX, pure=True,
+                            movable=True, hint=hint)
+
+    # Two rows, and the difference is the whole of what the caller's `term`
+    # does.  `slot_row` is what goes into the address, without the window's
+    # own shift and without the view's lower corner, because `term`
+    # subtracts that corner from this axis and `_uniform_packed_index`
+    # leaves the room for it in exactly the same way.  `row` is the box row
+    # the packing is indexed by, which is what the run bounds and the bit
+    # are about.  They differ by a constant, so this is one add and only
+    # where the window is shifted at all.
+    slot_row = writer.lane_offset(block, li._stride, hint='lane')
+    if wide > 1:
+      slot_row = writer.op('mul', INDEX, slot_row, wide, hint='row')
+    if wide * block * int(base):
+      slot_row = writer.op('add', INDEX, slot_row, wide * block * int(base),
+                           hint='row')
+    delta = int(origin) - wide * block * int(base)
+    row = (slot_row if not delta
+           else writer.op('add', INDEX, slot_row, delta, hint='row'))
+    if packing.kind == 'bits':
+      highest = int(origin) + wide * (block - 1)
+      if not 0 <= int(origin) or highest > 31:
+        raise InternalError(
+            f'{self.name}: a bitset read reaches row {highest}, past the 31 '
+            f'a 32-bit word holds')
+      off, word = entry(0, 'off'), entry(1, 'word')
+      mask = writer.op('sub', INDEX,
+                       writer.op('shl', INDEX, 1, row, hint='bit'), 1,
+                       hint='bit')
+      rank = writer.op('popcount', INDEX,
+                       writer.op('bitand', INDEX, word, mask, hint='bit'),
+                       hint='rank')
+      held = writer.op('ne', BOOL,
+                       writer.op('bitand', INDEX,
+                                 writer.op('shr', INDEX, word, row,
+                                           hint='bit'),
+                                 1, hint='bit'),
+                       0, hint='g')
+      # A count, as in `_bitset_index`: nothing of the lower corner belongs
+      # in it, so the corner the caller subtracts is added back.
+      addr = writer.op('add', INDEX, rank, off, hint='slot')
+      shift_back = lower[0]
+    else:
+      start, off, stop = (entry(0, 'start'), entry(1, 'off'),
+                          entry(2, 'stop'))
+      held = writer.op('and', BOOL,
+                       writer.op('ge', BOOL, row, start, hint='g'),
+                       writer.op('lt', BOOL, row, stop, hint='g'),
+                       hint='g')
+      # `slot_row + off - start`, and the window's shift less the lower
+      # corner is what `offset` and the caller's subtraction add back.
+      addr = writer.op('sub', INDEX,
+                       writer.op('add', INDEX, slot_row, off, hint='slot'),
+                       start, hint='slot')
+      shift_back = shift
+    lead_index = LeadIndex(0, block, li._stride, width=wide, vaddr=addr,
+                           offset=shift_back, valid=li.valid, pad=False,
+                           first=int(li.first or 0), present=held)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
 
   def _bitset_index(self, writer, index, packing, column, block, stride,

@@ -12,6 +12,8 @@ form, then that the forms agree with each other where they should, then
 that the generator offers one and addresses the reads through it.
 """
 
+import re
+
 import numpy as np
 import pytest
 
@@ -320,9 +322,10 @@ def test_a_wide_lead_is_packed_at_its_own_width():
     assert a.tensor.storage_elements() == a.tensor.packing.elements
 
 
-def test_a_rolled_reduction_takes_a_uniform_form_and_only_that():
+def test_a_rolled_reduction_takes_a_uniform_form_without_a_table():
     """The column is a loop variable then, so the slot has to be affine in
-    it: `rows` is, `runs` with unequal columns is not."""
+    it: `rows` is, `runs` with unequal columns is not -- and without
+    `pack_tables` there is nowhere to read the per-column numbers from."""
     rng = np.random.default_rng(53)
     rows, cols = 64, 96
     even = np.zeros((rows, cols))
@@ -345,7 +348,8 @@ def test_a_rolled_reduction_takes_a_uniform_form_and_only_that():
         gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
                         Context(arch="sm_120", backend="cuda",
                                 fp_type=Datatype.F32,
-                                options=Options(pack_operands=kind, k_roll=4)))
+                                options=Options(pack_operands=kind, k_roll=4,
+                                                pack_tables="off")))
         gen.generate()
         return gen, a.tensor
 
@@ -353,9 +357,184 @@ def test_a_rolled_reduction_takes_a_uniform_form_and_only_that():
     assert t.packing is not None and t.packing.uniform
     # the column term is the span, formed inside the loop
     assert f"* {t.packing.lengths[0]}" in gen.get_kernel()
+    assert t.packing_table is None
 
     _, t = built(odd, "runs")
     assert t.packing is None
+
+
+def test_a_table_makes_the_other_forms_reachable_from_a_rolled_reduction():
+    """`pack_tables`: the per-column numbers go into a kernel parameter, so
+    the column a loop hands over picks them instead of folding into the
+    address.  Which is three loads and two comparisons a column, against
+    the looser form the operand would otherwise be stored in."""
+    rng = np.random.default_rng(53)
+    rows, cols = 64, 96
+    odd = np.zeros((rows, cols))
+    for c in range(cols):
+        lo = 3 + (c % 11)
+        odd[lo:lo + 20 + (c % 7), c] = rng.uniform(
+            0.5, 1.5, size=20 + (c % 7))
+
+    def built(kind, tables='auto'):
+        a = SubTensor(Tensor([rows, cols], Addressing.NONE,
+                             BoundingBox([0, 0], [rows, cols]), alias="A",
+                             datatype=Datatype.F32, data=odd.copy()))
+        b = SubTensor(Tensor([cols, 6], Addressing.STRIDED,
+                             BoundingBox([0, 0], [cols, 6]), alias="B",
+                             datatype=Datatype.F32))
+        c = SubTensor(Tensor([rows, 6], Addressing.STRIDED,
+                             BoundingBox([0, 0], [rows, 6]), alias="C",
+                             datatype=Datatype.F32))
+        gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
+                        Context(arch="sm_120", backend="cuda",
+                                fp_type=Datatype.F32,
+                                options=Options(pack_operands=kind, k_roll=4,
+                                                pack_tables=tables)))
+        gen.generate()
+        return gen, a.tensor
+
+    gen, t = built("runs")
+    assert t.packing is not None and t.packing.kind == "runs"
+    assert t.packing_table is not None
+    src = gen.get_kernel()
+    # Three numbers a column, read from the parameter rather than spelled.
+    assert src.count(f"{t.packing_table}[") >= 3
+    # In param space, and nowhere else: `__grid_constant__` on CUDA.
+    assert f"__grid_constant__ const tensorforge::ValueArray<int32_t, " \
+           f"{3 * t.packing.columns}> {t.packing_table}" in src
+    # The caller passes nothing for it.
+    assert t.packing_table not in gen.get_header()
+
+    _, loose = built("fit", "off")
+    assert loose.packing is not None and loose.packing.kind == "rows"
+    _, tight = built("fit")
+    assert tight.packing is not None and tight.packing.kind == "runs"
+    assert tight.storage_volume() < loose.storage_volume()
+
+
+def test_a_table_leaves_room_for_the_views_lower_corner():
+    """`Symbol._address` subtracts the view's lower corner from every axis,
+    and the three packed forms have to leave room for that in three
+    different ways -- which is only visible where the corner is not zero.
+
+    `_packed_index` puts it in the lead index's own offset,
+    `_uniform_packed_index` keeps it out of the computed address and lets
+    the subtraction stand, and a table has to do both: the run bounds are
+    compared against the *box* row, which has the corner in it, while the
+    address must not.  `bits` adds it back instead, because a population
+    count owes the corner nothing.
+
+    Nothing in the corpus reaches this: all 207940 packed reads of the
+    recorded SeisSol kernels at orders 6 and 8 start their box at row zero,
+    where the three agree because there is nothing to disagree about.  So
+    the box is shifted here, and by 9 -- neither zero nor a multiple of the
+    lane count.
+    """
+    rows, cols, lo, hi = 56, 96, 9, 41
+    rng = np.random.default_rng(23)
+    values = np.zeros((rows, cols))
+    for c in range(cols):
+        first = lo + (3 * c) % 7
+        values[first:first + 9 + (5 * c) % 13, c] = rng.uniform(
+            0.5, 1.5, size=9 + (5 * c) % 13)
+    a = SubTensor(Tensor([rows, cols], Addressing.NONE,
+                         BoundingBox([lo, 0], [hi, cols]), alias="A",
+                         datatype=Datatype.F32, data=values))
+    b = SubTensor(Tensor([cols, 5], Addressing.STRIDED,
+                         BoundingBox([0, 0], [cols, 5]), alias="B",
+                         datatype=Datatype.F32))
+    c = SubTensor(Tensor([rows, 5], Addressing.STRIDED,
+                         BoundingBox([lo, 0], [hi, 5]), alias="C",
+                         datatype=Datatype.F32))
+    gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
+                    Context(arch="sm_120", backend="cuda",
+                            fp_type=Datatype.F32,
+                            options=Options(pack_operands="runs", k_roll=4)))
+    gen.generate()
+    t = a.tensor
+    assert t.packing is not None and t.packing_table is not None
+    src = gen.get_kernel()
+    # The box row, which is the lane's tensor row less the corner, and
+    # which is what the run bounds are about.
+    box = re.findall(r'int32_t (v\d+_row) = v\d+_(?:lead|row) \+ -9;', src)
+    assert box, src
+    # The predicate compares *that* row, not the tensor row.
+    guard = [line for line in src.splitlines()
+             if '_g = ' in line and '_start)' in line and '_stop)' in line]
+    assert guard and all(any(name in line for name in box) for line in guard), \
+        guard
+    # And the address subtracts the corner exactly once -- the table's own
+    # offset and start are applied to the tensor row, so the one
+    # subtraction `Symbol._address` makes is the whole of it.
+    slot = [line for line in src.splitlines()
+            if re.search(r'= \(\(v\d+_row \+ v\d+_off\) - v\d+_start\)', line)]
+    assert slot, src
+    assert all(line.count(' 9') == 1 and line.rstrip().endswith('- 9;')
+               for line in slot), slot
+
+
+def test_a_table_too_big_for_the_arguments_goes_into_the_file():
+    """The argument space is 4 kB on sm_86, and `module` is where a table
+    that no longer fits it lives -- the same numbers, read the same way,
+    out of the generated file rather than the arguments."""
+    rng = np.random.default_rng(53)
+    rows, cols = 64, 96
+    odd = np.zeros((rows, cols))
+    for c in range(cols):
+        odd[3 + (c % 11):24 + (c % 7), c] = rng.uniform(
+            0.5, 1.5, size=21 + (c % 7) - (c % 11))
+
+    def built(home):
+        a = SubTensor(Tensor([rows, cols], Addressing.NONE,
+                             BoundingBox([0, 0], [rows, cols]), alias="A",
+                             datatype=Datatype.F32, data=odd.copy()))
+        b = SubTensor(Tensor([cols, 6], Addressing.STRIDED,
+                             BoundingBox([0, 0], [cols, 6]), alias="B",
+                             datatype=Datatype.F32))
+        c = SubTensor(Tensor([rows, 6], Addressing.STRIDED,
+                             BoundingBox([0, 0], [rows, 6]), alias="C",
+                             datatype=Datatype.F32))
+        gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
+                        Context(arch="sm_86", backend="cuda",
+                                fp_type=Datatype.F32,
+                                options=Options(pack_operands="runs", k_roll=4,
+                                                pack_tables=home)))
+        gen.generate()
+        return gen, a.tensor
+
+    gen, t = built("module")
+    assert t.packing is not None and t.packing.kind == "runs"
+    assert t.packing_table is not None and not t.packing_table_param
+    src = gen.get_kernel()
+    assert f'__device__ const int32_t {t.packing_table}[288] = ' in src
+    # Named nowhere in the signature, and read exactly as a parameter is.
+    assert f'{t.packing_table},' not in src and f'{t.packing_table})' not in src
+    assert src.count(f'{t.packing_table}[') >= 3
+    assert t.packing_table not in gen.get_launcher()
+
+    gen, t = built("param")
+    assert t.packing_table_param
+    assert '__device__ const int32_t' not in gen.get_kernel()
+
+
+def test_a_bitset_word_reaches_the_table_as_a_pattern():
+    """A column holding row 31 is a word no `int32_t` holds as a number,
+    and the table carries `int32_t`; every read of it reads bits."""
+    rows, cols = 32, 24
+    values = np.zeros((rows, cols))
+    rng = np.random.default_rng(11)
+    for c in range(cols):
+        for r in range(c % 3, rows, 1 + c % 2):
+            values[r, c] = rng.uniform(0.5, 1.5)
+    packing = pack(_tensor(values), "bits")
+    assert packing is not None and packing.needs_table
+    table = packing.columns_table()
+    assert len(table) == 2 * cols and packing.table_stride == 2
+    assert any(w >= 1 << 31 for w in packing.words)
+    assert all(-(1 << 31) <= n < (1 << 31) for n in table)
+    # The pattern survives the reinterpretation.
+    assert [n & 0xFFFFFFFF for n in table[1::2]] == list(packing.words)
 
 
 def test_a_named_form_takes_the_operand_from_the_fragment_order():
@@ -378,9 +557,14 @@ def test_fit_stops_short_of_the_form_that_costs():
 
 def test_fit_falls_through_to_a_looser_form_where_a_tighter_is_refused():
     """A form can be refused rather than merely unprofitable: a rolled
-    reduction takes none whose slot is not affine in the column.  Offered
-    one form only, `fit` would leave such an operand unpacked -- which is
-    worse than the looser form it skipped."""
+    reduction without `pack_tables` takes none whose slot is not affine in
+    the column.  Offered one form only, `fit` would leave such an operand
+    unpacked -- which is worse than the looser form it skipped.
+
+    Pinned with the table off, because that is what makes this refusal a
+    refusal; with it on the tighter form is reachable and `fit` takes it,
+    which `test_a_table_makes_the_other_forms_reachable_from_a_rolled_reduction`
+    is the other half of."""
     rows, cols = 64, 96
     rng = np.random.default_rng(83)
     values = np.zeros((rows, cols))
@@ -399,7 +583,8 @@ def test_fit_falls_through_to_a_looser_form_where_a_tighter_is_refused():
     gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
                     Context(arch="sm_120", backend="cuda",
                             fp_type=Datatype.F32,
-                            options=Options(pack_operands="fit", k_roll=4)))
+                            options=Options(pack_operands="fit", k_roll=4,
+                                            pack_tables="off")))
     gen.generate()
     # `runs` is refused here and `rows` is not, so `rows` is what it takes
     assert a.tensor.packing is not None
