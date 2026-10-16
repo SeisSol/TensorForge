@@ -172,9 +172,27 @@ int main(int argc, char** argv) {
     if (rep > 0) bw_best = bw_best > bytes / s ? bw_best : bytes / s;
   }
 
+  // What the part *is*, beside what it did: the memory figure is exact
+  // arithmetic on the device's own clock and bus width (double data rate,
+  // bits to bytes), so it is a ceiling and not an estimate.  There is no
+  // matching FLOP/s: cores per unit is not in the properties and a table
+  // of it per architecture would be a guess for anything newer than the
+  // table.
+  // Through the attribute API and not the properties struct: CUDA 13
+  // removed `clockRate` and `memoryClockRate` from `cudaDeviceProp`, and
+  // the attributes are what both runtimes still answer.
+  int mem_khz = 0, bus_bits = 0, core_khz = 0;
+  %(prefix)sDeviceGetAttribute(&mem_khz, %(attr)sMemoryClockRate, device);
+  %(prefix)sDeviceGetAttribute(&bus_bits, %(buswidth)s, device);
+  %(prefix)sDeviceGetAttribute(&core_khz, %(attr)sClockRate, device);
+  const double peak_bytes =
+      2.0 * (double)mem_khz * 1.0e3 * ((double)bus_bits / 8.0);
   std::printf("{\"flops_per_s\": %%.6e, \"bytes_per_s\": %%.6e, "
-              "\"device\": \"%%s\", \"cus\": %%d}\n",
-              fma_best, bw_best, prop.name, prop.multiProcessorCount);
+              "\"device\": \"%%s\", \"cus\": %%d, "
+              "\"memory_bytes\": %%zu, \"peak_bytes_per_s\": %%.6e, "
+              "\"clock_khz\": %%d}\n",
+              fma_best, bw_best, prop.name, prop.multiProcessorCount,
+              (size_t)prop.totalGlobalMem, peak_bytes, core_khz);
   return 0;
 }
 '''
@@ -259,10 +277,18 @@ int main(int argc, char** argv) {
     if (rep > 0) bw_best = bw_best > bytes / s ? bw_best : bytes / s;
   }
 
+  // SYCL exposes the memory size and the clock but not the bus width, so
+  // there is no bus ceiling to print here -- `peak_bytes_per_s` is left
+  // out rather than guessed, and the table says "unknown".
+  const auto dev = q.get_device();
   std::printf("{\"flops_per_s\": %%.6e, \"bytes_per_s\": %%.6e, "
-              "\"device\": \"%%s\", \"cus\": %%zu}\n",
+              "\"device\": \"%%s\", \"cus\": %%zu, "
+              "\"memory_bytes\": %%zu, \"clock_khz\": %%u}\n",
               fma_best, bw_best,
-              q.get_device().get_info<sycl::info::device::name>().c_str(), cus);
+              dev.get_info<sycl::info::device::name>().c_str(), cus,
+              (size_t)dev.get_info<sycl::info::device::global_mem_size>(),
+              (unsigned)(dev.get_info<
+                  sycl::info::device::max_clock_frequency>() * 1000u));
   return 0;
 }
 '''
@@ -296,6 +322,12 @@ def emit_ceiling(backend: str, datatype: Datatype) -> str:
                    else 'hipDeviceProp_t'),
         'include': ('#include <cuda_runtime.h>' if backend == 'cuda'
                     else '#include <hip/hip_runtime.h>'),
+        # The attribute enumerators differ in more than the prefix: CUDA
+        # has `cudaDevAttrGlobalMemoryBusWidth`, HIP `hipDeviceAttribute`
+        # plus `MemoryBusWidth`.
+        'attr': 'cudaDevAttr' if backend == 'cuda' else 'hipDeviceAttribute',
+        'buswidth': ('cudaDevAttrGlobalMemoryBusWidth' if backend == 'cuda'
+                     else 'hipDeviceAttributeMemoryBusWidth'),
     }
 
 
@@ -309,6 +341,13 @@ class Ceiling:
     compute_units: int
     flops_per_s: float
     bytes_per_s: float
+    #: What the part is built from, where the runtime says: the memory it
+    #: carries, and the bandwidth its bus allows.  Zero where the backend
+    #: does not report it (SYCL has no bus width), which the readers spell
+    #: as "unknown" rather than filling in.
+    memory_bytes: int = 0
+    peak_bytes_per_s: float = 0.0
+    clock_khz: int = 0
 
     @property
     def ridge(self) -> float:
@@ -382,7 +421,10 @@ def measure_ceiling(device: bench_run.Device, datatype: Datatype,
                 datatype=datatype.name, device=blob['device'],
                 compute_units=int(blob['cus']),
                 flops_per_s=float(blob['flops_per_s']),
-                bytes_per_s=float(blob['bytes_per_s'])), ''
+                bytes_per_s=float(blob['bytes_per_s']),
+                memory_bytes=int(blob.get('memory_bytes') or 0),
+                peak_bytes_per_s=float(blob.get('peak_bytes_per_s') or 0.0),
+                clock_khz=int(blob.get('clock_khz') or 0)), ''
     return None, 'the ceiling benchmark printed no measurement'
 
 

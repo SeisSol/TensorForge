@@ -27,7 +27,10 @@ the thing timed.
 | `run.py` | the vendor-neutral timing run |
 | `profile.py` | the vendor profilers, over the same binary |
 | `roofline.py` | measured machine ceilings, and the kernels under them |
-| `plot.py` | charts over what the two runs wrote |
+| `plot.py` | charts over what the two runs wrote, one machine at a time |
+| `compare.py` | charts *across* runs: configurations, orders, machines |
+| `compareall.sh` | `compare.py` over data you already have, in one command |
+| `pdfout.py` | the second rendering: every chart as a page of a PDF |
 
 ```bash
 python3 tools/bench/evaluate.py --out eval/                  # measure and plot
@@ -114,6 +117,69 @@ starting the next, and keeps the best; interleaving spreads the drift over all
 of them instead of over the order they were built in. The spread across passes
 is reported in the `+/-` column, and a difference smaller than it is not a
 difference. The same two identical kernels now agree to 0.04 %.
+
+## Across runs: `compare.py`
+
+`plot.py` draws one run. The questions that come after a campaign are about
+the field rather than a point in it — does a configuration help everywhere or
+only here, does the picture hold as the order grows, does a kernel that is
+memory-bound on one machine stay memory-bound on the next. `compare.py` reads
+a whole tree of runs at once and writes a PDF.
+
+```bash
+./compareall.sh eval/                         # one campaign
+./compareall.sh gb200/ mi300/ laptop/         # three machines, rsynced back
+./compareall.sh eval/ -- --metric gflops --per-arch-order
+python3 tools/bench/compare.py eval/runs eval/ceiling --out eval/compare
+```
+
+`evaluate.py` runs it as its last step, so `runall.sh` produces the
+cross-cutting views too; `compareall.sh` is for the common case where the
+data is already there and possibly from several machines.
+
+| view | needs | the question |
+|---|---|---|
+| `devices` | | which machines are these, and what did they turn out to do? |
+| `bandwidth-peak` | a ceiling with the bus | how much of its own memory bus does each machine deliver? |
+| `intensity` | ceilings | is each kernel memory- or compute-bound, on each machine, and by how far? |
+| `kernels` | | what each kernel needs and carries — the numbers the charts divide by |
+| `configs` | 2+ configurations | does a configuration help everywhere, or only on one kernel? |
+| `order` | 2+ orders | how does the cost move as the discretisation order grows? |
+| `archs` | 2+ machines | the same kernel on each machine, as it ran |
+| `portability` | 2+ ceilings | the same, with each machine's own ceiling divided out |
+
+Two of them are tables rather than charts, and on purpose: six unrelated
+quantities about four machines is something a reader looks a value up in, and
+a chart of it would be six bar charts sharing an axis they have no business
+sharing.
+
+The order is read from the **run directory name** — `elastic-6-s-s1` as
+`evaluate.py` names an export, or `elastic-linearck-o8-s` as the recorded
+suite calls a configuration. A run whose name says neither is left out of the
+order views rather than placed at zero.
+
+`archs` and `portability` answer different questions and the difference
+matters. `archs` is absolute and ranks the *machines*; a set holding a laptop
+part and a data-centre one spans two orders of magnitude, which is why its
+axis is logarithmic. `portability` divides each machine's own ceiling out and
+ranks what was *made* of them, which is the number a generator is answerable
+for.
+
+## Everything as a PDF
+
+Both plotters write SVG and PDF from one list of primitives (`pdfout.py`),
+neither converted from the other. The SVG is the better thing to read at the
+machine — it carries `<title>` tooltips with the exact figures and a browser
+is already there. The PDF is the better thing to send: one file, every chart
+in order, printable at any size, and it goes into a paper without a
+screenshot.
+
+It is written by hand for the reason the SVG is: this directory runs on a
+login node somebody else administers, where `pip install matplotlib` is not a
+thing that reliably happens. Nothing here is a chart type a library would draw
+better — these are lines, bars, dots and rules — so a library would buy a
+dependency rather than a capability. Latin-1 only, and the typographic
+characters the charts use are transliterated rather than dropped.
 
 ## Reading the output
 
@@ -286,7 +352,8 @@ but no traffic in bytes, and `global-local-accesses` refused to
 collect on this stack. Advisor has them and is not wrapped,
 so `traffic` and `measured-roofline` are NVIDIA and AMD for now.
 
-Everything lands in one `index.html` beside the individual SVGs, and a view
+Everything lands in one `index.html` beside the individual SVGs, and with
+`--pdf` also in `report.pdf`, one page per view, plus a PDF per chart. A view
 whose data is missing is skipped with the reason rather than drawn empty —
 most often *only one batch size in the run*, which the suite's `BATCHES`
 fixes.

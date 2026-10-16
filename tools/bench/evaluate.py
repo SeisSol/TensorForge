@@ -259,10 +259,22 @@ def main() -> int:
             command += ['--roofline-json', str(roofline_json)]
         if profile_dir is not None:
             command += ['--profile', str(profile_dir)]
+        command.append('--pdf')
         steps.append(run_step(f'plot {tag}', command,
                               out / 'logs' / f'plot-{tag}.log', args.timeout))
 
-    # 6. the manifest
+    # 6. across everything that ran: the configurations against each other,
+    #    the orders against each other, and the machines against each other.
+    #    Last, because it reads what the steps above wrote and nothing else
+    #    -- a campaign that half failed still gets the comparison of the
+    #    half that did not.
+    steps.append(run_step(
+        'compare',
+        [sys.executable, str(HERE / 'compare.py'), str(out / 'runs'),
+         str(out / 'ceiling'), '--out', str(out / 'compare'), '--pdf'],
+        out / 'logs' / 'compare.log', args.timeout))
+
+    # 7. the manifest
     from tensorforge import interop                                 # noqa
     manifest = {
         'evaluation': {
