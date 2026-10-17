@@ -167,6 +167,37 @@ def _names(body: Sequence[Stmt]) -> Dict[Any, str]:
     return out
 
 
+def _rolled_spans(body: Sequence[Stmt]) -> List[Tuple[int, int]]:
+    """The position ranges of the merged runs in this body.
+
+    A merged run reaches its members through a table of their addresses, so
+    an access inside it names *every* member the table may hand over
+    (`DeclareOperandTable._accesses`) -- the claim is a union over the
+    trips, pinned at the position the table is declared at.  Two tables of
+    one rotated family therefore state the loop's read and its write in
+    whichever order they were declared, which is not the order a trip
+    touches them, and the slot the first trip reads is written on the trip
+    before by a statement standing after it.
+
+    So a read inside one of these is read against the run's head rather
+    than against its own position.  Only inside: a clobber *within* the run
+    still has to be answered by a write within the run before the read.
+    """
+    out: List[Tuple[int, int]] = []
+
+    def walk(stmts: Sequence[Stmt], pos: List[int]) -> None:
+        for stmt in stmts:
+            pos[0] += 1
+            start = pos[0]
+            for region in stmt.regions:
+                walk(region.body, pos)
+            if stmt.op == Op.FOR and stmt.attr('rolled'):
+                out.append((start, pos[0]))
+
+    walk(body, [0])
+    return out
+
+
 def check_layout(body: Sequence[Stmt]) -> Tuple[List[Violation], List[Any]]:
     """Buffers sharing bytes must not be read across each other's writes.
 
@@ -181,6 +212,7 @@ def check_layout(body: Sequence[Stmt]) -> Tuple[List[Violation], List[Any]]:
     win, unplaced = windows(body)
     if len(win) < 2:
         return [], list(unplaced)
+    spans = _rolled_spans(body)
     all_touches, opaque = touches(body, set(win))
     by_buffer: Dict[Any, List[Touch]] = {}
     for t in all_touches:
@@ -202,6 +234,13 @@ def check_layout(body: Sequence[Stmt]) -> Tuple[List[Violation], List[Any]]:
                 other = b if t.buffer == a else a
                 if t.reads and last_write[other] is not None:
                     mine = last_write[t.buffer]
+                    # Written anywhere inside the merged run this read sits
+                    # in counts as written at its head -- see `_rolled_spans`.
+                    for lo, hi in spans:
+                        if lo <= t.position <= hi and any(
+                                u.writes and lo <= u.position <= hi
+                                for u in by_buffer.get(t.buffer, ())):
+                            mine = lo if mine is None else max(mine, lo)
                     if mine is None or mine < last_write[other]:
                         violations.append(Violation(
                             names[t.buffer], t.position, names[other],

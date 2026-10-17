@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import List, Optional, Union, Type
+import os
+from typing import Dict, List, Optional, Union, Type
 import copy
 import functools
 import hashlib
@@ -1264,7 +1265,10 @@ class Generator:
 
     def tracked(sym) -> bool:
       return (getattr(sym, 'stype', None) is SymbolType.SharedMem
-              and not isinstance(getattr(sym, 'obj', None), ShrMemObject))
+              and not isinstance(getattr(sym, 'obj', None), ShrMemObject)
+              # A merged run's rotated stand-in is a pointer into whichever
+              # slot its table selects, and the slots are tracked already.
+              and not getattr(sym, 'borrowed', False))
 
     def block_wide(sym) -> bool:
       first = sym.get_first_user()
@@ -1276,6 +1280,15 @@ class Generator:
     def windows(instrs):
       for instr in instrs:
         for sym in tuple(instr.defs()) + tuple(instr.uses()):
+          # A write through a rotated stand-in declares nothing -- the slot
+          # its table selects was declared where the slot was -- but it is
+          # as ready to emit as any other, and saying so is this pass's job
+          # for every shared write there is.
+          if getattr(sym, 'borrowed', False):
+            for user in sym.get_user_list():
+              if isinstance(user, AbstractShrMemWrite):
+                user.set_window(False, False)
+            continue
           if not tracked(sym) or id(sym) in declared or block_wide(sym):
             continue
           declared.add(id(sym))
@@ -1287,13 +1300,47 @@ class Generator:
         for region in instr.regions():
           windows(region)
 
-    def lifetimes(instrs, written=frozenset()):
+    def repeats(instr) -> bool:
+      """Whether this instruction's regions run more than once.
+
+      The same question `pir.allocate` asks of a block it cannot read the
+      head of, and for the same reason: what a body carries around its
+      back edge is live where a single pass through it looks dead.
+      """
+      from tensorforge.backend.instructions.batch_loop import BatchLoop
+      from tensorforge.backend.instructions.ptr_manip import VariantLoop
+      return isinstance(instr, (BatchLoop, VariantLoop))
+
+    def carried_in(instr) -> set:
+      """Buffers this repeating body reads before it writes them.
+
+      A write that covers a buffer whole normally ends what was there --
+      nothing before it is wanted.  Inside a loop that is true of one pass
+      and false of the loop: a merged run's rotation writes the slot the
+      *next* pass reads, and killing it at the write makes the stretch
+      from there to the read look free, which the allocator then hands to
+      another buffer (`pir.allocate`).  SeisSol's anelastic chain shared a
+      rotation slot with a staged operand that way, and the kernel
+      computed with the operand's bytes.
+
+      Read *before* written, which is the question the loop instructions
+      already answer for their own operands (`VariantLoop.uses`), and not
+      read anywhere: a staged operand is copied in at the head of the body
+      and read below it, so a body that carries nothing would carry all of
+      them -- and the staged window would stop reusing the one the product
+      read the pass before, which is the reuse its barrier is there for.
+      """
+      return {id(sym) for sym in instr.uses() if tracked(sym)}
+
+    def lifetimes(instrs, written=frozenset(), carried=frozenset()):
       seen = set(written)
       for instr in instrs:
         if instr.regions():
           entering = frozenset(seen)
+          inner = (carried | carried_in(instr)
+                   if repeats(instr) else carried)
           for region in instr.regions():
-            lifetimes(region, entering)
+            lifetimes(region, entering, inner)
           seen.update(id(d) for d in instr.defs())
           continue
         kills = []
@@ -1301,8 +1348,9 @@ class Generator:
         for sym in instr.defs():
           if not tracked(sym) or block_wide(sym):
             continue
-          if not isinstance(instr, LoadWait) and not (
-              id(sym) in partial and id(sym) in seen):
+          if (not isinstance(instr, LoadWait)
+                  and id(sym) not in carried
+                  and not (id(sym) in partial and id(sym) in seen)):
             kills.append(sym)
           seen.add(id(sym))
         instr._kills = tuple(kills)
@@ -2555,7 +2603,8 @@ class Generator:
                           self._scopes.get_symbol(self._section.shr_mem_obj),
                           self._num_threads,
                           self._lead_width)
-    temporaries = Temporaries(self._context, self._scopes, self._num_threads)
+    temporaries = self._temporaries = Temporaries(
+        self._context, self._scopes, self._num_threads)
     # Every register image this section allocates is blocked the same way, so
     # the factory carries it rather than each caller passing it along.
     temporaries._lead_width = self._lead_width
@@ -2678,6 +2727,7 @@ class Generator:
         GetElementPtrBuilder
 
     body, variants = loop.decompose()
+    self._rotate_members(loop, variants)
     written = {id(d.writes().tensor) for d in body if d.writes() is not None}
 
     # What the body threads through itself.  A destination is not accumulated
@@ -2787,8 +2837,16 @@ class Generator:
         addressing = Addressing.SCALAR
       else:
         addressing = Addressing.NONE if resolved else stand_in.obj.addressing
+      # Named after the stand-in *tensor* where that is not the symbol's
+      # own name.  A rotated stand-in resolves to its family's first slot,
+      # so two holes of one family share a symbol -- the hole that reads
+      # `dQane_d` and the hole that writes `dQane_{d+1}` -- and both tables
+      # would be `s11Table`, which is one declaration of two things.
+      table_name = (variant.stand_in.tensor.name
+                    if stand_in.obj is not variant.stand_in.tensor
+                    else stand_in.name)
       table = DeclareOperandTable(
-          self._context, f'{stand_in.name}Table', members,
+          self._context, f'{table_name}Table', members,
           addressing,
           stand_in.obj.datatype,
           writable=id(variant.stand_in.tensor) in written,
@@ -2800,7 +2858,17 @@ class Generator:
       if self._stages(stand_in, written):
         region.extend(self._stage_member(stand_in, table, counter))
         continue
-      pointers.build(stand_in, table=table, variant=counter)
+      # A rotated stand-in resolves to its family's first slot, so two
+      # holes of one family share a symbol and would name one pointer
+      # twice -- the hole that reads `dQane_d` and the hole that writes
+      # `dQane_{d+1}` are two bindings on the same pass.  The stand-in
+      # tensor's own name (`v0`, `v1`) is what tells them apart, and it is
+      # the name a stand-in that is no temporary would have given anyway.
+      rotated = stand_in.obj is not variant.stand_in.tensor
+      pointers.build(stand_in, table=table, variant=counter,
+                     name=(getattr(variant.stand_in.tensor, 'name', None)
+                           if rotated else None),
+                     obj=variant.stand_in.tensor if rotated else None)
       region.extend(pointers.get_instructions())
 
     before = {}
@@ -2978,6 +3046,114 @@ class Generator:
       emitted.extend(builder.get_instructions())
     self._section.ir.extend(emitted)
     return True
+
+  def _rotate_members(self, loop, variants) -> None:
+    """Give a run's temporary members one buffer per *slot*, not per member.
+
+    A merged run reaches its members through a table of their addresses, and
+    a temporary has none until an operation asks for its buffer -- so a run
+    that selects one per iteration used to be left written out
+    (`rolling._selects_a_temporary`).  Handing each member a buffer of its
+    own would not do: SeisSol's anelastic derivative has 35 temporaries
+    worth 89 kB per multiplication, which the allocator aliases down to 8;
+    tabling them apart puts all 35 live at once and there is no such block.
+
+    What makes it work is that the run *carries* them. The dependence says
+    the value a pass writes is read `distance` passes later and never
+    after, so `distance + 1` buffers suffice and the members take them in
+    turn: the fifth derivative is written where the third was, because by
+    then nothing wants the third.  Two buffers for the anelastic chain,
+    where five members would have been.
+
+    The ends need no special case, which is the point of rotating by the
+    member's own position.  The value the peeled prologue leaves in member
+    one *is* slot zero, which the first pass reads; the last pass writes the
+    member the epilogue reads, in whichever slot that member sits.  Both
+    fall out of the mapping rather than being arranged around it.
+
+    A hole and the hole it feeds are one family and must share the slots --
+    `dQane_1..4` read and `dQane_2..5` written are five tensors, not two
+    sets of four -- so the variants are merged wherever their members
+    overlap.  Shapes within a family have to agree, since a slot is one
+    buffer: this refuses rather than letting two extents address one
+    allocation.
+    """
+    from tensorforge.backend.instructions.memory.store import ReserveShrMem
+    distance = getattr(getattr(loop, 'dependence', None), 'distance', None)
+    if not distance or distance < 1:
+      return
+    from tensorforge.generators.rolling import rotation_families
+    families = rotation_families(
+        [[v.tensor for v in variant.members
+          if getattr(v.tensor, 'is_tmp', False)] for variant in variants])
+
+    for family in families:
+      # In the order the run names them, which is the order they are
+      # written in: the slot is the member's position in the chain.
+      shapes = {(tuple(int(x) for x in t.get_actual_shape()),
+                 tuple(int(x) for x in t.get_bbox().lower()),
+                 tuple(int(x) for x in t.get_bbox().upper())) for t in family}
+      if len(shapes) != 1:
+        raise InternalError(
+            f'a merged run rotates {len(family)} temporaries through '
+            f'{distance + 1} buffers, and they do not agree on a shape: '
+            f'{sorted(str(s) for s in shapes)}')
+      slots: Dict[int, Symbol] = {}
+      asked = self._context.get_user_options().rotate_slots
+      width = asked if asked else distance + 1
+      for position, tensor in enumerate(family):
+        slot = position % width
+        if self._scopes.get_symbol(tensor) is not None:
+          # Already placed -- by an earlier run over the same family, or
+          # because it is no temporary after all.  Its buffer stands.
+          slots.setdefault(slot, self._scopes.get_symbol(tensor))
+          continue
+        owner = slots.get(slot)
+        if owner is None:
+          slots[slot] = self._temporaries.shared_symbol(tensor)
+        else:
+          self._scopes.alias_symbol(tensor, owner)
+      for symbol in slots.values():
+        # Marked, so that the binding declares *these* buffers occupied and
+        # no others: a table over staged members is shared too, and saying
+        # the same of those moves a fence the loop depends on.
+        symbol.rotation_slot = True
+
+      # A slot nobody else writes has no first user to declare its window,
+      # and every other buffer gets one from a store or a load
+      # (`temporaries`).  The rotation introduces its own, which is the one
+      # thing that knows their size.  A slot the peeled prologue already
+      # writes -- the family's first member, which is slot zero -- has a
+      # user and is left alone.
+      for slot, symbol in sorted(slots.items()):
+        if symbol.get_user_list():
+          continue
+        self._section.ir.append(ReserveShrMem(
+            self._context, symbol,
+            self._scopes.get_symbol(self._section.shr_mem_obj),
+            family[0].get_bbox()))
+
+    # The stand-in resolves to slot zero, and that is all it needs to be.
+    # `GetElementPtrBuilder` *reads* it and names a pointer of its own
+    # (`glb_s13`) which the loop rebinds from the table on every pass -- so
+    # what the stand-in has to be is a defined symbol of the family's shape,
+    # not a buffer.  Slot zero is both, and the pointer's new name is why
+    # this is no circle: the table's entries are the slots, the binding is
+    # not one of them.
+    #
+    # A symbol of its own would be neither defined nor declared: nothing
+    # writes it, so the verifier would report a read with no definition,
+    # and nothing sizes it, so `_declare_buffers` would have no window.
+    for variant in variants:
+      tensor = variant.stand_in.tensor
+      if (not getattr(tensor, 'is_tmp', False)
+              or self._scopes.get_symbol(tensor) is not None):
+        continue
+      members = [v.tensor for v in variant.members]
+      family = next((f for f in families
+                     if any(t is u for t in f for u in members)), None)
+      if family:
+        self._scopes.alias_symbol(tensor, self._scopes.get_symbol(family[0]))
 
   def _member_symbol(self, view):
     """The symbol a merged run reaches an operand through.

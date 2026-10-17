@@ -27,8 +27,8 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from tensorforge.analysis.antiunify import instantiate, substitute
-from tensorforge.analysis.dependence import (binding_period, carried,
-                                             escapes, shifts)
+from tensorforge.analysis.dependence import (Carried, binding_period,
+                                             carried, escapes, shifts)
 from tensorforge.analysis.families import find_repeats
 from tensorforge.generators.descriptions import (OperationDescription,
                                                  operand_name)
@@ -199,27 +199,115 @@ def _chunks(descrs: Sequence[OperationDescription], start: int, period: int,
             for i in range(count)]
 
 
-def _selects_a_temporary(run) -> bool:
-    """Whether a hole of this run binds a temporary.
+def _temporaries_of(run) -> List:
+    """The distinct temporaries this run's holes bind, in the order named."""
+    out = []
+    for binding in run.general.bindings:
+        for view in binding:
+            tensor = getattr(view, 'tensor', view)
+            if getattr(tensor, 'is_tmp', False) and not any(
+                    tensor is t for t in out):
+                out.append(tensor)
+    return out
+
+
+def rotation_families(groups: Sequence[Sequence]) -> List[List]:
+    """Merge the per-hole tensor lists into the families that share buffers.
+
+    A hole and the hole it feeds are one family: a derivative chain reads
+    `dQane_1..4` through one hole and writes `dQane_2..5` through another,
+    which is five tensors and not two sets of four.  They are recognised by
+    overlapping, which is what being the same chain means here.
+
+    Order within a family is first-named-first, and that order *is* the
+    rotation: the member's position decides its slot, so the chain has to
+    come out in the order the run writes it.  The caller passes the holes
+    in the run's own order, which is that order.
+
+    One rule in one place because two callers need it and need the same
+    answer -- `_rotatable` to decide and `Generator._rotate_members` to act.
+    Separately they could disagree, and the disagreement would be a run
+    admitted here and refused there, which is a build that stops.
+    """
+    families: List[List] = []
+    for group in groups:
+        members = [t for t in group if t is not None]
+        if not members:
+            continue
+        hit = next((f for f in families
+                    if any(t is u for t in f for u in members)), None)
+        if hit is None:
+            families.append(list(members))
+        else:
+            hit.extend(t for t in members if not any(t is u for u in hit))
+    return families
+
+
+def _same_shape(family: Sequence) -> bool:
+    """Whether a family's members can share one buffer."""
+    shapes = set()
+    for tensor in family:
+        try:
+            shapes.add((tuple(int(x) for x in tensor.get_actual_shape()),
+                        tuple(int(x) for x in tensor.get_bbox().lower()),
+                        tuple(int(x) for x in tensor.get_bbox().upper())))
+        except (AttributeError, TypeError):
+            return False
+    return len(shapes) == 1
+
+
+def _rotatable(run, chunks) -> bool:
+    """Whether the temporaries this run varies in can share a few buffers.
 
     A loop reaches its members through a table of their addresses, and an
     address is something a symbol has.  A kernel argument has one from the
-    prologue; a temporary's buffer is handed out by whichever operation first
-    asks for it, and a member the loop writes has nobody who has asked -- nor
-    has the stand-in, which is a name that resolves to a member and not a
-    buffer of its own.  Binding one per iteration is a table over the
-    section's own storage, which the emission does not do yet.
+    prologue; a temporary's buffer is handed out by whichever operation
+    first asks for it, and a member the loop writes has nobody who has
+    asked.  Giving each one a buffer is no answer either: SeisSol's
+    anelastic derivative varies in temporaries worth 89 kB per
+    multiplication, which the allocator aliases down to 8, and tabling them
+    apart puts every one of them live at once.
 
-    So a run that varies in a temporary is left written out.  Third of three
-    refusals, and the one that is a limitation rather than a decision: the
-    damage step's sums over nodal sources are exactly this shape.  With every
-    temporary identified by its slot they would roll into a loop that adds
-    one node's source six times (`antiunify._scratch_origins`); telling the
-    temporaries apart leaves them a correct written-out run, and lifting this
-    needs the loop to bind a buffer per iteration.
+    What makes it possible is the run *carrying* them.  Where the
+    dependence is a flow at a finite distance, a value written on one pass
+    is read `distance` passes later and never after, so `distance + 1`
+    buffers serve the whole family and the members take them in turn
+    (`Generator._rotate_members`).  Without a carry there is nothing to say
+    how long a member has to last, and the run is left written out.
+
+    Shapes have to agree, since a slot is one buffer.  They do wherever
+    this arises -- a derivative chain names one shape `order` times -- and
+    where they do not, the run is written out rather than two extents
+    addressing one allocation.
     """
-    return any(getattr(getattr(view, 'tensor', view), 'is_tmp', False)
-               for binding in run.general.bindings for view in binding)
+    temporaries = _temporaries_of(run)
+    if not temporaries:
+        return True
+    dependence = carried(chunks)
+    distance = getattr(dependence, 'distance', None)
+    if not distance or distance < 1:
+        return False
+    if Carried.FLOW not in getattr(dependence, 'kinds', frozenset()):
+        return False
+    holes = [[getattr(v, 'tensor', v) for v in hole]
+             for hole in zip(*run.general.bindings)]
+    temporary_holes = [[t for t in hole if getattr(t, 'is_tmp', False)]
+                       for hole in holes]
+    names = set(getattr(dependence, 'tensors', ()) or ())
+    for family in rotation_families(temporary_holes):
+        if not _same_shape(family):
+            return False
+        # Carried, and not merely temporary.  A scratch that is written and
+        # read inside one chunk is dead at its end: it wants the registers
+        # the body already gives it (`Generator._reset_temporaries`), and a
+        # buffer per slot would take that away and leave it unzeroed on the
+        # next trip.  Only a family that crosses an iteration boundary has
+        # anything to rotate -- the ends do not have to be carried
+        # themselves, since the first is what the prologue leaves and the
+        # last is what the epilogue reads.
+        if not any(getattr(t, 'alias', None) in names for t in family):
+            return False
+    return True
 
 
 def roll(descrs: Sequence[OperationDescription],
@@ -273,7 +361,7 @@ def roll(descrs: Sequence[OperationDescription],
             continue
         if run.arity == 0:
             continue
-        if _selects_a_temporary(run):
+        if not _rotatable(run, chunks):
             continue
         flat = [d for chunk in chunks for d in chunk]
         written_out = size(flat) if size is not None else 0

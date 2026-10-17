@@ -19,7 +19,8 @@ from tensorforge.generators.descriptions import (GemmDescr,
                                                  MultilinearDescr,
                                                  GridBarrierDescr,
                                                  GridFenceDescr)
-from tensorforge.generators.rolling import ForDescr, roll, unroll
+from tensorforge.analysis.families import find_repeats
+from tensorforge.generators.rolling import ForDescr, _chunks, roll, unroll
 
 DTYPE = Datatype.F32
 
@@ -174,13 +175,85 @@ def test_scratch_that_crosses_into_the_next_chunk_is_not_scratch():
     assert run.arity >= 2
 
 
-def test_a_run_that_varies_in_a_temporary_is_left_written_out():
-    """And no loop is built for it: a member is reached through a table of
-    addresses, and a temporary's buffer is the section's to hand out."""
+def test_a_run_that_carries_a_temporary_rolls_and_rotates_it():
+    """A member is reached through a table of addresses and a temporary has
+    none until something asks for its buffer -- so the loop hands them out
+    itself, as many as the carry needs rather than one per member.
+
+    `temporary_chain` is the shape: `deriv{k}` is written by one chunk and
+    read by the next, a flow at distance one, so two buffers serve the
+    whole chain and the members take them in turn
+    (`Generator._rotate_members`).  Unrolling it again gives back the list
+    that went in, which is the property the rotation must not break.
+    """
     descrs = temporary_chain()
     rolled = roll(descrs, min_count=3)
-    assert not any(isinstance(d, ForDescr) for d in rolled)
+    assert any(isinstance(d, ForDescr) for d in rolled)
     assert _bound(unroll(rolled)) == _bound(descrs)
+
+
+def _slot_buffers(gen):
+    """The distinct shared buffers the run's tables select from."""
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    from tensorforge.backend.symbol import SymbolType
+    ir = getattr(gen, 'built', gen)._sections[0].ir
+    loop, = [i for i in ir if isinstance(i, VariantLoop)]
+    return {m.name for t in loop.tables for m in t.get_operands()
+            if m.stype == SymbolType.SharedMem
+            and getattr(m, 'rotation_slot', False)}
+
+
+def _carried_chain(steps=5):
+    """`temporary_chain` with ends: an input to start it and a sink to read
+    it, so it is a kernel that can be built and not only rolled."""
+    out = [gemm(make('kDivM', [56, 56]),
+                make(f'deriv{k}', [56, 9], is_tmp=k > 0),
+                make(f'deriv{k + 1}', [56, 9], True)) for k in range(steps)]
+    out.append(gemm(make('P', [56, 56]), make(f'deriv{steps}', [56, 9], True),
+                    make('Q', [56, 9])))
+    return out
+
+
+@pytest.mark.parametrize('slots, want', [(0, 2), (1, 1), (3, 3)])
+def test_the_slots_a_carried_family_turns_through_are_asked_for(slots, want):
+    """`rotate_slots` is the width of the rotation, and 0 is the carry's own.
+
+    The default is one buffer more than the distance the run carries over,
+    which is what the value's lifetime needs.  Fewer is a trade: at 1 a
+    pass reads and writes one buffer, which is correct because a
+    multiplication accumulates in registers and the barrier between the
+    read and the write is already there -- and it is the difference
+    between 80 kB of shared memory and 53 kB on SeisSol's order 6
+    anelastic derivative.  More buys nothing and is allowed because
+    refusing it would be a rule with no case behind it.
+    """
+    gen = _merged_build(roll(_carried_chain(), min_count=3),
+                        **({'rotate_slots': slots} if slots else {}))
+    assert len(_slot_buffers(gen)) == want
+
+
+def test_a_temporary_that_is_not_carried_is_left_written_out():
+    """Rotating it would take away the registers the body gives it.
+
+    A scratch written and read inside one chunk is dead at its end, and the
+    loop already starts it from zeros on every trip
+    (`Generator._reset_temporaries`).  Only a family that crosses an
+    iteration boundary has anything to rotate, and this one does not: each
+    chunk names its own and nothing reads it afterwards.
+    """
+    descrs = [d for k in range(4) for d in
+              [gemm(make('A', [56, 56]), make(f'in{k}', [56, 9]),
+                    make(f'scratch{k}', [56, 9], True)),
+               gemm(make('B', [56, 56]), make(f'scratch{k}', [56, 9], True),
+                    make(f'out{k}', [56, 9]))]]
+    run = find_repeats(descrs, min_count=2)[0]
+    chunks = _chunks(descrs, run.start, run.period, run.count)
+    # The anti-unifier keeps such a scratch out of the holes entirely, so
+    # there is nothing for the rotation to refuse -- stated here because
+    # the refusal would be the fallback if that ever changed.
+    holes = [[getattr(v, 'tensor', v) for v in hole]
+             for hole in zip(*run.general.bindings)]
+    assert not any(getattr(t, 'is_tmp', False) for h in holes for t in h)
 
 
 def test_unroll_leaves_a_list_without_loops_alone():
@@ -1357,6 +1430,7 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('staged', False, {'stage_members': True}),
     ('scratch', False, {}),
     ('scratch', True, {}),
+    ('carried', False, {}),
 ])
 def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                                                               options):
@@ -1385,6 +1459,21 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                          make('Q', [24, 5]), add=True) for i in range(4)]
         if shape == 'read_first':
             return _read_first()
+        if shape == 'carried':
+            # A chain through temporaries: each step reads what the last
+            # wrote, which is what the rotation serves
+            # (`Generator._rotate_members`).  The oracle is the same list
+            # written out, so a slot bound to the wrong member, or one
+            # overwritten before its reader, shows up as numbers and not as
+            # a build that happens to succeed.
+            out = []
+            for i in range(4):
+                out.append(gemm(make(f'A{i}', [24, 24]),
+                                make(f'carry{i}', [24, 5], is_tmp=i > 0),
+                                make(f'carry{i + 1}', [24, 5], is_tmp=True)))
+            out.append(gemm(make('P', [24, 24]), make('carry4', [24, 5], True),
+                            make('Q', [24, 5])))
+            return out
         if shape == 'scratch':
             out = []
             for i in range(4):

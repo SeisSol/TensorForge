@@ -755,6 +755,31 @@ declare('stage_members',
             'on the same trips through the batch loop: the block is one group '
             'of `stage_group` multiplications.')
 
+declare('rotate_slots',
+        default=0,
+        parse=parse_int,
+        doc='Buffers a merged run\'s carried temporaries turn through, or 0 '
+            'for one more than the distance the run carries over.\n'
+            'A run that selects a temporary per iteration reaches it through '
+            'a table of addresses, and a buffer per member would put all of '
+            'them live at once -- 35 temporaries worth 89 kB a '
+            'multiplication on SeisSol\'s anelastic derivative, which the '
+            'allocator aliases down to 8 when the run is written out.  The '
+            'members take the buffers in turn instead, which needs as many '
+            'as the carry is deep: the value a pass writes is read '
+            '`distance` passes later and never after, so `distance + 1` '
+            'suffice and the fifth derivative is written where the third '
+            'was.\n'
+            'Fewer than that is a trade, not an error, and 1 is the far end '
+            'of it: a pass then reads and writes one buffer, which is '
+            'correct wherever the read of a trip completes before its write '
+            '-- a multiplication accumulates in registers, so it does -- and '
+            'costs the barrier between them.  On the order 6 anelastic '
+            'derivative it took the block from 80 kB of shared memory to '
+            '53 kB for two lines of code.  More than `distance + 1` buys '
+            'nothing and is allowed only because refusing it would be a '
+            'rule with no case behind it.')
+
 declare('stage_group',
         default=8,
         doc='Multiplications a block holds under `stage_members`, and so how '
