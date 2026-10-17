@@ -470,3 +470,64 @@ class StoreRegToGlb(AbstractInstruction):
 
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{r>g}}({self._src.name});'
+
+
+class ReserveShrMem(AbstractShrMemWrite):
+  """A shared buffer with a window and no transfer.
+
+  Every other buffer is introduced by a store or a load, and `temporaries`
+  says why: the window is declared by the buffer's *first user*, which has
+  to know how big it is, and a compute instruction writing shared memory
+  does not.  A rotation slot has no such user at all.  The members of a
+  merged run's carried family are written through the loop's table
+  (`Generator._rotate_members`), so the slot itself never appears as the
+  destination of a transfer, and `_declare_buffers` would reach it with an
+  empty user list.
+
+  So the rotation introduces them, which is the one thing that does know
+  their size: it is the family's shape, and the family has one by
+  construction (`rolling._rotatable` refuses otherwise).  Nothing is
+  emitted for it beyond the window -- `gen_code_inner` writes no statement
+  -- and the loop then stores through the table as it would through any
+  buffer.
+
+  It defines the slot rather than using it, which is what it is: before it
+  the buffer holds nothing anybody wants, and saying so is what lets the
+  allocator hand the stretch in front of it to another buffer.
+  """
+
+  def __init__(self, context: Context, dest: Symbol, shr_mem: Symbol,
+               bbox: BoundingBox):
+    super(ReserveShrMem, self).__init__(context)
+    if dest.stype != SymbolType.SharedMem:
+      raise InternalError(
+          f'{dest.name}: a reservation is of a shared buffer, not '
+          f'{dest.stype}')
+    dest.add_user(self)
+    shr_mem.add_user(self)
+    # The view as a store would have left it, padded the same way: a slot is
+    # read through the loop's table before anything writes it -- that is what
+    # a carried family *is* -- so the view cannot wait for a first write the
+    # way every other temporary's does.
+    dest.data_view = DataView(_padded_row(bbox.sizes(), context),
+                              permute=None, bbox=bbox)
+    self._dest = dest
+    self._shr_mem = shr_mem
+    self._shm_volume = dest.data_view.get_volume()
+    if self._shm_volume <= 0:
+      raise InternalError(
+          f'{dest.name}: a buffer of {self._shm_volume} elements')
+    self._is_ready = True
+
+  def gen_code_inner(self, writer: Writer) -> None:
+    """Nothing: the window is the whole of it, and that is emitted by
+    `gen_code_declare` before this runs."""
+
+  def get_dest(self) -> Symbol:
+    return self._dest
+
+  def get_src(self):
+    return None
+
+  def __str__(self) -> str:
+    return f'{self._dest.name} = reserve{{s}}({self._shm_volume})'

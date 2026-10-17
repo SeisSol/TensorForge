@@ -1041,6 +1041,12 @@ class IRBuilder:
         *head, last = indices
         return tuple(head) + (self.op('add', INDEX, last, shift, hint='at'),)
 
+    def swizzle_of(self, base: Any) -> Optional[XorSwizzle]:
+        """Public `_swizzle_of`, for a caller declaring a second name for a
+        buffer: the permutation belongs to the storage, so a window onto it
+        has to be given the same one or the two address different cells."""
+        return self._swizzle_of(base)
+
     def _swizzle_of(self, base: Any) -> Optional[XorSwizzle]:
         """This buffer's permutation, whichever way the access names it.
 
@@ -2009,7 +2015,8 @@ class IRBuilder:
                   extern: str = None, alias_root: Any = None,
                   quals: Tuple = (),
                   layout: Optional[RegisterLayout] = None,
-                  attrs: Tuple = ()) -> Value:
+                  attrs: Tuple = (),
+                  also: Sequence[Tuple[Effect, Any]] = ()) -> Value:
         """A declaration whose declarator is text too, not only its right side.
 
         `load_expr` renders `{ctype} {name} = {text};`, which is enough while
@@ -2076,11 +2083,26 @@ class IRBuilder:
         attrs = (('decl', decl), ('escapes', True))
         if extern is not None:
             attrs = attrs + (('extern', extern),)
+        # `also`: further bases the statement may reach, each with its own
+        # effect.  A binding that picks its base out of a table reaches
+        # whichever member the counter names, and nothing downstream can see
+        # which -- declaring them here keeps them occupied for as long as the
+        # binding is live, on the statement that is already there rather than
+        # on an empty one beside it, which the scheduler would have to be
+        # told not to move.
+        accesses = (Access(kind, self._space_of(base) if space is None
+                           else space, root),)
+        for other_kind, other in also:
+            # The base as given, not through `alias_root`: these are buffer
+            # values, and both the allocator and the layout check key them
+            # on the `Op.ALLOC` that made them.  Mapped to a view root they
+            # would match nothing and the access would say nothing.
+            accesses += (Access(other_kind, self._space_of(other), other),)
+        effect = kind
+        for other_kind, _ in also:
+            effect |= other_kind
         self._emit_op(Op.RAWEXPR, (v,), tuple(args), pure=False, movable=True,
-                      effect=kind,
-                      accesses=(Access(kind,
-                                       self._space_of(base) if space is None
-                                       else space, root),),
+                      effect=effect, accesses=accesses,
                       text=text, attrs=attrs + extra)
         return v
 

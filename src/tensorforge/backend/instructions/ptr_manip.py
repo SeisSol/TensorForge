@@ -63,6 +63,89 @@ class GetElementPtr(AbstractInstruction):
   #: reads the copy of the chain.
   _TABLE_HOLE = '\x00operandTable\x00'
 
+  def _member_accesses(self, writer):
+    """The buffers this pass may touch beyond its source: any the table
+    holds.
+
+    The accesses the body makes go through the pointer bound here and name
+    no member, so a shared member looks untouched between the write before
+    the loop and the read after it -- and the allocator puts another buffer
+    on its bytes (`pir.allocate`, `pir.layout_check`).  Which member a pass
+    picks is the counter's business and not knowable here, so each of them
+    is claimed, read and written.
+
+    Declared on the binding itself (`decl_expr(also=...)`) and not on a
+    statement of its own: an empty statement that says what it touches is
+    either movable, and then it may drift away from what it is speaking
+    for, or immovable, and then it is a wall the scheduler gives up at --
+    74 % of what `tools/ir_opacity.py` calls blocking is exactly that.
+
+    Named bases and not an access with no base: the second is what
+    `allocate` reads as "touches everything" and would pin every buffer of
+    the section.  This pins the table's own, which after rotation are
+    `distance + 1` slots and not one per member -- four members of
+    SeisSol's anelastic chain are two buffers, and both are genuinely
+    occupied for the whole loop.
+
+    Only rotation slots.  A table over kernel arguments names buffers the
+    shared allocator does not place, so claiming them would say nothing;
+    a table over *staged* members names shared buffers the loop already
+    fences around, and claiming those moves the fence.
+    """
+    members = getattr(self._table, '_members', None) if self._table else None
+    if not members or not hasattr(writer, 'decl_expr'):
+      return ()
+    out, seen = [], set()
+    for member in members:
+      if not getattr(member, 'rotation_slot', False):
+        continue
+      buffer = member.pir_buffer(writer)
+      if buffer is None or id(buffer) in seen:
+        continue
+      seen.add(id(buffer))
+      # With the effect *this* binding has, which the table's writability
+      # states: a pass reads the slot the previous one wrote through one
+      # hole and writes the slot the next will read through another, and
+      # the two are separate bindings.  Claiming both of both would read
+      # as a read before the write at the same position -- the layout
+      # check sorts a statement's own reads ahead of its writes -- and
+      # every rotation would report its first read as clobbered by
+      # whatever shares the slot's bytes.
+      #
+      # The write is the half the layout check needs: without it the slot
+      # looks clobbered and never rewritten before the epilogue reads it.
+      # Sayable only because this is the rotation slots alone; said of a
+      # staged member it moved the fence the loop depends on.
+      out.append((Effect.READ if self._readonly() else Effect.WRITE, buffer))
+    return tuple(out)
+
+  def uses(self):
+    """The source, and -- where the base comes from a table -- every member
+    the table may hand over.
+
+    Which member a pass picks is the counter's business and not knowable
+    here, so all of them are touched as far as anything downstream is
+    concerned.  That is what keeps a member alive across the loop: the
+    accesses themselves go through the bound pointer and name no member,
+    so without this the allocator sees a buffer written before the loop,
+    read after it, and nothing in between -- and puts another buffer on
+    its bytes (`pir.layout_check`).
+
+    It is not as coarse as it sounds.  A table over temporaries holds
+    `distance + 1` *slots*, not one entry per member
+    (`Generator._rotate_members`): four members of SeisSol's anelastic
+    chain resolve to two buffers, and both of those really are occupied for
+    the whole loop -- one holds what a pass reads, the other what it
+    writes, and they swap. A table over kernel arguments pins nothing at
+    all, since those are not the shared allocator's to place.
+    """
+    out = list(super().uses())
+    members = getattr(self._table, '_members', None) if self._table else None
+    for member in members or ():
+      if member not in out:
+        out.append(member)
+    return tuple(out)
+
   def batch_index(self) -> str:
     """The name this binding's element index goes by: the loop's own.
 
@@ -215,13 +298,11 @@ class GetElementPtr(AbstractInstruction):
     constant space, that private address faults on gfx1150; generic, the
     compiler infers whichever space it is.
     """
-    readonly = self._src.obj.direction == DataFlowDirection.SOURCE
-    if self._table is not None:
-      # Whatever the stand-in's direction says, the table is what it is read
-      # out of: a writable binding over a `const` table does not compile.
-      readonly = not self._table.writable
+    readonly = self._readonly()
     if passed_by_value(self._src):
       space = None
+    elif self._space() is MemSpace.SHARED:
+      space = MemSpace.SHARED
     elif readonly and self._src.obj.addressing == Addressing.NONE:
       space = MemSpace.CONSTANT
     else:
@@ -230,8 +311,37 @@ class GetElementPtr(AbstractInstruction):
         f'{datatype}', space, readonly=readonly,
         restrict=restrict, const=bool(const_mod))
 
+  def _readonly(self) -> bool:
+    """Whether nothing is written through this binding."""
+    if self._table is not None:
+      # Whatever the stand-in's direction says, the table is what it is read
+      # out of: a writable binding over a `const` table does not compile.
+      return not self._table.writable
+    return self._src.obj.direction == DataFlowDirection.SOURCE
+
+  def _space(self) -> MemSpace:
+    """The space this binding addresses.
+
+    A binding names an element's data and that is in global memory -- except
+    where a merged run selects it from a table of *slots*, which are shared
+    buffers the run's carried family turns through
+    (`Generator._rotate_members`).  Then the pointer is into shared memory,
+    and saying global would have the access model check it against a base
+    that is not, and the emitter read it in the wrong space.
+    """
+    return (MemSpace.SHARED
+            if self._dest.stype is SymbolType.SharedMem else MemSpace.GLOBAL)
+
   def _declarator(self, datatype, const_mod: str) -> str:
-    return f'{self._pointer_type(datatype, const_mod)} {self._dest.name}'
+    # Not `restrict` on a rotation slot's binding.  The holes of one family
+    # select out of one set of slots, and the promise would be false as soon
+    # as two of them land on the same buffer -- which is every trip once the
+    # family turns through a single slot, and the whole point of carrying
+    # the value is that another name for it is live.
+    return (f'{self._pointer_type(datatype, const_mod, restrict=False)} '
+            f'{self._dest.name}'
+            if self._space() is MemSpace.SHARED else
+            f'{self._pointer_type(datatype, const_mod)} {self._dest.name}')
 
   def _coerce(self, datatype, const_mod: str, rhs: str) -> str:
     """Bring an address into the space the declaration claims for it.
@@ -274,7 +384,8 @@ class GetElementPtr(AbstractInstruction):
       # space and a select over them decays -- so the binding casts back into
       # the space it claims, as every other addressing mode does (`_coerce`).
       self._emit_binding(writer, lhs,
-                         self._coerce(datatype, 'const', self.source_name()))
+                         self._coerce(datatype, 'const', self.source_name()),
+                         also=self._member_accesses(writer))
       return
 
     batch_obj = self._src.obj
@@ -428,7 +539,7 @@ class GetElementPtr(AbstractInstruction):
         [f'{self._dest.name}_s{e}' for e in range(k)])
 
   def _emit_binding(self, writer, lhs: str, rhs: str,
-                    scalar: bool = False) -> None:
+                    scalar: bool = False, also=()) -> None:
     """The binding, as a definition rather than a statement.
 
     A bare statement is `Effect.UNKNOWN`, so it conflicts with every access
@@ -474,14 +585,20 @@ class GetElementPtr(AbstractInstruction):
       # substitute -- `wrap_loads` could not advance a transfer that reads
       # through it.
       text, args = self._splice_index(writer, rhs)
+      # A window onto a permuted buffer is permuted.  The swizzle lives on
+      # the storage's type, and a second name for it built without one would
+      # write where the first name's readers do not look -- which for a
+      # rotation slot is every read the loop makes.
+      swizzle = (writer.swizzle_of(self._src)
+                 if self._space() is MemSpace.SHARED
+                 and hasattr(writer, 'swizzle_of') else None)
       type_ = (ScalarType(self._dest.get_fptype()) if scalar else
                BufferType(self._dest.get_fptype(), (self._extent(),),
-                          MemSpace.GLOBAL,
-                          readonly=self._src.obj.direction
-                          == DataFlowDirection.SOURCE))
+                          self._space(), swizzle,
+                          readonly=self._readonly()))
       value = writer.decl_expr(
-          lhs, text, type_,
-          self._src, args=args, kind=Effect.READ, hint=self._dest.name,
+          lhs, text, type_, self._src,
+          also=also, args=args, kind=Effect.READ, hint=self._dest.name,
           extern=self._dest.name, alias_root=self._src,
           # What the declared read cannot say: strided addressing reads
           # nothing and declares the read all the same, so only this tells a
@@ -773,6 +890,18 @@ class DeclareOperandTable(AbstractInstruction):
     loop needs: the allocator keeps a member staged in shared memory clear of
     what the loop allocates, and the barrier placement orders it after what
     wrote it.  A member that is a number touches no memory.
+
+    A *shared* member of a writable table is claimed written and not also
+    read.  The union is true of the loop and false of this position: the
+    whole claim sits at the head of the body, and the layout check sorts a
+    statement's reads ahead of its writes, so the union reads as a read of
+    the slot before anything wrote it -- which is a violation against
+    whatever shares its bytes, reported for every rotation there is.  What
+    the loop reads it reads through the other hole of the family, whose own
+    table says so (`Generator._rotate_members`).  Only for the shared ones:
+    a writable table over kernel arguments is an accumulator's, read and
+    written through the one binding, and saying less of it would let a
+    write move past a read.
     """
     from tensorforge.backend.pir.build import access_of
     from tensorforge.backend.pir.core import Access
@@ -783,8 +912,11 @@ class DeclareOperandTable(AbstractInstruction):
         continue
       window = (member.pir_buffer(writer)
                 if member.stype == SymbolType.SharedMem else None)
-      out.append(Access(kind, MemSpace.SHARED, window) if window is not None
-                 else access_of(member, kind))
+      if window is not None:
+        out.append(Access(Effect.WRITE if self._writable else Effect.READ,
+                          MemSpace.SHARED, window))
+      else:
+        out.append(access_of(member, kind))
     return tuple(out)
 
   def gen_ir(self, writer):

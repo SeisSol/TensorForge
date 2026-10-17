@@ -54,6 +54,23 @@ class Scopes:
     self._does_name_exist(self._inv_tables, symbol.name)
     self._inv_tables[-1][symbol.obj] = symbol
 
+  def alias_symbol(self, obj, symbol: Symbol):
+    """Let `obj` resolve to a symbol another tensor already owns.
+
+    One buffer, several tensors.  A merged run that carries a value from one
+    iteration to the next needs as many buffers as the distance it carries
+    over, not one per member: the fifth derivative is written where the
+    third was, because by then nothing wants the third
+    (`Generator._rotate_members`).  The members are distinct tensors all the
+    same -- the description names them apart and the unrolled form keeps
+    them apart -- so the sharing is recorded here, where the resolution
+    happens, rather than by merging the tensors themselves.
+
+    No name check, because there is no new name: the symbol is one that was
+    registered already.
+    """
+    self._inv_tables[-1][obj] = symbol
+
   def get_symbol(self, obj):
     for table in reversed(self._inv_tables):
       if obj in table:
