@@ -82,6 +82,7 @@ STACKING = Path('src/tensorforge/generators/stacking.py')
 BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
 TUNING = Path('src/tensorforge/generators/tuning.py')
 BOUND = Path('src/tensorforge/analysis/pipeline.py')
+RESIDENCY = Path('src/tensorforge/backend/residency.py')
 TILING = PKG / 'tiling.py'
 
 
@@ -2647,6 +2648,28 @@ GROUPS = {
         ('the writes of what it reads not looked for in a counted loop',
          sub(WRAP, '        if self.kind is not None:\n            writers = tuple(',
              '        if False:\n            writers = tuple(', 1)),
+    ]),
+    'closedtrips': ('tests/test_rolling.py::test_a_merged_run_computes_what_the_list_written_out_does '
+                    'tests/test_rolling.py::test_a_closed_trip_stores_a_temporary_the_next_trip_reads '
+                    'tests/test_rolling.py::test_a_closed_trip_stores_what_outlives_it_and_nothing_it_used_up '
+                    'tests/test_residency.py', [
+        ('a closed trip opened on a result still in registers',
+         sub(GEN, '      self._section.ir.extend(self._residency.flush(name))\n'
+                  '      if name not in writes:',
+             '      if name not in writes:', 1)),
+        ('a closed trip that stores nothing at its end',
+         sub(RESIDENCY, '        out = [self._store(entry) for entry in self._entries.values()\n'
+                        '               if not entry.is_preload and outlives(entry)]',
+             '        out = []', 1)),
+        ('a trip that forgets what the next one reads of it',
+         sub(GEN, '      carried.update(id(t) for t in reads if id(t) not in seen)\n', '', 1)),
+        ('a trip that stores the temporaries it used up',
+         sub(GEN, '      return id(tensor) in needed\n', '      return True\n', 1)),
+        ('a trip lets go of a result held around it',
+         sub(RESIDENCY, '                if not entry.is_preload:\n'
+                        '                    raise InternalError(',
+             '                if False:\n'
+                        '                    raise InternalError(', 1)),
     ]),
 }
 

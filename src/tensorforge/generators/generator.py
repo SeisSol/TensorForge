@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import hashlib
+import itertools
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.generators.rolling import ForDescr, roll
 from tensorforge.common.context import Context
@@ -2737,10 +2738,15 @@ class Generator:
     last = (self._last_touch(descr_list)
             if self._context.get_user_options().early_writebacks else None)
     index = -1
-    for outer in descr_list:
+    closed = self._context.get_user_options().closed_trips
+    for position, outer in enumerate(descr_list):
       if isinstance(outer, ForDescr) and self._emit_loops:
         guard.flush()
-        self._emit_variant_loop(outer, builders)
+        if closed:
+          self._emit_closed_loop(outer, builders,
+                                 self._read_after(descr_list, position))
+        else:
+          self._emit_variant_loop(outer, builders)
         index += len(outer.operations())
         if last is not None:
           self._retire_writebacks(residency, last, index, guard)
@@ -2815,10 +2821,7 @@ class Generator:
     assembled here and not inside a builder: no operation in the body knows it
     is in a loop, and none of them has to.
     """
-    from tensorforge.backend.instructions.ptr_manip import (
-        DeclareOperandTable, TableForm, VariantLoop)
-    from tensorforge.backend.instructions.builders.ptr_manip_builder import \
-        GetElementPtrBuilder
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
 
     body, variants = loop.decompose()
     self._rotate_members(loop, variants)
@@ -2918,74 +2921,8 @@ class Generator:
           continue
         self._section.ir.extend(self._residency.flush(member.name))
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
-
-    tables, region = [], []
-    pointers = GetElementPtrBuilder(self._context, self._scopes)
-    for variant in variants:
-      members = [self._member_symbol(view) for view in variant.members]
-      stand_in = self._member_symbol(variant.stand_in)
-      # A hole whose members all resolve to one symbol selects nothing.  A
-      # table over them would be a chain whose every arm is that symbol and
-      # a binding naming a pointer to read it through -- and the stand-in
-      # already resolves there, so the body reads it where it is.  Which for
-      # a register image is the only way to read it at all: a register has
-      # no address to put in a table, and the residency hands the image to
-      # whoever asks for the symbol it is the image of.
-      if all(m is stand_in for m in members):
-        continue
-      # The members are the bindings, not the parameters: `glb_m5` is
-      # already `&m5[batchId][offset]`, one element's data, whatever the
-      # parameter's addressing was -- and the binding after the table reads
-      # it as such.  So the table holds plain data pointers, which is what a
-      # batch-invariant operand's are.  Typed by the stand-in's addressing it
-      # would declare `const float **` over `const float *` members.
-      # A member staged into shared memory (`s0`, the peeled first one of a
-      # preloaded run) is a data pointer as much as a binding is: left out,
-      # SeisSol's `gpu_localFluxAll` would type its table `const float **`
-      # over `s0` and `glb_m5`, which nvcc refuses.
-      resolved = all(m.name.startswith(GeneralLexicon.GLOBAL_MEM_PREFIX)
-                     or m.stype == SymbolType.SharedMem for m in members)
-      # A scalar stays a scalar: its bindings are values, and a table of them
-      # is a select over values -- typed as data pointers because they are
-      # named `glb_`, it would declare `const float *` over `float`s.  And a
-      # table over members the loop writes is not `const`.
-      if stand_in.obj.addressing == Addressing.SCALAR:
-        addressing = Addressing.SCALAR
-      else:
-        addressing = Addressing.NONE if resolved else stand_in.obj.addressing
-      # Named after the stand-in *tensor* where that is not the symbol's
-      # own name.  A rotated stand-in resolves to its family's first slot,
-      # so two holes of one family share a symbol -- the hole that reads
-      # `dQane_d` and the hole that writes `dQane_{d+1}` -- and both tables
-      # would be `s11Table`, which is one declaration of two things.
-      table_name = (variant.stand_in.tensor.name
-                    if stand_in.obj is not variant.stand_in.tensor
-                    else stand_in.name)
-      table = DeclareOperandTable(
-          self._context, f'{table_name}Table', members,
-          addressing,
-          stand_in.obj.datatype,
-          writable=id(variant.stand_in.tensor) in written,
-          form=(TableForm.SELECT
-                if len(members) <= DeclareOperandTable.SELECT_LIMIT
-                else TableForm.ARRAY),
-          variant=counter, first=0 if resident else 1)
-      tables.append(table)
-      if self._stages(stand_in, written):
-        region.extend(self._stage_member(stand_in, table, counter))
-        continue
-      # A rotated stand-in resolves to its family's first slot, so two
-      # holes of one family share a symbol and would name one pointer
-      # twice -- the hole that reads `dQane_d` and the hole that writes
-      # `dQane_{d+1}` are two bindings on the same pass.  The stand-in
-      # tensor's own name (`v0`, `v1`) is what tells them apart, and it is
-      # the name a stand-in that is no temporary would have given anyway.
-      rotated = stand_in.obj is not variant.stand_in.tensor
-      pointers.build(stand_in, table=table, variant=counter,
-                     name=(getattr(variant.stand_in.tensor, 'name', None)
-                           if rotated else None),
-                     obj=variant.stand_in.tensor if rotated else None)
-      region.extend(pointers.get_instructions())
+    tables, region = self._bind_holes(variants, written, counter,
+                                      first=0 if resident else 1)
 
     before = {}
     for key in keys:
@@ -3103,6 +3040,236 @@ class Generator:
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables,
                     start=0 if resident else 1, carried=tuple(carried)))
+
+  def _emit_closed_loop(self, loop, builders, later) -> None:
+    """A merged run whose trips hand each other nothing but memory
+    (`Options.closed_trips`).
+
+    The body is built once and runs on every trip, so whatever its build
+    leaves in registers is what the next trip starts from.  Here that is
+    nothing:
+
+    * ahead of the loop, every result the body touches is stored where its
+      symbol says.  One the body only reads stays in registers as the copy it
+      now is, and every trip reads that copy; one it writes is forgotten,
+      since a trip changes what memory holds of it.  A table reads memory in
+      any case: a member whose newest copy were still in registers would be
+      read as the buffer was before it;
+    * the body is built in a residency of its own (`Residency.trip`), so
+      what its operations leave in registers is the trip's;
+    * at its end every result that something after the trip reads -- the
+      next trip, or the code behind the loop (`later`, the id() of what that
+      reads) -- is stored, and a temporary the trip computes and uses itself
+      is not (`_trip_outlives`).
+
+    So there is nothing to arrange around the back edge: no first trip built
+    beside the loop, no destination made resident ahead of it, no register
+    renamed to close a chain, and the body's registers are declared where its
+    operations declare them, afresh on every trip.  What it costs is an
+    accumulator stored and read again on every trip.
+    """
+    from tensorforge.backend.instructions.ptr_manip import VariantLoop
+
+    body, variants = loop.decompose()
+    self._rotate_members(loop, variants)
+    written = {id(d.writes().tensor) for d in body if d.writes() is not None}
+
+    # What the body touches, by the residency's key, and what of it it
+    # writes: the members through the tables, and the operands it names
+    # itself.  A stand-in is bound inside the loop and has no entry yet.
+    touched: List[str] = []
+    writes = set()
+
+    def touch(symbol, wrote: bool) -> None:
+      if symbol is None:
+        return
+      if symbol.name not in touched:
+        touched.append(symbol.name)
+      if wrote:
+        writes.add(symbol.name)
+
+    for variant in variants:
+      wrote = id(variant.stand_in.tensor) in written
+      for view in variant.members:
+        touch(self._member_symbol(view), wrote)
+    for descr in body:
+      for view in itertools.chain(descr.reads(), descr.condition_reads()):
+        if not getattr(view.tensor, 'is_variant', False):
+          touch(self._scopes.get_symbol(view.tensor), False)
+      dest = descr.writes()
+      if dest is not None and not getattr(dest.tensor, 'is_variant', False):
+        touch(self._scopes.get_symbol(dest.tensor), True)
+    for name in touched:
+      entry = self._residency.get(name)
+      if entry is None or (entry.is_preload and name not in writes):
+        continue
+      self._section.ir.extend(self._residency.flush(name))
+      if name not in writes:
+        # Stored, so the image is a copy of what memory now holds.
+        self._residency.record_preload(name, entry.image,
+                                       covered=entry.covered,
+                                       shift=entry.shift)
+
+    counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
+    outlives = self._trip_outlives(body, variants, later)
+    with self._residency.trip():
+      tables, region = self._bind_holes(variants, written, counter, first=0)
+      for descr in body:
+        for kind, builder in builders:
+          if (isinstance(descr, kind) if isinstance(kind, type)
+                  else kind(descr)):
+            builder.build(descr)
+            region.extend(builder.get_instructions())
+            break
+        else:
+          raise InternalError(
+              f'no builder for {descr.__class__.__name__}: {descr}')
+      region.extend(self._residency.close_trip(outlives))
+    self._section.ir.append(
+        VariantLoop(self._context, counter, loop.iterations, region, tables))
+
+  def _trip_outlives(self, body, variants, later):
+    """Which of a closed trip's results have to reach memory at its end
+    (`_emit_closed_loop`): a predicate over residency entries.
+
+    Anything with a home outside shared memory, a kernel argument above all,
+    whatever reads it.  In shared memory, a slot or binding of a hole -- the
+    next trip reads it through another hole, or the code behind the loop
+    reads the last one -- and a temporary that something after the trip
+    reads: the next trip, where the body reads it before it writes it (an
+    accumulation reads what it adds to), and the code behind the loop, where
+    `later` holds it.  What is left is a temporary the trip computes and uses
+    itself, which an assignment defines whole, so the next trip computes it
+    afresh.
+    """
+    seen, carried = set(), set()
+    for descr in body:
+      reads = [view.tensor for view in itertools.chain(
+          descr.reads(), descr.condition_reads())]
+      dest = descr.writes()
+      if dest is not None and getattr(descr, 'add', False):
+        reads.append(dest.tensor)
+      carried.update(id(t) for t in reads if id(t) not in seen)
+      if dest is not None:
+        seen.add(id(dest.tensor))
+    members = {id(self._member_symbol(view)) for variant in variants
+               for view in variant.members}
+    needed = carried | set(later)
+
+    def outlives(entry) -> bool:
+      home = entry.home
+      if home.stype != SymbolType.SharedMem:
+        return True
+      if id(home) in members or getattr(home, 'rotation_slot', False):
+        return True
+      tensor = home.obj
+      if (not getattr(tensor, 'is_tmp', False)
+              or getattr(tensor, 'is_variant', False)):
+        return True
+      return id(tensor) in needed
+
+    return outlives
+
+  @staticmethod
+  def _read_after(descr_list, position: int) -> frozenset:
+    """id() of every tensor an operation after `descr_list[position]` reads
+    -- what an accumulation adds to included."""
+    out = set()
+    for outer in descr_list[position + 1:]:
+      if not isinstance(outer, OperationDescription):
+        continue
+      for descr in outer.operations():
+        for view in itertools.chain(descr.reads(), descr.condition_reads()):
+          out.add(id(view.tensor))
+        dest = descr.writes()
+        if dest is not None and getattr(descr, 'add', False):
+          out.add(id(dest.tensor))
+    return frozenset(out)
+
+  def _bind_holes(self, variants, written, counter: str, first: int):
+    """The tables a merged run reaches its varying operands through, and the
+    bindings that open its body: `(tables, region)`.
+
+    One table per hole that selects anything, over the members' symbols, and
+    a binding that reads it at `counter` -- or the copy a staged hole makes
+    of its member (`_stage_member`).  `written` holds id() of the stand-ins
+    the body writes, whose tables are not `const`; `first` is the member the
+    loop's first trip selects.
+    """
+    from tensorforge.backend.instructions.ptr_manip import (
+        DeclareOperandTable, TableForm)
+    from tensorforge.backend.instructions.builders.ptr_manip_builder import \
+        GetElementPtrBuilder
+
+    tables, region = [], []
+    pointers = GetElementPtrBuilder(self._context, self._scopes)
+    for variant in variants:
+      members = [self._member_symbol(view) for view in variant.members]
+      stand_in = self._member_symbol(variant.stand_in)
+      # A hole whose members all resolve to one symbol selects nothing.  A
+      # table over them would be a chain whose every arm is that symbol and
+      # a binding naming a pointer to read it through -- and the stand-in
+      # already resolves there, so the body reads it where it is.  Which for
+      # a register image is the only way to read it at all: a register has
+      # no address to put in a table, and the residency hands the image to
+      # whoever asks for the symbol it is the image of.
+      if all(m is stand_in for m in members):
+        continue
+      # The members are the bindings, not the parameters: `glb_m5` is
+      # already `&m5[batchId][offset]`, one element's data, whatever the
+      # parameter's addressing was -- and the binding after the table reads
+      # it as such.  So the table holds plain data pointers, which is what a
+      # batch-invariant operand's are.  Typed by the stand-in's addressing it
+      # would declare `const float **` over `const float *` members.
+      # A member staged into shared memory (`s0`, the peeled first one of a
+      # preloaded run) is a data pointer as much as a binding is: left out,
+      # SeisSol's `gpu_localFluxAll` would type its table `const float **`
+      # over `s0` and `glb_m5`, which nvcc refuses.
+      resolved = all(m.name.startswith(GeneralLexicon.GLOBAL_MEM_PREFIX)
+                     or m.stype == SymbolType.SharedMem for m in members)
+      # A scalar stays a scalar: its bindings are values, and a table of them
+      # is a select over values -- typed as data pointers because they are
+      # named `glb_`, it would declare `const float *` over `float`s.  And a
+      # table over members the loop writes is not `const`.
+      if stand_in.obj.addressing == Addressing.SCALAR:
+        addressing = Addressing.SCALAR
+      else:
+        addressing = Addressing.NONE if resolved else stand_in.obj.addressing
+      # Named after the stand-in *tensor* where that is not the symbol's
+      # own name.  A rotated stand-in resolves to its family's first slot,
+      # so two holes of one family share a symbol -- the hole that reads
+      # `dQane_d` and the hole that writes `dQane_{d+1}` -- and both tables
+      # would be `s11Table`, which is one declaration of two things.
+      table_name = (variant.stand_in.tensor.name
+                    if stand_in.obj is not variant.stand_in.tensor
+                    else stand_in.name)
+      table = DeclareOperandTable(
+          self._context, f'{table_name}Table', members,
+          addressing,
+          stand_in.obj.datatype,
+          writable=id(variant.stand_in.tensor) in written,
+          form=(TableForm.SELECT
+                if len(members) <= DeclareOperandTable.SELECT_LIMIT
+                else TableForm.ARRAY),
+          variant=counter, first=first)
+      tables.append(table)
+      if self._stages(stand_in, written):
+        region.extend(self._stage_member(stand_in, table, counter))
+        continue
+      # A rotated stand-in resolves to its family's first slot, so two
+      # holes of one family share a symbol and would name one pointer
+      # twice -- the hole that reads `dQane_d` and the hole that writes
+      # `dQane_{d+1}` are two bindings on the same pass.  The stand-in
+      # tensor's own name (`v0`, `v1`) is what tells them apart, and it is
+      # the name a stand-in that is no temporary would have given anyway.
+      rotated = stand_in.obj is not variant.stand_in.tensor
+      pointers.build(stand_in, table=table, variant=counter,
+                     name=(getattr(variant.stand_in.tensor, 'name', None)
+                           if rotated else None),
+                     obj=variant.stand_in.tensor if rotated else None)
+      region.extend(pointers.get_instructions())
+
+    return tables, region
 
   def _reset_temporaries(self, region, allocations, follows, carried):
     """Set the accumulators the body allocated back where their allocations
@@ -3236,7 +3403,10 @@ class Generator:
       #
       # Only at one slot.  Two slots alternate, and a register has no
       # address to alternate by -- that wants a copy at the tail of the
-      # trip, not a table.
+      # trip, not a table.  A loop whose trips are closed
+      # (`_emit_closed_loop`) stores that image ahead of it like anything
+      # else its trips touch, and the family's one buffer is the member's
+      # own; what keeps it in registers there is the pseudo-IR's.
       home = self._scopes.get_symbol(family[0])
       entry = self._residency.get(home.name) if home is not None else None
       if (width == 1 and home is not None and entry is not None

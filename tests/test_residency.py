@@ -17,9 +17,12 @@ between a later consumer and the wrong elements from the wrong lanes.
 
 from __future__ import annotations
 
+import pytest
+
 from tensorforge.backend.residency import (Residency, ResidencyEntry,
                                            ResidencyKind)
 from tensorforge.backend.symbol import Symbol, SymbolType
+from tensorforge.common.exceptions import InternalError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 
 
@@ -184,3 +187,76 @@ def test_iteration_tolerates_dropping_during_it():
         seen.append(name)
         res.drop(name)
     assert seen == ["m0", "m1", "m2"]
+
+
+# ----------------------------------------------------------------------
+# a merged run's trip
+# ----------------------------------------------------------------------
+
+def test_a_trip_reads_the_copies_around_it_and_changes_none():
+    """A trip sees what the record around it holds, and letting go of a copy
+    only hides it from the trip: the code behind the loop still finds it."""
+    res = _residency()
+    image = _sym("r0")
+    res.record_preload("m0", image, _box([0, 0], [8, 8]), [0, 0])
+
+    with res.trip():
+        assert res.get("m0").image is image
+        assert "m0" in res
+        assert res.drop("m0").image is image
+        assert res.get("m0") is None
+        assert "m0" not in dict(res.items())
+        res.record_preload("m1", _sym("r1"))
+        assert res.close_trip(lambda entry: True) == []
+
+    assert res.get("m0").image is image
+    assert res.get("m1") is None
+
+
+def test_what_a_trip_records_shadows_the_record_around_it():
+    res = _residency()
+    res.record_preload("m0", _sym("r0"))
+    with res.trip():
+        res.record_preload("m0", _sym("r7"))
+        assert res.get("m0").image.name == "r7"
+        res.close_trip(lambda entry: True)
+    assert res.get("m0").image.name == "r0"
+
+
+def test_a_trip_may_not_let_go_of_a_result_held_around_it():
+    """Letting go of a result held only in registers means storing it, and
+    stored from inside the loop it would be stored on every trip.  Whoever
+    opens the trip stores those first (`Generator._emit_closed_loop`)."""
+    res = _residency()
+    res.record_writeback("m0", _sym("r0"), _sym("m0", SymbolType.Global))
+    with pytest.raises(InternalError):
+        with res.trip():
+            res.drop("m0")
+    # the record around the trip is as it was
+    assert not res.get("m0").is_preload
+
+
+def test_a_trip_ends_with_nothing_held_only_in_registers():
+    """What the trip leaves in registers would be read by the next trip as if
+    it were its own: `close_trip` settles it, and a trip ended without that
+    is refused."""
+    res = _residency()
+    with pytest.raises(InternalError):
+        with res.trip():
+            res.record_writeback("s0", _sym("r0"),
+                                 _sym("s0", SymbolType.SharedMem))
+
+    with res.trip():
+        res.record_writeback("s0", _sym("r0"),
+                             _sym("s0", SymbolType.SharedMem))
+        # nothing after the trip reads it: dropped, and nothing is stored
+        assert res.close_trip(lambda entry: False) == []
+        assert res.get("s0") is None
+
+
+def test_trips_do_not_nest():
+    res = _residency()
+    with pytest.raises(InternalError):
+        with res.trip():
+            with res.trip():
+                pass

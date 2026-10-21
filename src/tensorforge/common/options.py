@@ -780,6 +780,21 @@ declare('rotate_slots',
             'nothing and is allowed only because refusing it would be a '
             'rule with no case behind it.')
 
+declare('closed_trips',
+        default=False,
+        parse=parse_bool,
+        doc='Lower a merged run so that its trips hand each other nothing but '
+            'memory.\n'
+            'Ahead of the loop every result the body reads or writes is stored '
+            'where its symbol says; the body is built in a residency of its '
+            'own (`Residency.trip`), so it starts with nothing in registers a '
+            'trip could have changed; and at its end every result a later '
+            'trip or the code behind the loop reads is stored -- a temporary '
+            'the trip computes for itself is not.  The body is then the same '
+            'on every trip by construction.  What that costs is an accumulator '
+            'read and written through memory on every trip.  See '
+            '`Generator._emit_closed_loop`.')
+
 declare('stage_group',
         default=8,
         doc='Multiplications a block holds under `stage_members`, and so how '

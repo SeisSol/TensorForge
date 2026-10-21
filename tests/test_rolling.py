@@ -1433,6 +1433,28 @@ def _staged(count=4):
     return out + [gemm(make('I', [24, 5]), SubTensor(s), make('O', [24, 5]))]
 
 
+def _scratch(count=4):
+    """`t_i = I A_i` and `Q += P_i t_i`, a temporary assigned afresh on every
+    iteration and added onto the destination, as SeisSol's `localFluxAll`
+    does."""
+    out = []
+    for i in range(count):
+        scratch = make(f'scratch{i}', [24, 5], is_tmp=True)
+        out.append(gemm(make('I', [24, 5]), make(f'A{i}', [5, 5]), scratch))
+        out.append(gemm(make(f'P{i}', [24, 24]), scratch, make('Q', [24, 5]),
+                        add=True))
+    return out
+
+
+def _started(terms=4):
+    """`Q = L_0 C_0` and `Q += L_k C_k` behind it: an accumulator the list
+    begins ahead of the run, as SeisSol's Taylor expansion sums its first
+    term there."""
+    return ([gemm(make('L0', [24, 5]), make('C0', [5, 5]), make('Q', [24, 5]))]
+            + [gemm(make(f'L{k}', [24, 5]), make(f'C{k}', [5, 5]),
+                    make('Q', [24, 5]), add=True) for k in range(1, terms)])
+
+
 def _argument_chain(steps=3):
     """`L(k + 1) = A L(k)` and `Q += L(k + 1) C(k)`, with the levels the
     kernel's own arguments: the shape of SeisSol's anelastic time derivative,
@@ -1573,6 +1595,29 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('chain', False, {}),
     ('chain', False, {'wrap_early': False}),
     ('chain', False, {'enable_wrap_loads': False}),
+    ('accumulation', False, {'closed_trips': True}),
+    ('accumulation', True, {'closed_trips': True}),
+    ('read_first', False, {'closed_trips': True}),
+    ('staged', False, {'stage_members': True, 'closed_trips': True}),
+    ('scratch', False, {'closed_trips': True}),
+    ('scratch', True, {'closed_trips': True}),
+    ('carried', False, {'closed_trips': True}),
+    ('chain', False, {'closed_trips': True}),
+    ('started', False, {}),
+    ('started', True, {}),
+    ('started', False, {'closed_trips': True}),
+    ('started', True, {'closed_trips': True}),
+    ('read_first_temporary', False, {}),
+    ('read_first_temporary', False, {'closed_trips': True}),
+    ('read_by_the_next_trip', False, {}),
+    ('read_by_the_next_trip', False, {'closed_trips': True}),
+    ('projected', False, {}),
+    ('projected', False, {'closed_trips': True}),
+    ('carried', False, {'closed_trips': True, 'rotate_slots': 1}),
+    ('carried_from_ahead', False, {}),
+    ('carried_from_ahead', False, {'rotate_slots': 1}),
+    ('carried_from_ahead', False, {'closed_trips': True}),
+    ('carried_from_ahead', False, {'closed_trips': True, 'rotate_slots': 1}),
 ])
 def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                                                               options):
@@ -1590,7 +1635,9 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
     carries its levels through the kernel's own arguments, as SeisSol's
     anelastic time derivative does: the hole a trip writes is the hole the
     next one reads, and the read of the next trip's level, issued a trip
-    ahead (`pir.wrap`), has to wait for this trip's write of it."""
+    ahead (`pir.wrap`), has to wait for this trip's write of it.  And all of
+    them again with the trips closed (`Options.closed_trips`), where nothing
+    but memory crosses the back edge."""
     from dataclasses import replace
 
     import numpy as np
@@ -1605,30 +1652,37 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                          make('Q', [24, 5]), add=True) for i in range(4)]
         if shape == 'read_first':
             return _read_first()
-        if shape == 'carried':
+        if shape in ('carried', 'carried_from_ahead'):
             # A chain through temporaries: each step reads what the last
             # wrote, which is what the rotation serves
             # (`Generator._rotate_members`).  The oracle is the same list
             # written out, so a slot bound to the wrong member, or one
             # overwritten before its reader, shows up as numbers and not as
-            # a build that happens to succeed.
+            # a build that happens to succeed.  `carried_from_ahead` begins
+            # the chain with a step of another shape, ahead of the run, which
+            # leaves the run's first member in registers.
             out = []
+            if shape == 'carried_from_ahead':
+                out.append(gemm(make('B', [24, 16]), make('carry', [16, 5]),
+                                make('carry0', [24, 5], is_tmp=True)))
             for i in range(4):
                 out.append(gemm(make(f'A{i}', [24, 24]),
-                                make(f'carry{i}', [24, 5], is_tmp=i > 0),
+                                make(f'carry{i}', [24, 5],
+                                     is_tmp=i > 0 or shape != 'carried'),
                                 make(f'carry{i + 1}', [24, 5], is_tmp=True)))
             out.append(gemm(make('P', [24, 24]), make('carry4', [24, 5], True),
                             make('Q', [24, 5])))
             return out
         if shape == 'scratch':
-            out = []
-            for i in range(4):
-                scratch = make(f'scratch{i}', [24, 5], is_tmp=True)
-                out.append(gemm(make('I', [24, 5]), make(f'A{i}', [5, 5]),
-                                scratch))
-                out.append(gemm(make(f'P{i}', [24, 24]), scratch,
-                                make('Q', [24, 5]), add=True))
-            return out
+            return _scratch()
+        if shape == 'started':
+            return _started()
+        if shape == 'read_first_temporary':
+            return _read_first_temporary()
+        if shape == 'read_by_the_next_trip':
+            return _read_first_temporary(behind=False)
+        if shape == 'projected':
+            return _projected()
         if shape == 'chain':
             return _argument_chain()
         return _staged()
@@ -1843,3 +1897,127 @@ def test_a_run_reads_its_table_and_its_factor_inside_the_loop():
     early = {n: (used[n][0], declared.get(n)) for n in used
              if n in declared and used[n][0] < declared[n]}
     assert not early, f'read before it is bound: {early}'
+
+
+# -- closed trips (`Options.closed_trips`) ---------------------------------- #
+
+def _around_the_run(gen):
+    """`(ahead, loop, behind)` in the section's pseudo-IR: the statements of
+    the list the merged run's loop stands in, on either side of it."""
+    from tensorforge.backend.pir.core import Op
+
+    def find(stmts):
+        for i, s in enumerate(stmts):
+            if s.op is Op.FOR and s.attr('rolled'):
+                return list(stmts[:i]), s, list(stmts[i + 1:])
+            for r in s.regions:
+                found = find(r.body)
+                if found is not None:
+                    return found
+        return None
+    return find(gen._sections[0].body)
+
+
+def _output(gen):
+    """The one buffer in global memory the section writes: `Q` below."""
+    from tensorforge.backend.pir.core import MemSpace, walk_stmts
+    bases = {id(a.base): a.base for s in walk_stmts(gen._sections[0].body)
+             for a in s.accesses if a.space is MemSpace.GLOBAL and a.writes}
+    base, = bases.values()
+    return base
+
+
+def test_a_closed_trip_hands_the_next_one_nothing_but_memory():
+    """With its trips closed, the loop runs every iteration, its body
+    declares its own registers, and no register is threaded through the
+    trips or set back on each.  The accumulator goes to memory at the tail
+    of every trip and comes back at the head of the next."""
+    from tensorforge.backend.pir.core import walk_stmts
+    gen = _merged_build(roll(accumulation()), closed_trips=True)
+    ahead, loop, _ = _around_the_loop(gen)
+    assert (loop.start, loop.carried) == (0, ())
+    assert 'RegisterAlloc' not in _kinds(ahead)
+    assert 'RegisterReset' not in _kinds(loop.region)
+    q = _output(gen)
+    _, run, _ = _around_the_run(gen)
+    touched = [a for s in walk_stmts(run.regions[0].body)
+               for a in s.accesses if a.base is q]
+    assert any(a.writes for a in touched)
+    assert any(not a.writes for a in touched)
+
+
+def _projected(count=4):
+    """`T = X_0 A_i + X_1 B_i`, `U = T W` and `O_i = V U`: temporaries a trip
+    computes and uses itself, as SeisSol's `projectToDR` sums the time
+    derivatives of an element before it projects them."""
+    out = []
+    for i in range(count):
+        out.append(gemm(make('X0', [24, 9]), make(f'A{i}', [9, 9]),
+                        make('T', [24, 9], True)))
+        out.append(gemm(make('X1', [24, 9]), make(f'B{i}', [9, 9]),
+                        make('T', [24, 9], True), add=True))
+        out.append(gemm(make('T', [24, 9], True), make('W', [9, 9]),
+                        make('U', [24, 9], True)))
+        out.append(gemm(make('V', [32, 24]), make('U', [24, 9], True),
+                        make(f'O{i}', [32, 9])))
+    return out
+
+
+@pytest.mark.parametrize('shape', ['scratch', 'projected'])
+def test_a_closed_trip_stores_what_outlives_it_and_nothing_it_used_up(shape):
+    """At the end of a closed trip, what the next trip or the code behind the
+    loop reads goes to memory, and a temporary the trip computes and uses
+    itself does not (`Generator._trip_outlives`): `t_i = I A_i`,
+    `Q += P_i t_i` ends its trip storing `Q` and not `t` -- and
+    `T = X_0 A_i + X_1 B_i`, `O_i = V T W` its trip storing `O_i` and not
+    `T`, which the trip ends with in registers."""
+    descrs = _scratch() if shape == 'scratch' else _projected()
+    gen = _merged_build(roll(descrs), closed_trips=True)
+    _, loop, _ = _around_the_loop(gen)
+    tail = []
+    for instr in reversed(loop.region):
+        if type(instr).__name__ not in ('StoreRegToGlb', 'StoreRegToShr'):
+            break
+        tail.append(instr)
+    assert _kinds(tail) == ['StoreRegToGlb']
+
+
+def _read_first_temporary(count=4, behind=True):
+    """`T_i = W_i S; S += V_i T_i` over a temporary `S` that the list sets
+    ahead of the run and reads behind it -- or, without `behind`, that only
+    the next trip reads, and the trips leave `O += U T_i`."""
+    out = [gemm(make('Y', [9, 9]), make('X', [9, 4]),
+                make('S', [9, 4], is_tmp=True))]
+    for i in range(count):
+        tmp = make('T', [9, 4], is_tmp=True)
+        out.append(gemm(make(f'W{i}', [9, 9]), make('S', [9, 4], True), tmp))
+        out.append(gemm(make(f'V{i}', [9, 9]), tmp, make('S', [9, 4], True),
+                        add=True))
+        if not behind:
+            out.append(gemm(make('U', [9, 9]), tmp, make('O', [9, 4]),
+                            add=True))
+    if not behind:
+        return out
+    return out + [gemm(make('Z', [9, 9]), make('S', [9, 4], True),
+                       make('O', [9, 4]))]
+
+
+@pytest.mark.parametrize('behind', [True, False])
+def test_a_closed_trip_stores_a_temporary_the_next_trip_reads(behind):
+    """A temporary the trip reads before it writes it is the last trip's, and
+    a closed trip finds it in memory: what the trip leaves in `S` is stored
+    at its end, on every trip -- and `T`, which the trip computes and uses
+    itself, is not.  So it is where nothing behind the loop reads `S`: the
+    next trip does."""
+    gen = _merged_build(roll(_read_first_temporary(behind=behind)),
+                        closed_trips=True)
+    _, loop, _ = _around_the_loop(gen)
+    assert (loop.start, loop.count) == (0, 4)
+    tail = []
+    for instr in reversed(loop.region):
+        if type(instr).__name__ not in ('StoreRegToGlb', 'StoreRegToShr'):
+            break
+        tail.append(instr)
+    shared = [i for i in tail if type(i).__name__ == 'StoreRegToShr']
+    assert [i._dest.obj.alias for i in shared] == ['S']
+    assert len(tail) == (1 if behind else 2)
