@@ -33,6 +33,7 @@ from tensorforge.backend.passmanager import Pass, PassContext, PassManager
 from .asyncmem import schedule_async
 from .allocate import allocate
 from .barriers import place_barriers
+from .carry import carry_trips
 from .core import Stmt, dump
 from .move import cap_cover, move_loads
 from .transfers import memory_path
@@ -288,6 +289,37 @@ class Prefetch(Pass):
                                  report=self._report)
 
 
+class CarryTrips(Pass):
+    """Keep in registers what the trips of a merged run hand each other
+    through memory (`carry.carry_trips`).
+
+    Behind everything that cleans the body up -- the load at the head of a
+    trip and the store at its tail are transfers and nests the loaders and
+    the stores open, which `flatten` brings out -- and ahead of the wrap,
+    which would otherwise issue the next trip's load at the tail of this one.
+    Not under the explicit vector, whose register images are vectors a slot
+    does not hold.  `threads` is how many lanes a multiplication spans, and
+    `report` collects what was carried and why the rest was not.
+    """
+
+    name = 'carry'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, scratch, threads: int,
+                 report: Optional[List[str]] = None):
+        self._scratch = scratch
+        self._threads = threads
+        self._report = report
+
+    def run(self, pc: BodyContext) -> None:
+        if pc.explicit_simd:
+            return
+        pc.body = carry_trips(pc.body, self._scratch, threads=self._threads,
+                              report=self._report)
+
+
 class ShardLoads(Pass):
     """Read the shards of the batch-constant operands that fit from the
     block's shared memory (`shards.shard_loads`).
@@ -347,7 +379,8 @@ def standard_pipeline(debug: str = '',
                       move: Optional[MoveLoads] = None,
                       prefetch: Optional[Prefetch] = None,
                       shards: Optional[ShardLoads] = None,
-                      rows: Optional[GroupRows] = None) -> PassManager:
+                      rows: Optional[GroupRows] = None,
+                      carry: Optional[CarryTrips] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -412,6 +445,12 @@ def standard_pipeline(debug: str = '',
     for the next element are statements of the body like any other, and go
     through the cleanup with it (`Prefetch`).
 
+    ``carry``, where asked for, runs behind the cleanup as well: what the
+    trips of a merged run hand each other through memory goes into registers
+    where it may (`CarryTrips`), and a ``dce`` takes the address arithmetic
+    of the stores it took out.  Ahead of ``shards`` and the wrap, which see
+    the load it moved ahead of the loop as a load of the body like any other.
+
     ``shards``, where asked for, runs behind the cleanup: it moves the loads
     of the batch-constant operands that remain to shared memory, as much of
     them as the budget it is handed admits (`ShardLoads`).
@@ -445,6 +484,9 @@ def standard_pipeline(debug: str = '',
     for name, fn in (('loads', load_cse), ('licm', licm), ('cse2', cse),
                      ('dce', dce)):
         pm.add(Rewrite(name, fn, preserves=('flat',)))
+    if carry is not None:
+        pm.add(carry)
+        pm.add(Rewrite('carry-dce', dce, preserves=('flat',)))
     if shards is not None:
         pm.add(shards)
     if wrap is not None:
@@ -477,6 +519,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              prefetch: Optional[Prefetch] = None,
              shards: Optional[ShardLoads] = None,
              rows: Optional[GroupRows] = None,
+             carry: Optional[CarryTrips] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
@@ -489,7 +532,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
-                      shards, rows).run(pc)
+                      shards, rows, carry).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

@@ -405,7 +405,8 @@ class AbstractInstruction(ABC):
 
   @classmethod
   def optimized_body(cls, context, names, fill, arena=None, place=None,
-                     barriers=None, metrics=None, shards=None, trips=None):
+                     barriers=None, metrics=None, shards=None, trips=None,
+                     carry=None):
     """`fill(builder)` as one body, through the pipeline, ready to emit.
 
     The half of `build_shared_body` that needs no writer: `names` is the
@@ -426,6 +427,9 @@ class AbstractInstruction(ABC):
     pass reported for the body returned.  `trips` is what `trips.trip_shards`
     takes besides the body, where a counted loop's reads are copied into the
     multiplication's shared memory a shard a trip (`Options.trip_shards`).
+    `carry` is what `carry.carry_trips` takes besides the body, where what
+    the trips of a merged run hand each other through memory is kept in
+    registers (`Options.carry_trips`).
     """
     def attempt():
       builder = cls._body_builder(context, names, arena)
@@ -440,7 +444,7 @@ class AbstractInstruction(ABC):
         lambda builder, body: cls._optimize_shared_body(context, builder, body,
                                                         place, barriers,
                                                         metrics, shards,
-                                                        trips))
+                                                        trips, carry))
     return body
 
   @staticmethod
@@ -450,7 +454,7 @@ class AbstractInstruction(ABC):
 
   @staticmethod
   def _optimize_shared_body(context, builder, body, place=None, barriers=None,
-                            metrics=None, shards=None, trips=None):
+                            metrics=None, shards=None, trips=None, carry=None):
     """A shared body through the pipeline, with the transfers issued ahead
     where that is asked for: within their statement list, and across the
     batch loop's back edge.
@@ -490,6 +494,10 @@ class AbstractInstruction(ABC):
       # A body built again reports afresh.
       del kept[:]
       held = pir.ShardLoads(builder.scratch, spec, report=kept)
+    carried = None
+    carries: list = []
+    if carry is not None and options.carry_trips:
+      carried = pir.CarryTrips(builder.scratch, report=carries, **carry)
     if (options.wave_uniform_group_rows
         and context.target.reads_first_lane()):
       # A no-op on a body whose batch loop reads no group's rows so
@@ -498,7 +506,8 @@ class AbstractInstruction(ABC):
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         debug=options.ir_debug, move=move, wrap=wrap,
                         place=place, barriers=barriers, prefetch=prefetch,
-                        shards=held, rows=rows, where='shared body')
+                        shards=held, rows=rows, carry=carried,
+                        where='shared body')
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)
@@ -511,6 +520,9 @@ class AbstractInstruction(ABC):
     if held is not None and options.ir_debug:
       for line in kept:
         print(f'shards: {line}')
+    if carried is not None and options.ir_debug:
+      for line in carries:
+        print(line)
     return body
 
   @staticmethod

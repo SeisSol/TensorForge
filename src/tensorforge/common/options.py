@@ -791,9 +791,23 @@ declare('closed_trips',
             'trip could have changed; and at its end every result a later '
             'trip or the code behind the loop reads is stored -- a temporary '
             'the trip computes for itself is not.  The body is then the same '
-            'on every trip by construction.  What that costs is an accumulator '
-            'read and written through memory on every trip.  See '
+            'on every trip by construction.  What that costs, an accumulator '
+            'read and written through memory on every trip, the pseudo-IR '
+            'takes back where it can show that it may (`pir.carry`).  See '
             '`Generator._emit_closed_loop`.')
+
+declare('carry_trips',
+        default=True,
+        parse=parse_bool,
+        doc='Keep in registers what the trips of a merged run hand each other '
+            'through memory: an accumulator loaded at the head of a trip and '
+            'stored at its tail is loaded once ahead of the loop and stored '
+            'once behind it, and an atomic update of one is summed in '
+            'registers and applied once.  Only where every lane is shown to '
+            'read back what it stored, and nothing else in the loop touches '
+            'the buffer (`pir.carry`).  A loop whose trips are closed '
+            '(`closed_trips`) is one that hands its accumulators over that '
+            'way.')
 
 declare('stage_group',
         default=8,

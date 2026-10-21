@@ -1731,7 +1731,7 @@ class Generator:
         lambda body: self._emit_section(body, index, section),
         arena=obj.name, place=place, barriers=self._barriers(section),
         metrics=self._metrics, shards=self._shard_spec(section),
-        trips=self._trip_spec())
+        trips=self._trip_spec(), carry=self._carry_spec())
     return body, place.layout
 
   def _trip_spec(self) -> Optional[dict]:
@@ -1749,6 +1749,18 @@ class Generator:
     if self._context.fp_type.size() not in target.copy_async_sizes():
       return None
     split = MultLayout(self._num_threads, target.hw.vec_unit_length)
+    if not (split.contiguous or split.whole_waves):
+      return None
+    return dict(threads=self._num_threads)
+
+  def _carry_spec(self) -> Optional[dict]:
+    """What `pir.CarryTrips` takes besides the body: the lanes a
+    multiplication spans, which `threadIdx.x` counts -- where the lanes of
+    one multiplication are a run of them, which a layout that interleaves
+    the multiplications of a group does not give, and every lane would not
+    be asked about."""
+    split = MultLayout(self._num_threads,
+                       self._context.target.hw.vec_unit_length)
     if not (split.contiguous or split.whole_waves):
       return None
     return dict(threads=self._num_threads)
@@ -3065,8 +3077,10 @@ class Generator:
     So there is nothing to arrange around the back edge: no first trip built
     beside the loop, no destination made resident ahead of it, no register
     renamed to close a chain, and the body's registers are declared where its
-    operations declare them, afresh on every trip.  What it costs is an
-    accumulator stored and read again on every trip.
+    operations declare them, afresh on every trip.  What it costs -- an
+    accumulator stored and read again on every trip -- the pseudo-IR takes
+    back wherever it can show that the trips may share registers instead
+    (`pir.carry`).
     """
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
 

@@ -1446,13 +1446,22 @@ def _scratch(count=4):
     return out
 
 
-def _started(terms=4):
+def _started(terms=4, twice=False):
     """`Q = L_0 C_0` and `Q += L_k C_k` behind it: an accumulator the list
     begins ahead of the run, as SeisSol's Taylor expansion sums its first
-    term there."""
-    return ([gemm(make('L0', [24, 5]), make('C0', [5, 5]), make('Q', [24, 5]))]
-            + [gemm(make(f'L{k}', [24, 5]), make(f'C{k}', [5, 5]),
-                    make('Q', [24, 5]), add=True) for k in range(1, terms)])
+    term there.  `twice` sums `R = M_0 C_0 + ...` beside it, as the
+    anelastic time derivative carries two levels."""
+    out = [gemm(make('L0', [24, 5]), make('C0', [5, 5]), make('Q', [24, 5]))]
+    if twice:
+        out.append(gemm(make('M0', [24, 5]), make('D0', [5, 3]),
+                        make('R', [24, 3])))
+    for k in range(1, terms):
+        out.append(gemm(make(f'L{k}', [24, 5]), make(f'C{k}', [5, 5]),
+                        make('Q', [24, 5]), add=True))
+        if twice:
+            out.append(gemm(make(f'M{k}', [24, 5]), make(f'D{k}', [5, 3]),
+                            make('R', [24, 3]), add=True))
+    return out
 
 
 def _argument_chain(steps=3):
@@ -1597,6 +1606,8 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('chain', False, {'enable_wrap_loads': False}),
     ('accumulation', False, {'closed_trips': True}),
     ('accumulation', True, {'closed_trips': True}),
+    ('accumulation', False, {'closed_trips': True, 'carry_trips': False}),
+    ('accumulation', True, {'closed_trips': True, 'carry_trips': False}),
     ('read_first', False, {'closed_trips': True}),
     ('staged', False, {'stage_members': True, 'closed_trips': True}),
     ('scratch', False, {'closed_trips': True}),
@@ -1607,10 +1618,14 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('started', True, {}),
     ('started', False, {'closed_trips': True}),
     ('started', True, {'closed_trips': True}),
+    ('started_twice', False, {}),
+    ('started_twice', False, {'closed_trips': True}),
     ('read_first_temporary', False, {}),
     ('read_first_temporary', False, {'closed_trips': True}),
     ('read_by_the_next_trip', False, {}),
     ('read_by_the_next_trip', False, {'closed_trips': True}),
+    ('read_by_the_next_trip', False,
+     {'closed_trips': True, 'carry_trips': False}),
     ('projected', False, {}),
     ('projected', False, {'closed_trips': True}),
     ('carried', False, {'closed_trips': True, 'rotate_slots': 1}),
@@ -1637,7 +1652,9 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
     next one reads, and the read of the next trip's level, issued a trip
     ahead (`pir.wrap`), has to wait for this trip's write of it.  And all of
     them again with the trips closed (`Options.closed_trips`), where nothing
-    but memory crosses the back edge."""
+    but memory crosses the back edge and the carry takes the accumulator
+    back into registers (`pir.carry`) -- or, without it, leaves it going
+    through memory on every trip."""
     from dataclasses import replace
 
     import numpy as np
@@ -1677,6 +1694,8 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
             return _scratch()
         if shape == 'started':
             return _started()
+        if shape == 'started_twice':
+            return _started(twice=True)
         if shape == 'read_first_temporary':
             return _read_first_temporary()
         if shape == 'read_by_the_next_trip':
@@ -1899,7 +1918,7 @@ def test_a_run_reads_its_table_and_its_factor_inside_the_loop():
     assert not early, f'read before it is bound: {early}'
 
 
-# -- closed trips (`Options.closed_trips`) ---------------------------------- #
+# -- closed trips (`Options.closed_trips`) and the carry (`pir.carry`) ------- #
 
 def _around_the_run(gen):
     """`(ahead, loop, behind)` in the section's pseudo-IR: the statements of
@@ -1927,13 +1946,28 @@ def _output(gen):
     return base
 
 
+def _images(stmts, buffer, loading):
+    """The register images the statements of `stmts` move `buffer` through:
+    filled from it where `loading`, else stored into it."""
+    from tensorforge.backend.pir.core import MemSpace, collect_accesses
+    out = set()
+    for s in stmts:
+        found = collect_accesses((s,))
+        if any(a.base is buffer and a.writes != loading for a in found):
+            out |= {id(a.base) for a in found
+                    if a.space is MemSpace.REGISTER and a.writes == loading}
+    return out
+
+
 def test_a_closed_trip_hands_the_next_one_nothing_but_memory():
     """With its trips closed, the loop runs every iteration, its body
     declares its own registers, and no register is threaded through the
-    trips or set back on each.  The accumulator goes to memory at the tail
-    of every trip and comes back at the head of the next."""
+    trips or set back on each.  Without the carry the accumulator goes to
+    memory at the tail of every trip and comes back at the head of the
+    next."""
     from tensorforge.backend.pir.core import walk_stmts
-    gen = _merged_build(roll(accumulation()), closed_trips=True)
+    gen = _merged_build(roll(accumulation()), closed_trips=True,
+                        carry_trips=False)
     ahead, loop, _ = _around_the_loop(gen)
     assert (loop.start, loop.carried) == (0, ())
     assert 'RegisterAlloc' not in _kinds(ahead)
@@ -1944,6 +1978,98 @@ def test_a_closed_trip_hands_the_next_one_nothing_but_memory():
                for a in s.accesses if a.base is q]
     assert any(a.writes for a in touched)
     assert any(not a.writes for a in touched)
+
+
+def test_the_carry_holds_an_accumulator_in_registers_over_the_trips():
+    """What the trips hand each other through memory, the carry hands over in
+    registers: `Q` is loaded once ahead of the loop and stored once behind
+    it, and the trips add into the image it was loaded into -- one image,
+    and no copy between two at the end of each trip."""
+    from tensorforge.backend.pir.core import MemSpace, walk_stmts
+    gen = _merged_build(roll(accumulation()), closed_trips=True)
+    q = _output(gen)
+    ahead, run, behind = _around_the_run(gen)
+    inside = list(walk_stmts(run.regions[0].body))
+    assert not any(a.base is q for s in inside for a in s.accesses)
+    loaded = _images(ahead, q, loading=True)
+    assert loaded and loaded == _images(behind, q, loading=False)
+    assert any(a.space is MemSpace.REGISTER and a.writes
+               and id(a.base) in loaded for s in inside for a in s.accesses)
+
+
+@pytest.mark.parametrize('twice', [False, True])
+def test_an_accumulator_begun_ahead_of_the_run_stays_in_its_registers(twice):
+    """`Q = L_0 C_0` ahead of the run leaves `Q` in registers, which a closed
+    trip finds in memory: so the carry has the load it puts ahead of the
+    loop read those registers, and drops the store ahead of it, since the
+    store behind the loop writes all of `Q` again (`pir.carry`).  With `R`
+    summed beside it, the same for each -- the second load found where the
+    first left the statements around it."""
+    from tensorforge.backend.pir.core import MemSpace, Op, walk_stmts
+    gen = _merged_build(roll(_started(twice=twice)), closed_trips=True)
+    ahead, _, behind = _around_the_run(gen)
+    outputs = {id(a.base): a.base
+               for s in walk_stmts(gen._sections[0].body)
+               for a in s.accesses if a.space is MemSpace.GLOBAL and a.writes}
+    assert len(outputs) == (2 if twice else 1)
+
+    def moved(stmts, buffer):
+        return [a for s in walk_stmts(tuple(stmts)) for a in s.accesses
+                if s.op in (Op.LOAD, Op.STORE) and a.base is buffer]
+
+    for buffer in outputs.values():
+        assert not moved(ahead, buffer), 'stored or loaded ahead'
+        assert any(a.writes for a in moved(behind, buffer))
+
+
+def test_an_atomic_accumulator_is_summed_in_registers_and_added_once():
+    """Where the policy adds atomically, a trip adds what it computed onto
+    memory.  The carry sums the trips in registers from zeros instead, and
+    one atomic update behind the loop adds the sum -- the order the list
+    written out adds in."""
+    from dataclasses import replace
+
+    from tensorforge.backend.pir.core import Effect, Op, walk_stmts
+    from tensorforge.common import target
+    base = target.PREFERENCES['nvidia']
+    target.PREFERENCES['nvidia'] = replace(
+        base, placement=replace(base.placement, atomic_accumulation=True))
+    try:
+        gen = _merged_build(roll(accumulation()), closed_trips=True)
+    finally:
+        target.PREFERENCES['nvidia'] = base
+    q = _output(gen)
+    ahead, run, behind = _around_the_run(gen)
+    assert not any(a.base is q for s in walk_stmts(run.regions[0].body)
+                   for a in s.accesses)
+    summed = _images(behind, q, loading=False)
+    assert summed
+    assert any(a.kind & Effect.ATOMIC for s in walk_stmts(tuple(behind))
+               for a in s.accesses if a.base is q)
+    declared, = [s for s in ahead if s.op is Op.ALLOC
+                 and any(id(t) in summed for t in s.target)]
+    assert declared.attr('init') == '{}'
+
+
+def test_the_carry_leaves_what_a_table_reaches_in_memory():
+    """A chain's levels are the kernel's arguments, written through one hole
+    and read through another (`pir.AliasClass`): a trip's level is no other
+    trip's, so none of them is carried, and the loop goes on writing them.
+    The accumulator it adds them into is carried all the same: written
+    behind the loop, and nowhere in it."""
+    from tensorforge.backend.pir.core import (AliasClass, MemSpace,
+                                              walk_stmts)
+    gen = _merged_build(roll(_argument_chain()), closed_trips=True)
+    _, run, behind = _around_the_run(gen)
+
+    def written(stmts):
+        return {id(a.base): a.base for s in walk_stmts(tuple(stmts))
+                for a in s.accesses
+                if a.space is MemSpace.GLOBAL and a.writes}
+    inside = written(run.regions[0].body)
+    assert any(isinstance(b, AliasClass) for b in inside.values())
+    after = written(behind)
+    assert after and not set(after) & set(inside)
 
 
 def _projected(count=4):
@@ -2010,7 +2136,7 @@ def test_a_closed_trip_stores_a_temporary_the_next_trip_reads(behind):
     itself, is not.  So it is where nothing behind the loop reads `S`: the
     next trip does."""
     gen = _merged_build(roll(_read_first_temporary(behind=behind)),
-                        closed_trips=True)
+                        closed_trips=True, carry_trips=False)
     _, loop, _ = _around_the_loop(gen)
     assert (loop.start, loop.count) == (0, 4)
     tail = []

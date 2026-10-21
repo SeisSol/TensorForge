@@ -35,14 +35,14 @@ from .passes import (check_barrier_budget, cluster_loads, flatten_scopes,
                      if_convert, pressure, cse, dce, fold, licm, load_cse,
                      substitute, verify)
 from .barriers import Arena
-from .pipeline import (BodyContext, GroupRows, MoveLoads, PlaceBarriers,
-                       PlaceBuffers, Prefetch, ShardLoads, WrapLoads, optimize,
-                       standard_pipeline)
+from .pipeline import (BodyContext, CarryTrips, GroupRows, MoveLoads,
+                       PlaceBarriers, PlaceBuffers, Prefetch, ShardLoads,
+                       WrapLoads, optimize, standard_pipeline)
 from .emit import Emitter, emit
 
 __all__ = [
     'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'AliasClass',
-    'Arena', 'BodyContext', 'BufferType', 'Effect',
+    'Arena', 'BodyContext', 'BufferType', 'CarryTrips', 'Effect',
     'Emitter', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region',
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
     'accesses_conflict', 'check_barrier_budget', 'check_tokens',

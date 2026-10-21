@@ -83,6 +83,7 @@ BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
 TUNING = Path('src/tensorforge/generators/tuning.py')
 BOUND = Path('src/tensorforge/analysis/pipeline.py')
 RESIDENCY = Path('src/tensorforge/backend/residency.py')
+CARRY = Path('src/tensorforge/backend/pir/carry.py')
 TILING = PKG / 'tiling.py'
 
 
@@ -2670,6 +2671,42 @@ GROUPS = {
                         '                    raise InternalError(',
              '                if False:\n'
                         '                    raise InternalError(', 1)),
+    ]),
+    'carry': ('tests/test_carry.py '
+              'tests/test_rolling.py::test_the_carry_holds_an_accumulator_in_registers_over_the_trips '
+              'tests/test_rolling.py::test_an_atomic_accumulator_is_summed_in_registers_and_added_once '
+              'tests/test_rolling.py::test_an_accumulator_begun_ahead_of_the_run_stays_in_its_registers '
+              'tests/test_rolling.py::test_a_merged_run_computes_what_the_list_written_out_does', [
+        ('a store of other elements taken for the load\'s',
+         sub(CARRY, '                    if held.get(lane, {}).get(slot, _ZERO) != element:',
+             '                    if False:', 1)),
+        ('a binding handed on goes unnoticed',
+         sub(CARRY, '        if bindings & self._addresses:', '        if False:', 1)),
+        ('the image the load fills written by the trip',
+         sub(CARRY, '                if a.writes:\n'
+                    '                    raise _Refused(\'the trip writes the image the load fills\')',
+             '                if False:\n'
+                    '                    raise _Refused(\'the trip writes the image the load fills\')', 1)),
+        ('the copy fused without asking the slots',
+         sub(CARRY, "            if what == 'read head' and slot in first and at > first[slot]:\n"
+                    "                return body\n", '', 1)),
+        ('an atomic slot added twice',
+         sub(CARRY, "                    if slot in slots:\n"
+                    "                        raise _Refused('a slot of the image added twice')\n",
+             '', 1)),
+        ('a load ahead of the loop taken from a store that left rows out',
+         sub(CARRY, '                if slots.get(lane, {}).get(element) != slot:',
+             '                if False:', 1)),
+        ('a load ahead of the loop looked for where an earlier one rebuilt it',
+         sub(CARRY, '                for s in (rewrite((x,)) if id(x) in c.load else (x,))]',
+             '                for s in rewrite((x,))]', 1)),
+        ('the store ahead dropped where the one behind writes less',
+         sub(CARRY, '        dead = all(set(written) <= c.stored.get(lane, set())\n'
+                    '                   for lane, written in slots.items())',
+             '        dead = True', 1)),
+        ('the carry not run at all',
+         sub(CARRY, "            if counted(s) and s.attr('rolled'):\n",
+             "            if False:\n", 1)),
     ]),
 }
 
