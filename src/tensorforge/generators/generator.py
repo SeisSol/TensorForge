@@ -1145,8 +1145,9 @@ class Generator:
     """How many rows this section's traversal drives together.
 
     `1` where the multiplication divides the wave evenly -- each one is then
-    its own group and the traversal stays per row -- and `1` for a rotated
-    start, which is the restriction worth stating.  A rotated start is taken
+    its own group and the traversal stays per row, unless the wave is asked
+    to take its trips as one (`wave_group_traversal`) -- and `1` for a
+    rotated start, which is the restriction worth stating.  A rotated start is taken
     modulo the stride, and the modulo does not distribute over the lane offset:
     the leader's rotated start plus a lane is not the row's own rotated start
     once the wrap falls between them, so rows would collide on one element and
@@ -1168,14 +1169,17 @@ class Generator:
       if start != self._get_2d_block_id():
         return 1
       return mults_per_group(self._num_threads, wave)
+    asked = self._context.get_user_options().wave_group_traversal
     if self._num_threads < wave and (self._needs_wave_group()
-                                     or not self._mult_met_alone()):
+                                     or not self._mult_met_alone() or asked):
       # The multiplications of one wave, driven together, because something
       # in the body is issued by the whole wave at once -- or because every
       # rendezvous and every exchange is: SPMD SYCL has no barrier for part
-      # of a sub-group, and its broadcasts are sub-group collectives.  A
-      # rotated start has the same trouble as below, and leaves the verifier
-      # to refuse.
+      # of a sub-group, and its broadcasts are sub-group collectives -- or
+      # because the caller asked for it.  A rotated start has the same
+      # trouble as below.  Where the body needs the group, that leaves the
+      # verifier to refuse; where only the caller asked, the traversal stays
+      # per row.
       if start != self._get_2d_block_id():
         return 1
       return wave // self._num_threads

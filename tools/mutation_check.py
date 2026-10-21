@@ -2078,6 +2078,30 @@ GROUPS = {
              "declare('restrict_batch_arrays',\n        default=False,", 1)),
     ]),
 
+    # The multiplications of a wave driven through the batch loop together
+    # where only the caller asks for it.
+    'wavegroups': ('tests/test_wave_group_traversal.py', [
+        ('the option read and ignored',
+         sub(GEN, '                                     or not self._mult_met_alone() or asked):',
+             '                                     or not self._mult_met_alone()):', 1)),
+        ('every shared wave grouped, asked or not',
+         sub(GEN, '    asked = self._context.get_user_options().wave_group_traversal\n',
+             '    asked = True\n', 1)),
+        ('a rotated start grouped as well',
+         sub(GEN, '      # per row.\n      if start != self._get_2d_block_id():\n        return 1\n',
+             '      # per row.\n', 1)),
+        ('the group asked for by default',
+         sub(OPTIONS, "declare('wave_group_traversal',\n        default=False,",
+             "declare('wave_group_traversal',\n        default=True,", 1)),
+        ('a held back row writing its group\'s element',
+         sub(BATCHLOOP, '                    with elementmask.element_mask(active, self._active()), \\\n',
+             '                    with elementmask.element_mask(None, None), \\\n', 1)),
+        ('the oracle stopped by the schedule fence',
+         sub(ORACLE, "        if re.match(r'^__builtin_amdgcn_sched_barrier\\s*\\(', stmt):\n"
+                     "            return                      # a fence for the compiler's schedule\n",
+             '', 1)),
+    ]),
+
     # The cache hints for the element the loop reaches next.
     'prefetch': ('tests/test_pir_prefetch.py tests/test_prefetch_batch.py '
                  'tests/test_prefetch_data.py', [

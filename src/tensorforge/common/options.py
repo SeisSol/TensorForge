@@ -1302,6 +1302,34 @@ declare('restrict_batch_arrays',
             'within half a percent.  Off is the prototype the interface '
             'spells.')
 
+declare('wave_group_traversal',
+        default=False,
+        parse=parse_bool,
+        doc='Drive the multiplications that share a wave through the batch '
+            'loop together, a wave of rows at a time, wherever several share '
+            'one (`BatchLoop._gen_grouped_ir`).  Without it that happens only '
+            'where the body needs it: where the whole wave issues an '
+            'instruction at once, a matrix fragment product, or where the '
+            'target cannot synchronize part of a wave.  A row whose element is '
+            'past the end or held back by its flag then runs the body on its '
+            'group\'s element and writes nothing, instead of leaving the loop '
+            'or skipping the body, so a group whose rows are all held back '
+            'still computes.  What it buys is one body: the loop per row '
+            'issues the transfers for the next element in both arms of its '
+            'flag test.  Static ISA from clang 18 over the SeisSol kernels of '
+            '`wave_uniform_rows`: on gfx942, where most multiplications take '
+            '32 or 16 of the wave\'s 64 lanes, the 46 kernels it groups have '
+            '7 % fewer instructions in the median and 29 % fewer in sum -- '
+            '`accumulateIntegrals` and `stateToTransport` 40 to 59 % fewer, '
+            'their bodies being little more than the transfers -- and 10 of '
+            'them up to 2.5 % more; on gfx1150 the 8 kernels of 16 lanes, 6 % and '
+            '13 %.  One kernel takes every register: the VTK volume projection '
+            'at order 8, 511 VGPRs and 255 AGPRs against 313 and 57, since '
+            'with no flag test around its reads LLVM takes the 480 of its '
+            'constant operator out of the loop.  What the option is worth at '
+            'run time is not measured.  A section that follows another '
+            'without a barrier starts rotated and stays per row.')
+
 declare('lead_vectorize',
         default=False,
         env='TF_LEAD_VEC',

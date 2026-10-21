@@ -1060,6 +1060,8 @@ class Interp:
             return
         if re.match(r'^(__syncthreads|__syncwarp|__threadfence)\s*\(', stmt):
             return
+        if re.match(r'^__builtin_amdgcn_sched_barrier\s*\(', stmt):
+            return                      # a fence for the compiler's schedule
         if stmt.startswith('using namespace '):
             return
         am = _ATOMIC_ADD.match(stmt) or _ATOMIC_ADD_ASM.match(stmt)
