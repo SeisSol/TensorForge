@@ -2839,6 +2839,14 @@ class Generator:
     # back, and chaining that `I` round the loop would rename its reload and
     # not the product reading it -- `QDR(1..3)` would come out zero.
     def carries(tensor) -> bool:
+      # A family the loop carries in place (`_rotate_members`) is read
+      # through one hole and written through another, so no tensor of the
+      # body is named twice and the walk below answers no.  The carry is
+      # between the holes rather than within one, and the symbol they share
+      # is where it shows: ask that first, or the back edge is never closed
+      # and every trip reads what the prologue left.
+      if getattr(self._scopes.get_symbol(tensor), 'carried_in_place', False):
+        return True
       for descr in body:
         if any(view.tensor is tensor for view in descr.reads()):
           return True
@@ -2903,6 +2911,11 @@ class Generator:
     for variant in variants:
       for view in variant.members:
         member = self._member_symbol(view)
+        # Not one the loop carries in place (`_rotate_members`): there is no
+        # table to read it through, so storing it would put in memory the
+        # very value the loop means to keep in registers.
+        if getattr(member, 'carried_in_place', False):
+          continue
         self._section.ir.extend(self._residency.flush(member.name))
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
 
@@ -2911,6 +2924,15 @@ class Generator:
     for variant in variants:
       members = [self._member_symbol(view) for view in variant.members]
       stand_in = self._member_symbol(variant.stand_in)
+      # A hole whose members all resolve to one symbol selects nothing.  A
+      # table over them would be a chain whose every arm is that symbol and
+      # a binding naming a pointer to read it through -- and the stand-in
+      # already resolves there, so the body reads it where it is.  Which for
+      # a register image is the only way to read it at all: a register has
+      # no address to put in a table, and the residency hands the image to
+      # whoever asks for the symbol it is the image of.
+      if all(m is stand_in for m in members):
+        continue
       # The members are the bindings, not the parameters: `glb_m5` is
       # already `&m5[batchId][offset]`, one element's data, whatever the
       # parameter's addressing was -- and the binding after the table reads
@@ -3064,8 +3086,18 @@ class Generator:
       if dest is None or not getattr(dest.tensor, 'is_variant', False):
         continue
       key = self._residency_key(dest)
-      if key is not None and self._residency.get(key) is not None:
-        region.extend(self._residency.flush(key))
+      if key is None or self._residency.get(key) is None:
+        continue
+      # Except a family the loop carries in place: its destination is the
+      # register image the next trip reads, and storing it would be the
+      # memory round trip this exists to avoid.  The address the store
+      # writes is the same on every trip anyway -- there is one slot --
+      # so the sum of the stores is the last trip's, which is what the
+      # value already is.
+      if getattr(self._scopes.get_symbol(dest.tensor), 'carried_in_place',
+                 False):
+        continue
+      region.extend(self._residency.flush(key))
 
     self._section.ir.extend(allocations)
     self._section.ir.append(
@@ -3192,9 +3224,29 @@ class Generator:
             f'a merged run rotates {len(family)} temporaries through '
             f'{distance + 1} buffers, and they do not agree on a shape: '
             f'{sorted(str(s) for s in shapes)}')
-      slots: Dict[int, Symbol] = {}
       asked = self._context.get_user_options().rotate_slots
       width = asked if asked else distance + 1
+      # Carried in place.  At one slot the family selects nothing, so its
+      # holes need no table -- and a hole with no table needs no address,
+      # which is the only reason the value was in memory at all.  Where the
+      # member the prologue wrote is a register image, the loop reads and
+      # writes that image instead: the residency hands it to whoever asks
+      # for the symbol it is the image of, and the back edge is closed by
+      # the substitution this already makes for an accumulator.
+      #
+      # Only at one slot.  Two slots alternate, and a register has no
+      # address to alternate by -- that wants a copy at the tail of the
+      # trip, not a table.
+      home = self._scopes.get_symbol(family[0])
+      entry = self._residency.get(home.name) if home is not None else None
+      if (width == 1 and home is not None and entry is not None
+              and getattr(entry.image, 'stype', None) is SymbolType.Register):
+        home.carried_in_place = True
+        for tensor in family[1:]:
+          if self._scopes.get_symbol(tensor) is None:
+            self._scopes.alias_symbol(tensor, home)
+        continue
+      slots: Dict[int, Symbol] = {}
       for position, tensor in enumerate(family):
         slot = position % width
         if self._scopes.get_symbol(tensor) is not None:

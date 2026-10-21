@@ -234,22 +234,34 @@ def test_a_family_comes_out_in_the_order_its_chain_is_written():
     assert [t.alias for t in family] == [f'deriv{k}' for k in range(1, 6)]
 
 
-@pytest.mark.parametrize('slots, want', [(0, 2), (1, 1), (3, 3)])
+@pytest.mark.parametrize('slots, want', [(0, 2), (3, 3)])
 def test_the_slots_a_carried_family_turns_through_are_asked_for(slots, want):
     """`rotate_slots` is the width of the rotation, and 0 is the carry's own.
 
     The default is one buffer more than the distance the run carries over,
-    which is what the value's lifetime needs.  Fewer is a trade: at 1 a
-    pass reads and writes one buffer, which is correct because a
-    multiplication accumulates in registers and the barrier between the
-    read and the write is already there -- and it is the difference
-    between 80 kB of shared memory and 53 kB on SeisSol's order 6
-    anelastic derivative.  More buys nothing and is allowed because
-    refusing it would be a rule with no case behind it.
+    which is what the value's lifetime needs.  More buys nothing and is
+    allowed because refusing it would be a rule with no case behind it.
+    One is the other end and has no buffer at all -- see below.
     """
     gen = _merged_build(roll(_carried_chain(), min_count=3),
                         **({'rotate_slots': slots} if slots else {}))
     assert len(_slot_buffers(gen)) == want
+
+
+def test_one_slot_carries_the_family_in_registers():
+    """At one slot the family selects nothing, so its holes need no table --
+    and a hole with no table needs no address, which was the only reason the
+    value was in memory.  The loop then reads and writes the register image
+    the prologue left, and the buffer the rotation would have taken is not
+    taken at all: on the five-step chain that is 16 kB of a gfx942 block,
+    and the list written out takes none either.
+    """
+    gen = _merged_build(roll(_carried_chain(), min_count=2),
+                        arch='gfx942', backend='hip', rotate_slots=1)
+    assert not _slot_buffers(gen)
+    src = gen.get_kernel()
+    assert 'store{r>s}' not in src, 'the carry still goes through memory'
+    assert 'Table' not in src, 'a hole with one member still selects'
 
 
 def test_a_temporary_that_is_not_carried_is_left_written_out():
