@@ -113,15 +113,31 @@ def test_the_promise_is_the_default(backend, arch):
                                           ('cuda', 'sm_86')])
 def test_the_launcher_keeps_the_interface(backend, arch):
     """The caller's types, and a local of the kernel's for each promised
-    parameter, which is what the kernel is called with."""
+    parameter, which is what the kernel is called with.
+
+    Of the kernel's type but for the outermost `__restrict__`, which is
+    top-level on a parameter and so no part of the function's type.  A local
+    carrying it has a restrict-qualified *pointee* as soon as its address is
+    taken, and a cooperative launch takes exactly that
+    (`argsPtrs(Args &...)`): CUDA 13 refuses to initialize a `void *` from
+    it, which is what `barrier_two_gemms_16x16` compiles to.  What the local
+    does keep is every level that *is* part of the type -- the `const`
+    between the stars, and the space where the backend spells one.
+    """
     promised = _gemm(backend, arch, restrict_batch_arrays=True).get_launcher()
     plain = _gemm(backend, arch, restrict_batch_arrays=False).get_launcher()
     assert _prototype(promised, 'launcher_') == _prototype(plain, 'launcher_')
+    assert '__restrict__' not in promised and 'Restrict<' not in promised, (
+        'the launcher promises what only the kernel may')
     for name in ('m0', 'm1', 'flags0'):
-        assert re.search(rf'__restrict__\)?\s*{name}Arg = \(', promised) or \
-            re.search(rf'SpacePtrRestrict<[^>]*> {name}Arg = \(', promised)
+        assert re.search(rf'\b{name}Arg = \(', promised), (
+            f'no local of the kernel\'s type for {name}')
         assert re.search(rf'\bkernel_\w+[^;]*\b{name}Arg\b', promised), (
             f'the kernel called with the caller\'s {name}')
+    for name in ('m0', 'm1'):
+        assert re.search(rf'\*const \*\s*{name}Arg|SpacePtr<[^>]*> {name}Arg',
+                         promised), (
+            f'{name}Arg drops the const the kernel\'s type carries')
 
 
 @pytest.mark.parametrize('backend,arch', [('hip', 'gfx1150'),

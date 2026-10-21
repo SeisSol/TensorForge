@@ -83,13 +83,20 @@ class KernelParam:
         storage = f'{storage} ' if storage else ''
         return f'{storage}{body} {self.name}{tail}'
 
-    def _kernel_pointer(self, lexic) -> str:
+    def _kernel_pointer(self, lexic, restrict: bool = True) -> str:
         """The pointer as the kernel's prototype spells it.
 
         With the promise, `const` all the way down: an array of pointers is
         `T *const *__restrict__`, whatever its elements point at, and the
         flags `const unsigned *__restrict__`.  The space, where the backend
         spells one, stays with the level it describes (`Lexic.pointer_type`).
+
+        `restrict` is for the launcher's local (`binding`), which wants the
+        same type without the outermost promise: the promise is top-level on
+        a parameter and so no part of the function's type, while a local
+        carrying it has a restrict-qualified *pointee* as soon as its address
+        is taken -- which `argsPtrs` cannot put in a `void *`.  Every inner
+        level stays, those being part of the type.
         """
         if not self.promise:
             return lexic.pointer_type(f'{self.datatype}', self.space,
@@ -97,9 +104,10 @@ class KernelParam:
                                       depth=self.depth)
         if self.depth == 1:
             return lexic.pointer_type(f'{self.datatype}', self.space,
-                                      readonly=True, restrict=True, depth=1)
+                                      readonly=True, restrict=restrict,
+                                      depth=1)
         return lexic.pointer_type(f'{self.datatype}', self.space,
-                                  readonly=self.readonly, restrict=True,
+                                  readonly=self.readonly, restrict=restrict,
                                   depth=self.depth, inner_const=True)
 
     def _kernel_type(self, lexic) -> Optional[str]:
@@ -117,11 +125,18 @@ class KernelParam:
         A named local rather than a cast in the argument list: a cooperative
         launch hands the arguments over by address (`argsPtrs(Args &...)`),
         and a cast has none -- `barrier_two_gemms_16x16` would not compile.
+
+        Without the outermost `__restrict__`, for the same launch and the
+        same reason: `&flags0Arg` of a restrict-qualified pointer is a
+        pointer to a restrict-qualified type, which CUDA 13 refuses to
+        initialize a `void *` from.  The promise is top-level and so no part
+        of the kernel's type, which is why dropping it here costs nothing --
+        the prototype still carries it, and that is where it is read.
         """
-        kernel = self._kernel_type(lexic)
-        if kernel is None:
+        if self._kernel_type(lexic) is None:
             return None
-        return f'{kernel} {self.name}Arg = ({kernel}){self.name};'
+        local = self._kernel_pointer(lexic, restrict=False)
+        return f'{local} {self.name}Arg = ({local}){self.name};'
 
     def argument(self, lexic=None) -> str:
         """Without types, for a call.
