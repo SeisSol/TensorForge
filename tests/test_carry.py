@@ -15,7 +15,9 @@ refusals, one at a time.
 
 from __future__ import annotations
 
-from tensorforge.backend.pir import IRBuilder, verify
+import contextlib
+
+from tensorforge.backend.pir import IRBuilder, dce, verify
 from tensorforge.backend.pir.carry import carry_trips
 from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, BufferType,
                                           Effect, MemSpace, Op, ScalarType,
@@ -44,13 +46,34 @@ class Run:
     `tail_cols` is how many columns the tail stores, `head_cols` how many
     the head loads.  `late_slot` computes the slot the head writes behind the
     load of the element, as an unrolled copy does.
+
+    `rows` is how many rows the head loads and the tail stores; `padded`
+    stores ahead of the loop every row of `stored_ahead`, those past `rows`
+    as zeros, in one statement -- a `select` per element, as a store does
+    that writes its column whole.  `read_behind` loads `Q` once more behind
+    the loop, into an image the code there reads.  `spelled` makes the
+    atomic update a raw statement with its address spelled into its text,
+    and `guarded` puts every store of `Q` under a guard spelled in text, as
+    a batch element's guard is on AMD.  `tail_read` reads the tail's image
+    for another output as well, and `overwrite` writes its first slot once
+    more before the tail stores it.  `split` computes the columns past the
+    second under a guard of their own, which holds for the same lanes, as
+    the rows past a multiplication's first lanes get theirs; `wide` computes
+    the tail for every row, the rows the head does not load included.
     """
 
     def __init__(self, *, table=False, elsewhere=False, other_rows=False,
                  writes_head=False, atomic=False, stored_ahead=None,
                  late_read=False, twice=False, tail_cols=COLS, trips=4,
-                 late_slot=False, head_cols=COLS):
+                 late_slot=False, head_cols=COLS, rows=ROWS, padded=False,
+                 read_behind=False, spelled=False, guarded=False,
+                 tail_read=False, overwrite=False, split=False,
+                 wide=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
+
+        def guard():
+            return (b.Block('if (active)') if guarded
+                    else contextlib.nullcontext())
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         q = b.decl_expr(
             'float *const __restrict__ glb_m0', '&m0[{0} * 120]',
@@ -70,6 +93,8 @@ class Run:
             extern='glb_m1')
         lane = b.op('rem', INDEX, b.thread_id('x'), LANES, hint='lead')
         inside = b.op('lt', BOOL, lane, ROWS, hint='g')
+        valid = (inside if rows == ROWS
+                 else b.op('lt', BOOL, lane, rows, hint='v'))
         real = ScalarType(F32)
 
         def element(j, down=0):
@@ -84,7 +109,12 @@ class Run:
             with b.if_(b.op('lt', BOOL, lane, stored_ahead, hint='h')):
                 with b.for_(0, COLS, 1, unroll=True) as hop:
                     j = hop.induction
-                    b.store(q, b.load(before, j), element(j))
+                    value = b.load(before, j)
+                    if padded:
+                        value = b.op('select', real, valid, value, 0.0,
+                                     hint='pad')
+                    with guard():
+                        b.store(q, value, element(j))
             self.before = before
         with b.for_(0, trips, 1, rolled=True, hint='i'):
             head = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r1',
@@ -93,7 +123,7 @@ class Run:
                 with b.transfer():
                     with b.for_(0, head_cols, 1, unroll=True) as hop:
                         j = hop.induction
-                        value = b.load(q, element(j), predicate=inside)
+                        value = b.load(q, element(j), predicate=valid)
                         slot = (b.op('add', INDEX, j, 0, hint='s')
                                 if late_slot else j)
                         b.store(head, value, slot)
@@ -101,21 +131,51 @@ class Run:
                 b.store(head, b.load(q, element(0), predicate=inside), 0)
             tail = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r2',
                            extern='r2', init='{}')
-            with b.if_(inside):
-                with b.for_(0, COLS, 1, unroll=True) as hop:
+            cols = 2 if split else COLS
+            with b.if_(inside if wide else valid):
+                with b.for_(0, cols, 1, unroll=True) as hop:
                     j = hop.induction
                     b.store(tail, b.op('add', real, b.load(head, j), 1.0), j)
+            if split:
+                same = b.op('le', BOOL, lane, rows - 1, hint='s')
+                with b.if_(same):
+                    with b.for_(cols, COLS, 1, unroll=True) as hop:
+                        j = hop.induction
+                        b.store(tail, b.op('add', real, b.load(head, j), 1.0),
+                                j)
             if writes_head:
                 b.store(head, 0.0, 0)
             if late_read:
                 b.store(p, b.load(head, 0), lane)
-            with b.if_(inside):
+            if tail_read:
+                b.store(p, b.load(tail, 0), lane)
+            if overwrite:
+                with b.if_(valid):
+                    b.store(tail, b.op('mul', real, 5.0, 1.0), 0)
+            with b.if_(valid):
                 with b.for_(0, tail_cols, 1, unroll=True) as hop:
                     j = hop.induction
                     at = element(j, 1 if other_rows else 0)
-                    b.store(q, b.load(tail, j), at, atomic=atomic)
+                    if spelled:
+                        named = b.op('add', INDEX, at, 0, hint='a',
+                                     escapes=True)
+                        b.access_stmt(f'atomicAdd(&glb_m0[{named}], {{0}});',
+                                      q, Effect.ATOMIC,
+                                      args=(b.load(tail, j), named), fmt=True)
+                    else:
+                        value = b.load(tail, j)
+                        with guard():
+                            b.store(q, value, at, atomic=atomic)
                 if twice:
                     b.store(q, b.load(tail, 0), element(1), atomic=atomic)
+        if read_behind:
+            after = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r3',
+                            extern='r3', init='{}')
+            with b.transfer():
+                with b.for_(0, COLS, 1, unroll=True) as hop:
+                    j = hop.induction
+                    b.store(after, b.load(q, element(j), predicate=valid), j)
+            b.store(p, b.load(after, 0), lane)
         self.body = b.finish()
         verify(self.body)
 
@@ -137,10 +197,11 @@ def _split(body):
 def _touches(stmts, buffer):
     """The loads and stores among `stmts` that reach `buffer` -- not the
     declaration of a binding, which names what it points into."""
+    key = getattr(buffer, 'id', None)
     return [a for s in walk_stmts(tuple(stmts)) for a in s.accesses
             if s.op in (Op.LOAD, Op.STORE) and (
-                a.base is buffer or getattr(a.base, 'id', None)
-                == getattr(buffer, 'id', None))]
+                a.base is buffer
+                or key is not None and getattr(a.base, 'id', None) == key)]
 
 
 def _q_root(run):
@@ -174,6 +235,27 @@ def test_the_trips_add_into_the_image_they_were_loaded_into():
                if a.space is MemSpace.REGISTER and a.writes}
     assert written == images
     assert not any(s.op is Op.ALLOC for s in inside)
+
+
+def test_the_trips_add_in_place_under_guards_that_hold_for_the_same_lanes():
+    """Two guards, one condition: the lanes that write a slot of the tail's
+    image are the lanes that read the slot of the head's, so the trip
+    computes in the head's image whichever guard says so."""
+    run = Run(split=True)
+    out = run.carry()
+    _, loop, _ = _split(out)
+    assert not any(s.op is Op.ALLOC for s in walk_stmts(loop.regions[0].body))
+
+
+def test_rows_computed_and_not_stored_keep_their_own_image():
+    """The tail is computed for rows the store leaves out: computed in the
+    head's image, those would reach the next trip, which reads them from
+    memory, as it was before."""
+    run = Run(wide=True, rows=ROWS - 4)
+    out = run.carry()
+    _, loop, _ = _split(out)
+    assert any('in registers' in line for line in run.report)
+    assert any(s.op is Op.ALLOC for s in walk_stmts(loop.regions[0].body))
 
 
 def test_a_binding_handed_on_keeps_the_buffer_in_memory():
@@ -245,6 +327,148 @@ def test_a_slot_computed_behind_the_load_is_read_where_it_is_written():
     ahead, _, _ = _split(out)
     assert not _touches(ahead, _q_root(run))
     assert any(not a.writes for a in _touches(ahead, run.before))
+
+
+def test_a_store_ahead_padded_with_numbers_goes_behind_the_loop():
+    """The code ahead stores the rows of `Q` from its registers and zeros
+    past them, each element in one statement (`select`).  The load reads
+    only the rows with values, so it is taken from those registers; and the
+    store, which still has the zeros to write, goes behind the loop reading
+    the carried image -- in place of the store there, which writes nothing
+    it does not."""
+    run = Run(stored_ahead=ROWS, padded=True, rows=ROWS - 4)
+    out = run.carry()
+    ahead, _, behind = _split(out)
+    q = _q_root(run)
+    assert not _touches(ahead, q)
+    stores = [s for s in walk_stmts(tuple(behind)) if s.op is Op.STORE
+              and any(a.base is q for a in s.accesses)]
+    defs = {t.id: s for s in walk_stmts(tuple(behind)) for t in s.target}
+    assert stores and all(defs[s.args[1].id].op == 'select' for s in stores)
+    assert any('stored behind it instead' in line for line in run.report)
+
+
+def test_an_update_onto_what_the_code_ahead_stored_is_one_store():
+    """The code ahead stores `Q` from its registers, and the trips add onto
+    it atomically: the sum starts from those registers instead of zeros,
+    and the store ahead goes behind the loop in place of the update -- a
+    store and an update of every element become one store."""
+    run = Run(atomic=True, stored_ahead=ROWS)
+    out = run.carry()
+    ahead, _, behind = _split(out)
+    q = _q_root(run)
+    assert not _touches(ahead, q)
+    written = _touches(behind, q)
+    assert written and not any(a.kind & Effect.ATOMIC for a in written)
+    assert any(not a.writes for a in _touches(ahead, run.before))
+    assert any('summed onto' in line for line in run.report)
+
+
+def test_an_update_onto_part_of_what_the_code_ahead_stored_stays():
+    """The store ahead writes rows the update does not add to: taken behind
+    the loop, those would be stored from a sum that never held them."""
+    run = Run(atomic=True, stored_ahead=ROWS, rows=ROWS - 4)
+    out = run.carry()
+    ahead, _, behind = _split(out)
+    q = _q_root(run)
+    assert any(a.writes for a in _touches(ahead, q))
+    assert any(a.kind & Effect.ATOMIC for a in _touches(behind, q))
+
+
+def test_the_code_behind_the_loop_reads_the_accumulator_from_registers():
+    """Behind the loop the store writes `Q` from the carried image, and the
+    code there loads it straight back: the load reads the image."""
+    run = Run(read_behind=True)
+    out = run.carry()
+    _, _, behind = _split(out)
+    q = _q_root(run)
+    assert not [a for a in _touches(behind, q) if not a.writes]
+    assert any('taken from registers behind the loop' in line
+               for line in run.report)
+
+
+def test_what_the_store_behind_leaves_out_is_loaded_behind_the_loop():
+    """The store behind the loop writes one column fewer than the code
+    behind it loads: that column is in memory alone, and the load stays."""
+    run = Run(read_behind=True, tail_cols=COLS - 1)
+    _, _, behind = _split(run.carry())
+    assert [a for a in _touches(behind, _q_root(run)) if not a.writes]
+
+
+def test_an_update_spelled_in_text_leaves_no_address_in_the_trip():
+    """An atomic update names its address in its text, which keeps the
+    address from being dropped; summed into registers, the update is gone
+    from the trip, and so is what computed its address.  (The trip reads its
+    tail besides, so that the sum is added where the update stood.)"""
+    run = Run(atomic=True, spelled=True, tail_read=True)
+    _, loop, _ = _split(dce(run.carry()))
+    assert not [s for s in walk_stmts(loop.regions[0].body)
+                if s.attr('escapes') and s.op is not Op.ALLOC]
+
+
+def _tail_image(run, stmts):
+    """The accesses among `stmts` of the image the tail of `run` computes."""
+    tail, = [s.target[0] for s in walk_stmts(run.body) if s.op is Op.ALLOC
+             and s.attr('extern') == 'r2']
+    return [a for s in walk_stmts(tuple(stmts)) for a in s.accesses
+            if a.base is tail]
+
+
+def test_the_trips_add_into_the_sum_itself():
+    """The tail's image is written once a slot and then only added onto: the
+    trips add each term into the sum instead, as the list written out adds
+    into its accumulator, and the image and the copy into the sum go."""
+    run = Run(atomic=True)
+    _, loop, _ = _split(run.carry())
+    assert not _tail_image(run, loop.regions[0].body)
+
+
+def test_an_image_the_trip_reads_besides_is_added_at_its_end():
+    """The trip reads the tail's image for another output as well: summed
+    in place, that read would see the sum.  So the tail keeps its image, and
+    the end of the trip adds it into the sum."""
+    run = Run(atomic=True, tail_read=True)
+    _, loop, _ = _split(run.carry())
+    assert _tail_image(run, loop.regions[0].body)
+    assert any('in registers' in line for line in run.report)
+
+
+def test_a_slot_written_twice_is_added_at_the_end_of_the_trip():
+    """The trip writes a slot of the tail's image afresh after it computed
+    it: what the update adds is the second value alone, which a sum that
+    took the first would add as well."""
+    run = Run(atomic=True, overwrite=True)
+    _, loop, _ = _split(run.carry())
+    assert _tail_image(run, loop.regions[0].body)
+
+
+def test_a_guard_spelled_in_text_stays_with_the_update_behind_the_loop():
+    """An atomic update under a guard spelled in text: summed in registers,
+    the guard holds nothing a trip has to keep from memory, and goes from the
+    trip -- and stays around the update behind the loop, which is what it
+    guarded.  (The trip reads its tail besides, so that the sum is added at
+    its end, where the guard stood.)"""
+    run = Run(atomic=True, guarded=True, tail_read=True)
+    out = run.carry()
+    _, loop, behind = _split(out)
+    q = _q_root(run)
+    assert not _touches(loop.regions[0].body, q)
+    assert not [s for s in walk_stmts(loop.regions[0].body)
+                if s.op is Op.RAWBLOCK]
+    guards = [s for s in walk_stmts(tuple(behind)) if s.op is Op.RAWBLOCK]
+    assert guards and all(
+        any(a.kind & Effect.ATOMIC for a in _touches(g.regions[0].body, q))
+        for g in guards)
+
+
+def test_an_update_onto_a_store_under_the_same_guard_is_one_store():
+    run = Run(atomic=True, stored_ahead=ROWS, guarded=True)
+    out = run.carry()
+    ahead, _, behind = _split(out)
+    q = _q_root(run)
+    assert not _touches(ahead, q)
+    assert not any(a.kind & Effect.ATOMIC for a in _touches(behind, q))
+    assert any('summed onto' in line for line in run.report)
 
 
 def test_what_the_code_ahead_stored_only_in_part_is_loaded():

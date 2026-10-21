@@ -1620,6 +1620,7 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('started', True, {'closed_trips': True}),
     ('started_twice', False, {}),
     ('started_twice', False, {'closed_trips': True}),
+    ('started_twice', True, {'closed_trips': True}),
     ('read_first_temporary', False, {}),
     ('read_first_temporary', False, {'closed_trips': True}),
     ('read_by_the_next_trip', False, {}),
