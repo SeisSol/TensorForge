@@ -206,3 +206,21 @@ def test_no_shared_access_costs_more_than_four_bank_cycles():
     assert worst <= 4, (
         f"{counts[worst]} accesses cost {worst} bank cycles; the worst was 4. "
         f"A permutation is probably not being applied.\n{out[-600:]}")
+
+
+def test_the_corpus_check_compares_something_and_agrees():
+    """`host/corpus_check.py` builds a kernel of the corpus written out and
+    merged, and compares each build with NumPy and with the other.
+
+    A check that stops finding the outputs where the oracle leaves them -- a
+    buffer the builds no longer name alike, a table element it does not look
+    under -- reads every slot as it was before the kernel ran, on both sides,
+    and the builds agree with each other about nothing.  NumPy still computes
+    the products, so the slots have to be there, and agree with it."""
+    import re
+
+    out = _run("host/corpus_check.py", "tools/bench/data/elastic-4-d-s1.json",
+               "gpu_localFluxAll")
+    found = re.findall(r'numpy: (\d+)/(\d+) disagree', out)
+    assert len(found) == 2, out[-800:]
+    assert all(bad == '0' and int(slots) > 0 for bad, slots in found), out

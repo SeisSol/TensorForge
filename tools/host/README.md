@@ -75,12 +75,35 @@ at --- small enough to read the generated code for, and to turn into a test.
 | `check_structure.py` | Structural checks over a dump, no reference needed: results computed and discarded, a register serving as bias twice, a load overtaken by a store to what it reads, a register array indexed outside its declared range. None of these stops a kernel from compiling. |
 | `read_before_write.py` | Per descriptor, in program order: which regions does a kernel read that nothing wrote first? |
 | `lockstep.py` | The lane-parallel runner for a kernel cut out of a generated file. |
+| `corpus_check.py` | Build kernels of a `tools/bench/data` corpus file under several sets of options, run each build on the host and compare it with NumPy and with the first build. No SeisSol needed. |
 
 `check_structure.py` is the cheap one --- it takes a dump and nothing else, and
 is worth running on any new generation:
 
     python3 check_structure.py gen/gpulike_subroutine.cpp
     flagged: 0 of 60
+
+## Options against each other, on the corpus
+
+The corpus files under `tools/bench/data` hold the descriptions yateto hands
+over, so a kernel can be built without SeisSol, as often as a comparison
+needs.  `corpus_check.py` builds it once per set of options and runs every
+build from the same memory:
+
+    python3 corpus_check.py \
+        ../bench/data/viscoelastic-4-d-s1.json gpu_derivative \
+        --build merge_variants=0 --build merge_variants=1
+
+    gpu_derivative
+      merge_variants=0  numpy: 0/3888 disagree, worst 0
+      merge_variants=1  numpy: 0/3888 disagree, worst 0; first: 0/3888 differ
+
+Each output slot is compared with NumPy and with the first build.  The second
+comparison needs no reference, so it still says something where NumPy cannot
+follow --- a permuted operand, an elementwise operation.  The memory is the
+oracle's seeded fill, which is a function of the slot alone, with the
+operators' own numbers where the description has them; an output starts from
+that fill too, so a `+=` that loses what was there shows.
 
 ## Assignments, slices and accumulations
 
