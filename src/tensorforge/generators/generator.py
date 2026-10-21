@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-import os
 from typing import Dict, List, Optional, Union, Type
 import copy
 import dataclasses
