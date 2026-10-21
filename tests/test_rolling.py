@@ -214,6 +214,26 @@ def _carried_chain(steps=5):
     return out
 
 
+def test_a_family_comes_out_in_the_order_its_chain_is_written():
+    """The member's position decides its slot, so the order is the rotation.
+
+    A hole and the hole it feeds are the same list shifted -- `deriv1..4`
+    read against `deriv2..5` written -- and the member only the reading hole
+    names is written *before* the loop, so it belongs at the front.  Merged
+    by appending it landed last, took the slot its own successor wanted, and
+    the one buffer a width of 1 should collapse to came out as two.
+    """
+    from tensorforge.analysis.families import find_repeats
+    from tensorforge.generators.rolling import rotation_families
+    descrs = _carried_chain()
+    run = find_repeats(descrs, min_count=2)[0]
+    holes = [[getattr(v, 'tensor', v) for v in hole]
+             for hole in zip(*run.general.bindings)]
+    groups = [[t for t in h if getattr(t, 'is_tmp', False)] for h in holes]
+    family, = [f for f in rotation_families(groups) if len(f) > 1]
+    assert [t.alias for t in family] == [f'deriv{k}' for k in range(1, 6)]
+
+
 @pytest.mark.parametrize('slots, want', [(0, 2), (1, 1), (3, 3)])
 def test_the_slots_a_carried_family_turns_through_are_asked_for(slots, want):
     """`rotate_slots` is the width of the rotation, and 0 is the carry's own.

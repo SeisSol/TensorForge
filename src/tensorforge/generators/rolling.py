@@ -219,10 +219,19 @@ def rotation_families(groups: Sequence[Sequence]) -> List[List]:
     which is five tensors and not two sets of four.  They are recognised by
     overlapping, which is what being the same chain means here.
 
-    Order within a family is first-named-first, and that order *is* the
-    rotation: the member's position decides its slot, so the chain has to
-    come out in the order the run writes it.  The caller passes the holes
-    in the run's own order, which is that order.
+    Order within a family *is* the rotation -- the member's position decides
+    its slot -- so it has to be the order the chain is written in, and
+    appending each hole's new members is not that order.  A hole and the
+    hole it feeds are the same list shifted: `dQane_1..4` read against
+    `dQane_2..5` written line up at an offset of one, and `dQane_1` belongs
+    at the *front* of the family rather than after `dQane_5`.  Appended
+    there it would take the slot its own successor wants, and the single
+    buffer the family could share would come out as two.
+
+    So the groups are merged by that offset.  Where the overlap does not
+    line up at one constant offset the two holes are not one chain, and the
+    family is left as the first hole's -- `_same_shape` and the caller's
+    shape check then decide, as they do for any family they cannot place.
 
     One rule in one place because two callers need it and need the same
     answer -- `_rotatable` to decide and `Generator._rotate_members` to act.
@@ -238,8 +247,19 @@ def rotation_families(groups: Sequence[Sequence]) -> List[List]:
                     if any(t is u for t in f for u in members)), None)
         if hit is None:
             families.append(list(members))
-        else:
-            hit.extend(t for t in members if not any(t is u for u in hit))
+            continue
+        shifts = {f_at - g_at
+                  for g_at, t in enumerate(members)
+                  for f_at, u in enumerate(hit) if t is u}
+        if len(shifts) != 1:
+            continue
+        shift = shifts.pop()
+        placed = {id(t): g_at + shift for g_at, t in enumerate(members)}
+        placed.update({id(t): f_at for f_at, t in enumerate(hit)})
+        merged = list(hit) + [t for t in members
+                              if not any(t is u for u in hit)]
+        merged.sort(key=lambda t: placed[id(t)])
+        hit[:] = merged
     return families
 
 
