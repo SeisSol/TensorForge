@@ -41,13 +41,20 @@ CASES = Path(__file__).resolve().parent / "cases"
 #: (`NAME` is `gemm_sparse_band_B`; the snapshot goes by that.)
 SPARSE_CASE = "sparsity_band.py"
 
-#: `float v23_lin = glb_m2[0 + threadIdx.x * 1];`
+#: `float v23_lin = glb_m2[0 + threadIdx.x * 1];`, or, where the run does not
+#: fill a whole slot, the clamped tail
+#: `float v33_lin = glb_m2[32 + ((threadIdx.x * 1) < 14 ? (threadIdx.x * 1) : 14 - 1)];`
+#: -- `span` is how many elements are left, and the lanes above them read the
+#: last one instead of the one past it (`Symbol._linear_addr`).
 #:
 #: The temporary is a PIR value, so its name comes from the shared allocator
 #: and carries the builder's hint: `v23_lin`.
 _READ = re.compile(
     r"^\s*\w+\s+(?P<tmp>v\d+\w*)\s*=\s*(?P<src>\w+)\[(?P<base>\d+)\s*\+\s*"
-    r"threadIdx\.x\s*\*\s*(?P<vec>\d+)\]\s*;", re.M)
+    r"(?:threadIdx\.x\s*\*\s*(?P<vec>\d+)"
+    r"|\(\(threadIdx\.x\s*\*\s*(?P<cvec>\d+)\)\s*<\s*(?P<span>\d+)"
+    r"\s*\?\s*\(threadIdx\.x\s*\*\s*\d+\)\s*:\s*\d+\s*-\s*\d+\))"
+    r"\]\s*;", re.M)
 #: `r1[0] = v23_lin;`
 _WRITE = re.compile(r"^\s*(?P<reg>r\d+)\[(?P<slot>\d+)\]\s*=\s*(?P<tmp>v\d+\w*)\s*;",
                     re.M)
@@ -66,8 +73,12 @@ def _generate(case: str, arch: str = "gfx90a"):
 
 
 def _fills(source: str):
-    """`{register: {slot: (source_base, vec)}}`, read out of the emitted code."""
-    tmp_of = {m.group("tmp"): (int(m.group("base")), int(m.group("vec")))
+    """`{register: {slot: (source_base, vec, span)}}`, read out of the emitted
+    code.  `span` is `None` for a run that fills the slot in every lane, and
+    the number of lanes that hold an element for a clamped tail."""
+    tmp_of = {m.group("tmp"): (int(m.group("base")),
+                               int(m.group("vec") or m.group("cvec")),
+                               int(m.group("span")) if m.group("span") else None)
               for m in _READ.finditer(source)}
     out = {}
     for m in _WRITE.finditer(source):
@@ -102,11 +113,14 @@ def test_the_fill_puts_element_slot_times_threads_plus_lane_in_each_slot(
 
     axis = LaneAxis(threads, 1)
     for reg, slots in fills.items():
-        for slot, (base, vec) in sorted(slots.items()):
+        for slot, (base, vec, span) in sorted(slots.items()):
             assert vec == 1, (
                 f"{reg}[{slot}] is filled at vector width {vec}; the recorded "
                 f"layout describes scalar granularity")
-            for lane in range(threads):
+            # Up to `span` where the tail is clamped: the lanes above it hold
+            # a duplicate of the last element, which the map does not describe
+            # and no broadcast reads.
+            for lane in range(threads if span is None else span):
                 element = base + lane * vec
                 assert axis.holders(element, threads) == (lane,), (
                     f"{reg}[{slot}]: lane {lane} loads element {element}, "
@@ -115,6 +129,65 @@ def test_the_fill_puts_element_slot_times_threads_plus_lane_in_each_slot(
                 assert axis.slot(element) == slot, (
                     f"{reg}[{slot}]: element {element} belongs in slot "
                     f"{axis.slot(element)} according to {axis!r}")
+
+
+def _nonzeros(case: str) -> int:
+    """How many elements the case's compressed operand has."""
+    path = CASES / case
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    counts = {t.spp.count_nz()
+              for d in mod.descr_list() for m in d.matrix_list()
+              for t in [getattr(m, "tensor", m)]
+              if t is not None and not t.is_dense()}
+    assert len(counts) == 1, (
+        f"{case} has {len(counts)} compressed shapes {sorted(counts)}; the "
+        f"bound below names one operand")
+    return counts.pop()
+
+
+def test_no_linear_read_runs_past_the_operand():
+    """The read that faults, as against the read that is merely wrong.
+
+    A flat fill covers the operand in whole hops of `threads` elements and a
+    tail of fewer, and the lanes above the tail have nothing to read.  Left
+    unguarded they read into the next matrix of the batch -- 2 of 16 lanes
+    here, 23 of 32 for a 9-element operand -- and at the *last* matrix there
+    is no next one: the allocation ends and the read faults, which is what it
+    did on AMD.  So the tail clamps its index and the lanes above it reread
+    the last element (`Symbol._linear_addr`).
+
+    Stated as the bound rather than as the clamp, so that covering the tail
+    some other way -- predicating it, or narrowing the hop -- still passes.
+    That the case *has* a partial tail is asked of the arithmetic and not of
+    the emitted form, which would make the test pass for the one reason it
+    exists to rule out; and the reads have to account for every slot, so a
+    tail written in a form this does not parse fails here instead of
+    vanishing from it.
+    """
+    source = _generate(SPARSE_CASE)
+    total = _nonzeros(SPARSE_CASE)
+    threads = 16
+    assert total % threads, (
+        f"{SPARSE_CASE} covers {total} elements in whole hops of {threads}, "
+        f"so it has no tail and this says nothing")
+    reads = [(m.group("src"), int(m.group("base")),
+              int(m.group("vec") or m.group("cvec")),
+              int(m.group("span")) if m.group("span") else None)
+             for m in _READ.finditer(source)]
+    assert len({(src, base) for src, base, _, _ in reads}) == \
+        -(-total // threads), (
+            f"{len(reads)} linearized reads for {total} elements over "
+            f"{threads} lanes; the fill is written in a form this test does "
+            f"not parse, so the bound below would not be checked")
+    for src, base, vec, span in reads:
+        lanes = threads if span is None else span
+        top = base + (lanes - 1) * vec + vec - 1
+        assert top < total, (
+            f"{src}[{base} + lane * {vec}] reaches element {top} of an "
+            f"operand with {total}; the lanes past the end read into the "
+            f"next matrix of the batch, and the last one has no next")
 
 
 def test_a_sparse_operand_reaches_the_intrinsic_with_a_layout():

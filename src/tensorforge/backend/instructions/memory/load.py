@@ -1117,18 +1117,19 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
       if tail:
         # Fewer than `num_threads` elements, so some lanes have nothing to
-        # read.  Emitted unguarded, on purpose: the lanes past the end read
-        # into the neighboring matrix of the batch and their registers are
-        # never consumed.  It is still a read past the tensor -- 23 of 32
-        # lanes for a 9-element operand -- and at the last matrix in the batch
-        # there is no neighbor.  Guarding it is a decision about the buffer,
-        # not about the width; `_write_datatransfer` already predicates its
-        # own tail and is the shape to copy when that decision is made.
+        # read -- 23 of 32 lanes for a 9-element operand.  They read the last
+        # element instead of the one past it (`limit`), because at the last
+        # matrix of the batch there is no neighboring matrix to land in and
+        # the read faults.  Their registers are not consumed: the reader
+        # emits one broadcast per nonzero of the operand and so stops at the
+        # last lane that holds one, which `tests/test_sparse_layout.py`
+        # states as a test over the emitted DPP patterns.
         self._dest.store_linear(
             writer, self._context,
             self._src.load_linear(writer, self._context, None,
                                   total_size - tail, 1,
-                                  threads=self._num_threads),
+                                  threads=self._num_threads,
+                                  limit=total_size),
             total_size - tail, 1, threads=self._num_threads)
 
     else:

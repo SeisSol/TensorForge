@@ -327,7 +327,7 @@ class Variable:
   def build_nonlead(self, writer, context: Context):
     return self.build(writer, context)
 
-def _linear_addr(context: Context, index, vec) -> str:
+def _linear_addr(context: Context, index, vec, limit=None) -> str:
   """Where this work-item's run of a linearized image begins.
 
   Under SPMD a linear image is spread over the lanes, so lane `t` starts at
@@ -343,11 +343,28 @@ def _linear_addr(context: Context, index, vec) -> str:
   that the ESIMD emitter refuses everywhere it can see it, and here cannot,
   because the address is text by the time it arrives.
 
+  `limit` is how many elements the image has, where the run may not fill a
+  whole one -- the tail of a flat fill, where fewer than `threads` elements
+  are left and the lanes above them have nothing to read.  Those lanes then
+  read the last element instead of the one past it.  A duplicate and not a
+  zero, because the clamp answers a question about the *buffer*: nothing
+  consumes those lanes -- the reader emits one broadcast per nonzero and so
+  stops at the last one -- while reading past the operand is a fault at the
+  last element of the batch, where there is no neighbor to land in.
+
+  Clamped in the index and not by predicating the load.  Both are correct;
+  the index keeps the read unconditional, so it stays in the straight line
+  of the fill and shares its one `s_waitcnt`, where a guarded load is its
+  own basic block with its own wait.
   """
   lexic = context.target.lexic
   if context.target.explicit_simd:
     return f'{index}'
-  return f'{index} + {lexic.thread_idx_x} * {vec}'
+  lane = f'{lexic.thread_idx_x} * {vec}'
+  if limit is None or index + vec > limit:
+    return f'{index} + {lane}'
+  span = limit - index
+  return f'{index} + (({lane}) < {span} ? ({lane}) : {span} - {vec})'
 
 
 class LeadIndex:
@@ -2719,12 +2736,12 @@ class Symbol:
     return RegisterLayout((LaneAxis(threads, 1),))
 
   def load_linear(self, writer, context: Context, variable, index, vec = 1,
-                  threads=None):
+                  threads=None, limit=None):
     addrs = []
     if self.stype == SymbolType.Register:
       addr = index // self.num_threads
     else:
-      addr = _linear_addr(context, index, vec)
+      addr = _linear_addr(context, index, vec, limit)
     access = f'{self.name}[{addr}]'
 
     if variable is None:
