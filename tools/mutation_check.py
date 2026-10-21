@@ -2676,6 +2676,7 @@ GROUPS = {
               'tests/test_rolling.py::test_the_carry_holds_an_accumulator_in_registers_over_the_trips '
               'tests/test_rolling.py::test_an_atomic_accumulator_is_summed_in_registers_and_added_once '
               'tests/test_rolling.py::test_an_accumulator_begun_ahead_of_the_run_stays_in_its_registers '
+              'tests/test_rolling.py::test_a_temporary_each_lane_adds_onto_is_held_in_its_registers '
               'tests/test_rolling.py::test_a_merged_run_computes_what_the_list_written_out_does', [
         ('a store of other elements taken for the load\'s',
          sub(CARRY, '                    if held.get(lane, {}).get(slot, _ZERO) != element:',
@@ -2726,6 +2727,21 @@ GROUPS = {
          sub(CARRY, '                if (element not in c.stored.get(lane, set())\n'
                     '                        or c.held.get(lane, {}).get(slot) != element):',
              '                if False:', 1)),
+        ('an element another lane writes taken for a lane\'s own',
+         sub(CARRY, '        if any(len(touched[e]) > 1 for e in written):',
+             '        if False:', 1)),
+        ('a register given two elements of a lane',
+         sub(CARRY, '                if held.setdefault(find(node), element) != element:',
+             '                if False:', 1)),
+        ('a lane\'s first read taken from what nothing stored',
+         sub(CARRY, '            if not set(first.values()) <= seeded.get(lane, set()):',
+             '            if False:', 1)),
+        ('the store ahead of a lane\'s own buffer always dropped',
+         sub(CARRY, '        elif (again or not read_behind) and self._movable(out, at):',
+             '        elif self._movable(out, at):', 1)),
+        ('the back edge of a loop around the run not followed',
+         sub(CARRY, '        if _repeats(holder) and _again(path, level, key):',
+             '        if False:', 1)),
         ('the carry not run at all',
          sub(CARRY, "            if counted(s) and s.attr('rolled'):\n",
              "            if False:\n", 1)),

@@ -10,7 +10,8 @@ loop and the store behind it where every lane reads back what it stored and
 nothing else in the loop touches the buffer -- and leaves the loop alone
 otherwise, which costs a round trip through memory and never a value.  The
 merged runs of the generator are asked in `test_rolling.py`; here are the
-refusals, one at a time.
+refusals, one at a time -- and the same of a temporary in shared memory that
+every lane keeps to itself (`Own`).
 """
 
 from __future__ import annotations
@@ -187,11 +188,119 @@ class Run:
         return out
 
 
+class Own:
+    """A temporary in shared memory, `S`, that every trip adds onto, each
+    lane its own rows: `S[l, c] += 1` for the lanes `l` below `ROWS`, column
+    0 in one statement and the columns past it in another, whose register is
+    one on from its hop -- the way the products of the free-surface kernel
+    leave their temporaries.  The code ahead of the loop stores `S` from
+    registers of its own.
+
+    `across` reads `S` behind the loop, lane `l` the row of lane `l + 1`;
+    `other` makes a lane add the next lane's row onto its own; `parity` makes
+    an odd lane add its second column onto its first; `readonly` has the
+    trips read the columns past the first and store nothing of them, and
+    `plain` reaches them in loops that are not unrolled; `partial` leaves the
+    last column out of the store ahead of the loop, and
+    `extra` has the trips leave it alone; `mark` defines `S` anew in the
+    trip; `outer` puts it all in a loop of its own, whose body `defines`
+    begins with a `mark defines` of `S`.
+    """
+
+    def __init__(self, *, across=False, other=False, parity=False,
+                 readonly=False, plain=False, partial=False, extra=False,
+                 mark=False, outer=False, defines=False, trips=3):
+        b = self.b = IRBuilder(fptype=F32, arena='shrMem')
+        k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
+        p = b.decl_expr(
+            'float *const __restrict__ glb_m1', '&m1[{0} * 32]',
+            BufferType(F32, (LANES,), MemSpace.GLOBAL), 'm1', args=(k,),
+            kind=Effect.READ, space=MemSpace.GLOBAL, hint='glb_m1',
+            extern='glb_m1')
+        lane = b.op('rem', INDEX, b.thread_id('x'), LANES, hint='lead')
+        inside = b.op('lt', BOOL, lane, ROWS, hint='g')
+        s = self.s = b.alloc(F32, (ROWS * COLS,), MemSpace.SHARED, hint='s',
+                             extern='s0')
+        real = ScalarType(F32)
+        cols = COLS - 1 if extra else COLS
+
+        def element(j, shift=0):
+            row = lane if not shift else b.op(
+                'rem', INDEX, b.op('add', INDEX, lane, shift), ROWS)
+            return b.op('add', INDEX, row, b.op('mul', INDEX, j, ROWS),
+                        hint='a')
+
+        def adds(first, count, shift=0, odd=False, store=True,
+                 unroll=True):
+            temp = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='t',
+                           extern=f't{first}', init='{}')
+            with b.if_(inside):
+                with b.for_(0, count, 1, unroll=unroll) as hop:
+                    col = (hop.induction if not first
+                           else b.op('add', INDEX, hop.induction, first))
+                    read = (b.op('add', INDEX, col,
+                                 b.op('rem', INDEX, lane, 2, hint='odd'))
+                            if odd else col)
+                    b.store(temp, b.op('add', real,
+                                       b.load(s, element(read, shift)), 1.0),
+                            col)
+            if not store:
+                b.store(p, b.load(temp, first), lane)
+                return
+            with b.if_(inside):
+                with b.for_(0, count, 1, unroll=unroll) as hop:
+                    col = (hop.induction if not first
+                           else b.op('add', INDEX, hop.induction, first))
+                    b.store(s, b.load(temp, col), element(col))
+
+        def run():
+            if defines:
+                b.mark('defines', s)
+            before = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r0',
+                             extern='r0', init='{}')
+            with b.for_(0, COLS, 1, unroll=True) as hop:
+                b.store(before, b.op('mul', real, 2.0, 3.0), hop.induction)
+            with b.if_(inside):
+                with b.for_(0, COLS - 1 if partial else COLS, 1,
+                            unroll=True) as hop:
+                    b.store(s, b.load(before, hop.induction),
+                            element(hop.induction))
+            with b.for_(0, trips, 1, rolled=True, hint='i'):
+                if mark:
+                    b.mark('defines', s)
+                adds(0, 1, 1 if other else 0, odd=parity)
+                adds(1, cols - 1, store=not readonly, unroll=not plain)
+            if across:
+                with b.if_(inside):
+                    b.store(p, b.load(s, element(0, 1)), lane)
+
+        if outer:
+            with b.for_(0, 2, 1, hint='o'):
+                run()
+        else:
+            run()
+        self.body = b.finish()
+        verify(self.body)
+
+    def carry(self):
+        self.report = []
+        out = carry_trips(self.body, self.b.scratch, threads=LANES,
+                          arena='shrMem', report=self.report)
+        verify(out)
+        return out
+
+
 def _split(body):
     """`(ahead, loop, behind)` around the rolled loop of `body`."""
     at = next(i for i, s in enumerate(body) if s.op is Op.FOR
               and s.attr('rolled'))
     return list(body[:at]), body[at], list(body[at + 1:])
+
+
+def _shared(stmts, buffer):
+    """The loads and stores among `stmts` of `buffer` in shared memory."""
+    return [a for s in walk_stmts(tuple(stmts)) for a in s.accesses
+            if s.op in (Op.LOAD, Op.STORE) and a.base is buffer]
 
 
 def _touches(stmts, buffer):
@@ -509,3 +618,136 @@ def test_an_atomic_update_that_adds_a_slot_twice_stays_as_it_is():
     each of them twice."""
     run = Run(atomic=True, twice=True)
     assert run.carry() == run.body
+
+
+def test_a_temporary_each_lane_keeps_to_itself_is_held_in_registers():
+    """Every lane adds onto its own rows of `S`, which the code ahead of the
+    loop stored from registers and nothing behind the loop reads: the trips
+    add into registers of their own, which take what the code ahead stored
+    from its registers -- and `S` is stored neither ahead of the loop nor
+    behind it any more."""
+    run = Own()
+    out = run.carry()
+    ahead, loop, behind = _split(out)
+    assert not _shared(loop.regions[0].body, run.s)
+    assert not _shared(ahead, run.s) and not _shared(behind, run.s)
+    image, = [s.target[0] for s in ahead if s.op is Op.ALLOC
+              and s.attr('extern') == 'carry_s0']
+    assert image.type.shape == (COLS,)
+    assert any('not stored behind the loop' in line for line in run.report)
+    assert any('not stored there' in line for line in run.report)
+
+
+def test_a_register_one_on_from_its_hop_is_computed():
+    """The columns past the first are reached at the hop plus one: in the
+    trip, their register is that sum."""
+    run = Own()
+    ahead, loop, _ = _split(run.carry())
+    image, = [s.target[0] for s in ahead if s.op is Op.ALLOC
+              and s.attr('extern') == 'carry_s0']
+    every = walk_stmts(loop.regions[0].body)
+    defs = {t.id: s for s in every for t in s.target}
+    slots = [s.args[-1] for s in every if s.op in (Op.LOAD, Op.STORE)
+             and any(a.base is image for a in s.accesses)]
+    assert 0 in slots
+    assert any(getattr(x, 'id', None) in defs and defs[x.id].op == 'add'
+               and 1 in defs[x.id].args for x in slots)
+
+
+def test_what_the_code_behind_reads_is_stored_once_behind_the_loop():
+    """Lane `l` reads the row of lane `l + 1` behind the loop: what the trips
+    wrote goes there once, behind the loop, and the store ahead of it -- of
+    the same elements -- goes."""
+    run = Own(across=True)
+    ahead, loop, behind = _split(run.carry())
+    assert not _shared(loop.regions[0].body, run.s)
+    assert not [a for a in _shared(ahead, run.s) if a.writes]
+    image, = [s.target[0] for s in ahead if s.op is Op.ALLOC
+              and s.attr('extern') == 'carry_s0']
+    every = walk_stmts(tuple(behind))
+    defs = {t.id: s for s in every for t in s.target}
+    stores = [s for s in every if s.op is Op.STORE
+              and any(a.base is run.s for a in s.accesses)]
+    assert stores and all(
+        any(a.base is image for a in defs[s.args[1].id].accesses)
+        for s in stores)
+
+
+def test_a_lane_that_adds_another_lanes_row_keeps_the_temporary_in_memory():
+    """A lane adds the next lane's row onto its own: what it reads, another
+    lane writes, which no register of this lane holds."""
+    run = Own(other=True)
+    assert run.carry() == run.body
+    assert any('another lane writes' in line for line in run.report)
+
+
+def test_what_the_code_ahead_did_not_store_keeps_the_temporary_in_memory():
+    """The store ahead of the loop leaves the last column out: the trips read
+    it first from what an earlier statement wrote, which no register
+    holds."""
+    run = Own(partial=True)
+    assert run.carry() == run.body
+    assert any('does not store from registers' in line
+               for line in run.report)
+
+
+def test_a_store_ahead_of_more_than_the_trips_reach_keeps_it_in_memory():
+    """The trips leave the last column alone, which the store ahead of the
+    loop writes as well: a register of the trips' image for it would be one
+    the trips do not have."""
+    run = Own(extra=True)
+    assert run.carry() == run.body
+    assert any('do not reach' in line for line in run.report)
+
+
+def test_a_temporary_the_trip_defines_anew_stays_in_memory():
+    run = Own(mark=True)
+    assert run.carry() == run.body
+    assert any('a mark touches it' in line for line in run.report)
+
+
+def test_around_a_back_edge_the_loop_reads_what_it_left():
+    """The run stands in a loop of its own: around that loop's back edge the
+    store ahead of the run and the run itself come again, and the run reads
+    what the last trip left -- so it is stored behind the loop, and is not
+    where that loop's body begins by defining it anew."""
+    run = Own(outer=True)
+    out = run.carry()
+    inner = next(s for s in out if s.op is Op.FOR).regions[0].body
+    _, _, behind = _split(inner)
+    assert [a for a in _shared(behind, run.s) if a.writes]
+    run = Own(outer=True, defines=True)
+    out = run.carry()
+    inner = next(s for s in out if s.op is Op.FOR).regions[0].body
+    _, _, behind = _split(inner)
+    assert not _shared(behind, run.s)
+
+
+def test_a_register_that_would_hold_two_elements_keeps_it_in_memory():
+    """An odd lane reads its second column where an even lane reads its
+    first, and every lane writes its first: no register holds the same of
+    what every lane reads there."""
+    run = Own(parity=True)
+    assert run.carry() == run.body
+    assert any("two of a lane's elements" in line for line in run.report)
+
+
+def test_a_store_ahead_of_elements_the_trips_only_read_stays():
+    """The trips read the columns past the first and write nothing of them,
+    which lane `l + 1` reads behind the loop: what the store ahead of the
+    loop wrote there nothing writes again, so it stays."""
+    run = Own(readonly=True, across=True)
+    ahead, loop, _ = _split(run.carry())
+    assert not _shared(loop.regions[0].body, run.s)
+    assert [a for a in _shared(ahead, run.s) if a.writes]
+    assert any('taken from registers ahead of the loop' in line
+               and 'not stored there' not in line for line in run.report)
+
+
+def test_a_register_a_loop_picks_that_is_not_unrolled_stays_in_memory():
+    """A register picked by the hop of a loop that is not unrolled is one the
+    compiler cannot name ahead of time, and it keeps that in memory as
+    well."""
+    run = Own(plain=True)
+    assert run.carry() == run.body
+    assert any('not unrolled' in line for line in run.report)

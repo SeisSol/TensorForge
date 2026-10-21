@@ -1731,7 +1731,7 @@ class Generator:
         lambda body: self._emit_section(body, index, section),
         arena=obj.name, place=place, barriers=self._barriers(section),
         metrics=self._metrics, shards=self._shard_spec(section),
-        trips=self._trip_spec(), carry=self._carry_spec())
+        trips=self._trip_spec(), carry=self._carry_spec(section))
     return body, place.layout
 
   def _trip_spec(self) -> Optional[dict]:
@@ -1753,17 +1753,18 @@ class Generator:
       return None
     return dict(threads=self._num_threads)
 
-  def _carry_spec(self) -> Optional[dict]:
+  def _carry_spec(self, section) -> Optional[dict]:
     """What `pir.CarryTrips` takes besides the body: the lanes a
     multiplication spans, which `threadIdx.x` counts -- where the lanes of
     one multiplication are a run of them, which a layout that interleaves
     the multiplications of a group does not give, and every lane would not
-    be asked about."""
+    be asked about -- and the multiplication's own arena, which no lane of
+    another multiplication reaches."""
     split = MultLayout(self._num_threads,
                        self._context.target.hw.vec_unit_length)
     if not (split.contiguous or split.whole_waves):
       return None
-    return dict(threads=self._num_threads)
+    return dict(threads=self._num_threads, arena=section.shr_mem_obj.name)
 
   def _shard_spec(self, section) -> Optional[dict]:
     """What `pir.ShardLoads` takes besides the body, where the placement

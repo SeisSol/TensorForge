@@ -298,8 +298,10 @@ class CarryTrips(Pass):
     the stores open, which `flatten` brings out -- and ahead of the wrap,
     which would otherwise issue the next trip's load at the tail of this one.
     Not under the explicit vector, whose register images are vectors a slot
-    does not hold.  `threads` is how many lanes a multiplication spans, and
-    `report` collects what was carried and why the rest was not.
+    does not hold.  `threads` is how many lanes a multiplication spans,
+    `arena` the multiplication's own arena in shared memory, whose buffers a
+    lane may keep to itself in registers, and `report` collects what was
+    carried and why the rest was not.
     """
 
     name = 'carry'
@@ -307,17 +309,18 @@ class CarryTrips(Pass):
     preserves = ('flat',)
     is_transform = True
 
-    def __init__(self, scratch, threads: int,
+    def __init__(self, scratch, threads: int, arena: Optional[str] = None,
                  report: Optional[List[str]] = None):
         self._scratch = scratch
         self._threads = threads
+        self._arena = arena
         self._report = report
 
     def run(self, pc: BodyContext) -> None:
         if pc.explicit_simd:
             return
         pc.body = carry_trips(pc.body, self._scratch, threads=self._threads,
-                              report=self._report)
+                              arena=self._arena, report=self._report)
 
 
 class ShardLoads(Pass):

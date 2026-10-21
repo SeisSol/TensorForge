@@ -76,6 +76,24 @@ behind the loop instead, reading the carried image; trips that add onto `H`
 atomically start from the image instead of zeros, and the store ahead of
 the loop becomes the one behind it (`_summed`).  The code behind the loop
 that loads `H` straight back reads the carried image (`_forward_behind`).
+
+A buffer in shared memory need not be loaded whole at the head of a trip and
+stored whole at its tail.  Where every lane reads of it only what it wrote
+itself, the trips read and write it anywhere, in the middle of a computation
+as well -- a temporary of the multiplication's own arena that a trip adds
+onto and the next reads -- and every element a lane reaches is a register of
+an image of its own, one register per element, the same for every lane
+(`_private`)::
+
+    store H[e(l, 0)] <- R[0]      P[0] <- R[0]           (the code ahead)
+    for k:                        for k:
+      a = H[e(l, 0)] + ...          a = P[0] + ...
+      store H[e(l, 0)] <- a         P[0] <- a
+                                  store H[e(l, 0)] <- P[0]
+
+with the store behind the loop where anything behind it reads `H` before
+something defines it anew, and the store ahead of it where anything still
+reads what it wrote.
 """
 
 from __future__ import annotations
@@ -85,7 +103,7 @@ from dataclasses import dataclass, replace
 from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from .ahead import Clone, counted
-from .core import (Access, Effect, MemSpace, Op, Stmt, Value,
+from .core import (Access, BufferType, Effect, MemSpace, Op, Stmt, Value,
                    collect_accesses, collect_effect, defined_within, may_alias,
                    walk_stmts)
 from .shards import _Indices, _NotStatic
@@ -93,19 +111,23 @@ from .transfers import neutral, tag
 
 
 def carry_trips(body: Tuple[Stmt, ...], scratch, *, threads: int,
+                arena: Optional[str] = None,
                 report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with what the trips of its merged runs hand each other through
     memory kept in registers, where that is shown to be the same (see the
     module).  `threads` is how many lanes a multiplication spans,
-    `threadIdx.x` the lane; `scratch` makes the builder new statements are
-    built with; `report` collects what was carried and why the rest was
-    not."""
+    `threadIdx.x` the lane; `arena` is the multiplication's own arena in
+    shared memory, whose buffers no lane of another multiplication reaches,
+    and None where the buffers of none are to be kept per lane (`_private`);
+    `scratch` makes the builder new statements are built with; `report`
+    collects what was carried and why the rest was not."""
     taken = {str(s.attr('extern')) for s in walk_stmts(body)
              if s.attr('extern') is not None}
     constants = {t.id: s.attr('value') for s in walk_stmts(body)
                  if s.op is Op.CONST for t in s.target}
     carrier = _Carrier(scratch, _Indices(body, {'x': threads}), threads,
-                       report, taken, constants, _addresses(body))
+                       report, taken, constants, _addresses(body),
+                       _own(body, arena), body)
     out, changed = carrier.stmts(body)
     return out if changed else body
 
@@ -177,7 +199,8 @@ class _Carrier:
 
     def __init__(self, scratch, indices: _Indices, threads: int,
                  report: Optional[List[str]], taken: Set[str],
-                 constants: Dict[int, object], addresses: Set[int]):
+                 constants: Dict[int, object], addresses: Set[int],
+                 own: Dict[tuple, Stmt], root: Tuple[Stmt, ...]):
         self._scratch = scratch
         self._indices = indices
         self._threads = threads
@@ -188,6 +211,13 @@ class _Carrier:
         #: The values the body uses other than as the buffer of an access:
         #: a pointer put into a table, say (`_addresses`).
         self._addresses = addresses
+        #: The buffers a lane may keep to itself, by key, with their
+        #: declarations (`_own`).
+        self._own = own
+        #: The body as it came, and the loop being carried, by id: what is
+        #: read behind the loop is asked of them (`_read_behind`).
+        self._root = root
+        self._here: Optional[int] = None
         self._b = None
 
     def _constant(self, x) -> bool:
@@ -223,7 +253,7 @@ class _Carrier:
                     s = replace(s, regions=tuple(regions))
                     changed = True
             if counted(s) and s.attr('rolled'):
-                ahead, s, behind, carried = self._loop(s)
+                ahead, s, behind, carried = self._loop(s, out)
                 if ahead or behind:
                     changed = True
                 for c in carried:
@@ -238,11 +268,16 @@ class _Carrier:
             out = self._forward_behind(out, c)
         return tuple(out), changed
 
-    def _loop(self, loop: Stmt):
+    def _loop(self, loop: Stmt, out: List[Stmt]):
+        """`(ahead, loop, behind, carried)` for one merged run's loop, with
+        `out` the statements ahead of it in its list -- which the buffers a
+        lane keeps to itself take their first values from, and lose their
+        stores to, where those stores go (`_private`)."""
         ahead: List[Stmt] = []
         behind: List[Stmt] = []
         carried: List[_Carried] = []
         tried: Set[int] = set()
+        self._here = id(loop)
         while True:
             body = loop.regions[0].body
             found = None
@@ -254,7 +289,7 @@ class _Carrier:
                     continue
                 name = getattr(access.base, 'name', str(access.base))
                 try:
-                    found = self._carry(loop, access)
+                    found = self._carry(loop, access, out)
                 except _Refused as why:
                     self._say(f'carry: {name} stays in memory: {why}')
                     continue
@@ -277,12 +312,29 @@ class _Carrier:
 
     # -- one buffer ---------------------------------------------------------- #
 
-    def _carry(self, loop: Stmt, access: Access):
+    def _carry(self, loop: Stmt, access: Access, out: List[Stmt]):
         stmts = list(loop.regions[0].body)
         probe = Access(Effect.READ, access.space, access.base)
         touching = [i for i, s in enumerate(stmts)
                     if any(may_alias(a, probe)
                            for a in collect_accesses((s,)))]
+        try:
+            return self._shaped(loop, stmts, touching, access)
+        except _Refused as why:
+            if (access.space is not MemSpace.SHARED
+                    or _key(access.base) not in self._own):
+                raise
+            try:
+                return self._private(loop, stmts, touching, access, out)
+            except _Refused as other:
+                if str(other) == str(why):
+                    raise
+                raise _Refused(f"{why}; and it is not each lane's own: "
+                               f"{other}") from other
+
+    def _shaped(self, loop: Stmt, stmts: List[Stmt], touching: List[int],
+                access: Access):
+        """A load at the head and a store at the tail, or atomic updates."""
         units = self._units(stmts, touching, access)
         kinds = {u.kind for u in units}
         if kinds == {'atomic'}:
@@ -703,9 +755,10 @@ class _Carrier:
                       f'known per lane ({why})')
         return ahead, behind
 
-    def _forwarded(self, out: List[Stmt], ahead: List[Stmt],
-                   behind: List[Stmt], c: _Carried):
-        access = c.access
+    def _last_stores(self, out: List[Stmt], access: Access) -> List[_Unit]:
+        """The statements at the end of `out` that store `access`'s buffer,
+        from a register image or as numbers, last first: back to the first
+        that does anything else to it."""
         probe = Access(Effect.READ, access.space, access.base)
         units: List[_Unit] = []
         for i in range(len(out) - 1, -1, -1):
@@ -719,6 +772,12 @@ class _Carrier:
             if unit is None or unit.kind not in ('store', 'fill'):
                 break
             units.append(unit)
+        return units
+
+    def _forwarded(self, out: List[Stmt], ahead: List[Stmt],
+                   behind: List[Stmt], c: _Carried):
+        access = c.access
+        units = self._last_stores(out, access)
         stores = [u for u in units if u.kind == 'store']
         if not stores:
             raise _Refused('nothing ahead of the loop stores it from '
@@ -1358,6 +1417,397 @@ class _Carrier:
         b.store(image, now, slot)
         return list(b.finish())
 
+    # -- a buffer each lane keeps to itself ---------------------------------- #
+
+    def _private(self, loop: Stmt, stmts: List[Stmt], touching: List[int],
+                 access: Access, out: List[Stmt]):
+        """`access`'s buffer in a register image of every lane's own over the
+        trips: an element a lane writes in the trip, no other lane reads or
+        writes there, and every element a lane reaches is one register of
+        the image, whichever access reaches it -- the same register for
+        every lane (`_reach`), one of the hops of the loops around the
+        access (`_affine`).  Shared memory alone, of the multiplication's
+        own arena (`_own`): no lane of another multiplication reaches it.
+
+        What the trips read before they write it, the image takes ahead of
+        the loop from the registers the code there stored it from (`_seed`);
+        what they write goes to memory behind the loop, where anything
+        behind it reads the buffer (`_read_behind`).  The stores ahead go
+        where nothing reads what they wrote any more: the loop does not, and
+        behind it the buffer is defined anew or written again."""
+        base = access.base
+        alloc = self._own[_key(base)]
+        if any(x is alloc for x in walk_stmts(tuple(stmts))):
+            raise _Refused('it is declared in the trip')
+        probe = Access(Effect.READ, access.space, base)
+        nests = tuple(stmts[i] for i in touching)
+        reached: List[Stmt] = []
+        for x in walk_stmts(nests):
+            mine = [a for a in x.accesses if may_alias(a, probe)]
+            if not mine:
+                continue
+            if any(a.base is not base for a in mine):
+                raise _Refused('it is reached through another binding')
+            if x.op not in (Op.LOAD, Op.STORE) or any(
+                    a.kind & Effect.ATOMIC for a in mine):
+                raise _Refused(f'a {x.op} touches it')
+            if len(x.args) != (2 if x.op is Op.LOAD else 3):
+                raise _Refused('an access of more than one index')
+            value = x.target[0] if x.op is Op.LOAD else x.args[1]
+            if getattr(getattr(value, 'type', None), 'length',
+                       None) is not None:
+                raise _Refused('a vector access')
+            reached.append(x)
+        named = {x.args[0].id for x in reached
+                 if isinstance(x.args[0], Value)}
+        if isinstance(base, Value):
+            named.add(base.id)
+        if named & self._addresses:
+            raise _Refused('its binding is handed on, to a table of pointers '
+                           'or the like, and may reach it from anywhere')
+        if any(x.effect & Effect.UNKNOWN for x in walk_stmts(tuple(stmts))):
+            raise _Refused('the trip holds a statement that says nothing '
+                           'about what it touches')
+
+        events = {id(e.stmt): e for e in _events(nests)
+                  if any(a.base is base for a in e.stmt.accesses)}
+        trace: List[Tuple[Stmt, Dict]] = []
+        _trace(nests, {}, events, trace)
+        steps, register = self._reach(trace, events)
+        if not register:
+            raise _Refused('no lane reaches it')
+        size = max(register.values()) + 1
+        fits = self._fits(trace, register, size, _unrolled(nests))
+        exposed, written, own = _uses(steps, register)
+
+        b = self._scratch()
+        extern = Clone(self._fresh, 'carry', self._taken).rename(
+            str(alloc.attr('extern', 'own')))
+        image = b.alloc(base.type.elem, (size,), MemSpace.REGISTER,
+                        hint='own', extern=extern, init='{}')
+        declare = list(b.finish())
+
+        units, seed, seeded = self._seed(out, access, own, exposed, image,
+                                         size)
+        read_behind = self._read_behind(base)
+        behind: List[Stmt] = []
+        if read_behind:
+            behind = self._stored_behind(loop, stmts, touching, trace, steps,
+                                         register, fits, image)
+
+        inductions = _inductions(nests)
+        body: List[Stmt] = []
+        for i, s in enumerate(stmts):
+            if i in set(touching):
+                body.extend(self._privatized([s], fits, image, inductions))
+            else:
+                body.append(s)
+
+        # The stores ahead of the loop: the loop reads nothing they wrote
+        # any more, and behind it the buffer is defined anew, or written
+        # again wherever they wrote it.
+        at = sorted(i for u in units for i in u.at)
+        name = getattr(base, 'name', str(base))
+        again = all(elements <= set(written.get(lane, {}).values())
+                    for lane, elements in seeded.items())
+        if not units:
+            pass
+        elif (again or not read_behind) and self._movable(out, at):
+            for i in reversed(at):
+                del out[i]
+            self._say(f'carry: {name} taken from registers ahead of the '
+                      f'loop, and not stored there')
+        else:
+            self._say(f'carry: {name} taken from registers ahead of the loop')
+        if not read_behind:
+            self._say(f'carry: {name} not stored behind the loop: nothing '
+                      f'behind it reads it')
+        return declare + seed, body, behind, None
+
+    def _reach(self, trace: List[Tuple[Stmt, Dict]],
+               events: Dict[int, _Event]):
+        """What the accesses of `trace` reach, lane by lane: `(steps,
+        register)`, with `steps` per lane the list of `(node, writes,
+        element)` in the order the lane makes them -- a node an access at
+        the hops of the loops around it -- and `register` a node's register:
+        one per element of a lane, the same for every lane.  Refused where
+        an element a lane writes another lane reaches, or where a node
+        reaches two elements of a lane that two others reach apart."""
+        parent: Dict = {}
+
+        def find(n):
+            while parent[n] != n:
+                parent[n] = parent[parent[n]]
+                n = parent[n]
+            return n
+
+        steps: Dict[int, List] = {}
+        for lane in range(self._threads):
+            first: Dict[int, object] = {}
+            for x, env in trace:
+                e = events[id(x)]
+                full = {**env, 'x': lane}
+                index = x.args[1] if x.op is Op.LOAD else x.args[2]
+                self._known((index, x.predicate, *(c for c, _ in e.conds)),
+                            full)
+                memo: Dict = {}
+                if not self._active(e, full, memo):
+                    continue
+                element = self._indices.evaluate(index, full, memo)
+                node = (id(x), tuple(sorted(env.items())))
+                parent.setdefault(node, node)
+                if element in first:
+                    one, other = find(first[element]), find(node)
+                    if one != other:
+                        parent[other] = one
+                else:
+                    first[element] = node
+                steps.setdefault(lane, []).append(
+                    (node, x.op is Op.STORE, element))
+        touched: Dict[int, Set[int]] = {}
+        written: Set[int] = set()
+        for lane, seq in steps.items():
+            held: Dict = {}
+            for node, writes, element in seq:
+                if held.setdefault(find(node), element) != element:
+                    raise _Refused("a register would hold two of a lane's "
+                                   "elements")
+                touched.setdefault(element, set()).add(lane)
+                if writes:
+                    written.add(element)
+        if any(len(touched[e]) > 1 for e in written):
+            raise _Refused('a lane reaches an element another lane writes')
+        slot: Dict = {}
+        for x, env in trace:
+            node = (id(x), tuple(sorted(env.items())))
+            if node in parent:
+                slot.setdefault(find(node), len(slot))
+        return steps, {node: slot[find(node)] for node in parent}
+
+    def _fits(self, trace: List[Tuple[Stmt, Dict]], register: Dict,
+              size: int,
+              unrolled: Set[int]) -> Dict[int, Tuple[int, Dict[int, int]]]:
+        """Per access of `trace`, by id, its register as an affine function
+        of the hops of the loops around it (`_affine`) -- one inside the
+        image at every hop, whether a lane takes it or not, and of the hops
+        of unrolled loops alone (`unrolled`, their inductions): a register
+        the compiler cannot name ahead of time is one it keeps in memory."""
+        points: Dict[int, List] = {}
+        for x, env in trace:
+            node = (id(x), tuple(sorted(env.items())))
+            found = points.setdefault(id(x), [])
+            if node in register:
+                found.append((env, register[node]))
+        fits = {sid: _affine(found) for sid, found in points.items()}
+        for x, env in trace:
+            c, coef = fits[id(x)]
+            if set(coef) - unrolled:
+                raise _Refused('a register picked by the hop of a loop that '
+                               'is not unrolled')
+            if not 0 <= c + sum(a * env[k] for k, a in coef.items()) < size:
+                raise _Refused('a register outside the image')
+        return fits
+
+    def _seed(self, out: List[Stmt], access: Access, own, exposed, image,
+              size: int):
+        """`(units, seed, seeded)`: the stores at the end of `out` that the
+        trips read first what they wrote -- every element a lane reads in
+        the trip before it writes it there -- and `seed`, the same stores
+        into the registers of `image` instead (`own`: per lane, element to
+        register), behind them and ahead of the loop; `seeded` holds per
+        lane the elements they write.  Refused where they do not write all
+        of that, or write an element the trips do not reach."""
+        if not exposed:
+            return [], [], {}
+        units = self._last_stores(out, access)
+        if not units:
+            raise _Refused('nothing ahead of the loop stores it from '
+                           'registers')
+        units.reverse()
+        for u in units:
+            if u.image is None:
+                continue
+            for i in range(min(u.at), len(out)):
+                if i not in u.at and any(
+                        a.writes and _key(a.base) == _key(u.image)
+                        for a in collect_accesses((out[i],))):
+                    raise _Refused('an image it is stored from ahead of the '
+                                   'loop is written again there')
+        base = access.base
+        seeded: Dict[int, Set[int]] = {}
+        seed: List[Stmt] = []
+        for u in units:
+            nests = tuple(out[i] for i in sorted(u.at))
+            events = {id(e.stmt): e for e in u.events
+                      if e.stmt.op is Op.STORE
+                      and any(a.base is base for a in e.stmt.accesses)}
+            trace: List[Tuple[Stmt, Dict]] = []
+            _trace(nests, {}, events, trace)
+            register: Dict = {}
+            for x, env in trace:
+                e = events[id(x)]
+                node = (id(x), tuple(sorted(env.items())))
+                for lane in range(self._threads):
+                    full = {**env, 'x': lane}
+                    index = x.args[2]
+                    self._known((index, x.predicate,
+                                 *(c for c, _ in e.conds)), full)
+                    memo: Dict = {}
+                    if not self._active(e, full, memo):
+                        continue
+                    element = self._indices.evaluate(index, full, memo)
+                    r = own.get(lane, {}).get(element)
+                    if r is None:
+                        raise _Refused('the code ahead of the loop stores '
+                                       'what the trips do not reach')
+                    if register.setdefault(node, r) != r:
+                        raise _Refused('the code ahead of the loop stores '
+                                       'into registers that differ between '
+                                       'lanes')
+                    seeded.setdefault(lane, set()).add(element)
+            fits = self._fits(trace, register, size, _unrolled(nests))
+            seed += self._privatized(list(nests), fits, image,
+                                     _inductions(nests))
+        for lane, first in exposed.items():
+            if not set(first.values()) <= seeded.get(lane, set()):
+                raise _Refused('the trips read first what the code ahead of '
+                               'the loop does not store from registers')
+        seed = Clone(self._fresh, 'carry', self._taken).stmts(seed,
+                                                              named=True)
+        return units, seed, seeded
+
+    def _privatized(self, stmts: Sequence[Stmt], fits, image,
+                    inductions: Dict[int, Value]) -> List[Stmt]:
+        """`stmts` with each access of `fits` an access of the register of
+        `image` that its fit gives."""
+        out: List[Stmt] = []
+        for s in stmts:
+            if s.regions:
+                out.append(replace(s, regions=tuple(
+                    replace(r, body=tuple(self._privatized(
+                        r.body, fits, image, inductions)))
+                    for r in s.regions)))
+                continue
+            fit = fits.get(id(s))
+            if fit is None:
+                out.append(s)
+                continue
+            b = self._scratch()
+            slot = _slot(b, fit, inductions)
+            out.extend(b.finish())
+            if s.op is Op.LOAD:
+                out.append(replace(
+                    s, args=(image, slot),
+                    accesses=(Access(Effect.READ, MemSpace.REGISTER, image),),
+                    attrs=tuple((k, v) for k, v in s.attrs
+                                if k in ('extern', 'other'))))
+            else:
+                out.append(replace(
+                    s, args=(image, s.args[1], slot),
+                    accesses=(Access(Effect.WRITE, MemSpace.REGISTER,
+                                     image),),
+                    attrs=()))
+        return out
+
+    def _stored_behind(self, loop: Stmt, stmts: List[Stmt],
+                       touching: List[int], trace, steps, register, fits,
+                       image) -> List[Stmt]:
+        """The stores of the trip again, behind the loop, each storing the
+        register of `image` its fit gives in place of what it stored -- as
+        few of them as write every register a lane writes."""
+        writes: Dict[int, Set] = {}
+        for lane, seq in steps.items():
+            for node, wrote, _ in seq:
+                if wrote:
+                    writes.setdefault(node[0], set()).add(
+                        (lane, register[node]))
+        order: List[Stmt] = []
+        for x, _ in trace:
+            if x.op is Op.STORE and all(y is not x for y in order):
+                order.append(x)
+        covered: Set = set()
+        kept: List[Stmt] = []
+        for x in reversed(order):
+            pairs = writes.get(id(x), set())
+            if pairs <= covered:
+                continue
+            covered |= pairs
+            kept.append(x)
+        kept.reverse()
+        where = {id(y): i for i in touching for y in walk_stmts((stmts[i],))}
+        inside = set(defined_within(tuple(stmts)))
+        inside |= {a.id for a in loop.regions[0].args}
+        out: List[Stmt] = []
+        for x in kept:
+            top = stmts[where[id(x)]]
+            cut = self._cut(top, x, fits[id(x)], image, _inductions((top,)))
+            out += Clone(self._fresh, 'carry', self._taken).stmts(cut,
+                                                                  named=True)
+        _needs_only(tuple(out), inside, 'the store behind the loop needs what '
+                    'the trip computes')
+        return out
+
+    def _cut(self, top: Stmt, x: Stmt, fit, image,
+             inductions: Dict[int, Value]) -> List[Stmt]:
+        """`top` cut down to the store `x` and what it needs -- the loops
+        and branches around it, what computes their conditions and its index
+        and predicate -- with `x` storing the register of `image` that `fit`
+        gives instead of what it stored."""
+        parent: Dict[int, Stmt] = {}
+
+        def index(xs, owner):
+            for y in xs:
+                if owner is not None:
+                    parent[id(y)] = owner
+                for r in y.regions:
+                    index(r.body, y)
+
+        index((top,), None)
+        defs = {t.id: y for y in walk_stmts((top,)) for t in y.target}
+        need: Set[int] = set()
+        work = [x]
+        while work:
+            y = work.pop()
+            if id(y) in need:
+                continue
+            need.add(id(y))
+            if id(y) in parent:
+                work.append(parent[id(y)])
+            operands = (tuple(y.args[2:]) + ((y.predicate,) if y.predicate
+                                             is not None else ())
+                        if y is x else y.operands())
+            for v in operands:
+                if isinstance(v, Value) and v.id in defs:
+                    work.append(defs[v.id])
+        b = self._scratch()
+        value = b.load(image, _slot(b, fit, inductions), hint='own')
+        loaded = list(b.finish())
+
+        def keep(xs) -> List[Stmt]:
+            kept: List[Stmt] = []
+            for y in xs:
+                if id(y) not in need:
+                    continue
+                if y is x:
+                    kept += loaded
+                    kept.append(replace(y, args=(y.args[0], value)
+                                        + tuple(y.args[2:])))
+                    continue
+                if y.regions:
+                    y = replace(y, regions=tuple(
+                        replace(r, body=tuple(keep(r.body)))
+                        for r in y.regions))
+                kept.append(y)
+            return kept
+
+        return keep((top,))
+
+    def _read_behind(self, base) -> bool:
+        """Whether anything may read `base`, a buffer in shared memory,
+        behind the loop being carried before something defines it anew
+        (`_read_after`)."""
+        return _read_after(self._root, self._here, _key(base))
+
     # -- shared --------------------------------------------------------------- #
 
     def _alone(self, loop: Stmt, stmts: List[Stmt], mine: Set[int],
@@ -1475,6 +1925,10 @@ def _addresses(body: Sequence[Stmt]) -> Set[int]:
     that name it can tell."""
     out: Set[int] = set()
     for s in walk_stmts(tuple(body)):
+        if s.op is Op.MARK:
+            # Names the buffers it says something about, and hands them to
+            # nobody.
+            continue
         args = s.args
         if s.op in (Op.LOAD, Op.STORE, Op.PREFETCH, Op.LOAD_ASYNC):
             args = args[1:]
@@ -1551,6 +2005,217 @@ def _unescaped(stmts: List[Stmt], ids: Set[int]) -> List[Stmt]:
         return out
 
     return strip(stmts)
+
+
+def _own(body: Sequence[Stmt], arena: Optional[str]) -> Dict[tuple, Stmt]:
+    """The buffers of `arena` in shared memory that a lane may keep to
+    itself, by key, with their declarations: those that are buffers of
+    their own -- one window, of one stage -- since an access names its
+    window, and through another window of the buffer it would reach the
+    same bytes unseen."""
+    if arena is None:
+        return {}
+    allocs = [s for s in walk_stmts(tuple(body))
+              if s.op is Op.ALLOC and s.target
+              and isinstance(s.target[0].type, BufferType)
+              and s.target[0].type.space is MemSpace.SHARED]
+    windows: Dict[int, int] = {}
+    for s in allocs:
+        if s.attr('identity') is not None:
+            key = id(s.attr('identity'))
+            windows[key] = windows.get(key, 0) + 1
+    out: Dict[tuple, Stmt] = {}
+    for s in allocs:
+        if s.attr('arena') != arena or (s.attr('stages') or 1) > 1:
+            continue
+        if s.attr('identity') is not None \
+                and windows[id(s.attr('identity'))] > 1:
+            continue
+        out[_key(s.target[0])] = s
+    return out
+
+
+def _uses(steps, register):
+    """Per lane, from the `steps` of `_Carrier._reach`: `(exposed, written,
+    own)` -- the registers the trip reads before it writes them, with the
+    element each holds; those it writes, likewise; and every element it
+    reaches, with its register."""
+    exposed: Dict[int, Dict[int, int]] = {}
+    written: Dict[int, Dict[int, int]] = {}
+    own: Dict[int, Dict[int, int]] = {}
+    for lane, seq in steps.items():
+        done: Set[int] = set()
+        for node, writes, element in seq:
+            r = register[node]
+            own.setdefault(lane, {})[element] = r
+            if writes:
+                done.add(r)
+                written.setdefault(lane, {})[r] = element
+            elif r not in done:
+                exposed.setdefault(lane, {}).setdefault(r, element)
+    return exposed, written, own
+
+
+def _trace(xs: Sequence[Stmt], env: Dict, events: Dict[int, _Event],
+           out: List[Tuple[Stmt, Dict]]) -> None:
+    """The statements of `events` among `xs`, each with the hops of the
+    loops around it, in the order a lane makes them -- through every
+    branch, which `_Carrier._active` decides per lane."""
+    for x in xs:
+        if x.op is Op.FOR:
+            if not counted(x) or x.loop_inits:
+                raise _NotStatic('a loop of an unknown count')
+            for trip in range(*x.loop_bounds):
+                _trace(x.regions[0].body, {**env, x.induction.id: trip},
+                       events, out)
+        elif x.regions:
+            for r in x.regions:
+                _trace(r.body, env, events, out)
+        elif id(x) in events:
+            out.append((x, env))
+
+
+def _affine(points) -> Tuple[int, Dict[int, int]]:
+    """`(c, {induction: a})` such that `c` plus the sum of `a` times the hop
+    of each induction is the register of every point `(hops, register)` --
+    refused where the registers are no such function of the hops."""
+    if not points:
+        return 0, {}
+    keys = sorted(points[0][0])
+    env0, r0 = points[0]
+    coef: Dict[int, int] = {}
+    for k in keys:
+        coef[k] = 0
+        for env, r in points[1:]:
+            if env[k] != env0[k] and all(env[j] == env0[j]
+                                         for j in keys if j != k):
+                step = env[k] - env0[k]
+                if (r - r0) % step:
+                    raise _Refused('registers that are not affine in the '
+                                   'hops of the loops around the access')
+                coef[k] = (r - r0) // step
+                break
+    c = r0 - sum(coef[k] * env0[k] for k in keys)
+    for env, r in points:
+        if c + sum(coef[k] * env[k] for k in keys) != r:
+            raise _Refused('registers that are not affine in the hops of the '
+                           'loops around the access')
+    return c, {k: a for k, a in coef.items() if a}
+
+
+def _slot(b, fit, inductions: Dict[int, Value]):
+    """The register `fit` gives, as an operand: a number, or arithmetic over
+    the inductions built with `b`."""
+    c, coef = fit
+    terms = []
+    for k, a in sorted(coef.items()):
+        induction = inductions[k]
+        terms.append(induction if a == 1 else
+                     b.op('mul', induction.type, induction, a, hint='slot'))
+    if not terms:
+        return c
+    out = terms[0]
+    for t in terms[1:]:
+        out = b.op('add', out.type, out, t, hint='slot')
+    if c:
+        out = b.op('add', out.type, out, c, hint='slot')
+    return out
+
+
+def _inductions(stmts: Sequence[Stmt]) -> Dict[int, Value]:
+    """The inductions of the loops among `stmts`, by id."""
+    return {x.induction.id: x.induction for x in walk_stmts(tuple(stmts))
+            if x.op is Op.FOR}
+
+
+def _unrolled(stmts: Sequence[Stmt]) -> Set[int]:
+    """The inductions of the unrolled loops among `stmts`, by id."""
+    return {x.induction.id for x in walk_stmts(tuple(stmts))
+            if x.op is Op.FOR and x.attr('unroll')}
+
+
+def _read_after(root: Sequence[Stmt], target: Optional[int], key) -> bool:
+    """Whether anything may read the buffer in shared memory that `key`
+    names behind the statement `target` (by id) of `root`, before a
+    `mark defines` of it says it holds nothing anybody wants (`allocate`).
+
+    Behind it in its list, then behind each statement around it -- and
+    around every back edge of a loop it stands in, from the start of the
+    loop's body down to `target` again, which reached again counts as a
+    read.  Past the end of the body nothing reads shared memory.  Which
+    branch a lane takes is not asked: a read in either is a read, and a
+    `mark defines` in a branch or a loop is none."""
+    path = _path(tuple(root), target) if target is not None else None
+    if path is None:
+        return True
+    for level in range(len(path) - 1, -1, -1):
+        stmts, i = path[level]
+        first = _decides(stmts[i + 1:], key)
+        if first is not None:
+            return first
+        if level == 0:
+            return False
+        holder = path[level - 1][0][path[level - 1][1]]
+        if _repeats(holder) and _again(path, level, key):
+            return True
+    return False
+
+
+def _again(path, level: int, key) -> bool:
+    """Around the back edge of the loop whose body is `path[level]`'s list:
+    whether the way from the start of that body down `path` to its last
+    statement reads the buffer `key` names before it defines it anew --
+    reaching that statement again counts as reading it."""
+    for stmts, i in path[level:]:
+        first = _decides(stmts[:i], key)
+        if first is not None:
+            return first
+    return True
+
+
+def _path(stmts: Tuple[Stmt, ...], target: int):
+    """`[(list, index)]` from `stmts` down to the statement `target`."""
+    for i, s in enumerate(stmts):
+        if id(s) == target:
+            return [(stmts, i)]
+        for r in s.regions:
+            found = _path(tuple(r.body), target)
+            if found is not None:
+                return [(stmts, i)] + found
+    return None
+
+
+def _decides(stmts: Sequence[Stmt], key) -> Optional[bool]:
+    """True where the first of `stmts` that decides about the buffer `key`
+    names reads it, False where it defines it anew, None where none does.
+    A statement that says nothing about what it touches reads it."""
+    for s in stmts:
+        if s.op is Op.MARK and s.attr('mark') == 'defines' and any(
+                isinstance(a, Value) and _key(a) == key for a in s.args):
+            return False
+        if s.op is Op.ALLOC and s.target and _key(s.target[0]) == key:
+            return False
+        for x in walk_stmts((s,)):
+            if x.effect & Effect.UNKNOWN:
+                return True
+            for a in x.accesses:
+                if a.space is MemSpace.UNKNOWN:
+                    return True
+                if (a.space is MemSpace.SHARED and a.kind & Effect.READ
+                        and (a.base is None or _key(a.base) == key)):
+                    return True
+    return None
+
+
+def _repeats(s: Stmt) -> bool:
+    """Whether `s` may run what it holds more than once: a loop, or a raw
+    block whose head is one."""
+    if s.op in (Op.FOR, Op.WHILE):
+        return True
+    if s.op is not Op.RAWBLOCK:
+        return False
+    head = (s.text or '').lstrip()
+    return bool(re.match(r'(?:#pragma[^\n]*\n\s*)?(?:for|while)\b', head))
 
 
 def _key(base):

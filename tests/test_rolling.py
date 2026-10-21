@@ -1464,6 +1464,24 @@ def _started(terms=4, twice=False):
     return out
 
 
+def _own(terms=4):
+    """`T = L_k C` and `A += T R_k`, with `A = T R_0` ahead of the run and
+    `Q = W A` behind it: a temporary each lane adds its own rows onto, which
+    the product behind the run reads across the lanes -- in shared memory,
+    then, as the temporaries of SeisSol's free-surface kernel are."""
+    out = [gemm(make('L0', [24, 9]), make('C', [9, 1]),
+                make('T', [24, 1], True)),
+           gemm(make('T', [24, 1], True), make('R0', [1, 3]),
+                make('A', [24, 3], True))]
+    for k in range(1, terms):
+        out.append(gemm(make(f'L{k}', [24, 9]), make('C', [9, 1]),
+                        make('T', [24, 1], True)))
+        out.append(gemm(make('T', [24, 1], True), make(f'R{k}', [1, 3]),
+                        make('A', [24, 3], True), add=True))
+    return out + [gemm(make('W', [16, 24]), make('A', [24, 3], True),
+                       make('Q', [16, 3]))]
+
+
 def _argument_chain(steps=3):
     """`L(k + 1) = A L(k)` and `Q += L(k + 1) C(k)`, with the levels the
     kernel's own arguments: the shape of SeisSol's anelastic time derivative,
@@ -1634,6 +1652,8 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('carried_from_ahead', False, {'rotate_slots': 1}),
     ('carried_from_ahead', False, {'closed_trips': True}),
     ('carried_from_ahead', False, {'closed_trips': True, 'rotate_slots': 1}),
+    ('own', False, {}),
+    ('own', False, {'closed_trips': True}),
 ])
 def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                                                               options):
@@ -1705,6 +1725,8 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
             return _projected()
         if shape == 'chain':
             return _argument_chain()
+        if shape == 'own':
+            return _own()
         return _staged()
 
     base = target.PREFERENCES['nvidia']
@@ -2107,6 +2129,33 @@ def test_a_closed_trip_stores_what_outlives_it_and_nothing_it_used_up(shape):
             break
         tail.append(instr)
     assert _kinds(tail) == ['StoreRegToGlb']
+
+
+def test_a_temporary_each_lane_adds_onto_is_held_in_its_registers():
+    """`A += T R_k` adds each lane's rows of `A` onto what the lane itself
+    wrote, and `A` is in shared memory for the product behind the run, which
+    reads it across the lanes.  With the trips closed, the lanes hold their
+    elements in registers over the trips (`pir.carry`): nothing in the loop
+    reaches `A`, the code ahead of it hands `A` over in registers instead of
+    storing it, and it is stored once behind the loop, for the product."""
+    from tensorforge.backend.pir.core import MemSpace, Op, walk_stmts
+    gen = _merged_build(roll(_own()), closed_trips=True)
+    ahead, run, behind = _around_the_run(gen)
+
+    def stores(stmts):
+        return {id(a.base) for s in walk_stmts(tuple(stmts))
+                for a in s.accesses if s.op is Op.STORE
+                and a.space is MemSpace.SHARED}
+
+    def reached(stmts):
+        return {id(a.base) for s in walk_stmts(tuple(stmts))
+                for a in s.accesses if s.op in (Op.LOAD, Op.STORE)
+                and a.space is MemSpace.SHARED}
+
+    held = stores(behind)
+    assert held
+    assert not held & reached(run.regions[0].body)
+    assert not held & stores(ahead)
 
 
 def _read_first_temporary(count=4, behind=True):
