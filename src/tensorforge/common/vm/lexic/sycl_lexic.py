@@ -336,7 +336,7 @@ class SyclLexic(Lexic):
     return f'sycl::vec<{fptype}, {length}>'
 
   def pointer_type(self, elem, space=None, readonly=False, restrict=False,
-                   const=False, depth=1):
+                   const=False, depth=1, inner_const=False):
     """`SlmPtr<T>` for shared memory under the explicit vector, else generic.
 
     The address space is in the type here for the same reason it is on AMD --
@@ -359,7 +359,7 @@ class SyclLexic(Lexic):
       tail = ' const' if const else ''
       return f'tensorforge::SlmPtr<{ro}{elem}>{tail}'
     return super().pointer_type(elem, space, readonly, restrict, const,
-                                depth)
+                                depth, inner_const)
 
   def shared_pointer_type(self, elem, restrict=False):
     if self._explicit_simd:

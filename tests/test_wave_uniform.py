@@ -145,7 +145,8 @@ def test_the_numbers_do_not_change(arch, rows, options, monkeypatch):
                                mults=mults)
         signature = re.search(r'\bkernel_\w+\(([^)]*)\)', src).group(1)
         outputs = {p.split()[-1] for p in signature.split(',')
-                   if '*' in p and 'const' not in p}
+                   if '*' in p and not p.strip().startswith('const')
+                   and '<const ' not in p}
         out = {key: v for key, v in mem.items()
                if key[0].split('@')[0] in outputs}
         assert out, 'nothing written to compare'

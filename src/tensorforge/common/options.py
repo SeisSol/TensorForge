@@ -1286,6 +1286,22 @@ declare('wave_uniform_rows',
             'share a wave nothing changes.  A switch to compare against, '
             'pending hardware numbers.')
 
+declare('restrict_batch_arrays',
+        default=True,
+        parse=parse_bool,
+        doc='Promise in the kernel\'s prototype that nothing writes the arrays '
+            'of pointers and the flags while the kernel runs, and that nothing '
+            'else reaches them: `const` all the way down and `__restrict__` '
+            '(CUDA and HIP; `KernelParam.promise`).  The interface means that '
+            'already, and the launcher keeps its types.  On AMD a pointer or a '
+            'flag word the whole wave reads is then a scalar load through the '
+            'scalar cache, and a wait for it no longer queues behind the '
+            'vector loads in flight.  Static ISA over the SeisSol kernels of '
+            '`wave_uniform_rows`: 3 to 4 % fewer vector loads on gfx1150 and '
+            'with `lanes_per_mult=64` on gfx942, and the instruction count '
+            'within half a percent.  Off is the prototype the interface '
+            'spells.')
+
 declare('lead_vectorize',
         default=False,
         env='TF_LEAD_VEC',

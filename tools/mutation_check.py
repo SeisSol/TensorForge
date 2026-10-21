@@ -69,6 +69,8 @@ SHARDS = Path('src/tensorforge/backend/pir/shards.py')
 LOAD = Path('src/tensorforge/backend/instructions/memory/load.py')
 PASSES = Path('src/tensorforge/backend/pir/passes.py')
 GEN = Path('src/tensorforge/generators/generator.py')
+KPARAMS = Path('src/tensorforge/generators/kernel_params.py')
+OPTIONS = Path('src/tensorforge/common/options.py')
 PTR = Path('src/tensorforge/backend/instructions/ptr_manip.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py')
@@ -2011,6 +2013,38 @@ GROUPS = {
         ('the oracle reading the call as an unknown one',
          sub(ORACLE, "    e = re.sub(r'\\btensorforge::wave_uniform\\s*<[^<>()]*>\\s*\\(', '(', e)\n",
              '', 1)),
+    ]),
+
+    # The arrays of pointers and the flags promised unwritten and unaliased
+    # in the kernel's prototype, the launcher's left as the interface has it.
+    'restrictarrays': ('tests/test_restrict_arrays.py', [
+        ('the arrays of pointers left unpromised',
+         sub(GEN, '      if (symbol.obj.addressing == Addressing.PTR_BASED\n',
+             '      if (False\n', 1)),
+        ('every pointer promised, the batch\'s own operand too',
+         sub(GEN, '      if (symbol.obj.addressing == Addressing.PTR_BASED\n',
+             '      if (symbol.obj.addressing != Addressing.SCALAR\n', 1)),
+        ('the flags left unpromised',
+         sub(GEN, '            promise=self._promise_arrays()))',
+             '            promise=False))', 1)),
+        ('SYCL promised as well',
+         sub(GEN, "            and self._context.target.backend in ('cuda', 'hip'))",
+             '            and True)', 1)),
+        ('the launcher declaring the kernel\'s types',
+         sub(KPARAMS, '        elif host:\n', '        elif False:\n', 1)),
+        ('the kernel called with the caller\'s pointers',
+         sub(KPARAMS, "        return (self.name if self._kernel_type(lexic) is None\n"
+             "                else f'{self.name}Arg')",
+             '        return self.name', 1)),
+        ('the levels between left writable',
+         sub(LEXIC, "    stars = ('*const ' * (depth - 1) + '*') if inner_const else '*' * depth",
+             "    stars = '*' * depth", 1)),
+        ('the promise without restrict',
+         sub(KPARAMS, '                                  readonly=self.readonly, restrict=True,\n',
+             '                                  readonly=self.readonly, restrict=False,\n', 1)),
+        ('the promise asked for rather than made',
+         sub(OPTIONS, "declare('restrict_batch_arrays',\n        default=True,",
+             "declare('restrict_batch_arrays',\n        default=False,", 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

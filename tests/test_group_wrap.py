@@ -74,7 +74,8 @@ def _written(src: str, geometry, races=None, masked=True) -> dict:
     lanes, mults = geometry
     signature = re.search(r'\bkernel_\w+\(([^)]*)\)', src).group(1)
     outputs = {p.split()[-1] for p in signature.split(',')
-               if '*' in p and 'const' not in p}
+               if '*' in p and not p.strip().startswith('const')
+               and '<const ' not in p}
     mem = ke.evaluate_wave(src, lanes, seed=5, globals_only=True,
                            mults=mults, block=True, races=races,
                            elements=3 * mults,

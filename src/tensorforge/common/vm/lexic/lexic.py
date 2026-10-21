@@ -102,7 +102,7 @@ class Lexic(ABC):
 
   def pointer_type(self, elem: str, space=None, readonly: bool = False,
                    restrict: bool = False, const: bool = False,
-                   depth: int = 1) -> str:
+                   depth: int = 1, inner_const: bool = False) -> str:
     """How a pointer into `space` is spelled, for a declaration of one.
 
     Asked of the backend rather than assembled from `restrict_kw` at the call
@@ -125,11 +125,16 @@ class Lexic(ABC):
 
     `space` is a `pir.MemSpace`, taken structurally so this module does not
     have to import the IR.
+
+    `inner_const` is about the levels between: an array of pointers nothing
+    writes is `T *const *`, and with `restrict` on top a promise the compiler
+    can read the array through its scalar cache on (`restrict_batch_arrays`).
     """
     lhs = 'const ' if readonly else ''
     ptr = 'const' if const else ''
     qual = f' {self.restrict_kw}' if restrict and self.restrict_kw else ''
-    return f'{lhs}{elem} {"*" * depth}{ptr}{qual}'
+    stars = ('*const ' * (depth - 1) + '*') if inner_const else '*' * depth
+    return f'{lhs}{elem} {stars}{ptr}{qual}'
 
   def shared_pointer_type(self, elem: str, restrict: bool = False) -> str:
     """The declarator for a window into the shared arena, without the name.

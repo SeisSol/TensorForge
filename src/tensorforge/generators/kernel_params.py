@@ -47,6 +47,12 @@ class KernelParam:
     depth: int = 0
     default: str = ''
     decl: Optional[str] = None
+    #: In the kernel's own prototype, a promise that nothing writes what the
+    #: pointer reaches while the kernel runs -- an array of pointers, or the
+    #: flags -- and that nothing else reaches it: `const` down to the last
+    #: level and `restrict` (`restrict_batch_arrays`).  The launcher keeps the
+    #: interface's spelling and binds a local of the kernel's (`binding`).
+    promise: bool = False
 
     # -- the surfaces ----------------------------------------------------- #
 
@@ -67,21 +73,40 @@ class KernelParam:
         if self.depth == 0:
             const = 'const ' if self.readonly else ''
             body = f'{const}{self.datatype}'
-        else:
-            body = lexic.pointer_type(f'{self.datatype}',
-                                      None if host else self.space,
+        elif host:
+            body = lexic.pointer_type(f'{self.datatype}', None,
                                       readonly=self.readonly,
                                       depth=self.depth)
+        else:
+            body = self._kernel_pointer(lexic)
         storage = '' if host else lexic.storage_class(self.space)
         storage = f'{storage} ' if storage else ''
         return f'{storage}{body} {self.name}{tail}'
+
+    def _kernel_pointer(self, lexic) -> str:
+        """The pointer as the kernel's prototype spells it.
+
+        With the promise, `const` all the way down: an array of pointers is
+        `T *const *__restrict__`, whatever its elements point at, and the
+        flags `const unsigned *__restrict__`.  The space, where the backend
+        spells one, stays with the level it describes (`Lexic.pointer_type`).
+        """
+        if not self.promise:
+            return lexic.pointer_type(f'{self.datatype}', self.space,
+                                      readonly=self.readonly,
+                                      depth=self.depth)
+        if self.depth == 1:
+            return lexic.pointer_type(f'{self.datatype}', self.space,
+                                      readonly=True, restrict=True, depth=1)
+        return lexic.pointer_type(f'{self.datatype}', self.space,
+                                  readonly=self.readonly, restrict=True,
+                                  depth=self.depth, inner_const=True)
 
     def _kernel_type(self, lexic) -> Optional[str]:
         """The kernel's pointer spelling, where the launcher's differs."""
         if lexic is None or self.decl is not None or self.depth == 0:
             return None
-        kernel = lexic.pointer_type(f'{self.datatype}', self.space,
-                                    readonly=self.readonly, depth=self.depth)
+        kernel = self._kernel_pointer(lexic)
         host = lexic.pointer_type(f'{self.datatype}', None,
                                   readonly=self.readonly, depth=self.depth)
         return None if kernel == host else kernel

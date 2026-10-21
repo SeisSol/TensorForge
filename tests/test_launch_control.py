@@ -501,7 +501,8 @@ def test_the_lookahead_computes_what_the_queue_loop_computes():
         assert not races, races
         signature = re.search(r"\bkernel_\w+\(([^)]*)\)", src).group(1)
         outputs = {p.split()[-1] for p in signature.split(",")
-                   if "*" in p and "const" not in p}
+                   if "*" in p and not p.strip().startswith("const")
+                   and "<const " not in p}
         return {k: v for k, v in mem.items() if k[0] in outputs}
 
     plain, at = _square(enable_wrap_loads=False)

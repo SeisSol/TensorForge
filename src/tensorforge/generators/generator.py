@@ -4,6 +4,7 @@
 import os
 from typing import Dict, List, Optional, Union, Type
 import copy
+import dataclasses
 import functools
 import hashlib
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
@@ -3718,7 +3719,11 @@ class Generator:
         # Its numbers, by value: nothing to offset into.
         params.append(KernelParam.value(symbol, datatype))
         continue
-      params.append(KernelParam.of_symbol(symbol, datatype))
+      param = KernelParam.of_symbol(symbol, datatype)
+      if (symbol.obj.addressing == Addressing.PTR_BASED
+              and self._promise_arrays()):
+        param = dataclasses.replace(param, promise=True)
+      params.append(param)
       if symbol.obj.addressing not in (Addressing.SCALAR, Addressing.NONE):
         params.append(KernelParam.size(get_extra_offset_name(symbol)))
     self._check_arguments(params)
@@ -3742,10 +3747,22 @@ class Generator:
       # signature is where "you have to pass one" is stated.
       default = ' = nullptr' if self._flags is FlagMode.OPTIONAL else ''
       for i, section in enumerate(self._sections):
-        params.append(KernelParam.flags(f'{GeneralLexicon.FLAGS_NAME}{i}',
-                                        default))
+        params.append(dataclasses.replace(
+            KernelParam.flags(f'{GeneralLexicon.FLAGS_NAME}{i}', default),
+            promise=self._promise_arrays()))
 
     return params
+
+  def _promise_arrays(self) -> bool:
+    """Whether the kernel promises its arrays of pointers and its flags
+    unwritten and unaliased (`restrict_batch_arrays`, `KernelParam.promise`).
+
+    CUDA and HIP spell the promise with `__restrict__`.  The SYCL kernels
+    carry `kernel_args_restrict` already, and the other backends take no
+    pointer to an array of pointers.
+    """
+    return (self._context.get_user_options().restrict_batch_arrays
+            and self._context.target.backend in ('cuda', 'hip'))
 
   def _declare(self, params, with_defaults=False, host=False):
     lexic = self._context.target.lexic

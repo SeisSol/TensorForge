@@ -79,7 +79,8 @@ def _written(src: str, geometry, elements: int = 1) -> dict:
     lanes, mults = geometry
     signature = re.search(r'\bkernel_\w+\(([^)]*)\)', src).group(1)
     outputs = {p.split()[-1] for p in signature.split(',')
-               if '*' in p and 'const' not in p}
+               if '*' in p and not p.strip().startswith('const')
+               and '<const ' not in p}
     assert outputs, 'the kernel writes no operand'
     mem = ke.evaluate_wave(src, lanes, seed=17, globals_only=True,
                            mults=mults, block=True, elements=elements)

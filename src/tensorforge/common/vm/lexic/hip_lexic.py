@@ -38,7 +38,7 @@ class HipLexic(CudaLexic):
               'PARAM': 'tensorforge::ConstantMemspace'}
 
   def pointer_type(self, elem, space=None, readonly=False, restrict=False,
-                   const=False, depth=1):
+                   const=False, depth=1, inner_const=False):
     """The space-qualified pointer, where `hip.h` has a name for the space.
 
     A named space is worth spelling here and nowhere else: the attribute sits
@@ -66,7 +66,7 @@ class HipLexic(CudaLexic):
     name = self.MEMSPACE.get(getattr(space, 'name', None))
     if name is None or depth != 1:
       return super().pointer_type(elem, space, readonly, restrict, const,
-                                  depth)
+                                  depth, inner_const)
     ro = 'const ' if readonly else ''
     alias = 'SpacePtrRestrict' if restrict else 'SpacePtr'
     # `SpacePtrRestrict<T, S> const` is `T *__restrict const`, which is the

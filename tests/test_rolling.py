@@ -1377,7 +1377,8 @@ def _written_by_alias(gen, descrs, numbering):
                  gen.get_kernel())
     signature = re.search(r'\bkernel_\w+\(([^)]*)\)', src).group(1)
     outputs = {p.split()[-1] for p in signature.split(',')
-               if '*' in p and 'const' not in p}
+               if '*' in p and not p.strip().startswith('const')
+               and '<const ' not in p}
     lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
     mem = kernel_eval.evaluate_wave(src, lanes, seed=29, globals_only=True,
                                     mults=mults, block=True)
