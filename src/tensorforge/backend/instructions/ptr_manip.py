@@ -266,6 +266,18 @@ class GetElementPtr(AbstractInstruction):
     """
     return getattr(self._src.obj, 'addressing', None) == Addressing.PTR_BASED
 
+  def _alias_root(self):
+    """What the accesses through this binding are recorded against.
+
+    The source, as for any binding -- unless the binding selects from a table
+    whose members another table of the run shares and writes through
+    (`VariantLoop._join_tables`).  Then the class both tables are given: a
+    read through one pointer and a write through the other may meet, on this
+    trip or the next, and every pass has to see one buffer in them.
+    """
+    shared = getattr(self._table, 'alias_class', None) if self._table else None
+    return self._src if shared is None else shared
+
   def _element_pointer(self, address: str) -> str:
     """`&m[batchId][off]`, read as the wave's where the build reads the row
     so (`Generator._wave_uniform_row`).
@@ -355,11 +367,14 @@ class GetElementPtr(AbstractInstruction):
     # select out of one set of slots, and the promise would be false as soon
     # as two of them land on the same buffer -- which is every trip once the
     # family turns through a single slot, and the whole point of carrying
-    # the value is that another name for it is live.
-    return (f'{self._pointer_type(datatype, const_mod, restrict=False)} '
-            f'{self._dest.name}'
-            if self._space() is MemSpace.SHARED else
-            f'{self._pointer_type(datatype, const_mod)} {self._dest.name}')
+    # the value is that another name for it is live.  Nor on a binding whose
+    # table shares members with another one written through
+    # (`_alias_root`): the pointer for the next trip reaches what this trip
+    # writes, and both are live at once.
+    restrict = (self._space() is not MemSpace.SHARED
+                and self._alias_root() is self._src)
+    return (f'{self._pointer_type(datatype, const_mod, restrict=restrict)} '
+            f'{self._dest.name}')
 
   def _coerce(self, datatype, const_mod: str, rhs: str) -> str:
     """Bring an address into the space the declaration claims for it.
@@ -470,18 +485,22 @@ class GetElementPtr(AbstractInstruction):
     obj = self._src.obj
     datatype = self._fp_as_str if obj.datatype is None else obj.datatype
     readonly = not self._table.writable
+    root = self._alias_root()
+    # `restrict` as `_declarator` grants it: not where the members are also
+    # reached through a table written through.
+    restrict = readonly and root is self._src
     values = []
     for e, chain in enumerate(chains):
       name = f'{self._dest.name}_s{e}'
       values.append(writer.decl_expr(
-          f'{self._pointer_type(datatype, "const", readonly)} {name}',
+          f'{self._pointer_type(datatype, "const", restrict)} {name}',
           self._coerce(datatype, 'const', '{0}'),
           BufferType(self._dest.get_fptype(), chain.type.shape, MemSpace.GLOBAL,
                      readonly=readonly),
           self._src, args=(chain,), kind=Effect.READ, hint=name, extern=name,
-          alias_root=self._src))
+          alias_root=root))
     self._dest.set_pir_stack(writer, values,
-                             self._pointer_type(datatype, 'const', readonly),
+                             self._pointer_type(datatype, 'const', restrict),
                              [f'{self._dest.name}_s{e}'
                               for e in range(len(values))])
 
@@ -624,10 +643,11 @@ class GetElementPtr(AbstractInstruction):
                BufferType(self._dest.get_fptype(), (self._extent(),),
                           self._space(), swizzle,
                           readonly=self._readonly()))
+      root = self._alias_root()
       value = writer.decl_expr(
           lhs, text, type_, self._src,
           also=also, args=args, kind=Effect.READ, hint=self._dest.name,
-          extern=self._dest.name, alias_root=self._src,
+          extern=self._dest.name, alias_root=root,
           # What the declared read cannot say: strided addressing reads
           # nothing and declares the read all the same, so only this tells a
           # pass that the address is a pointer of the element's own, valid to
@@ -639,10 +659,13 @@ class GetElementPtr(AbstractInstruction):
           # scope, and a pass may clone this computation for the next element
           # while the original is still live -- two pointers into one buffer,
           # which is a promise kept as long as both only read and broken the
-          # moment one writes.
+          # moment one writes.  A pointer whose table shares members with a
+          # table written through breaks it the same way: the clone for the
+          # next trip reaches what this trip writes.
           quals=(() if scalar else
                  (Qual.RESTRICT,)
                  if self._src.obj.direction == DataFlowDirection.SOURCE
+                 and root is self._src
                  else ()))
       if scalar:
         self._dest.set_pir_scalar(writer, value)
@@ -783,7 +806,18 @@ class DeclareOperandTable(AbstractInstruction):
     #: `(builder uid, value)`: the chain, where the body being built made it
     #: a value (`gen_ir`).
     self._value = None
+    #: The base the accesses through this table's pointer are recorded
+    #: against where another table of the run reaches the same members and
+    #: one of the two writes through them (`VariantLoop._join_tables`);
+    #: None, and the stand-in is the base, otherwise.
+    self.alias_class = None
     self._is_ready = True
+
+  def reachable(self) -> list:
+    """The members the loop may select: those from `first` on.  The ones
+    ahead of it ran before the loop and are reached through no pointer of
+    this table."""
+    return self._members[self._first:]
 
   @property
   def form(self) -> 'TableForm':
@@ -1147,7 +1181,67 @@ class VariantLoop(AbstractInstruction):
     #: fix, and an empty tuple here means a body that carries nothing -- not a
     #: body whose carried value went unnoticed.
     self._carried = tuple(carried)
+    self._join_tables()
     self._is_ready = True
+
+  def _join_tables(self) -> None:
+    """Give the tables whose members meet one alias class, where one of them
+    is written through (`pir.AliasClass`).
+
+    A chain's holes are the case: the hole read on trip `k` selects level
+    `k`, the hole written selects level `k + 1`, and their members are one
+    family shifted by a trip.  Each pointer is a base of its own to the
+    passes otherwise, so a write through one and a read through the other
+    conflict with nothing, and the read of the next trip's member is moved
+    ahead of the write that produces it (`pir.wrap`).
+
+    Only members in global memory: a shared member is a window the
+    allocator and the barrier placement key on (`_member_accesses`), and
+    tables of reads alone may meet without consequence.  Joined transitively,
+    since a member two tables share makes one buffer of all three where a
+    third shares another with either.
+    """
+    from tensorforge.backend.pir.core import AliasClass
+
+    def in_memory(member) -> bool:
+      # A number the code carries is no memory, whatever space its symbol
+      # type maps to.
+      stype = getattr(member, 'stype', None)
+      return (stype != SymbolType.Data
+              and MemSpace.from_symbol_type(stype) is MemSpace.GLOBAL)
+
+    tables = [t for t in self._tables
+              if any(in_memory(m) for m in t.reachable())]
+    parent = list(range(len(tables)))
+
+    def find(i):
+      while parent[i] != i:
+        parent[i] = parent[parent[i]]
+        i = parent[i]
+      return i
+
+    owner = {}
+    for i, table in enumerate(tables):
+      for member in table.reachable():
+        if not in_memory(member):
+          continue
+        j = owner.setdefault(id(member), i)
+        if j != i:
+          parent[find(i)] = find(j)
+    groups = {}
+    for i, table in enumerate(tables):
+      groups.setdefault(find(i), []).append(table)
+    for group in groups.values():
+      if len(group) < 2 or not any(t.writable for t in group):
+        continue
+      members = []
+      for table in group:
+        for member in table.reachable():
+          if not any(member is m for m in members):
+            members.append(member)
+      shared = AliasClass('|'.join(t.name for t in group), tuple(members))
+      for table in group:
+        table.alias_class = shared
 
   @property
   def carried(self):

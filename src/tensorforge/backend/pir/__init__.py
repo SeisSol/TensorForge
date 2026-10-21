@@ -22,7 +22,8 @@ both decisions depend on.  ``Op.ALLOC`` carries the answer: a shared buffer
 has no offset until the allocator gives it one.
 """
 
-from .core import (ANY_EFFECT, BOOL, INDEX, SIZE, TOKEN, Access, BufferType, Effect,
+from .core import (ANY_EFFECT, BOOL, INDEX, SIZE, TOKEN, Access, AliasClass,
+                   BufferType, Effect,
                    IRError, MemSpace, Op, Operand, Region, ScalarType, Stmt,
                    TokenType, Value, accesses_conflict, collect_accesses,
                    collect_effect, def_use, defined_within, dump, free_values,
@@ -40,7 +41,8 @@ from .pipeline import (BodyContext, GroupRows, MoveLoads, PlaceBarriers,
 from .emit import Emitter, emit
 
 __all__ = [
-    'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'Arena', 'BodyContext', 'BufferType', 'Effect',
+    'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'AliasClass',
+    'Arena', 'BodyContext', 'BufferType', 'Effect',
     'Emitter', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand', 'Region',
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
     'accesses_conflict', 'check_barrier_budget', 'check_tokens',

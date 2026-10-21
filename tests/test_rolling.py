@@ -1433,6 +1433,112 @@ def _staged(count=4):
     return out + [gemm(make('I', [24, 5]), SubTensor(s), make('O', [24, 5]))]
 
 
+def _argument_chain(steps=3):
+    """`L(k + 1) = A L(k)` and `Q += L(k + 1) C(k)`, with the levels the
+    kernel's own arguments: the shape of SeisSol's anelastic time derivative,
+    whose levels are its outputs.  Rolled, one hole reads `L(0..steps-1)` and
+    another writes `L(1..steps)` -- one family of members, shifted by a
+    trip."""
+    out = []
+    for k in range(steps):
+        out.append(gemm(make('A', [24, 24]), make(f'L{k}', [24, 5]),
+                        make(f'L{k + 1}', [24, 5])))
+        out.append(gemm(make(f'L{k + 1}', [24, 5]), make(f'C{k}', [5, 5]),
+                        make('Q', [24, 5]), add=True))
+    return out
+
+
+def _run_body(gen):
+    """The statements of the merged run's loop, nested ones included."""
+    from tensorforge.backend.pir.core import Op, walk_stmts
+    loop = next(s for s in walk_stmts(gen._sections[0].body)
+                if s.op is Op.FOR and s.attr('rolled'))
+    return loop, list(walk_stmts(loop.regions[0].body))
+
+
+def test_holes_that_share_members_are_one_buffer_to_the_passes():
+    """The hole a trip reads and the hole it writes select from members they
+    share, so a write through one and a read through the other may meet --
+    on this trip's pointers or on the next trip's.  Their accesses are
+    recorded against one base (`pir.AliasClass`), and neither pointer
+    promises `restrict`: the one fetched for the next trip reaches what this
+    trip writes."""
+    from tensorforge.backend.pir.core import AliasClass, MemSpace
+    from tensorforge.common.basic_types import GeneralLexicon
+    gen = _merged_build(roll(_argument_chain()))
+    _, body = _run_body(gen)
+    bases = {id(a.base): a.base for s in body for a in s.accesses
+             if a.space is MemSpace.GLOBAL and isinstance(a.base, AliasClass)}
+    family, = bases.values()
+    reads = [s for s in body for a in s.accesses
+             if a.base is family and not a.writes]
+    writes = [s for s in body for a in s.accesses
+              if a.base is family and a.writes]
+    assert reads and writes
+    # The levels both holes reach, as the bindings the tables hold.
+    shared = {GeneralLexicon.GLOBAL_MEM_PREFIX
+              + gen._scopes.get_symbol(make(f'L{k}', [24, 5]).tensor).name
+              for k in range(1, 3)}
+    assert {m.name for m in family.members} >= shared
+    declared = [s.attr('decl') for s in body if s.attr('decl')
+                and any(a.base is family for a in s.accesses)]
+    assert declared and not any('__restrict__' in d for d in declared)
+
+
+def test_holes_that_only_read_shared_members_stay_apart():
+    """Two holes that read overlapping members and write nothing conflict
+    nowhere, and one buffer would only cost them their `restrict`."""
+    from tensorforge.backend.pir.core import AliasClass
+    descrs = []
+    for k in range(3):
+        descrs.append(gemm(make(f'x{k}', [24, 5]), make('C', [5, 5]),
+                           make('Q', [24, 5]), add=True))
+        descrs.append(gemm(make('B', [24, 24]), make(f'x{k + 1}', [24, 5]),
+                           make('R', [24, 5]), add=True))
+    gen = _merged_build(roll(descrs))
+    loop, = [i for i in gen._sections[0].ir
+             if type(i).__name__ == 'VariantLoop']
+    reached = [{id(m) for m in t.reachable()} for t in loop.tables]
+    assert any(a & b for i, a in enumerate(reached) for b in reached[i + 1:]), \
+        'two tables that share members'
+    _, body = _run_body(gen)
+    assert not any(isinstance(a.base, AliasClass)
+                   for s in body for a in s.accesses)
+
+
+def test_the_next_trips_level_is_fetched_behind_this_trips_write_of_it():
+    """Issued a trip ahead (`pir.wrap`), the copy of the level the next trip
+    reads stands behind the store this trip makes of that level -- however
+    early its buffer is free.  A batch loop's elements own their data, so
+    nothing of the kind holds there; a counted loop's trips do not."""
+    from tensorforge.backend.pir.core import AliasClass, MemSpace, walk_stmts
+    for early in (True, False):
+        gen = _merged_build(roll(_argument_chain()), enable_wrap_loads=True,
+                            wrap_early=early)
+        loop, body = _run_body(gen)
+        # The pointers the wrap computed again for the next trip.
+        ahead = {s.target[0].id for s in body if s.target
+                 and str(s.attr('extern') or '').startswith('wrap_glb')}
+        assert ahead, 'nothing issued a trip ahead'
+        top = list(loop.regions[0].body)
+
+        def holds(s, test):
+            return any(test(x) for x in walk_stmts((s,)))
+
+        def writes_family(x):
+            return any(isinstance(a.base, AliasClass) and a.writes
+                       and a.space is MemSpace.GLOBAL for a in x.accesses)
+
+        def reads_ahead(x):
+            return (any(v.id in ahead for v in x.operands())
+                    and any(isinstance(a.base, AliasClass) and not a.writes
+                            for a in x.accesses))
+        written = max(i for i, s in enumerate(top) if holds(s, writes_family))
+        fetched = [i for i, s in enumerate(top) if holds(s, reads_ahead)]
+        assert fetched, 'nothing read through the next trip\'s pointer'
+        assert min(fetched) > written, (early, min(fetched), written)
+
+
 def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     """A barrier in the run keeps the staging of what every iteration shares
     in the body (`pir.move`), and the operation behind the loop reads the
@@ -1464,6 +1570,9 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('scratch', False, {}),
     ('scratch', True, {}),
     ('carried', False, {}),
+    ('chain', False, {}),
+    ('chain', False, {'wrap_early': False}),
+    ('chain', False, {'enable_wrap_loads': False}),
 ])
 def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                                                               options):
@@ -1477,7 +1586,11 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
     temporary afresh on every iteration and adds it onto the destination, as
     SeisSol's `localFluxAll` does (`t = I A(i)`, `Q += P(i) t`): the registers
     of the temporary are allocated ahead of the loop, and every trip has to
-    start it from zeros again (`Generator._reset_temporaries`)."""
+    start it from zeros again (`Generator._reset_temporaries`).  `chain`
+    carries its levels through the kernel's own arguments, as SeisSol's
+    anelastic time derivative does: the hole a trip writes is the hole the
+    next one reads, and the read of the next trip's level, issued a trip
+    ahead (`pir.wrap`), has to wait for this trip's write of it."""
     from dataclasses import replace
 
     import numpy as np
@@ -1516,6 +1629,8 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                 out.append(gemm(make(f'P{i}', [24, 24]), scratch,
                                 make('Q', [24, 5]), add=True))
             return out
+        if shape == 'chain':
+            return _argument_chain()
         return _staged()
 
     base = target.PREFERENCES['nvidia']

@@ -460,6 +460,12 @@ class _Plan:
     rotate: bool = False
     #: Why it keeps one stage where two were asked for.
     single: Optional[str] = None
+    #: The statements of a counted loop's body that write what it reads: the
+    #: transfer for the next trip goes behind every one of them
+    #: (`_Rewrite._behind_writers`).  Empty in a batch loop.
+    writers: Tuple[Stmt, ...] = ()
+    #: The transfer for the next element or trip, as the rewrite places it.
+    tail: List[Stmt] = field(default_factory=list)
 
 
 class _Loop(ElementLoop):
@@ -613,12 +619,25 @@ class _Loop(ElementLoop):
                        for a in x.accesses):
                     raise Refusal('the body writes what the transfer reads, '
                                   'which is the same for every element')
+        # The trips of a counted loop are no elements: what one trip writes,
+        # the next may read -- a chain's level, which the hole the next trip
+        # reads selects (`pir.AliasClass`).  So the transfer for the next
+        # trip waits for every write of what it reads in this one.  Between
+        # elements there is no such write: an element's data is its own.
+        writers: Tuple[Stmt, ...] = ()
+        if self.kind is not None:
+            writers = tuple(
+                x for x in walk_stmts(self.region.body) if id(x) not in mine
+                and any(writes(a) and any(same(a.base, r) for r in reads)
+                        for a in x.accesses))
         single = None
         if t.shared and self.stages > 1:
-            single = self._single_stage(t, alloc, inside, tokens)
+            single = ('the trip writes what the transfer reads for the next '
+                      'one, so it cannot go to the head' if writers
+                      else self._single_stage(t, alloc, inside, tokens))
         return _Plan(t, alloc, inside, wait, deps, owns,
                      rotate=t.shared and self.stages > 1 and single is None,
-                     single=single)
+                     single=single, writers=writers)
 
     def _single_stage(self, t: Transfer, alloc: Stmt, inside: bool,
                       tokens: Sequence[Value]) -> Optional[str]:
@@ -940,6 +959,7 @@ class _Rewrite:
                 tail = self._guarded(tail, tail_flag)
                 if masked is not None:
                     masked = self._guarded(masked, tail_flag)
+            p.tail = tail
             before += peel
             if p.rotate:
                 if flag_at_head and tail_flag_stmts:
@@ -1077,6 +1097,30 @@ class _Rewrite:
                 return i
             behind += units[i - 1]
         return at
+
+    def _behind_writers(self, rest: List[Stmt]) -> None:
+        """Each transfer for the next trip behind the last statement of the
+        trip that writes what it reads (`_Plan.writers`), wherever its spot
+        was chosen: right behind its buffer's last access, ahead of the
+        barrier that closes the trip, or at the tail.  Moved as the block it
+        was placed as, which keeps its own order and its place relative to
+        the barrier where the writer stands ahead of it."""
+        for p in self.plans:
+            if not p.writers or not p.tail:
+                continue
+            ids = {id(w) for w in p.writers}
+            last = max((i for i, x in enumerate(rest)
+                        if any(id(y) in ids for y in walk_stmts((x,)))),
+                       default=None)
+            placed = [i for i, x in enumerate(rest)
+                      if any(x is s for s in p.tail)]
+            if last is None or not placed or placed[0] > last:
+                continue
+            block = [rest[i] for i in placed]
+            for i in reversed(placed):
+                del rest[i]
+            last -= sum(1 for i in placed if i < last)
+            rest[last + 1:last + 1] = block
 
     def _body(self, heads, tails_reg, tails_shared, tail_flag_stmts, waits,
               carry, own, nxt, yields, carried, inits, results, top,
@@ -1224,6 +1268,8 @@ class _Rewrite:
         else:
             rest[closing + 1:closing + 1] = tails_shared
             rest[closing:closing] = tail_flag_stmts + tails_reg
+        if l.kind is not None:
+            self._behind_writers(rest)
         if l.guard_at is not None:
             new += rest
         new = top + new

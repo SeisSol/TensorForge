@@ -2624,6 +2624,30 @@ GROUPS = {
              '                    params = dict(params, lane=i // step)',
              '                    params = dict(params, lane=0)')),
     ]),
+
+    # The holes of a merged run that share members: one buffer to the passes,
+    # no `restrict`, and the transfer for the next trip behind this trip's
+    # write of what it reads.
+    'tablealias': ('tests/test_rolling.py::test_holes_that_share_members_are_one_buffer_to_the_passes '
+                   'tests/test_rolling.py::test_holes_that_only_read_shared_members_stay_apart '
+                   'tests/test_rolling.py::test_the_next_trips_level_is_fetched_behind_this_trips_write_of_it '
+                   'tests/test_rolling.py::test_a_merged_run_computes_what_the_list_written_out_does', [
+        ('the tables of a run never joined',
+         sub(PTR, '    self._join_tables()\n', '', 1)),
+        ('tables of reads alone joined as well',
+         sub(PTR, '      if len(group) < 2 or not any(t.writable for t in group):',
+             '      if len(group) < 2:', 1)),
+        ('a pointer of the family still promising restrict',
+         sub(PTR, '    restrict = (self._space() is not MemSpace.SHARED\n'
+                  '                and self._alias_root() is self._src)',
+             '    restrict = self._space() is not MemSpace.SHARED', 1)),
+        ('the transfer for the next trip left where its buffer frees up',
+         sub(WRAP, '        if l.kind is not None:\n            self._behind_writers(rest)\n',
+             '', 1)),
+        ('the writes of what it reads not looked for in a counted loop',
+         sub(WRAP, '        if self.kind is not None:\n            writers = tuple(',
+             '        if False:\n            writers = tuple(', 1)),
+    ]),
 }
 
 

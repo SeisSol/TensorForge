@@ -364,6 +364,40 @@ class Access:
         return f'{k} {self.space.name.lower()}:{b}'
 
 
+class AliasClass:
+    """One base for the accesses of several pointers that may reach the same
+    memory.
+
+    A merged run reaches each varying operand through a pointer its counter
+    selects from a table, and two tables may select from members they share:
+    a chain reads level ``k`` through one and writes level ``k + 1`` through
+    the other, and level ``k + 1`` is what the first reads on the next trip.
+    Recorded against a base each, a write through one pointer and a read
+    through the other would conflict with nothing (`may_alias`), and a pass
+    would move the read of the next trip's member ahead of the write that
+    produces it.  Recorded against one of these, they are one buffer to every
+    pass, whether it asks `may_alias` or keys its bookkeeping by base.
+
+    *May* alias, and no more: two reads through it at one index are not one
+    location.  Each read names the pointer it goes through as an operand,
+    which is what `cse` and `load_cse` key on, so reads through different
+    pointers stay apart.
+
+    Identity semantics, like a buffer: two classes are two buffers.  It states
+    no space of its own (`base_space`), so the access's space stands.
+    """
+
+    __slots__ = ('name', 'members')
+
+    def __init__(self, name: str, members: Tuple[Any, ...] = ()):
+        self.name = name
+        #: What the pointers may reach, for whoever reads a report.
+        self.members = tuple(members)
+
+    def __repr__(self):
+        return f'AliasClass({self.name})'
+
+
 def base_space(base) -> Optional[MemSpace]:
     """The space a base states about itself, or ``None`` where it states none.
 
