@@ -152,6 +152,11 @@ class HipLexic(CudaLexic):
     targs = f'{lanes}, {ctype}' if ctype else f'{lanes}'
     return f'tensorforge::wave_uniform<{targs}>({value})'
 
+  def pick(self, index, values):
+    if self._underlying_hardware != 'amd':
+      return super().pick(index, values)
+    return f'tensorforge::pick<{len(values)}>({index}, {", ".join(values)})'
+
   def handoff_fence(self):
     """A fence at wavefront scope: no instruction on any AMD target (the
     memory model orders a wave's own accesses), but a statement LLVM will not

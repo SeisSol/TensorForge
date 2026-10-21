@@ -226,6 +226,10 @@ T broadcast(T value);
 // a coordinate proxy rather than an integer.
 template <int Lanes, typename T> T wave_uniform(T value);
 
+// Multiplication `mult`'s value out of one per multiplication of the wave.
+template <int G, typename T, typename... Ts>
+T pick(unsigned mult, T first, Ts... rest);
+
 // The operator tag is a type, so `Operation` and `ReductionOperation` have to
 // be here too -- a `reduction` declared over an opaque `typename Op` would
 // accept `ReductionOperation<float, Operation::Nonsense>` and report nothing.

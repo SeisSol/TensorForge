@@ -237,6 +237,15 @@ class Lexic(ABC):
         f'{type(self).__name__} has no spelling for a value uniform across '
         f'the wave')
 
+  def pick(self, index: str, values) -> str:
+    """The value of multiplication `index` out of `values`, one for each
+    multiplication of a wave and each held as the wave's (`first_lane`): what
+    a lane of that multiplication takes.  Reached only where the target can
+    say the first lane (`Target.reads_first_lane`)."""
+    raise NotImplementedError(
+        f'{type(self).__name__} has no spelling for a value picked per '
+        f'multiplication of the wave')
+
   def handoff_fence(self):
     """What orders one lane's store before the other lanes' load, where the
     rendezvous itself is spelled as nothing -- or None where it is not.

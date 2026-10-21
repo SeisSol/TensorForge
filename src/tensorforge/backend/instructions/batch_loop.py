@@ -55,7 +55,8 @@ class BatchLoop(AbstractInstruction):
                  queue_depth: int = 1,
                  group_size: int = 1,
                  narrow_group: bool = False,
-                 stack: int = 1):
+                 stack: int = 1,
+                 wave_rows: int = 0):
         super().__init__(context)
         self._section_index = section_index
         self._mode = mode
@@ -102,6 +103,11 @@ class BatchLoop(AbstractInstruction):
         # of the stack has a mask of its own, bound at the top of the trip
         # (`_stack_actives`).
         self._stack = max(1, int(stack))
+        # The lanes of the wave a group fills where each multiplication's row
+        # is read as the wave's (`Options.wave_uniform_group_rows`), 0 where
+        # the rows are the lanes' own.  The group is the wave then: one
+        # multiplication per row of it.
+        self._wave_rows = int(wave_rows)
         self._is_ready = True
 
     # -- structure ------------------------------------------------------- #
@@ -1132,11 +1138,24 @@ class BatchLoop(AbstractInstruction):
                                                   Uniformity)
         lexic = self._context.target.lexic
         self._declare_windows_early(writer, list(self._region))
+        # Where each multiplication reads its row as the wave's, the row's
+        # place in its group says so: `pir.rows` gives each multiplication a
+        # copy of what reads memory through it, with the place a constant.
+        # Not for a stack of elements a trip, whose masks are no row's.
+        wave = self._wave_rows if self._stack == 1 else 0
         lane = writer.op('rem', SIZE, writer.thread_id('y'), self._group_size,
-                         hint=self._lane())
+                         hint=self._lane(),
+                         attrs=((('mult_lane', self._group_size),) if wave
+                                else ()))
         start = (f'({lexic.thread_idx_y} - {lexic.thread_idx_y} % '
                  f'{self._group_size}) + {lexic.block_dim_y} * '
                  f'({lexic.block_idx_x})')
+        if wave:
+            # The group's first element is the same on every lane of its
+            # wave.  Read as the wave's, the loop counts on the scalar unit,
+            # and so does each multiplication's row, that plus a constant --
+            # and with it what the row reads.
+            start = lexic.first_lane(start, wave, 'unsigned')
         with writer.for_(start, self._stacks(), self._stride,
                          hint=self._group_batch(), index_type=SIZE,
                          uniform=Uniformity.MULTGROUP,
@@ -1166,10 +1185,15 @@ class BatchLoop(AbstractInstruction):
                 actives = self._stack_actives(writer, row)
                 cond = ' || '.join(f'{{{e}}}' for e in range(self._stack))
                 kind, space, args = Effect.NONE, None, tuple(actives)
+            # The flag word is read through the row: once per multiplication
+            # where each reads its row as the wave's (`pir.rows`).
             active = writer.decl_expr(f'const bool {self._active()}', cond,
                                       BOOL, None, kind=kind, space=space,
                                       args=args, hint=self._active(),
-                                      extern=self._active())
+                                      extern=self._active(),
+                                      attrs=((('per_mult', True),)
+                                             if wave and kind is Effect.READ
+                                             else ()))
             batch = writer.op('select', SIZE, active, row, group,
                               hint=self._batch(0))
             self._induction = batch
@@ -1189,10 +1213,24 @@ class BatchLoop(AbstractInstruction):
                     if fence:
                         writer(fence, accesses=())
                     with elementmask.element_mask(active, self._active()), \
-                            self._stacked(writer, batch, bound, actives):
+                            self._stacked(writer, batch, bound, actives), \
+                            self._rows_per_mult(wave > 0):
                         self._emit_guarded(writer, list(self._region))
             finally:
                 self._induction = None
+
+    @contextmanager
+    def _rows_per_mult(self, on: bool):
+        """Publish whether each multiplication reads its row as the wave's
+        (`wave_uniform_group_rows`), for the element pointers the body binds
+        (`GetElementPtr._emit_binding`)."""
+        lexic = self._context.target.lexic
+        saved = getattr(lexic, 'rows_per_mult', False)
+        lexic.rows_per_mult = on
+        try:
+            yield
+        finally:
+            lexic.rows_per_mult = saved
 
     def __str__(self) -> str:
         return (f'batchloop.{self._mode.value} '

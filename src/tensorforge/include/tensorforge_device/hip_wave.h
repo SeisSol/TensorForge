@@ -73,6 +73,22 @@ __device__ __forceinline__ auto wave_uniform(T value) -> T {
   }
 }
 
+/// The value of multiplication `mult` out of the `G` that share a wave, each
+/// given as the whole wave holds it: the flag word and the element pointers
+/// of every multiplication of a group, loaded once each from a row the wave
+/// holds alike (`pir.rows`), and every lane takes its own multiplication's.
+///
+/// A chain of selects, one per multiplication after the first: a
+/// `v_cndmask` per 32-bit word on the lane's place, from scalar registers.
+template <int G, typename T, typename... Ts>
+__device__ __forceinline__ auto pick(unsigned mult, T first, Ts... rest) -> T {
+  static_assert(sizeof...(rest) + 1 == G, "one value per multiplication");
+  T out = first;
+  unsigned g = 0;
+  ((out = (mult == ++g) ? static_cast<T>(rest) : out), ...);
+  return out;
+}
+
 } // namespace tensorforge
 
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_HIP_WAVE_H_

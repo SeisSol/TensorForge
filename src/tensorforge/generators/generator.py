@@ -1025,6 +1025,7 @@ class Generator:
 
         index = len(self._sections)
         start, stride = self._section_traversal(index)
+        group = self._group_size(index, start)
         loop = BatchLoop(context=self._context,
                          section_index=index,
                          mode=self._batch_loop_mode(),
@@ -1033,10 +1034,11 @@ class Generator:
                          region=self._section.ir,
                          flags=self._flags,
                          queue_depth=self._launch_control_depth,
-                         group_size=self._group_size(index, start),
+                         group_size=group,
                          narrow_group=self._num_threads
                          < self._context.target.hw.vec_unit_length,
-                         stack=self._stack)
+                         stack=self._stack,
+                         wave_rows=self._group_wave_rows(group))
 
         self._section.stream = list(self._section.global_ir) + [loop]
 
@@ -1188,6 +1190,26 @@ class Generator:
     if start != self._get_2d_block_id():
       return 1
     return mults_per_group(self._num_threads, wave)
+
+  def _group_wave_rows(self, group: int) -> int:
+    """The lanes over which each multiplication's row of a group is read as
+    the wave's (`wave_uniform_group_rows`): the wave, where its
+    multiplications take their trips as one group -- `group` of them, which
+    fill it -- and the target can say the first lane.
+
+    0 elsewhere: for a group of one, and for a group wider than the wave
+    (`stage_members`, the multiplications that straddle waves).  A stack of
+    elements a trip, whose masks are no row's, is the loop's to leave out
+    (`BatchLoop._gen_grouped_ir`).
+    """
+    target = self._context.target
+    if not (self._context.get_user_options().wave_uniform_group_rows
+            and target.reads_first_lane()):
+      return 0
+    wave = target.hw.vec_unit_length
+    if group < 2 or group * self._num_threads != wave:
+      return 0
+    return wave
 
   def _mult_met_alone(self) -> bool:
     """Whether one multiplication narrower than the wave can be synchronized

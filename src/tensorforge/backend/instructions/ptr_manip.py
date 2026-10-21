@@ -596,6 +596,11 @@ class GetElementPtr(AbstractInstruction):
     addressing: a scalar that varies per element is a buffer of one number,
     read through an address like any other operand, and typing it here as a
     value would say it is the same for every element.
+
+    An element's own pointer is read through the row, and where each
+    multiplication of a group reads its row as the wave's
+    (`BatchLoop._rows_per_mult`), it says so: `pir.rows` gives each
+    multiplication a copy of it.
     """
     if hasattr(writer, 'decl_expr'):
       from tensorforge.backend.pir.core import BufferType, ScalarType
@@ -605,6 +610,9 @@ class GetElementPtr(AbstractInstruction):
       # substitute -- `wrap_loads` could not advance a transfer that reads
       # through it.
       text, args = self._splice_index(writer, rhs)
+      owns = self.dereferences_the_batch()
+      per_mult = (owns and getattr(self._context.target.lexic,
+                                   'rows_per_mult', False))
       # A window onto a permuted buffer is permuted.  The swizzle lives on
       # the storage's type, and a second name for it built without one would
       # write where the first name's readers do not look -- which for a
@@ -624,8 +632,8 @@ class GetElementPtr(AbstractInstruction):
           # nothing and declares the read all the same, so only this tells a
           # pass that the address is a pointer of the element's own, valid to
           # follow for an element the caller did not mask.
-          attrs=(('element_pointer', True),)
-          if self.dereferences_the_batch() else (),
+          attrs=((('element_pointer', True),) if owns else ())
+          + ((('per_mult', True),) if per_mult else ()),
           # Only where nothing is written through it.  `restrict` promises
           # that what this pointer reaches is reached through no other in
           # scope, and a pass may clone this computation for the next element

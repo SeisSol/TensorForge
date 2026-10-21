@@ -1330,6 +1330,30 @@ declare('wave_group_traversal',
             'run time is not measured.  A section that follows another '
             'without a barrier starts rotated and stays per row.')
 
+declare('wave_uniform_group_rows',
+        default=False,
+        parse=parse_bool,
+        doc='Where the multiplications of one wave take their trips through '
+            'the batch loop as a group, read the row of each as the wave\'s, '
+            'and with it its flag word and its element pointers: one copy per '
+            'multiplication, each a scalar the whole wave holds, and every '
+            'lane picks its own (AMD; `pir.rows`, `tensorforge::pick`).  The '
+            'loop counts on the scalar unit, a pointer and a flag word are '
+            'scalar loads through the scalar cache, and a wait for them does '
+            'not queue behind the vector loads in flight -- for G '
+            'multiplications to a wave, G of each, picked with a '
+            '`v_cndmask` per 32-bit word.  Only where the group is the wave '
+            'and one element a trip: not for a block-wide group '
+            '(`stage_members`) and not under `stack_elements`.  Static ISA '
+            'from clang 18 for gfx942 over the SeisSol kernels of '
+            '`wave_uniform_rows`, all of them grouped '
+            '(`wave_group_traversal`): 10 % fewer vector loads, 951 of 9100, '
+            'and 7 VGPRs fewer in the median, for 13 % more instructions in '
+            'the median and 9 % more in sum, every kernel longer -- 7 % for '
+            'the 71 whose matrix products group the wave anyway, 12 % at two '
+            'multiplications to a wave and 95 % at four.  What the scalar '
+            'loads are worth at run time is not measured.')
+
 declare('lead_vectorize',
         default=False,
         env='TF_LEAD_VEC',

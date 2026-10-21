@@ -408,7 +408,8 @@ class IRBuilder:
         return v
 
     def op(self, name: str, type_, *args: Operand,
-           hint: str = '', pure: bool = True, escapes: bool = False) -> Value:
+           hint: str = '', pure: bool = True, escapes: bool = False,
+           attrs: Tuple = ()) -> Value:
         """A generic pure operation (``add``, ``mul``, ``fma``, ``select``...).
 
         Uniformity is propagated: the result is uniform iff every value operand
@@ -419,6 +420,11 @@ class IRBuilder:
         purity, movability and an empty access set without being asked, and
         those are answers about scalar arithmetic; for anything else they are
         a guess, and the guess is the permissive one.
+
+        `attrs` are facts about the result that a later pass reads and the
+        arithmetic does not say -- that it is a row's place in a group of
+        rows, say (`BatchLoop._gen_grouped_ir`).  A result with them is
+        shared only with one that has the same.
         """
         if name not in Op.ARITH:
             raise IRError(
@@ -432,7 +438,7 @@ class IRBuilder:
         # disagree with them; `escapes` is the name being read from raw text
         # the IR cannot see, and `pure=False` is the caller saying the answer
         # is not a function of the arguments.
-        key = (_cons_key(name, type_, args)
+        key = (_cons_key(name, type_, args, extra=tuple(attrs) or None)
                if pure and not escapes else None)
         shared = self._shared(key)
         if shared is not None:
@@ -445,7 +451,7 @@ class IRBuilder:
         # `escapes`: the name is referenced from raw text, so the value must
         # neither be eliminated nor folded into its consumer.  A consumer
         # that takes the Value itself needs no such flag.
-        attrs = (('escapes', True),) if escapes else ()
+        attrs = ((('escapes', True),) if escapes else ()) + tuple(attrs)
         self._emit_op(name, (v,), args, pure=pure, attrs=attrs)
         self._share(key, v)
         return v

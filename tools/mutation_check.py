@@ -77,6 +77,7 @@ MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py
 TRIPS = Path('src/tensorforge/backend/pir/trips.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 PIPE = Path('src/tensorforge/backend/pir/pipeline.py')
+ROWS = Path('src/tensorforge/backend/pir/rows.py')
 STACKING = Path('src/tensorforge/generators/stacking.py')
 BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
 TUNING = Path('src/tensorforge/generators/tuning.py')
@@ -2011,8 +2012,7 @@ GROUPS = {
          sub(HIP_WAVE, 'static_assert(__AMDGCN_WAVEFRONT_SIZE == WaveSize,',
              'static_assert(true || __AMDGCN_WAVEFRONT_SIZE == WaveSize,', 1)),
         ('the oracle reading the call as an unknown one',
-         sub(ORACLE, "    e = re.sub(r'\\btensorforge::wave_uniform\\s*<[^<>()]*>\\s*\\(', '(', e)\n",
-             '', 1)),
+         sub(ORACLE, '    e = _wave_reads(e)\n', '', 1)),
     ]),
 
     # The collectives of `hip.h` by the width of the wave.  The tests compile
@@ -2100,6 +2100,66 @@ GROUPS = {
          sub(ORACLE, "        if re.match(r'^__builtin_amdgcn_sched_barrier\\s*\\(', stmt):\n"
                      "            return                      # a fence for the compiler's schedule\n",
              '', 1)),
+    ]),
+
+    # Each multiplication's row of a group read as the wave's, with its flag
+    # word and its element pointers, and a lane's own picked.
+    'grouprows': ('tests/test_wave_uniform_group_rows.py tests/test_pir_rows.py', [
+        ('the rows the lanes\' own though asked for',
+         sub(GEN, '    if group < 2 or group * self._num_threads != wave:\n'
+                  '      return 0\n    return wave',
+             '    return 0', 1)),
+        ('a stack of elements read per multiplication',
+         sub(BATCHLOOP, '        wave = self._wave_rows if self._stack == 1 else 0\n',
+             '        wave = self._wave_rows\n', 1)),
+        ('the place left unmarked',
+         sub(BUILD, "        attrs = ((('escapes', True),) if escapes else ()) + tuple(attrs)\n",
+             "        attrs = (('escapes', True),) if escapes else ()\n", 1)),
+        ('the loop counted per lane',
+         sub(BATCHLOOP, "            start = lexic.first_lane(start, wave, 'unsigned')\n",
+             '            pass\n', 1)),
+        ('the flag word read per lane',
+         sub(BATCHLOOP, '                                             if wave and kind is Effect.READ\n',
+             '                                             if False\n', 1)),
+        ('the element pointers read per lane',
+         sub(PTR, "      per_mult = (owns and getattr(self._context.target.lexic,\n"
+                  "                                   'rows_per_mult', False))\n",
+             '      per_mult = False\n', 1)),
+        ('a copy that keeps the lane\'s place',
+         sub(ROWS, '        clone.given(value, mult)\n', '', 1)),
+        ('a row through what cannot be computed again copied all the same',
+         sub(ROWS, '        if len(clean) != len(reached):\n            continue\n',
+             '', 1)),
+        ('every lane taking the first multiplication\'s copy',
+         sub(ROWS, "                text=pick('{0}', [f'{{{m + 1}}}' for m in range(count)]),\n",
+             "                text='{1}',\n", 1)),
+        ('what a row reads copied again for each binding',
+         sub(ROWS, '                todo = [x for x in reads + [s]\n'
+                   '                        if x.target[0].id not in clone.mapping]\n',
+             '                todo = reads + [s]\n', 1)),
+        ('the first multiplication\'s row left at its place',
+         sub(PIPE, "        for name, fn in (('rows-fold', fold), ('rows-dce', dce)):\n",
+             "        for name, fn in (('rows-dce', dce),):\n", 1)),
+        ('the lane\'s element left behind',
+         sub(PIPE, "        for name, fn in (('rows-fold', fold), ('rows-dce', dce)):\n",
+             "        for name, fn in (('rows-fold', fold),):\n", 1)),
+        ('the oracle taking a lane\'s own copy',
+         sub(ORACLE, '        run = self.lockstep\n        if run is None:\n',
+             '        run = self.lockstep\n        if True:\n', 1)),
+        ('the oracle picking the first value',
+         sub(ORACLE, '    return values[int(mult)]\n', '    return values[0]\n', 1)),
+        ('the header picking the value after',
+         sub(HIP_WAVE, '((out = (mult == ++g) ? static_cast<T>(rest) : out), ...);',
+             '((out = (mult == g++) ? static_cast<T>(rest) : out), ...);', 1)),
+        ('a pick of any length',
+         sub(HIP_WAVE, 'static_assert(sizeof...(rest) + 1 == G, "one value per multiplication");',
+             'static_assert(true, "one value per multiplication");', 1)),
+        ('the pick spelled for two',
+         sub(HIP_LEXIC, "return f'tensorforge::pick<{len(values)}>(",
+             "return f'tensorforge::pick<2>(", 1)),
+        ('the rows read per multiplication by default',
+         sub(OPTIONS, "declare('wave_uniform_group_rows',\n        default=False,",
+             "declare('wave_uniform_group_rows',\n        default=True,", 1)),
     ]),
 
     # The cache hints for the element the loop reaches next.

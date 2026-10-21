@@ -37,6 +37,7 @@ from .core import Stmt, dump
 from .move import cap_cover, move_loads
 from .transfers import memory_path
 from .prefetch import prefetch_hints
+from .rows import group_rows
 from .shards import shard_loads
 from .trips import trip_reads, trip_shards
 from .wrap import wrap_loads
@@ -315,13 +316,38 @@ class ShardLoads(Pass):
                               **self._spec)
 
 
+class GroupRows(Pass):
+    """Read each multiplication's row of a group as the wave's, with what
+    reads memory through it (`rows.group_rows`).
+
+    Behind the wrap and its cleanup, whose copies of the bindings for the
+    first group and the next read through the rows as well, and ahead of the
+    allocator and the barriers, which the copies do not concern: they read
+    global memory only.  `pick` spells the choice of a lane's own copy
+    (`Lexic.pick`).
+    """
+
+    name = 'rows'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, scratch, pick):
+        self._scratch = scratch
+        self._pick = pick
+
+    def run(self, pc: BodyContext) -> None:
+        pc.body = group_rows(pc.body, self._scratch, self._pick)
+
+
 def standard_pipeline(debug: str = '',
                       wrap: Optional[WrapLoads] = None,
                       place: Optional[PlaceBuffers] = None,
                       barriers: Optional[PlaceBarriers] = None,
                       move: Optional[MoveLoads] = None,
                       prefetch: Optional[Prefetch] = None,
-                      shards: Optional[ShardLoads] = None) -> PassManager:
+                      shards: Optional[ShardLoads] = None,
+                      rows: Optional[GroupRows] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -390,6 +416,13 @@ def standard_pipeline(debug: str = '',
     of the batch-constant operands that remain to shared memory, as much of
     them as the budget it is handed admits (`ShardLoads`).
 
+    ``rows``, where asked for, runs behind the wrap and its cleanup: the
+    copies of the bindings for the first group and the next are there to be
+    given a copy per multiplication as well (`GroupRows`).  Each copy holds
+    its multiplication's place as a constant, zero for the first, so a
+    ``fold`` follows -- and a ``dce`` for the lane's element that no binding
+    reads any more.
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
@@ -423,6 +456,10 @@ def standard_pipeline(debug: str = '',
         for name, fn in (('wrap-licm', licm), ('wrap-cse', cse),
                          ('wrap-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',)))
+    if rows is not None:
+        pm.add(rows)
+        for name, fn in (('rows-fold', fold), ('rows-dce', dce)):
+            pm.add(Rewrite(name, fn, preserves=('flat',)))
     if place is not None:
         pm.add(place)
     if barriers is not None:
@@ -439,18 +476,20 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              barriers: Optional[PlaceBarriers] = None,
              prefetch: Optional[Prefetch] = None,
              shards: Optional[ShardLoads] = None,
+             rows: Optional[GroupRows] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
     ``diagnostics`` collects what the scheduler could not determine;
     ``move`` adds the transfers issued ahead within their list, ``wrap`` the
-    ones moved across the back edge, ``place`` the placement of shared memory
-    and ``barriers`` the barriers behind all of them; ``where`` names what
-    built the body in the findings `debug` reports.
+    ones moved across the back edge, ``rows`` a copy per multiplication of
+    what a row of a group reads, ``place`` the placement of shared memory and
+    ``barriers`` the barriers behind all of them; ``where`` names what built
+    the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
-                      shards).run(pc)
+                      shards, rows).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

@@ -460,7 +460,7 @@ class AbstractInstruction(ABC):
     by a builder numbering its values from the one that built this body.
     """
     options = context.get_user_options()
-    move = wrap = prefetch = held = None
+    move = wrap = prefetch = held = rows = None
     report: list = []
     hints: list = []
     kept: list = []
@@ -490,10 +490,15 @@ class AbstractInstruction(ABC):
       # A body built again reports afresh.
       del kept[:]
       held = pir.ShardLoads(builder.scratch, spec, report=kept)
+    if (options.wave_uniform_group_rows
+        and context.target.reads_first_lane()):
+      # A no-op on a body whose batch loop reads no group's rows so
+      # (`BatchLoop._gen_grouped_ir`).
+      rows = pir.GroupRows(builder.scratch, context.target.lexic.pick)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         debug=options.ir_debug, move=move, wrap=wrap,
                         place=place, barriers=barriers, prefetch=prefetch,
-                        shards=held, where='shared body')
+                        shards=held, rows=rows, where='shared body')
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)

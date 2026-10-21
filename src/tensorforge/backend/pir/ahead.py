@@ -246,6 +246,14 @@ class Clone:
         self.mapping[old.id] = new
         self.spell[str(old)] = str(new)
 
+    def fork(self) -> 'Clone':
+        """A copier that knows what this one has copied, for a nested scope:
+        what it copies there stays there."""
+        child = Clone(self._fresh, self._prefix, self._taken)
+        child.mapping = dict(self.mapping)
+        child.spell = dict(self.spell)
+        return child
+
     def _sub(self, x):
         if isinstance(x, Value):
             return self.mapping.get(x.id, x)

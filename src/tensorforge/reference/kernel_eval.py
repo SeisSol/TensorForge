@@ -537,6 +537,51 @@ class Abort(Exception):
     """Raised when the interpreter meets something outside its subset."""
 
 
+#: The texts `wave_uniform` reads as the wave's, by the key `_wave_reads`
+#: hands `Interp._wave_uniform`; and the key of each.
+_WAVE_TEXTS: List[str] = []
+_WAVE_KEYS: Dict[str, int] = {}
+
+_WAVE_UNIFORM = re.compile(
+    r'\btensorforge::wave_uniform\s*<\s*(\d+)\s*(?:,[^<>()]*)?>\s*\(')
+
+
+def _wave_reads(e: str) -> str:
+    """Every `tensorforge::wave_uniform<Lanes>(v)` of `e` as
+    `WAVE_UNIFORM(Lanes, key)`, with `key` naming the text of `v`."""
+    out, at = [], 0
+    while True:
+        m = _WAVE_UNIFORM.search(e, at)
+        if m is None:
+            out.append(e[at:])
+            return ''.join(out)
+        depth, j = 1, m.end()
+        while j < len(e) and depth:
+            depth += (e[j] == '(') - (e[j] == ')')
+            j += 1
+        text = e[m.end():j - 1]
+        key = _WAVE_KEYS.get(text)
+        if key is None:
+            key = _WAVE_KEYS[text] = len(_WAVE_TEXTS)
+            _WAVE_TEXTS.append(text)
+        out.append(f'{e[at:m.start()]}WAVE_UNIFORM({m.group(1)}, {key})')
+        at = j
+
+
+def _pick(count, mult, *values):
+    """`tensorforge::pick<count>(mult, values...)`."""
+    if len(values) != int(count) or not 0 <= int(mult) < len(values):
+        raise Abort(f'pick<{count}>({mult}, ...) among {len(values)} values')
+    return values[int(mult)]
+
+
+def _same(a, b) -> bool:
+    """Whether two lanes hold the same value: a pointer by where it points."""
+    if isinstance(a, Ptr) and isinstance(b, Ptr):
+        return (a.base, a.off) == (b.base, b.off)
+    return a == b
+
+
 def _py(expr: str) -> str:
     """Translate a C expression into a Python one."""
     e = expr
@@ -552,8 +597,12 @@ def _py(expr: str) -> str:
     # through: `(tensorforge::SpacePtrRestrict<double, ...>)&m0[...]`
     e = re.sub(r'\(\s*tensorforge::\w+<[^()]*>\s*(?:const\s*)?\)\s*', '', e)
     # `wave_uniform<Lanes>(v)` reads the first lane's copy of a value every
-    # lane of the wave holds alike, which is this lane's own: the value.
-    e = re.sub(r'\btensorforge::wave_uniform\s*<[^<>()]*>\s*\(', '(', e)
+    # lane of the wave holds alike.  Its text is handed over by a key, since
+    # the rewrites below would reach into a string, and evaluated by
+    # `Interp._wave_uniform` in every lane of the wave: they have to agree.
+    e = _wave_reads(e)
+    # `pick<G>(m, a, b, ...)`: multiplication `m`'s value among `G`.
+    e = re.sub(r'\btensorforge::pick\s*<\s*(\d+)\s*>\s*\(', r'PICK(\1, ', e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__builtin_nontemporal_load\s*\(\s*&', 'DEREF(', e)
@@ -750,8 +799,12 @@ class Interp:
         #: single-lane run, where a cross-lane read has no defined answer and
         #: says so instead of quietly returning this lane's copy.
         self.peers: List['Interp'] = []
+        #: The run this lane takes part in, set by `Lockstep`.
+        self.lockstep: Optional['Lockstep'] = None
         self.env['READLANE'] = self._readlane
         self.env['BROADCAST'] = self._broadcast
+        self.env['WAVE_UNIFORM'] = self._wave_uniform
+        self.env['PICK'] = _pick
         self.env['VEC'] = lambda *xs: Vec(xs)
         self.env['FMA'] = lambda a, b, c: a * b + c
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
@@ -794,6 +847,34 @@ class Interp:
             raise Abort(f'readlane({name!r}, {lane}): lane {lane} never '
                         f'defined it -- it was masked off there')
         return peer.env[name]
+
+    def _wave_uniform(self, lanes: int, key: int):
+        """`tensorforge::wave_uniform<lanes>(text)`, the text `key` names:
+        its value in the first lane of this lane's `lanes`, which every lane
+        of them that executes it holds alike.
+
+        Checked rather than taken on trust: the lanes of the run that take
+        part are asked for their copies, and a value they do not agree on is
+        an `Abort`, since the hardware would hand every lane the first one's.
+        Once per statement and group of lanes (`Lockstep.wave_cache`).  A
+        lane run on its own has nothing to ask, and takes its own.
+        """
+        text = _WAVE_TEXTS[int(key)]
+        run = self.lockstep
+        if run is None:
+            return self.ev(text)
+        lanes = int(lanes)
+        group = self.lane // lanes
+        cached = run.wave_cache.get((group, lanes, key), self)
+        if cached is not self:
+            return cached
+        values = [it.ev(text) for it in run.current
+                  if it.lane // lanes == group]
+        if any(not _same(v, values[0]) for v in values[1:]):
+            raise Abort(f'wave_uniform<{lanes}>({text}): the lanes of the wave '
+                        f'hold different values')
+        run.wave_cache[(group, lanes, key)] = values[0]
+        return values[0]
 
     def _broadcast(self, name: str, block: int, subblock: int, lane: int):
         """`tensorforge::broadcast<Block, Subblock, Lane>(name)` for this lane.
@@ -1222,6 +1303,12 @@ class Lockstep:
         for group in groups if groups is not None else [interps]:
             for it in group:
                 it.peers = group
+        for it in interps:
+            it.lockstep = self
+        #: The lanes executing the statement at hand, and what of it was read
+        #: as the wave's (`Interp._wave_uniform`).
+        self.current: List['Interp'] = interps
+        self.wave_cache: Dict = {}
         self.tracker: Optional[Races] = interps[0].mem.tracker if interps \
             else None
 
@@ -1294,6 +1381,8 @@ class Lockstep:
             return
         for node in block:
             kind = node[0]
+            self.current = lanes
+            self.wave_cache = {}
             if kind == 'expr':
                 if self.tracker is not None:
                     self._tracked(node[1], lanes)
@@ -1312,12 +1401,14 @@ class Lockstep:
                     it.env[v] = it.ev(a)
                 inc = 1 if '++' in step or '+=' in step else -1
                 while True:
+                    self.current, self.wave_cache = lanes, {}
                     active = [it for it in lanes
                               if (it.env[v] < it.ev(b) if '<' in cmp_
                                   else it.env[v] > it.ev(b))]
                     if not active:
                         break
                     self.run(node[6], active)
+                    self.current, self.wave_cache = active, {}
                     for it in active:
                         it.env[v] += (it.ev(step.split('=')[1]) *
                                       (1 if '+=' in step else -1)
@@ -1330,6 +1421,7 @@ class Lockstep:
                 # break here -- the launch-control traversal -- leave on a
                 # condition every thread of the block reads alike.
                 while True:
+                    self.current, self.wave_cache = lanes, {}
                     active = [it for it in lanes if it.ev(node[1])]
                     if not active:
                         break
