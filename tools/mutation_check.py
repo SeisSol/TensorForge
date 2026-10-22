@@ -2966,9 +2966,12 @@ GROUPS = {
          sub(FLOW, '            if (not r.certain or not r.cell or r.mask & taken\n',
              '            if (not r.certain or not r.cell\n', 1)),
         ('the register of an earlier load taken whether it holds it or not',
-         sub(FLOW, '                if m & r.mask == r.mask and self._holds(cell, store, r.mask,\n'
-                   '                                                         conds):\n',
-             '                if m & r.mask == r.mask:\n', 1)),
+         sub(FLOW, '                               if m & r.mask == r.mask\n'
+                   '                               and self._holds(cell, store, r.mask, conds)),\n',
+             '                               if m & r.mask == r.mask),\n', 1)),
+        ('the last load of an element asked before the first',
+         sub(FLOW, '                self._fetched[(r.cell, r.mask)].append((load, r))\n',
+             '                self._fetched[(r.cell, r.mask)].insert(0, (load, r))\n', 1)),
     ]),
 }
 

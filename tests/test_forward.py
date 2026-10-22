@@ -576,6 +576,26 @@ def test_what_the_lane_stored_comes_before_what_it_loaded():
     assert not _loads(out, MemSpace.GLOBAL, t.q)
 
 
+def test_a_third_load_of_an_element_reads_the_register_of_the_first():
+    """`q` loaded into `r0`, `r1` and `r2`: the third load reads `r0`, as
+    the second does, and not `r1`, which the same round takes from `r0` in
+    turn.  Two rounds, and no copy is left: the reads of `r1` and `r2` read
+    `r0`."""
+    t = Body()
+    b = t.b
+    _, r1 = _reload(t)
+    r2 = t.registers('r2')
+    with b.if_(t.valid):
+        with b.for_(0, COLS, 1, unroll=True) as hop:
+            j = hop.induction
+            b.store(r2, b.load(t.q, t.element(j)), j)
+    b.store(t.p, b.load(r2, 2), t.lane)
+    out = t.run(rounds=2)
+    assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 1
+    assert not _stores(out, MemSpace.REGISTER, r1)
+    assert not _stores(out, MemSpace.REGISTER, r2)
+
+
 def test_a_load_behind_a_store_of_the_element_keeps_its_load():
     t = Body()
     b = t.b

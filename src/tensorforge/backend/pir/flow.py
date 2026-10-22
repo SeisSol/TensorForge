@@ -268,10 +268,11 @@ class Flow:
         #: The masks taken to hold (`masks`).
         self.masks: FrozenSet = self._masks() if masks else frozenset()
         self._forwarded: Dict[int, List[Tuple[int, Tuple, Tuple[Reach, ...]]]] = {}
-        #: Per element of memory and lane group: the last load of it whose
-        #: value went into a register, and what that load found there
+        #: Per element of memory and lane group: the loads of it whose value
+        #: went into a register, the first first, and what each found there
         #: (`_fetches`).
-        self._fetched: Dict[Tuple[Tuple, int], Tuple[int, Reach]] = {}
+        self._fetched: Dict[Tuple[Tuple, int], List[Tuple[int, Reach]]] = \
+            defaultdict(list)
         #: Per execution of a load of memory: the registers its value went
         #: into, `(mask, cell, store)`.
         self._held: Dict[int, List[Tuple[int, Tuple, int]]] = defaultdict(list)
@@ -641,22 +642,27 @@ class Flow:
         between -- both found the same write there -- and the register that
         earlier load's value went into holding it still.  Not for the lanes
         in `taken`, which read what their own store put there, and take
-        that."""
+        that.
+
+        The first such load whose register holds it, not the last: a third
+        staging of an element reads the register of the first, and not the
+        second's, which the same round takes from the first in turn -- a
+        chain one round of the forwarding would leave half done."""
         out: List[Tuple[int, Tuple, Tuple[Reach, ...]]] = []
         for r in self.reach.get(n, ()):
             if (not r.certain or not r.cell or r.mask & taken
                     or r.cell[0][0] is MemSpace.REGISTER):
                 continue
-            last = self._fetched.get((r.cell, r.mask))
-            if last is None:
-                continue
-            earlier, found = last
-            if not found.certain or found.writer != r.writer:
-                continue
-            for m, cell, store in self._held.get(earlier, ()):
-                if m & r.mask == r.mask and self._holds(cell, store, r.mask,
-                                                         conds):
-                    out.append((r.mask, ('reg', cell, store), (r, found)))
+            for earlier, found in self._fetched.get((r.cell, r.mask), ()):
+                if not found.certain or found.writer != r.writer:
+                    continue
+                holder = next(((cell, store)
+                               for m, cell, store in self._held.get(earlier, ())
+                               if m & r.mask == r.mask
+                               and self._holds(cell, store, r.mask, conds)),
+                              None)
+                if holder is not None:
+                    out.append((r.mask, ('reg',) + holder, (r, found)))
                     break
         return out
 
@@ -681,7 +687,7 @@ class Flow:
         self._held[load].extend(held)
         for r in self.reach.get(load, ()):
             if r.cell:
-                self._fetched[(r.cell, r.mask)] = (load, r)
+                self._fetched[(r.cell, r.mask)].append((load, r))
 
     def _numbers(self, cell, lanes: int, conds) -> Dict[Any, int]:
         """The numbers `cell`, a register, holds for certain for the lanes of
