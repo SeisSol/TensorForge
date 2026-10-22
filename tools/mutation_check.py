@@ -1535,6 +1535,8 @@ GROUPS = {
 
     # The transfer for the next element, issued across the back edge.
     'wrap': ('tests/test_pir_wrap.py tests/test_pass_pipeline.py', [
+        ('a binding a kept binding reads dropped',
+         sub(WRAP, '    pending = list(read)\n', '    pending = []\n', 1)),
         ('the tail fetches the element the iteration computes',
          sub(WRAP, '        tail_copy.given(l.k, l.next)',
              '        tail_copy.given(l.k, l.k)', 1)),

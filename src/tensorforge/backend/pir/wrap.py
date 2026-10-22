@@ -381,7 +381,8 @@ def _drop_unread(body: Tuple[Stmt, ...],
     use the graph sees.  So it goes only where none of the three reads it --
     no operand, no text but comments, no operand named like it.  Where the moved transfers
     were its only readers, it would otherwise be a declaration of a pointer
-    nothing follows.
+    nothing follows.  A binding of `copied` that stays reads like any other
+    statement: what it reads stays with it.
     """
     from .build import _names_in
     names = {id(s): str(s.attr('extern')) for s in copied
@@ -390,10 +391,13 @@ def _drop_unread(body: Tuple[Stmt, ...],
         return body
     by_value = {s.target[0].id: id(s) for s in copied if id(s) in names}
     read = set()
+    #: The bindings each binding of `copied` reads: one stays where a binding
+    #: that stays reads it -- a pointer cast from the table a merged run
+    #: selects its member with, and the cast read by a transfer that did not
+    #: move.
+    among: Dict[int, set] = {sid: set() for sid in names}
     for x in walk_stmts(body):
-        if id(x) in names:
-            continue
-        read.update(by_value[v.id] for v in x.operands() if v.id in by_value)
+        hits = {by_value[v.id] for v in x.operands() if v.id in by_value}
         # A comment names what it describes, and reads nothing.
         texts = [] if (x.text or '').lstrip().startswith('//') else [x.text or '']
         texts += [a for a in x.args if isinstance(a, str)]
@@ -401,8 +405,18 @@ def _drop_unread(body: Tuple[Stmt, ...],
                   if not isinstance(a, Value)]
         texts += [v for k, v in x.attrs if isinstance(v, str)]
         for sid, name in names.items():
-            if sid not in read and any(_names_in(t, name) for t in texts if t):
-                read.add(sid)
+            if sid not in hits and sid != id(x) and any(
+                    _names_in(t, name) for t in texts if t):
+                hits.add(sid)
+        if id(x) in names:
+            among[id(x)] |= hits - {id(x)}
+        else:
+            read |= hits
+    pending = list(read)
+    while pending:
+        for sid in among[pending.pop()] - read:
+            read.add(sid)
+            pending.append(sid)
     gone = set(names) - read
     if not gone:
         return body

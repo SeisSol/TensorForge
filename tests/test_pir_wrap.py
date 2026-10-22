@@ -257,6 +257,47 @@ def test_the_binding_nothing_reads_any_more_goes():
     assert {'peel_glb_m0', 'wrap_glb_m0', 'glb_m1'} <= set(names)
 
 
+def test_a_binding_a_staying_binding_reads_stays():
+    """Two transfers read through one pointer, cast from a binding of its
+    own -- a merged run's member, selected from a table -- and at distance
+    1 the first wraps alone.  The cast stays for the second, and with it the
+    binding it reads: the first transfer's copies are not its only readers
+    any more."""
+    b = IRBuilder(fptype=F32, arena='shrMem')
+    count = b.extern_value('numElements0', SIZE, hint='count')
+    start = b.extern_value('start', SIZE, uniform=Uniformity.MULT,
+                           hint='start')
+    inside = b.op('lt', BOOL, start, count, hint='inside')
+    first = b.op('select', SIZE, inside, start, 0, hint='batchId1',
+                 escapes=True)
+    with b.for_('start', count, 'stride', hint='batchId0', index_type=SIZE,
+                peel_index=first, uniform=Uniformity.MULT) as f:
+        k = f.induction
+        ahead_k = b.op('add', SIZE, k, 'stride', hint='ahead1')
+        fits = b.op('lt', BOOL, ahead_k, count, hint='inbatch1')
+        f._next_index = b.op('select', SIZE, fits, ahead_k, k,
+                             hint='batchId1', escapes=True)
+        table = _binding(b, k, name='tab_m0')
+        cast = b.decl_expr('const float *const __restrict__ glb_m0', '{0}',
+                           BufferType(F32, (64,), MemSpace.GLOBAL,
+                                      readonly=True), SRC, args=(table,),
+                           kind=Effect.READ, space=MemSpace.GLOBAL,
+                           hint='glb_m0', extern='glb_m0')
+        out = _binding(b, k, base=DST, name='glb_m1', writable=True)
+        for j in range(2):
+            dest = b.alloc(F32, (8,), MemSpace.REGISTER, hint='r',
+                           extern=f'r{j}')
+            _register_transfer(b, cast, dest, f'r{j}')
+            b.store(out, b.load(dest, 3, hint='u'), j)
+    body = b.finish()
+    verify(body)
+    out = wrap_loads(body, b.scratch, distance=1, report=[])
+    verify(out)
+    names = [s.attr('extern') for s, _ in walk(out) if s.attr('extern')]
+    assert 'wrap_glb_m0' in names, 'the first transfer wraps'
+    assert 'glb_m0' in names and 'tab_m0' in names, names
+
+
 def test_the_moved_body_renders():
     out = Section().wrap()
     w = Writer()
