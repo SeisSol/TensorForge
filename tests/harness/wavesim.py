@@ -58,6 +58,14 @@ def dpp(ctrl: int, vals: Sequence) -> Lanes:
     return [vals[(l & ~3) + perm[l % 4]] for l in range(len(vals))]
 
 
+def dpp8(sel: Sequence[int], vals: Sequence) -> Lanes:
+    """`dpp8:[s0,...,s7]`, gfx10 on: lane `l` reads lane `sel[l % 8]` of its
+    own group of eight -- no row or bank mask, no bound control (`FMADPP8`
+    and `dpp8` in hip.h)."""
+    assert len(sel) == 8 and all(0 <= s < 8 for s in sel)
+    return [vals[(l & ~7) + sel[l % 8]] for l in range(len(vals))]
+
+
 def dpp_update(ctrl: int, row_mask: int, bank_mask: int,
                src: Sequence, old: Sequence) -> Lanes:
     """`tensorforge::dppUpdate<ctrl, row_mask, bank_mask, true>(src, old)`.

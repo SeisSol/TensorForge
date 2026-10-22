@@ -87,6 +87,7 @@ CARRY = Path('src/tensorforge/backend/pir/carry.py')
 ATOMICS = Path('src/tensorforge/backend/pir/atomics.py')
 FORWARD = Path('src/tensorforge/backend/pir/forward.py')
 FLOW = Path('src/tensorforge/backend/pir/flow.py')
+DEMAND = Path('src/tensorforge/backend/pir/demand.py')
 EPILOGUE = Path('src/tensorforge/backend/instructions/compute/epilogue.py')
 PROMISE = Path('src/tensorforge/backend/instructions/compute/promise.py')
 TILING = PKG / 'tiling.py'
@@ -2890,6 +2891,52 @@ GROUPS = {
          sub(RESIDENCY, '        view = self.home.data_view\n        if view is None:\n',
              '        view = None\n        if view is None:\n', 1)),
     ]),
+    # Which lanes of a value anything reads, and the loads taken where the
+    # lanes they would get wrong are none of those.
+    'demand': ('tests/test_demand.py', [
+        ('a broadcast taken to read the lane it gives',
+         sub(DEMAND, '     lambda block, sub, lane: (block, lambda p: lane * sub + p % sub)),',
+             '     lambda block, sub, lane: (block, lambda p: p)),', 1)),
+        ('the operand an FMA adds taken for the one it moves',
+         sub(DEMAND, "    (re.compile(r'tensorforge::fmacdpp(4|8|16)<\\s*(\\d+)\\s*>$'), 1, False,",
+             "    (re.compile(r'tensorforge::fmacdpp(4|8|16)<\\s*(\\d+)\\s*>$'), 2, False,", 1)),
+        ('the lanes a broadcast is read in not handed on',
+         sub(DEMAND, '            wanted = self.lanes(u.target[0], env, depth + 1)\n',
+             '            wanted = 0\n', 1)),
+        ('a call it does not know taken to read no lane',
+         sub(DEMAND, '        if known is None:\n            return full\n',
+             '        if known is None:\n            return 0\n', 1)),
+        ('a text it does not know taken to read no lane',
+         sub(DEMAND, '                if m is None:\n                    return full\n',
+             '                if m is None:\n                    continue\n', 1)),
+        ('a value stored to memory taken for one stored to registers',
+         sub(DEMAND, '                or u.accesses[0].space is not MemSpace.REGISTER\n'
+                     '                or len(u.args) < 2', '                or len(u.args) < 2', 1)),
+        ('a register an access nothing can place reads taken for one read back',
+         sub(DEMAND, '                    # Anything but a load back: an access the flow cannot\n'
+                     '                    # place, which reads every element it may reach.\n'
+                     '                    return full\n', '                    continue\n', 1)),
+        ('a register read back taken to read nothing',
+         sub(DEMAND, "                out |= self.lanes(x.target[0], flow.insts[r].env(),\n"
+                     "                                  depth + 1) & m\n",
+             "                pass\n", 1)),
+        ('the multiplicand of an FMA taken to read no lane',
+         sub(DEMAND, '            return self._accumulated(u, env, depth)\n'
+                     '        if len(u.args) <= operand or u.args[operand] is not v:\n',
+             '            return 0\n'
+             '        if len(u.args) <= operand or u.args[operand] is not v:\n', 1)),
+        ('any call on an accumulator taken for an FMA that adds into it',
+         sub(DEMAND, '        known = lane_map(u.attr(\'callee\'))\n'
+                     '        return (known is not None and not known[1] and len(u.args) == 3\n',
+             '        return True\n'
+             '        return (known is not None and not known[1] and len(u.args) == 3\n', 1)),
+        ('the lanes a predicate leaves out taken for unread unasked',
+         sub(FORWARD, '        if s.predicate is None:\n            return True\n        execs = flow.executions(s)\n',
+             '        return True\n        execs = flow.executions(s)\n', 1)),
+        ('no lane of a load taken to be read',
+         sub(FORWARD, '        return self.demand.lanes(s.target[0], self.flow.insts[n].env())\n',
+             '        return 0\n', 1)),
+    ]),
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.
     'forward': ('tests/test_forward.py', [
@@ -2900,7 +2947,7 @@ GROUPS = {
          sub(FLOW, '            if not r.certain or r.writer is None or r.writer < 0 or not r.own:',
              '            if not r.certain or r.writer is None or r.writer < 0:', 1)),
         ('a load taken where some of its lanes read something else',
-         sub(FORWARD, '            if covered & inst.mask != inst.mask:\n'
+         sub(FORWARD, '            if covered & need != need:\n'
                       '                return False\n', '', 1)),
         ('a value taken where it does not stand',
          sub(FORWARD, '        if v.type != s.target[0].type or not self._stands(v, s):',

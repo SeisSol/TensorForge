@@ -26,9 +26,13 @@ the same write there: the load reads the register that earlier load's value
 went into, where it holds it still.
 
 Every execution and every lane the load runs for has to agree: one number,
-one value, one register array.  Then the stores: one that nothing reads and
-that leaves nothing behind -- no element of global memory the body ends
-with, nothing another multiplication reads -- goes.
+one value, one register array -- every lane anything reads the load's value
+in (`demand.Demand`).  A lane nothing reads may take what the others take
+instead of what the load gives it: a register that does not hold the number
+there, a value where the load's predicate gives a zero, a lane that read
+nothing for certain.  Then the stores: one that nothing reads and that
+leaves nothing behind -- no element of global memory the body ends with,
+nothing another multiplication reads -- goes.
 
 
 An element's mask is taken to hold where the body keeps its contract
@@ -43,6 +47,7 @@ from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts
+from .demand import Demand
 from .flow import Flow, TooLarge
 from .passes import _zero_like, dce, substitute
 
@@ -222,6 +227,8 @@ class _Forward:
         self.mapped: Dict[int, Value] = {}
         #: The stores whose registers a load reads from now on.
         self.kept: Set[int] = set()
+        #: Which lanes of a load's value anything reads.
+        self.demand = Demand(flow)
 
     def run(self) -> Tuple[Stmt, ...]:
         for s in walk_stmts(self.flow.body):
@@ -282,7 +289,8 @@ class _Forward:
                     cells.add(o[1])
                     writers.add(o[2])
                     held |= m
-            if covered & inst.mask != inst.mask:
+            need = inst.mask & self._read(s, n)
+            if covered & need != need:
                 return False
             if cells:
                 if len(cells) != 1:
@@ -295,9 +303,9 @@ class _Forward:
         if (kinds == {'reg', 'const'} and len(consts) == 1 and len(bases) == 1
                 and len(taken) == len(lanes)
                 and self._holding(next(iter(consts)), taken, lambda n, h:
-                                  flow.insts[n].mask & ~h)):
+                                  flow.insts[n].mask & ~h & self._read(s, n))):
             # The lanes that take the number find it in the register as
-            # well: the register, in every lane.
+            # well, or nothing reads them: the register, in every lane.
             if self._register(s, next(iter(bases)), points, taken):
                 self.kept |= writers
                 return True
@@ -343,7 +351,7 @@ class _Forward:
         if v.type != s.target[0].type or not self._stands(v, s):
             return False
         b = self.scratch()
-        out = self._select(b, s, v)
+        out = v if self._unread_outside(s) else self._select(b, s, v)
         self.rebuilt[id(s)] = list(b.finish())
         self.mapped[s.target[0].id] = out
         return True
@@ -385,9 +393,12 @@ class _Forward:
 
     def _idle(self, s: Stmt, taken) -> bool:
         """Do the lanes the predicate of `s` leaves out find in the register
-        each execution takes what the load gives them, the else-value?
-        Only where the flow told those lanes apart (`Flow.whole`)."""
+        each execution takes what the load gives them, the else-value -- or
+        read nothing of it?  Only where the flow told those lanes apart
+        (`Flow.whole`)."""
         flow = self.flow
+        if self._unread_outside(s):
+            return True
         other = s.attr('other')
         if other is None:
             other = 0
@@ -396,7 +407,25 @@ class _Forward:
         if any(n not in flow.whole for n, _, _ in taken):
             return False
         return self._holding(other, taken, lambda n, h:
-                             flow.whole[n] & ~flow.insts[n].mask)
+                             flow.whole[n] & ~flow.insts[n].mask
+                             & self._read(s, n))
+
+    def _read(self, s: Stmt, n: int) -> int:
+        """The lanes of what execution `n` of `s` loads anything reads."""
+        return self.demand.lanes(s.target[0], self.flow.insts[n].env())
+
+    def _unread_outside(self, s: Stmt) -> bool:
+        """Does nothing read what `s` loads in the lanes its predicate
+        leaves out, at any execution?  Only where the flow told those lanes
+        apart (`Flow.whole`)."""
+        flow = self.flow
+        if s.predicate is None:
+            return True
+        execs = flow.executions(s)
+        return bool(execs) and all(
+            n in flow.whole
+            and not flow.whole[n] & ~flow.insts[n].mask & self._read(s, n)
+            for n in execs)
 
     def _mixed(self, s: Stmt, base: int, points, c, lanes) -> bool:
         """The load as a register where a condition of the lanes holds and
@@ -424,7 +453,7 @@ class _Forward:
         number = b.const(c, t)
         picked = (b.op('select', t, g, v, number, hint='fwd') if register_lanes
                   else b.op('select', t, g, number, v, hint='fwd'))
-        out = self._select(b, s, picked)
+        out = picked if self._unread_outside(s) else self._select(b, s, picked)
         self.rebuilt[id(s)] = lead + list(b.finish())
         self.mapped[s.target[0].id] = out
         return True
@@ -474,8 +503,8 @@ class _Forward:
 
     def _unless(self, s: Stmt, v):
         """`v` where the load's predicate holds, and what the load gives
-        where it does not."""
-        if s.predicate is None:
+        where it does not -- where anything reads it there."""
+        if s.predicate is None or self._unread_outside(s):
             return v
         b = self.scratch()
         out = self._select(b, s, v)
