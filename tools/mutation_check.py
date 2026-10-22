@@ -2890,6 +2890,22 @@ GROUPS = {
         ('a writeback laid over its own box',
          sub(RESIDENCY, '        view = self.home.data_view\n        if view is None:\n',
              '        view = None\n        if view is None:\n', 1)),
+        ('the cover counted ahead of the forward of memory',
+         subs(PIPE, ("    pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))\n",
+                     "    pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))\n"
+                     "    if move is not None and move.cover > 0:\n"
+                     "        pm.add(Rewrite('cap', move.cap, requires=('flat',),\n"
+                     "                       preserves=('flat',)))\n"),
+              ("    if move is not None and move.cover > 0:\n"
+               "        pm.add(Rewrite('cap', move.cap, requires=('flat',),\n"
+               "                       preserves=('flat',)))\n"
+               "    if atomics is not None:\n",
+               "    if atomics is not None:\n"))),
+        ('no forward of memory ahead of the cover without atomics',
+         sub(ABSTR, '      early = pir.Forward(builder.scratch, report=carries,\n'
+                    '                          registers=False, **carry)\n',
+             '      early = pir.Forward(builder.scratch, report=carries,\n'
+             '                          registers=False, **carry) if added else None\n', 1)),
     ]),
     # Which lanes of a value anything reads, and the loads taken where the
     # lanes they would get wrong are none of those.

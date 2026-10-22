@@ -519,10 +519,15 @@ def standard_pipeline(debug: str = '',
     in the anonymous scopes the loaders open until ``flatten`` has removed
     them.
 
-    ``cap``, where ``move`` asks for one, runs right behind ``flatten``: there
-    the statements of an instruction stand on their own, and a transfer
-    issued further ahead of its first read than its cover needs goes back
-    down among them (`move.cap_cover`).
+    ``cap``, where ``move`` asks for one, runs behind the carry and the
+    forward of memory: there the statements of an instruction stand on their
+    own, and a transfer issued further ahead of its first read than its
+    cover needs goes back down among them (`move.cap_cover`).  What it counts
+    as cover is what the emitter will emit, and a result a lane stores and
+    loads back is none of it once the forward has taken the round trip away.
+    Right behind ``flatten`` it would count every such round trip, and a
+    list whose operations hand their results through memory
+    (`memory_semantics`) has one behind every operation.
 
     ``prefetch``, where asked for, runs right behind ``flatten``: the hints
     for the next element are statements of the body like any other, and go
@@ -533,6 +538,13 @@ def standard_pipeline(debug: str = '',
     where it may (`CarryTrips`), and a ``dce`` takes the address arithmetic
     of the stores it took out.  Ahead of ``shards`` and the wrap, which see
     the load it moved ahead of the loop as a load of the body like any other.
+
+    ``early_forward``, where asked for, runs behind the carry: a load of
+    memory that reads what its own lane stored is read from the registers
+    the store took it from (`Forward` without registers).  Ahead of the
+    atomics, which see a result handed to the accumulation behind it as the
+    chain it is, and of ``cap`` and the wrap, which count the work ahead of a
+    transfer's first read.
 
     ``atomics``, where asked for, runs behind the carry: the accumulator a
     merged run's trips hand each other in registers is then one load ahead
@@ -569,9 +581,6 @@ def standard_pipeline(debug: str = '',
     if move is not None:
         pm.add(move)
     pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))
-    if move is not None and move.cover > 0:
-        pm.add(Rewrite('cap', move.cap, requires=('flat',),
-                       preserves=('flat',)))
     if prefetch is not None:
         pm.add(prefetch)
     pm.add(Rewrite('if_convert',
@@ -591,6 +600,9 @@ def standard_pipeline(debug: str = '',
         for name, fn in (('forward-memory-fold', fold),
                          ('forward-memory-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',)))
+    if move is not None and move.cover > 0:
+        pm.add(Rewrite('cap', move.cap, requires=('flat',),
+                       preserves=('flat',)))
     if atomics is not None:
         pm.add(atomics)
         for name, fn in (('atomics-fold', fold), ('atomics-dce', dce)):
@@ -652,7 +664,8 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     registers what the trips of a merged run hand each other through memory,
     ``atomics`` adds an accumulation atomically where nothing reads the
     sum, and ``forward`` takes a load from where its own lane's store took
-    the value -- ``early_forward`` a load of memory, ahead of the atomics;
+    the value -- ``early_forward`` a load of memory, ahead of the atomics
+    and of the cover's count;
     ``where`` names what built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)

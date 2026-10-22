@@ -113,3 +113,38 @@ def test_an_accumulation_over_fewer_rows_lands_in_the_buffer_as_laid_out(
                         lambda descrs, backend='cuda', arch='sm_86':
                         _built(descrs, backend, arch, **options))
     assert lanes._worst(accumulation_over_fewer_rows()) < 1e-9
+
+
+@pytest.mark.parametrize('atomic', [True, False])
+def test_a_transfer_keeps_the_cover_the_round_trips_would_take(atomic):
+    """Behind every operation the result goes to memory, and the next stages
+    it back: round trips the forward of memory takes away (`pir.forward`).
+    The cover a transfer is issued with is counted behind that
+    (`pir.standard_pipeline`, ``cap``), so `chain_three`'s transfers stand at
+    least as far ahead of their first reads as with the residency -- with
+    the atomics, which ask the forward of memory as well, and without."""
+    import test_issue_cover as cover
+    held = cover._gaps(cover._generate('chain_three.py', 'hip', 'gfx942',
+                                       atomic_accumulation=atomic))
+    handed = cover._gaps(cover._generate('chain_three.py', 'hip', 'gfx942',
+                                         atomic_accumulation=atomic,
+                                         **OPTIONS))
+    assert held and handed.keys() == held.keys()
+    assert all(handed[k] >= held[k] for k in held), (held, handed)
+
+
+def test_the_forward_of_memory_runs_ahead_of_the_cover_without_atomics(
+        monkeypatch):
+    """The forward of memory runs for the cover's count as much as for the
+    atomics: a build that adds nothing atomically has it as well."""
+    from tensorforge.backend.instructions import abstract_instruction
+    seen = []
+    real = abstract_instruction.pir.optimize
+
+    def spy(body, **kwargs):
+        seen.append(kwargs.get('early_forward'))
+        return real(body, **kwargs)
+    monkeypatch.setattr(abstract_instruction.pir, 'optimize', spy)
+    _built(lanes.slice_of_a_temporary(), backend='hip', arch='gfx942',
+           atomic_accumulation=False, **OPTIONS)
+    assert seen and all(early is not None for early in seen)

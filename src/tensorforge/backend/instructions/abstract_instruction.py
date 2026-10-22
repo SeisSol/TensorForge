@@ -512,12 +512,12 @@ class AbstractInstruction(ABC):
     forwarded = early = None
     if carry is not None and options.forward_memory:
       forwarded = pir.Forward(builder.scratch, report=carries, **carry)
-      if added is not None:
-        # A result handed through memory to the accumulation behind it is
-        # read from its registers before the atomics ask what the store
-        # adds onto (`pir.standard_pipeline`).
-        early = pir.Forward(builder.scratch, report=carries,
-                            registers=False, **carry)
+      # What the lanes store and load back -- a result handed to the
+      # accumulation behind it, or to the next operation -- is read from its
+      # registers before the atomics ask what a store adds onto, and before
+      # the cover of a transfer is counted (`pir.standard_pipeline`).
+      early = pir.Forward(builder.scratch, report=carries,
+                          registers=False, **carry)
     if (options.wave_uniform_group_rows
         and context.target.reads_first_lane()):
       # A no-op on a body whose batch loop reads no group's rows so
