@@ -304,12 +304,16 @@ def test_a_result_is_stored_once_nothing_reads_it_again():
 
 
 def _carried(system, config, kernel):
+    """How many values each loop of an open run (`closed_trips` off)
+    threads through its body."""
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    from tensorforge.common.context import Options
     from tensorforge.generators.generator import MergeFallbackWarning
 
     descrs = _read(system, config, kernel)
     fp = Datatype.F64 if config.endswith('-d') else Datatype.F32
-    gen = Generator(descrs, Context(arch='sm_86', backend='cuda', fp_type=fp))
+    gen = Generator(descrs, Context(arch='sm_86', backend='cuda', fp_type=fp,
+                                    options=Options(closed_trips=False)))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         warnings.simplefilter('error', MergeFallbackWarning)
@@ -349,8 +353,9 @@ def test_every_kernel_builds(request, system, config, backend, arch):
 
 
 def test_a_merged_run_carries_the_temporaries_it_reads_back():
-    """What the body reads before it assigns rides the back edge -- including
-    the values that are not `+=` and the ones that are temporaries.
+    """What the body of an open run (`closed_trips` off) reads before it
+    assigns rides the back edge -- including the values that are not `+=` and
+    the ones that are temporaries.
 
     The residency keys its entries by *symbol* name.  A key spelled from the
     tensor -- `glb_` and the tensor's name -- is the symbol for a kernel
@@ -361,10 +366,12 @@ def test_a_merged_run_carries_the_temporaries_it_reads_back():
     `transportDer(0..3)`, which are parameters, would be right.
     """
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
+    from tensorforge.common.context import Options
 
     system = 'damage-nonlinearck'
     gen = Generator(_read(system, f'{system}-o4-s', 'gpu_damageStep'),
-                    Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32))
+                    Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32,
+                            options=Options(closed_trips=False)))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         gen.generate()

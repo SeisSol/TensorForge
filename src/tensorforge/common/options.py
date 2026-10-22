@@ -783,7 +783,7 @@ declare('rotate_slots',
             'rule with no case behind it.')
 
 declare('closed_trips',
-        default=False,
+        default=True,
         parse=parse_bool,
         doc='Lower a merged run so that its trips hand each other nothing but '
             'memory.\n'
@@ -796,7 +796,11 @@ declare('closed_trips',
             'on every trip by construction.  What that costs, an accumulator '
             'read and written through memory on every trip, the pseudo-IR '
             'takes back where it can show that it may (`pir.carry`).  See '
-            '`Generator._emit_closed_loop`.')
+            '`Generator._emit_closed_loop`.  On by default; off, the first '
+            'trip is built beside the loop where the body cannot start from '
+            'a destination made resident ahead of it, and the trips hand '
+            'each other the accumulator in the registers they computed it '
+            'in.')
 
 declare('carry_trips',
         default=True,

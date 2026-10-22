@@ -195,8 +195,10 @@ def test_a_zero_filled_tail_is_written_whole():
     """The rows after the 56 computed ones are zero-filled by the store
     anyway: the tail writes them in its own write, padding lanes zeroed --
     under ESIMD a merge and a 32-wide write where off has 16 + 8 and a fill
-    nest, under SPMD a select where off has a branch -- and the fill nest has
-    nothing left to do."""
+    nest -- and the fill nest has nothing left to do.  Under SPMD the run's
+    trips keep `R` in a register and store it whole behind the last: its rows
+    past the 56 are the zeros it holds there, the tail on every lane or not,
+    and the first face's write ahead of the run is a select where it is."""
     off = _kernel(_padded_local_flux(), full_lane_tails=False)
     on = _kernel(_padded_local_flux(), full_lane_tails=True)
     assert 'v' not in re.findall(r'v\d+_pad', off) and not re.search(r'v\d+_pad', off)
@@ -207,8 +209,9 @@ def test_a_zero_filled_tail_is_written_whole():
     cuda = _kernel(_padded_local_flux(), backend='cuda', arch='sm_100',
                    full_lane_tails=True)
     zeros = re.compile(r'glb_m2\[[^\]]*\] = 0\.0f;')
-    assert zeros.search(cuda_off) and not zeros.search(cuda), 'no fill nest left'
-    assert re.search(r'glb_m2\[[^\]]*\] = \(v\d+_g \? v\d+_data : 0\.0f\);',
+    assert not zeros.search(cuda_off) and not zeros.search(cuda), 'no fill nest left'
+    assert len(re.findall(r'glb_m2\[[^\]]*\] = ', cuda_off)) == 1, cuda_off
+    assert re.search(r'glb_m2\[[^\]]*\] = \(v\d+_g \? .*: 0\.0f\);',
                      cuda), cuda
 
 

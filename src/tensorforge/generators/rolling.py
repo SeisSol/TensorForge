@@ -350,7 +350,7 @@ def roll(descrs: Sequence[OperationDescription],
     `keep_unrolled_under` asks whether *this* run is worth a loop at all.  A
     small body is better left alone: written out it keeps every operand at a
     compile-time address, while rolled it costs a counter, an indexed load per
-    varying operand, and a residency that has to survive the back edge.
+    varying operand, and what its trips hand each other through memory.
 
     `fit_within` asks whether the *list* is too large, and is the one that
     answers to an instruction cache.  A cache holds the body that repeats, not
