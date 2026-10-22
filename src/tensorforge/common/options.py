@@ -1123,6 +1123,23 @@ declare('register_temporaries',
             'does not suit says so through the tuner, which carries this '
             'knob (`tuning.simple_space`).')
 
+declare('identity_reduction',
+        default=True,
+        parse=parse_bool,
+        env='TF_IDENTITY_REDUCTION',
+        doc='Collapse a product whose batch-constant first operand is the '
+            'identity pattern -- the description gives its numbers, and every '
+            'row the lanes run along has its nonzeros at the reduction step '
+            'equal to the row -- to the one product a lane needs, `A[i,i] '
+            'B[i,j]`, its weight a literal the lane selects.  Computed the '
+            'usual way it is the dense product, since a step is issued by '
+            'every lane and only one holds a nonzero there.  SeisSol\'s face '
+            'orientation `fP(1)` is this at every order: `neighboringFlux[16]` '
+            'on sm_120 loses 19 % (o4), 15.5 % (o6) and 8 % (o8) of its executed '
+            'flops, and nothing crosses a lane on AMD where the broadcast path '
+            'issued one step per row.  Ones are the second operand as it is, '
+            'ones and zeros a select of it.  Needs `skip_known_zeros`.')
+
 declare('skip_known_zeros',
         default=True,
         parse=parse_bool,

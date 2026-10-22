@@ -485,6 +485,113 @@ class MultilinearInstruction(ComputeInstruction):
             axes.append(cells)
         return all(data[cell] == 0 for cell in itertools.product(*axes))
 
+    def _identity_reduction(self):
+        """The diagonal of the first operand, where it is the whole of it.
+
+        A batch-constant first operand the description gives numbers for,
+        whose every row this contraction iterates has its nonzeros at the
+        reduction step equal to the row -- the identity pattern, weighted or
+        not.  The sum over the reduction is then the one product
+        `A[i,i] B[i,j]`, and each lane reads only its own row of each
+        operand: nothing crosses a lane.  Computed the usual way it is the
+        dense product, because a step of the reduction is issued by every
+        lane at once and only one of them holds a nonzero there -- SeisSol's
+        face orientation `fP(1)` is exactly this, at every order, and as a
+        dense product it was 8 % (o8) to 19 % (o4) of the flops
+        `neighboringFlux[16]` executes on sm_120.
+
+        Returns the diagonal's values in the contraction's rows, or None.
+        One reduction, the output's lead on the operand's other dimension,
+        and the lead's range inside the reduction's, so every lane's
+        diagonal step exists and no lane reads a row the reduction does not
+        cover.  `identity_reduction` turns it off, and `skip_known_zeros`
+        with the rest.
+        """
+        options = self._context.get_user_options()
+        if not (options.identity_reduction and options.skip_known_zeros):
+            return None
+        if (len(self._ops) != 2 or len(self._ks) != 1
+                or 0 not in self._lead_dims
+                or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']
+                or 'k0' not in self._opdim_to_nks[1]
+                or 'n0' in self._opdim_to_nks[1]):
+            return None
+        symbol = self._ops[0].symbol
+        obj = getattr(symbol, 'obj', None)
+        if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
+                or obj.addressing is not Addressing.NONE
+                or not obj.has_values()):
+            return None
+        if self._lead_width != 1:
+            return None
+        (lo, hi), (klo, khi) = self._ns[0], self._ks[0]
+        if hi <= lo or not (klo <= lo and hi <= khi):
+            return None
+        nks = self._opdim_to_nks[0]
+        lead, red = nks.index('n0'), nks.index('k0')
+        o_lead, o_red = self._eff_offset(0, lead), self._eff_offset(0, red)
+        data = obj.get_values()
+        if data.ndim != 2:
+            return None
+        diagonal = []
+        for r in range(lo, hi):
+            for k in range(klo, khi):
+                cell = [0, 0]
+                cell[lead], cell[red] = r + o_lead, k + o_red
+                inside = all(0 <= cell[d] < data.shape[d] for d in (0, 1))
+                if k == r:
+                    if not inside:
+                        return None
+                    diagonal.append(float(data[tuple(cell)]))
+                elif inside and data[tuple(cell)] != 0:
+                    return None
+        return diagonal
+
+    def _diagonal_term(self, writer, row, b, diagonal):
+        """`A[i,i] B[i,j]` for the lane holding row `i`, from the numbers.
+
+        The weight is not read from the operand: the description gives it,
+        and a packed operand has no address for a cell whose column is a
+        lane's.  A literal per row, the lane's row selecting it -- the
+        pattern `Symbol._encode_lead_values` writes for a number in the code,
+        and like that one it does not depend on the column, so the columns of
+        a slot share it.
+
+        The four cases the identity pattern has: all ones, the second
+        operand's row as it is; ones and zeros, a select of it; weights with
+        zeros among them, the product selected, so that a zero is no product
+        with a `NaN` -- the contract `skip_known_zeros` keeps everywhere; and
+        weights only, the product.
+        """
+        from tensorforge.backend.pir.core import BOOL, ScalarType
+        fp = ScalarType(self._ops[0].symbol.get_fptype())
+        lo = self._ns[0][0]
+        values = set(diagonal)
+        if values == {1.0}:
+            return b
+        zero = writer.const(0.0, fp)
+        if len(values) == 1:
+            weight = writer.const(diagonal[0], fp)
+        else:
+            weight = None
+            for at, value in enumerate(diagonal):
+                if value == 0:
+                    continue
+                cond = writer.op('eq', BOOL, row, lo + at, hint='diag')
+                weight = writer.op('select', fp, cond, writer.const(value, fp),
+                                   weight if weight is not None else zero,
+                                   hint='weight')
+            if weight is None:
+                return zero
+        if 0.0 not in values:
+            return writer.op('mul', fp, weight, b, hint='p')
+        live = writer.op('ne', BOOL, weight, zero, hint='live')
+        if values <= {0.0, 1.0}:
+            return writer.op('select', fp, live, b, zero, hint='p')
+        return writer.op('select', fp, live,
+                         writer.op('mul', fp, weight, b, hint='p'), zero,
+                         hint='p')
+
     @staticmethod
     def _indexed_as_tensor(symbol) -> bool:
         """Is an index into `symbol` a cell of its tensor?
@@ -594,8 +701,13 @@ class MultilinearInstruction(ComputeInstruction):
 
         loopmap = {}
 
+        diagonal = self._identity_reduction()
         for i, (dimmin, dimmax) in enumerate(self._ks):
             loopmap[f'k{i}'] = len(loopstack)
+            if diagonal is not None:
+                # Collapsed: the one live step of a lane is its own row,
+                # which the body takes from the lead index.
+                continue
             if -i-1 not in self._lead_dims:
                 step = 1
                 if i == len(self._ks) - 1 and self._k_width > 1:
@@ -648,7 +760,11 @@ class MultilinearInstruction(ComputeInstruction):
                 [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)])
             ftype = (ScalarType(self._idest.get_fptype()) if width == 1
                      else ScalarType(self._idest.get_fptype(), width))
-            steps, kslot = self._k_group(varlist, loopmap)
+            if diagonal is not None:
+                # The reduction step a lane reads is the row it holds.
+                steps, kslot = [varlist[loopmap['n0']]], 'k0'
+            else:
+                steps, kslot = self._k_group(varlist, loopmap)
             # A vector body folds its last factor in as one `fma` op rather
             # than a multiply and an add.  The compiler contracts the pair
             # anyway, so the arithmetic is the same; what the op adds is a
@@ -664,7 +780,8 @@ class MultilinearInstruction(ComputeInstruction):
             # reduction, hoisted out of the group: `B[k,n] .. B[k+V-1,n]` are
             # adjacent, so the `V` steps below take their operand from
             # components of a single load instead of from `V` loads.
-            packs = self._k_packs(writer, varlist, loopmap, kslot, len(steps))
+            packs = ({} if diagonal is not None else
+                     self._k_packs(writer, varlist, loopmap, kslot, len(steps)))
 
             prods = []
             for c, kval in enumerate(steps):
@@ -678,6 +795,17 @@ class MultilinearInstruction(ComputeInstruction):
                     # this step reads: no load, and no product to add.
                     continue
                 terms = []
+                if diagonal is not None:
+                    # The lane's one product, its weight from the numbers
+                    # (`_diagonal_term`); the first operand is not read.
+                    b = self._ops[1].symbol.load(writer, self._context, None,
+                                                 idxs[1], False)
+                    if b is None:
+                        return
+                    row = kval.build(writer, self._context)
+                    prods.append(self._diagonal_term(writer, row, b,
+                                                     diagonal))
+                    continue
                 for i, op in enumerate(self._ops):
                     if (i, c) in packs:
                         v = packs[(i, c)]
@@ -1766,6 +1894,13 @@ class MultilinearInstruction(ComputeInstruction):
         if len(self._ops) > 1 and 'n0' in self._opdim_to_nks[1]:
             return False
         if len(self._ops) > 1 and not self._lane_readable_by_reduction(1):
+            return False
+        # A first operand that is the identity pattern has one live step per
+        # lane, and a different one in each: a matrix path issues every step
+        # on every lane and would compute the dense product.  The nest takes
+        # the one product a lane needs and reads nothing across the lanes
+        # (`_identity_reduction`).
+        if self._identity_reduction() is not None:
             return False
 
         if plan[0].strategy is not Strategy.GENERIC:
