@@ -161,6 +161,9 @@ def _where(s: Stmt) -> str:
 # -- the chains of one store ------------------------------------------------- #
 
 def _chains(flow: Flow, s: Stmt) -> List[_Chain]:
+    if id(s) in flow.opaque:
+        # Nothing tells what it writes, and so nothing tells who reads it.
+        raise _Refused('where it writes is nothing the flow can place')
     out: List[_Chain] = []
     for n in flow.executions(s):
         inst = flow.insts[n]
@@ -291,8 +294,8 @@ def _check_chain(flow: Flow, c: _Chain, heads: Set[int]) -> Optional[str]:
         # Those lanes store what the else-value gives plus the terms: an
         # assignment, which an add onto memory is not.
         return 'it stores lanes its load leaves to an else-value'
-    loaded = _by_lane(flow.cells.get(c.bias, ()))
-    stored = _by_lane(flow.cells.get(c.store, ()))
+    loaded = _by_lane(flow.cells_of(c.bias))
+    stored = _by_lane(flow.cells_of(c.store))
     before = flow.before.get(c.store, {})
     held: Dict[Tuple[int, Tuple], object] = {}
     for r in flow.reach.get(c.bias, ()):

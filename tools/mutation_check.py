@@ -2799,6 +2799,8 @@ GROUPS = {
              '    flow = Flow(body, threads, arena)', 1)),
         ('a body past the budget asked all the same',
          sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
+        ('a store the flow cannot place taken for one it can',
+         sub(ATOMICS, '    if id(s) in flow.opaque:\n', '    if False:\n', 1)),
     ]),
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.

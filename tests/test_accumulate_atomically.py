@@ -52,14 +52,16 @@ class Acc:
     decides; `split_store` stores the first two columns and the last two
     from two loops of their own.  `assigned` stores a number into the
     element before the load, under `guarded`'s kind of guard, which
-    `'element'` makes an element's mask.
+    `'element'` makes an element's mask.  `unplaced` stores into a row the
+    body takes from outside, which no flow can place.
     """
 
     def __init__(self, *, read_after=False, sum_read=False, bias_read=False,
                  between=False, shared_element=False, silent=False,
                  other_lane=False, trips=0, carried=False, uninit=False,
                  guarded=False, guarded_load=False, narrow_load=False,
-                 flagged_load=False, split_store=False, assigned=False):
+                 flagged_load=False, split_store=False, assigned=False,
+                 unplaced=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         q = self.q = b.decl_expr(
@@ -121,6 +123,9 @@ class Acc:
             if other_lane:
                 target = b.op('rem', INDEX, b.op('add', INDEX, lane, 1),
                               ROWS)
+            if unplaced:
+                target = b.extern_value('row', INDEX,
+                                        uniform=Uniformity.MULT, hint='row')
             spans = (((0, 2), (2, COLS)) if split_store
                      else ((0, COLS),))
             with b.if_(valid):
@@ -236,6 +241,13 @@ def test_a_read_of_the_sum_keeps_it():
 
 def test_a_read_of_the_bias_keeps_it():
     _stays(Acc(bias_read=True), 'read elsewhere')
+
+
+def test_a_store_the_flow_cannot_place_keeps_it():
+    """Into a row the body takes from outside, with the element read
+    behind it: where the store writes, and so who reads what it wrote, no
+    flow can tell."""
+    _stays(Acc(unplaced=True, read_after=True), 'nothing the flow can place')
 
 
 def test_a_write_between_the_load_and_the_store_keeps_it():

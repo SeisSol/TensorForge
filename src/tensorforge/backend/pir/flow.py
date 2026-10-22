@@ -55,9 +55,9 @@ holds zeros until something stores into it, as a store of the number would
 leave it.
 
 What `Flow` keeps grows with the elements it places, lane by lane and
-execution by execution -- with `values`, about a kilobyte each.  A body
-that places more than `BUDGET` is not run (`TooLarge`), and a pass that
-asks leaves it as it is.
+execution by execution -- with `values`, some 300 bytes each.  A body that
+places more than `BUDGET` is not run (`TooLarge`), and a pass that asks
+leaves it as it is.
 
 Nothing here changes the body.  A pass asks, and decides what it may do
 with the answer.
@@ -89,14 +89,20 @@ _DEPTH = 8
 
 #: The elements one body may place, summed over its executions and lanes,
 #: before `Flow` gives up on it.  The largest body of the corpus places
-#: 263 000 -- the merged derivative at order 6 in double, on sm_86 -- and
-#: SeisSol's damage step written out at order 5, every temporary in memory,
-#: 1.2 million, which with `values` hold 1.5 GB.
+#: 263 000 -- the merged derivative at order 6 in double, on sm_86, which
+#: the flow holds in 92 MB -- and SeisSol's damage step written out at
+#: order 5, every temporary in memory, 1.2 million.
 BUDGET = 1_000_000
 
 
 class TooLarge(Exception):
     """The body places more elements than `Flow` keeps track of (`BUDGET`)."""
+
+#: The one empty set of writers every record without any shares: a
+#: `frozenset()` of its own is 216 bytes, and a body reads a few hundred
+#: thousand elements nothing in it wrote.
+EMPTY: FrozenSet[int] = frozenset()
+
 
 #: The flags as numbers: tested on every access, where the flag arithmetic
 #: of `Effect` is the cost of the test.
@@ -105,7 +111,7 @@ _WRITTEN = int(Effect.WRITE | Effect.ATOMIC)
 _READ_OR_ATOMIC = int(Effect.READ | Effect.ATOMIC)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Inst:
     """One execution of `stmt`: at `hops`, the inductions of the counted
     loops around it, outermost first, for the lanes in `mask`, under the
@@ -120,7 +126,7 @@ class Inst:
         return {k: v for k, v in self.hops if v is not None}
 
 
-@dataclass
+@dataclass(slots=True)
 class Reach:
     """What one execution of a load reads, for the lanes in `mask`: the
     store `writer` wrote it for certain (`INITIAL`: nothing in the body did),
@@ -129,7 +135,7 @@ class Reach:
 
     mask: int
     writer: Optional[int]
-    maybe: FrozenSet[int] = frozenset()
+    maybe: FrozenSet[int] = EMPTY
     own: bool = True
     #: The element read.
     cell: Tuple = ()
@@ -139,7 +145,7 @@ class Reach:
         return self.writer is not None and not self.maybe
 
 
-@dataclass
+@dataclass(slots=True)
 class _Layer:
     """A write still visible in a cell: who, under which conditions, for
     which lanes (registers), or by which lane (memory)."""
@@ -159,8 +165,9 @@ class Flow:
     that read it, `replaced` whether a later store took its place in every
     element before anything read it, `final` which of its elements are still
     what memory holds at the end of the body.  `opaque` names the
-    statements whose accesses could not be placed, `cells` the elements an
-    execution touched, lane by lane.
+    statements whose accesses could not be placed: what they write, every
+    read of the buffer may read, and their readers are not listed.
+    `cells_of` gives the elements an execution touched, lane by lane.
     """
 
     def __init__(self, body: Sequence[Stmt], threads: int,
@@ -197,9 +204,10 @@ class Flow:
         #: Executions of stores read by what the analysis cannot place.
         self.escaped: Set[int] = set()
         self.opaque: Set[int] = set()
-        #: Per execution, the elements it touched: (mask, cell) where a cell
-        #: is `(buffer key, address)`.
-        self.cells: Dict[int, List[Tuple[int, Tuple]]] = {}
+        #: Per execution, the elements it touched: the lane groups and the
+        #: cells side by side, which `cells_of` pairs up.  A cell is
+        #: `(buffer key, address)`.
+        self._cells: Dict[int, Tuple[Tuple[int, ...], Tuple[Tuple, ...]]] = {}
         self.defs: Dict[int, Stmt] = {}
         self.uses: Dict[int, List[Stmt]] = defaultdict(list)
         self.loops: Dict[int, Tuple[Stmt, ...]] = {}
@@ -226,6 +234,11 @@ class Flow:
         #: its space.
         self._smeared_space: Dict[Any, List[int]] = defaultdict(list)
         self._fresh: Dict[int, int] = {}
+        #: Each set of writers a record holds, once (`_frozen`).
+        self._sets: Dict[FrozenSet[int], FrozenSet[int]] = {}
+        #: Each element, once (`_place_one`): every access to it names the
+        #: same cell.
+        self._interned: Dict[Tuple, Tuple] = {}
         #: For a store's execution, lane group by lane group, where what it
         #: stored came from: `('reg', cell, writer)`, a register a load read
         #: it from, holding what `writer` wrote; `('const', number)`; or
@@ -251,6 +264,21 @@ class Flow:
             if cell[0][0] is MemSpace.GLOBAL:
                 for layer in layers:
                     self.final.add(layer.writer)
+
+    def cells_of(self, n: int) -> List[Tuple[int, Tuple]]:
+        """The elements execution `n` touched, `(lanes, cell)` by lane
+        group."""
+        entry = self._cells.get(n)
+        return list(zip(*entry)) if entry else []
+
+    def _frozen(self, writers) -> FrozenSet[int]:
+        """`writers` as the one set every record with these writers holds:
+        the reads of a buffer something unplaced wrote all may read it, and
+        a set apiece is a few hundred bytes each."""
+        if not writers:
+            return EMPTY
+        key = frozenset(writers)
+        return self._sets.setdefault(key, key)
 
     # -- static facts -------------------------------------------------------- #
 
@@ -502,7 +530,7 @@ class Flow:
                 local.add(a.id)
         last: Dict[Tuple, Set[int]] = defaultdict(set)
         for n in range(first, len(self.insts)):
-            for _, cell in self.cells.get(n, ()):
+            for _, cell in self.cells_of(n):
                 if self._writes(self.insts[n].stmt) and not self._iteration(
                         cell, local):
                     last[cell].add(n)
@@ -511,7 +539,7 @@ class Flow:
         for n in range(first, len(self.insts)):
             if n not in self.reach:
                 continue
-            for k, (m, cell) in enumerate(self.cells.get(n, ())):
+            for k, (m, cell) in enumerate(self.cells_of(n)):
                 writers = last.get(cell)
                 if not writers:
                     continue
@@ -578,7 +606,8 @@ class Flow:
             self.opaque.add(id(s))
             self._smear(n, s, conds)
             return
-        self.cells[n] = [(m, cell) for m, cell, _ in placed]
+        self._cells[n] = (tuple(m for m, _, _ in placed),
+                          tuple(cell for _, cell, _ in placed))
         read = [p for p in placed if p[2] in ('read', 'rmw')]
         written = [p for p in placed if p[2] in ('write', 'rmw')]
         if read:
@@ -705,14 +734,18 @@ class Flow:
                    and not any('x' in self._ix.leaves(i) for i in index
                                if isinstance(i, Value)))
         out = []
+        interned = self._interned
         if uniform:
             for addr in _span(self._address(index, env), width):
-                out.append((mask, (key, addr), kind))
+                cell = (key, addr)
+                out.append((mask, interned.setdefault(cell, cell), kind))
         else:
             for lane in self.lanes(mask):
                 here = {**env, 'x': lane}
                 for addr in _span(self._address(index, here), width):
-                    out.append((1 << lane, (key, addr), kind))
+                    cell = (key, addr)
+                    out.append((1 << lane, interned.setdefault(cell, cell),
+                                kind))
         self._budget -= len(out)
         if self._budget < 0:
             raise TooLarge(f'the body places more than {self._limit} '
@@ -796,7 +829,7 @@ class Flow:
             if not hit:
                 continue
             if layer.conds <= conds:
-                out.append(Reach(hit, layer.writer, frozenset(maybe),
+                out.append(Reach(hit, layer.writer, self._frozen(maybe),
                                  cell=cell))
                 self.readers[layer.writer].append((n, hit))
                 left &= ~hit
@@ -807,10 +840,7 @@ class Flow:
                 self.readers[layer.writer].append((n, hit))
         if left:
             fresh = self._fresh.get(cell[0][1], INITIAL)
-            out.append(Reach(left, fresh, frozenset(maybe), cell=cell))
-        for w in smeared:
-            if w >= 0:
-                self.readers[w].append((n, mask))
+            out.append(Reach(left, fresh, self._frozen(maybe), cell=cell))
         return out
 
     def _read_memory(self, n, mask, lane, cell, layers, conds, smeared):
@@ -818,13 +848,10 @@ class Flow:
         for layer in reversed(layers):
             self.readers[layer.writer].append((n, mask))
             if layer.conds <= conds:
-                return Reach(mask, layer.writer, frozenset(maybe),
+                return Reach(mask, layer.writer, self._frozen(maybe),
                              own=layer.lane == lane, cell=cell)
             maybe.add(layer.writer)
-        for w in smeared:
-            if w >= 0:
-                self.readers[w].append((n, mask))
-        return Reach(mask, INITIAL, frozenset(maybe), own=False, cell=cell)
+        return Reach(mask, INITIAL, self._frozen(maybe), own=False, cell=cell)
 
     def _write(self, n: int, placed, conds) -> None:
         before: Dict[Tuple[int, Tuple], Tuple[Optional[int], bool]] = {}
@@ -899,12 +926,8 @@ class Flow:
                                [w for k, w in self._smeared.items()
                                 if k[0] is space])
                     for writers in smeared:
-                        for w in writers:
-                            self.readers[w].append((n, self.full))
-                            self.escaped.add(w)
-                    for w in self._smeared_space.get(space, ()):
-                        self.readers[w].append((n, self.full))
-                        self.escaped.add(w)
+                        self.escaped.update(writers)
+                    self.escaped.update(self._smeared_space.get(space, ()))
                     fresh = ([self._fresh[base]] if base in self._fresh
                              else list(self._fresh.values()) if base is None
                              else [])
