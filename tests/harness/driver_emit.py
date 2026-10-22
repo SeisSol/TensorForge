@@ -153,14 +153,23 @@ def collect_operands(generator) -> List[DriverOperand]:
 
 def _cell_values(t):
     """`DriverOperand.values`: the description's numbers by cell of the box,
-    column-major, or None."""
+    column-major, or None.
+
+    The cells of the *box*: the numbers come shaped as the tensor is, and
+    the box need not be all of it nor start at its corner -- SeisSol's
+    `kDivMT` is 120 by 120 with a box from column 1 to 117 of 96 rows.
+    Laid out whole, they would land a column and more off the cells the
+    buffer's slots name."""
     if not getattr(t, 'has_values', lambda: False)():
         return None
     import numpy as np
     data = t.get_values()
     if data is None:
         return None
-    return tuple(float(v) for v in np.asarray(data, dtype=float).flatten(order='F'))
+    box = t.get_bbox()
+    cells = np.asarray(data, dtype=float)[
+        tuple(slice(lo, hi) for lo, hi in zip(box.lower(), box.upper()))]
+    return tuple(float(v) for v in cells.flatten(order='F'))
 
 
 def launcher_call_expr(generator, ops: List[DriverOperand], *,
