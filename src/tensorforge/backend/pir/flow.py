@@ -1,0 +1,688 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+
+"""Pseudo-IR: which store every load of a body reads, lane by lane.
+
+A body is a program every lane of a multiplication runs, and what a load
+reads is decided by the stores before it -- of the same lane, for a register
+array, and of any lane, for shared or global memory.  `Flow` runs the body
+once over the lanes of one multiplication, statement by statement, and keeps
+for every element of every buffer the store that wrote it last.  What comes
+out is the relation the passes want and the IR does not state: for every
+execution of a load (`Inst`), the store it reads (`Flow.reach`); for every
+execution of a store, who reads what it wrote (`Flow.readers`), whether a
+later store replaces it unread, and whether it is what the body leaves
+behind (`Flow.final`).
+
+Executions, not statements.  A statement in a counted loop runs once a trip,
+and its trips read and write different elements: the loop is run trip by
+trip, with the induction as a number (`Inst.hops`).  A loop whose bounds are
+not numbers -- the batch loop -- is run once, as one element's iteration;
+what an iteration hands the next through registers or shared memory is
+added afterwards (`_wrap`).  An address is evaluated for every lane from
+what defines it: thread indices, inductions and constants (`shards._Indices`).
+An access whose address is anything else is placed nowhere, and it reaches
+every element of its buffer: a read of all of them, a write that may have
+replaced any of them.
+
+Conditions come in two kinds.  One that is a function of the lane -- the
+rows a multiplication's lanes hold -- is evaluated, and only the lanes it
+holds for run what it guards.  Any other one -- an element's flag, a guard
+spelled in text -- is the same value wherever the body tests it, and is
+carried as a named condition (`Inst.conds`): a store under it is certain to
+a load under it as well and possible to any other.  A load whose element a
+store may or may not have written reads either; such a load reads nothing
+for certain, and both stores stay read.
+
+Nothing here changes the body.  A pass asks, and decides what it may do
+with the answer.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, Set, Tuple
+
+from .core import Effect, MemSpace, Op, Stmt, Value, walk_stmts
+from .shards import _Indices, _NotStatic
+
+#: What a cell held before the body wrote it.
+INITIAL = -1
+
+#: A write by a lane of another multiplication, to shared memory the lanes
+#: of more than one share: possible to every read of it.
+EXTERNAL = -2
+
+#: The spaces whose elements are placed: registers, which every lane has its
+#: own of, and the memory the lanes of a multiplication share.
+_PLACED = (MemSpace.REGISTER, MemSpace.SHARED, MemSpace.GLOBAL)
+
+#: How many writes of uncertain standing a cell keeps apart before they are
+#: taken as one.
+_DEPTH = 8
+
+#: The flags as numbers: tested on every access, where the flag arithmetic
+#: of `Effect` is the cost of the test.
+_READ = int(Effect.READ)
+_WRITTEN = int(Effect.WRITE | Effect.ATOMIC)
+_READ_OR_ATOMIC = int(Effect.READ | Effect.ATOMIC)
+
+
+@dataclass(frozen=True)
+class Inst:
+    """One execution of `stmt`: at `hops`, the inductions of the counted
+    loops around it, outermost first, for the lanes in `mask`, under the
+    named conditions `conds`."""
+
+    stmt: Stmt
+    hops: Tuple[Tuple[int, Optional[int]], ...]
+    mask: int
+    conds: FrozenSet[Tuple[Any, bool]]
+
+    def env(self) -> Dict[int, int]:
+        return {k: v for k, v in self.hops if v is not None}
+
+
+@dataclass
+class Reach:
+    """What one execution of a load reads, for the lanes in `mask`: the
+    store `writer` wrote it for certain (`INITIAL`: nothing in the body did),
+    or one of `maybe`, which it may read as well.  `own`: the writer is the
+    lane that reads."""
+
+    mask: int
+    writer: Optional[int]
+    maybe: FrozenSet[int] = frozenset()
+    own: bool = True
+    #: The element read.
+    cell: Tuple = ()
+
+    @property
+    def certain(self) -> bool:
+        return self.writer is not None and not self.maybe
+
+
+@dataclass
+class _Layer:
+    """A write still visible in a cell: who, under which conditions, for
+    which lanes (registers), or by which lane (memory)."""
+
+    writer: int
+    conds: FrozenSet[Tuple[Any, bool]]
+    mask: int = 0
+    lane: int = -1
+
+
+class Flow:
+    """The loads and stores of `body`, run over `threads` lanes.
+
+    `insts` holds every execution; `by_stmt` lists them for a statement.
+    For a load's execution, `reach` says what it read, lane group by lane
+    group.  For a store's execution, `readers` lists the executions of loads
+    that read it, `replaced` whether a later store took its place in every
+    element before anything read it, `final` which of its elements are still
+    what memory holds at the end of the body.  `opaque` names the
+    statements whose accesses could not be placed, `cells` the elements an
+    execution touched, lane by lane.
+    """
+
+    def __init__(self, body: Sequence[Stmt], threads: int,
+                 arena: Optional[str] = None):
+        self.body = tuple(body)
+        self.threads = threads
+        #: The shared buffers no lane of another multiplication reaches: those
+        #: of the multiplication's own arena.
+        self._own: Set[int] = {
+            id(x.target[0]) for x in walk_stmts(self.body)
+            if x.op == Op.ALLOC and x.target and arena is not None
+            and x.attr('arena') == arena}
+        self.full = (1 << threads) - 1
+        self._ix = _Indices(self.body, {'x': threads})
+        self.insts: List[Inst] = []
+        self.by_stmt: Dict[int, List[int]] = defaultdict(list)
+        self._key: Dict[Tuple[int, Tuple], int] = {}
+        self.reach: Dict[int, List[Reach]] = {}
+        self.readers: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
+        #: For a store's execution, per lane and element: the write the
+        #: element held right before it, and whether that was certain.
+        self.before: Dict[int, Dict[Tuple[int, Tuple], Tuple[Optional[int], bool]]] = {}
+        #: Executions of stores some element of which is what the body
+        #: leaves behind.
+        self.final: Set[int] = set()
+        #: Executions of stores read by what the analysis cannot place.
+        self.escaped: Set[int] = set()
+        self.opaque: Set[int] = set()
+        #: Per execution, the elements it touched: (mask, cell) where a cell
+        #: is `(buffer key, address)`.
+        self.cells: Dict[int, List[Tuple[int, Tuple]]] = {}
+        self.defs: Dict[int, Stmt] = {}
+        self.uses: Dict[int, List[Stmt]] = defaultdict(list)
+        self.loops: Dict[int, Tuple[Stmt, ...]] = {}
+        self.parents: Dict[int, Tuple[Stmt, ...]] = {}
+        #: The values that bind a buffer of memory, by the name their
+        #: declaration gives them.
+        self._bound: Dict[str, Value] = {}
+        self._index(self.body, ())
+        #: The buffers a load, a store or a copy places an element of: what
+        #: anything else touches of another buffer -- an accumulator a call
+        #: adds into in place -- is nothing those read.
+        self._placed: Set[int] = {
+            id(a.base) for x in walk_stmts(self.body)
+            if x.op in (Op.LOAD, Op.STORE, Op.LOAD_ASYNC, Op.COPY_ASYNC)
+            for a in x.accesses if a.base is not None}
+        self._reg: Dict[Tuple, List[_Layer]] = {}
+        self._mem: Dict[Tuple, List[_Layer]] = {}
+        #: The cells of both tables by buffer, `(space, base)`.
+        self._cells_of: Dict[Tuple, Set[Tuple]] = defaultdict(set)
+        #: Buffers written by what could not be placed: every read of them
+        #: may read that write.
+        self._smeared: Dict[Tuple, List[int]] = defaultdict(list)
+        #: The same for a write whose buffer nothing names: every buffer of
+        #: its space.
+        self._smeared_space: Dict[Any, List[int]] = defaultdict(list)
+        self._fresh: Dict[int, int] = {}
+        self._run(self.body, {}, self.full, frozenset())
+        for cell, layers in self._mem.items():
+            if cell[0][0] is MemSpace.GLOBAL:
+                for layer in layers:
+                    self.final.add(layer.writer)
+
+    # -- static facts -------------------------------------------------------- #
+
+    def _index(self, stmts: Sequence[Stmt], parents: Tuple[Stmt, ...]):
+        loops = tuple(p for p in parents if p.op == Op.FOR)
+        for s in stmts:
+            self.parents[id(s)] = parents
+            self.loops[id(s)] = loops
+            if (s.op == Op.RAWEXPR and s.target and s.attr('decl') is not None
+                    and s.attr('extern')):
+                self._bound.setdefault(s.attr('extern'), s.target[0])
+            for t in s.target:
+                self.defs[t.id] = s
+            for v in s.operands():
+                self.uses[v.id].append(s)
+            for r in s.regions:
+                for a in r.args:
+                    self.defs[a.id] = s
+                self._index(r.body, parents + (s,))
+
+    def binding(self, base) -> Any:
+        """The value a buffer of memory is reached through: `base` itself
+        where it is one, the value its symbol's name binds where it is a
+        symbol -- a store names the symbol, a load the value."""
+        if isinstance(base, Value):
+            return base
+        name = getattr(base, 'name', None)
+        return self._bound.get(name, base) if name is not None else base
+
+    def inst(self, stmt: Stmt, env: Dict[int, int]) -> Optional[int]:
+        """The execution of `stmt` at the trips `env` names."""
+        hops = tuple(env.get(l.induction.id)
+                     for l in self.loops.get(id(stmt), ()))
+        return self._key.get((id(stmt), hops))
+
+    def executions(self, stmt: Stmt) -> List[int]:
+        return self.by_stmt.get(id(stmt), [])
+
+    def lanes(self, mask: int) -> Iterator[int]:
+        lane = 0
+        while mask:
+            if mask & 1:
+                yield lane
+            mask >>= 1
+            lane += 1
+
+    # -- running ------------------------------------------------------------- #
+
+    def _new(self, s: Stmt, env: Dict[int, int], mask: int, conds) -> int:
+        hops = tuple((l.induction.id, env.get(l.induction.id))
+                     for l in self.loops.get(id(s), ()))
+        n = len(self.insts)
+        self.insts.append(Inst(s, hops, mask, conds))
+        self.by_stmt[id(s)].append(n)
+        self._key[(id(s), tuple(v for _, v in hops))] = n
+        return n
+
+    def _static(self, operand, env) -> bool:
+        if not isinstance(operand, Value):
+            return isinstance(operand, (bool, int))
+        try:
+            leaves = self._ix.leaves(operand)
+        except _NotStatic:
+            return False
+        return all(l == 'x' or l in env for l in leaves)
+
+    def _lanes_where(self, cond, env, mask) -> int:
+        out = 0
+        memo: Dict[int, int] = {}
+        uniform = 'x' not in self._ix.leaves(cond)
+        if uniform:
+            return mask if self._ix.evaluate(cond, dict(env), memo) else 0
+        for lane in self.lanes(mask):
+            if self._ix.evaluate(cond, {**env, 'x': lane}, {}):
+                out |= 1 << lane
+        return out
+
+    def _run(self, stmts: Sequence[Stmt], env: Dict[int, int], mask: int,
+             conds) -> None:
+        for s in stmts:
+            if not mask:
+                return
+            if s.op == Op.FOR and s.regions:
+                self._loop(s, env, mask, conds)
+                continue
+            if s.op == Op.IF and s.regions:
+                cond = s.cond
+                if isinstance(cond, Value) and self._static(cond, env):
+                    held = self._lanes_where(cond, env, mask)
+                    self._run(s.regions[0].body, env, held, conds)
+                    if len(s.regions) > 1:
+                        self._run(s.regions[1].body, env, mask & ~held, conds)
+                    continue
+                name = cond.id if isinstance(cond, Value) else repr(cond)
+                self._run(s.regions[0].body, env, mask,
+                          conds | {(name, True)})
+                if len(s.regions) > 1:
+                    self._run(s.regions[1].body, env, mask,
+                              conds | {(name, False)})
+                continue
+            if s.op == Op.RAWBLOCK and s.regions:
+                self._run(s.regions[0].body, env, mask,
+                          conds | {(s.text, True)})
+                continue
+            if s.regions:
+                # A loop that is not counted, or a region the IR gives no
+                # more meaning: it may not run, and it may run again.
+                self._uncounted(s, env, mask, conds)
+                continue
+            self._stmt(s, env, mask, conds)
+
+    def _loop(self, s: Stmt, env, mask, conds) -> None:
+        lo, hi, step = s.loop_bounds
+        ind = s.induction
+        if all(isinstance(x, int) and not isinstance(x, bool)
+               for x in (lo, hi, step)) and step:
+            for hop in range(lo, hi, step):
+                self._run(s.regions[0].body, {**env, ind.id: hop}, mask, conds)
+            return
+        self._uncounted(s, env, mask, conds)
+
+    def _uncounted(self, s: Stmt, env, mask, conds) -> None:
+        """A region run once, as one of any number of runs.
+
+        Under a condition of its own, since it may not run at all: what it
+        writes is possible to what follows.  And what one run hands the next
+        through a register or shared memory is added once the run is over:
+        a read of an element the region writes, made before the region wrote
+        it, may read what the run before left there (`_wrap`).
+        """
+        first = len(self.insts)
+        inner = conds | {(('runs', id(s)), True)}
+        for r in s.regions:
+            self._run(r.body, env, mask, inner)
+        self._wrap(s, first)
+
+    def _wrap(self, s: Stmt, first: int) -> None:
+        local = {t.id for x in walk_stmts(tuple(b for r in s.regions
+                                                for b in r.body))
+                 for t in x.target}
+        for r in s.regions:
+            for a in r.args:
+                local.add(a.id)
+        last: Dict[Tuple, Set[int]] = defaultdict(set)
+        for n in range(first, len(self.insts)):
+            for _, cell in self.cells.get(n, ()):
+                if self._writes(self.insts[n].stmt) and not self._iteration(
+                        cell, local):
+                    last[cell].add(n)
+        if not last:
+            return
+        for n in range(first, len(self.insts)):
+            if n not in self.reach:
+                continue
+            for k, (m, cell) in enumerate(self.cells.get(n, ())):
+                writers = last.get(cell)
+                if not writers:
+                    continue
+                for reach in self.reach[n]:
+                    if not reach.mask & m:
+                        continue
+                    if reach.writer is not None and reach.writer >= first \
+                            and not reach.maybe:
+                        continue
+                    others = frozenset(w for w in writers)
+                    reach.maybe = reach.maybe | others
+                    for w in others:
+                        self.readers[w].append((n, reach.mask & m))
+
+    @staticmethod
+    def _iteration(cell, local: Set[int]) -> bool:
+        """Is the element one an iteration has to itself: in a buffer bound
+        inside the region, which every run binds anew?"""
+        key = cell[0]
+        return len(key) > 2 and key[2] in local
+
+    @staticmethod
+    def _writes(s: Stmt) -> bool:
+        return any(int(a.kind) & _WRITTEN for a in s.accesses)
+
+    # -- one statement ------------------------------------------------------- #
+
+    def _stmt(self, s: Stmt, env, mask, conds) -> None:
+        if s.op == Op.ALLOC and s.target:
+            n = self._new(s, env, mask, conds)
+            buf = s.target[0]
+            space = getattr(buf.type, 'space', None)
+            if space in _PLACED:
+                self._reset(space, id(buf), n if s.attr('init') == '{}' else None)
+            return
+        if s.op == Op.MARK and s.attr('mark') == 'defines':
+            n = self._new(s, env, mask, conds)
+            for a in s.accesses:
+                if a.base is not None:
+                    self._reset(a.space, id(a.base), None)
+            return
+        if not s.accesses or s.op in (Op.WAIT, Op.PREFETCH, Op.COMMIT_ASYNC):
+            # A wait carries the accesses of the copies it completes, which
+            # are placed where they are issued.
+            return
+        if s.op == Op.RAWEXPR and s.attr('decl') is not None:
+            # A binding: it computes where a buffer is, and reads none of it.
+            return
+        if s.predicate is not None:
+            pred = s.predicate
+            if isinstance(pred, Value) and self._static(pred, env):
+                mask = self._lanes_where(pred, env, mask)
+                if not mask:
+                    return
+            else:
+                name = pred.id if isinstance(pred, Value) else repr(pred)
+                conds = conds | {(name, True)}
+        n = self._new(s, env, mask, conds)
+        placed = self._place(s, env, mask)
+        if placed is None:
+            self.opaque.add(id(s))
+            self._smear(n, s, conds)
+            return
+        self.cells[n] = [(m, cell) for m, cell, _ in placed]
+        read = [p for p in placed if p[2] in ('read', 'rmw')]
+        written = [p for p in placed if p[2] in ('write', 'rmw')]
+        if read:
+            self.reach[n] = self._read(n, read, conds)
+        if written:
+            self._write(n, written, conds)
+
+    def _reset(self, space, base: int, fresh: Optional[int]) -> None:
+        table = self._reg if space is MemSpace.REGISTER else self._mem
+        for cell in self._cells_of.pop((space, base), ()):
+            table.pop(cell, None)
+        if fresh is not None:
+            self._fresh[base] = fresh
+        else:
+            self._fresh.pop(base, None)
+        self._smeared.pop((space, base), None)
+
+    def _place(self, s: Stmt, env, mask):
+        """`[(mask, cell, kind)]` for the elements `s` touches, or None where
+        they cannot be told."""
+        if s.op == Op.LOAD and len(s.accesses) == 1:
+            a = s.accesses[0]
+            index = s.args[1:]
+            width = _width(s.target[0] if s.target else None, a, s.args[0])
+            kind = 'read'
+        elif s.op == Op.STORE and len(s.accesses) == 1:
+            a = s.accesses[0]
+            index, width = s.args[2:], _width(s.args[1], a, s.args[0])
+            kind = 'rmw' if a.kind & Effect.ATOMIC else 'write'
+        elif s.op == Op.LOAD_ASYNC and len(s.accesses) == 1:
+            a = s.accesses[0]
+            index = s.load_index
+            width = _width(s.target[0] if s.target else None, a, s.load_base)
+            kind = 'read'
+            return self._place_one(s.load_base, a, index, width, kind, env,
+                                   mask)
+        elif s.op == Op.COPY_ASYNC:
+            return self._place_copy(s, env, mask)
+        else:
+            return None
+        return self._place_one(s.args[0], a, index, width, kind, env, mask)
+
+    def _place_one(self, binding, a, index, width, kind, env, mask):
+        if a.space not in _PLACED or a.base is None:
+            return None
+        if not all(self._static(i, env) for i in index):
+            return None
+        key = self._buffer(a, binding, env)
+        if key is None:
+            return None
+        uniform = (a.space is MemSpace.REGISTER
+                   and not any('x' in self._ix.leaves(i) for i in index
+                               if isinstance(i, Value)))
+        out = []
+        if uniform:
+            for addr in _span(self._address(index, env), width):
+                out.append((mask, (key, addr), kind))
+            return out
+        for lane in self.lanes(mask):
+            here = {**env, 'x': lane}
+            for addr in _span(self._address(index, here), width):
+                out.append((1 << lane, (key, addr), kind))
+        return out
+
+    def _place_copy(self, s: Stmt, env, mask):
+        """A copy reads its source and writes its destination, lane by lane;
+        its value is none a pass could name."""
+        reads = [a for a in s.accesses if a.kind & Effect.READ]
+        writes = [a for a in s.accesses if a.kind & Effect.WRITE]
+        if len(reads) != 1 or len(writes) != 1:
+            return None
+        elems = s.attr('elems', 1) or 1
+        src = self._place_one(s.copy_src, reads[0], s.copy_src_index, elems,
+                              'read', env, mask)
+        dst = self._place_one(s.copy_dst, writes[0], s.copy_dst_index, elems,
+                              'write', env, mask)
+        if src is None or dst is None:
+            return None
+        return src + dst
+
+    def _address(self, index, env) -> Tuple[int, ...]:
+        memo: Dict[int, int] = {}
+        return tuple(int(self._ix.evaluate(i, env, memo)) for i in index)
+
+    def _buffer(self, a, binding, env) -> Optional[Tuple]:
+        """The identity of the buffer an access lands in.
+
+        A register array is its allocation.  Memory is the buffer and the
+        binding it is read through, at the trips of the loops the binding is
+        computed in: a binding a loop computes points somewhere else every
+        trip -- a table's member, the next element.
+        """
+        if a.space is MemSpace.REGISTER:
+            return (a.space, id(a.base))
+        binding = self.binding(binding)
+        if not isinstance(binding, Value):
+            return (a.space, id(a.base), None, ())
+        d = self.defs.get(binding.id)
+        hops = ()
+        if d is not None:
+            hops = tuple(env.get(l.induction.id)
+                         for l in self.loops.get(id(d), ()))
+        return (a.space, id(a.base), binding.id, hops)
+
+    def _layers(self, cell) -> List[_Layer]:
+        table = self._reg if cell[0][0] is MemSpace.REGISTER else self._mem
+        layers = table.get(cell)
+        if layers is None:
+            layers = table[cell] = []
+            self._cells_of[cell[0][:2]].add(cell)
+        return layers
+
+    def _shared_with_others(self, cell) -> bool:
+        return cell[0][0] is MemSpace.SHARED and cell[0][1] not in self._own
+
+    def _read(self, n: int, placed, conds) -> List[Reach]:
+        out: List[Reach] = []
+        for m, cell, _ in placed:
+            layers = self._layers(cell)
+            smeared = frozenset(self._smeared.get(cell[0][:2], ())) | \
+                frozenset(self._smeared_space.get(cell[0][0], ()))
+            if self._shared_with_others(cell):
+                smeared = smeared | {EXTERNAL}
+            if cell[0][0] is MemSpace.REGISTER:
+                out.extend(self._read_register(n, m, cell, layers, conds,
+                                               smeared))
+            else:
+                lane = next(self.lanes(m))
+                out.append(self._read_memory(n, m, lane, cell, layers, conds,
+                                             smeared))
+        return out
+
+    def _read_register(self, n, mask, cell, layers, conds, smeared):
+        out: List[Reach] = []
+        left = mask
+        maybe: Set[int] = set(smeared)
+        for layer in reversed(layers):
+            hit = left & layer.mask
+            if not hit:
+                continue
+            if layer.conds <= conds:
+                out.append(Reach(hit, layer.writer, frozenset(maybe),
+                                 cell=cell))
+                self.readers[layer.writer].append((n, hit))
+                left &= ~hit
+                if not left:
+                    break
+            else:
+                maybe.add(layer.writer)
+                self.readers[layer.writer].append((n, hit))
+        if left:
+            fresh = self._fresh.get(cell[0][1], INITIAL)
+            out.append(Reach(left, fresh, frozenset(maybe), cell=cell))
+        for w in smeared:
+            if w >= 0:
+                self.readers[w].append((n, mask))
+        return out
+
+    def _read_memory(self, n, mask, lane, cell, layers, conds, smeared):
+        maybe: Set[int] = set(smeared)
+        for layer in reversed(layers):
+            self.readers[layer.writer].append((n, mask))
+            if layer.conds <= conds:
+                return Reach(mask, layer.writer, frozenset(maybe),
+                             own=layer.lane == lane, cell=cell)
+            maybe.add(layer.writer)
+        for w in smeared:
+            if w >= 0:
+                self.readers[w].append((n, mask))
+        return Reach(mask, INITIAL, frozenset(maybe), own=False, cell=cell)
+
+    def _write(self, n: int, placed, conds) -> None:
+        before: Dict[Tuple[int, Tuple], Tuple[Optional[int], bool]] = {}
+        for m, cell, _ in placed:
+            layers = self._layers(cell)
+            register = cell[0][0] is MemSpace.REGISTER
+            for lane in self.lanes(m):
+                prior, certain = INITIAL, True
+                for layer in reversed(layers):
+                    if register and not layer.mask & (1 << lane):
+                        continue
+                    if layer.conds <= conds:
+                        prior = layer.writer
+                        break
+                    certain = False
+                if prior == INITIAL and register:
+                    prior = self._fresh.get(cell[0][1], INITIAL)
+                if (self._smeared.get(cell[0][:2])
+                        or self._smeared_space.get(cell[0][0])
+                        or self._shared_with_others(cell)):
+                    certain = False
+                before[(lane, cell)] = (prior, certain)
+            kept: List[_Layer] = []
+            for layer in layers:
+                if layer.conds >= conds:
+                    if register:
+                        layer.mask &= ~m
+                        if not layer.mask:
+                            continue
+                    else:
+                        continue
+                kept.append(layer)
+            if register:
+                kept.append(_Layer(n, conds, mask=m))
+            else:
+                kept.append(_Layer(n, conds, lane=next(self.lanes(m))))
+            if len(kept) > _DEPTH:
+                kept = kept[-_DEPTH:]
+            table = self._reg if register else self._mem
+            table[cell] = kept
+            if self._shared_with_others(cell):
+                self.escaped.add(n)
+        self.before[n] = before
+
+    def _smear(self, n: int, s: Stmt, conds) -> None:
+        """An access nothing can place: it reads every element of its buffer
+        and may have written any of them."""
+        for a in s.accesses:
+            spaces = (list(_PLACED) if a.space is MemSpace.UNKNOWN
+                      else [a.space])
+            base = None if a.base is None or a.space is MemSpace.UNKNOWN \
+                else id(a.base)
+            if base is not None and base not in self._placed:
+                continue
+            kind = int(a.kind)
+            for space in spaces:
+                if space not in _PLACED:
+                    continue
+                table = self._reg if space is MemSpace.REGISTER else self._mem
+                if kind & _READ_OR_ATOMIC:
+                    keys = ([(space, base)] if base is not None else
+                            [k for k in self._cells_of if k[0] is space])
+                    for key in keys:
+                        for cell in self._cells_of.get(key, ()):
+                            for layer in table.get(cell, ()):
+                                self.readers[layer.writer].append(
+                                    (n, self.full))
+                                self.escaped.add(layer.writer)
+                    smeared = ([self._smeared.get((space, base), ())]
+                               if base is not None else
+                               [w for k, w in self._smeared.items()
+                                if k[0] is space])
+                    for writers in smeared:
+                        for w in writers:
+                            self.readers[w].append((n, self.full))
+                            self.escaped.add(w)
+                    for w in self._smeared_space.get(space, ()):
+                        self.readers[w].append((n, self.full))
+                        self.escaped.add(w)
+                    fresh = ([self._fresh[base]] if base in self._fresh
+                             else list(self._fresh.values()) if base is None
+                             else [])
+                    for w in fresh:
+                        self.readers[w].append((n, self.full))
+                        self.escaped.add(w)
+                if kind & _WRITTEN:
+                    if base is None:
+                        self._smeared_space[space].append(n)
+                    else:
+                        self._smeared[(space, base)].append(n)
+
+
+def _width(v, access, binding) -> int:
+    """How many elements of its buffer a value covers: its own width over
+    the width of the buffer's element."""
+    t = getattr(v, 'type', None)
+    length = getattr(t, 'length', None) or 1
+    buffer = access.base if access.space is MemSpace.REGISTER else binding
+    elem = getattr(getattr(buffer, 'type', None), 'elem', None)
+    per = getattr(elem, 'length', None) or 1
+    return max(1, length // per)
+
+
+def _span(addr: Tuple[int, ...], width: int) -> List[Tuple[int, ...]]:
+    """The elements a `width`-wide access at `addr` covers: the last index
+    runs on."""
+    if width <= 1 or not addr:
+        return [addr]
+    return [addr[:-1] + (addr[-1] + k,) for k in range(width)]
