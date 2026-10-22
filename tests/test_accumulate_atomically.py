@@ -50,14 +50,16 @@ class Acc:
     `guarded_load` the load.  `narrow_load` loads the bias for four rows
     fewer than the store stores, `flagged_load` under a flag no lane
     decides; `split_store` stores the first two columns and the last two
-    from two loops of their own.
+    from two loops of their own.  `assigned` stores a number into the
+    element before the load, under `guarded`'s kind of guard, which
+    `'element'` makes an element's mask.
     """
 
     def __init__(self, *, read_after=False, sum_read=False, bias_read=False,
                  between=False, shared_element=False, silent=False,
                  other_lane=False, trips=0, carried=False, uninit=False,
                  guarded=False, guarded_load=False, narrow_load=False,
-                 flagged_load=False, split_store=False):
+                 flagged_load=False, split_store=False, assigned=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         q = self.q = b.decl_expr(
@@ -82,6 +84,8 @@ class Acc:
                         hint='a')
 
         def guard(on):
+            if on == 'element':
+                return b.If('active', guard='element')
             return (b.Block('if (active)') if on
                     else contextlib.nullcontext())
 
@@ -128,6 +132,11 @@ class Acc:
                             b.store(q, value, element(j, target))
 
         def once():
+            if assigned:
+                with b.if_(valid):
+                    with b.for_(0, COLS, 1, unroll=True) as hop:
+                        with guard(guarded):
+                            b.store(q, 1.0, element(hop.induction))
             bias = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r0',
                            extern='r0', init='{}')
             load_bias(bias)
@@ -333,3 +342,33 @@ def test_a_store_under_a_guard_its_load_is_not_under_is_added():
 
 def test_a_load_under_a_guard_the_store_is_not_under_keeps_it():
     _stays(Acc(guarded_load=True), 'not certain')
+
+
+def test_onto_a_store_under_an_elements_mask_it_is_added():
+    """On AMD every store of an element stands under its mask and no load
+    does: the bias reads what the store before it wrote where the mask
+    holds, and where it does not, nothing is stored, atomic or not."""
+    acc = Acc(assigned=True, guarded='element')
+    out = acc.run()
+    assert len(_atomic(out)) == 1, acc.report
+    assert len(_stores_of_q(out, acc.q)) == 2
+
+
+def test_onto_a_store_under_a_guard_of_unknown_value_it_is_kept():
+    """The same under a guard spelled in text that is no mask: where it
+    does not hold, the bias reads what memory held before, which the store
+    behind it does not replace."""
+    _stays(Acc(assigned=True, guarded=True), 'written between')
+
+
+def test_a_body_past_the_budget_keeps_every_store(monkeypatch):
+    """The accumulation of the first test, in a body too large for the flow
+    to keep track of: no store is added atomically."""
+    from tensorforge.backend.pir import flow
+    monkeypatch.setattr(flow, 'BUDGET', 10)
+    acc = Acc()
+    out = acc.run()
+    assert not _atomic(out), acc.report
+    assert _loads_of_q(out, acc.q)
+    assert any('more than 10 elements' in line for line in acc.report), \
+        acc.report

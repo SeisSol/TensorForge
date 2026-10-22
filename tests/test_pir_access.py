@@ -40,18 +40,19 @@ from pathlib import Path
 
 import pytest
 
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
 CASES = Path(__file__).parent / "cases"
 
 
-def _generate(name, backend="cuda", arch="sm_86"):
+def _generate(name, backend="cuda", arch="sm_86", **options):
     path = next(iter(sorted(CASES.rglob(f"{name}.py"))), CASES / f"{name}.py")
     spec = importlib.util.spec_from_file_location(f"tf_access__{name}", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    ctx = Context(arch=arch, backend=backend, fp_type=getattr(mod, "DTYPE", None))
+    ctx = Context(arch=arch, backend=backend, fp_type=getattr(mod, "DTYPE", None),
+                  options=Options(**options))
     gen = Generator(mod.descr_list(), ctx)
     gen.generate()
     return gen.get_kernel() or ""
@@ -117,7 +118,10 @@ def test_a_value_without_axes_is_stored_structurally_too():
 
     pirmod.emit = watch
     try:
-        _generate("red_scalar_then_ew", "cuda", "sm_120")
+        # Without the forwarding: the value's one reader takes it where the
+        # reduction computed it, and the store into `r1` goes (`pir.forward`).
+        # What is asked here is how the store is written.
+        _generate("red_scalar_then_ew", "cuda", "sm_120", forward_memory=False)
     finally:
         pirmod.emit = original
 
@@ -134,7 +138,10 @@ def test_one_address_serves_every_access_at_that_index(case_name):
     unrelated computations with no edge between them. Sharing is the thing the
     structured form buys, so its absence should fail rather than merely cost.
     """
-    src = _generate(case_name)
+    # Without the forwarding, which reads the image the copy read and drops
+    # the copy (`pir.forward`): what is asked here is how two accesses at one
+    # index are addressed.
+    src = _generate(case_name, forward_memory=False)
     shared = [n for n, _ in ADDR.findall(src) if len(_uses(src, n)) > 1]
     assert shared, 'no address is shared between two accesses'
 

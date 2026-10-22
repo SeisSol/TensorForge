@@ -1222,11 +1222,11 @@ def _unnamed(gen):
     return re.sub(r'kernel_[0-9a-f]{16}|// options:.*', '', gen.get_kernel())
 
 
-# On sm_86 the four contributions lay down 6432 B written out, 3522 B merged,
-# and the merged build bounds the written-out size from above at 6474 B --
+# On sm_86 the four contributions lay down 5036 B written out, 3495 B merged,
+# and the merged build bounds the written-out size from above at 5469 B --
 # so a fraction of the 128 KB cache puts the budget on either side of each.
-BETWEEN_AND_FITS = 0.0492       # 6449 B
-BETWEEN_AND_OVER = 0.040        # 5243 B
+BETWEEN_AND_FITS = 0.0401       # 5256 B
+BETWEEN_AND_OVER = 0.0324       # 4247 B
 
 
 def test_a_kernel_under_the_upper_bound_is_built_as_given(monkeypatch):
@@ -2029,7 +2029,11 @@ def test_an_accumulator_begun_ahead_of_the_run_stays_in_its_registers(twice):
     summed beside it, the same for each -- the second load found where the
     first left the statements around it."""
     from tensorforge.backend.pir.core import MemSpace, Op, walk_stmts
-    gen = _merged_build(roll(_started(twice=twice)), closed_trips=True)
+    # Without the forwarding: it takes the load ahead of the loop and drops
+    # the store ahead on its own (`pir.forward`), and what is asked here is
+    # whether the carry does.
+    gen = _merged_build(roll(_started(twice=twice)), closed_trips=True,
+                        forward_memory=False)
     ahead, _, behind = _around_the_run(gen)
     outputs = {id(a.base): a.base
                for s in walk_stmts(gen._sections[0].body)

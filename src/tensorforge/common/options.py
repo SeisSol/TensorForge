@@ -809,6 +809,17 @@ declare('carry_trips',
             '(`closed_trips`) is one that hands its accumulators over that '
             'way.')
 
+declare('forward_memory',
+        default=True,
+        parse=parse_bool,
+        doc='Take a load from where its own lane\'s store took the value: a '
+            'result stored to memory and loaded back reads the registers it '
+            'was stored from, where they hold it still, and a register image '
+            'copied into another is read where the copy read it.  A store '
+            'nothing reads then goes.  Asked lane by lane and trip by trip '
+            '(`pir.forward`); an element\'s mask is taken to hold where the '
+            'body keeps its contract (`elementmask`).')
+
 declare('stage_group',
         default=8,
         doc='Multiplications a block holds under `stage_members`, and so how '

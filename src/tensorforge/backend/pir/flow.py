@@ -35,6 +35,30 @@ a load under it as well and possible to any other.  A load whose element a
 store may or may not have written reads either; such a load reads nothing
 for certain, and both stores stay read.
 
+An element's mask is a condition of the second kind with a contract of its
+own (`elementmask`): where it does not hold, the element is past the batch
+or masked off, its lanes compute what nobody keeps, and every write that
+could keep it -- to global memory -- stands under the mask.  Asked with
+`masks`, a mask is taken to hold, as it does for every element anything is
+kept of -- where the body keeps the contract (`_masks`): its global writes
+stand under one, what it writes to shared memory others read is no value
+of the element, and no branch it takes turns on what memory holds.  A
+statement that emits nothing and only says what others reach through a name
+the IR does not follow (`IRBuilder.touches`) writes nothing of its own; the
+statements it speaks for are asked where they stand.
+
+Asked with `values`, a store's execution records where its value came from
+(`Flow.origin`), and a load's what it may read instead of its element
+(`Flow.forward`): the value itself, a number, or a register a load read it
+from and that still holds it.  A register array declared zeroed (`{}`)
+holds zeros until something stores into it, as a store of the number would
+leave it.
+
+What `Flow` keeps grows with the elements it places, lane by lane and
+execution by execution -- with `values`, about a kilobyte each.  A body
+that places more than `BUDGET` is not run (`TooLarge`), and a pass that
+asks leaves it as it is.
+
 Nothing here changes the body.  A pass asks, and decides what it may do
 with the answer.
 """
@@ -62,6 +86,17 @@ _PLACED = (MemSpace.REGISTER, MemSpace.SHARED, MemSpace.GLOBAL)
 #: How many writes of uncertain standing a cell keeps apart before they are
 #: taken as one.
 _DEPTH = 8
+
+#: The elements one body may place, summed over its executions and lanes,
+#: before `Flow` gives up on it.  The largest body of the corpus places
+#: 263 000 -- the merged derivative at order 6 in double, on sm_86 -- and
+#: SeisSol's damage step written out at order 5, every temporary in memory,
+#: 1.2 million, which with `values` hold 1.5 GB.
+BUDGET = 1_000_000
+
+
+class TooLarge(Exception):
+    """The body places more elements than `Flow` keeps track of (`BUDGET`)."""
 
 #: The flags as numbers: tested on every access, where the flag arithmetic
 #: of `Effect` is the cost of the test.
@@ -129,9 +164,16 @@ class Flow:
     """
 
     def __init__(self, body: Sequence[Stmt], threads: int,
-                 arena: Optional[str] = None):
+                 arena: Optional[str] = None, masks: bool = False,
+                 values: bool = False, before: bool = True,
+                 budget: Optional[int] = None):
         self.body = tuple(body)
         self.threads = threads
+        self._values = values
+        self._before = before
+        #: What may still be placed before the body counts as too large.
+        self._limit = BUDGET if budget is None else budget
+        self._budget = self._limit
         #: The shared buffers no lane of another multiplication reaches: those
         #: of the multiplication's own arena.
         self._own: Set[int] = {
@@ -146,7 +188,8 @@ class Flow:
         self.reach: Dict[int, List[Reach]] = {}
         self.readers: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
         #: For a store's execution, per lane and element: the write the
-        #: element held right before it, and whether that was certain.
+        #: element held right before it, and whether that was certain.  Not
+        #: kept without `before`.
         self.before: Dict[int, Dict[Tuple[int, Tuple], Tuple[Optional[int], bool]]] = {}
         #: Executions of stores some element of which is what the body
         #: leaves behind.
@@ -183,7 +226,27 @@ class Flow:
         #: its space.
         self._smeared_space: Dict[Any, List[int]] = defaultdict(list)
         self._fresh: Dict[int, int] = {}
+        #: For a store's execution, lane group by lane group, where what it
+        #: stored came from: `('reg', cell, writer)`, a register a load read
+        #: it from, holding what `writer` wrote; `('const', number)`; or
+        #: `('value', value)`.  With `values` only.
+        self.origin: Dict[int, List[Tuple[int, Tuple]]] = {}
+        #: For a load's execution, lane group by lane group, what it reads
+        #: for certain besides its element: `('reg', cell, writer)`, a
+        #: register that holds still what `writer` wrote; `('const',
+        #: number)`; `('value', value)`.  With `values` only, and only where
+        #: the store was the lane's own.
+        self.forward: Dict[int, List[Tuple[int, Tuple]]] = {}
+        #: The masks taken to hold (`masks`).
+        self.masks: FrozenSet = self._masks() if masks else frozenset()
+        self._forwarded: Dict[int, List[Tuple[int, Tuple, Reach]]] = {}
         self._run(self.body, {}, self.full, frozenset())
+        # What a loop's next run hands back (`_wrap`) can make a read
+        # uncertain after the fact; what it would read instead goes with it.
+        for n, found in self._forwarded.items():
+            kept = [(m, o) for m, o, r in found if r.certain]
+            if kept:
+                self.forward[n] = kept
         for cell, layers in self._mem.items():
             if cell[0][0] is MemSpace.GLOBAL:
                 for layer in layers:
@@ -207,6 +270,108 @@ class Flow:
                 for a in r.args:
                     self.defs[a.id] = s
                 self._index(r.body, parents + (s,))
+
+    def _masks(self) -> FrozenSet:
+        """The element masks of the body -- the text of a raw block, the
+        condition of an `if`, that says `guard='element'` -- where the body
+        keeps their contract, and none where it does not.
+
+        Kept, where every write to global memory stands under a mask; where
+        every write to shared memory that lanes of other multiplications
+        read stores a number, or what a load read from global memory the
+        body never writes, which the mask changes nothing of; and where no
+        condition of a branch or a loop reads memory.  A lane under a mask
+        that does not hold then leaves nothing behind but what every lane
+        would, and reaches every barrier the others do.
+
+        Not asked: a statement that only says what others reach
+        (`_stands_in`) -- a merged run's members, which its reads and writes
+        through the pointer its counter selects reach.  Those writes are
+        statements of their own, under a mask or not."""
+        masks: Set = set()
+        for x in walk_stmts(self.body):
+            if x.attr('guard') != 'element':
+                continue
+            if x.op == Op.RAWBLOCK and x.text:
+                masks.add(x.text)
+            elif x.op == Op.IF:
+                cond = x.cond
+                masks.add(cond.id if isinstance(cond, Value) else repr(cond))
+        if not masks:
+            return frozenset()
+        written = {id(a.base) for x in walk_stmts(self.body)
+                   for a in x.accesses if a.space is MemSpace.GLOBAL
+                   and a.kind & (Effect.WRITE | Effect.ATOMIC)}
+        loads = _MemoryReads(self.defs)
+
+        def kept(stmts, under: bool) -> bool:
+            for x in stmts:
+                if x.op == Op.RAWBLOCK and x.regions:
+                    inner = under or x.text in masks
+                    if not all(kept(r.body, inner) for r in x.regions):
+                        return False
+                    continue
+                if x.op == Op.IF and x.regions:
+                    cond = x.cond
+                    name = cond.id if isinstance(cond, Value) else repr(cond)
+                    if name in masks:
+                        if not kept(x.regions[0].body, True):
+                            return False
+                        if len(x.regions) > 1 and not kept(x.regions[1].body,
+                                                           under):
+                            return False
+                        continue
+                    if loads.reads(cond):
+                        return False
+                    if not all(kept(r.body, under) for r in x.regions):
+                        return False
+                    continue
+                if x.regions:
+                    heads = list(x.operands())
+                    if any(loads.reads(v) for v in heads):
+                        return False
+                    if not all(kept(r.body, under) for r in x.regions):
+                        return False
+                    continue
+                if x.op == Op.EXIT and loads.reads(x.exit_cond):
+                    return False
+                if _stands_in(x):
+                    continue
+                for a in x.accesses:
+                    if not a.kind & (Effect.WRITE | Effect.ATOMIC):
+                        continue
+                    if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):
+                        if not under:
+                            return False
+                    elif (a.space is MemSpace.SHARED
+                          and id(a.base) not in self._own
+                          and not self._element_free(x, written)):
+                        return False
+            return True
+
+        return frozenset(masks) if kept(self.body, False) else frozenset()
+
+    def _element_free(self, x: Stmt, written: Set[int]) -> bool:
+        """Does `x`, a write to shared memory, store what no element's mask
+        changes: a number, or what a load read from a buffer of global
+        memory the body never writes?"""
+        if x.op == Op.COPY_ASYNC:
+            src = [a for a in x.accesses if a.kind & Effect.READ]
+            return (len(src) == 1 and src[0].space is MemSpace.GLOBAL
+                    and id(src[0].base) not in written)
+        if x.op != Op.STORE or len(x.args) < 2:
+            return False
+        v = x.args[1]
+        if not isinstance(v, Value):
+            return True
+        d = self.defs.get(v.id)
+        if d is None:
+            return False
+        if d.op == Op.CONST:
+            return True
+        return (d.op == Op.LOAD and len(d.accesses) == 1
+                and d.accesses[0].space is MemSpace.GLOBAL
+                and id(d.accesses[0].base) not in written)
 
     def binding(self, base) -> Any:
         """The value a buffer of memory is reached through: `base` itself
@@ -282,6 +447,9 @@ class Flow:
                         self._run(s.regions[1].body, env, mask & ~held, conds)
                     continue
                 name = cond.id if isinstance(cond, Value) else repr(cond)
+                if name in self.masks:
+                    self._run(s.regions[0].body, env, mask, conds)
+                    continue
                 self._run(s.regions[0].body, env, mask,
                           conds | {(name, True)})
                 if len(s.regions) > 1:
@@ -289,8 +457,9 @@ class Flow:
                               conds | {(name, False)})
                 continue
             if s.op == Op.RAWBLOCK and s.regions:
-                self._run(s.regions[0].body, env, mask,
-                          conds | {(s.text, True)})
+                inner = conds if s.text in self.masks \
+                    else conds | {(s.text, True)}
+                self._run(s.regions[0].body, env, mask, inner)
                 continue
             if s.regions:
                 # A loop that is not counted, or a region the IR gives no
@@ -376,7 +545,10 @@ class Flow:
             buf = s.target[0]
             space = getattr(buf.type, 'space', None)
             if space in _PLACED:
-                self._reset(space, id(buf), n if s.attr('init') == '{}' else None)
+                zeros = s.attr('init') == '{}'
+                self._reset(space, id(buf), n if zeros else None)
+                if zeros and self._values and space is MemSpace.REGISTER:
+                    self.origin[n] = [(mask, ('const', 0))]
             return
         if s.op == Op.MARK and s.attr('mark') == 'defines':
             n = self._new(s, env, mask, conds)
@@ -411,8 +583,80 @@ class Flow:
         written = [p for p in placed if p[2] in ('write', 'rmw')]
         if read:
             self.reach[n] = self._read(n, read, conds)
+            if self._values and s.op == Op.LOAD:
+                self._forwarded[n] = self._forwards(n, conds)
         if written:
             self._write(n, written, conds)
+            if self._values and s.op == Op.STORE:
+                self.origin[n] = self._origin(s, env, mask)
+
+    def _origin(self, s: Stmt, env, mask: int) -> List[Tuple[int, Tuple]]:
+        """Where the value `s` stores came from, lane group by lane group."""
+        v = s.args[1]
+        if not isinstance(v, Value):
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return [(mask, ('const', v))]
+            return []
+        if getattr(v.type, 'length', None) is not None:
+            # A vector covers several elements, none of which it is.
+            return []
+        d = self.defs.get(v.id)
+        if d is not None and d.op == Op.CONST:
+            return [(mask, ('const', d.attr('value')))]
+        if (d is not None and d.op == Op.LOAD and len(d.accesses) == 1
+                and d.accesses[0].space is MemSpace.REGISTER):
+            nd = self.inst(d, env)
+            out: List[Tuple[int, Tuple]] = []
+            for r in self.reach.get(nd, ()) if nd is not None else ():
+                hit = r.mask & mask
+                if not hit:
+                    continue
+                if r.certain and r.writer is not None and r.writer >= 0:
+                    out.append((hit, ('reg', r.cell, r.writer)))
+                else:
+                    out.append((hit, ('value', v)))
+            if out:
+                return out
+        return [(mask, ('value', v))]
+
+    def _forwards(self, n: int, conds) -> List[Tuple[int, Tuple, Reach]]:
+        """What the load's execution `n` reads for certain, besides its
+        element, lane group by lane group: what the lane's own store put
+        there, where that is a value, a number, or a register that holds
+        it still."""
+        out: List[Tuple[int, Tuple, Reach]] = []
+        for r in self.reach.get(n, ()):
+            if not r.certain or r.writer is None or r.writer < 0 or not r.own:
+                continue
+            for m, o in self.origin.get(r.writer, ()):
+                hit = m & r.mask
+                if not hit:
+                    continue
+                if o[0] == 'reg':
+                    _, cell, writer = o
+                    if self._holds(cell, writer, hit, conds):
+                        out.append((hit, ('reg', cell, writer), r))
+                else:
+                    out.append((hit, o, r))
+        return out
+
+    def _holds(self, cell, writer: int, lanes: int, conds) -> bool:
+        """Does `cell`, a register, hold what `writer` wrote for every lane
+        of `lanes`, as a read under `conds` would find it now?"""
+        if (self._smeared.get(cell[0][:2])
+                or self._smeared_space.get(cell[0][0])):
+            return False
+        left = lanes
+        for layer in reversed(self._reg.get(cell, ())):
+            hit = left & layer.mask
+            if not hit:
+                continue
+            if not layer.conds <= conds or layer.writer != writer:
+                return False
+            left &= ~hit
+            if not left:
+                return True
+        return not left or self._fresh.get(cell[0][1], INITIAL) == writer
 
     def _reset(self, space, base: int, fresh: Optional[int]) -> None:
         table = self._reg if space is MemSpace.REGISTER else self._mem
@@ -464,11 +708,15 @@ class Flow:
         if uniform:
             for addr in _span(self._address(index, env), width):
                 out.append((mask, (key, addr), kind))
-            return out
-        for lane in self.lanes(mask):
-            here = {**env, 'x': lane}
-            for addr in _span(self._address(index, here), width):
-                out.append((1 << lane, (key, addr), kind))
+        else:
+            for lane in self.lanes(mask):
+                here = {**env, 'x': lane}
+                for addr in _span(self._address(index, here), width):
+                    out.append((1 << lane, (key, addr), kind))
+        self._budget -= len(out)
+        if self._budget < 0:
+            raise TooLarge(f'the body places more than {self._limit} '
+                           f'elements')
         return out
 
     def _place_copy(self, s: Stmt, env, mask):
@@ -583,7 +831,7 @@ class Flow:
         for m, cell, _ in placed:
             layers = self._layers(cell)
             register = cell[0][0] is MemSpace.REGISTER
-            for lane in self.lanes(m):
+            for lane in self.lanes(m) if self._before else ():
                 prior, certain = INITIAL, True
                 for layer in reversed(layers):
                     if register and not layer.mask & (1 << lane):
@@ -619,7 +867,8 @@ class Flow:
             table[cell] = kept
             if self._shared_with_others(cell):
                 self.escaped.add(n)
-        self.before[n] = before
+        if self._before:
+            self.before[n] = before
 
     def _smear(self, n: int, s: Stmt, conds) -> None:
         """An access nothing can place: it reads every element of its buffer
@@ -667,6 +916,46 @@ class Flow:
                         self._smeared_space[space].append(n)
                     else:
                         self._smeared[(space, base)].append(n)
+
+
+def _stands_in(x: Stmt) -> bool:
+    """Is `x` a statement that emits nothing and only says what others
+    reach through a name the IR does not follow (`IRBuilder.touches`)?"""
+    return (x.op == Op.RAWSTMT and not x.text and bool(x.accesses)
+            and not x.target and not x.args)
+
+
+class _MemoryReads:
+    """Whether a value is computed from what a load read -- of memory or of
+    registers, which memory may have filled."""
+
+    def __init__(self, defs: Dict[int, Stmt]):
+        self._defs = defs
+        self._memo: Dict[int, bool] = {}
+
+    def reads(self, v) -> bool:
+        if not isinstance(v, Value):
+            return False
+        if v.id in self._memo:
+            return self._memo[v.id]
+        self._memo[v.id] = False
+        d = self._defs.get(v.id)
+        out = False
+        if d is not None:
+            if d.regions:
+                # An induction is what the bounds give; any other value a
+                # region defines carries what its body computed.
+                if d.op == Op.FOR and v is d.induction:
+                    out = any(self.reads(x) for x in d.operands())
+                else:
+                    out = True
+            elif d.op in (Op.LOAD, Op.LOAD_ASYNC) or any(
+                    a.kind & Effect.READ for a in d.accesses):
+                out = True
+            else:
+                out = any(self.reads(x) for x in d.operands())
+        self._memo[v.id] = out
+        return out
 
 
 def _width(v, access, binding) -> int:

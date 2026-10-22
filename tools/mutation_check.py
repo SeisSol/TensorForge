@@ -85,6 +85,7 @@ BOUND = Path('src/tensorforge/analysis/pipeline.py')
 RESIDENCY = Path('src/tensorforge/backend/residency.py')
 CARRY = Path('src/tensorforge/backend/pir/carry.py')
 ATOMICS = Path('src/tensorforge/backend/pir/atomics.py')
+FORWARD = Path('src/tensorforge/backend/pir/forward.py')
 FLOW = Path('src/tensorforge/backend/pir/flow.py')
 TILING = PKG / 'tiling.py'
 
@@ -2789,9 +2790,9 @@ GROUPS = {
         ('the image carried over a loop left with its bias',
          sub(ATOMICS, '                self.zeroed.add(id(bias))\n', '', 1)),
         ('a guard spelled in text dropped from what a statement stands under',
-         sub(FLOW, '                self._run(s.regions[0].body, env, mask,\n'
-                   '                          conds | {(s.text, True)})',
-             '                self._run(s.regions[0].body, env, mask, conds)', 1)),
+         sub(FLOW, '                inner = conds if s.text in self.masks \\\n'
+                   '                    else conds | {(s.text, True)}',
+             '                inner = conds', 1)),
         ('a loop that runs again read as running once',
          sub(FLOW, '        self._wrap(s, first)\n', '', 1)),
         ('a write under a guard taken for one that replaces what was there',
@@ -2815,6 +2816,69 @@ GROUPS = {
         ('a buffer defined anew taken for what it held',
          sub(FLOW, "        if s.op == Op.MARK and s.attr('mark') == 'defines':",
              '        if False:', 1)),
+        ('an element mask taken for a guard of unknown value',
+         sub(ATOMICS, '    flow = Flow(body, threads, arena, masks=True)',
+             '    flow = Flow(body, threads, arena)', 1)),
+        ('a body past the budget asked all the same',
+         sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
+    ]),
+    # A load taken from where its own lane's store took the value, a store
+    # nothing reads dropped, and the masks taken to hold for it.
+    'forward': ('tests/test_forward.py', [
+        ('a register written since taken for what it held',
+         sub(FLOW, '            if not layer.conds <= conds or layer.writer != writer:\n'
+                   '                return False\n', '', 1)),
+        ('another lane\'s store taken for the lane\'s own',
+         sub(FLOW, '            if not r.certain or r.writer is None or r.writer < 0 or not r.own:',
+             '            if not r.certain or r.writer is None or r.writer < 0:', 1)),
+        ('a load taken where some of its lanes read something else',
+         sub(FORWARD, '            if covered & inst.mask != inst.mask:\n'
+                      '                return False\n', '', 1)),
+        ('a value taken where it does not stand',
+         sub(FORWARD, '        if v.type != s.target[0].type or not self._stands(v, s):',
+             '        if v.type != s.target[0].type:', 1)),
+        ('a register a rolled loop picks taken',
+         sub(FORWARD, '        if fit is None or set(fit[1]) - unrolled:',
+             '        if fit is None:', 1)),
+        ('a store the body ends with taken for dead',
+         sub(FORWARD, '        if all(n not in flow.escaped and n not in flow.final and n not in kept',
+             '        if all(n not in flow.escaped and n not in kept', 1)),
+        ('a store a forwarded load reads from now on dropped',
+         sub(FORWARD, '        if all(n not in flow.escaped and n not in flow.final and n not in kept',
+             '        if all(n not in flow.escaped and n not in flow.final', 1)),
+        ('a named load replaced by a number',
+         sub(FORWARD, "        if kind != 'reg' and s.attr('extern') is not None:",
+             '        if False:', 1)),
+        ('a guard spelled in text taken to hold',
+         sub(FLOW, '                inner = conds if s.text in self.masks \\\n'
+                   '                    else conds | {(s.text, True)}',
+             '                inner = conds', 1)),
+        ('masks taken to hold where a global write stands outside them',
+         sub(FLOW, '                    if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):\n'
+                   '                        if not under:\n'
+                   '                            return False\n',
+             '                    if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):\n'
+                   '                        pass\n', 1)),
+        ('masks taken to hold where a branch turns on memory',
+         sub(FLOW, '                    if loads.reads(cond):\n'
+                   '                        return False\n', '', 1)),
+        ('a statement that stands in for others asked as a write of its own',
+         sub(FLOW, '                if _stands_in(x):\n'
+                   '                    continue\n', '', 1)),
+        ('text with a known effect taken to stand in for others',
+         sub(FLOW, '    return (x.op == Op.RAWSTMT and not x.text and bool(x.accesses)',
+             '    return (x.op == Op.RAWSTMT and bool(x.accesses)', 1)),
+        ('a zeroed declaration taken to hold nothing known',
+         sub(FLOW, "                if zeros and self._values and space is MemSpace.REGISTER:\n"
+                   "                    self.origin[n] = [(mask, ('const', 0))]\n", '', 1)),
+        ('a buffer nothing reaches any more left declared',
+         sub(FORWARD, '        body = _strip(body, _unreached(body))\n'
+                      '        return substitute(body, self.mapped) if self.mapped else body\n',
+             '        return substitute(body, self.mapped) if self.mapped else body\n', 1)),
+        ('a buffer something still reaches taken for unreached',
+         sub(FORWARD, '            reached |= hit\n', '            pass\n', 1)),
+        ('a body past the budget forwarded all the same',
+         sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
     ]),
 }
 

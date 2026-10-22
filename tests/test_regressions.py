@@ -23,7 +23,7 @@ import pytest
 from harness import UNSUPPORTED
 from tensorforge.backend.instructions.memory.load import GlbToRegLoader
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 from tensorforge.reference import kernel_eval
 
@@ -631,8 +631,9 @@ def _predictor_descrs():
     ]
 
 
-def _predictor_source(backend, arch):
-    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+def _predictor_source(backend, arch, **options):
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32,
+                  options=Options(**options))
     gen = Generator(_predictor_descrs(), ctx)
     gen.generate()
     return gen.get_kernel()
@@ -689,7 +690,10 @@ def test_shared_bias_carries_the_destination_offset(backend, arch):
     has to as well, or the accumulation takes its bias from the wrong
     elements --- `t[10:20, 8] += ...` would read `t[0:10, 0]`.
     """
-    src = _predictor_source(backend, arch)
+    # The pair asked about is the builder's: the bias it reads and the store
+    # of the sum.  Where nothing reads that sum, the body drops the store
+    # (`pir.forward`), which says nothing about either address.
+    src = _predictor_source(backend, arch, forward_memory=False)
     lines = src.splitlines()
     checked = 0
     for i, line in enumerate(lines):

@@ -119,9 +119,9 @@ class Writer:
   def Scope(self):
     return Block(self, '')
 
-  def If(self, expression, uniform=None):
-    # `uniform` is what the IR builder records for a raw head; text has no
-    # use for it.
+  def If(self, expression, uniform=None, guard=None):
+    # `uniform` and `guard` are what the IR builder records for a raw head;
+    # text has no use for them.
     return Block(self, 'if ({})'.format(expression))
 
   def For(self, argument, unroll=False, uniform=None):

@@ -430,7 +430,9 @@ class AbstractInstruction(ABC):
     `carry` is what `carry.carry_trips` takes besides the body, where what
     the trips of a merged run hand each other through memory is kept in
     registers (`Options.carry_trips`), and what `atomics` takes, where an
-    accumulation is added atomically (`Options.atomic_accumulation`).
+    accumulation is added atomically (`Options.atomic_accumulation`), and
+    `forward`, where a load reads what its own lane stored from where the
+    store took it (`Options.forward_memory`).
     """
     def attempt():
       builder = cls._body_builder(context, names, arena)
@@ -507,6 +509,9 @@ class AbstractInstruction(ABC):
         t = value.type
         return target.native_atomic(None, t.base, getattr(t, 'length', None) or 1)
       added = pir.Atomics(supported, report=carries, **carry)
+    forwarded = None
+    if carry is not None and options.forward_memory:
+      forwarded = pir.Forward(builder.scratch, report=carries, **carry)
     if (options.wave_uniform_group_rows
         and context.target.reads_first_lane()):
       # A no-op on a body whose batch loop reads no group's rows so
@@ -516,7 +521,8 @@ class AbstractInstruction(ABC):
                         debug=options.ir_debug, move=move, wrap=wrap,
                         place=place, barriers=barriers, prefetch=prefetch,
                         shards=held, rows=rows, carry=carried,
-                        atomics=added, where='shared body')
+                        atomics=added, forward=forwarded,
+                        where='shared body')
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)
@@ -529,7 +535,8 @@ class AbstractInstruction(ABC):
     if held is not None and options.ir_debug:
       for line in kept:
         print(f'shards: {line}')
-    if (carried is not None or added is not None) and options.ir_debug:
+    if (carried is not None or added is not None
+        or forwarded is not None) and options.ir_debug:
       for line in carries:
         print(line)
     return body

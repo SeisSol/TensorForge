@@ -37,6 +37,12 @@ two chains onto one element, and neither passes the second test.  Elements
 another multiplication or another block writes are outside what the body
 can know; an accumulation into memory a body owns is what every placement
 in the generator assumes, atomic or not.
+
+An element's mask is taken to hold where the body keeps its contract (`Flow`
+with `masks`): on AMD every store to global memory stands under one and the
+load of its bias does not, which a guard of unknown value would leave
+unsure of what the store replaces.  Where the mask does not hold, the store
+stays out, atomic or not.
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts
-from .flow import INITIAL, Flow
+from .flow import INITIAL, Flow, TooLarge
 from .passes import _zero_like
 
 
@@ -99,7 +105,12 @@ def accumulate_atomically(body: Tuple[Stmt, ...], *, threads: int,
     stores = [s for s in walk_stmts(body) if _candidate(s)]
     if not stores:
         return body
-    flow = Flow(body, threads, arena)
+    try:
+        flow = Flow(body, threads, arena, masks=True)
+    except TooLarge as why:
+        if report is not None:
+            report.append(f'atomics: {why}; every store stays')
+        return body
     chains: Dict[int, List[_Chain]] = {}
     reasons: Dict[int, str] = {}
     for s in stores:

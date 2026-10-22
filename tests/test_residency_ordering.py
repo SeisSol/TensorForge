@@ -120,7 +120,11 @@ def _flatten(stream):
                          ids=[b for b, _ in ALL_TARGETS])
 def test_pointwise_read_follows_the_contraction_store(backend, arch):
     """``C = abs(M)`` may not read ``M`` before ``M = A @ B`` has written it."""
-    gen, descrs = _generate("mixed/ml_glb_then_ew", backend, arch)
+    # Without the forwarding, which hands each lane the value it stored and
+    # leaves no read of `M` at all (`pir.forward`): what is asked here is the
+    # order of the read and the write.
+    gen, descrs = _generate("mixed/ml_glb_then_ew", backend, arch,
+                            forward_memory=False)
     array = f"glb_{descrs[0].dest.tensor.name}"
     accesses = _accesses(gen.get_kernel(), array)
 
@@ -285,8 +289,12 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     # and no barrier to find.  What this pins is the pair, for every temporary
     # an image cannot serve -- one whose lane axis a consumer moves, one whose
     # type differs from the image's, a global result.
+    #
+    # Without the forwarding as well: here the pointwise operation reads each
+    # element in the lane that stored it, which the forwarding finds, and
+    # then nothing is read through shared memory (`pir.forward`).
     gen, _ = _generate("mixed/ml_then_ew", backend, arch,
-                       register_temporaries='scalars')
+                       register_temporaries='scalars', forward_memory=False)
     stream = _flatten(gen._sections[0].stream)
     stores = [i for i in stream if isinstance(i, StoreRegToShr)]
     assert len(stores) == 1, f"expected exactly one shared store, got {stores}"

@@ -13,11 +13,13 @@ loop that runs again, a write nothing can place -- and the ways it is not.
 
 from __future__ import annotations
 
+import pytest
+
 from tensorforge.backend.pir import IRBuilder, verify
 from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, BufferType,
                                           Effect, MemSpace, Op, ScalarType,
                                           Uniformity, walk_stmts)
-from tensorforge.backend.pir.flow import INITIAL, Flow
+from tensorforge.backend.pir.flow import INITIAL, Flow, TooLarge
 from tensorforge.common.basic_types import Datatype
 
 F32 = Datatype.F32
@@ -262,3 +264,20 @@ def test_a_binding_a_loop_computes_is_another_buffer_every_trip():
     f = t.flow()
     load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
     assert all(r.writer == INITIAL for r in _reaches(f, load))
+
+
+def test_a_body_that_places_more_than_its_budget_is_too_large():
+    """What `Flow` keeps grows with the elements a body places, lane by lane
+    and trip by trip, and they count against its budget: `ROWS` lanes
+    storing `COLS` elements place 96, which a budget of 96 runs and one of
+    95 does not."""
+    t = Body()
+    b = t.b
+    with b.if_(t.valid):
+        with b.for_(0, COLS, 1, unroll=True) as hop:
+            b.store(t.q, 1.0, t.element(hop.induction))
+    body = b.finish()
+    verify(body)
+    assert Flow(body, LANES, budget=96).insts
+    with pytest.raises(TooLarge):
+        Flow(body, LANES, budget=95)

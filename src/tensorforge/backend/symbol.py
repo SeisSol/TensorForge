@@ -3842,7 +3842,7 @@ class Symbol:
             f'only global memory has an atomic path')
         assign = f'{access} = {var};'
 
-    guard = (writer.If(mask_name) if mask_name is not None
+    guard = (writer.If(mask_name, guard='element') if mask_name is not None
              else contextlib.nullcontext())
 
     if structured:

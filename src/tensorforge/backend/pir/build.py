@@ -2253,8 +2253,13 @@ class IRBuilder:
     def AnonymousScope(self) -> '_RawBlock':
         return _RawBlock(self, '')
 
-    def If(self, expression, uniform: Optional[Uniformity] = None) -> '_RawBlock':
-        return _RawBlock(self, f'if ({expression})', uniform=uniform)
+    def If(self, expression, uniform: Optional[Uniformity] = None,
+           guard: Optional[str] = None) -> '_RawBlock':
+        """`if (expression)` around a region.  `guard` says what the guard is
+        where a pass may want to know: `'element'` for an element's mask
+        (`elementmask`), as the `if` of the batch loop says it."""
+        return _RawBlock(self, f'if ({expression})', uniform=uniform,
+                         guard=guard)
 
     def For(self, argument, unroll=False,
             uniform: Optional[Uniformity] = None) -> '_RawBlock':
@@ -2350,11 +2355,13 @@ class _RawBlock:
     """
 
     def __init__(self, builder: IRBuilder, text: str, pragma: Optional[str] = None,
-                 uniform: Optional[Uniformity] = None):
+                 uniform: Optional[Uniformity] = None,
+                 guard: Optional[str] = None):
         self.builder = builder
         self.text = text
         self.pragma = pragma
         self.uniform = uniform
+        self.guard = guard
 
     def __enter__(self):
         self.builder.push(kind='rawblock')
@@ -2367,6 +2374,8 @@ class _RawBlock:
         attrs = (('pragma', self.pragma),) if self.pragma else ()
         if self.uniform is not None:
             attrs = attrs + (('uniform', self.uniform),)
+        if self.guard is not None:
+            attrs = attrs + (('guard', self.guard),)
         self.builder.emit(Stmt(op=Op.RAWBLOCK, regions=(region,), text=self.text,
                                pure=False, movable=False, effect=Effect.NONE,
                                attrs=attrs))
