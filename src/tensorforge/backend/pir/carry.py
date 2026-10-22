@@ -6,13 +6,14 @@
 """Pseudo-IR: what the trips of a merged run hand each other through memory,
 handed over in registers instead.
 
-A merged run whose trips are closed (`Options.closed_trips`) touches an
-accumulator twice a trip: its head reads it into a register image, and its
-tail stores the image the trip computed from that.  Memory is all that
-crosses the back edge, which is what makes the body the same on every trip
--- and it is a load and a store of the whole accumulator per trip.  Where the
-next trip only reads back what this one stored, the load goes ahead of the
-loop, the store behind it, and the tail copies its image into the head's::
+A merged run's trips hand each other nothing but memory
+(`Generator._emit_closed_loop`), so the run touches an accumulator twice a
+trip: its head reads it into a register image, and its tail stores the
+image the trip computed from that.  Memory is all that crosses the back
+edge, which is what makes the body the same on every trip -- and it is a
+load and a store of the whole accumulator per trip.  Where the next trip
+only reads back what this one stored, the load goes ahead of the loop, the
+store behind it, and the tail copies its image into the head's::
 
     for k:                        I = load H             (once)
       I = load H                  for k:

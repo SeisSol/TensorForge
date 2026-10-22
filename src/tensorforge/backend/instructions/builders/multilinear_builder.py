@@ -869,47 +869,6 @@ class MultilinearBuilder(OperationBuilder):
     else:
       return dest_symbol
 
-  def establish(self, descr) -> bool:
-    """Make the destination `descr` accumulates onto resident, as the first
-    build of `descr` finds it right before adding its term -- without the
-    term.
-
-    For a merged run (`Generator._emit_variant_loop`), whose iterations then
-    all accumulate, the first included, so that none of them has to be built
-    beside the loop to leave the destination resident.  A global destination
-    is loaded into registers where the policy preloads one
-    (`_get_target_symbol`).
-
-    Only where the build keeps its result resident in turn (`_make_store`),
-    which is what lets the next iteration add onto it: a destination
-    assembled from several writes goes out to memory as each is produced, as
-    does every result where the policy does not keep results in registers,
-    and then each iteration has to find the last one's sum in memory -- read
-    from the image ahead of the loop instead, every iteration would add its
-    term to the same start and only the last would be kept.
-
-    False, with nothing recorded, for anything else: a destination in shared
-    memory.
-    """
-    self._reset()
-    self._descr = descr
-    self._dest_obj = descr.dest
-    self._add = descr.add
-    # no build, so no origin: what is made resident here is staged as the
-    # destination's offset puts it, and the build adds where it finds it
-    self._theta = None
-    dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
-    if (not self._add or dest_symbol is None
-        or dest_symbol.stype != SymbolType.Global
-        or self._plan.written_in_slices(self._dest_obj.tensor)):
-      return False
-    if dest_symbol.name in self._residency:
-      return self._target_image_fits(dest_symbol.name)
-    if not self._policy.keep_results_in_registers:
-      return False
-    self._get_target_symbol(prev=True)
-    return dest_symbol.name in self._residency
-
   def _make_compute(self):
     prev = self._get_target_symbol(True) if self._add else None
     # A register image `_get_target_symbol` hands out holds the destination's

@@ -303,40 +303,6 @@ def test_a_result_is_stored_once_nothing_reads_it_again():
     assert where[True] < 0.1
 
 
-def _carried(system, config, kernel):
-    """How many values each loop of an open run (`closed_trips` off)
-    threads through its body."""
-    from tensorforge.backend.instructions.ptr_manip import VariantLoop
-    from tensorforge.common.context import Options
-    from tensorforge.generators.generator import MergeFallbackWarning
-
-    descrs = _read(system, config, kernel)
-    fp = Datatype.F64 if config.endswith('-d') else Datatype.F32
-    gen = Generator(descrs, Context(arch='sm_86', backend='cuda', fp_type=fp,
-                                    options=Options(closed_trips=False)))
-    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        warnings.simplefilter('error', MergeFallbackWarning)
-        gen.generate()
-    loops = [i for s in gen.built._sections for i in s.ir
-             if isinstance(i, VariantLoop)]
-    assert loops, kernel
-    return [len(loop._carried) for loop in loops]
-
-
-def test_only_a_value_read_before_it_is_assigned_rides_the_back_edge():
-    """The damage model projects four times, each computing `I` afresh
-    (`I = dQ(0) ...; I += ...`) and reading it back: nothing flows from one
-    projection to the next, and chaining `I` anyway would rename its reload
-    but not the product reading it, so `QDR(1..3)` would come out zero.  The
-    anelastic derivative adds each level onto `I` and `Iane`: those two do
-    flow."""
-    assert _carried('damage-nonlinearck', 'damage-nonlinearck-o4-s',
-                    'gpu_projectToDR[0]') == [0]
-    system = 'viscoelastic-linearckanelastic'
-    assert _carried(system, f'{system}-o4-d', 'gpu_derivative') == [2]
-
-
 @pytest.mark.parametrize('backend,arch', TARGETS)
 @pytest.mark.parametrize('system,config', CONFIGS,
                          ids=[c for _, c in CONFIGS])
@@ -350,45 +316,6 @@ def test_every_kernel_builds(request, system, config, backend, arch):
         except Exception as error:     # noqa: BLE001 -- collected, all named
             failed.append(f'{kernel}: {type(error).__name__}: {error}')
     assert not failed, '\n'.join(failed[:20])
-
-
-def test_a_merged_run_carries_the_temporaries_it_reads_back():
-    """What the body of an open run (`closed_trips` off) reads before it
-    assigns rides the back edge -- including the values that are not `+=` and
-    the ones that are temporaries.
-
-    The residency keys its entries by *symbol* name.  A key spelled from the
-    tensor -- `glb_` and the tensor's name -- is the symbol for a kernel
-    parameter and for nothing else: a temporary is `s233` where its tensor is
-    `t232`.  With such keys the damage step's seven integrals would never be
-    found -- each would be left in registers ahead of the loop, the chain
-    would never close, and `I` and `sourceI` would come out wrong while
-    `transportDer(0..3)`, which are parameters, would be right.
-    """
-    from tensorforge.backend.instructions.ptr_manip import VariantLoop
-    from tensorforge.common.context import Options
-
-    system = 'damage-nonlinearck'
-    gen = Generator(_read(system, f'{system}-o4-s', 'gpu_damageStep'),
-                    Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32,
-                            options=Options(closed_trips=False)))
-    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        gen.generate()
-
-    def loops(instructions):
-        for instr in instructions:
-            if isinstance(instr, VariantLoop):
-                yield instr
-            for region in instr.regions() or ():
-                yield from loops(region)
-
-    found = [loop for section in gen.built._sections
-             for loop in loops(section.stream)]
-    assert found, 'the damage step merged nothing'
-    biggest = max(found, key=lambda loop: len(loop.region))
-    assert biggest.carried, ('the longest run carries nothing round its back '
-                             'edge, though its body reads its integrals back')
 
 
 @functools.lru_cache(maxsize=None)

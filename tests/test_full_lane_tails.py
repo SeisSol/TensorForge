@@ -302,8 +302,7 @@ class _Beside(HOST.Kernel):
 
 
 BUILDS = {'written out': dict(merge_variants=False),
-          'merged': dict(merge_variants=True),
-          'closed trips': dict(merge_variants=True, closed_trips=True)}
+          'merged': dict(merge_variants=True)}
 
 
 @pytest.mark.parametrize('build', list(BUILDS))

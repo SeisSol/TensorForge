@@ -2813,15 +2813,11 @@ class Generator:
     last = (self._last_touch(descr_list)
             if self._context.get_user_options().early_writebacks else None)
     index = -1
-    closed = self._context.get_user_options().closed_trips
     for position, outer in enumerate(descr_list):
       if isinstance(outer, ForDescr) and self._emit_loops:
         guard.flush()
-        if closed:
-          self._emit_closed_loop(outer, builders,
-                                 self._read_after(descr_list, position))
-        else:
-          self._emit_variant_loop(outer, builders)
+        self._emit_closed_loop(outer, builders,
+                               self._read_after(descr_list, position))
         index += len(outer.operations())
         if last is not None:
           self._retire_writebacks(residency, last, index, guard)
@@ -2893,239 +2889,8 @@ class Generator:
     for name in done:
       self._section.ir.extend(residency.flush(name))
 
-  def _emit_variant_loop(self, loop, builders) -> None:
-    """One body, one counter, and one binding per varying operand.
-
-    The body is built with the same builders as anything else -- it is an
-    ordinary descriptor list over the stand-ins -- and the only thing this adds
-    is where a stand-in resolves: a table over the members, and a binding
-    inside the loop that reads it at the counter.  Which is why the loop is
-    assembled here and not inside a builder: no operation in the body knows it
-    is in a loop, and none of them has to.
-    """
-    from tensorforge.backend.instructions.ptr_manip import VariantLoop
-
-    body, variants = loop.decompose()
-    self._rotate_members(loop, variants)
-    written = {id(d.writes().tensor) for d in body if d.writes() is not None}
-
-    # What the body threads through itself.  A destination is not accumulated
-    # in place: each build takes a fresh register and reads the last one, so
-    # the expanded form is a chain and one turn of it is what the body holds.
-    #
-    # Read off either side of the build, because that is the only moment both
-    # links exist.  Keyed by the *binding*, which is what the residency is
-    # keyed by -- the tensor is `m0`, its entry is `glb_m0`, and asking for the
-    # tensor finds nothing and looks exactly like nothing to carry.
-    #
-    # And only what the body reads before it assigns it rides the back edge.
-    # A tensor assigned first starts afresh on every pass: each of the damage
-    # model's projections computes `I = dQ(0) ...; I += ...` and reads it
-    # back, and chaining that `I` round the loop would rename its reload and
-    # not the product reading it -- `QDR(1..3)` would come out zero.
-    def carries(tensor) -> bool:
-      # A family the loop carries in place (`_rotate_members`) is read
-      # through one hole and written through another, so no tensor of the
-      # body is named twice and the walk below answers no.  The carry is
-      # between the holes rather than within one, and the symbol they share
-      # is where it shows: ask that first, or the back edge is never closed
-      # and every trip reads what the prologue left.
-      if getattr(self._scopes.get_symbol(tensor), 'carried_in_place', False):
-        return True
-      for descr in body:
-        if any(view.tensor is tensor for view in descr.reads()):
-          return True
-        dest = descr.writes()
-        if dest is not None and dest.tensor is tensor:
-          return bool(getattr(descr, 'add', False))
-      return False
-
-    # Every destination the body reads before it assigns, and not only the
-    # accumulating ones.  `carries` is the whole question, and asking it of
-    # `+=` destinations alone answers it for a chain written as `X += ...`
-    # and not for one written as `X = f(X, ...)` -- the same dependency, from
-    # a frontend that folded the read into the operands.  SeisSol's damage
-    # step has fifteen of the second kind and none of the first.
-    keys = list(dict.fromkeys(
-        key for key in (self._residency_key(descr.writes()) for descr in body
-                        if descr.writes() is not None
-                        and carries(descr.writes().tensor))
-        if key is not None))
-
-    # Every iteration builds this one body, and the body adds onto what its
-    # destinations hold when it starts: for the first iteration, what a load
-    # of each gives.  A destination not resident yet is made so ahead of the
-    # loop -- loaded into registers (`_establish`) -- so that a load stands
-    # ahead of the loop rather than an iteration beside it.
-    # An operand every iteration shares is staged in the body, the same copy
-    # on every trip, and leaves the loop in the pseudo-IR (`pir.move`).  A
-    # destination that varies is the member's own on each pass, read and
-    # stored there.
-    #
-    # Where a destination cannot be made resident that way -- one in shared
-    # memory, one written in slices, one the body reads before it adds to
-    # it -- the first iteration is built beside the loop instead and leaves
-    # the residency behind.  Not
-    # the body itself: built cold, it does what the *first* of the expanded
-    # descriptors did, loads the destination and computes a result from it,
-    # and repeated it recomputes `Q + contribution` from the stored `Q` every
-    # time and keeps only the last one.
-    missing = list(dict.fromkeys(
-        key for key in (self._residency_key(d.writes()) for d in body
-                        if d.writes() is not None
-                        and not getattr(d.writes().tensor, 'is_variant', False)
-                        and carries(d.writes().tensor))
-        if key is not None and self._residency.get(key) is None))
-    resident = not missing or self._establish(body, builders, missing)
-
-    if not resident:
-      for descr in loop.body(0):
-        for kind, builder in builders:
-          if (isinstance(descr, kind) if isinstance(kind, type) else kind(descr)):
-            builder.build(descr)
-            self._section.ir.extend(builder.get_instructions())
-            break
-
-    # The loop reaches its members through a table, and a table is an address:
-    # it reads memory and never asks the residency.  So a member whose newest
-    # copy is still in registers has to be stored before the loop, or the loop
-    # reads the buffer as it was.  SeisSol's anelastic time derivative is the
-    # case -- a level built ahead of the loop leaves `dQ(1)` in registers, and
-    # if that were stored only after the loop, the next level would read the
-    # launch's input in its place.
-    for variant in variants:
-      for view in variant.members:
-        member = self._member_symbol(view)
-        # Not one the loop carries in place (`_rotate_members`): there is no
-        # table to read it through, so storing it would put in memory the
-        # very value the loop means to keep in registers.
-        if getattr(member, 'carried_in_place', False):
-          continue
-        self._section.ir.extend(self._residency.flush(member.name))
-    counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
-    tables, region = self._bind_holes(variants, written, counter,
-                                      first=0 if resident else 1)
-
-    before = {}
-    for key in keys:
-      entry = self._residency.get(key)
-      if entry is not None:
-        before[key] = entry.image
-
-    for descr in body:
-      for kind, builder in builders:
-        if (isinstance(descr, kind) if isinstance(kind, type) else kind(descr)):
-          builder.build(descr)
-          region.extend(builder.get_instructions())
-          break
-      else:
-        # A descriptor nobody recognizes is an error: dropped, it would turn
-        # a missing builder into a wrong kernel.
-        raise InternalError(
-            f'no builder for {descr.__class__.__name__}: {descr}')
-
-    # An allocation is not a per-iteration act.  Left in the region it would
-    # give the enclosing stream no definition for a register the body fills
-    # and something after the loop reads -- the accumulator's writeback is
-    # exactly that -- and in the emitted text it would put the declaration
-    # inside the braces its users sit outside of.
-    from tensorforge.backend.instructions.allocate import RegisterAlloc
-    # Each with the instruction it stood ahead of, which is where a trip has
-    # to set it back (below).
-    allocations, follows, waiting, kept = [], {}, [], []
-    for instr in region:
-      if isinstance(instr, RegisterAlloc):
-        allocations.append(instr)
-        waiting.append(instr)
-        continue
-      for alloc in waiting:
-        follows[id(alloc)] = instr
-      waiting = []
-      kept.append(instr)
-    region = kept
-    # A preload at the end is a value memory holds, so nothing rides the back
-    # edge.  Kept as (key, init, result): pairing a filtered key list with the
-    # pairs afterwards would lose step as soon as one key is not carried.
-    carried = []
-    for key in keys:
-      entry = self._residency.get(key)
-      was = before.get(key)
-      if (was is not None and entry is not None and not entry.is_preload
-          and entry.image is not was):
-        carried.append((key, was, entry.image))
-    # What was made resident ahead of the loop has to come out of the body
-    # resident again, or there is no chain to close: every iteration would
-    # add its term onto the image ahead of the loop, and only the last one's
-    # sum would be kept.  `_establish` asks the builders not to promise what
-    # their build will not do; this is where a broken promise would show.
-    broken = sorted(set(missing) - {key for key, _, _ in carried})
-    if resident and broken:
-      raise InternalError(
-          f'merged run: {", ".join(broken)} made resident ahead of the loop '
-          f'and not left resident by its body')
-
-    # Close the chain: the body reads one register and writes another, and a
-    # loop needs the two to be one.  Substituted on the built region rather
-    # than arranged during the build, because what the residency hands out is
-    # its business and the fact that a repeated body must land where it
-    # started is not something it can know.
-    for key, init, result in carried:
-      for instr in region:
-        instr.substitute(result, init)
-      # And tell the residency where the value now lives, because the
-      # writeback is emitted after this returns and would otherwise store a
-      # register the substitution has just made unreachable.
-      # Only the image moves: what it covers and what its store owes stay.
-      # Re-recorded bare, the store would forget the assignment's promise and
-      # leave rows 20..24 of the anelastic derivative's `I` as the buffer has
-      # them.
-      entry = self._residency.get(key)
-      self._residency.record_writeback(key, init, entry.home,
-                                       covered=entry.covered,
-                                       shift=entry.shift,
-                                       promise=entry.promise)
-    region = self._reset_temporaries(region, allocations, follows, carried)
-    carried = tuple((init, init) for _, init, _ in carried)
-
-    # A destination that *varies* has to be stored inside the loop, and one
-    # that does not must not be.
-    #
-    # The residency flushes once, at the end of the section, against whatever
-    # address the entry holds by then.  For a destination that is the same
-    # tensor every iteration -- an accumulator -- that is right and is the
-    # whole point: the sum is written once.  For one that is a different
-    # tensor every iteration the address is the last iteration's, so every
-    # iteration computes and only the last is kept.
-    #
-    # Which it is, is whether the destination is a stand-in.  Not whether it
-    # escapes: an accumulator escapes too, and asking that stores the sum on
-    # every pass.
-    for descr in body:
-      dest = descr.writes()
-      if dest is None or not getattr(dest.tensor, 'is_variant', False):
-        continue
-      key = self._residency_key(dest)
-      if key is None or self._residency.get(key) is None:
-        continue
-      # Except a family the loop carries in place: its destination is the
-      # register image the next trip reads, and storing it would be the
-      # memory round trip this exists to avoid.  The address the store
-      # writes is the same on every trip anyway -- there is one slot --
-      # so the sum of the stores is the last trip's, which is what the
-      # value already is.
-      if getattr(self._scopes.get_symbol(dest.tensor), 'carried_in_place',
-                 False):
-        continue
-      region.extend(self._residency.flush(key))
-
-    self._section.ir.extend(allocations)
-    self._section.ir.append(
-        VariantLoop(self._context, counter, loop.iterations, region, tables,
-                    start=0 if resident else 1, carried=tuple(carried)))
-
   def _emit_closed_loop(self, loop, builders, later) -> None:
-    """A merged run whose trips hand each other nothing but memory
-    (`Options.closed_trips`).
+    """A merged run whose trips hand each other nothing but memory.
 
     The body is built once and runs on every trip, so whatever its build
     leaves in registers is what the next trip starts from.  Here that is
@@ -3144,13 +2909,13 @@ class Generator:
       reads) -- is stored, and a temporary the trip computes and uses itself
       is not (`_trip_outlives`).
 
-    So there is nothing to arrange around the back edge: no first trip built
-    beside the loop, no destination made resident ahead of it, no register
-    renamed to close a chain, and the body's registers are declared where its
-    operations declare them, afresh on every trip.  What it costs -- an
-    accumulator stored and read again on every trip -- the pseudo-IR takes
-    back wherever it can show that the trips may share registers instead
-    (`pir.carry`).
+    So there is nothing to arrange around the back edge -- no first trip to
+    build beside the loop, no destination to make resident ahead of it, no
+    register to rename to close a chain -- and the body's registers are
+    declared where its operations declare them, afresh on every trip.  What
+    it costs -- an accumulator stored and read again on every trip -- the
+    pseudo-IR takes back wherever it can show that the trips may share
+    registers instead (`pir.carry`).
     """
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
 
@@ -3197,7 +2962,7 @@ class Generator:
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
     outlives = self._trip_outlives(body, variants, later)
     with self._residency.trip():
-      tables, region = self._bind_holes(variants, written, counter, first=0)
+      tables, region = self._bind_holes(variants, written, counter)
       for descr in body:
         for kind, builder in builders:
           if (isinstance(descr, kind) if isinstance(kind, type)
@@ -3270,15 +3035,14 @@ class Generator:
           out.add(id(dest.tensor))
     return frozenset(out)
 
-  def _bind_holes(self, variants, written, counter: str, first: int):
+  def _bind_holes(self, variants, written, counter: str):
     """The tables a merged run reaches its varying operands through, and the
     bindings that open its body: `(tables, region)`.
 
     One table per hole that selects anything, over the members' symbols, and
     a binding that reads it at `counter` -- or the copy a staged hole makes
     of its member (`_stage_member`).  `written` holds id() of the stand-ins
-    the body writes, whose tables are not `const`; `first` is the member the
-    loop's first trip selects.
+    the body writes, whose tables are not `const`.
     """
     from tensorforge.backend.instructions.ptr_manip import (
         DeclareOperandTable, TableForm)
@@ -3305,7 +3069,7 @@ class Generator:
       # it as such.  So the table holds plain data pointers, which is what a
       # batch-invariant operand's are.  Typed by the stand-in's addressing it
       # would declare `const float **` over `const float *` members.
-      # A member staged into shared memory (`s0`, the peeled first one of a
+      # A member staged into shared memory (`s0`, the first one of a
       # preloaded run) is a data pointer as much as a binding is: left out,
       # SeisSol's `gpu_localFluxAll` would type its table `const float **`
       # over `s0` and `glb_m5`, which nvcc refuses.
@@ -3335,7 +3099,7 @@ class Generator:
           form=(TableForm.SELECT
                 if len(members) <= DeclareOperandTable.SELECT_LIMIT
                 else TableForm.ARRAY),
-          variant=counter, first=first)
+          variant=counter)
       tables.append(table)
       if self._stages(stand_in, written):
         region.extend(self._stage_member(stand_in, table, counter))
@@ -3354,75 +3118,6 @@ class Generator:
       region.extend(pointers.get_instructions())
 
     return tables, region
-
-  def _reset_temporaries(self, region, allocations, follows, carried):
-    """Set the accumulators the body allocated back where their allocations
-    stood, now that the allocations go ahead of the loop.
-
-    A multiplication assigns its result by adding its terms onto the zeros of
-    the register array it allocates, so declared once ahead of the loop that
-    array would start every trip with what the trip before left: the
-    temporary `t0 = I A(i)` of `localFluxAll` held the sum over the faces so
-    far, and the kernel came out as wrong as the first face is small.  Only
-    the arrays a multiplication of the body adds onto, and none the loop
-    carries -- those start where the trip before stopped by design -- nor one
-    a load fills, which a reset would keep from leaving the loop.
-    """
-    from tensorforge.backend.instructions.allocate import RegisterReset
-    from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
-    accumulated = {id(sym) for instr in region
-                   if isinstance(instr, MultilinearInstruction)
-                   for sym in instr.defs()}
-    chained = {id(sym) for _, init, result in carried for sym in (init, result)}
-    resets = {}
-    for alloc in allocations:
-      ahead = follows.get(id(alloc))
-      if (alloc.init_value is None or ahead is None
-          or id(alloc.dest) not in accumulated or id(alloc.dest) in chained):
-        continue
-      resets.setdefault(id(ahead), []).append(
-          RegisterReset(self._context, alloc.dest, alloc.init_value))
-    if not resets:
-      return region
-    return [out for instr in region
-            for out in (*resets.get(id(instr), ()), instr)]
-
-  def _establish(self, body, builders, keys) -> bool:
-    """Make every destination in `keys` resident ahead of a merged run, as
-    the run's first iteration finds it right before adding its terms
-    (`MultilinearBuilder.establish`).
-
-    Each has to be one the body's first touch of adds to -- a chain that
-    starts with a read of it would need the value itself, not a place to
-    add onto.  All or nothing: where one cannot be, what the others recorded
-    is dropped again and nothing is emitted.
-    """
-    planned = []
-    for key in keys:
-      first = next((d for d in body
-                    if any(self._residency_key(v) == key for v in d.reads())
-                    or (d.writes() is not None
-                        and self._residency_key(d.writes()) == key)), None)
-      if (first is None or not getattr(first, 'add', False)
-          or self._residency_key(first.writes()) != key
-          or any(self._residency_key(v) == key for v in first.reads())):
-        return False
-      builder = next((b for kind, b in builders
-                      if (isinstance(first, kind) if isinstance(kind, type)
-                          else kind(first))), None)
-      if not hasattr(builder, 'establish'):
-        return False
-      planned.append((key, first, builder))
-    done, emitted = [], []
-    for key, first, builder in planned:
-      if not builder.establish(first):
-        for name in done:
-          self._residency.drop(name)
-        return False
-      done.append(key)
-      emitted.extend(builder.get_instructions())
-    self._section.ir.extend(emitted)
-    return True
 
   def _rotate_members(self, loop, variants) -> None:
     """Give a run's temporary members one buffer per *slot*, not per member.
@@ -3443,10 +3138,10 @@ class Generator:
     where five members would have been.
 
     The ends need no special case, which is the point of rotating by the
-    member's own position.  The value the peeled prologue leaves in member
-    one *is* slot zero, which the first pass reads; the last pass writes the
-    member the epilogue reads, in whichever slot that member sits.  Both
-    fall out of the mapping rather than being arranged around it.
+    member's own position.  The value the prologue leaves in member one *is*
+    slot zero, which the first pass reads; the last pass writes the member
+    the epilogue reads, in whichever slot that member sits.  Both fall out
+    of the mapping rather than being arranged around it.
 
     A hole and the hole it feeds are one family and must share the slots --
     `dQane_1..4` read and `dQane_2..5` written are five tensors, not two
@@ -3477,25 +3172,16 @@ class Generator:
             f'{sorted(str(s) for s in shapes)}')
       asked = self._context.get_user_options().rotate_slots
       width = asked if asked else distance + 1
-      # Carried in place.  At one slot the family selects nothing, so its
-      # holes need no table -- and a hole with no table needs no address,
-      # which is the only reason the value was in memory at all.  Where the
-      # member the prologue wrote is a register image, the loop reads and
-      # writes that image instead: the residency hands it to whoever asks
-      # for the symbol it is the image of, and the back edge is closed by
-      # the substitution this already makes for an accumulator.
-      #
-      # Only at one slot.  Two slots alternate, and a register has no
-      # address to alternate by -- that wants a copy at the tail of the
-      # trip, not a table.  A loop whose trips are closed
-      # (`_emit_closed_loop`) stores that image ahead of it like anything
-      # else its trips touch, and the family's one buffer is the member's
-      # own; what keeps it in registers there is the pseudo-IR's.
+      # At one slot the family selects nothing, so its holes need no table:
+      # where the prologue left the first member a register image, the later
+      # members take its symbol, and the run stores that image ahead of its
+      # loop like anything else its trips touch (`_emit_closed_loop`).
+      # Keeping it in registers across the trips is the pseudo-IR's to
+      # decide (`pir.carry`), which does not take this round trip back yet.
       home = self._scopes.get_symbol(family[0])
       entry = self._residency.get(home.name) if home is not None else None
       if (width == 1 and home is not None and entry is not None
               and getattr(entry.image, 'stype', None) is SymbolType.Register):
-        home.carried_in_place = True
         for tensor in family[1:]:
           if self._scopes.get_symbol(tensor) is None:
             self._scopes.alias_symbol(tensor, home)
@@ -3522,9 +3208,9 @@ class Generator:
       # A slot nobody else writes has no first user to declare its window,
       # and every other buffer gets one from a store or a load
       # (`temporaries`).  The rotation introduces its own, which is the one
-      # thing that knows their size.  A slot the peeled prologue already
-      # writes -- the family's first member, which is slot zero -- has a
-      # user and is left alone.
+      # thing that knows their size.  A slot the prologue already writes --
+      # the family's first member, which is slot zero -- has a user and is
+      # left alone.
       for slot, symbol in sorted(slots.items()):
         if symbol.get_user_list():
           continue
@@ -3571,27 +3257,6 @@ class Generator:
           f'run selects it per iteration and it has no symbol to select '
           f'through; a temporary cannot be a member (`rolling.roll`)')
     return symbol
-
-  def _residency_key(self, view) -> Optional[str]:
-    """What the residency knows this destination by, or None.
-
-    Entries are keyed by *symbol* name, and spelling the key from the tensor
-    instead -- `glb_` and the tensor's name -- agrees with that for exactly
-    one kind of operand: a kernel parameter, whose binding is `glb_m115`
-    where the tensor is `m115`.  A temporary is `s233` where its tensor is
-    `t232`, so every one of them would miss, silently, and a merged run would
-    carry its parameters round the back edge and none of its temporaries.
-
-    SeisSol's damage step is where that shows: the seven integrals its
-    outputs are read from are temporaries, each left in registers ahead of
-    the loop, and with the chain never closed every iteration would read the
-    image left there.  `I` and `sourceI` would come out at three fifths of
-    what the written-out kernel computes, while
-    `transportDer(0..3)` -- kernel parameters, and so the one kind such a key
-    matches -- would be right.
-    """
-    sym = self._scopes.get_symbol(view.tensor)
-    return None if sym is None else sym.name
 
   def _stages(self, stand_in, written) -> bool:
     """Whether a merged run's hole is staged per iteration (`stage_members`):

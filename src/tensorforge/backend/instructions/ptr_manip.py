@@ -767,12 +767,8 @@ class DeclareOperandTable(AbstractInstruction):
 
   def __init__(self, context: Context, name: str, members, addressing,
                datatype=None, form: 'TableForm' = None, variant: str = None,
-               writable: bool = False, first: int = 0):
+               writable: bool = False):
     super(DeclareOperandTable, self).__init__(context)
-    #: The first member the loop selects.  Those before it are the
-    #: iterations that ran before the loop (`VariantLoop.start`): a select
-    #: chain leaves them out, and nothing reaches them through the table.
-    self._first = first
     #: Whether the loop writes through the members: the table then holds
     #: pointers to mutable data.  Not `const` regardless: a written stand-in's
     #: binding (`float *const glb_v0`) cannot be initialized from a
@@ -814,10 +810,8 @@ class DeclareOperandTable(AbstractInstruction):
     self._is_ready = True
 
   def reachable(self) -> list:
-    """The members the loop may select: those from `first` on.  The ones
-    ahead of it ran before the loop and are reached through no pointer of
-    this table."""
-    return self._members[self._first:]
+    """The members the loop may select."""
+    return list(self._members)
 
   @property
   def form(self) -> 'TableForm':
@@ -969,7 +963,7 @@ class DeclareOperandTable(AbstractInstruction):
     from tensorforge.backend.pir.core import Access
     kind = Effect.READ | (Effect.WRITE if self._writable else Effect.NONE)
     out = []
-    for member in self._members[self._first:]:
+    for member in self._members:
       if member.stype == SymbolType.Data:
         continue
       window = (member.pir_buffer(writer)
@@ -1012,7 +1006,7 @@ class DeclareOperandTable(AbstractInstruction):
     """The conditionals that collapse to the member the counter names, with
     the counter spelled `counter` and each member as `spell` has it."""
     chain = spell(self._members[-1])
-    for index in range(len(self._members) - 2, self._first - 1, -1):
+    for index in range(len(self._members) - 2, -1, -1):
       chain = f'({counter} == {index}) ? {spell(self._members[index])} : {chain}'
     return chain
 
@@ -1052,7 +1046,7 @@ class DeclareOperandTable(AbstractInstruction):
     else:
       type_ = BufferType(dtype, (self._extent(),), MemSpace.GLOBAL,
                          readonly=not self._writable)
-    args = [counter] if len(self._members) - self._first > 1 else []
+    args = [counter] if len(self._members) > 1 else []
 
     def spell(member):
       value = self._value_of(writer, member)
@@ -1079,7 +1073,7 @@ class DeclareOperandTable(AbstractInstruction):
     dtype = self._datatype or self._context.fp_type
     values = []
     for e in range(stack):
-      args = [counter] if len(self._members) - self._first > 1 else []
+      args = [counter] if len(self._members) > 1 else []
 
       def spell(member, _e=e):
         pointers = member.pir_stack(writer)
@@ -1160,27 +1154,15 @@ class VariantLoop(AbstractInstruction):
   """
 
   def __init__(self, context: Context, counter: str, count: int,
-               region, tables=(), unroll: bool = False, start: int = 0,
-               carried=()):
+               region, tables=(), unroll: bool = False):
     super(VariantLoop, self).__init__(context)
     if count < 1:
       raise GenerationError(f'a loop runs at least once, given {count}')
-    if not 0 <= start < count:
-      raise GenerationError(f'a loop starting at {start} of {count} runs '
-                            f'no iterations')
     self._counter = counter
-    self._start = start
     self._count = count
     self._region = list(region)
     self._tables = list(tables)
     self._unroll = unroll
-    #: `(init, result)` per value the body threads through itself.
-    #:
-    #: `init` is the link the body reads, `result` the link it writes.  The
-    #: two being different registers is the whole of what a back edge has to
-    #: fix, and an empty tuple here means a body that carries nothing -- not a
-    #: body whose carried value went unnoticed.
-    self._carried = tuple(carried)
     self._join_tables()
     self._is_ready = True
 
@@ -1242,10 +1224,6 @@ class VariantLoop(AbstractInstruction):
       shared = AliasClass('|'.join(t.name for t in group), tuple(members))
       for table in group:
         table.alias_class = shared
-
-  @property
-  def carried(self):
-    return self._carried
 
   # -- structure ----------------------------------------------------------- #
 
@@ -1310,11 +1288,9 @@ class VariantLoop(AbstractInstruction):
 
     Which is everything but the bindings its counter selects, which are
     declared in the body and scoped to it.  The loop runs at least once
-    (`__init__`), registers are allocated ahead of it
-    (`Generator._emit_variant_loop`) and shared windows declared ahead of it
-    (`_declare_windows_early`), so an operand the first iteration stages is
-    there for whatever reads it after the loop -- a later operation the
-    residency or the scopes hand the staged copy.
+    (`__init__`) and shared windows are declared ahead of it
+    (`_declare_windows_early`), so what the first iteration writes into one
+    is there for whatever reads it after the loop.
     """
     scoped = {id(sym) for instr in self._region
               if isinstance(instr, GetElementPtr) for sym in instr.defs()}
@@ -1375,14 +1351,10 @@ class VariantLoop(AbstractInstruction):
 
   # -- emission ------------------------------------------------------------ #
 
-  @property
-  def start(self) -> int:
-    return self._start
-
   def header(self) -> str:
     # `int32_t` and not `int`: the same type, and the spelling the IR renders
     # from `INDEX`, so the two ways this loop can be emitted agree.
-    return (f'int32_t {self._counter} = {self._start}; '
+    return (f'int32_t {self._counter} = 0; '
             f'{self._counter} < {self._count}; ++{self._counter}')
 
   def _emit_region(self, writer, per_iteration) -> None:
@@ -1397,8 +1369,7 @@ class VariantLoop(AbstractInstruction):
     The same hoist `BatchLoop` and `Conditional` do out of their own
     regions, for the same reason: a window is declared by the first
     instruction that fills it, and one inside the body would scope the name
-    to the body, where everything after the loop that reads the buffer --
-    the residency hands a later operation the copy the loop staged, and a
+    to the body, where everything after the loop that reads the buffer -- a
     temporary the loop assigns is read behind it -- names something never
     declared where it stands.  The offset is the allocator's and the same on
     every trip, so the declaration does not depend on the counter.  Nested
@@ -1434,7 +1405,7 @@ class VariantLoop(AbstractInstruction):
     if hasattr(writer, 'for_'):
       # `extern` because the counter's name is the macro layer's: a table
       # built where the counter is no value (`For`, below) spells it as text.
-      with writer.for_(self._start, self._count, 1, extern=self._counter,
+      with writer.for_(0, self._count, 1, extern=self._counter,
                        unroll=self._unroll, rolled=True) as loop:
         # The counter as a value, which the select chains and the array
         # accesses read as an operand: an edge back to the loop, so nothing
@@ -1450,5 +1421,5 @@ class VariantLoop(AbstractInstruction):
       self._emit_region(writer, per_iteration)
 
   def __str__(self):
-    return (f'for {self._counter} in [{self._start},{self._count}): '
+    return (f'for {self._counter} in [0,{self._count}): '
             f'{len(self._region)} instruction(s)')

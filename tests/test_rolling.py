@@ -248,31 +248,26 @@ def test_the_slots_a_carried_family_turns_through_are_asked_for(slots, want):
     assert len(_slot_buffers(gen)) == want
 
 
-def test_one_slot_carries_the_family_in_registers():
-    """At one slot the family selects nothing, so its holes need no table --
-    and a hole with no table needs no address, which was the only reason the
-    value was in memory.  The open run (`closed_trips` off) then reads and
-    writes the register image the prologue left, and the buffer the rotation
-    would have taken is not taken at all: on the five-step chain that is
-    16 kB of a gfx942 block, and the list written out takes none either.
+def test_one_slot_takes_no_buffer_of_its_own():
+    """At one slot the family selects nothing, so its holes need no table,
+    and the family's one buffer is the member's the prologue wrote: the
+    buffer the rotation would have taken is not taken at all -- on the
+    five-step chain that is 16 kB of a gfx942 block.
     """
     gen = _merged_build(roll(_carried_chain(), min_count=2),
-                        arch='gfx942', backend='hip', rotate_slots=1,
-                        closed_trips=False)
+                        arch='gfx942', backend='hip', rotate_slots=1)
     assert not _slot_buffers(gen)
-    src = gen.get_kernel()
-    assert 'store{r>s}' not in src, 'the carry still goes through memory'
-    assert 'Table' not in src, 'a hole with one member still selects'
+    assert 'Table' not in gen.get_kernel(), 'a hole with one member still selects'
 
 
 def test_a_temporary_that_is_not_carried_is_left_written_out():
     """Rotating it would take away the registers the body gives it.
 
-    A scratch written and read inside one chunk is dead at its end, and the
-    loop already starts it from zeros on every trip
-    (`Generator._reset_temporaries`).  Only a family that crosses an
-    iteration boundary has anything to rotate, and this one does not: each
-    chunk names its own and nothing reads it afterwards.
+    A scratch written and read inside one chunk is dead at its end, and
+    every trip declares its registers afresh (`Generator._emit_closed_loop`).
+    Only a family that crosses an iteration boundary has anything to rotate,
+    and this one does not: each chunk names its own and nothing reads it
+    afterwards.
     """
     descrs = [d for k in range(4) for d in
               [gemm(make('A', [56, 56]), make(f'in{k}', [56, 9]),
@@ -875,25 +870,9 @@ def test_the_loop_runs_every_iteration():
     """Nothing is built beside the loop: every trip runs the body, and adds
     onto what the trip before it stored (`Generator._emit_closed_loop`)."""
     ahead, loop, _ = _around_the_loop(_merged_build(roll(accumulation())))
-    assert (loop.start, loop.count) == (0, 4)
+    assert loop.count == 4
     assert loop.header().startswith('int32_t ')
     assert 'MultilinearInstruction' not in _kinds(ahead)
-
-
-def test_the_destination_is_loaded_ahead_of_the_loop():
-    """Where the policy keeps results in registers, the open run's first
-    iteration finds the destination loaded, as the written-out list's first
-    operation would have loaded it, and every iteration adds onto the one
-    before it."""
-    ahead, loop, behind = _around_the_loop(
-        _merged_build(roll(accumulation()), closed_trips=False))
-    loads = [i for i in ahead if type(i).__name__ == 'GlbToRegLoader']
-    assert len(loads) == 1
-    assert loads[0].uses()[0].obj.alias == 'Q'
-    # the varying operand is still loaded every iteration, and the sum goes
-    # out once, after the loop
-    assert _kinds(loop.region).count('GlbToRegLoader') == 1
-    assert _kinds(behind).count('StoreRegToGlb') == 1
 
 
 def test_an_atomic_destination_starts_from_zeros():
@@ -926,103 +905,11 @@ def test_what_every_iteration_shares_leaves_the_loop():
     assert not any(s.op is Op.WAIT for s in body)
 
 
-def _writer_of_the_destination(loop):
-    """The instruction that reads the accumulated value and writes it back.
-
-    An accumulation's epilogue (`MultilinearEpilogue`): the contraction only
-    fills its own accumulator, and the previous value and the destination are
-    the epilogue's.  Where there is none the contraction itself.
-    """
-    kinds = [type(i).__name__ for i in loop.region]
-    kind = ('MultilinearEpilogue' if 'MultilinearEpilogue' in kinds
-            else 'MultilinearInstruction')
-    return next(i for i in loop.region if type(i).__name__ == kind)
-
-
-def _loop_of(descrs):
-    """The open run's loop (`closed_trips` off), whose body threads a value
-    through itself."""
-    from tensorforge.common.context import Context, Options
+def _stores(descrs):
+    from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
     gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
-                                    fp_type=DTYPE,
-                                    options=Options(closed_trips=False)))
-    gen._emit_loops = True
-    gen.generate()
-    return next(i for i in gen._sections[0].ir
-                if type(i).__name__ == 'VariantLoop')
-
-
-def test_the_loop_names_the_value_its_body_threads_through_itself():
-    """The pair a back edge has to close, read off either side of the build.
-
-    A destination is not accumulated in place -- each build takes a fresh
-    register and reads the last -- so what the body holds is one turn of the
-    expanded form's chain, and the two links being different registers is the
-    whole of what is missing.
-    """
-    loop = _loop_of(roll(accumulation()))
-    assert len(loop.carried) == 1
-    init, result = loop.carried[0]
-    # Reported after the substitution closed it, so the two links are one.
-    assert init is result
-
-    compute = _writer_of_the_destination(loop)
-    assert init in compute.uses()
-    assert init in compute.defs()
-
-
-def test_a_body_that_accumulates_nothing_carries_nothing():
-    """Empty means nothing to carry, not a carried value gone unnoticed."""
-    assert _loop_of(roll(separate())).carried == ()
-
-
-def test_the_body_reads_and_writes_the_same_register():
-    """The chain closed: a repeated body has to land where it started.
-
-    Substituted on the built region rather than arranged during the build,
-    because what the residency hands out is its business and the fact that a
-    body will be repeated is not something it can know.
-    """
-    loop = _loop_of(roll(accumulation()))
-    compute = _writer_of_the_destination(loop)
-    written = {s.name for s in compute.defs()}
-    assert written & {s.name for s in compute.uses()} == written
-
-
-def test_the_writeback_stores_the_register_the_loop_kept():
-    """Emitted after the open run's loop is assembled, so the residency has
-    to be told."""
-    from tensorforge.common.context import Context, Options
-    from tensorforge.generators.generator import Generator
-    gen = Generator(roll(accumulation()),
-                    Context(arch='sm_86', backend='cuda', fp_type=DTYPE,
-                            options=Options(closed_trips=False)))
-    gen._emit_loops = True
-    gen.generate()
-    loop = next(i for i in gen._sections[0].ir
-                if type(i).__name__ == 'VariantLoop')
-    stores = [i for i in gen._sections[0].ir
-              if type(i).__name__ == 'StoreRegToGlb']
-    kept = {s.name for i in loop.region for s in i.defs()}
-    assert len(stores) == 1
-    assert {s.name for s in stores[0].uses()} <= kept
-
-
-def test_substitution_reports_whether_it_reached_anything():
-    """So a substitution that did nothing is not mistaken for one applied."""
-    loop = _loop_of(roll(accumulation()))
-    compute = next(i for i in loop.region
-                   if type(i).__name__ == 'MultilinearInstruction')
-    absent = object()
-    assert compute.substitute(absent, absent) is False
-
-
-def _stores(descrs, **options):
-    from tensorforge.common.context import Context, Options
-    from tensorforge.generators.generator import Generator
-    gen = Generator(descrs, Context(arch='sm_86', backend='cuda',
-                                    fp_type=DTYPE, options=Options(**options)))
+                                    fp_type=DTYPE))
     gen._emit_loops = True
     gen.generate()
     ir = gen._sections[0].ir
@@ -1032,24 +919,11 @@ def _stores(descrs, **options):
     return inside, after
 
 
-def test_an_accumulator_is_written_once_after_the_loop():
-    """Which is the whole reason for rolling this one: the sum goes out once,
-    where the open run carries it in registers."""
-    assert _stores(roll(accumulation()), closed_trips=False) == (0, 1)
-
-
 def test_a_destination_that_varies_is_written_every_iteration():
     """Its address is a different tensor each time: every trip stores what
     it computes where its member says."""
     inside, _ = _stores(roll(recursion()))
     assert inside == 1
-
-
-def test_the_rule_is_whether_the_destination_varies_not_whether_it_escapes():
-    """An accumulator escapes too, and asking that stores the sum every pass."""
-    loop = [d for d in roll(accumulation()) if isinstance(d, ForDescr)][0]
-    assert 'Q' in loop.escaping
-    assert _stores(roll(accumulation()), closed_trips=False)[0] == 0
 
 
 def _flux(count=4):
@@ -1058,46 +932,22 @@ def _flux(count=4):
                  make('Q', [9, 4]), add=(i > 0)) for i in range(count)]
 
 
-def test_a_run_after_an_assigning_contribution_is_not_peeled_again():
-    """The residency the open run would establish is already established.
-
-    A frontend writes the first contribution as an assignment and the rest as
-    additions, so the first falls out of the run -- and it is exactly the
-    iteration a peel would add.  Peeling on top of it writes a second copy of
-    the body for nothing.
+def test_a_run_after_an_assigning_contribution_is_built_once():
+    """A frontend writes the first contribution as an assignment and the rest
+    as additions, so the first falls out of the run, and the run is the
+    additions: the body is built once, inside the loop.
     """
-    from tensorforge.common.context import Context, Options
+    from tensorforge.common.context import Context
     from tensorforge.generators.generator import Generator
 
     gen = Generator(roll(_flux()), Context(arch='sm_86', backend='cuda',
-                                           fp_type=DTYPE,
-                                           options=Options(closed_trips=False)))
+                                           fp_type=DTYPE))
     gen._emit_loops = True
     gen.generate()
     ir = gen._sections[0].ir
-    loop = next(i for i in ir if type(i).__name__ == 'VariantLoop')
-    assert loop.start == 0
+    assert any(type(i).__name__ == 'VariantLoop' for i in ir)
     outside = [i for i in ir if type(i).__name__ == 'MultilinearInstruction']
     assert len(outside) == 1
-
-
-def test_where_every_result_goes_out_to_memory_the_run_is_peeled():
-    """A policy that stores each result as it is computed leaves nothing in
-    registers for the open run's next iteration to add onto, so there is no
-    image to make resident ahead of the loop
-    (`MultilinearBuilder.establish`)."""
-    from dataclasses import replace
-
-    from tensorforge.common import target
-    base = target.PREFERENCES['nvidia']
-    target.PREFERENCES['nvidia'] = replace(base, placement=replace(
-        base.placement, keep_results_in_registers=False))
-    try:
-        _, loop, _ = _around_the_loop(
-            _merged_build(roll(accumulation()), closed_trips=False))
-    finally:
-        target.PREFERENCES['nvidia'] = base
-    assert loop.start == 1
 
 
 def _read_first(count=4):
@@ -1110,43 +960,6 @@ def _read_first(count=4):
         out.append(gemm(make(f'V{i}', [9, 9]), tmp, make('D', [9, 4]),
                         add=True))
     return out
-
-
-def test_a_run_that_reads_its_destination_first_is_peeled():
-    """A chain that starts with a read of the destination needs its value,
-    not a place to add onto, so the open run's first iteration is built
-    beside the loop and leaves the residency behind."""
-    ahead, loop, _ = _around_the_loop(
-        _merged_build(roll(_read_first()), closed_trips=False))
-    assert (loop.start, loop.count) == (1, 4)
-    assert 'MultilinearInstruction' in _kinds(ahead)
-
-
-def _add_onto_a_read(count=4):
-    """`D += W_i D`: each iteration's first touch of the destination is an
-    accumulation that also reads it."""
-    return [gemm(make(f'W{i}', [9, 9]), make('D', [9, 4]), make('D', [9, 4]),
-                 add=True) for i in range(count)]
-
-
-def test_a_run_that_adds_onto_what_it_reads_is_peeled():
-    """An accumulation that reads its own destination needs the value as
-    well as a place to add onto -- decided at the chain's first statement,
-    which here is the accumulation itself."""
-    ahead, loop, _ = _around_the_loop(
-        _merged_build(roll(_add_onto_a_read()), closed_trips=False))
-    assert (loop.start, loop.count) == (1, 4)
-    assert 'MultilinearInstruction' in _kinds(ahead)
-
-
-def test_a_destination_assembled_from_several_writes_is_peeled():
-    """Each write of a destination written in slices goes out to memory as
-    it is produced, so there is no image for the open run to carry from one
-    iteration to the next (`MultilinearBuilder.establish`)."""
-    gen = _with_option(_accumulate_then_read().descr_list(),
-                       merge_variants=True, closed_trips=False)
-    _, loop, _ = _around_the_loop(gen)
-    assert loop.start == 1
 
 
 def test_the_driver_counts_what_the_launcher_takes():
@@ -1650,25 +1463,6 @@ def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     ('carried_from_ahead', False, {}),
     ('carried_from_ahead', False, {'rotate_slots': 1}),
     ('own', False, {}),
-    ('accumulation', False, {'closed_trips': False}),
-    ('accumulation', True, {'closed_trips': False}),
-    ('read_first', False, {'closed_trips': False}),
-    ('staged', False, {'stage_members': True, 'closed_trips': False}),
-    ('scratch', False, {'closed_trips': False}),
-    ('scratch', True, {'closed_trips': False}),
-    ('carried', False, {'closed_trips': False}),
-    ('chain', False, {'closed_trips': False}),
-    ('chain', False, {'wrap_early': False, 'closed_trips': False}),
-    ('chain', False, {'enable_wrap_loads': False, 'closed_trips': False}),
-    ('started', False, {'closed_trips': False}),
-    ('started', True, {'closed_trips': False}),
-    ('started_twice', False, {'closed_trips': False}),
-    ('read_first_temporary', False, {'closed_trips': False}),
-    ('read_by_the_next_trip', False, {'closed_trips': False}),
-    ('projected', False, {'closed_trips': False}),
-    ('carried_from_ahead', False, {'closed_trips': False}),
-    ('carried_from_ahead', False, {'rotate_slots': 1, 'closed_trips': False}),
-    ('own', False, {'closed_trips': False}),
 ])
 def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
                                                               options):
@@ -1686,12 +1480,7 @@ def test_a_merged_run_computes_what_the_list_written_out_does(shape, atomics,
     levels through the kernel's own arguments, as SeisSol's anelastic time
     derivative does: the hole a trip writes is the hole the next one reads,
     and the read of the next trip's level, issued a trip ahead (`pir.wrap`),
-    has to wait for this trip's write of it.  And most of them again with
-    the trips open (`closed_trips` off): the destination made resident ahead
-    of the loop, the first iteration built beside it where it cannot be
-    (`read_first`), and the registers of `scratch`'s temporary allocated
-    ahead of the loop and set back on every trip
-    (`Generator._reset_temporaries`)."""
+    has to wait for this trip's write of it."""
     from dataclasses import replace
 
     import numpy as np
@@ -1957,7 +1746,7 @@ def test_a_run_reads_its_table_and_its_factor_inside_the_loop():
     assert not early, f'read before it is bound: {early}'
 
 
-# -- closed trips (`Options.closed_trips`) and the carry (`pir.carry`) ------- #
+# -- closed trips (`Generator._emit_closed_loop`) and the carry (`pir.carry`) - #
 
 def _around_the_run(gen):
     """`(ahead, loop, behind)` in the section's pseudo-IR: the statements of
@@ -1999,17 +1788,15 @@ def _images(stmts, buffer, loading):
 
 
 def test_a_closed_trip_hands_the_next_one_nothing_but_memory():
-    """With its trips closed, the loop runs every iteration, its body
-    declares its own registers, and no register is threaded through the
-    trips or set back on each.  Without the carry the accumulator goes to
+    """With its trips closed, the loop runs every iteration and its body
+    declares its own registers.  Without the carry the accumulator goes to
     memory at the tail of every trip and comes back at the head of the
     next."""
     from tensorforge.backend.pir.core import walk_stmts
     gen = _merged_build(roll(accumulation()), carry_trips=False)
     ahead, loop, _ = _around_the_loop(gen)
-    assert (loop.start, loop.carried) == (0, ())
+    assert loop.count == 4
     assert 'RegisterAlloc' not in _kinds(ahead)
-    assert 'RegisterReset' not in _kinds(loop.region)
     q = _output(gen)
     _, run, _ = _around_the_run(gen)
     touched = [a for s in walk_stmts(run.regions[0].body)
@@ -2208,7 +1995,7 @@ def test_a_closed_trip_stores_a_temporary_the_next_trip_reads(behind):
     gen = _merged_build(roll(_read_first_temporary(behind=behind)),
                         carry_trips=False)
     _, loop, _ = _around_the_loop(gen)
-    assert (loop.start, loop.count) == (0, 4)
+    assert loop.count == 4
     tail = []
     for instr in reversed(loop.region):
         if type(instr).__name__ not in ('StoreRegToGlb', 'StoreRegToShr'):

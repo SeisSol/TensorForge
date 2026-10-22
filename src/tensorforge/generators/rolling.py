@@ -319,12 +319,11 @@ def _rotatable(run, chunks) -> bool:
             return False
         # Carried, and not merely temporary.  A scratch that is written and
         # read inside one chunk is dead at its end: it wants the registers
-        # the body already gives it (`Generator._reset_temporaries`), and a
-        # buffer per slot would take that away and leave it unzeroed on the
-        # next trip.  Only a family that crosses an iteration boundary has
-        # anything to rotate -- the ends do not have to be carried
-        # themselves, since the first is what the prologue leaves and the
-        # last is what the epilogue reads.
+        # every trip declares afresh (`Generator._emit_closed_loop`), and a
+        # buffer per slot would take those away.  Only a family that crosses
+        # an iteration boundary has anything to rotate -- the ends do not
+        # have to be carried themselves, since the first is what the
+        # prologue leaves and the last is what the epilogue reads.
         if not any(getattr(t, 'alias', None) in names for t in family):
             return False
     return True

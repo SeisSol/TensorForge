@@ -782,26 +782,6 @@ declare('rotate_slots',
             'nothing and is allowed only because refusing it would be a '
             'rule with no case behind it.')
 
-declare('closed_trips',
-        default=True,
-        parse=parse_bool,
-        doc='Lower a merged run so that its trips hand each other nothing but '
-            'memory.\n'
-            'Ahead of the loop every result the body reads or writes is stored '
-            'where its symbol says; the body is built in a residency of its '
-            'own (`Residency.trip`), so it starts with nothing in registers a '
-            'trip could have changed; and at its end every result a later '
-            'trip or the code behind the loop reads is stored -- a temporary '
-            'the trip computes for itself is not.  The body is then the same '
-            'on every trip by construction.  What that costs, an accumulator '
-            'read and written through memory on every trip, the pseudo-IR '
-            'takes back where it can show that it may (`pir.carry`).  See '
-            '`Generator._emit_closed_loop`.  On by default; off, the first '
-            'trip is built beside the loop where the body cannot start from '
-            'a destination made resident ahead of it, and the trips hand '
-            'each other the accumulator in the registers they computed it '
-            'in.')
-
 declare('carry_trips',
         default=True,
         parse=parse_bool,
@@ -810,8 +790,8 @@ declare('carry_trips',
             'stored at its tail is loaded once ahead of the loop and stored '
             'once behind it.  Only where every lane is shown to read back what '
             'it stored, and nothing else in the loop touches the buffer '
-            '(`pir.carry`).  A loop whose trips are closed (`closed_trips`) is '
-            'one that hands its accumulators over that way.')
+            '(`pir.carry`).  Every merged run hands its accumulators over '
+            'that way (`Generator._emit_closed_loop`).')
 
 declare('forward_across',
         rule=lambda target: target.prefs.placement.read_across,

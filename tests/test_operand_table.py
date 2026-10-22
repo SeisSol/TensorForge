@@ -487,6 +487,5 @@ def test_the_loop_takes_the_structured_path_where_one_is_open():
 
 def test_the_text_path_still_writes_a_counted_loop():
     from tensorforge.backend.instructions.ptr_manip import VariantLoop
-    text = written(VariantLoop(context(), 'face', 4, [Marker('body();')],
-                               start=1))
-    assert 'for (int32_t face = 1; face < 4; ++face)' in text
+    text = written(VariantLoop(context(), 'face', 4, [Marker('body();')]))
+    assert 'for (int32_t face = 0; face < 4; ++face)' in text

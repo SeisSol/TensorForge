@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-import copy
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 from tensorforge.common.context import Context
@@ -173,46 +172,6 @@ class AbstractInstruction(ABC):
   # that case, so a pass that reorders on the basis of accesses stays
   # conservative rather than silently gaining permission.
   # ----------------------------------------------------------------- #
-
-  def substitute(self, old, new) -> bool:
-    """Make this instruction name `new` wherever it named `old`.
-
-    Reflective over the same attributes `defs` and `uses` read, and for the
-    same reason: what an instruction calls its destination and its operands is
-    a convention, not an interface, and a substitution that knew each kind
-    would have to be extended for every kind that is ever added.
-
-    Returns whether anything changed, so a caller can tell a substitution that
-    did nothing from one it never reached.
-    """
-    changed = False
-    for attr in ('_dest', '_src'):
-      if getattr(self, attr, None) is old:
-        setattr(self, attr, new)
-        changed = True
-    for attr in ('_ops', '_srcs', '_operands'):
-      held = getattr(self, attr, None)
-      if isinstance(held, list) and any(x is old for x in held):
-        setattr(self, attr, [new if x is old else x for x in held])
-        changed = True
-      # An operand held as a view (`SymbolView`: the multilinear's `_ops`,
-      # the pointwise `_srcs`) names its symbol one level down.  Missed, a
-      # merged run closing its chain (`Generator`, `carried`) would rename the
-      # epilogue writing the image and leave every reader of it in the body
-      # on the register the substitution retired -- never written inside the
-      # loop.  A copy, not the view itself: a view may be shared with
-      # instructions outside the region.
-      if isinstance(held, list) and any(
-          getattr(x, 'symbol', None) is old for x in held):
-        setattr(self, attr, [_renamed(x, new)
-                             if getattr(x, 'symbol', None) is old else x
-                             for x in held])
-        changed = True
-    view = getattr(self, '_dest', None)
-    if getattr(view, 'symbol', None) is old:
-      self._dest = _renamed(view, new)
-      changed = True
-    return changed
 
   def defs(self) -> Tuple:
     """Symbols written by this instruction."""
@@ -628,10 +587,3 @@ class AbstractInstruction(ABC):
 
   def set_threadconfig_pre(self, num_threads, mults):
     pass
-
-
-def _renamed(view, symbol):
-  """`view` over `symbol` instead, the rest of it unchanged."""
-  out = copy.copy(view)
-  out.symbol = symbol
-  return out
