@@ -51,26 +51,32 @@ _SPACES = (MemSpace.GLOBAL, MemSpace.SHARED, MemSpace.REGISTER)
 
 def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
                    arena: Optional[str] = None, masks: bool = True,
-                   rounds: int = 2,
+                   rounds: int = 2, registers: bool = True,
                    report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with its loads taken from what their own lane stored, and its
     stores nothing reads dropped (see the module); `scratch` makes the
     builder new statements are built with.  Until nothing changes, or
     `rounds` times: a load taken from a register may read one that a copy
     filled, which the next round takes from where the copy did.  A body too
-    large for the flow (`flow.TooLarge`) is left as it is."""
+    large for the flow (`flow.TooLarge`) is left as it is.
+
+    Without `registers`, only loads of memory, and only from what their own
+    lane stored: what the atomics ask runs ahead of the wrap, which counts
+    the register copies this would take away, and a load taken from an
+    earlier load keeps that load's registers until here
+    (`pipeline.standard_pipeline`)."""
     for _ in range(rounds):
         # Let the last round's flow go first: two at once would hold twice
         # what the body takes.
         flow = None
         try:
             flow = Flow(body, threads, arena, masks=masks, values=True,
-                        before=False)
+                        before=False, fetches=registers)
         except TooLarge as why:
             if report is not None:
                 report.append(f'forward: {why}; left as it is')
             break
-        out = _Forward(flow, scratch, report).run()
+        out = _Forward(flow, scratch, report, registers=registers).run()
         if out is body:
             break
         body = out
@@ -199,10 +205,13 @@ def _strip(body: Sequence[Stmt], dead: Set[int]) -> Tuple[Stmt, ...]:
 class _Forward:
     """One round over the loads of a body."""
 
-    def __init__(self, flow: Flow, scratch, report: Optional[List[str]]):
+    def __init__(self, flow: Flow, scratch, report: Optional[List[str]],
+                 registers: bool = True):
         self.flow = flow
         self.scratch = scratch
         self.report = report
+        #: Whether a load of registers is taken as well as one of memory.
+        self.registers = registers
         self.allocs: Dict[int, Stmt] = {
             id(s.target[0]): s for s in walk_stmts(flow.body)
             if s.op == Op.ALLOC and s.target}
@@ -216,7 +225,9 @@ class _Forward:
 
     def run(self) -> Tuple[Stmt, ...]:
         for s in walk_stmts(self.flow.body):
-            if self._candidate(s):
+            if self._candidate(s) and (
+                    self.registers
+                    or s.accesses[0].space is not MemSpace.REGISTER):
                 self._take(s)
         dead = _dead_stores(self.flow, set(self.rebuilt), self.kept)
         if not self.rebuilt and not dead:

@@ -21,6 +21,7 @@ import contextlib
 from tensorforge.backend.pir import IRBuilder, dce, fold, verify
 from tensorforge.backend.pir.atomics import accumulate_atomically
 from tensorforge.backend.pir.carry import carry_trips
+from tensorforge.backend.pir.forward import forward_memory
 from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, BufferType,
                                           Effect, MemSpace, Op, ScalarType,
                                           Uniformity, walk_stmts)
@@ -53,7 +54,9 @@ class Acc:
     from two loops of their own.  `assigned` stores a number into the
     element before the load, under `guarded`'s kind of guard, which
     `'element'` makes an element's mask.  `unplaced` stores into a row the
-    body takes from outside, which no flow can place.
+    body takes from outside, which no flow can place.  `preread` loads the element into
+    registers of its own ahead of everything and stores their first column
+    into another output.
     """
 
     def __init__(self, *, read_after=False, sum_read=False, bias_read=False,
@@ -61,7 +64,7 @@ class Acc:
                  other_lane=False, trips=0, carried=False, uninit=False,
                  guarded=False, guarded_load=False, narrow_load=False,
                  flagged_load=False, split_store=False, assigned=False,
-                 unplaced=False):
+                 unplaced=False, preread=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         q = self.q = b.decl_expr(
@@ -137,6 +140,11 @@ class Acc:
                             b.store(q, value, element(j, target))
 
         def once():
+            if preread:
+                early = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='e',
+                                extern='e', init='{}')
+                load_bias(early)
+                b.store(p, b.load(early, 0), lane)
             if assigned:
                 with b.if_(valid):
                     with b.for_(0, COLS, 1, unroll=True) as hop:
@@ -366,6 +374,34 @@ def test_onto_a_store_under_an_elements_mask_it_is_added():
     assert len(_stores_of_q(out, acc.q)) == 2
 
 
+def test_a_bias_its_lanes_loaded_before_is_added_onto_atomically():
+    """The lanes loaded the element before, and its registers hold it
+    still.  Taking the bias from them would keep them until the store; the
+    atomic add needs neither them nor the load."""
+    acc = Acc(preread=True)
+    out = acc.run()
+    assert len(_atomic(out)) == 1, acc.report
+    assert len(_loads_of_q(out, acc.q)) == 1
+
+
+def test_a_bias_its_lane_stored_is_taken_from_the_registers_first():
+    """The store before the load wrote a number the load reads for
+    certain.  Ahead of the atomics the forward pass takes the number for
+    the load, as the pipeline runs it (`standard_pipeline`), and the second
+    store replaces the first, which goes: one plain store, where an atomic
+    add would have kept both."""
+    acc = Acc(assigned=True, guarded='element')
+    body = forward_memory(acc.body, acc.b.scratch, threads=LANES,
+                          arena='shrMem', registers=False)
+    out = accumulate_atomically(dce(fold(body)), threads=LANES,
+                                arena='shrMem', supported=lambda v: True)
+    out = dce(fold(out))
+    verify(out)
+    assert not _atomic(out)
+    assert not _loads_of_q(out, acc.q)
+    assert len(_stores_of_q(out, acc.q)) == 1
+
+
 def test_onto_a_store_under_a_guard_of_unknown_value_it_is_kept():
     """The same under a guard spelled in text that is no mask: where it
     does not hold, the bias reads what memory held before, which the store
@@ -384,3 +420,22 @@ def test_a_body_past_the_budget_keeps_every_store(monkeypatch):
     assert _loads_of_q(out, acc.q)
     assert any('more than 10 elements' in line for line in acc.report), \
         acc.report
+
+
+def test_the_pipeline_takes_a_bias_the_lane_stored_ahead_of_the_atomics():
+    """`standard_pipeline` with both: the forward pass over the loads of
+    memory runs ahead of the atomics, and the store it leaves is plain."""
+    from tensorforge.backend.pir import optimize
+    from tensorforge.backend.pir.pipeline import Atomics, Forward
+    acc = Acc(assigned=True, guarded='element')
+    out = optimize(acc.body,
+                   atomics=Atomics(lambda v: True, threads=LANES,
+                                   arena='shrMem'),
+                   early_forward=Forward(acc.b.scratch, threads=LANES,
+                                         arena='shrMem', registers=False))
+    assert not _atomic(out)
+    assert not _loads_of_q(out, acc.q)
+    assert len(_stores_of_q(out, acc.q)) == 1
+    alone = optimize(acc.body, atomics=Atomics(lambda v: True,
+                                               threads=LANES, arena='shrMem'))
+    assert _atomic(alone)

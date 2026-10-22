@@ -2814,6 +2814,8 @@ GROUPS = {
          sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
         ('a store the flow cannot place taken for one it can',
          sub(ATOMICS, '    if id(s) in flow.opaque:\n', '    if False:\n', 1)),
+        ('the loads of memory not taken ahead of the atomics',
+         sub(PIPE, '    if early_forward is not None:\n', '    if False:\n', 1)),
     ]),
     # Every register image of a tensor in the lanes of its rows: the lead
     # loop's origin, the stagings' shifts, and the images that hold their

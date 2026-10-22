@@ -380,17 +380,23 @@ class Forward(Pass):
     is_transform = True
 
     def __init__(self, scratch, threads: int, arena: Optional[str] = None,
-                 report: Optional[List[str]] = None):
+                 report: Optional[List[str]] = None, registers: bool = True):
         self._scratch = scratch
         self._threads = threads
         self._arena = arena
         self._report = report
+        #: Whether loads of registers are taken too, or only loads of memory
+        #: (`standard_pipeline`, ahead of the atomics).
+        self._registers = registers
+        if not registers:
+            self.name = 'forward-memory'
 
     def run(self, pc: BodyContext) -> None:
         if pc.explicit_simd:
             return
         pc.body = forward_memory(pc.body, self._scratch,
                                  threads=self._threads, arena=self._arena,
+                                 registers=self._registers,
                                  report=self._report)
 
 
@@ -456,7 +462,8 @@ def standard_pipeline(debug: str = '',
                       rows: Optional[GroupRows] = None,
                       carry: Optional[CarryTrips] = None,
                       atomics: Optional[Atomics] = None,
-                      forward: Optional[Forward] = None) -> PassManager:
+                      forward: Optional[Forward] = None,
+                      early_forward: Optional[Forward] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -579,6 +586,11 @@ def standard_pipeline(debug: str = '',
     if carry is not None:
         pm.add(carry)
         pm.add(Rewrite('carry-dce', dce, preserves=('flat',)))
+    if early_forward is not None:
+        pm.add(early_forward)
+        for name, fn in (('forward-memory-fold', fold),
+                         ('forward-memory-dce', dce)):
+            pm.add(Rewrite(name, fn, preserves=('flat',)))
     if atomics is not None:
         pm.add(atomics)
         for name, fn in (('atomics-fold', fold), ('atomics-dce', dce)):
@@ -625,6 +637,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              carry: Optional[CarryTrips] = None,
              atomics: Optional[Atomics] = None,
              forward: Optional[Forward] = None,
+             early_forward: Optional[Forward] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
@@ -636,12 +649,13 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     registers what the trips of a merged run hand each other through memory,
     ``atomics`` adds an accumulation atomically where nothing reads the
     sum, and ``forward`` takes a load from where its own lane's store took
-    the value; ``where`` names what built the body in the findings `debug`
-    reports.
+    the value -- ``early_forward`` a load of memory, ahead of the atomics;
+    ``where`` names what built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
-                      shards, rows, carry, atomics, forward).run(pc)
+                      shards, rows, carry, atomics, forward,
+                      early_forward).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

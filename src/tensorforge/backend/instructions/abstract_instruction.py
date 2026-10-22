@@ -509,9 +509,15 @@ class AbstractInstruction(ABC):
         t = value.type
         return target.native_atomic(None, t.base, getattr(t, 'length', None) or 1)
       added = pir.Atomics(supported, report=carries, **carry)
-    forwarded = None
+    forwarded = early = None
     if carry is not None and options.forward_memory:
       forwarded = pir.Forward(builder.scratch, report=carries, **carry)
+      if added is not None:
+        # A result handed through memory to the accumulation behind it is
+        # read from its registers before the atomics ask what the store
+        # adds onto (`pir.standard_pipeline`).
+        early = pir.Forward(builder.scratch, report=carries,
+                            registers=False, **carry)
     if (options.wave_uniform_group_rows
         and context.target.reads_first_lane()):
       # A no-op on a body whose batch loop reads no group's rows so
@@ -522,7 +528,7 @@ class AbstractInstruction(ABC):
                         place=place, barriers=barriers, prefetch=prefetch,
                         shards=held, rows=rows, carry=carried,
                         atomics=added, forward=forwarded,
-                        where='shared body')
+                        early_forward=early, where='shared body')
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)

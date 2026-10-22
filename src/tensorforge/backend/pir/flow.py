@@ -175,10 +175,13 @@ class Flow:
     def __init__(self, body: Sequence[Stmt], threads: int,
                  arena: Optional[str] = None, masks: bool = False,
                  values: bool = False, before: bool = True,
-                 budget: Optional[int] = None):
+                 budget: Optional[int] = None, fetches: bool = True):
         self.body = tuple(body)
         self.threads = threads
         self._values = values
+        #: Whether `forward` lists what the lanes loaded before as well as
+        #: what they stored (`_fetches`).
+        self._fetches_too = fetches
         self._before = before
         #: What may still be placed before the body counts as too large.
         self._limit = BUDGET if budget is None else budget
@@ -545,7 +548,8 @@ class Flow:
                 taken = 0
                 for m, _, _ in found:
                     taken |= m
-                found += self._fetches(n, conds, taken)
+                if self._fetches_too:
+                    found += self._fetches(n, conds, taken)
                 self._forwarded[n] = found
                 if whole != mask:
                     self.whole[n] = whole
