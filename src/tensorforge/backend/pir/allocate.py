@@ -25,7 +25,11 @@ analysis that knew only the accesses would keep every buffer alive from its
 first write to its last read, across every burst.  So the instruction that
 writes a buffer whole says so, with a `mark defines` in front of its first
 write: the buffer holds nothing anybody wants up to there.  An `Op.ALLOC`
-says the same of a buffer that has no other window.
+says the same of a buffer that has no other window.  And up to the first
+statement behind the mark that writes the buffer without reading it, where
+nothing in between touches it, it still holds nothing anybody wants: that is
+where the value begins (`_Liveness.begin`), however far a pass moved the
+writes from the mark.
 
 The answer is per statement and around every back edge: a buffer is occupied
 where it is live -- read further on before something defines it anew --
@@ -132,6 +136,8 @@ class _Liveness:
         self.neighbors = [0] * len(self.bit)
         self.touched = 0
         self.recording = False
+        #: The buffers whose value begins at a statement, by its id (`begin`).
+        self.begins: Dict[int, int] = {}
 
     def _mask(self, base) -> int:
         """The buffer an access names, by its window or by the buffer a
@@ -176,6 +182,47 @@ class _Liveness:
                 uses |= m
         return uses, defs, 0
 
+    def begin(self, body: Sequence[Stmt]) -> None:
+        """Where a buffer's value begins behind its `mark defines`: at the
+        first statement after the mark that touches it, where that one --
+        a loop or a branch with everything in it -- writes it and reads
+        nothing of it, adding onto it included, with nothing in between
+        touching it.  Up to that write the buffer holds nothing anybody
+        wants, as it holds nothing up to the mark.  A pass that takes the
+        definition's first writes away from the mark leaves the mark where
+        the instruction put it -- the carry stores an accumulator behind its
+        loop instead of ahead of it (`pir.carry`) -- and the buffer would
+        be occupied over the whole loop for nothing."""
+        def effects(s: Stmt) -> Tuple[int, int, int]:
+            uses = defs = kills = 0
+            for x in walk_stmts((s,)):
+                if x.regions:
+                    continue
+                u, d, k = self.info(x)
+                for a in x.accesses:
+                    if a.kind & Effect.ATOMIC:
+                        u |= (self._mask(a.base) if a.base is not None
+                              else self.everything)
+                uses, defs, kills = uses | u, defs | d, kills | k
+            return uses, defs, kills
+
+        def walk(stmts: Sequence[Stmt]) -> None:
+            pending = 0
+            for s in stmts:
+                uses, defs, kills = effects(s)
+                if s.regions:
+                    for r in s.regions:
+                        walk(r.body)
+                elif kills:
+                    pending |= kills
+                    continue
+                hit = pending & defs & ~uses
+                if hit:
+                    self.begins[id(s)] = hit
+                pending &= ~(uses | defs | kills)
+
+        walk(body)
+
     def record(self, occupied: int) -> None:
         if not self.recording or not occupied:
             return
@@ -186,9 +233,10 @@ class _Liveness:
     def backward(self, body: Sequence[Stmt], live: int) -> int:
         for s in reversed(body):
             if s.regions:
-                live = self.region(s, live)
+                live = self.region(s, live) & ~self.begins.get(id(s), 0)
                 continue
             uses, defs, kills = self.info(s)
+            kills |= self.begins.get(id(s), 0)
             self.record(live | uses | defs)
             live = (live & ~kills) | uses
         return live
@@ -277,6 +325,7 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
 
     # The multiplication's, by occupancy.
     live = _Liveness(buffers, value_key, single)
+    live.begin(body)
     live.recording = True
     live.backward(body, 0)
     # A buffer that holds something for the whole body -- the barrier a bulk

@@ -148,6 +148,57 @@ def test_a_value_ends_where_the_writer_says_the_buffer_is_defined_anew(defines):
         assert offsets['c'] >= 64 or offsets['a'] >= 32
 
 
+@pytest.mark.parametrize('nested', [False, True])
+def test_a_value_begins_at_the_first_write_behind_its_mark(nested):
+    """Nothing touches `a` between its mark and its first write, which is
+    behind a loop -- where the carry stores an accumulator it took over
+    (`pir.carry`), leaving the mark where the instruction put it.  `a` holds
+    nothing anybody wants up to that write, so `c`, used in the loop, may
+    share its bytes.  The write may stand in a nest of its own."""
+    b = _builder()
+    lane = b.thread_id('x')
+    a = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='a')
+    c = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='c')
+    b.mark('defines', a)
+    with b.for_(0, 4, 1):
+        _burst(b, c, lane)
+    if nested:
+        with b.for_(0, 2, 1):
+            b.store(a, b.const(1.0), lane)
+    else:
+        b.store(a, b.const(1.0), lane)
+    b.load(a, lane, hint='d')
+    _, layout, offsets = _layout(b.finish())
+    assert offsets == {'a': 0, 'c': 0}
+    assert layout.per_mult == 32
+
+
+@pytest.mark.parametrize('first', ['read', 'atomic', 'loop'])
+def test_a_value_read_before_its_first_write_begins_at_its_mark(first):
+    """What reads `a` ahead of its first write behind the mark -- a load, an
+    atomic update, a loop that reads it -- keeps `a` occupied from the mark
+    on, and `c` away from its bytes."""
+    b = _builder()
+    lane = b.thread_id('x')
+    a = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='a')
+    c = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='c')
+    b.mark('defines', a)
+    with b.for_(0, 4, 1):
+        _burst(b, c, lane)
+    if first == 'read':
+        b.load(a, lane, hint='d')
+    elif first == 'atomic':
+        b.store(a, b.const(1.0), lane, atomic=True)
+    else:
+        with b.for_(0, 2, 1):
+            b.load(a, lane, hint='d')
+            b.store(a, b.const(1.0), lane)
+    b.store(a, b.const(1.0), lane)
+    b.load(a, lane, hint='d')
+    _, _, offsets = _layout(b.finish())
+    assert offsets['a'] != offsets['c']
+
+
 def test_a_buffer_carried_around_a_back_edge_is_occupied_throughout():
     """Read at the top of the body before anything defines it there: the
     value comes from the previous iteration, so `c`, used in between, may
