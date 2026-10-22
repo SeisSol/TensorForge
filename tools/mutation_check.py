@@ -2901,6 +2901,12 @@ GROUPS = {
                "                       preserves=('flat',)))\n"
                "    if atomics is not None:\n",
                "    if atomics is not None:\n"))),
+        ('the bias loaded ahead of the product',
+         sub(MLB, "      if (any(isinstance(x, GlbToRegLoader) for x in staged)\n",
+             "      if (False and any(isinstance(x, GlbToRegLoader) for x in staged)\n", 1)),
+        ('the bias staged and never loaded',
+         sub(MLB, "    self._instructions.extend(getattr(self, '_bias_loads', ()))\n"
+                  "    self._bias_loads = []\n", "", 1)),
         ('no forward of memory ahead of the cover without atomics',
          sub(ABSTR, '      early = pir.Forward(builder.scratch, report=carries,\n'
                     '                          registers=False, **carry)\n',

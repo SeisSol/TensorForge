@@ -4,6 +4,7 @@
 from typing import Tuple
 from tensorforge.common.basic_types import Addressing
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
+from tensorforge.backend.instructions.allocate import RegisterAlloc
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr
 from tensorforge.backend.instructions.sync_block import SyncThreads
@@ -86,11 +87,25 @@ class MultilinearBuilder(OperationBuilder):
   def alloc_destination(self, descr, operands):
     """The accumulator, in the shifted origin the lead loop runs in.
 
-    An accumulation stages what it adds onto first, so its load goes out
-    ahead of the accumulator's declaration (`_get_target_symbol`).
+    An accumulation stages what it adds onto here (`_get_target_symbol`).
+    A load of it into registers goes out behind the product, right ahead
+    of the epilogue that adds it (`_make_compute`), with the declaration of
+    the registers it fills: the product reads it nowhere, and its registers
+    are free while the product runs.  Anything
+    else stays where it is -- a load into shared memory, which the barrier
+    behind the operands orders ahead of the epilogue's reads, and the store
+    that empties a register image the destination may not be read from.
     """
+    self._bias_loads = []
     if self._add:
+      mark = len(self._instructions)
       self._get_target_symbol()
+      staged = self._instructions[mark:]
+      if (any(isinstance(x, GlbToRegLoader) for x in staged)
+          and all(isinstance(x, (GlbToRegLoader, RegisterAlloc))
+                  for x in staged)):
+        self._bias_loads = staged
+        del self._instructions[mark:]
     self._temp_regs = self._alloc_register_array()
     return self._temp_regs
 
@@ -925,6 +940,9 @@ class MultilinearBuilder(OperationBuilder):
                                      lead_width=getattr(self, '_lead_width', 1),
                                      k_width=self._k_width(self._descr))
     self._instructions.append(compute)
+    # The bias, behind the product it is no operand of (`alloc_destination`).
+    self._instructions.extend(getattr(self, '_bias_loads', ()))
+    self._bias_loads = []
     # What the multiplication does with its result -- scale it, add the
     # previous value, write the destination's box -- is an instruction of its
     # own, right behind it.

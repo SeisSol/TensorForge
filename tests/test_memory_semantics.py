@@ -148,3 +148,28 @@ def test_the_forward_of_memory_runs_ahead_of_the_cover_without_atomics(
     _built(lanes.slice_of_a_temporary(), backend='hip', arch='gfx942',
            atomic_accumulation=False, **OPTIONS)
     assert seen and all(early is not None for early in seen)
+
+
+def test_the_bias_is_loaded_behind_the_product(monkeypatch):
+    """An accumulation stages what it adds onto from memory, and its load
+    goes out behind the product, which does not read it, right ahead of the
+    epilogue, which does (`MultilinearBuilder.alloc_destination`)."""
+    built = []
+    real = multilinear_builder.MultilinearBuilder.get_instructions
+
+    def spy(self):
+        out = real(self)
+        built.append([type(x).__name__ for x in out])
+        return out
+    monkeypatch.setattr(multilinear_builder.MultilinearBuilder,
+                        'get_instructions', spy)
+    _built(lanes.window_from_row_one(), backend='hip', arch='gfx942',
+           **OPTIONS)
+    accumulations = [names for names in built if 'MultilinearEpilogue' in names
+                     and names.count('GlbToRegLoader') == 3]
+    assert accumulations
+    for names in accumulations:
+        product = names.index('MultilinearInstruction')
+        epilogue = names.index('MultilinearEpilogue')
+        assert names[product + 1:epilogue] == ['RegisterAlloc',
+                                               'GlbToRegLoader'], names
