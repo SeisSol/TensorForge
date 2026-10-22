@@ -1209,6 +1209,17 @@ class Emitter:
             # a global store would have to stay on the text path.
             space = s.accesses[0].space if s.accesses else None
             lex = self._lexic()
+            if s.effect & Effect.ATOMIC:
+                # An add onto what memory holds (`atomics`): the lexic spells
+                # it, as a statement whose result nothing reads, which is
+                # what makes it the reduction and not the fetch.
+                if space is not MemSpace.GLOBAL or lex is None:
+                    raise IRError('an atomic store outside global memory, or '
+                                  'with no lexic to spell it')
+                dt, width = self.access_type(vt, s.args[0])
+                w(lex.atomic_store(self.context, access, self.operand(val),
+                                   None, dt, width))
+                return
             if space is MemSpace.GLOBAL and lex is not None:
                 dt, width = self.access_type(vt, s.args[0])
                 hint = s.attr('nontemporal') or False

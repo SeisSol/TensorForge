@@ -51,6 +51,11 @@ SEED = 7
 #: Slots that differ by less than this are the same number; the two paths
 #: sum in a different order, so bit equality is the wrong bar.
 TOL = 1e-4
+#: An atomic add as any lexic spells one: the CUDA call, the PTX reduction it
+#: is restated as where the space is known to be global, and AMD's builtins.
+#: The interpreter reads all of them (`kernel_eval._ATOMIC_ADD`).
+ATOMIC = re.compile(r'\batomicAdd\b|red\.global\.add|global_atomic_fadd'
+                    r'|__hip_atomic_fetch_add')
 
 
 def _t(shape, alias, dtype):
@@ -127,8 +132,9 @@ def test_the_atomic_path_computes_what_the_plain_one_does(kind, m):
     descrs = _descrs(kind, m, n, Datatype.F32)
     plain = _render(descrs, Datatype.F32, False)
     atomic = _render(descrs, Datatype.F32, True)
-    if 'atomicAdd' not in atomic:
+    if not ATOMIC.search(atomic):
         pytest.skip('no atomic emitted for this shape')
+    assert not ATOMIC.search(plain), 'the plain path emitted an atomic'
     lanes = _lanes(atomic)
     assert lanes == _lanes(plain), 'the two paths disagree on the block width'
 

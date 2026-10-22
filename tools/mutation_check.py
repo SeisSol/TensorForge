@@ -84,6 +84,8 @@ TUNING = Path('src/tensorforge/generators/tuning.py')
 BOUND = Path('src/tensorforge/analysis/pipeline.py')
 RESIDENCY = Path('src/tensorforge/backend/residency.py')
 CARRY = Path('src/tensorforge/backend/pir/carry.py')
+ATOMICS = Path('src/tensorforge/backend/pir/atomics.py')
+FLOW = Path('src/tensorforge/backend/pir/flow.py')
 TILING = PKG / 'tiling.py'
 
 
@@ -2745,6 +2747,56 @@ GROUPS = {
         ('the carry not run at all',
          sub(CARRY, "            if counted(s) and s.attr('rolled'):\n",
              "            if False:\n", 1)),
+    ]),
+    # An accumulation added atomically where nothing reads the sum, and the
+    # per-lane account of which store every load reads that it asks.
+    'atomics': ('tests/test_accumulate_atomically.py tests/test_flow.py', [
+        ('a read of what the store wrote ignored',
+         sub(ATOMICS, '        if m & c.mask and reader not in heads:', '        if False:', 1)),
+        ('a register on the chain read elsewhere taken for a link',
+         sub(ATOMICS, '            if m & l.mask and reader != l.load:', '            if False:', 1)),
+        ('a write between the load and the store ignored',
+         sub(ATOMICS, '            if r is None or before.get((lane, cell)) != (r.writer, True):',
+             '            if r is None:', 1)),
+        ('another element taken for the one the load read',
+         sub(ATOMICS, '        if loaded.get(lane) != stored.get(lane):', '        if False:', 1)),
+        ('lanes the load leaves to an else-value added onto',
+         sub(ATOMICS, '    if c.mask & ~bias.mask:\n', '    if False:\n', 1)),
+        ('a store where its load did not run',
+         sub(ATOMICS, '    if not bias.conds <= store.conds:', '    if False:', 1)),
+        ('a statement on a chain changed for some of its runs',
+         sub(ATOMICS, '            if set(flow.by_stmt.get(stmt, ())) - seen:', '            if False:', 1)),
+        ('a type the target cannot add made atomic',
+         sub(ATOMICS, '        if not supported(s.args[1]):', '        if False:', 1)),
+        ('the image carried over a loop left with its bias',
+         sub(ATOMICS, '                self.zeroed.add(id(bias))\n', '', 1)),
+        ('a guard spelled in text dropped from what a statement stands under',
+         sub(FLOW, '                self._run(s.regions[0].body, env, mask,\n'
+                   '                          conds | {(s.text, True)})',
+             '                self._run(s.regions[0].body, env, mask, conds)', 1)),
+        ('a loop that runs again read as running once',
+         sub(FLOW, '        self._wrap(s, first)\n', '', 1)),
+        ('a write under a guard taken for one that replaces what was there',
+         sub(FLOW, '                    if layer.conds <= conds:\n'
+                   '                        prior = layer.writer\n'
+                   '                        break\n'
+                   '                    certain = False\n',
+             '                    prior = layer.writer\n'
+                   '                    break\n', 1)),
+        ('what text reads not taken as read',
+         sub(FLOW, '                            for layer in table.get(cell, ()):\n'
+                   '                                self.readers[layer.writer].append(\n'
+                   '                                    (n, self.full))\n'
+                   '                                self.escaped.add(layer.writer)\n',
+             '                            for layer in table.get(cell, ()):\n'
+                   '                                pass\n', 1)),
+        ('a binding a loop computes taken for one buffer every trip',
+         sub(FLOW, '            hops = tuple(env.get(l.induction.id)\n'
+                   '                         for l in self.loops.get(id(d), ()))',
+             '            hops = ()', 1)),
+        ('a buffer defined anew taken for what it held',
+         sub(FLOW, "        if s.op == Op.MARK and s.attr('mark') == 'defines':",
+             '        if False:', 1)),
     ]),
 }
 

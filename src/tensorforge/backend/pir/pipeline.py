@@ -32,6 +32,7 @@ from tensorforge.backend.passmanager import Pass, PassContext, PassManager
 
 from .asyncmem import schedule_async
 from .allocate import allocate
+from .atomics import accumulate_atomically
 from .barriers import place_barriers
 from .carry import carry_trips
 from .core import Stmt, dump
@@ -323,6 +324,43 @@ class CarryTrips(Pass):
                               arena=self._arena, report=self._report)
 
 
+class Atomics(Pass):
+    """Add an accumulation into global memory atomically where nothing
+    reads the sum (`atomics.accumulate_atomically`).
+
+    Behind the carry, which hands the trips of a merged run their
+    accumulator in registers and leaves one load ahead of the loop and one
+    store behind it -- the chain this asks about, and one it would not find
+    with a load and a store on every trip in between, each read by the
+    next.  Ahead of the wrap, which issues a load ahead of the iteration
+    that reads it: a load this takes away is one the wrap need not move.
+    Not under the explicit vector, whose registers are vectors a store of
+    one element does not name.  `supported(value)` says whether the target
+    adds such a value atomically; `threads`, `arena` and `report` are what
+    the carry takes.
+    """
+
+    name = 'atomics'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, supported, threads: int, arena: Optional[str] = None,
+                 report: Optional[List[str]] = None):
+        self._supported = supported
+        self._threads = threads
+        self._arena = arena
+        self._report = report
+
+    def run(self, pc: BodyContext) -> None:
+        if pc.explicit_simd:
+            return
+        pc.body = accumulate_atomically(pc.body, threads=self._threads,
+                                        arena=self._arena,
+                                        supported=self._supported,
+                                        report=self._report)
+
+
 class ShardLoads(Pass):
     """Read the shards of the batch-constant operands that fit from the
     block's shared memory (`shards.shard_loads`).
@@ -383,7 +421,8 @@ def standard_pipeline(debug: str = '',
                       prefetch: Optional[Prefetch] = None,
                       shards: Optional[ShardLoads] = None,
                       rows: Optional[GroupRows] = None,
-                      carry: Optional[CarryTrips] = None) -> PassManager:
+                      carry: Optional[CarryTrips] = None,
+                      atomics: Optional[Atomics] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -454,6 +493,12 @@ def standard_pipeline(debug: str = '',
     of the stores it took out.  Ahead of ``shards`` and the wrap, which see
     the load it moved ahead of the loop as a load of the body like any other.
 
+    ``atomics``, where asked for, runs behind the carry: the accumulator a
+    merged run's trips hand each other in registers is then one load ahead
+    of the loop and one store behind it, the chain it asks about
+    (`Atomics`).  Ahead of the wrap, which has a load less to move for every
+    bias it takes away.
+
     ``shards``, where asked for, runs behind the cleanup: it moves the loads
     of the batch-constant operands that remain to shared memory, as much of
     them as the budget it is handed admits (`ShardLoads`).
@@ -490,6 +535,10 @@ def standard_pipeline(debug: str = '',
     if carry is not None:
         pm.add(carry)
         pm.add(Rewrite('carry-dce', dce, preserves=('flat',)))
+    if atomics is not None:
+        pm.add(atomics)
+        for name, fn in (('atomics-fold', fold), ('atomics-dce', dce)):
+            pm.add(Rewrite(name, fn, preserves=('flat',)))
     if shards is not None:
         pm.add(shards)
     if wrap is not None:
@@ -523,6 +572,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              shards: Optional[ShardLoads] = None,
              rows: Optional[GroupRows] = None,
              carry: Optional[CarryTrips] = None,
+             atomics: Optional[Atomics] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
@@ -530,12 +580,15 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     ``move`` adds the transfers issued ahead within their list, ``wrap`` the
     ones moved across the back edge, ``rows`` a copy per multiplication of
     what a row of a group reads, ``place`` the placement of shared memory and
-    ``barriers`` the barriers behind all of them; ``where`` names what built
-    the body in the findings `debug` reports.
+    ``barriers`` the barriers behind all of them; ``carry`` keeps in
+    registers what the trips of a merged run hand each other through memory,
+    and ``atomics`` adds an accumulation atomically where nothing reads the
+    sum; ``where`` names what built the body in the findings `debug`
+    reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
-                      shards, rows, carry).run(pc)
+                      shards, rows, carry, atomics).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body
