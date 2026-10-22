@@ -23,7 +23,8 @@ that memory too, outputs included: `+=` adds onto what was there.
 Two comparisons per build, over every slot of every output: against NumPy,
 and against the first build.  The second needs no reference, so it stands
 where NumPy cannot follow -- a permuted operand, an operation other than a
-product.  Exit status 1 where a build disagrees or the oracle cannot run it.
+product.  Each build says how many merged runs it holds (`runs`).  Exit
+status 1 where a build disagrees or the oracle cannot run it.
 """
 import argparse
 import json
@@ -38,10 +39,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 
 from tensorforge.common.basic_types import Addressing, Datatype  # noqa: E402
 from tensorforge.common.context import Context, Options  # noqa: E402
+from tensorforge.common.options import registry  # noqa: E402
 from tensorforge.frontend.yateto import DescriptionReader  # noqa: E402
 from tensorforge.generators.descriptions import (  # noqa: E402
     MultilinearDescr, OperationDescription)
 from tensorforge.generators.generator import Generator  # noqa: E402
+from tensorforge.generators.rolling import ForDescr  # noqa: E402
 from tensorforge.reference import descriptors as reference  # noqa: E402
 from tensorforge.reference import kernel_eval  # noqa: E402
 
@@ -52,21 +55,19 @@ TOLERANCE = 1e-9
 
 
 def parse_build(text):
-    """`name=value,...` as keyword arguments of `Options`."""
+    """`name=value,...` as keyword arguments of `Options`, each value read by
+    the option's own parser, as `TF_OPTIONS` reads it: `merge_variants=1` is
+    `True` there, which the generator asks for by identity."""
+    declared = registry()
     out = {}
     for item in filter(None, text.split(',')):
-        name, _, value = item.partition('=')
-        out[name.strip()] = _value(value.strip())
+        name, sep, value = item.partition('=')
+        name = name.strip()
+        if name not in declared:
+            raise SystemExit(f'--build {text}: no option {name!r}')
+        out[name] = declared[name].read(value.strip() if sep else '1',
+                                        f'--build {name}')
     return out
-
-
-def _value(text):
-    for conv in (int, float):
-        try:
-            return conv(text)
-        except ValueError:
-            pass
-    return {'true': True, 'false': False}.get(text.lower(), text)
 
 
 def _slots(tensor):
@@ -139,11 +140,13 @@ class Kernel:
         return kernel_eval.Slot(SEED).read(base, slot)
 
     def run(self, options):
-        """What a build leaves in the outputs, (alias, slot) -> value."""
+        """What a build leaves in the outputs, (alias, slot) -> value, and
+        how many merged runs it holds."""
         gen = Generator(self.descrs(), Context(
             arch=self._arch, backend='cuda', fp_type=self._dtype,
             options=Options(**options)))
         gen.generate()
+        runs = sum(isinstance(d, ForDescr) for d in gen.descr_list)
         names, tensors = {}, {}
         for outer in gen.descr_list:
             for d in outer.operations():
@@ -175,7 +178,7 @@ class Kernel:
                 value = mem.get((base, slot))
                 out[(alias, slot)] = (self.initial(alias, slot)
                                       if value is None else value)
-        return out
+        return out, runs
 
     def expected(self):
         """The outputs as NumPy evaluates the list, (alias, slot) -> value."""
@@ -225,12 +228,14 @@ def check(kernel, builds, out=sys.stdout):
     first = None
     for label, options in builds:
         try:
-            got = kernel.run(options)
+            got, runs = kernel.run(options)
         except kernel_eval.Abort as e:
             print(f'  {label:<{width}}  oracle: {e}', file=out)
             ok = False
             continue
-        parts = []
+        # A build that was to merge and merged nothing is the list written
+        # out, and agrees with it whatever the merging does.
+        parts = [f'runs: {runs}']
         if expected is None:
             parts.append(f'numpy: n/a ({kernel.unevaluable})')
         else:

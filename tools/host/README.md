@@ -95,8 +95,8 @@ build from the same memory:
         --build merge_variants=0 --build merge_variants=1
 
     gpu_derivative
-      merge_variants=0  numpy: 0/3888 disagree, worst 0
-      merge_variants=1  numpy: 0/3888 disagree, worst 0; first: 0/3888 differ
+      merge_variants=0  runs: 0; numpy: 0/3888 disagree, worst 0
+      merge_variants=1  runs: 1; numpy: 0/3888 disagree, worst 0; first: 0/3888 differ
 
 Each output slot is compared with NumPy and with the first build.  The second
 comparison needs no reference, so it still says something where NumPy cannot

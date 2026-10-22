@@ -216,11 +216,16 @@ def test_the_corpus_check_compares_something_and_agrees():
     buffer the builds no longer name alike, a table element it does not look
     under -- reads every slot as it was before the kernel ran, on both sides,
     and the builds agree with each other about nothing.  NumPy still computes
-    the products, so the slots have to be there, and agree with it."""
+    the products, so the slots have to be there, and agree with it.  And a
+    build asked to merge that merged nothing -- an option read as something
+    the generator does not take for it -- is the list written out, which
+    agrees with the list written out: so the merged build has to hold a run.
+    """
     import re
 
     out = _run("host/corpus_check.py", "tools/bench/data/elastic-4-d-s1.json",
                "gpu_localFluxAll")
-    found = re.findall(r'numpy: (\d+)/(\d+) disagree', out)
+    found = re.findall(r'runs: (\d+); numpy: (\d+)/(\d+) disagree', out)
     assert len(found) == 2, out[-800:]
-    assert all(bad == '0' and int(slots) > 0 for bad, slots in found), out
+    assert all(bad == '0' and int(slots) > 0 for _, bad, slots in found), out
+    assert [int(runs) > 0 for runs, _, _ in found] == [False, True], out
