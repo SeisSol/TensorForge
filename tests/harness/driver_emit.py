@@ -73,6 +73,15 @@ class DriverOperand:
     #: slot holds; ``None`` when the tensor is stored dense and the two orders
     #: are the same thing.
     pack_index: tuple | None = None
+    #: The numbers the description gives this operand, one per *cell* of its
+    #: box in column-major order -- the order ``pack_index`` names cells in --
+    #: or ``None`` where it gives none.  A kernel may take those numbers from
+    #: the description instead of reading the buffer: a literal, a value
+    #: passed by argument, a diagonal it collapses a reduction to.  A driver
+    #: filling the buffer with anything else then compares a kernel that
+    #: reads its input with one that does not, and the difference it reports
+    #: is the fill's.
+    values: tuple | None = None
 
 
 def collect_operands(generator) -> List[DriverOperand]:
@@ -128,6 +137,7 @@ def collect_operands(generator) -> List[DriverOperand]:
             storage_planar=bool(getattr(t, "storage_planar", False))
             and int(getattr(t, "storage_parts", 1)) > 1,
             pack_index=t.storage_map(),
+            values=_cell_values(t),
             # the kernel addresses the *stored* region: memory spans
             # upper - lower and address 0 is `lower`, so the host buffer is
             # bbox-shaped, not shape-shaped (see DataView.get_dim_strides)
@@ -139,6 +149,18 @@ def collect_operands(generator) -> List[DriverOperand]:
                        else "memory"),
         ))
     return ops
+
+
+def _cell_values(t):
+    """`DriverOperand.values`: the description's numbers by cell of the box,
+    column-major, or None."""
+    if not getattr(t, 'has_values', lambda: False)():
+        return None
+    import numpy as np
+    data = t.get_values()
+    if data is None:
+        return None
+    return tuple(float(v) for v in np.asarray(data, dtype=float).flatten(order='F'))
 
 
 def launcher_call_expr(generator, ops: List[DriverOperand], *,
