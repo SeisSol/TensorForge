@@ -2777,6 +2777,13 @@ class Generator:
         index += 1
         if last is not None:
           self._retire_writebacks(residency, last, index, guard)
+        if self._context.get_user_options().memory_semantics:
+          # Nothing an operation leaves in registers reaches the next: the
+          # residency is emptied behind each, writebacks stored and copies
+          # dropped (`memory_semantics`).
+          guard.flush()
+          for name, _ in list(residency.items()):
+            self._section.ir.extend(residency.flush(name))
 
     guard.flush()
 

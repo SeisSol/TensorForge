@@ -809,6 +809,28 @@ declare('carry_trips',
             '(`pir.carry`).  A loop whose trips are closed (`closed_trips`) is '
             'one that hands its accumulators over that way.')
 
+declare('memory_semantics',
+        default=False,
+        parse=parse_bool,
+        doc='Hand results between the operations of a list through memory '
+            'alone: behind every operation, what it left in registers is '
+            'stored where its symbol says, and what it staged is dropped, so '
+            'the next operation stages its operands from memory anew.  What '
+            'that costs, the pseudo-IR takes back where it can show that it '
+            'may (`pir.forward`).  The step towards a builder without a '
+            'residency; `stage_shared` stages what then sits in shared '
+            'memory into registers as well.')
+
+declare('stage_shared',
+        default=False,
+        parse=parse_bool,
+        doc='Stage an operand that sits in shared memory into the registers '
+            'of the operation that reads it, where its placement says '
+            'registers -- as one in global memory is.  Read where it is '
+            'without; with `memory_semantics`, every result handed to the '
+            'next operation sits in memory, and only a register image lets '
+            'the pseudo-IR take the round trip back.')
+
 declare('forward_memory',
         default=True,
         parse=parse_bool,

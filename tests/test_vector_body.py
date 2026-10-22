@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 
 from tensorforge.common.basic_types import Addressing, Datatype
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import MultilinearDescr
@@ -51,9 +51,11 @@ def _faces():
     return descrs
 
 
-def _kernel(arch, backend, lanes=None):
+def _kernel(arch, backend, lanes=None, **options):
     gen = Generator(_faces(), Context(arch=arch, backend=backend,
-                                      fp_type=Datatype.F32), lanes=lanes)
+                                      fp_type=Datatype.F32,
+                                      options=Options(**options)),
+                    lanes=lanes)
     gen.generate()
     return gen.get_kernel()
 
@@ -70,6 +72,15 @@ def _narrowing_stores(src):
         r"^\s*(?:i?r\d+)\[[^\]]+\] = \((v\d+_\w+) [-+*] (v\d+_\w+)\);",
         src, re.M)
         if m.group(1) in vectors or m.group(2) in vectors]
+
+
+def test_a_temporary_stored_from_wide_lanes_keeps_its_vectors_whole():
+    """Handed from one product to the next through its shared buffer
+    (`memory_semantics`), the temporary is stored a lane's adjacent rows at
+    a time, and the buffer's permutation keeps them together
+    (`StoreRegToShr.transfer_granule`)."""
+    src = _kernel("sm_86", "cuda", _WIDE, memory_semantics=True)
+    assert "VectorT<float, 4>" in src
 
 
 def test_the_accumulating_face_stores_a_whole_vector():

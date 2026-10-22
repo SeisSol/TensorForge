@@ -2883,6 +2883,13 @@ GROUPS = {
          sub(PASSES, '    if (s.op == Op.LOAD and len(s.args) == 2 and len(s.accesses) == 1\n',
              '    if (s.op == Op.LOAD and len(s.accesses) == 1\n', 1)),
     ]),
+    # Results handed between the operations of a list through memory, and
+    # what the pipeline does so that they cost what the residency did.
+    'memsem': ('tests/test_memory_semantics.py', [
+        ('a writeback laid over its own box',
+         sub(RESIDENCY, '        view = self.home.data_view\n        if view is None:\n',
+             '        view = None\n        if view is None:\n', 1)),
+    ]),
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.
     'forward': ('tests/test_forward.py', [

@@ -98,6 +98,33 @@ class ResidencyEntry:
         return ([l + s for l, s in zip(self.covered.lower(), self.shift)],
                 [u + s for u, s in zip(self.covered.upper(), self.shift)])
 
+    def in_buffer(self) -> Optional[Tuple[BoundingBox, List[int]]]:
+        """Where the image lands in its shared home: the box the buffer is
+        laid out over and the image's place in it, or None.
+
+        The buffer as its first store laid it out (`StoreRegToShr`), where
+        that holds every cell of the image.  A later image can hold fewer:
+        an accumulation onto what the buffer holds computes the rows its
+        product reaches and leaves the rest to the buffer.  Laid over its own
+        box, its store would re-stride every access of the buffer, the
+        earlier stores' among them, to those rows.  None where the buffer has
+        no layout yet, the image does not fit in it, or the image is shifted
+        against its tensor (`shift`), as a buffer the residency laid out is
+        not: the store lays the buffer out over the image.
+        """
+        if any(self.shift):
+            return None
+        view = self.home.data_view
+        if view is None:
+            return None
+        box = view.get_bbox()
+        own = self.image.data_view.get_bbox()
+        if box.rank() != own.rank() or any(
+                ol < bl or ou > bu for ol, ou, bl, bu in zip(
+                    own.lower(), own.upper(), box.lower(), box.upper())):
+            return None
+        return box, [0] * own.rank()
+
 
 class Residency:
     """The set of tensors whose newest copy is not where their symbol says.
@@ -288,12 +315,15 @@ class Residency:
                                  dest_offset=shift,
                                  dest_bbox=entry.promise,
                                  zero_fill=entry.promise is not None)
+        box, offset = entry.in_buffer() or (None, None)
         return StoreRegToShr(context=self._context,
                              src=entry.image,
                              dest=entry.home,
                              shr_mem=self._shr_mem,
                              num_threads=self._num_threads,
-                             lead_width=self._lead_width)
+                             lead_width=self._lead_width,
+                             dest_bbox=box,
+                             dest_offset=offset)
 
     def _put(self, entry: ResidencyEntry, name: str) -> ResidencyEntry:
         # One entry per name, and replacing is the normal case: a later

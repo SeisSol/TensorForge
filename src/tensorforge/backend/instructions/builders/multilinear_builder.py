@@ -224,11 +224,14 @@ class MultilinearBuilder(OperationBuilder):
         # placement said -- a shared copy adds a store, a barrier and a load.
         self._ops[i].symbol = entry.image
       elif placement is Placement.SHARED and entry.home.stype == SymbolType.SharedMem:
+        box, offset = entry.in_buffer() or (None, None)
         self._instructions.append(StoreRegToShr(context=self._context,
                                                 src=entry.image,
                                                 dest=entry.home,
                                                 shr_mem=self._shr_mem,
-                                                num_threads=self._num_threads))
+                                                num_threads=self._num_threads,
+                                                dest_bbox=box,
+                                                dest_offset=offset))
         self._residency.drop(name)
         self._ops[i].symbol = entry.home
       elif placement is Placement.SHARED:
@@ -284,6 +287,18 @@ class MultilinearBuilder(OperationBuilder):
             # Note: operand will reside in glb. mem for gemm operation
             self._mem_regions[i] = self._ops[i]
 
+      elif (self._ops[i].symbol.stype == SymbolType.SharedMem
+            and placement is Placement.REGISTER
+            and self._context.get_user_options().stage_shared):
+        # Staged into this operation's registers, as a global operand is
+        # (`stage_shared`).
+        shift = self._stage_shift(i, absorb_lead=not lane_axis_needs_moving)
+        staged, load_op = self._make_loader_and_symbol_reg(
+            self._stage_view(i, shift), linearize=linearize,
+            lead_pos=lead_pos,
+            carries_lead=0 in self._descr.target[i])
+        self._mem_regions[i] = self._staged_region(i, staged, shift)
+        self._instructions.append(load_op)
       elif self._ops[i].symbol.stype == SymbolType.SharedMem or self._ops[i].symbol.stype == SymbolType.Register:
         # An operand that already sits in shared memory or in registers is
         # read where it is.  Deciding to re-stage it in a different

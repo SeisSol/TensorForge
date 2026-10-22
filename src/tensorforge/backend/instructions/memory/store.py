@@ -133,6 +133,13 @@ class StoreRegToShr(AbstractShrMemWrite):
     view: DataView = self._dest.data_view
     self._shm_volume: int = view.get_volume()
 
+  def transfer_granule(self) -> int:
+    """Elements one access of this store writes: the lead width the register
+    image is blocked by (`_store`), whose lane holds that many consecutive
+    rows and writes them in one access.  The buffer's permutation keeps
+    them together (`AbstractShrMemWrite._swizzle`)."""
+    return max(1, self._lead_width)
+
   def partial_defs(self):
     """The buffer, when this store is one of several that assemble it.
 

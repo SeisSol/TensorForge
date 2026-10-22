@@ -18,17 +18,41 @@ from .hints import cache_hint, readers
 def _hint_allowed(loader) -> bool:
   """Whether a load from global memory may take the cache hint.
 
-  Where it is the only user of its source.  With `Options.hint_outputs` also
-  where it is the only *reader*: the one read of a `+=` destination, whose
-  other users only write it.
+  Where it is the only user of its source, or all of its users copy the same
+  of it (`_copies`): operations that each stage what they read stage one box
+  of an operand they share, and the pseudo-IR reads a later copy from the
+  registers of the first where their lanes agree (`pir.forward`).  With
+  `Options.hint_outputs` also where it is the only *reader*, or the readers
+  copy the same: the read of a `+=` destination, whose other users only
+  write it.
   """
   src = loader._src
-  if len(src.get_user_list()) == 1:
+  users = src.get_user_list()
+  if len(users) == 1 or _copies(users, loader):
     return True
   if not loader._context.get_user_options().hint_outputs:
     return False
   mine = readers(src)
-  return len(mine) == 1 and mine[0] is loader
+  return (len(mine) == 1 and mine[0] is loader) or _copies(mine, loader)
+
+
+def _copies(users, loader) -> bool:
+  """Whether every one of `users` copies what `loader` copies of their
+  source: the same box into registers, or the whole of it into shared memory
+  in the same order."""
+  mine = _copied(loader)
+  return mine is not None and all(_copied(u) == mine for u in users)
+
+
+def _copied(user):
+  """What a loader copies of its source, or None for a user that is no
+  loader."""
+  if isinstance(user, GlbToRegLoader):
+    return ('registers', list(user._bbox.lower()), list(user._bbox.upper()),
+            list(user._offset), bool(user._linearize))
+  if isinstance(user, GlbToShrLoader):
+    return ('shared', user._permute, user._alignment)
+  return None
 
 
 # to find a number coprime to the number of shared memory banks
@@ -1037,8 +1061,11 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     if not isinstance(dest.obj, RegMemObject):
       raise InternalError(f'store: operand `dest` is registers, instead: {type(dest.obj)}')
 
-    if src.stype != SymbolType.Global:
-      raise InternalError('store: operand `src` is not in global memory.')
+    # Shared memory as well: an operand a shared buffer holds, staged into
+    # the registers of the operation that reads it (`stage_shared`).
+    if src.stype not in (SymbolType.Global, SymbolType.SharedMem):
+      raise InternalError('store: operand `src` is neither in global nor in '
+                          'shared memory.')
 
     if not isinstance(src.obj, Tensor):
       raise InternalError('store: operand `src` is not a matrix')
