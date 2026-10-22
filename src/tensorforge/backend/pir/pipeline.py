@@ -608,7 +608,10 @@ def standard_pipeline(debug: str = '',
             pm.add(Rewrite(name, fn, preserves=('flat',)))
     if forward is not None:
         pm.add(forward)
-        for name, fn in (('forward-fold', fold), ('forward-dce', dce)):
+        # A load taken from a register can make two computations one: the
+        # same register read twice, where two loads were.
+        for name, fn in (('forward-fold', fold), ('forward-loads', load_cse),
+                         ('forward-cse', cse), ('forward-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',)))
     # What the producers promised was said for the forward pass; behind it,
     # it only keeps the lane conditions it stands under alive.

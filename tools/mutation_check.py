@@ -2872,6 +2872,17 @@ GROUPS = {
          sub(FLOW, '        elif s.op in (Op.STORE, Op.MARK) and len(s.accesses) == 1:\n',
              '        elif s.op == Op.STORE and len(s.accesses) == 1:\n', 1)),
     ]),
+    # One register, one read: the forwarding spells a register by the value
+    # that declares it, the builder by its symbol, and `load_cse` keys both
+    # by the buffer where one index is the whole address.
+    'loadkey': ('tests/test_alias_identity.py', [
+        ('a register read through its value taken for another than through its symbol',
+         sub(PASSES, "        key = (op, (('buf', id(s.accesses[0].base)),) + args[1:]) + key[2:]\n",
+             '', 1)),
+        ('a register read at more than one index taken by its buffer',
+         sub(PASSES, '    if (s.op == Op.LOAD and len(s.args) == 2 and len(s.accesses) == 1\n',
+             '    if (s.op == Op.LOAD and len(s.accesses) == 1\n', 1)),
+    ]),
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.
     'forward': ('tests/test_forward.py', [

@@ -893,7 +893,19 @@ def _load_key(s: Stmt):
     about the two predicates rather than about the location.  See
     `_may_stand_in`.
     """
-    return (_cse_key(s, with_predicate=False),
+    key = _cse_key(s, with_predicate=False)
+    if (s.op == Op.LOAD and len(s.args) == 2 and len(s.accesses) == 1
+            and s.accesses[0].space is MemSpace.REGISTER
+            and s.accesses[0].base is not None):
+        # A register by its buffer, however the first argument spells it:
+        # the builder's reads name the symbol, a read the forwarding builds
+        # names the value that declares it (`forward._Forward._register`).
+        # At one index both are `name[index]` (`Emitter.address`); at more,
+        # the symbol's view and the buffer's shape may linearize them
+        # differently, and the spelling stays part of the key.
+        op, args = key[0], key[1]
+        key = (op, (('buf', id(s.accesses[0].base)),) + args[1:]) + key[2:]
+    return (key,
             tuple((a.space, None if a.base is None else id(a.base))
                   for a in s.accesses))
 

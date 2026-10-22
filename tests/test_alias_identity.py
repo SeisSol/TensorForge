@@ -67,3 +67,39 @@ def test_a_value_from_another_body_leaves_the_symbol_alone():
 
     b2 = IRBuilder(fptype=Datatype.F32, arena='shrMem')
     assert b2.alias_root(sym) is sym
+
+
+def _register_reads(through_symbol, through_value, *, store=None):
+    """A read of register `r5` through its symbol, as the builder spells
+    one, then a read through the value that declares it, as the forwarding
+    spells one (`forward._Forward._register`) -- with a store between, where
+    asked."""
+    b = IRBuilder(fptype=Datatype.F32)
+    buf = b.alloc(Datatype.F32, (9,), MemSpace.REGISTER, hint='r5')
+    sym = Symbol('r5', SymbolType.Register, None)
+    sym.set_pir_buffer(b, buf)
+    r1 = b.load(sym, *through_symbol, hint='r1')
+    if store is not None:
+        b.store(buf, b.const(1.0), store)
+    r2 = b.load(buf, *through_value, hint='r2')
+    b.op('add', F32, r1, r2, hint='use')
+    return b.finish()
+
+
+def _loads(body):
+    return sum(1 for s in body if str(s.op) == 'load')
+
+
+def test_a_register_read_through_its_symbol_or_its_value_is_one_read():
+    """Both are `r5[3]`: the second read is the first."""
+    assert _loads(_register_reads((3,), (3,))) == 2
+    assert _loads(load_cse(_register_reads((3,), (3,)))) == 1
+
+
+def test_the_reads_of_a_register_stay_two_where_they_are_two():
+    """Another element, a store to the element between, or an index of more
+    than one term -- which the symbol's view and the buffer's shape need not
+    linearize alike (`Emitter.address`)."""
+    assert _loads(load_cse(_register_reads((3,), (4,)))) == 2
+    assert _loads(load_cse(_register_reads((3,), (3,), store=3))) == 2
+    assert _loads(load_cse(_register_reads((1, 1), (1, 1)))) == 2

@@ -460,18 +460,19 @@ def test_a_table_leaves_room_for_the_views_lower_corner():
     box = re.findall(r'int32_t (v\d+_row) = v\d+_(?:lead|row) \+ -9;', src)
     assert box, src
     # The predicate compares *that* row, not the tensor row.
+    # Where the predicate stands as a value of its own, and where it guards
+    # the select that reads the element.
     guard = [line for line in src.splitlines()
-             if '_g = ' in line and '_start)' in line and '_stop)' in line]
+             if '_start)' in line and '_stop)' in line]
     assert guard and all(any(name in line for name in box) for line in guard), \
         guard
     # And the address subtracts the corner exactly once -- the table's own
     # offset and start are applied to the tensor row, so the one
     # subtraction `Symbol._address` makes is the whole of it.
-    slot = [line for line in src.splitlines()
-            if re.search(r'= \(\(v\d+_row \+ v\d+_off\) - v\d+_start\)', line)]
+    slot = re.findall(r'\(\(v\d+_(?:row|lead) \+ v\d+_off\) - v\d+_start\)'
+                      r'((?: - \d+)*)', src)
     assert slot, src
-    assert all(line.count(' 9') == 1 and line.rstrip().endswith('- 9;')
-               for line in slot), slot
+    assert all(tail == ' - 9' for tail in slot), slot
 
 
 def test_a_table_too_big_for_the_arguments_goes_into_the_file():
