@@ -498,6 +498,10 @@ class Flow:
                 if a.base is not None:
                     self._reset(a.space, id(a.base), None)
             return
+        if s.op == Op.MARK:
+            # What a later pass is told about the order of the writes
+            # (`clears`, `cleared`): no element changes.
+            return
         if not s.accesses or s.op in (Op.WAIT, Op.PREFETCH, Op.COMMIT_ASYNC):
             # A wait carries the accesses of the copies it completes, which
             # are placed where they are issued.

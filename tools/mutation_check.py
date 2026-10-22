@@ -2904,6 +2904,11 @@ GROUPS = {
          sub(FORWARD, '            reached |= hit\n', '            pass\n', 1)),
         ('a body past the budget forwarded all the same',
          sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
+        ('a mark around a clearing store taken for a write nobody can place',
+         sub(FLOW, "        if s.op == Op.MARK:\n"
+                   "            # What a later pass is told about the order of the writes\n"
+                   "            # (`clears`, `cleared`): no element changes.\n"
+                   "            return\n", '', 1)),
         ('a load of memory taken from no earlier load',
          sub(FLOW, '                self._forwarded[n] = found + self._fetches(n, conds, taken)\n',
              '                self._forwarded[n] = found\n', 1)),

@@ -649,3 +649,21 @@ def test_a_body_past_the_budget_is_left_as_it_is(monkeypatch):
     assert _loads(out, MemSpace.GLOBAL, t.q)
     assert any('more than 50 elements' in line for line in t.report), t.report
     assert drop_dead_stores(t.body, threads=LANES, arena='shrMem') is t.body
+
+
+def test_the_marks_around_a_clearing_store_write_nothing():
+    """`mark clears` and `mark cleared` tell the barrier placement about the
+    order of the writes (`pir.barriers`) and change no element: what the
+    clearing store wrote between them is read from its registers."""
+    t = Body()
+    b = t.b
+    s = b.alloc(F32, (LANES,), MemSpace.SHARED, hint='s', extern='s0',
+                arena='shrMem')
+    r = t.registers('r0', 1)
+    b.store(r, b.op('mul', REAL, 2.0, b.load(t.p, t.lane)), 0)
+    b.mark('clears', s)
+    b.store(s, b.load(r, 0), t.lane)
+    b.mark('cleared', s)
+    b.store(t.p, b.load(s, t.lane), t.lane)
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED)
