@@ -147,9 +147,8 @@ class OperationBuilder(AbstractBuilder):
 
         Only a temporary's: a writeback pending to a shared buffer, which is a
         value nothing else holds and nothing after the section reads.  A global
-        result has a home other elements and later kernels see, a preload is a
-        copy in whatever orientation its contraction staged it, and an atomic
-        writeback is this element's share of a sum rather than its value.
+        result has a home other elements and later kernels see, and a preload
+        is a copy in whatever orientation its contraction staged it.
 
         An image without axes is one value, held by every lane, so it serves
         any reader (`register_temporaries=scalars`).  One with axes (`all`)
@@ -171,7 +170,7 @@ class OperationBuilder(AbstractBuilder):
             return None
         symbol = self._scopes.get_symbol(subtensor.tensor)
         entry = self._residency.get(symbol.name) if symbol is not None else None
-        if (entry is None or entry.is_preload or entry.atomic
+        if (entry is None or entry.is_preload
                 or entry.home.stype != SymbolType.SharedMem
                 or entry.image.stype != SymbolType.Register):
             return None
@@ -330,7 +329,7 @@ class OperationBuilder(AbstractBuilder):
             self._home_store = lambda: StoreRegToGlb(
                 context=self._context, src=registers, dest=symbol,
                 num_threads=self._num_threads, lead_width=self._lead_width,
-                atomic=None, dest_offset=shift,
+                dest_offset=shift,
                 # the promise in the image's coordinates, as `src` is
                 dest_bbox=BoundingBox(
                     [l - s for l, s in zip(owed.lower(), shift)],

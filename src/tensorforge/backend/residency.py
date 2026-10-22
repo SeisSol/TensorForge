@@ -66,9 +66,6 @@ class ResidencyEntry:
     covered: Optional[BoundingBox] = None
     #: Position `r` of the image holds tensor element `r + shift`.
     shift: List[int] = field(default_factory=list)
-    #: Whether the pending store is an atomic update.  Only meaningful for a
-    #: writeback.
-    atomic: Optional[bool] = None
     #: The box the producing operation undertook to define, so the store can
     #: zero-fill exactly what the range narrowing left out and nothing else.
     promise: Optional[BoundingBox] = None
@@ -210,12 +207,11 @@ class Residency:
                                         image=image, home=image,
                                         covered=covered,
                                         shift=list(shift or []),
-                                        atomic=None, promise=None), name)
+                                        promise=None), name)
 
     def record_writeback(self, name: str, image: Symbol, home: Symbol,
                          covered: Optional[BoundingBox] = None,
                          shift: Optional[List[int]] = None,
-                         atomic: Optional[bool] = None,
                          promise: Optional[BoundingBox] = None
                          ) -> ResidencyEntry:
         """`image` is the only copy of a result destined for `home`."""
@@ -223,7 +219,7 @@ class Residency:
                                         image=image, home=home,
                                         covered=covered,
                                         shift=list(shift or []),
-                                        atomic=atomic, promise=promise), name)
+                                        promise=promise), name)
 
     def drop(self, name: str) -> Optional[ResidencyEntry]:
         """Forget `name`, and hand back what was forgotten.
@@ -289,7 +285,6 @@ class Residency:
                                  dest=entry.home,
                                  num_threads=self._num_threads,
                                  lead_width=self._lead_width,
-                                 atomic=entry.atomic,
                                  dest_offset=shift,
                                  dest_bbox=entry.promise,
                                  zero_fill=entry.promise is not None)

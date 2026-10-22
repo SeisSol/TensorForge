@@ -568,9 +568,11 @@ declare('atomic_accumulation',
             'beat the read-modify-write by 37 %, and at the bandwidth limit '
             'the two are equal because the write allocates the line either '
             'way.\n'
-            'Only ever a preference: `result_is_atomic` still asks whether '
-            'the target has the instruction, and an accumulation that is '
-            'written in slices goes out normally whatever this says.')
+            'Only ever a preference: the body adds atomically only where '
+            'nothing reads the sum -- not the element behind the store, not '
+            'a register the sum passes through -- and the target has the '
+            'instruction (`pir.atomics`).  Anything else goes out as the '
+            'read, the add and the store.')
 
 declare('preload_globals',
         rule=lambda target: target.prefs.preload_globals,
@@ -802,12 +804,10 @@ declare('carry_trips',
         doc='Keep in registers what the trips of a merged run hand each other '
             'through memory: an accumulator loaded at the head of a trip and '
             'stored at its tail is loaded once ahead of the loop and stored '
-            'once behind it, and an atomic update of one is summed in '
-            'registers and applied once.  Only where every lane is shown to '
-            'read back what it stored, and nothing else in the loop touches '
-            'the buffer (`pir.carry`).  A loop whose trips are closed '
-            '(`closed_trips`) is one that hands its accumulators over that '
-            'way.')
+            'once behind it.  Only where every lane is shown to read back what '
+            'it stored, and nothing else in the loop touches the buffer '
+            '(`pir.carry`).  A loop whose trips are closed (`closed_trips`) is '
+            'one that hands its accumulators over that way.')
 
 declare('forward_memory',
         default=True,

@@ -1223,9 +1223,6 @@ GROUPS = {
         ('a chain that starts with a read of its destination made resident',
          sub(GEN, '          or any(self._residency_key(v) == key for v in first.reads())):',
              '          or False):', 1)),
-        ('the atomic chain started from a load',
-         sub(MLB, '    if self._policy.atomic_accumulation:\n      supported = self._context.target.native_atomic(',
-             '    if False:\n      supported = self._context.target.native_atomic(', 1)),
         ('the windows a run fills declared in its body',
          sub(PTR, '    self._declare_windows_early(writer, self._region, cleared)\n', '', 1)),
         ('what a run defines not defined behind it',
@@ -2236,11 +2233,8 @@ GROUPS = {
 
     'access': ('tests/test_pir_access.py', [
         ('the structured store falls back to text',
-         sub(SYM, '    structured = (not atomic and isinstance(variable, _Value)',
+         sub(SYM, '    structured = (isinstance(variable, _Value)',
              '    structured = (False and isinstance(variable, _Value)')),
-        ('an atomic routed through Op.STORE, losing the atomicity',
-         sub(SYM, '    structured = (not atomic and isinstance(variable, _Value)',
-             '    structured = (isinstance(variable, _Value)')),
         ('the address pinned again, so nothing folds or shares',
          sub(SYM, '    return self.build_address(writer, context, index, shift=shift)\n\n'
                   '  def access_address',
@@ -2699,10 +2693,6 @@ GROUPS = {
         ('the image computed in place for rows nothing hands on',
          sub(CARRY, '                if set(first) != handed.get(lane, set()):',
              '                if False:', 1)),
-        ('an atomic slot added twice',
-         sub(CARRY, "                    if slot in slots:\n"
-                    "                        raise _Refused('a slot of the image added twice')\n",
-             '', 1)),
         ('a load ahead of the loop taken from a store that left rows out',
          sub(CARRY, '                if written.get(lane, {}).get(element) != slot:',
              '                if False:', 1)),
@@ -2730,20 +2720,6 @@ GROUPS = {
         ('a load behind the loop outside the guard taken from registers',
          sub(CARRY, '            if not (c.guards <= under or (not c.fused and c.loaded <= under)):',
              '            if False:', 1)),
-        ('an address spelled in text left escaping',
-         sub(CARRY, '        body = _unescaped(body, spelled)\n', '', 1)),
-        ('a slot of the sum written afresh twice',
-         sub(CARRY, '                        if (id(x) in adding) != (slot in written):',
-             '                        if False:', 1)),
-        ('a read of the tail besides the sum taken for an addend',
-         sub(CARRY, "            if len(used) != 1 or used[0].op != 'add':",
-             "            if not used:", 1)),
-        ('a guard around nothing but a sum kept in the trip',
-         sub(CARRY, '                    and _sums_only(regions[0].body, image)):',
-             '                    and False):', 1)),
-        ('an update folded onto a store of other elements',
-         sub(CARRY, '            if adds != written.get(lane, {}):',
-             '            if False:', 1)),
         ('a load behind the loop taken from what was not stored',
          sub(CARRY, '                if (element not in c.stored.get(lane, set())\n'
                     '                        or c.held.get(lane, {}).get(slot) != element):',
@@ -2769,7 +2745,9 @@ GROUPS = {
     ]),
     # An accumulation added atomically where nothing reads the sum, and the
     # per-lane account of which store every load reads that it asks.
-    'atomics': ('tests/test_accumulate_atomically.py tests/test_flow.py', [
+    'atomics': ('tests/test_accumulate_atomically.py tests/test_flow.py '
+                'tests/test_rolling.py::test_an_atomic_destination_starts_from_zeros '
+                'tests/test_rolling.py::test_an_atomic_accumulator_is_summed_in_registers_and_added_once', [
         ('a read of what the store wrote ignored',
          sub(ATOMICS, '        if m & c.mask and reader not in heads:', '        if False:', 1)),
         ('a register on the chain read elsewhere taken for a link',

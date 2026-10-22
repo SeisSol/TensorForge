@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: MIT
 """Which atomic updates the hardware performs, and which it emulates.
 
-An atomic accumulation is chosen for speed: it lets a store go out on its own
-instead of waiting for the tensor's other writers, which is what
-`placement.atomic_accumulation` is about.  That reasoning holds only where the
+An atomic accumulation is chosen for speed: one reduction in place of the
+read, the add and the store, which is what `Options.atomic_accumulation` asks
+for and `pir.atomics` decides where.  That reasoning holds only where the
 update is one instruction.  Where the target has no instruction for it the
 compiler emits a compare-and-swap loop, which is slower than the
 read-modify-write the atomic was chosen to avoid -- so "does this target have
@@ -22,11 +22,12 @@ gfx1030 do not have and gfx908 has only in its non-returning form.
 
 What is *not* modeled here, and why:
 
-* **Shared memory.**  Nothing reaches an atomic on a non-global symbol today,
-  and `Symbol.store` says so rather than silently writing a plain assignment.
-  When it does, the AMD gates are `lds-atomic-add-f64` for f64 and nothing at
-  all for f32 -- `ds_add_f32` predates every target here.
-* **Operations other than add.**  `Symbol.store` passes `op=None` and every
+* **Shared memory.**  `pir.atomics` makes global stores atomic and nothing
+  else, and the emitter refuses any other rather than silently writing a
+  plain assignment.  Should a shared one be wanted, the AMD gates are
+  `lds-atomic-add-f64` for f64 and nothing at all for f32 -- `ds_add_f32`
+  predates every target here.
+* **Operations other than add.**  The emitter passes `op=None` and every
   lexic writes an add.  Min and max exist on both vendors and on different
   targets again (`atomic-fmin-fmax-global-f32` reaches RDNA1, which has no
   add at all), so the parameter is threaded through to keep the question

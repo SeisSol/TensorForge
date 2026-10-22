@@ -242,7 +242,6 @@ class StoreRegToGlb(AbstractInstruction):
                src: Symbol,
                dest: Symbol,
                num_threads: int,
-               atomic,
                lead_width: int = 1,
                dest_offset=None,
                dest_bbox=None,
@@ -284,7 +283,6 @@ class StoreRegToGlb(AbstractInstruction):
     #: See `gen_code_inner`: the register image is blocked by this.
     self._lead_width: int = lead_width
     self._is_ready: bool = True
-    self._atomic = atomic
     # logical->storage shift of the destination slice.  `src` (registers) is
     # indexed logically, `dest` (global) in storage coordinates, so the shift
     # enters both the loop bounds --- which mix the two bboxes --- and the
@@ -333,8 +331,7 @@ class StoreRegToGlb(AbstractInstruction):
       # One value, the same on every lane, and every lane writes it: the same
       # number to the same address, so there is no owner to pick.
       value = self._src.load(writer, self._context, None, [], False)
-      self._dest.store(writer, self._context, value, [], allow_nontemporal,
-                       self._atomic)
+      self._dest.store(writer, self._context, value, [], allow_nontemporal)
       return
     with writer.Scope():
       loops = []
@@ -368,7 +365,7 @@ class StoreRegToGlb(AbstractInstruction):
           else:
             value = writer.const(0) # TODO: dtype
           self._dest.store(writer, self._context, value, dest_indices,
-                           allow_nontemporal, self._atomic)
+                           allow_nontemporal)
 
         # A lead index the loop handed over as a plain integer -- the peeled
         # tail of a widened lead dimension -- names one element, and one lane
@@ -421,7 +418,7 @@ class StoreRegToGlb(AbstractInstruction):
     all (`get_actual_shape` is the box).
     """
     opts = self._context.get_user_options()
-    if (not getattr(opts, 'full_lane_tails', False) or self._atomic
+    if (not getattr(opts, 'full_lane_tails', False)
             or not getattr(self, '_zero_fill', True)
             or self._lead_width != 1 or not self._num_threads):
       return False
@@ -443,10 +440,9 @@ class StoreRegToGlb(AbstractInstruction):
     further would read past the end.  A separate nest over just the remainder
     can, because it writes a constant and never touches `src`.
 
-    An accumulation never gets here --- it does not zero-fill at all --- so
-    the atomic flag is irrelevant and deliberately not passed on.
+    An accumulation never gets here: it does not zero-fill at all.
     """
-    if src_bbox.rank() == 0 or self._atomic:
+    if src_bbox.rank() == 0:
       return
     gaps = [(dest_bbox.lower()[0], src_bbox.lower()[0]),
             (upper_from if upper_from is not None else src_bbox.upper()[0],
@@ -464,7 +460,7 @@ class StoreRegToGlb(AbstractInstruction):
         self._dest.store(writer, self._context, value,
                          [add_offset(x, self._dest_offset[i])
                           for i, x in enumerate(indices)],
-                         allow_nontemporal, None)
+                         allow_nontemporal)
 
       write_loops(self._context, writer, loops, zero)
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 from typing import Tuple
 from tensorforge.common.basic_types import Addressing
-from tensorforge.backend.symbol import DataView, Symbol, SymbolType, SymbolView
+from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr
 from tensorforge.backend.instructions.sync_block import SyncThreads
@@ -13,13 +13,11 @@ from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.backend.instructions.builders.operation_builder import OperationBuilder
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
-from dataclasses import replace
 from tensorforge.backend.placement import (Placement, ResultPlacement,
                                            choose_operand_placement,
                                            choose_result_placement,
                                            legal_operand_placements,
-                                           legal_result_placements,
-                                           result_is_atomic)
+                                           legal_result_placements)
 from tensorforge.common.operation import AddOperator, MulOperator
 
 
@@ -28,16 +26,11 @@ class MultilinearBuilder(OperationBuilder):
     super().__init__(*args, **kwargs)
     #: What this hardware prefers among the placements that are legal.  Only
     #: preferences: nothing here can make a correct kernel incorrect, and the
-    #: legality half is asked separately at each decision.
-    #:
-    #: `atomic_accumulation` is the one a caller may overrule
-    #: (`Options.atomic_accumulation`), so that the vendor's answer and the
-    #: other one can be built in one run and measured against each other
-    #: rather than across two source trees.
-    self._policy = replace(
-        self._context.target.prefs.placement,
-        atomic_accumulation=bool(
-            self._context.get_user_options().atomic_accumulation))
+    #: legality half is asked separately at each decision.  An accumulation
+    #: is built onto what its destination holds, whatever the hardware
+    #: prefers: whether it reaches memory as an atomic add is the body's to
+    #: decide once it knows who reads the sum (`pir.atomics`).
+    self._policy = self._context.target.prefs.placement
 
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.
@@ -437,9 +430,7 @@ class MultilinearBuilder(OperationBuilder):
       if entry.is_preload:
         self._residency.drop(name)
         return False
-      # An atomic writeback is this element's share of a sum others add to as
-      # well: read back, it would be theirs too.
-      if entry.home.stype != SymbolType.Global or entry.atomic:
+      if entry.home.stype != SymbolType.Global:
         raise GenerationError(
             f'{name}: operand wants {view.bbox} at offset {view.offset} but '
             f'the staged image only covers {entry.covered} at shift '
@@ -687,14 +678,8 @@ class MultilinearBuilder(OperationBuilder):
       self._invalidate_residency(dest_symbol.name)
     if dest_symbol.name in self._residency:
       return self._residency.get(dest_symbol.name).image
-    elif (self._policy.atomic_accumulation and prev
-          and (next or dest_symbol.stype == SymbolType.Global)):
-      # the atomic store adds onto what global memory holds; a buffer of the
-      # section's own is stored plainly, so its old value has to be read
-      return None
     elif (self._policy.preload_operands_into_registers
-          and dest_symbol.stype == SymbolType.Global
-          and not self._policy.atomic_accumulation and not next):
+          and dest_symbol.stype == SymbolType.Global and not next):
       view = self._dest_preload_view(dest_symbol)
       symbol, load_op = self._make_loader_and_symbol_reg(view, False)
       self._residency.record_preload(
@@ -704,8 +689,7 @@ class MultilinearBuilder(OperationBuilder):
       self._instructions.append(load_op)
       return symbol.symbol
     elif (self._policy.preload_operands_into_shared
-          and dest_symbol.stype == SymbolType.Global
-          and not self._policy.atomic_accumulation and not next):
+          and dest_symbol.stype == SymbolType.Global and not next):
       view = self._dest_preload_view(dest_symbol)
       symbol, load_op = self._make_loader_and_symbol(view, None)
       self._residency.record_preload(
@@ -726,10 +710,7 @@ class MultilinearBuilder(OperationBuilder):
     all accumulate, the first included, so that none of them has to be built
     beside the loop to leave the destination resident.  A global destination
     is loaded into registers where the policy preloads one
-    (`_get_target_symbol`).  Where the policy adds atomically, the first build
-    takes no bias and defers an atomic update of what it computed, so the
-    start of the chain is zeros owed to that update -- a register array
-    starts as zeros.
+    (`_get_target_symbol`).
 
     Only where the build keeps its result resident in turn (`_make_store`),
     which is what lets the next iteration add onto it: a destination
@@ -740,7 +721,7 @@ class MultilinearBuilder(OperationBuilder):
     term to the same start and only the last would be kept.
 
     False, with nothing recorded, for anything else: a destination in shared
-    memory, an atomic update the target does not have.
+    memory.
     """
     self._reset()
     self._descr = descr
@@ -753,26 +734,6 @@ class MultilinearBuilder(OperationBuilder):
       return False
     if dest_symbol.name in self._residency:
       return self._target_image_fits(dest_symbol.name)
-    if self._policy.atomic_accumulation:
-      supported = self._context.target.native_atomic(
-          None, dest_symbol.get_fptype(), self._lead_width)
-      if not result_is_atomic(accumulating=True, pending_is_atomic=True,
-                              supported=supported, policy=self._policy):
-        return False
-      # Where `_get_target_symbol` would load it: the same view, the same
-      # image, so that `_target_image_fits` takes it as it takes a preload.
-      view = self._dest_preload_view(dest_symbol)
-      spp = None if dest_symbol.obj.is_dense() else dest_symbol.obj.spp
-      registers, alloc = self._temporaries.register_array(view.bbox, 0,
-                                                          spp=spp)
-      registers.data_view = DataView(shape=dest_symbol.obj.shape,
-                                     permute=None, bbox=view.bbox)
-      self._instructions.append(alloc)
-      self._residency.record_writeback(
-          dest_symbol.name, registers, dest_symbol,
-          covered=registers.data_view.get_bbox(), shift=list(view.offset),
-          atomic=True)
-      return True
     if not self._policy.keep_results_in_registers:
       return False
     self._get_target_symbol(prev=True)
@@ -959,9 +920,9 @@ class MultilinearBuilder(OperationBuilder):
     entry = self._residency.get(name)
     if entry is None or entry.is_preload or entry.covered is None:
       return False
-    # An accumulation that was not built on the pending image -- an atomic
-    # policy takes no bias, a view that did not fit was not handed out --
-    # holds only its own term; the pending one's would be lost.
+    # An accumulation that was not built on the pending image -- a view that
+    # did not fit was not handed out -- holds only its own term; the pending
+    # one's would be lost.
     if self._add and not getattr(self, '_built_on_pending', False):
       return True
     if entry.shift and list(entry.shift) != list(self._store_offset()):
@@ -1007,52 +968,14 @@ class MultilinearBuilder(OperationBuilder):
         in_slices = (self._plan.written_in_slices(self._dest_obj.tensor)
                      or self._narrows_pending(dest_symbol.name))
         pending = self._residency.get(dest_symbol.name)
-        atomic = result_is_atomic(
-            accumulating=self._add,
-            pending_is_atomic=pending is None or pending.atomic is not None,
-            # Asked of the lexic and not of `atomics` directly: the backend
-            # gets the last word, because a target whose hardware has the
-            # instruction can still have a lowering that cannot reach it --
-            # ESIMD is the case, where the value is a vector and the SPMD
-            # `atomic_ref` has no scalar to bind.
-            # The width is the accumulator's and not the destination's: a
-            # global symbol carries `lead_width` 1 whatever the register image
-            # is blocked by, so asking `dest` would answer for a nest that is
-            # not the one about to be built.
-            #
-            # Asked of the target and not of `atomics` directly: the
-            # lowering gets the last word, because a target whose hardware has
-            # the instruction can still have a lowering that cannot reach it
-            # -- ESIMD is the case, where the value is a vector and the SPMD
-            # `atomic_ref` has no scalar to bind.
-            supported=self._context.target.native_atomic(
-                None, dest_symbol.get_fptype(), self._lead_width),
-            policy=self._policy)
         result = choose_result_placement(
             legal_result_placements(written_in_slices=in_slices),
-            atomic=atomic, policy=self._policy)
+            policy=self._policy)
         # A destination assembled from several writes cannot be kept in
         # registers: the residency holds one entry per name, so a second
         # slice would displace the first and its whole contribution would be
         # computed and thrown away.
-        #
-        # Atomics are exempt from that *only* if they really do go out on
-        # their own.  Deferring one is what makes it collide with the next
-        # slice, so with several writers the update is emitted here instead
-        # of at the epilogue; there is nothing to serialize, since an atomic
-        # add is order-independent by construction.  With a single covering
-        # writer deferring still pays --- it saves the read-modify-write.
-        if result is ResultPlacement.MEMORY and atomic:
-          self._instructions.append(StoreRegToGlb(context=self._context,
-                                                  src=self._temp_regs,
-                                                  dest=dest_symbol,
-                                                  num_threads=self._num_threads,
-                                                  lead_width=self._lead_width,
-                                                  atomic=True,
-                                                  dest_offset=self._store_offset(),
-                                                  dest_bbox=self._promised_box(),
-                                                  zero_fill=not self._add))
-        elif result is ResultPlacement.REGISTER:
+        if result is ResultPlacement.REGISTER:
           self._residency.record_writeback(
               dest_symbol.name, self._temp_regs, dest_symbol,
               # the *actual* range the accumulator ended up with: _analyze
@@ -1060,7 +983,6 @@ class MultilinearBuilder(OperationBuilder):
               # the declared destination box
               covered=self._temp_regs.data_view.get_bbox(),
               shift=self._store_offset(),
-              atomic=True if atomic else None,
               promise=(self._promised_box() if not self._add
                        else self._inherited_promise(pending)))
         else:
@@ -1070,7 +992,6 @@ class MultilinearBuilder(OperationBuilder):
                                                   dest=dest_symbol,
                                                   num_threads=self._num_threads,
                                                   lead_width=self._lead_width,
-                                                  atomic=None,
                                                   dest_offset=self._store_offset(),
                                                   dest_bbox=self._promised_box(),
                                                   zero_fill=not self._add))

@@ -48,11 +48,9 @@ class Placement(Enum):
 class ResultPlacement(Enum):
     """Where a result is kept once the operation has computed it.
 
-    *Where* it is kept and *how* it is written are two decisions, not one.  A
-    deferred store can itself be atomic: the update goes out at the section
-    boundary rather than here, and is still an add rather than an overwrite.
-    Modeling atomicity as a third placement collapses that and quietly turns
-    an accumulation into an assignment.
+    Not how it is written: an accumulation is stored as the sum it is, and
+    whether that store becomes an atomic add of the terms is decided in the
+    body, once it is known who reads the sum (`pir.atomics`).
     """
 
     #: Leave it in the accumulator and write it out when someone needs it.
@@ -78,8 +76,9 @@ class VendorPolicy:
     preload_operands_into_shared: bool = False
     #: Keep a result in its accumulator instead of storing it eagerly.
     keep_results_in_registers: bool = False
-    #: Accumulate into global memory atomically, which lets a store go out on
-    #: its own instead of waiting for the tensor's other writers.
+    #: Add an accumulation into global memory atomically where nothing reads
+    #: the sum: the default of `Options.atomic_accumulation`, which the body's
+    #: pipeline asks (`pir.atomics`).
     atomic_accumulation: bool = False
     #: A cross-lane broadcast is cheap enough that an operand missing the lane
     #: axis can be read in place instead of staged.
@@ -156,34 +155,6 @@ def choose_operand_placement(legal: FrozenSet[Placement],
     return Placement.IN_PLACE
 
 
-def result_is_atomic(*, accumulating: bool, pending_is_atomic: bool,
-                     supported: bool, policy: VendorPolicy) -> bool:
-    """Whether this result reaches memory as an atomic update.
-
-    Only an accumulation can be one, and only while nothing non-atomic is
-    already pending for the same tensor: mixing the two lets a plain store
-    overwrite an update instead of adding to it.
-
-    `supported` is the third condition and it is not a preference, which is
-    why it is an argument rather than a row of the table.  The policy says
-    this hardware is *worth* accumulating atomically on; whether the
-    architecture has the instruction for this datatype and width is a separate
-    fact, and keeping it in the table would make every AMD target answer for
-    gfx90a.  Where there is no instruction the compiler emits a
-    compare-and-swap loop, so saying yes here is slower than saying no -- and
-    on a target whose builtin does not exist, it does not compile at all.
-
-    No condition asks whether each element is written exactly once, which an
-    atomic add needs where a plain store needs only coverage: the nest
-    partitions its range at every width.  The peeled tail is stored by the
-    lane that owns the element, not by the whole wave, which would be the
-    same value `threads` times under `=` and the contribution `threads` times
-    under `+=`.  `tests/test_lead_coverage` checks the property.
-    """
-    return (policy.atomic_accumulation and accumulating and pending_is_atomic
-            and supported)
-
-
 def legal_result_placements(*, written_in_slices: bool
                             ) -> FrozenSet[ResultPlacement]:
     """Which placements would produce a correct result.
@@ -191,9 +162,7 @@ def legal_result_placements(*, written_in_slices: bool
     A destination assembled from several partial writes cannot stay in an
     accumulator: the residency holds one entry per name, so a second slice
     would displace the first and its whole contribution would be computed and
-    thrown away.  Being atomic does not change that -- an atomic that is
-    deferred is exactly one that collides with the next slice -- so it has to
-    go out here, which it can afford to, being order-independent.
+    thrown away.
     """
     if written_in_slices:
         return frozenset({ResultPlacement.MEMORY})
@@ -201,19 +170,13 @@ def legal_result_placements(*, written_in_slices: bool
 
 
 def choose_result_placement(legal: FrozenSet[ResultPlacement], *,
-                            atomic: bool,
                             policy: VendorPolicy) -> ResultPlacement:
     """The best of the legal answers for this hardware.
 
-    Keeping a result in registers wins where it is legal, since it saves the
-    read-modify-write outright.
-
-    An atomic result defers too, and would even where the policy does not ask
-    for deferral in general.  That disjunct is redundant today -- the one
-    vendor with atomics also keeps results in registers -- and it is kept
-    because the two are separate claims and a table row could separate them.
+    Keeping a result in registers wins where it is legal and the policy asks
+    for it, since it saves the read-modify-write outright.
     """
     if ResultPlacement.REGISTER in legal \
-            and (atomic or policy.keep_results_in_registers):
+            and policy.keep_results_in_registers:
         return ResultPlacement.REGISTER
     return ResultPlacement.MEMORY

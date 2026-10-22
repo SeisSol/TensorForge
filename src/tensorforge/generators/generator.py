@@ -2886,8 +2886,8 @@ class Generator:
     # Every iteration builds this one body, and the body adds onto what its
     # destinations hold when it starts: for the first iteration, what a load
     # of each gives.  A destination not resident yet is made so ahead of the
-    # loop -- loaded, or zeros owed to an atomic update (`_establish`) -- so
-    # that a load stands ahead of the loop rather than an iteration beside it.
+    # loop -- loaded into registers (`_establish`) -- so that a load stands
+    # ahead of the loop rather than an iteration beside it.
     # An operand every iteration shares is staged in the body, the same copy
     # on every trip, and leaves the loop in the pseudo-IR (`pir.move`).  A
     # destination that varies is the member's own on each pass, read and
@@ -3013,7 +3013,7 @@ class Generator:
       entry = self._residency.get(key)
       self._residency.record_writeback(key, init, entry.home,
                                        covered=entry.covered,
-                                       shift=entry.shift, atomic=entry.atomic,
+                                       shift=entry.shift,
                                        promise=entry.promise)
     region = self._reset_temporaries(region, allocations, follows, carried)
     carried = tuple((init, init) for _, init, _ in carried)

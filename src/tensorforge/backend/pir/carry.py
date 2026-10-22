@@ -21,21 +21,9 @@ loop, the store behind it, and the tail copies its image into the head's::
       store H <- J                  I <- J
                                   store H <- I           (once)
 
-An atomic store reads nothing: it adds what the trip computed onto memory.
-The trips add into an image of zeros instead, and one atomic store behind
-the loop adds the sum::
-
-    for k:                        A = 0                  (once)
-      ...                         for k:
-      J = f(...)                    ...
-      atomic H += J                 J = f(...)
-                                    A <- A + J
-                                  atomic H += A          (once)
-
-which is the order the list written out adds in as well: its terms into
-registers, and one atomic update.  Where the trip writes `J` once a slot and
-then only adds onto it, its terms go into `A` itself, and `J` goes
-(`_sum_in_place`).
+Whether the one store behind the loop then adds its sum atomically is not
+this pass's question: the body asks it afterwards, where it can see who reads
+the sum (`pir.atomics`).
 
 A loop that does not qualify keeps its load and its store, which costs a
 round trip through memory per trip and never a wrong value.  What has to
@@ -58,9 +46,6 @@ hold, besides a loop that runs at least once and is a merged run's
   tail's image, so that one can stand ahead of the loop and the other
   behind it.
 
-For an atomic store: nothing else in the loop touches `H`, and each slot of
-the tail's image is added once a trip.
-
 A guard spelled in text -- a batch element's, on AMD -- is not known per
 lane, and what stands under one is taken to run wherever the rest of its
 conditions say.  Which is the same where the guard means the same over the
@@ -82,10 +67,9 @@ accumulator the list began in front of the run is one -- the load that now
 stands there reads that image instead of memory, and the store goes as well
 where the one behind the loop writes all of it again (`_forward`).  A store
 there that pads what it writes with numbers in the same statement goes
-behind the loop instead, reading the carried image; trips that add onto `H`
-atomically start from the image instead of zeros, and the store ahead of
-the loop becomes the one behind it (`_summed`).  The code behind the loop
-that loads `H` straight back reads the carried image (`_forward_behind`).
+behind the loop instead, reading the carried image.  The code behind the
+loop that loads `H` straight back reads the carried image
+(`_forward_behind`).
 
 A buffer in shared memory need not be loaded whole at the head of a trip and
 stored whole at its tail.  Where every lane reads of it only what it wrote
@@ -165,8 +149,7 @@ class _Unit:
     """Statements of a list that touch the carried buffer, and the register
     image they move it through."""
     #: `load` fills the image from the buffer, `store` stores the image into
-    #: it, `atomic` adds the image onto it, and `fill` stores numbers into
-    #: it and no image (`_filled`).
+    #: it, and `fill` stores numbers into it and no image (`_filled`).
     kind: str
     #: Positions in the statement list.
     at: List[int]
@@ -179,29 +162,23 @@ class _Unit:
 
 @dataclass
 class _Carried:
-    """A buffer the trips now hand each other in registers, and where.
+    """A buffer the trips now hand each other in registers: a load ahead of
+    the loop and a store behind it.
 
-    `kind` 'load': a load ahead of the loop and a store behind it.  The load
-    reads into `image` -- spelled `operand` by its loads and stores -- what
-    `held` says (per lane, slot to element), the store behind the loop
-    writes `stored` (per lane, the elements) from it, and `load` holds the
-    statements of the load by id.  `kind` 'atomic': an update behind the
-    loop adds `image`, the sum of the trips, declared ahead of the loop by
-    `declare`; `held` says what it adds (per lane, slot to element).
-    `behind` holds the statements behind the loop that write the buffer, by
-    id."""
+    The load reads into `image` -- spelled `operand` by its loads and
+    stores -- what `held` says (per lane, slot to element), the store behind
+    the loop writes `stored` (per lane, the elements) from it, and `load`
+    holds the statements of the load by id.  `behind` holds the statements
+    behind the loop that write the buffer, by id."""
     access: Access
-    kind: str
     operand: object
     image: object
     held: Dict[int, Dict[int, object]]
     stored: Dict[int, Set[int]]
     load: Set[int]
     behind: Set[int]
-    declare: Optional[Stmt] = None
-    #: The guards spelled in text the store or the atomic update stands
-    #: under (`_guarded`), and those the load stands under, every one of them
-    #: one of the store's.
+    #: The guards spelled in text the store stands under (`_guarded`), and
+    #: those the load stands under, every one of them one of the store's.
     guards: frozenset = frozenset()
     loaded: frozenset = frozenset()
     #: Whether the images reach nothing but themselves and the store
@@ -279,7 +256,7 @@ class _Carrier:
                 out.extend(ahead)
                 out.append(s)
                 out.extend(behind)
-                behind_loops.extend(c for c in carried if c.kind == 'load')
+                behind_loops.extend(carried)
             else:
                 out.append(s)
         for c in behind_loops:
@@ -352,11 +329,9 @@ class _Carrier:
 
     def _shaped(self, loop: Stmt, stmts: List[Stmt], touching: List[int],
                 access: Access):
-        """A load at the head and a store at the tail, or atomic updates."""
+        """A load at the head and a store at the tail."""
         units = self._units(stmts, touching, access)
         kinds = {u.kind for u in units}
-        if kinds == {'atomic'}:
-            return self._atomic(loop, stmts, units, access)
         loads = [u for u in units if u.kind == 'load']
         stores = [u for u in units if u.kind == 'store']
         if not loads or not stores or kinds - {'load', 'store'}:
@@ -400,19 +375,18 @@ class _Carrier:
                                     | Effect.UNKNOWN):
             raise _Refused('a statement that synchronizes or says nothing '
                            'about what it touches')
-        reads_h = writes_h = atomic_h = False
+        reads_h = writes_h = False
         images: Dict[object, Tuple[object, bool, bool]] = {}
         for x in walk_stmts(inner):
             for a in x.accesses:
                 if a.base is access.base and a.space is access.space:
                     if a.kind & Effect.ATOMIC:
-                        atomic_h = True
-                    elif a.kind & Effect.WRITE:
+                        raise _Refused('an atomic update of it')
+                    if a.kind & Effect.WRITE:
                         writes_h = True
                     else:
                         reads_h = True
-                    if x.op not in (Op.LOAD, Op.STORE) and not (
-                            x.op is Op.RAWSTMT and a.kind & Effect.ATOMIC):
+                    if x.op not in (Op.LOAD, Op.STORE):
                         raise _Refused(f'a {x.op} touches it')
                 elif a.space is MemSpace.REGISTER and a.base is not None \
                         and x.op in (Op.LOAD, Op.STORE):
@@ -431,12 +405,10 @@ class _Carrier:
                        and any(_key(a.base) == _key(image)
                                for a in x.accesses))
         events = _events(inner)
-        if reads_h and writes_i and not (writes_h or atomic_h or reads_i):
+        if reads_h and writes_i and not (writes_h or reads_i):
             return _Unit('load', at, image, operand, events)
-        if writes_h and reads_i and not (reads_h or atomic_h or writes_i):
+        if writes_h and reads_i and not (reads_h or writes_i):
             return _Unit('store', at, image, operand, events)
-        if atomic_h and reads_i and not (reads_h or writes_h or writes_i):
-            return _Unit('atomic', at, image, operand, events)
         raise _Refused('a statement that both reads and writes it')
 
     # -- a load at the head, a store at the tail ---------------------------- #
@@ -519,9 +491,8 @@ class _Carrier:
         under = frozenset(g for u in loads for e in u.events
                           for g in _spelled((e,)))
         return ahead, body, behind, _Carried(
-            access, 'load', head.operand, head.image, held, stored, loaded,
-            {id(x) for x in behind}, None, guards, under, closed,
-            body is not copied)
+            access, head.operand, head.image, held, stored, loaded,
+            {id(x) for x in behind}, guards, under, closed, body is not copied)
 
     def _guarded(self, loop: Stmt, stmts: List[Stmt], access: Access,
                  loads: List[_Unit], stores: List[_Unit]) -> frozenset:
@@ -855,15 +826,14 @@ class _Carrier:
         of the run -- SeisSol's Taylor expansion sums its first term there --
         would go to memory and come straight back.  Else as they are."""
         name = getattr(c.access.base, 'name', str(c.access.base))
-        what = ('loaded from memory ahead of the loop' if c.kind == 'load'
-                else 'stored ahead of the loop and added behind it')
         try:
             return self._forwarded(out, ahead, behind, c)
         except _Refused as why:
-            self._say(f'carry: {name} is {what}: {why}')
+            self._say(f'carry: {name} is loaded from memory ahead of the loop: '
+                      f'{why}')
         except _NotStatic as why:
-            self._say(f'carry: {name} is {what}: an index or a condition not '
-                      f'known per lane ({why})')
+            self._say(f'carry: {name} is loaded from memory ahead of the loop: '
+                      f'an index or a condition not known per lane ({why})')
         return ahead, behind
 
     def _last_stores(self, out: List[Stmt], access: Access) -> List[_Unit]:
@@ -909,12 +879,6 @@ class _Carrier:
         at = sorted(i for u in stores for i in u.at)
         name = getattr(access.base, 'name', str(access.base))
 
-        if c.kind == 'atomic':
-            if guards != c.guards:
-                raise _Refused('the store ahead of the loop and the update '
-                               'stand under different guards spelled in text')
-            return self._summed(out, ahead, behind, c, source, at, written,
-                                filled)
         # Under a guard spelled in text, the load takes what the store ahead
         # wrote, and the store goes, only where the two hold for the same
         # elements -- and where the guard does not hold, what the trips then
@@ -965,85 +929,6 @@ class _Carrier:
             return forwarded, kept + moved
         self._say(f'carry: {name} taken from registers ahead of the loop')
         return forwarded, behind
-
-    def _summed(self, out: List[Stmt], ahead: List[Stmt], behind: List[Stmt],
-                c: _Carried, source: _Unit, at: List[int], written,
-                filled):
-        """`(ahead, behind)` for an update behind the loop whose buffer the
-        code ahead of it stored from registers: the trips add onto that image
-        instead of onto zeros, and the store ahead goes behind the loop in
-        place of the update, storing the sum.  A store and an update of every
-        element become one store.
-
-        Only where the store ahead writes exactly what the update adds, each
-        element from the slot the update adds it from, and fills in nothing
-        the update adds to."""
-        for lane in set(c.held) | set(written):
-            adds = {e: slot for slot, e in c.held.get(lane, {}).items()}
-            if adds != written.get(lane, {}):
-                raise _Refused('the store ahead of the loop writes other '
-                               'elements than the update adds, or from other '
-                               'slots')
-            if set(adds) & filled:
-                raise _Refused('the update adds to what the store ahead of '
-                               'the loop fills in')
-        if not self._movable(out, at, ahead, behind):
-            raise _Refused('the store ahead of the loop defines what other '
-                           'statements read')
-        stores = [out[i] for i in at]
-        start = self._copy_in(stores, c.access, source, c.operand, c.image)
-        moved = self._reread(stores, source.image, c.operand, c.image)
-        for i in reversed(at):
-            del out[i]
-        name = getattr(c.access.base, 'name', str(c.access.base))
-        self._say(f'carry: {name} summed onto what the code ahead of the loop '
-                  f'stored, and stored once behind it')
-        return (ahead + start,
-                [x for x in behind if id(x) not in c.behind] + moved)
-
-    def _copy_in(self, stores: List[Stmt], access: Access, source: _Unit,
-                 operand, image) -> List[Stmt]:
-        """`stores`, a store of `source`'s image into the buffer, cloned to
-        store into `image` instead: each value into the slot of `source` it
-        was read from, which is the slot it is summed in."""
-        clones = Clone(self._fresh, 'carry', self._taken).stmts(stores)
-        defs = {t.id: x for x in walk_stmts(tuple(clones)) for t in x.target}
-
-        def slot_of(value):
-            d = defs.get(getattr(value, 'id', None))
-            if d is None:
-                return None
-            if d.op is Op.LOAD and any(_key(a.base) == _key(source.image)
-                                       for a in d.accesses):
-                return _load_index(d)
-            if d.op == 'select':
-                found = [slot_of(x) for x in d.args[1:]]
-                found = [x for x in found if x is not None]
-                return found[0] if len(found) == 1 else None
-            return None
-
-        def redirect(xs) -> List[Stmt]:
-            out = []
-            for x in xs:
-                if x.regions:
-                    out.append(replace(x, regions=tuple(
-                        replace(r, body=tuple(redirect(r.body)))
-                        for r in x.regions)))
-                    continue
-                if x.op is Op.STORE and any(a.base is access.base
-                                            for a in x.accesses):
-                    value, _ = _store_parts(x)
-                    slot = slot_of(value)
-                    if slot is None:
-                        continue
-                    x = replace(x, args=(operand, value, slot),
-                                accesses=(Access(Effect.WRITE,
-                                                 MemSpace.REGISTER, image),),
-                                attrs=())
-                out.append(x)
-            return out
-
-        return redirect(clones)
 
     def _movable(self, out: List[Stmt], at: List[int], *others) -> bool:
         """Whether the statements of `out` at `at` can stand anywhere behind
@@ -1285,264 +1170,6 @@ class _Carrier:
         self._say(f'carry: {getattr(access.base, "name", str(access.base))} '
                   f'taken from registers behind the loop')
         return out
-
-    # -- an atomic store at the tail ----------------------------------------- #
-
-    def _atomic(self, loop: Stmt, stmts: List[Stmt], units: List[_Unit],
-                access: Access):
-        tail = units[0]
-        if len({_key(u.image) for u in units}) != 1:
-            raise _Refused('more than one register image')
-        mine = {i for u in units for i in u.at}
-        self._alone(loop, stmts, mine, access, units)
-        inside = set(defined_within(tuple(stmts)))
-        inside |= {a.id for a in loop.regions[0].args}
-        _needs_only(tuple(stmts[i] for i in sorted(mine)), inside,
-                    'the store needs what the trip computes',
-                    allowed={_key(tail.operand), _key(tail.image)})
-        alloc = next((s for s in walk_stmts(tuple(stmts))
-                      if s.op is Op.ALLOC
-                      and any(_key(t) == _key(tail.image) for t in s.target)),
-                     None)
-        if alloc is None or not isinstance(tail.image, Value):
-            raise _Refused('the image is not declared in the trip')
-        # A guard of the update spelled in text goes behind the loop with it,
-        # and has to mean the same there.
-        counter = loop.attr('extern')
-        if counter and any(
-                isinstance(cond, str)
-                and re.search(rf'\b{re.escape(str(counter))}\b', cond)
-                for u in units for e in u.events for cond, _ in e.conds):
-            raise _Refused('a guard of the update reads the trip')
-        # Each slot of the image added once a trip.
-        slots: Set[int] = set()
-        for unit in units:
-            producers = {t.id: e for e in unit.events
-                         if e.stmt.op is Op.LOAD for t in e.stmt.target}
-            for e in unit.events:
-                s = e.stmt
-                if not (s.op is Op.RAWSTMT or s.op is Op.STORE):
-                    continue
-                value = s.args[0] if s.op is Op.RAWSTMT else s.args[1]
-                if not isinstance(value, Value) or value.id not in producers:
-                    raise _Refused('the update adds something other than the '
-                                   'image')
-                if getattr(value.type, 'length', None) is not None:
-                    raise _Refused('a vector update')
-                src = producers[value.id]
-                index = _load_index(src.stmt)
-                trips = self._indices.leaves(index)
-                if trips - set(src.loops):
-                    raise _Refused('a slot not known for every hop')
-                for env in self._indices.domain(trips, src.loops):
-                    slot = self._indices.evaluate(index, env, {})
-                    if slot in slots:
-                        raise _Refused('a slot of the image added twice')
-                    slots.add(slot)
-
-        image = self._fresh(tail.image)
-        name = Clone(self._fresh, 'carry', self._taken).rename(
-            str(alloc.attr('extern', tail.image.hint or 'acc')))
-        attrs = [(k, v) for k, v in alloc.attrs
-                 if k not in ('extern', 'init', 'decl')]
-        attrs += [('extern', name), ('init', '{}')]
-        declare = replace(alloc, target=(image,), attrs=tuple(attrs))
-        try:
-            added: Optional[Dict[int, Dict[int, int]]] = self._added(units)
-        except (_Refused, _NotStatic):
-            added = None
-        body: List[Stmt] = []
-        spelled: Set[int] = set()
-        for i, s in enumerate(stmts):
-            unit = next((u for u in units if i in u.at), None)
-            if unit is not None:
-                body.extend(self._accumulate(s, access, unit, image, spelled))
-            else:
-                body.append(s)
-        if added is not None:
-            body = self._sum_in_place(stmts, mine, tail, image,
-                                      added) or body
-        body = _unescaped(body, spelled)
-        behind = self._rebased(
-            Clone(self._fresh, 'carry', self._taken).stmts(
-                [stmts[i] for i in sorted(mine)]),
-            tail, image, image)
-        if added is None:
-            return [declare], body, behind, None
-        return [declare], body, behind, _Carried(
-            access, 'atomic', image, image, added,
-            {lane: set(m.values()) for lane, m in added.items()}, set(),
-            {id(x) for x in behind}, declare,
-            _spelled(e for u in units for e in u.events
-                     if e.stmt.op in (Op.RAWSTMT, Op.STORE)))
-
-    def _sum_in_place(self, stmts: List[Stmt], mine: Set[int],
-                      tail: _Unit, image: Value,
-                      added: Dict[int, Dict[int, int]]
-                      ) -> Optional[List[Stmt]]:
-        """The trip, `stmts`, computing the sum of the trips in `image`
-        itself, where that is the same: the trip writes every slot of the
-        tail's image first with a value that reads nothing of it, from then
-        on only adds onto it -- reads it into an `add` whose sum it stores
-        into the slot again -- and the update adds the slots a lane wrote and
-        no other (`added`).  The first write of a slot then adds onto the
-        sum instead, every other access of the tail's image is one of the
-        sum, and the update, the statements at `mine`, goes: the sum is the
-        one the trips add up, term by term, as the list written out adds
-        into its accumulator.  In one image, it is the tail's image fewer of
-        registers live at once.  Else None."""
-        body = None
-        rest = [x for i, x in enumerate(stmts) if i not in mine]
-        every = walk_stmts(tuple(rest))
-        users: Dict[int, List[Stmt]] = {}
-        for x in every:
-            for v in x.operands():
-                users.setdefault(v.id, []).append(x)
-
-        def of_tail(x):
-            return any(_key(a.base) == _key(tail.image) for a in x.accesses)
-
-        adding: Set[int] = set()
-        for x in every:
-            if not of_tail(x):
-                continue
-            if x.op not in (Op.LOAD, Op.STORE) or x.predicate is not None:
-                return body
-            if x.op is Op.STORE:
-                continue
-            used = users.get(x.target[0].id, [])
-            if len(used) != 1 or used[0].op != 'add':
-                return body
-            total = used[0].target[0]
-            back = users.get(total.id, [])
-            if (len(back) != 1 or back[0].op is not Op.STORE
-                    or not of_tail(back[0]) or back[0].args[1] is not total
-                    or len(back[0].args) != 3
-                    or not _same_slot(back[0].args[2], x.args[1])):
-                return body
-            adding.add(id(back[0]))
-        events: List[Tuple[str, int, tuple, Dict, Stmt]] = []
-        try:
-            self._sequence(rest, tail, tail, {}, (), events)
-            for lane in range(self._threads):
-                written: Set[int] = set()
-                for what, slot, conds, env, x in events:
-                    full = {**env, 'x': lane}
-                    self._known(tuple(c for c, _ in conds), full)
-                    if not all(bool(self._indices.evaluate(c, full, {}))
-                               == side for c, side in conds):
-                        continue
-                    if what == 'read tail' and slot not in written:
-                        return body
-                    if what == 'write tail':
-                        if (id(x) in adding) != (slot in written):
-                            return body
-                        written.add(slot)
-                if written != set(added.get(lane, {})):
-                    return body
-        except (_Refused, _NotStatic, KeyError):
-            return body
-        alloc = next((x for x in rest if x.op is Op.ALLOC and any(
-            _key(t) == _key(tail.image) for t in x.target)), None)
-
-        def onto(xs) -> List[Stmt]:
-            out: List[Stmt] = []
-            for x in xs:
-                if x is alloc:
-                    continue
-                if x.regions:
-                    out.append(replace(x, regions=tuple(
-                        replace(r, body=tuple(onto(r.body)))
-                        for r in x.regions)))
-                    continue
-                if x.op is Op.STORE and of_tail(x) and id(x) not in adding:
-                    b = self._scratch()
-                    value, slot = x.args[1], x.args[2]
-                    was = b.load(image, slot, type_=value.type, hint='sum')
-                    now = b.op('add', value.type, was, value, hint='sum')
-                    b.store(image, now, slot)
-                    out.extend(b.finish())
-                    continue
-                out.extend(self._rebased([x], tail, image, image,
-                                         stores=True))
-            return out
-
-        out = onto(rest)
-        if any(_key(a.base) == _key(tail.image)
-               for a in collect_accesses(tuple(out))):
-            return body
-        return out
-
-    def _added(self, units: List[_Unit]) -> Dict[int, Dict[int, int]]:
-        """Per lane, what the atomic update adds: slot of its image to
-        element."""
-        added: Dict[int, Dict[int, int]] = {}
-        owner: Dict[int, int] = {}
-        for unit in units:
-            producers = {t.id: e for e in unit.events
-                         if e.stmt.op is Op.LOAD for t in e.stmt.target}
-            for e in unit.events:
-                s = e.stmt
-                if s.op is Op.RAWSTMT:
-                    if len(s.args) != 2:
-                        raise _Refused('an update addressed by more than one '
-                                       'value')
-                    value, index = s.args
-                elif s.op is Op.STORE:
-                    value, index = _store_parts(s)
-                else:
-                    continue
-                src = producers[value.id]
-                loops = {**src.loops, **e.loops}
-                slot_index = _load_index(src.stmt)
-                for lane, env, memo in self._domain(
-                        (index, slot_index, s.predicate,
-                         *(c for c, _ in e.conds + src.conds)), loops):
-                    if not self._active(e, env, memo, text=True):
-                        continue
-                    element = self._indices.evaluate(index, env, memo)
-                    slot = self._indices.evaluate(slot_index, env, memo)
-                    if owner.setdefault(element, lane) != lane:
-                        raise _Refused('two lanes add to one element')
-                    if added.setdefault(lane, {}).setdefault(
-                            slot, element) != element:
-                        raise _Refused('a slot added to two elements')
-        return added
-
-    def _accumulate(self, s: Stmt, access: Access, tail: _Unit,
-                    image: Value, spelled: Set[int]) -> List[Stmt]:
-        """`s`, a statement of the atomic store, as the sum into `image`: an
-        update of memory becomes an update of the slot its value was read
-        from.  The values an update spelled out in text -- its address --
-        go into `spelled`.
-
-        A guard spelled in text that holds nothing but the sum then has
-        nothing left to guard, and goes: the sum reaches memory through the
-        update behind the loop, which stands under the guard still."""
-        if s.regions:
-            regions = []
-            for r in s.regions:
-                inner: List[Stmt] = []
-                for x in r.body:
-                    inner.extend(self._accumulate(x, access, tail, image,
-                                                  spelled))
-                regions.append(replace(r, body=tuple(inner)))
-            if (s.op is Op.RAWBLOCK and len(regions) == 1
-                    and (s.text or '').startswith('if (')
-                    and _sums_only(regions[0].body, image)):
-                return list(regions[0].body)
-            return [replace(s, regions=tuple(regions))]
-        if not any(a.base is access.base for a in s.accesses):
-            return [s]
-        value = s.args[0] if s.op is Op.RAWSTMT else s.args[1]
-        if s.op is Op.RAWSTMT:
-            spelled.update(v.id for v in s.args[1:] if isinstance(v, Value))
-        slot = self._slot_of(value, s, tail)
-        b = self._scratch()
-        was = b.load(image, slot, type_=value.type, hint='sum')
-        now = b.op('add', value.type, was, value, hint='sum')
-        b.store(image, now, slot)
-        return list(b.finish())
 
     # -- a buffer each lane keeps to itself ---------------------------------- #
 
@@ -1986,8 +1613,8 @@ class _Carrier:
     def _active(self, e: _Event, env, memo, text: bool = False) -> bool:
         """Whether `e` runs for the lane and the hops of `env`.  A guard
         spelled in text is not known per lane: with `text`, the caller has
-        answered for it and it is taken to hold (`_guarded`, `_spelled`), and
-        else it is refused."""
+        answered for it and it is taken to hold (`_guarded`), and else it is
+        refused."""
         for cond, side in e.conds:
             if isinstance(cond, str):
                 if text:
@@ -2068,28 +1695,6 @@ def _addresses(body: Sequence[Stmt]) -> Set[int]:
     return out
 
 
-def _same_slot(a, b) -> bool:
-    """Whether two indices are the one value, or the one number."""
-    if isinstance(a, Value) or isinstance(b, Value):
-        return a is b or (isinstance(a, Value) and isinstance(b, Value)
-                          and a.id == b.id)
-    return a == b
-
-
-def _sums_only(stmts: Sequence[Stmt], image) -> bool:
-    """Whether `stmts` are arithmetic and accesses of the register image
-    `image` alone -- a sum the trips keep to themselves."""
-    for x in walk_stmts(tuple(stmts)):
-        if x.regions or x.effect & ~(Effect.READ | Effect.WRITE):
-            return False
-        if any(a.space is not MemSpace.REGISTER
-               or _key(a.base) != _key(image) for a in x.accesses):
-            return False
-        if x.op not in (Op.LOAD, Op.STORE) and x.accesses:
-            return False
-    return True
-
-
 def _spelled(events) -> frozenset:
     """The guards spelled in text the statements of `events` stand under,
     with the side of each."""
@@ -2104,35 +1709,6 @@ def _leaves(form) -> List[object]:
     if form[0] == 'select':
         return [form[1], *_leaves(form[2]), *_leaves(form[3])]
     return []
-
-
-def _unescaped(stmts: List[Stmt], ids: Set[int]) -> List[Stmt]:
-    """`stmts` with the values of `ids` no longer marked `escapes` where
-    nothing reads them any more: the statement that spelled their names into
-    its text is gone, and what computed them is dead code DCE may take."""
-    if not ids:
-        return stmts
-    every = tuple(walk_stmts(tuple(stmts)))
-    read = {v.id for x in every for v in x.operands()}
-    text = '\n'.join(x.text for x in every if x.text)
-
-    def free(t: Value) -> bool:
-        return (t.id in ids and t.id not in read
-                and not re.search(rf'\b{re.escape(str(t))}\b', text))
-
-    def strip(xs) -> List[Stmt]:
-        out = []
-        for x in xs:
-            if x.regions:
-                x = replace(x, regions=tuple(
-                    replace(r, body=tuple(strip(r.body))) for r in x.regions))
-            elif x.attr('escapes') and x.target and all(map(free, x.target)):
-                x = replace(x, attrs=tuple((k, v) for k, v in x.attrs
-                                           if k != 'escapes'))
-            out.append(x)
-        return out
-
-    return strip(stmts)
 
 
 def _own(body: Sequence[Stmt], arena: Optional[str]) -> Dict[tuple, Stmt]:

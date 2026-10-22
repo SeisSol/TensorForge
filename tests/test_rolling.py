@@ -894,15 +894,22 @@ def test_the_destination_is_loaded_ahead_of_the_loop():
 
 
 def test_an_atomic_destination_starts_from_zeros():
-    """Where the policy adds atomically, the first iteration takes no bias,
-    so the chain starts as zeros owed to the atomic update after the loop --
-    nothing is read ahead of it."""
+    """Where the policy adds atomically, the run is built as everywhere else
+    -- the destination loaded ahead of the loop, the sum stored behind it --
+    and the body adds it atomically, since nothing reads the sum
+    (`pir.atomics`): the load ahead becomes zeros and goes, and the store
+    behind adds."""
+    from tensorforge.backend.pir.core import Effect, Op, walk_stmts
     gen = _merged_build(roll(accumulation()), arch='gfx942', backend='hip')
     ahead, loop, behind = _around_the_loop(gen)
     assert loop.start == 0
-    assert not any('Loader' in k for k in _kinds(ahead))
-    store, = [i for i in behind if type(i).__name__ == 'StoreRegToGlb']
-    assert store._atomic
+    assert any('Loader' in k for k in _kinds(ahead))
+    q = _output(gen)
+    body = tuple(walk_stmts(gen._sections[0].body))
+    assert not any(a.base is q for s in body if s.op is Op.LOAD
+                   for a in s.accesses)
+    assert any(a.base is q and a.kind & Effect.ATOMIC for s in body
+               if s.op is Op.STORE for a in s.accesses)
 
 
 def test_what_every_iteration_shares_leaves_the_loop():
@@ -2050,10 +2057,11 @@ def test_an_accumulator_begun_ahead_of_the_run_stays_in_its_registers(twice):
 
 
 def test_an_atomic_accumulator_is_summed_in_registers_and_added_once():
-    """Where the policy adds atomically, a trip adds what it computed onto
-    memory.  The carry sums the trips in registers from zeros instead, and
-    one atomic update behind the loop adds the sum -- the order the list
-    written out adds in."""
+    """Where the policy adds atomically, the trips are built as everywhere
+    else: each loads the accumulator and stores its sum.  The carry keeps it
+    in registers over the trips, and the body adds the sum behind the loop
+    atomically (`pir.atomics`), from an image that starts as zeros -- the
+    order the list written out adds in."""
     from dataclasses import replace
 
     from tensorforge.backend.pir.core import Effect, Op, walk_stmts

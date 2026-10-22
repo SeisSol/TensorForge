@@ -3742,17 +3742,16 @@ class Symbol:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       return True
 
-  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp, atomic=None):
+  def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     addrs = []
     assert self.stype != SymbolType.Data
 
-    kind = Effect.ATOMIC if atomic else Effect.WRITE
     from tensorforge.backend.pir.core import Value as _Value
     lead = index[self.lead_dims[0]] if len(self.lead_dims) == 1 else None
     # A sliced store qualifies as well: its slicing offset sits in the
     # `LeadIndex` itself (`add_offset` folds it), so its address is an operand
     # here rather than a pinned name on the text path.
-    structured = (not atomic and isinstance(variable, _Value)
+    structured = (isinstance(variable, _Value)
                   and lead is not None and unwrap_lead(lead) is not None
                   and self.stype in (SymbolType.Register, SymbolType.Scratch,
                                      SymbolType.Global, SymbolType.SharedMem))
@@ -3796,7 +3795,7 @@ class Symbol:
     # what a cross-lane reduction writes, and it wrote it as text --
     # `r1[0] = reduction<..>(..)`, beside a structured read of the same
     # buffer two lines down.
-    named = (not structured and not atomic
+    named = (not structured
              and self.stype in (SymbolType.Register, SymbolType.Scratch)
              and (isinstance(lead, (int, np.integer))
                   or (not self.lead_dims and not index
@@ -3818,28 +3817,13 @@ class Symbol:
       fmt = not isinstance(variable, (str, int, float))
       var = '{0}' if fmt else variable
       if self.stype == SymbolType.Global:
-        if atomic:
-          assign = context.target.lexic.atomic_store(
-              context, access, var, None, self.get_fptype(),
-              lead_width_of(index))
-        else:
-          length = lead_width_of(index)
-          if not context.target.nontemporal(self.get_fptype(), length):
-            nontemp = False
-          assign = context.target.lexic.glb_store(
-              access, var, datatype=self.get_fptype(), length=length,
-              nontemporal=nontemp)
+        length = lead_width_of(index)
+        if not context.target.nontemporal(self.get_fptype(), length):
+          nontemp = False
+        assign = context.target.lexic.glb_store(
+            access, var, datatype=self.get_fptype(), length=length,
+            nontemporal=nontemp)
       else:
-        # An `atomic` reaching here would be dropped: the update would come
-        # out as `access = var;`, an assignment where an accumulation was
-        # asked for, with nothing said.  Nothing builds one -- the builder only
-        # marks a `SymbolType.Global` destination atomic -- so this states the
-        # precondition rather than implementing a second path.  The shared
-        # one, when it is wanted, is `ds_add_*` and gated separately;
-        # `backend/atomics.py` names the features.
-        assert not atomic, (
-            f'atomic store to a {self.stype.name} symbol {self.name!r}: '
-            f'only global memory has an atomic path')
         assign = f'{access} = {var};'
 
     guard = (writer.If(mask_name, guard='element') if mask_name is not None
@@ -3857,12 +3841,11 @@ class Symbol:
       # into a finished statement with `lexic.glb_store` at this call site
       # would leave nothing structured to emit.
       #
-      # Two cases stay on the text path, each for its own reason.  A
-      # non-Value variable is a literal, and the spelling a literal gets is
-      # the emitter's to decide; routing it here would change `0` into `0.0f`
-      # or the reverse for reasons unrelated to the store.  And an atomic
-      # goes through `atomic_store`, which returns an expression rather than a
-      # statement.
+      # A non-Value variable stays on the text path: it is a literal, and
+      # the spelling a literal gets is the emitter's to decide; routing it
+      # here would change `0` into `0.0f` or the reverse for reasons unrelated
+      # to the store.  An accumulation is a plain store here too: whether it
+      # becomes an atomic add is the body's question (`pir.atomics`).
       # The width comes off the *stored value*, as it does in the emitter:
       # the buffer is typed by its element and would narrow every wide write
       # to its first component.  `RELAXED` for the same reason as in `load`.
@@ -3932,7 +3915,7 @@ class Symbol:
                        self.address_value(writer, context, index),
                        align=None if wide is None else RELAXED)
         else:
-          writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+          writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
 
       if conds:
         with writer.If(' && '.join(conds)):
@@ -3940,13 +3923,10 @@ class Symbol:
       else:
         emit()
     else:
-      # The atomic lands here: `atomic_store` returns an expression the lexic
-      # finished, so there is nothing structured to attach a predicate to and
-      # the mask has to be the block it runs in.  Which is the case that most
-      # needs one -- an accumulation from a row whose element is out of range
-      # is not a value overwritten later but a contribution counted twice.
+      # Text the lexic finished: nothing structured to attach a predicate to,
+      # so the mask is the block it runs in.
       with guard:
-        writer.access_stmt(assign, self, kind, args=_operands(variable, addrs), fmt=fmt)
+        writer.access_stmt(assign, self, Effect.WRITE, args=_operands(variable, addrs), fmt=fmt)
 
   def _stack_mask(self, context, index) -> str:
     """The mask a write of a stacked operand runs under: its element's
