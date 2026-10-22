@@ -60,6 +60,11 @@ class Run:
     own, which holds for the same lanes, as the rows past a multiplication's
     first lanes get theirs; `wide` computes the tail for every row, the rows
     the head does not load included.
+
+    `masked` makes `guard` an element's mask (`elementmask`) and puts every
+    store of the other output under it as well, so that the body keeps the
+    mask's contract; `stray` stores into that output once outside it, so
+    that it does not.
     """
 
     def __init__(self, *, table=False, elsewhere=False, other_rows=False,
@@ -67,11 +72,16 @@ class Run:
                  early_read=False, twice=False, tail_cols=COLS, trips=4, late_slot=False,
                  head_cols=COLS, rows=ROWS, padded=False, read_behind=False,
                  guarded=False, guarded_load=False, guard='if (active)',
-                 tail_read=False, overwrite=False, split=False, wide=False):
+                 tail_read=False, overwrite=False, split=False, wide=False,
+                 masked=False, stray=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
 
         def guarding(on):
-            return b.Block(guard) if on else contextlib.nullcontext()
+            if not on:
+                return contextlib.nullcontext()
+            if masked:
+                return b.If('active', guard='element')
+            return b.Block(guard)
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         q = b.decl_expr(
             'float *const __restrict__ glb_m0', '&m0[{0} * 120]',
@@ -94,6 +104,13 @@ class Run:
         valid = (inside if rows == ROWS
                  else b.op('lt', BOOL, lane, rows, hint='v'))
         real = ScalarType(F32)
+
+        def output(value):
+            with guarding(masked):
+                b.store(p, value, lane)
+
+        if stray:
+            b.store(p, 1.0, lane)
 
         def element(j, down=0):
             return b.op('add', INDEX, b.op('add', INDEX, lane, down),
@@ -128,7 +145,7 @@ class Run:
             if elsewhere:
                 b.store(head, b.load(q, element(0), predicate=inside), 0)
             if early_read:
-                b.store(p, b.load(head, 0), lane)
+                output(b.load(head, 0))
             tail = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r2',
                            extern='r2', init='{}')
             cols = 2 if split else COLS
@@ -146,9 +163,9 @@ class Run:
             if writes_head:
                 b.store(head, 0.0, 0)
             if late_read:
-                b.store(p, b.load(head, 0), lane)
+                output(b.load(head, 0))
             if tail_read:
-                b.store(p, b.load(tail, 0), lane)
+                output(b.load(tail, 0))
             if overwrite:
                 with b.if_(valid):
                     b.store(tail, b.op('mul', real, 5.0, 1.0), 0)
@@ -168,7 +185,7 @@ class Run:
                 with b.for_(0, COLS, 1, unroll=True) as hop:
                     j = hop.induction
                     b.store(after, b.load(q, element(j), predicate=valid), j)
-            b.store(p, b.load(after, 0), lane)
+            output(b.load(after, 0))
         self.body = b.finish()
         verify(self.body)
 
@@ -608,6 +625,48 @@ def test_a_load_behind_the_loop_outside_the_guard_reads_memory():
     assert [a for a in _touches(behind, _q_root(run)) if not a.writes]
     assert any('a guard spelled in text the load does not' in line
                for line in run.report)
+
+
+# -- an element's mask (`elementmask`) ----------------------------------------
+
+def test_a_load_behind_the_loop_outside_an_elements_mask_reads_registers():
+    """The store behind the loop under an element's mask, the load behind
+    it not, and the body keeps the mask's contract: where the mask does not
+    hold, nothing the lane computes from what the load reads is kept, so
+    the load reads the image the trips left, as where the mask holds."""
+    run = Run(guarded=True, read_behind=True, masked=True)
+    _, _, behind = _split(run.carry())
+    q = _q_root(run)
+    assert not [a for a in _touches(behind, q) if not a.writes]
+    assert _guards(behind, q)
+    assert any('taken from registers behind the loop' in line
+               for line in run.report)
+
+
+def test_a_mask_the_body_does_not_keep_is_a_guard_like_any_other():
+    """One store outside every mask, and a lane past the batch leaves
+    behind what it computed: there the load behind the loop reads memory."""
+    run = Run(guarded=True, read_behind=True, masked=True, stray=True)
+    _, _, behind = _split(run.carry())
+    assert [a for a in _touches(behind, _q_root(run)) if not a.writes]
+    assert any('a guard spelled in text the load does not' in line
+               for line in run.report)
+
+
+def test_under_an_elements_mask_the_trips_add_in_place_where_more_reads():
+    """The trip reads the loaded image for another output ahead of its
+    computation, under the mask as well: where the mask does not hold,
+    neither output is written, so the sum the trips compute in place reaches
+    nothing anyone keeps.  A mask the body does not keep is a guard as any
+    other, and the image is copied."""
+    run = Run(guarded=True, early_read=True, masked=True)
+    _, loop, _ = _split(run.carry())
+    assert any('in registers' in line for line in run.report)
+    assert not _tail_image(run, loop.regions[0].body)
+    run = Run(guarded=True, early_read=True, masked=True, stray=True)
+    _, loop, _ = _split(run.carry())
+    assert any('in registers' in line for line in run.report)
+    assert _tail_image(run, loop.regions[0].body)
 
 
 def test_a_temporary_each_lane_keeps_to_itself_is_held_in_registers():

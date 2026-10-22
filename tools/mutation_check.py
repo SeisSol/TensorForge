@@ -2711,7 +2711,18 @@ GROUPS = {
          sub(CARRY, "                if re.search(rf'\\b{re.escape(name)}\\b', text):",
              '                if False:', 1)),
         ('the trips summed in place under a guard where another output reads them',
-         sub(CARRY, '        if closed or not guards:', '        if True:', 1)),
+         sub(CARRY, '        if closed or not {g for g in guards\n'
+                    '                          if not (g[1] and g[0] in self._masks)}:',
+             '        if True:', 1)),
+        ('a guard spelled in text taken for an element\'s mask in the trips',
+         sub(CARRY, '                          if not (g[1] and g[0] in self._masks)}:',
+             '                          if not g[1]}:', 1)),
+        ('a guard spelled in text taken for an element\'s mask behind the loop',
+         sub(CARRY, '        masked = {g for g in c.guards if g[1] and g[0] in self._masks}',
+             '        masked = {g for g in c.guards if g[1]}', 1)),
+        ('an element\'s mask taken to hold where the body does not keep it',
+         sub(FLOW, '    return frozenset(masks) if kept(body, False) else frozenset()',
+             '    return frozenset(masks)', 1)),
         ('a read of the tail besides the copy taken for closed',
          sub(CARRY, '                if _key(a.base) == _key(tail.image) and not a.writes:\n'
                     '                    return False\n', '', 1)),
@@ -2868,17 +2879,17 @@ GROUPS = {
                    '                    else conds | {(s.text, True)}',
              '                inner = conds', 1)),
         ('masks taken to hold where a global write stands outside them',
-         sub(FLOW, '                    if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):\n'
-                   '                        if not under:\n'
-                   '                            return False\n',
-             '                    if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):\n'
-                   '                        pass\n', 1)),
+         sub(FLOW, '                if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):\n'
+                   '                    if not under:\n'
+                   '                        return False\n',
+             '                if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):\n'
+                   '                    pass\n', 1)),
         ('masks taken to hold where a branch turns on memory',
-         sub(FLOW, '                    if loads.reads(cond):\n'
-                   '                        return False\n', '', 1)),
+         sub(FLOW, '                if loads.reads(cond):\n'
+                   '                    return False\n', '', 1)),
         ('a statement that stands in for others asked as a write of its own',
-         sub(FLOW, '                if _stands_in(x):\n'
-                   '                    continue\n', '', 1)),
+         sub(FLOW, '            if _stands_in(x):\n'
+                   '                continue\n', '', 1)),
         ('text with a known effect taken to stand in for others',
          sub(FLOW, '    return (x.op == Op.RAWSTMT and not x.text and bool(x.accesses)',
              '    return (x.op == Op.RAWSTMT and bool(x.accesses)', 1)),

@@ -100,6 +100,7 @@ from .ahead import Clone, counted
 from .core import (Access, BufferType, Effect, MemSpace, Op, Stmt, Value,
                    collect_accesses, collect_effect, defined_within, may_alias,
                    walk_stmts)
+from .flow import body_masks
 from .shards import _Indices, _NotStatic
 from .transfers import neutral, tag
 
@@ -121,7 +122,7 @@ def carry_trips(body: Tuple[Stmt, ...], scratch, *, threads: int,
                  if s.op is Op.CONST for t in s.target}
     carrier = _Carrier(scratch, _Indices(body, {'x': threads}), threads,
                        report, taken, constants, _addresses(body),
-                       _own(body, arena), body)
+                       _own(body, arena), body, body_masks(body, arena))
     out, changed = carrier.stmts(body)
     return out if changed else body
 
@@ -195,7 +196,8 @@ class _Carrier:
     def __init__(self, scratch, indices: _Indices, threads: int,
                  report: Optional[List[str]], taken: Set[str],
                  constants: Dict[int, object], addresses: Set[int],
-                 own: Dict[tuple, Stmt], root: Tuple[Stmt, ...]):
+                 own: Dict[tuple, Stmt], root: Tuple[Stmt, ...],
+                 masks: frozenset = frozenset()):
         self._scratch = scratch
         self._indices = indices
         self._threads = threads
@@ -212,6 +214,11 @@ class _Carrier:
         #: The body as it came, and the loop being carried, by id: what is
         #: read behind the loop is asked of them (`_read_behind`).
         self._root = root
+        #: The element masks the body keeps the contract of (`flow.
+        #: kept_masks`): where one does not hold, nothing a lane computes is
+        #: kept, so a read there may be taken from wherever the lane's value
+        #: would be where it holds.
+        self._masks = masks
         self._here: Optional[int] = None
         self._b = None
 
@@ -481,7 +488,10 @@ class _Carrier:
             body.append(s)
         closed = self._closed(body, copies, head, tail)
         copied = body
-        if closed or not guards:
+        # An element's mask the body keeps is no guard here: where it does
+        # not hold, what the trips sum in place is nothing anyone keeps.
+        if closed or not {g for g in guards
+                          if not (g[1] and g[0] in self._masks)}:
             body = self._fused(body, copies, head, tail, handed)
         behind = self._rebased(
             Clone(self._fresh, 'carry', self._taken).stmts(
@@ -1152,8 +1162,12 @@ class _Carrier:
         # ahead of the loop ran: the load reads the image where it runs only
         # under the store's guards, or under the load's of an image the
         # trips did not compute in place.
+        # An element's mask the body keeps is taken to hold for the load as
+        # well: where it does not, nothing the lane computes from what the
+        # load reads is kept.
+        masked = {g for g in c.guards if g[1] and g[0] in self._masks}
         for e in unit.events:
-            under = _spelled((e,))
+            under = _spelled((e,)) | masked
             if not (c.guards <= under or (not c.fused and c.loaded <= under)):
                 raise _Refused('the store behind the loop stands under a '
                                'guard spelled in text the load does not')

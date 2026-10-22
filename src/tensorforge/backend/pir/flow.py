@@ -311,106 +311,9 @@ class Flow:
                 self._index(r.body, parents + (s,))
 
     def _masks(self) -> FrozenSet:
-        """The element masks of the body -- the text of a raw block, the
-        condition of an `if`, that says `guard='element'` -- where the body
-        keeps their contract, and none where it does not.
-
-        Kept, where every write to global memory stands under a mask; where
-        every write to shared memory that lanes of other multiplications
-        read stores a number, or what a load read from global memory the
-        body never writes, which the mask changes nothing of; and where no
-        condition of a branch or a loop reads memory.  A lane under a mask
-        that does not hold then leaves nothing behind but what every lane
-        would, and reaches every barrier the others do.
-
-        Not asked: a statement that only says what others reach
-        (`_stands_in`) -- a merged run's members, which its reads and writes
-        through the pointer its counter selects reach.  Those writes are
-        statements of their own, under a mask or not."""
-        masks: Set = set()
-        for x in walk_stmts(self.body):
-            if x.attr('guard') != 'element':
-                continue
-            if x.op == Op.RAWBLOCK and x.text:
-                masks.add(x.text)
-            elif x.op == Op.IF:
-                cond = x.cond
-                masks.add(cond.id if isinstance(cond, Value) else repr(cond))
-        if not masks:
-            return frozenset()
-        written = {id(a.base) for x in walk_stmts(self.body)
-                   for a in x.accesses if a.space is MemSpace.GLOBAL
-                   and a.kind & (Effect.WRITE | Effect.ATOMIC)}
-        loads = _MemoryReads(self.defs)
-
-        def kept(stmts, under: bool) -> bool:
-            for x in stmts:
-                if x.op == Op.RAWBLOCK and x.regions:
-                    inner = under or x.text in masks
-                    if not all(kept(r.body, inner) for r in x.regions):
-                        return False
-                    continue
-                if x.op == Op.IF and x.regions:
-                    cond = x.cond
-                    name = cond.id if isinstance(cond, Value) else repr(cond)
-                    if name in masks:
-                        if not kept(x.regions[0].body, True):
-                            return False
-                        if len(x.regions) > 1 and not kept(x.regions[1].body,
-                                                           under):
-                            return False
-                        continue
-                    if loads.reads(cond):
-                        return False
-                    if not all(kept(r.body, under) for r in x.regions):
-                        return False
-                    continue
-                if x.regions:
-                    heads = list(x.operands())
-                    if any(loads.reads(v) for v in heads):
-                        return False
-                    if not all(kept(r.body, under) for r in x.regions):
-                        return False
-                    continue
-                if x.op == Op.EXIT and loads.reads(x.exit_cond):
-                    return False
-                if _stands_in(x):
-                    continue
-                for a in x.accesses:
-                    if not a.kind & (Effect.WRITE | Effect.ATOMIC):
-                        continue
-                    if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):
-                        if not under:
-                            return False
-                    elif (a.space is MemSpace.SHARED
-                          and id(a.base) not in self._own
-                          and not self._element_free(x, written)):
-                        return False
-            return True
-
-        return frozenset(masks) if kept(self.body, False) else frozenset()
-
-    def _element_free(self, x: Stmt, written: Set[int]) -> bool:
-        """Does `x`, a write to shared memory, store what no element's mask
-        changes: a number, or what a load read from a buffer of global
-        memory the body never writes?"""
-        if x.op == Op.COPY_ASYNC:
-            src = [a for a in x.accesses if a.kind & Effect.READ]
-            return (len(src) == 1 and src[0].space is MemSpace.GLOBAL
-                    and id(src[0].base) not in written)
-        if x.op != Op.STORE or len(x.args) < 2:
-            return False
-        v = x.args[1]
-        if not isinstance(v, Value):
-            return True
-        d = self.defs.get(v.id)
-        if d is None:
-            return False
-        if d.op == Op.CONST:
-            return True
-        return (d.op == Op.LOAD and len(d.accesses) == 1
-                and d.accesses[0].space is MemSpace.GLOBAL
-                and id(d.accesses[0].base) not in written)
+        """The element masks the body keeps the contract of
+        (`kept_masks`)."""
+        return kept_masks(self.body, self.defs, self._own)
 
     def binding(self, base) -> Any:
         """The value a buffer of memory is reached through: `base` itself
@@ -1010,6 +913,131 @@ def _stands_in(x: Stmt) -> bool:
     reach through a name the IR does not follow (`IRBuilder.touches`)?"""
     return (x.op == Op.RAWSTMT and not x.text and bool(x.accesses)
             and not x.target and not x.args)
+
+
+def kept_masks(body: Sequence[Stmt], defs: Dict[int, Stmt],
+               own: Set[int]) -> FrozenSet:
+    """The element masks of `body` -- the text of a raw block, the condition
+    of an `if`, that says `guard='element'` -- where the body keeps their
+    contract, and none where it does not.  `defs` is what defines each value
+    of the body, by id; `own` holds the shared buffers no lane of another
+    multiplication reaches, by id.
+
+    Kept, where every write to global memory stands under a mask; where
+    every write to shared memory that lanes of other multiplications read
+    stores a number, or what a load read from global memory the body never
+    writes, which the mask changes nothing of; and where no condition of a
+    branch or a loop reads memory.  A lane under a mask that does not hold
+    then leaves nothing behind but what every lane would, and reaches every
+    barrier the others do.
+
+    Not asked: a statement that only says what others reach (`_stands_in`)
+    -- a merged run's members, which its reads and writes through the
+    pointer its counter selects reach.  Those writes are statements of
+    their own, under a mask or not."""
+    masks: Set = set()
+    for x in walk_stmts(body):
+        if x.attr('guard') != 'element':
+            continue
+        if x.op == Op.RAWBLOCK and x.text:
+            masks.add(x.text)
+        elif x.op == Op.IF:
+            cond = x.cond
+            masks.add(cond.id if isinstance(cond, Value) else repr(cond))
+    if not masks:
+        return frozenset()
+    written = {id(a.base) for x in walk_stmts(body)
+               for a in x.accesses if a.space is MemSpace.GLOBAL
+               and a.kind & (Effect.WRITE | Effect.ATOMIC)}
+    loads = _MemoryReads(defs)
+
+    def kept(stmts, under: bool) -> bool:
+        for x in stmts:
+            if x.op == Op.RAWBLOCK and x.regions:
+                inner = under or x.text in masks
+                if not all(kept(r.body, inner) for r in x.regions):
+                    return False
+                continue
+            if x.op == Op.IF and x.regions:
+                cond = x.cond
+                name = cond.id if isinstance(cond, Value) else repr(cond)
+                if name in masks:
+                    if not kept(x.regions[0].body, True):
+                        return False
+                    if len(x.regions) > 1 and not kept(x.regions[1].body,
+                                                       under):
+                        return False
+                    continue
+                if loads.reads(cond):
+                    return False
+                if not all(kept(r.body, under) for r in x.regions):
+                    return False
+                continue
+            if x.regions:
+                heads = list(x.operands())
+                if any(loads.reads(v) for v in heads):
+                    return False
+                if not all(kept(r.body, under) for r in x.regions):
+                    return False
+                continue
+            if x.op == Op.EXIT and loads.reads(x.exit_cond):
+                return False
+            if _stands_in(x):
+                continue
+            for a in x.accesses:
+                if not a.kind & (Effect.WRITE | Effect.ATOMIC):
+                    continue
+                if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):
+                    if not under:
+                        return False
+                elif (a.space is MemSpace.SHARED
+                      and id(a.base) not in own
+                      and not _element_free(x, written, defs)):
+                    return False
+        return True
+
+    return frozenset(masks) if kept(body, False) else frozenset()
+
+
+def body_masks(body: Sequence[Stmt], arena: Optional[str]) -> FrozenSet:
+    """`kept_masks` of a body as it stands: the definitions read off it, and
+    the buffers of `arena` -- the multiplication's own -- as those no lane of
+    another multiplication reaches."""
+    defs: Dict[int, Stmt] = {}
+    own: Set[int] = set()
+    for x in walk_stmts(body):
+        for t in x.target:
+            defs[t.id] = x
+        for r in x.regions:
+            for a in r.args:
+                defs[a.id] = x
+        if (x.op == Op.ALLOC and x.target and arena is not None
+                and x.attr('arena') == arena):
+            own.add(id(x.target[0]))
+    return kept_masks(body, defs, own)
+
+
+def _element_free(x: Stmt, written: Set[int], defs: Dict[int, Stmt]) -> bool:
+    """Does `x`, a write to shared memory, store what no element's mask
+    changes: a number, or what a load read from a buffer of global memory
+    the body never writes?"""
+    if x.op == Op.COPY_ASYNC:
+        src = [a for a in x.accesses if a.kind & Effect.READ]
+        return (len(src) == 1 and src[0].space is MemSpace.GLOBAL
+                and id(src[0].base) not in written)
+    if x.op != Op.STORE or len(x.args) < 2:
+        return False
+    v = x.args[1]
+    if not isinstance(v, Value):
+        return True
+    d = defs.get(v.id)
+    if d is None:
+        return False
+    if d.op == Op.CONST:
+        return True
+    return (d.op == Op.LOAD and len(d.accesses) == 1
+            and d.accesses[0].space is MemSpace.GLOBAL
+            and id(d.accesses[0].base) not in written)
 
 
 class _MemoryReads:
