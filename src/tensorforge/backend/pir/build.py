@@ -1031,6 +1031,32 @@ class IRBuilder:
                                             for b in buffers),
                              attrs=(('mark', kind),))
 
+    def promise_zero(self, base: Any, *indices: Operand,
+                     predicate: Optional[Value] = None) -> Stmt:
+        """A statement that emits nothing and says that the element of
+        `base` at `indices` holds a zero -- in the lanes where `predicate`
+        holds, or in every lane.
+
+        What a producer knows of a register image and no pass could find out:
+        the lanes past the rows it computed hold what its contraction left
+        there, a sum of products with a zero factor
+        (`MultilinearBuilder._promised_zeros`).  A load of the element there
+        reads that zero (`flow.Flow` takes the promise for a store of it), so
+        a load the forward pass takes from the image does not have to tell
+        those lanes apart (`pir.forward`).  Ordered against the buffer's
+        accesses by declaring a write of it, and against nothing else."""
+        base, indices = self._unstacked(base, indices)
+        space = (base.type.space if isinstance(base, Value)
+                 and isinstance(base.type, BufferType)
+                 else MemSpace.from_symbol_type(getattr(base, 'stype', None)))
+        indices = tuple(self._swizzled(base, i) for i in indices)
+        return self._emit_op(Op.MARK, (), (base, 0.0) + indices,
+                             predicate=predicate, pure=False, movable=True,
+                             effect=Effect.WRITE,
+                             accesses=(Access(Effect.WRITE, space,
+                                              self.alias_root(base)),),
+                             attrs=(('mark', 'zeros'),))
+
     def _shifted(self, indices: Tuple[Operand, ...],
                  shift: Optional[Operand]) -> Tuple[Operand, ...]:
         """`shift` added to the last index *after* the swizzle.

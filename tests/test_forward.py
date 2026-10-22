@@ -651,6 +651,71 @@ def test_a_body_past_the_budget_is_left_as_it_is(monkeypatch):
     assert drop_dead_stores(t.body, threads=LANES, arena='shrMem') is t.body
 
 
+# -- what a producer promises of its image (`IRBuilder.promise_zero`) --------
+
+def _handed_over(promise, predicated=False):
+    """`r` computed on every lane, its rows below 10 stored into `s` and
+    loaded back into `t` by those lanes, the rest of `t` its zeros, and `t`
+    read on every lane into `p` -- the way a product hands its result to the
+    next through shared memory.  `promise` says `r` holds zeros past row 10;
+    `predicated` loads back with a predicate instead of in a branch."""
+    t = Body()
+    b = t.b
+    s = b.alloc(F32, (LANES,), MemSpace.SHARED, hint='s', extern='s0',
+                arena='shrMem')
+    r = t.registers('r0', 1)
+    b.store(r, b.op('mul', REAL, 2.0, b.load(t.p, t.lane)), 0)
+    rows = b.op('lt', BOOL, t.lane, 10, hint='g')
+    if promise:
+        past = b.op('ge', BOOL, t.lane, 10, hint='o')
+        b.promise_zero(r, 0, predicate=past)
+    with b.if_(rows):
+        b.store(s, b.load(r, 0), t.lane)
+    back = t.registers('r1', 1)
+    if predicated:
+        b.store(back, b.load(s, t.lane, predicate=rows), 0)
+    else:
+        with b.if_(rows):
+            b.store(back, b.load(s, t.lane), 0)
+    b.store(t.p, b.load(back, 0), t.lane)
+    return t, r
+
+
+def _selects(body):
+    return [x for x in walk_stmts(body) if x.op == 'select']
+
+
+def test_lanes_a_promise_holds_zero_read_the_register_as_the_rest():
+    """Lanes below 10 read what `r` holds, the rest the zeros `t` was
+    declared with -- which `r` holds there as well, as its producer
+    promises: the read is `r`'s, on every lane, and no select tells the
+    lanes apart."""
+    t, r = _handed_over(promise=True)
+    out = t.run()
+    assert not _selects(out)
+    assert not _loads(out, MemSpace.SHARED)
+
+
+def test_without_the_promise_a_select_tells_the_lanes_apart():
+    t, r = _handed_over(promise=False)
+    out = t.run()
+    assert _selects(out)
+
+
+def test_a_predicated_load_of_a_promised_image_reads_it_on_every_lane():
+    """The load back stands under a predicate whose lanes left out are
+    given a zero, and `r` holds one there: no predicate, no select."""
+    t, r = _handed_over(promise=True, predicated=True)
+    out = t.run()
+    assert not _selects(out)
+    assert not [x for x in walk_stmts(out) if x.op == Op.LOAD
+                and x.predicate is not None]
+    t, r = _handed_over(promise=False, predicated=True)
+    out = t.run()
+    assert _selects(out) or [x for x in walk_stmts(out) if x.op == Op.LOAD
+                             and x.predicate is not None]
+
+
 def test_the_marks_around_a_clearing_store_write_nothing():
     """`mark clears` and `mark cleared` tell the barrier placement about the
     order of the writes (`pir.barriers`) and change no element: what the

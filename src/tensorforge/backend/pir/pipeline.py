@@ -33,7 +33,7 @@ from tensorforge.backend.passmanager import Pass, PassContext, PassManager
 from .asyncmem import schedule_async
 from .allocate import allocate
 from .atomics import accumulate_atomically
-from .forward import forward_memory
+from .forward import drop_promises, forward_memory
 from .barriers import place_barriers
 from .carry import carry_trips
 from .core import Stmt, dump
@@ -598,6 +598,9 @@ def standard_pipeline(debug: str = '',
         pm.add(forward)
         for name, fn in (('forward-fold', fold), ('forward-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',)))
+    # What the producers promised was said for the forward pass; behind it,
+    # it only keeps the lane conditions it stands under alive.
+    pm.add(Rewrite('promises', drop_promises, preserves=('flat',)))
     if rows is not None:
         pm.add(rows)
         for name, fn in (('rows-fold', fold), ('rows-dce', dce)):

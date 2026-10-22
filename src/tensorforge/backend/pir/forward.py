@@ -44,7 +44,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts
 from .flow import Flow, TooLarge
-from .passes import _zero_like, substitute
+from .passes import _zero_like, dce, substitute
 
 _SPACES = (MemSpace.GLOBAL, MemSpace.SHARED, MemSpace.REGISTER)
 
@@ -175,6 +175,15 @@ def _unreached(body: Sequence[Stmt]) -> Set[int]:
     return out
 
 
+def drop_promises(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+    """`body` without the zeros its producers promised (`mark zeros`,
+    `IRBuilder.promise_zero`): said for this pass, they would otherwise keep
+    the lane conditions they stand under alive to the emitter."""
+    dead = {id(x) for x in walk_stmts(body)
+            if x.op == Op.MARK and x.attr('mark') == 'zeros'}
+    return dce(_strip(body, dead)) if dead else body
+
+
 def _strip(body: Sequence[Stmt], dead: Set[int]) -> Tuple[Stmt, ...]:
     out: List[Stmt] = []
     for s in body:
@@ -243,6 +252,9 @@ class _Forward:
         points: List[Tuple[Dict[int, int], Tuple]] = []
         #: Per execution, its hops and the lanes it takes from registers.
         lanes: List[Tuple[Dict[int, int], int, int]] = []
+        #: Per execution: the execution, the register it takes, and the
+        #: lanes that take it.
+        taken: List[Tuple[int, Tuple, int]] = []
         for n in flow.executions(s):
             inst = flow.insts[n]
             covered = held = 0
@@ -267,7 +279,18 @@ class _Forward:
                 cell, = cells
                 bases.add(cell[0][1])
                 points.append((inst.env(), cell[1]))
+                taken.append((n, cell, held & inst.mask))
             lanes.append((inst.env(), inst.mask, held & inst.mask))
+        if (kinds == {'reg', 'const'} and len(consts) == 1 and len(bases) == 1
+                and len(taken) == len(lanes)
+                and self._holding(next(iter(consts)), taken, lambda n, h:
+                                  flow.insts[n].mask & ~h)):
+            # The lanes that take the number find it in the register as
+            # well: the register, in every lane.
+            if self._register(s, next(iter(bases)), points, taken):
+                self.kept |= writers
+                return True
+            return False
         if kinds == {'reg', 'const'} and len(consts) == 1 and len(bases) == 1:
             # Some lanes from a register, the rest a number: where a
             # condition of the lanes tells them apart, a select.
@@ -287,7 +310,8 @@ class _Forward:
             return len(consts) == 1 and self._const(s, next(iter(consts)))
         if kind == 'value':
             return len(values) == 1 and self._value(s, value)
-        if len(bases) == 1 and self._register(s, next(iter(bases)), points):
+        if len(bases) == 1 and self._register(s, next(iter(bases)), points,
+                                              taken):
             self.kept |= writers
             return True
         return False
@@ -313,17 +337,55 @@ class _Forward:
         self.mapped[s.target[0].id] = out
         return True
 
-    def _register(self, s: Stmt, base: int, points) -> bool:
+    def _register(self, s: Stmt, base: int, points, taken) -> bool:
         read = self._register_read(s, base, points)
         if read is None:
             return False
         lead, slot, image = read
         attrs = tuple((k, v) for k, v in s.attrs if k in ('other', 'extern'))
+        predicate = s.predicate
+        if predicate is not None and self._idle(s, taken):
+            # Where the predicate leaves a lane out, the register holds what
+            # the load gives there: the register, in every lane.
+            predicate = None
+            attrs = tuple((k, v) for k, v in attrs if k != 'other')
         self.rebuilt[id(s)] = lead + [replace(
             s, args=(image, slot),
             accesses=(Access(Effect.READ, MemSpace.REGISTER, image),),
-            attrs=attrs)]
+            attrs=attrs, predicate=predicate)]
         return True
+
+    def _holding(self, number, taken, lanes_of) -> bool:
+        """Does the register each execution of `taken` takes hold `number`
+        for certain in the lanes `lanes_of(execution, lanes taken)` gives?
+        """
+        for n, cell, held in taken:
+            want = lanes_of(n, held)
+            have = self.flow.numbers.get(n, {}).get(cell, {})
+            if not want:
+                continue
+            got = 0
+            for value, m in have.items():
+                if value == number and not isinstance(value, bool):
+                    got |= m
+            if want & ~got:
+                return False
+        return True
+
+    def _idle(self, s: Stmt, taken) -> bool:
+        """Do the lanes the predicate of `s` leaves out find in the register
+        each execution takes what the load gives them, the else-value?
+        Only where the flow told those lanes apart (`Flow.whole`)."""
+        flow = self.flow
+        other = s.attr('other')
+        if other is None:
+            other = 0
+        if not isinstance(other, (int, float)) or isinstance(other, bool):
+            return False
+        if any(n not in flow.whole for n, _, _ in taken):
+            return False
+        return self._holding(other, taken, lambda n, h:
+                             flow.whole[n] & ~flow.insts[n].mask)
 
     def _mixed(self, s: Stmt, base: int, points, c, lanes) -> bool:
         """The load as a register where a condition of the lanes holds and

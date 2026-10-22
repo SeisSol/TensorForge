@@ -253,6 +253,15 @@ class Flow:
         #: the store was the lane's own, or where an earlier load by the
         #: same lanes found the same write and put it in that register.
         self.forward: Dict[int, List[Tuple[int, Tuple]]] = {}
+        #: For a load's execution under a predicate of the lanes: the lanes
+        #: it would run for without it.  With `values` only.
+        self.whole: Dict[int, int] = {}
+        #: For a load's execution that `forward` gives a register for: the
+        #: numbers each such register holds for certain where the load
+        #: stands, number -> lanes, among the lanes of `whole` -- what reading
+        #: the register in lanes that take a number, or that the predicate
+        #: leaves out, would find (`_numbers`).  With `values` only.
+        self.numbers: Dict[int, Dict[Tuple, Dict[Any, int]]] = {}
         #: The masks taken to hold (`masks`).
         self.masks: FrozenSet = self._masks() if masks else frozenset()
         self._forwarded: Dict[int, List[Tuple[int, Tuple, Tuple[Reach, ...]]]] = {}
@@ -498,7 +507,7 @@ class Flow:
                 if a.base is not None:
                     self._reset(a.space, id(a.base), None)
             return
-        if s.op == Op.MARK:
+        if s.op == Op.MARK and s.attr('mark') != 'zeros':
             # What a later pass is told about the order of the writes
             # (`clears`, `cleared`): no element changes.
             return
@@ -509,6 +518,7 @@ class Flow:
         if s.op == Op.RAWEXPR and s.attr('decl') is not None:
             # A binding: it computes where a buffer is, and reads none of it.
             return
+        whole = mask
         if s.predicate is not None:
             pred = s.predicate
             if isinstance(pred, Value) and self._static(pred, env):
@@ -535,10 +545,17 @@ class Flow:
                 taken = 0
                 for m, _, _ in found:
                     taken |= m
-                self._forwarded[n] = found + self._fetches(n, conds, taken)
+                found += self._fetches(n, conds, taken)
+                self._forwarded[n] = found
+                if whole != mask:
+                    self.whole[n] = whole
+                cells = {o[1] for _, o, _ in found if o[0] == 'reg'}
+                if cells:
+                    self.numbers[n] = {c: self._numbers(c, whole, conds)
+                                       for c in cells}
         if written:
             self._write(n, written, conds)
-            if self._values and s.op == Op.STORE:
+            if self._values and s.op in (Op.STORE, Op.MARK):
                 self.origin[n] = self._origin(s, env, mask)
                 self._holding(s, n, env, written)
 
@@ -555,6 +572,28 @@ class Flow:
         d = self.defs.get(v.id)
         if d is not None and d.op == Op.CONST:
             return [(mask, ('const', d.attr('value')))]
+        if (d is not None and d.op == Op.LOAD and d.predicate is not None
+                and isinstance(d.predicate, Value)
+                and self._static(d.predicate, env)):
+            # A load under a predicate of the lanes gives the lanes it leaves
+            # out its else-value.
+            other = d.attr('other')
+            if other is None:
+                other = 0
+            inside = self._lanes_where(d.predicate, env, mask)
+            if (inside != mask and isinstance(other, (int, float))
+                    and not isinstance(other, bool)):
+                out = [(mask & ~inside, ('const', other))]
+                if inside:
+                    out += self._loaded(v, d, env, inside)
+                return out
+        return self._loaded(v, d, env, mask)
+
+    def _loaded(self, v: Value, d: Optional[Stmt], env,
+                mask: int) -> List[Tuple[int, Tuple]]:
+        """Where `v`, defined by `d`, came from for the lanes of `mask`: the
+        register a load of registers read, where it read what one store
+        wrote for certain, or the value itself."""
         if (d is not None and d.op == Op.LOAD and len(d.accesses) == 1
                 and d.accesses[0].space is MemSpace.REGISTER):
             nd = self.inst(d, env)
@@ -640,6 +679,36 @@ class Flow:
             if r.cell:
                 self._fetched[(r.cell, r.mask)] = (load, r)
 
+    def _numbers(self, cell, lanes: int, conds) -> Dict[Any, int]:
+        """The numbers `cell`, a register, holds for certain for the lanes of
+        `lanes`, as a read under `conds` would find them now: number ->
+        lanes.  A lane whose last write stands under a condition the read
+        does not, or wrote anything but a number, holds none."""
+        out: Dict[Any, int] = {}
+        if (self._smeared.get(cell[0][:2])
+                or self._smeared_space.get(cell[0][0])):
+            return out
+        left = lanes
+
+        def found(writer: int, hit: int) -> None:
+            for m, o in self.origin.get(writer, ()):
+                if o[0] == 'const' and m & hit:
+                    out[o[1]] = out.get(o[1], 0) | (m & hit)
+
+        for layer in reversed(self._reg.get(cell, ())):
+            hit = left & layer.mask
+            if not hit:
+                continue
+            left &= ~hit
+            if layer.conds <= conds:
+                found(layer.writer, hit)
+            if not left:
+                return out
+        fresh = self._fresh.get(cell[0][1])
+        if left and fresh is not None:
+            found(fresh, left)
+        return out
+
     def _holds(self, cell, writer: int, lanes: int, conds) -> bool:
         """Does `cell`, a register, hold what `writer` wrote for every lane
         of `lanes`, as a read under `conds` would find it now?"""
@@ -676,7 +745,8 @@ class Flow:
             index = s.args[1:]
             width = _width(s.target[0] if s.target else None, a, s.args[0])
             kind = 'read'
-        elif s.op == Op.STORE and len(s.accesses) == 1:
+        elif s.op in (Op.STORE, Op.MARK) and len(s.accesses) == 1:
+            # A promise of a zero (`mark zeros`) as the store of that zero.
             a = s.accesses[0]
             index, width = s.args[2:], _width(s.args[1], a, s.args[0])
             kind = 'rmw' if a.kind & Effect.ATOMIC else 'write'

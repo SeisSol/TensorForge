@@ -88,6 +88,7 @@ ATOMICS = Path('src/tensorforge/backend/pir/atomics.py')
 FORWARD = Path('src/tensorforge/backend/pir/forward.py')
 FLOW = Path('src/tensorforge/backend/pir/flow.py')
 EPILOGUE = Path('src/tensorforge/backend/instructions/compute/epilogue.py')
+PROMISE = Path('src/tensorforge/backend/instructions/compute/promise.py')
 TILING = PKG / 'tiling.py'
 
 
@@ -2847,6 +2848,28 @@ GROUPS = {
          sub(EPILOGUE, '                return start < hi_i and lo_i < start + var._block * var.width\n',
              '                return lo_i <= start < hi_i\n', 1)),
     ]),
+    # What a multiplication's register image holds outside its rows, said
+    # to the passes, and gone before the emitter.
+    'promises': ('tests/test_promised_zeros.py tests/test_forward.py', [
+        ('no promise behind a multiplication',
+         sub(MLB, '    promise = self._promised_zeros(compute)\n',
+             '    promise = None\n', 1)),
+        ('a promise over the rows the multiplication computed',
+         sub(PROMISE, "            past = writer.op('ge', BOOL, lane, valid, hint='o')\n",
+             '            past = None\n', 1)),
+        ('a register image taken to hold zeros past rows it does not end with',
+         sub(MLB, '    return sym.data_view.get_bbox().upper()[axis] <= end\n',
+             '    return True\n', 1)),
+        ('an image nobody vouched for taken to hold zeros past its rows',
+         sub(MLB, "    if not getattr(sym, 'zero_past', False):\n"
+                  '      return False\n', '', 1)),
+        ('a promise left to the emitter',
+         sub(PIPE, "    pm.add(Rewrite('promises', drop_promises, preserves=('flat',)))\n",
+             '', 1)),
+        ('a promise taken for a write nobody can place',
+         sub(FLOW, '        elif s.op in (Op.STORE, Op.MARK) and len(s.accesses) == 1:\n',
+             '        elif s.op == Op.STORE and len(s.accesses) == 1:\n', 1)),
+    ]),
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.
     'forward': ('tests/test_forward.py', [
@@ -2904,14 +2927,25 @@ GROUPS = {
          sub(FORWARD, '            reached |= hit\n', '            pass\n', 1)),
         ('a body past the budget forwarded all the same',
          sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
+        ('a number the lanes take read in a register that need not hold it',
+         sub(FORWARD, '            if want & ~got:\n'
+                      '                return False\n', '', 1)),
+        ('a register never read for the number its lanes take',
+         sub(FORWARD, '                and self._holding(next(iter(consts)), taken, lambda n, h:',
+             '                and False and self._holding(next(iter(consts)), taken, lambda n, h:', 1)),
+        ('a predicate dropped where the register holds something else',
+         sub(FORWARD, '        if predicate is not None and self._idle(s, taken):',
+             '        if predicate is not None:', 1)),
+        ('a promise of zeros taken for nothing',
+         sub(FLOW, "        if s.op == Op.MARK and s.attr('mark') != 'zeros':\n",
+             "        if s.op == Op.MARK:\n", 1)),
         ('a mark around a clearing store taken for a write nobody can place',
-         sub(FLOW, "        if s.op == Op.MARK:\n"
+         sub(FLOW, "        if s.op == Op.MARK and s.attr('mark') != 'zeros':\n"
                    "            # What a later pass is told about the order of the writes\n"
                    "            # (`clears`, `cleared`): no element changes.\n"
                    "            return\n", '', 1)),
         ('a load of memory taken from no earlier load',
-         sub(FLOW, '                self._forwarded[n] = found + self._fetches(n, conds, taken)\n',
-             '                self._forwarded[n] = found\n', 1)),
+         sub(FLOW, '                found += self._fetches(n, conds, taken)\n', '', 1)),
         ('an earlier load taken whatever write it found',
          sub(FLOW, '            if not found.certain or found.writer != r.writer:\n',
              '            if not found.certain:\n', 1)),

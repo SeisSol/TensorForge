@@ -3742,6 +3742,15 @@ class Symbol:
         writer.access_stmt(f'{self.get_fptype()} {variable} = {access};', self, Effect.READ, args=_operands(variable, addrs))
       return True
 
+  def promise_zero(self, writer, context, index, where) -> None:
+    """Say that the element at `index` of this register image holds a zero
+    in the lanes where `where` holds (`IRBuilder.promise_zero`).  Emits
+    nothing."""
+    if self.stype not in (SymbolType.Register, SymbolType.Scratch):
+      raise InternalError(f'{self.name}: a zero promised outside registers')
+    writer.promise_zero(self, self.address_value(writer, context, index),
+                        predicate=where)
+
   def store(self, writer, context, variable, index: List[Union[str, int, Immediate, Variable, LeadIndex]], nontemp):
     addrs = []
     assert self.stype != SymbolType.Data

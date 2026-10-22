@@ -7,6 +7,7 @@ from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
 from tensorforge.backend.instructions.memory.store import StoreRegToGlb, StoreRegToShr
 from tensorforge.backend.instructions.sync_block import SyncThreads
+from tensorforge.backend.instructions.compute.promise import PromisedZeros
 from tensorforge.backend.instructions.compute.multilinear import MultilinearInstruction
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.exceptions import InternalError, GenerationError
@@ -630,6 +631,11 @@ class MultilinearBuilder(OperationBuilder):
     registers, registerAlloc = self._temporaries.register_array(
         bbox, lead,
         spp=None if operand.obj.is_dense() else operand.obj.spp)
+    # Past the rows it loads, the image holds a zero: the loader's accesses
+    # are held to them (`LeadIndex.valid`), or keep off the slot's other
+    # lanes, which hold the zeros the image is declared with.  Not said of a
+    # flat copy, which has no rows to be past (`_zero_past`).
+    registers.zero_past = not linearize
     self._instructions.append(registerAlloc)
 
     load_op = GlbToRegLoader(context=self._context,
@@ -910,6 +916,67 @@ class MultilinearBuilder(OperationBuilder):
     epilogue = compute.epilogue()
     if epilogue is not None:
       self._instructions.append(epilogue)
+    promise = self._promised_zeros(compute)
+    if promise is not None:
+      self._instructions.append(promise)
+    compute._dest.zero_past = promise is not None or not self._writes_past(
+        compute)
+
+  def _promised_zeros(self, compute):
+    """What the result's register image holds past its rows, said where
+    only the multiplication knows it (`PromisedZeros`), or None.
+
+    Only where the multiplication itself writes the image past its rows: it
+    has no epilogue, and its last slot computes on every lane
+    (`MultilinearInstruction._full_lane_tail`).  An epilogue writes the rows
+    alone, and a loop that keeps to its rows writes nothing past them; the
+    image then holds the zeros it is declared with there, which the passes
+    see.  And only where what it writes there is a zero: every operand that
+    carries the destination's lead index reads one past the rows
+    (`_zero_past`), so every product there has a zero factor.  Not before
+    the rows: a head computed on every lane may read whole what lies before
+    a window (`Symbol._memory_first`)."""
+    image = compute._dest
+    if (image.stype not in (SymbolType.Register, SymbolType.Scratch)
+        or len(image.lead_dims) != 1 or not self._writes_past(compute)):
+      return None
+    d = compute._lead_dims[0]
+    for i, region in enumerate(self._mem_regions):
+      target = self._descr.target[i]
+      if d in target and not self._zero_past(region, target.index(d)):
+        return None
+    lead = image.lead_dims[0]
+    box = compute._idest.data_view.get_bbox()
+    if box.rank() <= lead:
+      return None
+    return PromisedZeros(self._context, image,
+                         (box.lower()[lead], box.upper()[lead]),
+                         self._num_threads, getattr(self, '_lead_width', 1))
+
+  @staticmethod
+  def _writes_past(compute) -> bool:
+    """Does the multiplication itself write its image past the rows: no
+    epilogue, and a last slot computed on every lane?"""
+    if compute._has_epilogue:
+      return False
+    d = compute._lead_dims[0]
+    return d < len(compute._ns) and compute._full_lane_tail(d, *compute._ns[d])
+
+  @staticmethod
+  def _zero_past(region, axis) -> bool:
+    """Does the operand `region` read a zero past its rows along its `axis`?
+    Memory does: a read there is held off the lanes past the rows
+    (`LeadIndex.valid`).  A register image where its own rows end there,
+    and whose producer said that it holds a zero past them (`zero_past`:
+    a staging, or a multiplication that leaves those lanes alone or wrote
+    zeros there); not where it holds rows past the window."""
+    sym = region.symbol
+    if sym.stype not in (SymbolType.Register, SymbolType.Scratch):
+      return True
+    if not getattr(sym, 'zero_past', False):
+      return False
+    end = region.offset[axis] + region.bbox.upper()[axis]
+    return sym.data_view.get_bbox().upper()[axis] <= end
 
   def _prev_offset(self, prev):
     """Where the accumulation bias sits, relative to the loop indices.

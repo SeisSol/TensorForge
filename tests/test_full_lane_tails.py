@@ -71,10 +71,16 @@ def test_the_tail_computes_on_the_whole_wave_under_esimd():
 
 def test_a_lead_origin_shift_keeps_the_tail_narrow():
     """Theta: the window starts inside a register block, and the lanes past
-    its end in the next block are the tensor's next rows."""
+    its end in the next block are the tensor's next rows.  The code is the
+    same; the listing is not quite: with the tail on every lane the product
+    promises zeros past its rows (`PromisedZeros`), an instruction that
+    emits nothing but the line naming it."""
     mod = _module('lead_window_spans_two_blocks')
-    assert (_kernel(mod.descr_list(), full_lane_tails=True)
-            == _kernel(mod.descr_list(), full_lane_tails=False))
+
+    def code(kernel):
+        return re.sub(r'\n[ \t]*//[^\n]*', '', kernel)
+    assert (code(_kernel(mod.descr_list(), full_lane_tails=True))
+            == code(_kernel(mod.descr_list(), full_lane_tails=False)))
 
 
 def test_spmd_keeps_only_the_memory_to_the_tail():
