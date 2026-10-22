@@ -116,7 +116,7 @@ def test_operand_union_is_absent_for_a_tensor_with_no_symbol():
 
 
 # ----------------------------------------------------------------------
-# written_in_slices: may the value stay in registers between operations
+# written_in_slices: is the buffer laid out for several writes
 # ----------------------------------------------------------------------
 
 def test_a_single_covering_writer_is_not_written_in_slices():
@@ -135,11 +135,10 @@ def test_a_single_covering_writer_is_not_written_in_slices():
 
 
 def test_an_accumulation_chain_is_not_written_in_slices():
-    """Every term covers the whole box, so the last accumulator holds it all.
+    """Every term covers the whole box, so each one stores all of it.
 
-    This is the case the register residency exists for, and forcing a store per
-    term would cost a round trip on each of them.  Several writers are not by
-    themselves a reason to materialize.
+    Several writers are not by themselves a reason to lay the buffer out for
+    slices.
     """
     a1, b1, a2, b2 = (_tensor(n) for n in ("A1", "B1", "A2", "B2"))
     tmp = _tensor("TMP", tmp=True)
@@ -181,11 +180,10 @@ def test_nested_accumulations_after_a_whole_assignment_are_not_written_in_slices
     """`t = Q; t += F0; t += F1`, the two accumulations over half the rows.
 
     Each accumulation writes half -- `_analyze` narrows it to its operand --
-    but the assignment before them covers the whole box, so the register image
-    it leaves holds everything and every later term is added into that image.
-    One image, stored once.  The ADER Taylor expansion (`I = dQ(0) c_0;
-    I += dQ(k) c_k`, each term over fewer rows) has this shape, and without it
-    would go through global memory on every term.
+    but the assignment before them covers the whole box, so each term adds
+    onto everything the one before it stored and stores all of it.  The ADER
+    Taylor expansion (`I = dQ(0) c_0; I += dQ(k) c_k`, each term over fewer
+    rows) has this shape.
     """
     q, m = _tensor("Q"), _tensor("M")
     f0 = _tensor("F0", shape=(N // 2, N))
@@ -311,8 +309,7 @@ def test_an_accumulation_chain_over_one_box_is_not_cleared():
     """`d = a1 b1` then `d += a2 b2`, both over all of `d`.
 
     What a yateto ADER derivative looks like: every cell is defined before
-    anything adds to it, so there is nothing to clear, and the deferral that
-    keeps the chain in registers stays.
+    anything adds to it, so there is nothing to clear.
     """
     a = _tensor("A")
     b = _tensor("B")

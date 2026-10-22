@@ -86,9 +86,10 @@ def test_the_bias_is_read_at_all(backend, arch):
     """The image is staged once and used, rather than staged twice.
 
     Moving the image into the loop's frame changes the box it covers, and the
-    residency is keyed on that box: recorded in one frame and looked up in the
-    other, the entry misses, the operation stages a second copy of the same
-    region, and the first is dead weight in a kernel that already spills.
+    build finds its copy by that box (`_target_image_fits`): recorded in one
+    frame and looked up in the other, the lookup misses, the operation stages
+    a second copy of the same region, and the first is dead weight in a
+    kernel that already spills.
     """
     source = _generate(backend, arch)
     staged = re.findall(r"^\s*// (r\d+) = load\{g>r\}\(glb_\w+\);", source,

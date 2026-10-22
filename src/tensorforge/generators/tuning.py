@@ -392,9 +392,9 @@ def simple_space(descrs, context: Context,
     # 1.097) and is worse on the clock: tuned, it runs at 0.99x of the SPMD
     # default where pinning the deduced width is 1.14x, against 1.09x untuned
     # and 3 % of run-to-run noise.  The evaluation weighs one axis with
-    # everything else held still; the walk turns `k_roll`, `k_width` and
-    # `register_temporaries` around whatever width it took first, and a bad
-    # first step is not a bad step alone.  So the axis goes, not its lower end.
+    # everything else held still; the walk turns `k_roll` and `k_width`
+    # around whatever width it took first, and a bad first step is not a bad
+    # step alone.  So the axis goes, not its lower end.
     #
     # The widths differ by spilling and the modelled footprint cannot see it:
     # `o6d:localFluxAll` is 79396 B at sixteen lanes and 79760 at 32, half a
@@ -517,20 +517,6 @@ def simple_space(descrs, context: Context,
     if (context.target.prefs.tune_preload_globals
             and any(t.addressing == Addressing.NONE for t in _tensors(descrs))):
         knobs.append(Knob('preload_globals', lambda c: (False, True)))
-    # Reading an array temporary out of its producer's register image trades
-    # a shared buffer for registers that stay live to the last reader, and
-    # which of the two a kernel wants is measured rather than argued: over 70
-    # corpus cases on sm_120 it is a geomean of 1 % for `all`, with
-    # `mixed/ew_then_ew` at +72 % and five cases 4-6 % the other way;
-    # SeisSol's damage step gains 6 %, and 11 % once its material part is a
-    # kernel of its own.  Only where something is written that a later
-    # operation reads: with no intermediate there is no image to keep, and the
-    # knob would spend a build to arrive back where it started.
-    written = {id(d.writes().tensor) for d in flat
-               if getattr(d, 'writes', None) is not None
-               and d.writes() is not None}
-    if written & {id(v.tensor) for d in flat for v in d.reads()}:
-        knobs.append(Knob('register_temporaries', lambda c: ('all', 'scalars')))
     # Two reduction steps per body, so an operand contiguous along the
     # reduction is read once for both.  What it removes is mostly *address*
     # arithmetic rather than loads -- SeisSol's damage step goes from 40 % of

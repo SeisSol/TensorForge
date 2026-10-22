@@ -7,12 +7,12 @@
     tmp += A2 @ B2
     C    = abs(tmp)
 
-The accumulation is the case the register residency exists for: both writers
-cover the whole box, so the second one accumulates into the array the first one
-left behind and nothing goes to memory in between.  That makes it the strongest
-form of what `ml_then_ew` checks -- there are two operations' worth of value in
-registers when the elementwise asks for the tensor -- and a consumer that reads
-anything but the newest copy gets one product without the other.
+Both writers cover the whole box, so the second one adds onto what the first
+one stored, and the pseudo-IR takes that round trip back where it may.  That
+makes it the strongest form of what `ml_then_ew` checks -- there are two
+operations' worth of value behind the tensor when the elementwise reads it --
+and a consumer that reads anything but the newest copy gets one product
+without the other.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

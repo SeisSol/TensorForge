@@ -1985,24 +1985,3 @@ def _read_first_temporary(count=4, behind=True):
         return out
     return out + [gemm(make('Z', [9, 9]), make('S', [9, 4], True),
                        make('O', [9, 4]))]
-
-
-@pytest.mark.parametrize('behind', [True, False])
-def test_a_closed_trip_stores_a_temporary_the_next_trip_reads(behind):
-    """A temporary the trip reads before it writes it is the last trip's, and
-    a closed trip finds it in memory: what the trip leaves in `S` is stored
-    at its end, on every trip -- and `T`, which the trip computes and uses
-    itself, is not.  So it is where nothing behind the loop reads `S`: the
-    next trip does."""
-    gen = _merged_build(roll(_read_first_temporary(behind=behind)),
-                        carry_trips=False)
-    _, loop, _ = _around_the_loop(gen)
-    assert loop.count == 4
-    tail = []
-    for instr in reversed(loop.region):
-        if type(instr).__name__ not in ('StoreRegToGlb', 'StoreRegToShr'):
-            break
-        tail.append(instr)
-    shared = [i for i in tail if type(i).__name__ == 'StoreRegToShr']
-    assert [i._dest.obj.alias for i in shared] == ['S']
-    assert len(tail) == (1 if behind else 2)

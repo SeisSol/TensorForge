@@ -199,7 +199,7 @@ def test_the_lane_space_stops_at_the_vector_unit_under_spmd():
 def test_the_simple_space_turns_only_what_is_safe_to_ship():
     knobs = _simple("sm_100")
     assert set(knobs) <= {'lanes', 'merge_variants', 'k_roll', 'k_unroll_max',
-                          'register_temporaries', 'k_width'}
+                          'k_width'}
     widths = {c.num_threads for c in knobs['lanes']}
     assert all(w & (w - 1) == 0 for w in widths), 'powers of two only'
     # 2 beside the divisors: the shortest body, which is what a kernel at

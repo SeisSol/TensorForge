@@ -162,8 +162,7 @@ def test_a_value_without_axes_in_shared_memory_is_stored_structurally(backend,
     pirmod.emit = watch
     try:
         # Without the forwarding, as above: asked is how the store is written.
-        _generate("red_scalar_then_ew", backend, arch, memory_semantics=True,
-                  forward_memory=False)
+        _generate("red_scalar_then_ew", backend, arch, forward_memory=False)
     finally:
         pirmod.emit = original
 

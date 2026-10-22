@@ -26,7 +26,9 @@ memory request and not a number.  Two kinds, each its own switch:
 
 Which pointers and which transfers: those whose address is computed per
 element in the body, each pointer once.  A batch-invariant operand is the
-same data for every element and cached already.  The element is the one the
+same data for every element and cached already, and a transfer of what the
+body writes ahead of it reads the element's own result back: what the next
+element holds there is none of its operands.  The element is the one the
 body is on, which a loop over groups of rows binds per row (`element`); the
 successor's index takes its place in the copy, and what binds it is not
 copied (`ElementLoop.dependencies`).
@@ -47,8 +49,8 @@ from dataclasses import replace
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from .ahead import Clone, ElementLoop, Refusal, behind_defs
-from .core import BufferType, MemSpace, Op, Region, Stmt, Value
-from .transfers import transfers
+from .core import BufferType, MemSpace, Op, Region, Stmt, Value, walk_stmts
+from .transfers import transfers, writes
 
 
 def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
@@ -134,7 +136,18 @@ class _Hints:
         clone = Clone(self._fresh, 'pf', set())
         clone.given(self.l.element, self.l.next)
         done: set = set()
+        order, written = self._written()
         for t in transfers(self.l.scope):
+            at = order.get(id(t.stmts[0]))
+            if at is not None and any(
+                    written.get(_buffer(a.base), at) < at
+                    for x in walk_stmts(tuple(t.pieces)) for a in x.accesses
+                    if a.space is MemSpace.GLOBAL):
+                # The element's own result, read back: what the next element
+                # holds there is none of its operands.
+                self._note(f'- {t.dest.hint or t.dest}: the body writes what '
+                           f'it reads ahead of it')
+                continue
             try:
                 deps, own = self.l.dependencies(t)
             except Refusal as why:
@@ -154,6 +167,20 @@ class _Hints:
             owns = owns or own
             self._note(f'+ {binding.attr("extern")} [data]')
         return heads, tails, owns
+
+    def _written(self) -> Tuple[dict, dict]:
+        """Where each statement at the top of the loop runs
+        (`ElementLoop.top`), by its id, and per buffer of global memory the
+        body writes, where the first statement that writes it runs."""
+        order: dict = {}
+        first: dict = {}
+        for at, s in self.l.top():
+            order[id(s)] = at
+            for x in walk_stmts((s,)):
+                for a in x.accesses:
+                    if a.space is MemSpace.GLOBAL and writes(a):
+                        first.setdefault(_buffer(a.base), at)
+        return order, first
 
     def _spans(self, ahead: Value) -> List[Stmt]:
         """Hints over all that `ahead` reaches, one per line."""
@@ -210,6 +237,12 @@ class _Hints:
             body.append(terminator)
         return replace(l.loop, regions=(Region(args=region.args,
                                                body=tuple(body)),))
+
+
+def _buffer(base) -> tuple:
+    """A buffer as `transfers.same` tells it: a value by its id, anything
+    else as itself."""
+    return ('value', base.id) if isinstance(base, Value) else ('base', id(base))
 
 
 def _source_binding(t, deps: Sequence[Stmt]) -> Optional[Stmt]:

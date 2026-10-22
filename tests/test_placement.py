@@ -22,12 +22,9 @@ from dataclasses import replace
 
 import pytest
 
-from tensorforge.backend.placement import (Placement, ResultPlacement,
-                                           VendorPolicy,
+from tensorforge.backend.placement import (Placement, VendorPolicy,
                                            choose_operand_placement,
-                                           choose_result_placement,
-                                           legal_operand_placements,
-                                           legal_result_placements)
+                                           legal_operand_placements)
 from tensorforge.common.target import PREFERENCES, Target, _explicit_simd
 
 POLICIES = {name: row.placement for name, row in PREFERENCES.items()}
@@ -144,16 +141,6 @@ def test_an_unaddressable_operand_can_only_be_read_in_place(policy):
         == frozenset({Placement.IN_PLACE})
 
 
-def test_a_destination_written_in_slices_cannot_stay_in_registers():
-    """The residency holds one entry per name.
-
-    A second slice displaces the first, and the first slice's whole
-    contribution is computed and then thrown away.
-    """
-    assert legal_result_placements(written_in_slices=True) \
-        == frozenset({ResultPlacement.MEMORY})
-
-
 # ----------------------------------------------------------------------
 # preference: what each vendor picks among correct answers
 # ----------------------------------------------------------------------
@@ -209,35 +196,6 @@ def test_without_a_budget_the_size_is_not_asked():
     """Under SPMD a lane holds a slice of the image, and no figure is passed."""
     assert choose_operand_placement(_legal(NVIDIA), NVIDIA,
                                     image_bytes=1 << 20) is Placement.REGISTER
-
-
-# ----------------------------------------------------------------------
-# a result: kept, or stored now
-# ----------------------------------------------------------------------
-
-@pytest.mark.parametrize("policy", [NVIDIA, AMD, INTEL],
-                         ids=["nvidia", "amd", "intel"])
-def test_every_vendor_keeps_a_result_in_registers(policy):
-    """Kept, the next operation reads it from there, and the store happens
-    once, behind the last of them.  How it is stored -- an atomic add or the
-    sum -- is not asked here: that is the body's to decide, once it is known
-    who reads the sum (`pir.atomics`)."""
-    assert choose_result_placement(legal_result_placements(
-        written_in_slices=False), policy=policy) is ResultPlacement.REGISTER
-
-
-@pytest.mark.parametrize("policy", [NVIDIA, AMD, INTEL, DEFAULT_POLICY],
-                         ids=["nvidia", "amd", "intel", "unnamed"])
-def test_a_result_written_in_slices_goes_out_now(policy):
-    """The next slice would displace this one from the residency."""
-    assert choose_result_placement(legal_result_placements(
-        written_in_slices=True), policy=policy) is ResultPlacement.MEMORY
-
-
-def test_a_policy_that_keeps_nothing_stores_every_result():
-    assert choose_result_placement(legal_result_placements(
-        written_in_slices=False), policy=DEFAULT_POLICY) \
-        is ResultPlacement.MEMORY
 
 
 def test_a_lane_share_keeps_the_second_large_operator_out():

@@ -8,11 +8,8 @@
     C           = abs(tmp)
 
 `SectionPlan.written_in_slices` is true here, so the multilinear stores each
-half into shared memory as it is produced rather than deferring it.  The
-residency is therefore empty by the time the elementwise runs, and this case
-separates "the consumer cannot see the residency" from "the consumer cannot
-address a shared-memory temporary at all": a consumer with the first defect
-passes it, one with the second fails it.
+half into its place in a shared buffer laid out for both.  A consumer that
+cannot address a shared-memory temporary at all fails it.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

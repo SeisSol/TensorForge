@@ -6,15 +6,8 @@
 Both are short, and the reason they are short is the point of the base class:
 resolving operands and recording the result are the same for them as for a
 contraction, so all they have to say is what their destination looks like and
-which instruction to emit.
-
-Where they differ from a contraction is a temporary still sitting in the
-register image its producer computed into.  A contraction takes the image
-where it is, shifted and with the lane on whichever axis it likes.  These lay
-their own loop over the lanes without being asked how, so they take an image
-only where that loop lands on it the way it would on the buffer -- always, for
-a value without axes, which every lane holds -- and settle the rest back to
-memory first (`OperationBuilder.image_in_place`, `register_temporaries`).
+which instruction to emit.  They read their operands where their symbols
+say, and lay their own loop over the lanes without being asked how.
 """
 
 from typing import List
@@ -34,10 +27,10 @@ from tensorforge.generators.descriptions import MultilinearDescr
 
 class ElementwiseBuilder(OperationBuilder):
     def resolve_operands(self, descr) -> List:
-        # Scalars are values, not tensors: they settle nothing and are handed
-        # to the instruction as they are.
-        settled = iter(self.resolve_in_place(descr, arrays=True))
-        return [s if isinstance(s, ScalarLike) else next(settled)
+        # Scalars are values, not tensors: they are handed to the
+        # instruction as they are.
+        views = iter(super().resolve_operands(descr))
+        return [s if isinstance(s, ScalarLike) else next(views)
                 for s in descr.srcs]
 
     def alloc_destination(self, descr, operands):
@@ -76,8 +69,7 @@ class ScalarBuilder(OperationBuilder):
         buffer per lane, where the tensor is spread over the lanes to begin
         with.  Written as a pointwise product into a register image and a
         reduction over it, each lane multiplies the four elements it owns and
-        the lanes fold their partials (`CrossLaneFold`) -- and with
-        `register_temporaries=all` the image never reaches memory at all.
+        the lanes fold their partials (`CrossLaneFold`).
 
         Both halves are instructions that already exist, which is the point:
         the fold is the reduction's, not a second one written here.  SeisSol's
@@ -89,8 +81,10 @@ class ScalarBuilder(OperationBuilder):
             super().build(descr)
             return
         self._reset()
-        operands = self.resolve_in_place(descr, arrays=True)
+        self._home_store = None
+        operands = self.resolve_operands(descr)
         self._instructions.extend(self._product_and_fold(descr, operands, box))
+        self.record_result(descr, None)
 
     def _foldable(self, descr):
         """`(lo, hi)` of the contracted axis where folding is the better shape.
@@ -137,12 +131,6 @@ class ScalarBuilder(OperationBuilder):
                 ReductionInstruction(self._context, dest, product, [0],
                                      AddOperator(), False, self._num_threads)]
 
-    def resolve_operands(self, descr) -> List:
-        # Values without axes only.  Every lane runs the whole sum, so an
-        # image with axes would be read one fixed element at a time -- an
-        # exchange with the owning lane per read, where the buffer is a load.
-        return self.resolve_in_place(descr, arrays=False)
-
     def alloc_destination(self, descr, operands):
         return self.materialize_dest(descr, ()) or self.view_of(descr.dest)
 
@@ -153,9 +141,6 @@ class ScalarBuilder(OperationBuilder):
 
 
 class ReductionBuilder(OperationBuilder):
-    def resolve_operands(self, descr) -> List:
-        return self.resolve_in_place(descr, arrays=True)
-
     def alloc_destination(self, descr, operands):
         """The destination keeps the axes the reduction does not contract.
 

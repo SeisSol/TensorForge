@@ -590,9 +590,9 @@ def standard_pipeline(debug: str = '',
     cover needs goes back down among them (`move.cap_cover`).  What it counts
     as cover is what the emitter will emit, and a result a lane stores and
     loads back is none of it once the forward has taken the round trip away.
-    Right behind ``flatten`` it would count every such round trip, and a
-    list whose operations hand their results through memory
-    (`memory_semantics`) has one behind every operation.
+    Right behind ``flatten`` it would count every such round trip, and the
+    operations of a list hand their results through memory: there is one
+    behind every operation.
 
     ``prefetch``, where asked for, runs right behind ``flatten``: the hints
     for the next element are statements of the body like any other, and go

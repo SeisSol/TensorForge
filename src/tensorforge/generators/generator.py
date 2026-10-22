@@ -6,7 +6,6 @@ import copy
 import dataclasses
 import functools
 import hashlib
-import itertools
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.generators.rolling import ForDescr, roll
 from tensorforge.common.context import Context
@@ -20,7 +19,6 @@ from tensorforge.backend.data_types import ShrMemObject
 from tensorforge.backend import pir
 from tensorforge.backend.opt.inspect import format_diagnostics, verify
 from tensorforge.backend.scopes import Scopes
-from tensorforge.backend.residency import Residency
 from tensorforge.backend.section_plan import SectionPlan
 from tensorforge.generators import lanes as lane_config
 from tensorforge.generators import tuning
@@ -247,13 +245,13 @@ class _GuardGrouping:
   state the same conjunction run under the same condition -- so their
   instructions go into one region and the condition is evaluated once. The
   run ends where the conjunction changes, which keeps the emitted order the
-  order the descriptor list states.
+  order the descriptor list states.  What an operation computes is stored
+  behind it by its own build, and so under its guard.
   """
 
-  def __init__(self, context, scopes, residency, out):
+  def __init__(self, context, scopes, out):
     self._context = context
     self._scopes = scopes
-    self._residency = residency
     self._out = out
     self._key = None
     self._literals = []
@@ -277,70 +275,25 @@ class _GuardGrouping:
             for literal in descr.condition]
 
   def begin(self, descr) -> None:
-    """Open the region `descr` belongs to, before `descr` is built.
-
-    Before, and not when its instructions arrive: building an operation asks
-    the residency for its operands and its destination, and a flush that
-    answering costs is emitted into the operation's own instructions. Closing
-    the previous run afterwards would leave that store inside the new region
-    -- under a condition that has nothing to do with the value.
-    """
+    """Open the region `descr` belongs to, before `descr` is built."""
     key = self._key_of(descr)
     if key != self._key:
       self.flush()
       self._key = key
       self._literals = self._resolve(descr) if key is not None else []
-      # The condition is read where the region opens, which is before its
-      # body runs. A value another operation left in registers has to reach
-      # its buffer *here* -- `prepare_operands` flushes an operation's own
-      # operands, and a guard's operands are not among them.
-      for symbol, _ in self._literals:
-        self._out.extend(self._residency.flush(symbol.name))
 
   def add(self, descr, instrs) -> None:
     assert self._key == self._key_of(descr), \
         'the run this operation belongs to was not opened for it'
     self._pending.extend(instrs)
 
-  def _defined_inside(self, instrs):
-    """The ids of the symbols the instructions define, regions included."""
-    out = set()
-    for instr in instrs:
-      for symbol in instr.defs():
-        out.add(id(symbol))
-      for region in instr.regions():
-        out |= self._defined_inside(region)
-    return out
-
-  def _writebacks(self, instrs) -> List[AbstractInstruction]:
-    """Stores for the values this region computed and did not write out.
-
-    A result the region leaves in registers has to reach its home *inside*
-    the region. Both halves of a hoisted `where` write one tensor, so the
-    second half asks the residency to flush what the first left behind -- and
-    a store emitted where the asking happens would land in the region under
-    the opposite condition. It would then run when the value does not exist
-    and not run when it does, and the register it reads would not even be in
-    scope there, which the host compiler says out loud.
-
-    So every entry whose image this region defined is flushed here, before the
-    region closes. A guard is a scope: what is computed under it is stored
-    under it.
-    """
-    defined = self._defined_inside(instrs)
-    out = []
-    for name, entry in self._residency.items():
-      if id(entry.image) in defined:
-        out.extend(self._residency.flush(name))
-    return out
-
   def flush(self) -> None:
     if self._pending:
       if self._key is None:
         self._out.extend(self._pending)
       else:
-        body = self._pending + self._writebacks(self._pending)
-        self._out.append(GuardedRegion(self._context, self._literals, body))
+        self._out.append(GuardedRegion(self._context, self._literals,
+                                       self._pending))
     self._key = None
     self._literals = []
     self._pending = []
@@ -2820,29 +2773,23 @@ class Generator:
     # Both of these belong to the section rather than to any one builder.
     #
     # The plan is the section's read/write geometry, computed once from the
-    # descriptor list; the residency is where the section's values currently
-    # are, which every operation reads and writes as it goes.
-    #
-    # The residency's lifetime is the section's, deliberately.  Carrying one
-    # across a barrier would push its writebacks past the barrier that was
-    # supposed to publish them.
+    # descriptor list; the temporaries are where its buffers and their names
+    # come from.  What an operation stages and computes in registers is its
+    # build's own, and its result goes to memory behind it
+    # (`OperationBuilder.record_result`).
     plan = SectionPlan(descr_list, self._scopes)
-    residency = self._residency = Residency(self._context,
-                          self._scopes.get_symbol(self._section.shr_mem_obj),
-                          self._num_threads,
-                          self._lead_width)
     temporaries = self._temporaries = Temporaries(
         self._context, self._scopes, self._num_threads)
     # Every register image this section allocates is blocked the same way, so
     # the factory carries it rather than each caller passing it along.
     temporaries._lead_width = self._lead_width
 
-    # One builder per kind of operation, all sharing the section's plan,
-    # residency and temporaries.  The list is ordered: `GemmDescr` is a
+    # One builder per kind of operation, all sharing the section's plan and
+    # temporaries.  The list is ordered: `GemmDescr` is a
     # `MultilinearDescr`, so the first match wins rather than the exact type.
     common = (self._context, self._scopes,
               self._scopes.get_symbol(self._section.shr_mem_obj),
-              self._num_threads, plan, residency, temporaries,
+              self._num_threads, plan, temporaries,
               self._lead_width)
     builders = [
         # a type, or a test: a contraction without destination axes is a
@@ -2863,22 +2810,11 @@ class Generator:
     # Neighbors under one guard become one region rather than one region
     # each: the condition is then read once, and a body that is skipped is
     # skipped as a whole.
-    guard = _GuardGrouping(self._context, self._scopes, residency,
-                           self._section.ir)
-    # Counted over the operations and not the list: a rolled list and the same
-    # list written out have to generate the same body, and a loop stands for
-    # all of its iterations' operations, not for one.
-    last = (self._last_touch(descr_list)
-            if self._context.get_user_options().early_writebacks else None)
-    index = -1
-    for position, outer in enumerate(descr_list):
+    guard = _GuardGrouping(self._context, self._scopes, self._section.ir)
+    for outer in descr_list:
       if isinstance(outer, ForDescr) and self._emit_loops:
         guard.flush()
-        self._emit_closed_loop(outer, builders,
-                               self._read_after(descr_list, position))
-        index += len(outer.operations())
-        if last is not None:
-          self._retire_writebacks(residency, last, index, guard)
+        self._emit_closed_loop(outer, builders)
         continue
       for descr in outer.operations():
         guard.begin(descr)
@@ -2889,83 +2825,18 @@ class Generator:
             break
         else:
           raise InternalError(f'{type(descr)} has no registered builder.')
-        index += 1
-        if last is not None:
-          self._retire_writebacks(residency, last, index, guard)
-        if self._context.get_user_options().memory_semantics:
-          # Nothing an operation leaves in registers reaches the next: the
-          # residency is emptied behind each, writebacks stored and copies
-          # dropped (`memory_semantics`).
-          guard.flush()
-          for name, _ in list(residency.items()):
-            self._section.ir.extend(residency.flush(name))
 
     guard.flush()
 
-    # Anything the section still holds only in registers has to reach memory
-    # before the section ends.
-    self._section.ir.extend(residency.flush_all())
-
-  @staticmethod
-  def _last_touch(descr_list):
-    """id(tensor) -> the index, among the list's operations, of the last one
-    that reads it, guards on it or writes it."""
-    last = {}
-    index = -1
-    for outer in descr_list:
-      if not isinstance(outer, OperationDescription):
-        continue
-      for descr in outer.operations():
-        index += 1
-        views = (list(descr.reads()) + list(descr.condition_reads())
-                 + [descr.writes()])
-        for view in views:
-          tensor = getattr(view, 'tensor', None)
-          if tensor is not None:
-            last[id(tensor)] = index
-    return last
-
-  def _retire_writebacks(self, residency, last, index, guard) -> None:
-    """Store now what the rest of the section will not touch again
-    (`early_writebacks`).
-
-    A result left in registers is final once no later descriptor reads or
-    writes its tensor, and holding it to the section's end only holds its
-    registers: SeisSol's elastic derivative would keep every `dQ(k)` until the
-    last line.  Only a global home -- a shared temporary no one reads is simply
-    dead.  The guard's open run is closed first, so that the store is not
-    conditional on it.  A tensor the list does not name -- a merged run's
-    stand-in -- keeps its place at the end.
-    """
-    done = [name for name, entry in residency.items()
-            if not entry.is_preload
-            and entry.home.stype == SymbolType.Global
-            and last.get(id(entry.home.obj), float('inf')) <= index]
-    if not done:
-      return
-    guard.flush()
-    for name in done:
-      self._section.ir.extend(residency.flush(name))
-
-  def _emit_closed_loop(self, loop, builders, later) -> None:
+  def _emit_closed_loop(self, loop, builders) -> None:
     """A merged run whose trips hand each other nothing but memory.
 
     The body is built once and runs on every trip, so whatever its build
-    leaves in registers is what the next trip starts from.  Here that is
-    nothing:
-
-    * ahead of the loop, every result the body touches is stored where its
-      symbol says.  One the body only reads stays in registers as the copy it
-      now is, and every trip reads that copy; one it writes is forgotten,
-      since a trip changes what memory holds of it.  A table reads memory in
-      any case: a member whose newest copy were still in registers would be
-      read as the buffer was before it;
-    * the body is built in a residency of its own (`Residency.trip`), so
-      what its operations leave in registers is the trip's;
-    * at its end every result that something after the trip reads -- the
-      next trip, or the code behind the loop (`later`, the id() of what that
-      reads) -- is stored, and a temporary the trip computes and uses itself
-      is not (`_trip_outlives`).
+    left in registers would be what the next trip starts from.  Here that is
+    nothing, as between any two operations: each stores what it computes
+    behind it (`OperationBuilder.build`), and the next reads its operands
+    where their symbols say -- the next trip, and the code behind the loop,
+    included.  A table reads memory in any case.
 
     So there is nothing to arrange around the back edge -- no first trip to
     build beside the loop, no destination to make resident ahead of it, no
@@ -2980,118 +2851,20 @@ class Generator:
     body, variants = loop.decompose()
     self._rotate_members(loop, variants)
     written = {id(d.writes().tensor) for d in body if d.writes() is not None}
-
-    # What the body touches, by the residency's key, and what of it it
-    # writes: the members through the tables, and the operands it names
-    # itself.  A stand-in is bound inside the loop and has no entry yet.
-    touched: List[str] = []
-    writes = set()
-
-    def touch(symbol, wrote: bool) -> None:
-      if symbol is None:
-        return
-      if symbol.name not in touched:
-        touched.append(symbol.name)
-      if wrote:
-        writes.add(symbol.name)
-
-    for variant in variants:
-      wrote = id(variant.stand_in.tensor) in written
-      for view in variant.members:
-        touch(self._member_symbol(view), wrote)
-    for descr in body:
-      for view in itertools.chain(descr.reads(), descr.condition_reads()):
-        if not getattr(view.tensor, 'is_variant', False):
-          touch(self._scopes.get_symbol(view.tensor), False)
-      dest = descr.writes()
-      if dest is not None and not getattr(dest.tensor, 'is_variant', False):
-        touch(self._scopes.get_symbol(dest.tensor), True)
-    for name in touched:
-      entry = self._residency.get(name)
-      if entry is None or (entry.is_preload and name not in writes):
-        continue
-      self._section.ir.extend(self._residency.flush(name))
-      if name not in writes:
-        # Stored, so the image is a copy of what memory now holds.
-        self._residency.record_preload(name, entry.image,
-                                       covered=entry.covered,
-                                       shift=entry.shift)
-
     counter = f'{GeneralLexicon.BATCH_ID_NAME}v{len(self._section.ir)}'
-    outlives = self._trip_outlives(body, variants, later)
-    with self._residency.trip():
-      tables, region = self._bind_holes(variants, written, counter)
-      for descr in body:
-        for kind, builder in builders:
-          if (isinstance(descr, kind) if isinstance(kind, type)
-                  else kind(descr)):
-            builder.build(descr)
-            region.extend(builder.get_instructions())
-            break
-        else:
-          raise InternalError(
-              f'no builder for {descr.__class__.__name__}: {descr}')
-      region.extend(self._residency.close_trip(outlives))
+    tables, region = self._bind_holes(variants, written, counter)
+    for descr in body:
+      for kind, builder in builders:
+        if (isinstance(descr, kind) if isinstance(kind, type)
+                else kind(descr)):
+          builder.build(descr)
+          region.extend(builder.get_instructions())
+          break
+      else:
+        raise InternalError(
+            f'no builder for {descr.__class__.__name__}: {descr}')
     self._section.ir.append(
         VariantLoop(self._context, counter, loop.iterations, region, tables))
-
-  def _trip_outlives(self, body, variants, later):
-    """Which of a closed trip's results have to reach memory at its end
-    (`_emit_closed_loop`): a predicate over residency entries.
-
-    Anything with a home outside shared memory, a kernel argument above all,
-    whatever reads it.  In shared memory, a slot or binding of a hole -- the
-    next trip reads it through another hole, or the code behind the loop
-    reads the last one -- and a temporary that something after the trip
-    reads: the next trip, where the body reads it before it writes it (an
-    accumulation reads what it adds to), and the code behind the loop, where
-    `later` holds it.  What is left is a temporary the trip computes and uses
-    itself, which an assignment defines whole, so the next trip computes it
-    afresh.
-    """
-    seen, carried = set(), set()
-    for descr in body:
-      reads = [view.tensor for view in itertools.chain(
-          descr.reads(), descr.condition_reads())]
-      dest = descr.writes()
-      if dest is not None and getattr(descr, 'add', False):
-        reads.append(dest.tensor)
-      carried.update(id(t) for t in reads if id(t) not in seen)
-      if dest is not None:
-        seen.add(id(dest.tensor))
-    members = {id(self._member_symbol(view)) for variant in variants
-               for view in variant.members}
-    needed = carried | set(later)
-
-    def outlives(entry) -> bool:
-      home = entry.home
-      if home.stype != SymbolType.SharedMem:
-        return True
-      if id(home) in members or getattr(home, 'rotation_slot', False):
-        return True
-      tensor = home.obj
-      if (not getattr(tensor, 'is_tmp', False)
-              or getattr(tensor, 'is_variant', False)):
-        return True
-      return id(tensor) in needed
-
-    return outlives
-
-  @staticmethod
-  def _read_after(descr_list, position: int) -> frozenset:
-    """id() of every tensor an operation after `descr_list[position]` reads
-    -- what an accumulation adds to included."""
-    out = set()
-    for outer in descr_list[position + 1:]:
-      if not isinstance(outer, OperationDescription):
-        continue
-      for descr in outer.operations():
-        for view in itertools.chain(descr.reads(), descr.condition_reads()):
-          out.add(id(view.tensor))
-        dest = descr.writes()
-        if dest is not None and getattr(descr, 'add', False):
-          out.add(id(dest.tensor))
-    return frozenset(out)
 
   def _bind_holes(self, variants, written, counter: str):
     """The tables a merged run reaches its varying operands through, and the
@@ -3117,10 +2890,7 @@ class Generator:
       # A hole whose members all resolve to one symbol selects nothing.  A
       # table over them would be a chain whose every arm is that symbol and
       # a binding naming a pointer to read it through -- and the stand-in
-      # already resolves there, so the body reads it where it is.  Which for
-      # a register image is the only way to read it at all: a register has
-      # no address to put in a table, and the residency hands the image to
-      # whoever asks for the symbol it is the image of.
+      # already resolves there, so the body reads it where it is.
       if all(m is stand_in for m in members):
         continue
       # The members are the bindings, not the parameters: `glb_m5` is
@@ -3235,20 +3005,6 @@ class Generator:
             f'{sorted(str(s) for s in shapes)}')
       asked = self._context.get_user_options().rotate_slots
       width = asked if asked else distance + 1
-      # At one slot the family selects nothing, so its holes need no table:
-      # where the prologue left the first member a register image, the later
-      # members take its symbol, and the run stores that image ahead of its
-      # loop like anything else its trips touch (`_emit_closed_loop`).
-      # Keeping it in registers across the trips is the pseudo-IR's to
-      # decide (`pir.carry`), which does not take this round trip back yet.
-      home = self._scopes.get_symbol(family[0])
-      entry = self._residency.get(home.name) if home is not None else None
-      if (width == 1 and home is not None and entry is not None
-              and getattr(entry.image, 'stype', None) is SymbolType.Register):
-        for tensor in family[1:]:
-          if self._scopes.get_symbol(tensor) is None:
-            self._scopes.alias_symbol(tensor, home)
-        continue
       slots: Dict[int, Symbol] = {}
       for position, tensor in enumerate(family):
         slot = position % width

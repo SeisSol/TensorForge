@@ -1,22 +1,18 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Where an operand is read from, and where a result is kept.
+"""Where an operand is read from.
 
 Two questions that look like one and are not.
 
 *Legality* is what the operation and the data allow.  An operand whose lane
 axis is not the one it is stored along cannot be read where it lies: the
-address would have to transpose across lanes, which an address cannot do.  A
-result assembled from several partial writes cannot stay in an accumulator,
-because each operation holds only its own part.  These are facts; getting one
-wrong produces a kernel that is wrong.
+address would have to transpose across lanes, which an address cannot do.
+These are facts; getting one wrong produces a kernel that is wrong.
 
 *Preference* is what the hardware makes worthwhile among the legal answers.
-Staging an operand into registers pays on one vendor and not on another;
-deferring a store pays when it saves a read-modify-write and costs when it
-serializes against the next slice.  Getting one wrong produces a kernel that is
-slower.
+Staging an operand into registers pays on one vendor and not on another.
+Getting one wrong produces a kernel that is slower.
 
 Keeping preference in a table is what makes it replaceable.  The eventual
 producer of these decisions is a pass with the shared-memory budget and the
@@ -34,8 +30,7 @@ from typing import FrozenSet, Optional
 class Placement(Enum):
     """Where an operand is read from."""
 
-    #: Read where it already is: global memory, a shared buffer, or a register
-    #: image an earlier operation left behind.
+    #: Read where it already is: global memory, or a shared buffer.
     IN_PLACE = 'in_place'
     #: Copy into a shared buffer first.  The only answer that can reorder,
     #: so the only one available to a transposed operand.
@@ -43,21 +38,6 @@ class Placement(Enum):
     #: Copy into a register array first.  Cheapest to read and the least
     #: flexible: the lane axis is fixed when the image is written.
     REGISTER = 'register'
-
-
-class ResultPlacement(Enum):
-    """Where a result is kept once the operation has computed it.
-
-    Not how it is written: an accumulation is stored as the sum it is, and
-    whether that store becomes an atomic add of the terms is decided in the
-    body, once it is known who reads the sum (`pir.atomics`).
-    """
-
-    #: Leave it in the accumulator and write it out when someone needs it.
-    #: Saves the read-modify-write of an accumulation chain.
-    REGISTER = 'register'
-    #: Write it out now.
-    MEMORY = 'memory'
 
 
 @dataclass(frozen=True)
@@ -74,8 +54,6 @@ class VendorPolicy:
     #: The same for a shared buffer.  No vendor takes it today; it stays as a
     #: named alternative rather than a dead branch.
     preload_operands_into_shared: bool = False
-    #: Keep a result in its accumulator instead of storing it eagerly.
-    keep_results_in_registers: bool = False
     #: Add an accumulation into global memory atomically where nothing reads
     #: the sum: the default of `Options.atomic_accumulation`, which the body's
     #: pipeline asks (`pir.atomics`).
@@ -161,30 +139,3 @@ def choose_operand_placement(legal: FrozenSet[Placement],
     if policy.preload_operands_into_shared and Placement.SHARED in legal:
         return Placement.SHARED
     return Placement.IN_PLACE
-
-
-def legal_result_placements(*, written_in_slices: bool
-                            ) -> FrozenSet[ResultPlacement]:
-    """Which placements would produce a correct result.
-
-    A destination assembled from several partial writes cannot stay in an
-    accumulator: the residency holds one entry per name, so a second slice
-    would displace the first and its whole contribution would be computed and
-    thrown away.
-    """
-    if written_in_slices:
-        return frozenset({ResultPlacement.MEMORY})
-    return frozenset({ResultPlacement.MEMORY, ResultPlacement.REGISTER})
-
-
-def choose_result_placement(legal: FrozenSet[ResultPlacement], *,
-                            policy: VendorPolicy) -> ResultPlacement:
-    """The best of the legal answers for this hardware.
-
-    Keeping a result in registers wins where it is legal and the policy asks
-    for it, since it saves the read-modify-write outright.
-    """
-    if ResultPlacement.REGISTER in legal \
-            and policy.keep_results_in_registers:
-        return ResultPlacement.REGISTER
-    return ResultPlacement.MEMORY

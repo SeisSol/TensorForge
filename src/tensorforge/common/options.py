@@ -826,28 +826,6 @@ declare('keep_own',
             'The vendor table decides by default -- AMD and NVIDIA yes, '
             'Intel no.')
 
-declare('memory_semantics',
-        default=False,
-        parse=parse_bool,
-        doc='Hand results between the operations of a list through memory '
-            'alone: behind every operation, what it left in registers is '
-            'stored where its symbol says, and what it staged is dropped, so '
-            'the next operation stages its operands from memory anew.  What '
-            'that costs, the pseudo-IR takes back where it can show that it '
-            'may (`pir.forward`).  The step towards a builder without a '
-            'residency; `stage_shared` stages what then sits in shared '
-            'memory into registers as well.')
-
-declare('stage_shared',
-        default=False,
-        parse=parse_bool,
-        doc='Stage an operand that sits in shared memory into the registers '
-            'of the operation that reads it, where its placement says '
-            'registers -- as one in global memory is.  Read where it is '
-            'without; with `memory_semantics`, every result handed to the '
-            'next operation sits in memory, and only a register image lets '
-            'the pseudo-IR take the round trip back.')
-
 declare('forward_memory',
         default=True,
         parse=parse_bool,
@@ -1129,38 +1107,6 @@ declare('min_blocks_per_sm',
             '7.3 us an element on sm_120; told one block, it took 255 and ran '
             'at 1.3 us.  HIP reads the second argument as warps per execution '
             'unit, so it is not passed there.')
-
-declare('early_writebacks',
-        default=True,
-        parse=parse_bool,
-        env='TF_EARLY_WRITEBACKS',
-        doc='Store a result that stayed in registers as soon as the rest of '
-            'the section neither reads nor writes it, rather than with every '
-            'other one at the section\'s end.  Held to the end, SeisSol\'s '
-            'elastic time derivative (order 6) kept all six `dQ(k)` in '
-            'registers through the whole kernel -- `dQ(0)` for 19,000 of its '
-            '19,500 lines -- 72 registers of 255 that only waited for a store.')
-
-declare('register_temporaries',
-        default='all',
-        env='TF_REGISTER_TEMPORARIES',
-        doc='Which temporaries a pointwise operation -- elementwise, a '
-            'reduction, a contraction to one value -- reads straight out of '
-            'the register image its producer left them in, rather than having '
-            'the image stored to its shared-memory buffer first and loading it '
-            'back: `none`; `scalars`, the temporaries without axes, which are '
-            'one value on every lane and need neither a buffer nor a barrier; '
-            '`all`, arrays as well where the image spreads the lanes the way '
-            'the buffer would.  SeisSol\'s damage step (order 4, single, 32 '
-            'lanes) stored 398 scalars and loaded them 2061 times, each store '
-            'followed by a barrier; arrays trade the shared buffer for '
-            'registers that stay live until their last reader.  `all` by '
-            'default, on measurement: over 70 corpus cases on sm_120 a '
-            'geomean of 1 %, with `mixed/ew_then_ew` at +72 % and five cases '
-            '4-6 % the other way, and SeisSol\'s damage step 6 % -- 11 % once '
-            'its material part is a kernel of its own.  A kernel the trade '
-            'does not suit says so through the tuner, which carries this '
-            'knob (`tuning.simple_space`).')
 
 declare('identity_reduction',
         default=True,

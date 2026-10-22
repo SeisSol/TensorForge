@@ -150,15 +150,29 @@ def test_wrapped_write_lands_after_the_last_read(d, backend, arch):
     lines = kernel.splitlines()
     loop = _loop_start(lines)
 
-    for name in {m.group(1) for m in re.finditer(r'\b(r\d+)\[', kernel)}:
-        writes = [i for i, l in enumerate(lines)
-                  if i > loop and re.search(rf'\b{name}\[[^\]]*\]\s*=', l)]
-        before = [i for i, l in enumerate(lines)
-                  if i < loop and re.search(rf'\b{name}\[[^\]]*\]\s*=', l)]
-        if not before or not writes:
-            continue                      # not wrapped
+    def written(name, inside):
+        return [i for i, l in enumerate(lines)
+                if (i > loop) == inside
+                and re.search(rf'\b{name}\[[^\]]*\]\s*=', l)]
+
+    names = {m.group(1) for m in re.finditer(r'\b(r\d+)\[', kernel)}
+    wrapped = {n for n in names if written(n, False) and written(n, True)}
+
+    def hands_on(i):
+        """Does line `i` read a value that the next line stores into a
+        wrapped buffer?  A second staging of the same operand, which the
+        pseudo-IR fills from the first, reads the next element's data, for
+        the next element."""
+        m = re.match(r'\s*(?:float|double) (\w+) = r\d+\[', lines[i])
+        return bool(m) and i + 1 < len(lines) and any(
+            re.match(rf'\s*{w}\[[^\]]*\]\s*=\s*{m.group(1)};', lines[i + 1])
+            for w in wrapped)
+
+    for name in wrapped:
+        writes = written(name, True)
         reads = [i for i, l in enumerate(lines)
-                 if i > loop and re.search(rf'=\s*[^=]*\b{name}\[', l)]
+                 if i > loop and re.search(rf'=\s*[^=]*\b{name}\[', l)
+                 and not hands_on(i)]
         if not reads:
             continue
         assert max(reads) < min(writes), (

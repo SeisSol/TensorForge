@@ -3,20 +3,18 @@
 # SPDX-License-Identifier: MIT
 """``M = A @ B`` then ``C = abs(M)``, with ``M`` a global output.
 
-With a global destination the store is deferred so the value can stay in
-registers.  Deferred to the end of the section, it would come after every
-descriptor in it, so the elementwise would read `M` from global memory before
-anything had written it, and the contraction's result would overwrite `M`
-afterwards:
+The contraction stores `M` behind itself, before the elementwise reads it.
+Stored later -- at the end of the section, say -- the elementwise would read
+`M` from global memory before anything had written it, and the contraction's
+result would overwrite `M` afterwards:
 
     // glb_m3 = abs(glb_m0);     <- reads whatever the caller left there
     // glb_m0 = store{r>g}(r1);  <- writes it only then
 
-The elementwise cannot consult the residency, so `M` is settled into memory
-before it runs.  `verify` would not see the wrong order, because `m0` is a
-kernel parameter and so a symbol with a definition on entry.
-`test_residency_ordering.py` states the ordering the generated source has to
-have; a snapshot records whichever order is generated.
+`verify` would not see the wrong order, because `m0` is a kernel parameter and
+so a symbol with a definition on entry.  `test_memory_ordering.py` states the
+ordering the generated source has to have; a snapshot records whichever order
+is generated.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

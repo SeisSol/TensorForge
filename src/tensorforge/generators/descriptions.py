@@ -51,7 +51,7 @@ class OperationDescription:
   #: or None for one that always runs. An empty conjunction is also always.
   #:
   #: A field rather than a wrapping descriptor, because everything that walks
-  #: a section -- `SectionPlan`, residency, the temporaries -- asks each
+  #: a section -- `SectionPlan`, the builders, the temporaries -- asks each
   #: descriptor for its geometry through `reads`, `writes` and
   #: `effective_boxes` and deliberately does not know what kinds there are. A
   #: wrapper would have to be unwrapped by every one of those walks, and a

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Tuple
+from typing import Dict, Tuple
 from tensorforge.common.basic_types import Addressing
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.allocate import RegisterAlloc
@@ -14,12 +14,11 @@ from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.exceptions import InternalError, GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.backend.instructions.builders.operation_builder import OperationBuilder
+from tensorforge.backend.instructions.builders.staged import StagedCopy
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
-from tensorforge.backend.placement import (Placement, ResultPlacement,
+from tensorforge.backend.placement import (Placement,
                                            choose_operand_placement,
-                                           choose_result_placement,
-                                           legal_operand_placements,
-                                           legal_result_placements)
+                                           legal_operand_placements)
 from tensorforge.common.operation import AddOperator, MulOperator
 
 
@@ -33,6 +32,10 @@ class MultilinearBuilder(OperationBuilder):
     #: prefers: whether it reaches memory as an atomic add is the body's to
     #: decide once it knows who reads the sum (`pir.atomics`).
     self._policy = self._context.target.prefs.placement
+    #: The copies the build in progress staged, by the name of the symbol
+    #: they are copies of: what reads the same tensor again within the build
+    #: finds them here (`_resolve_reuse`, `_get_target_symbol`).
+    self._staged: Dict[str, StagedCopy] = {}
 
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.
@@ -48,10 +51,12 @@ class MultilinearBuilder(OperationBuilder):
   def resolve_operands(self, descr):
     """Stage every operand where this operation wants to read it.
 
-    Not the base's answer: a contraction does not have to settle a value back
-    into memory to use it.  It consults the residency, takes a register image
-    where the lane axis agrees, and stages afresh where it does not.
+    Not the base's answer: a contraction stages its operands -- into
+    registers, into shared memory, or not at all -- where its placement says,
+    and an operand of a tensor it staged already reads that copy where it
+    serves.
     """
+    self._staged = {}
     self._descr = descr
     self._dest_obj = descr.dest
     self._ops = [self.view_of(op) for op in descr.ops]
@@ -91,10 +96,9 @@ class MultilinearBuilder(OperationBuilder):
     A load of it into registers goes out behind the product, right ahead
     of the epilogue that adds it (`_make_compute`), with the declaration of
     the registers it fills: the product reads it nowhere, and its registers
-    are free while the product runs.  Anything
-    else stays where it is -- a load into shared memory, which the barrier
-    behind the operands orders ahead of the epilogue's reads, and the store
-    that empties a register image the destination may not be read from.
+    are free while the product runs.  A load into shared memory stays
+    where it is: the barrier behind the operands orders it ahead of the
+    epilogue's reads.
     """
     self._bias_loads = []
     if self._add:
@@ -177,31 +181,19 @@ class MultilinearBuilder(OperationBuilder):
 
     name = self._ops[i].symbol.name
 
-    # An image already staged for an earlier operation spreads whichever
-    # dimension *that* operation needed across lanes, and holds its rows in
-    # the lanes *that* operation read them in.  Reusing it for an operand
-    # with a different lane axis -- the same tensor used once plainly and once
-    # transposed -- is a cross-lane transpose, and for one whose rows this
-    # operation computes in other lanes -- rows `8..16` of an image read for
-    # rows `0..8` of the destination -- a cross-lane move; an address
-    # expresses neither (`_image_serves`).  Both cases have a fallback
-    # already:
-    #   * a preload of a global input (`src is dest`) can be dropped, since
-    #     global memory still holds the value and the ordinary path re-stages
-    #     it in the orientation and the lanes this operand wants;
-    #   * a pending store of a temporary has to go out to shared memory first,
-    #     which is exactly what a shared placement already does (and what the CUDA
-    #     path does for every transposed operand anyway).
-    staged = self._residency.get(name)
-    scalar = staged is not None and self._scalar_image(i)
-    if (staged is not None and not scalar
-            and not self._image_serves(i, staged, lead_pos)):
-      if staged.is_preload:
-        self._residency.drop(name)
-      else:
-        # legality, not preference: the image cannot serve, and only a copy
-        # through shared memory can move a value between lanes
-        placement = Placement.SHARED
+    # A copy staged for an earlier operand of the same tensor spreads
+    # whichever dimension *that* operand needed across lanes, and holds its
+    # rows in the lanes *that* operand read them in.  Reusing it for an
+    # operand with a different lane axis -- the same tensor used once plainly
+    # and once transposed -- is a cross-lane transpose, and for one whose
+    # rows this operation computes in other lanes -- rows `8..16` of an image
+    # read for rows `0..8` of the destination -- a cross-lane move; an
+    # address expresses neither (`_image_serves`).  Memory still holds the
+    # value, so the copy is dropped and the ordinary path stages it again in
+    # the orientation and the lanes this operand wants.
+    staged = self._staged.get(name)
+    if staged is not None and not self._image_serves(i, staged, lead_pos):
+      del self._staged[name]
 
     # A register image staged in the tensor's own coordinates -- a transposed
     # operand, which `_stage_shift` leaves unshifted -- holds the operand's
@@ -232,38 +224,15 @@ class MultilinearBuilder(OperationBuilder):
     # -- a vectorized fill stays available under either.
     linearize = lane_axis_needs_moving and lead_pos == 0 and not dense
 
-    if name in self._residency and self._resolve_reuse(i, name):
-      entry = self._residency.get(name)
-      if scalar:
-        # One value, and every lane holds it: read where it is, whatever the
-        # placement said -- a shared copy adds a store, a barrier and a load.
-        self._ops[i].symbol = entry.image
-      elif placement is Placement.SHARED and entry.home.stype == SymbolType.SharedMem:
-        box, offset = entry.in_buffer() or (None, None)
-        self._instructions.append(StoreRegToShr(context=self._context,
-                                                src=entry.image,
-                                                dest=entry.home,
-                                                shr_mem=self._shr_mem,
-                                                num_threads=self._num_threads,
-                                                dest_bbox=box,
-                                                dest_offset=offset))
-        self._residency.drop(name)
-        self._ops[i].symbol = entry.home
-      elif placement is Placement.SHARED:
-        # The image is the only copy of a pending write, so it cannot be
-        # dropped the way a preload can.  Its home is where its symbol says,
-        # and for anything but a temporary that is global memory, which a
-        # store into shared memory has no way to name.  So the write goes to
-        # its home and the operand keeps its global symbol; the staging below
-        # then reads it back in the orientation this operand wants.
-        #
-        # A round trip, and the price of moving the lane axis of a value the
-        # kernel has to publish anyway.  Only a shared staging buffer of its
-        # own would avoid it, and that is a placement decision rather than
-        # something to settle here.
-        self._instructions.extend(self._residency.flush(name))
+    if name in self._staged and self._resolve_reuse(i, name):
+      copy = self._staged[name]
+      if (placement is Placement.SHARED
+              and copy.image.stype != SymbolType.SharedMem):
+        # A copy in registers, where this operand is read from shared
+        # memory: staged there from memory, which still holds the value.
+        del self._staged[name]
       else:
-        self._ops[i].symbol = entry.image
+        self._ops[i].symbol = copy.image
 
     if self._ops[i].symbol.stype == SymbolType.Scalar or self._ops[i].symbol.stype == SymbolType.Data \
       or (isinstance(self._ops[i].symbol.obj, Tensor) and len(self._ops[i].symbol.obj.shape) == 0): # <-- quasi-scalar
@@ -285,28 +254,29 @@ class MultilinearBuilder(OperationBuilder):
                 lead_pos=lead_pos,
                 carries_lead=0 in self._descr.target[i])
             self._mem_regions[i] = self._staged_region(i, staged, shift)
-            self._residency.record_preload(
-                self._ops[i].symbol.name, self._mem_regions[i].symbol,
-                self._mem_regions[i].symbol.data_view.get_bbox(), shift)
+            self._staged[self._ops[i].symbol.name] = StagedCopy(
+                self._mem_regions[i].symbol,
+                self._mem_regions[i].symbol.data_view.get_bbox(), list(shift))
             self._instructions.append(load_op)
           elif placement is Placement.SHARED and self._ops[i].symbol.obj.addressing != Addressing.NONE:
             # only register-preload dense matrices for now
             shift = self._stage_shift(i, absorb_lead=False)
             staged, load_op = self._make_loader_and_symbol(self._stage_view(i, shift), None)
             self._mem_regions[i] = self._staged_region(i, staged, shift)
-            self._residency.record_preload(
-                self._ops[i].symbol.name, self._mem_regions[i].symbol,
-                self._mem_regions[i].symbol.data_view.get_bbox(), shift)
+            self._staged[self._ops[i].symbol.name] = StagedCopy(
+                self._mem_regions[i].symbol,
+                self._mem_regions[i].symbol.data_view.get_bbox(), list(shift))
             self._instructions.append(load_op)
           else:
             # Note: operand will reside in glb. mem for gemm operation
             self._mem_regions[i] = self._ops[i]
 
       elif (self._ops[i].symbol.stype == SymbolType.SharedMem
-            and placement is Placement.REGISTER
-            and self._context.get_user_options().stage_shared):
-        # Staged into this operation's registers, as a global operand is
-        # (`stage_shared`).
+            and placement is Placement.REGISTER):
+        # Staged into this operation's registers, as a global operand is.
+        # The operation that computed it stored it here, and only a load
+        # into registers lets the pseudo-IR take that round trip back
+        # (`pir.forward`).
         shift = self._stage_shift(i, absorb_lead=not lane_axis_needs_moving)
         staged, load_op = self._make_loader_and_symbol_reg(
             self._stage_view(i, shift), linearize=linearize,
@@ -316,10 +286,8 @@ class MultilinearBuilder(OperationBuilder):
         self._instructions.append(load_op)
       elif self._ops[i].symbol.stype == SymbolType.SharedMem or self._ops[i].symbol.stype == SymbolType.Register:
         # An operand that already sits in shared memory or in registers is
-        # read where it is.  Deciding to re-stage it in a different
-        # orientation would need a record of which orientation the existing
-        # image has; the residency entry carries that, and `_image_serves`
-        # above is what consults it.
+        # read where it is: a copy this build staged, which `_image_serves`
+        # above found to serve, or a buffer its placement reads in place.
         self._mem_regions[i] = self._ops[i]
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
@@ -344,9 +312,9 @@ class MultilinearBuilder(OperationBuilder):
     the image alone is held against the thread's register file.  Under SPMD a
     lane holds `1 / num_threads` of it, which alone never comes near the file;
     what does is several of them at once.  So there the figure is this
-    image's share per lane plus every register image already resident, held
-    against `Options.preload_register_share` of the lane's file -- and nothing
-    is checked where that share is 0.
+    image's share per lane plus every register image the build staged
+    already, held against `Options.preload_register_share` of the lane's
+    file -- and nothing is checked where that share is 0.
     """
     budget = getattr(self._context.target.hw,
                      'max_reg_per_thread', None)
@@ -368,8 +336,8 @@ class MultilinearBuilder(OperationBuilder):
     if share <= 0:
       return None, None
     resident = 0
-    for _, entry in self._residency.items():
-      image = entry.image
+    for copy in self._staged.values():
+      image = copy.image
       if image.stype == SymbolType.Register and image.obj.size:
         elem = getattr(image, 'datatype', None) or self._context.fp_type
         resident += image.obj.size * elem.size()
@@ -387,10 +355,9 @@ class MultilinearBuilder(OperationBuilder):
     reads the operand's row `n` at position `n + offset - shift`; so the shift
     is congruent to `offset - theta` modulo a round of the lanes, `T * w`,
     and every row is read by the lane that holds it.  Where the operand's
-    rows are the destination's and the origin is the destination's own --
-    nothing pending decides it otherwise -- that is a shift by whole rounds,
-    and the image holds row `r` of its tensor in lane `(r div w) mod T`, as
-    the operation's result does.
+    rows are the destination's, the origin being the destination's own, that
+    is a shift by whole rounds, and the image holds row `r` of its tensor in
+    lane `(r div w) mod T`, as the operation's result does.
 
     Within that, the shift absorbs as much of the union's lead lower bound as
     it can: free, since the loader forms an address per element anyway, and
@@ -439,18 +406,6 @@ class MultilinearBuilder(OperationBuilder):
     return SymbolView(staged.symbol, self._ops[i].bbox,
                       [o - s for o, s in zip(self._ops[i].offset, shift)])
 
-  def _scalar_image(self, i) -> bool:
-    """Is operand `i` a temporary without axes, still in its register image?
-
-    Such an image has no lane axis to agree with -- it is one value, the same
-    on every lane -- so `_image_serves`, which asks for one, is not the
-    question.  Whether it may be read at all is `image_in_place`'s, and the
-    option's (`register_temporaries`).
-    """
-    return (self._ops[i].bbox.rank() == 0
-            and self.image_in_place(self._descr.ops[i], arrays=False)
-            is not None)
-
   def _lane_span(self) -> int:
     """Rows of the lead dimension one round of the lanes holds, `T * w`; 0
     where nothing is spread over lanes."""
@@ -473,8 +428,8 @@ class MultilinearBuilder(OperationBuilder):
       return True
     return (self._ops[i].offset[lead_pos] - shift - self._theta) % span == 0
 
-  def _image_serves(self, i, entry, lead_pos) -> bool:
-    """Does the staged image `entry` hold operand `i` where this operation
+  def _image_serves(self, i, copy, lead_pos) -> bool:
+    """Does the staged image `copy` hold operand `i` where this operation
     reads it?
 
     Only register images have lanes at all; a shared-memory staging is a
@@ -482,67 +437,40 @@ class MultilinearBuilder(OperationBuilder):
     the dimension this operand needs, and hold each of its rows in the lane
     that reads it (`_in_loop_lanes`).
     """
-    image = entry.image
+    image = copy.image
     if image.stype not in (SymbolType.Register, SymbolType.Scratch):
       return True
     if image.lead_dims != [lead_pos]:
       return False
-    shift = entry.shift[lead_pos] if entry.shift else 0
+    shift = copy.shift[lead_pos] if copy.shift else 0
     return self._in_loop_lanes(i, shift)
 
   def _resolve_reuse(self, i, name):
-    """Decide whether the already-staged image can serve this operand.
+    """Decide whether the copy staged under `name` can serve this operand.
 
-    The residency is keyed by the global symbol's name and lives for the
-    whole kernel, so any later operation on the same tensor inherits the
-    earlier staging regardless of which slice it asks for.  Two things follow.
-
-    The image is indexed in *its own* coordinates --- position `r` holds tensor
+    The copy is indexed in *its own* coordinates --- position `r` holds tensor
     element `r + shift` --- while the operand states its offset against the
-    tensor, so it has to be rebased before the symbol is swapped underneath it.
+    tensor, so it has to be rebased before the symbol is swapped underneath
+    it.
 
-    And the image only covers what its producer happened to stage.  When a
-    consumer wants a different part, what can be done depends on where the
-    authoritative copy lives:
-
-      * a *preload*: global memory still holds the value, so the entry is
-        simply dropped and the ordinary path stages the range that is actually
-        wanted;
-      * a *writeback*: the value exists only in registers, so it is written
-        home first -- zero-filled over what its producer promised, as its
-        store at the end would have -- and then read back like a preload.
-
-    The second is not refused on the grounds that the missing part may be
-    produced by some other instruction.  It need not be: an assignment covers
-    rows 0..10 and a copy reads rows 0..20, the rest zero by the assignment's
-    promise.  The straight-line build never meets it, because its stores go
-    out as they are made; a merged run keeps its accumulations in registers,
-    and SeisSol's time derivative (`dQ(k+1) = dQext(k+1)`) meets it on every
-    iteration.  A part written by another instruction is still safe: a
-    destination written in slices is never kept in registers.
+    And the copy only covers what was staged.  An operand that wants a
+    different part drops it: memory still holds the value, and the ordinary
+    path stages the range that is actually wanted.
     """
-    entry = self._residency.get(name)
+    copy = self._staged[name]
     view = self._ops[i]
-    if entry.covered is None:
+    if copy.covered is None:
       if any(o != 0 for o in view.offset):
         raise GenerationError(
             f'{name}: reusing a staged image whose covered range was not '
             f'recorded, with a non-zero slicing offset {view.offset}')
       return True
 
-    if not entry.holds(view.bbox, view.offset):
-      if entry.is_preload:
-        self._residency.drop(name)
-        return False
-      if entry.home.stype != SymbolType.Global:
-        raise GenerationError(
-            f'{name}: operand wants {view.bbox} at offset {view.offset} but '
-            f'the staged image only covers {entry.covered} at shift '
-            f'{entry.shift}, and the value exists only in registers.')
-      self._instructions.extend(self._residency.flush(name))
+    if not copy.holds(view.bbox, view.offset):
+      del self._staged[name]
       return False
 
-    view.offset = [o - s for o, s in zip(view.offset, entry.shift)]
+    view.offset = [o - s for o, s in zip(view.offset, copy.shift)]
     return True
 
   def _lead_origin_shift(self):
@@ -553,74 +481,18 @@ class MultilinearBuilder(OperationBuilder):
     sits at position `n + theta` of the accumulator, in lane
     `((n + theta) div w) mod T`.  An operand staged for this operation is
     staged in the lanes the origin says (`_stage_shift`), and so is a bias
-    loaded from memory (`_dest_preload_view`): what decides it is what
-    cannot move without a trip through memory.
+    loaded from memory (`_dest_preload_view`).
 
-    That is a pending result, held in registers alone, which this operation
-    reads where it is: moving it to other lanes means storing it, a barrier,
-    and loading it back (`_image_serves`).  The destination's own, where the
-    operation adds onto one, comes first -- it is the bias where the sum is
-    computed, and an accumulation chain over it stays in registers -- and
-    then the operands', where they agree.  A copy of what memory holds does
-    not decide anything: dropped, it is staged again where it is wanted.
-
-    Where nothing decides, the origin is the destination's offset modulo a
-    round of the lanes, so that the accumulator holds row `r` of its tensor
-    in lane `(r div w) mod T` -- the lanes an operand staged for the same
-    rows takes, so that the next operation reading the result finds each row
-    in the lane that reads it.
+    The origin is the destination's offset modulo a round of the lanes, so
+    that the accumulator holds row `r` of its tensor in lane `(r div w) mod T`
+    -- the lanes an operand staged for the same rows takes, so that the next
+    operation loads each row of the result back in the lane that stored it,
+    and the pseudo-IR can take the round trip back (`pir.forward`).
     """
     span = self._lane_span()
     if not span:
       return 0
-    target = self._target_residue()
-    if target is not None:
-      return target
-    pinned = {r for r in map(self._image_residue, range(len(self._ops)))
-              if r is not None}
-    if len(pinned) == 1:
-      return pinned.pop()
     return (self._dest_obj.offset[0] if self._dest_obj.offset else 0) % span
-
-  def _pending(self, symbol):
-    """The register image holding `symbol`'s pending result, as its residency
-    entry, or None."""
-    entry = self._residency.get(symbol.name) if symbol is not None else None
-    if (entry is None or entry.is_preload
-        or entry.image.stype not in (SymbolType.Register, SymbolType.Scratch)
-        or not entry.image.lead_dims):
-      return None
-    return entry
-
-  def _target_residue(self):
-    """The lane residue of the pending result this operation adds onto, or
-    None: where the destination's row `n` sits in it, modulo a round of the
-    lanes."""
-    if not self._add:
-      return None
-    symbol = self._scopes.get_symbol(self._dest_obj.tensor)
-    entry = self._pending(symbol)
-    if entry is None or not self._target_image_fits(symbol.name):
-      return None
-    offset = self._dest_obj.offset[0] if self._dest_obj.offset else 0
-    return (offset - (entry.shift[0] if entry.shift else 0)) % self._lane_span()
-
-  def _image_residue(self, i):
-    """The lane residue of the pending result operand `i` reads where it is,
-    or None: where its row `n` sits in the image, modulo a round of the
-    lanes."""
-    target = self._descr.target[i]
-    view = self._ops[i]
-    if 0 not in target or view.bbox.rank() == 0:
-      return None
-    entry = self._pending(view.symbol)
-    lead_pos = target.index(0)
-    if (entry is None or entry.image.lead_dims != [lead_pos]
-        or (entry.covered is not None
-            and not entry.holds(view.bbox, view.offset))):
-      return None
-    shift = entry.shift[lead_pos] if entry.shift else 0
-    return (view.offset[lead_pos] - shift) % self._lane_span()
 
   def _make_loader_and_symbol_reg(self, opview, linearize,
                                   lead_pos: int = 0,
@@ -746,36 +618,30 @@ class MultilinearBuilder(OperationBuilder):
     return registers
 
   def _target_image_fits(self, name):
-    """Does the image staged under `name` hold exactly this destination?
+    """Does the copy staged under `name` hold exactly this destination?
 
-    The residency is keyed by symbol name and lives for
-    the whole kernel, so what a destination finds under its name may have been
-    staged for something else entirely --- most often an *operand* read of a
-    different slice of the same tensor.  Taking it as the accumulation bias
-    would then read the wrong elements, from the wrong lanes: in the
-    poroelastic space-time predictor `m2[:, 11] += ...` would pick up the
-    image of `m2[:, 12]`, staged one descriptor earlier, and accumulate onto
-    that.
-
-    An accumulation chain onto the same box --- the case the reuse exists for
-    --- has the staged region equal to the destination's, so require that.
+    What a destination finds under its name may have been staged for an
+    operand of the same product -- a different slice of the same tensor,
+    `m2[:, 11] += m2[:, 12] ...`.  Taking it as the accumulation bias would
+    then read the wrong elements, from the wrong lanes.  The bias staged
+    ahead of the product and asked for again behind it -- the case the reuse
+    exists for -- has the staged region equal to the destination's, so
+    require that.
 
     And a register image has to hold the box the way the accumulation adds
     over it: spread along the destination's axis 0, over the whole wave.  An
-    image the accumulator or `_dest_preload_view` left is; an operand's
-    staging of the same box need not be.  Where the build has an origin, its
-    rows have to sit in the lanes the origin computes them in, as well
-    (`_lead_origin_shift`): a copy staged for the rows of another operation
-    need not.
+    image `_dest_preload_view` left is; an operand's staging of the same box
+    need not be.  Where the build has an origin, its rows have to sit in the
+    lanes the origin computes them in, as well (`_lead_origin_shift`).
     """
-    entry = self._residency.get(name)
-    if entry is None or entry.covered is None \
-        or entry.covered.rank() != self._dest_obj.bbox.rank():
+    copy = self._staged.get(name)
+    if copy is None or copy.covered is None \
+        or copy.covered.rank() != self._dest_obj.bbox.rank():
       return False
     want = self._dest_obj.storage_box()
-    if entry.region() != (list(want.lower()), list(want.upper())):
+    if copy.region() != (list(want.lower()), list(want.upper())):
       return False
-    image = entry.image
+    image = copy.image
     span = self._lane_span()
     if (image.stype not in (SymbolType.Register, SymbolType.Scratch)
         or not image.lead_dims or not span):
@@ -786,7 +652,7 @@ class MultilinearBuilder(OperationBuilder):
     if theta is None:
       return True
     offset = self._dest_obj.offset[0] if self._dest_obj.offset else 0
-    shift = entry.shift[0] if entry.shift else 0
+    shift = copy.shift[0] if copy.shift else 0
     return (offset - shift - theta) % span == 0
 
   def _dest_preload_view(self, dest_symbol):
@@ -837,22 +703,19 @@ class MultilinearBuilder(OperationBuilder):
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if dest_symbol is None:
       return None
-    if (dest_symbol.name in self._residency
+    if (dest_symbol.name in self._staged
         and not self._target_image_fits(dest_symbol.name)):
-      # staged for something else: it cannot serve as this destination.  A
-      # pending writeback still has to reach memory, which is exactly what
-      # `_invalidate_residency` does; a preload is simply dropped and the
-      # ordinary path below stages the region this operation needs.
-      self._invalidate_residency(dest_symbol.name)
-    if dest_symbol.name in self._residency:
-      return self._residency.get(dest_symbol.name).image
+      # staged for something else: it cannot serve as this destination, and
+      # the ordinary path below stages the region this operation needs
+      del self._staged[dest_symbol.name]
+    if dest_symbol.name in self._staged:
+      return self._staged[dest_symbol.name].image
     elif (self._policy.preload_operands_into_registers
           and dest_symbol.stype == SymbolType.Global and not next):
       view = self._dest_preload_view(dest_symbol)
       symbol, load_op = self._make_loader_and_symbol_reg(view, False)
-      self._residency.record_preload(
-          dest_symbol.name, symbol.symbol,
-          symbol.symbol.data_view.get_bbox(),
+      self._staged[dest_symbol.name] = StagedCopy(
+          symbol.symbol, symbol.symbol.data_view.get_bbox(),
           list(view.offset))
       self._instructions.append(load_op)
       return symbol.symbol
@@ -860,9 +723,8 @@ class MultilinearBuilder(OperationBuilder):
           and dest_symbol.stype == SymbolType.Global and not next):
       view = self._dest_preload_view(dest_symbol)
       symbol, load_op = self._make_loader_and_symbol(view, None)
-      self._residency.record_preload(
-          dest_symbol.name, symbol.symbol,
-          symbol.symbol.data_view.get_bbox(),
+      self._staged[dest_symbol.name] = StagedCopy(
+          symbol.symbol, symbol.symbol.data_view.get_bbox(),
           list(view.offset))
       self._instructions.append(load_op)
       return symbol.symbol
@@ -874,15 +736,13 @@ class MultilinearBuilder(OperationBuilder):
     # A register image `_get_target_symbol` hands out holds the destination's
     # whole box -- it fits exactly or it is not handed out -- so the result is
     # written over all of it: the product where this term reaches, `prev`
-    # elsewhere.  Left to this term's own box, a chain whose terms narrow (the
-    # ADER Taylor expansion, `I += dQ(k) c_k` over fewer rows each time) would
-    # keep only the last term's rows, and such a chain would have to go
-    # through memory on every term.
+    # elsewhere, and the store writes the box whole.  A chain whose terms
+    # narrow (the ADER Taylor expansion, `I += dQ(k) c_k` over fewer rows
+    # each time) hands every term on whole, through the store of the term
+    # before it, and the pseudo-IR takes that round trip back where it may
+    # (`pir.forward`).
     whole_prev = (prev is not None and prev.stype == SymbolType.Register
-                  and any(e.image is prev for _, e in self._residency.items()))
-    # Whether this result is built on the pending image; `_narrows_pending`
-    # keeps one that was not from displacing it.
-    self._built_on_pending = whole_prev
+                  and any(c.image is prev for c in self._staged.values()))
     compute = MultilinearInstruction(context=self._context,
                                      whole_prev=whole_prev,
                                      ops=self._mem_regions,
@@ -981,41 +841,6 @@ class MultilinearBuilder(OperationBuilder):
     return [o - (self._theta if j == 0 else 0)
             for j, o in enumerate(self._dest_obj.offset)]
 
-  def _invalidate_residency(self, name):
-    """The image of `name` is about to stop being the newest copy.
-
-    `_get_target_symbol` preloads a global destination into registers and
-    records that image so the *next* operation on the same tensor can
-    accumulate straight into it.  That is only sound while the image stays the
-    newest copy.  As soon as this operation writes memory from a different
-    array --- which is what the eager-store paths below do --- the recorded
-    image is one accumulation step behind, and leaving it in place hands every
-    later `+=` a stale bias: each step then computes `preload + own term` and
-    overwrites the previous one, so the destination ends up holding the first
-    write plus the *last* term and nothing in between.
-    """
-    self._instructions.extend(self._residency.flush(name))
-
-  def _inherited_promise(self, pending):
-    """What an accumulation onto a pending writeback still owes.
-
-    The assignment it adds to promised zeros outside what it covered, and the
-    store keeps that promise -- the store that is now this entry's, since the
-    residency holds one entry per name.  Dropped, it would send a merged run's
-    `dQext(k+1) = ...; dQext(k+1) += ...` out with rows 10..20 as whatever the
-    buffer held.  Carried only while it means the same cells: in the same
-    frame, with nothing the pending image held left out.
-    """
-    if (pending is None or pending.is_preload or pending.promise is None
-        or pending.covered is None
-        or list(pending.shift) != list(self._store_offset())):
-      return None
-    covered = self._temp_regs.data_view.get_bbox()
-    inside = all(cl <= pl and pu <= cu for pl, pu, cl, cu in zip(
-        pending.covered.lower(), pending.covered.upper(),
-        covered.lower(), covered.upper()))
-    return pending.promise if inside else None
-
   def _promised_box(self):
     """What this operation undertakes to define, in the accumulator's frame.
 
@@ -1083,43 +908,15 @@ class MultilinearBuilder(OperationBuilder):
     return BoundingBox([l + o for l, o in zip(promise.lower(), shift)],
                        [u + o for u, o in zip(promise.upper(), shift)])
 
-  def _narrows_pending(self, name) -> bool:
-    """Would recording this result displace a pending writeback that holds
-    more than it does?
-
-    The plan keeps a chain in registers where every term can write the whole
-    image (`whole_prev`).  Where one cannot after all -- its accumulator is
-    not in the image's frame, or it did not take the image's box -- recording
-    it would drop the rows only the pending image holds.  Then the pending
-    image goes to its home first, and this result follows it there.
-    """
-    entry = self._residency.get(name)
-    if entry is None or entry.is_preload or entry.covered is None:
-      return False
-    # An accumulation that was not built on the pending image -- a view that
-    # did not fit was not handed out -- holds only its own term; the pending
-    # one's would be lost.
-    if self._add and not getattr(self, '_built_on_pending', False):
-      return True
-    if entry.shift and list(entry.shift) != list(self._store_offset()):
-      return True
-    mine = self._temp_regs.data_view.get_bbox()
-    if mine.rank() != entry.covered.rank():
-      return True
-    return any(lm > le or um < ue for lm, um, le, ue in zip(
-        mine.lower(), mine.upper(),
-        entry.covered.lower(), entry.covered.upper()))
-
   def _make_store(self):
+    """The store of the result, behind the product: what this operation
+    computes goes where its symbol says, and the next one finds it there."""
     if self._dest_obj.tensor in self._scopes:
       dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
       if dest_symbol.stype == SymbolType.SharedMem:
-        if (self._plan.written_in_slices(self._dest_obj.tensor)
-            or self._narrows_pending(dest_symbol.name)):
-          self._invalidate_residency(dest_symbol.name)
-          # assembled from several writes: this slice has to land in the shared
-          # buffer now, since `_temp_regs` only ever holds our own part and the
-          # deferred entry keeps just one of them
+        if self._plan.written_in_slices(self._dest_obj.tensor):
+          # assembled from several writes: this slice lands in its place in
+          # the buffer, which is laid out for all of them
           zero_box = self._assignment_zero_box()
           self._instructions.append(StoreRegToShr(context=self._context,
                                                   src=self._temp_regs,
@@ -1132,45 +929,16 @@ class MultilinearBuilder(OperationBuilder):
                                                   clear=zero_box is not None,
                                                   clear_within=zero_box))
           return
-        # see note below (but update to the new temp regs)
-        self._residency.record_writeback(
-            dest_symbol.name, self._temp_regs, dest_symbol,
-            # the *actual* range the accumulator ended up with: _analyze
-            # intersects the operands, so _ns can be strictly smaller than
-            # the declared destination box
-            covered=self._temp_regs.data_view.get_bbox(),
-            shift=self._store_offset())
+        self._instructions.append(self._store_whole(dest_symbol))
       elif dest_symbol.stype == SymbolType.Global:
-        in_slices = (self._plan.written_in_slices(self._dest_obj.tensor)
-                     or self._narrows_pending(dest_symbol.name))
-        pending = self._residency.get(dest_symbol.name)
-        result = choose_result_placement(
-            legal_result_placements(written_in_slices=in_slices),
-            policy=self._policy)
-        # A destination assembled from several writes cannot be kept in
-        # registers: the residency holds one entry per name, so a second
-        # slice would displace the first and its whole contribution would be
-        # computed and thrown away.
-        if result is ResultPlacement.REGISTER:
-          self._residency.record_writeback(
-              dest_symbol.name, self._temp_regs, dest_symbol,
-              # the *actual* range the accumulator ended up with: _analyze
-              # intersects the operands, so _ns can be strictly smaller than
-              # the declared destination box
-              covered=self._temp_regs.data_view.get_bbox(),
-              shift=self._store_offset(),
-              promise=(self._promised_box() if not self._add
-                       else self._inherited_promise(pending)))
-        else:
-          self._invalidate_residency(dest_symbol.name)
-          self._instructions.append(StoreRegToGlb(context=self._context,
-                                                  src=self._temp_regs,
-                                                  dest=dest_symbol,
-                                                  num_threads=self._num_threads,
-                                                  lead_width=self._lead_width,
-                                                  dest_offset=self._store_offset(),
-                                                  dest_bbox=self._promised_box(),
-                                                  zero_fill=not self._add))
+        self._instructions.append(StoreRegToGlb(context=self._context,
+                                                src=self._temp_regs,
+                                                dest=dest_symbol,
+                                                num_threads=self._num_threads,
+                                                lead_width=self._lead_width,
+                                                dest_offset=self._store_offset(),
+                                                dest_bbox=self._promised_box(),
+                                                zero_fill=not self._add))
       else:
         raise InternalError(f'gemm-builder: `res` must be either in shr. or glb. mem., given: {dest_symbol.stype}')
     else:
@@ -1178,10 +946,7 @@ class MultilinearBuilder(OperationBuilder):
         raise InternalError('gemm-buider: `res` is not in scopes and thus must be tmp')
 
       dest_symbol = self._temporaries.shared_symbol(self._dest_obj.tensor)
-      if (self._plan.written_in_slices(self._dest_obj.tensor)
-          or self._narrows_pending(dest_symbol.name)):
-        # a pending image that holds more than this result goes out first
-        self._invalidate_residency(dest_symbol.name)
+      if self._plan.written_in_slices(self._dest_obj.tensor):
         # the first write of the temporary: where the plan found a use of
         # cells nothing defined before it, this store clears the buffer; an
         # assignment clears at least what it promised and did not compute
@@ -1198,13 +963,48 @@ class MultilinearBuilder(OperationBuilder):
                                                 clear=zero_first or zero_box is not None,
                                                 clear_within=None if zero_first else zero_box))
         return
-      self._residency.record_writeback(
-          dest_symbol.name, self._temp_regs, dest_symbol,
-          # the *actual* range the accumulator ended up with: _analyze
-          # intersects the operands, so _ns can be strictly smaller than the
-          # declared destination box
-          covered=self._temp_regs.data_view.get_bbox(),
-          shift=self._store_offset())
+      self._instructions.append(self._store_whole(dest_symbol))
+
+  def _store_whole(self, dest_symbol):
+    """The store of a shared buffer one write defines whole: the
+    accumulator, in the buffer as laid out (`_in_buffer`)."""
+    box, offset = self._in_buffer(dest_symbol) or (None, None)
+    return StoreRegToShr(context=self._context,
+                         src=self._temp_regs,
+                         dest=dest_symbol,
+                         shr_mem=self._shr_mem,
+                         num_threads=self._num_threads,
+                         lead_width=self._lead_width,
+                         dest_bbox=box,
+                         dest_offset=offset)
+
+  def _in_buffer(self, dest_symbol):
+    """Where the accumulator lands in its shared buffer: the box the buffer
+    is laid out over and the accumulator's place in it, or None.
+
+    The buffer as its first store laid it out (`StoreRegToShr`), where that
+    holds every cell of the accumulator.  An accumulation onto what the
+    buffer holds computes the rows its product reaches and leaves the rest
+    to the buffer: SeisSol's `projectToDR` adds a derivative of ten rows
+    onto a sum of twenty.  Laid out over its own box, its store would
+    re-stride every access of the buffer, the earlier stores' among them,
+    to those rows.  None where the buffer has no layout yet, the
+    accumulator does not fit in it, or the accumulator is shifted against
+    its tensor (`_store_offset`), as a buffer laid out here is not: the
+    store lays the buffer out over the accumulator.
+    """
+    if any(self._store_offset()):
+      return None
+    view = dest_symbol.data_view
+    if view is None:
+      return None
+    box = view.get_bbox()
+    own = self._temp_regs.data_view.get_bbox()
+    if box.rank() != own.rank() or any(
+        ol < bl or ou > bu for ol, ou, bl, bu in zip(
+            own.lower(), own.upper(), box.lower(), box.upper())):
+      return None
+    return box, [0] * own.rank()
 
   def _insert_sync_block(self):
     """A barrier around the shared traffic, where nothing later will derive one.

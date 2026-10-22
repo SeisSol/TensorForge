@@ -6,10 +6,10 @@
 The shape a plasticity kernel has: a contraction produces stresses, a pointwise
 operation evaluates a yield criterion on them.
 
-`MultilinearBuilder` leaves the result of the contraction in a register array
-and records a pending writeback in the residency.  The elementwise has to ask
-the residency where the newest copy is: read through the shared-memory symbol
-alone, the temporary is a buffer that writeback has not reached yet.
+`MultilinearBuilder` computes the result of the contraction in a register
+array and stores it into the temporary's shared buffer behind it, where the
+elementwise reads it; the pseudo-IR takes the round trip back where every
+lane reads what it stored.
 
 Shapes are 8x8 throughout: the elementwise descriptor pins the lane count to the
 vector unit length regardless of the tensors, so nothing is gained by going

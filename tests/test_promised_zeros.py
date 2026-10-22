@@ -56,9 +56,8 @@ def _chain():
 
 
 def _slices():
-    """`T = A B` with twenty rows, `U = T[0:10] C` read from `T`'s image,
-    whose rows go on past `U`'s, then `V = U E` and `W = V F`: `U` and `V`
-    are left in registers as well."""
+    """`T = A B` with twenty rows, `U = T[0:10] C`, which reads ten of them,
+    then `V = U E` and `W = V F`."""
     t = _t([20, 6], 'T', is_tmp=True)
     u = _t([10, 4], 'U', is_tmp=True)
     v = _t([10, 3], 'V', is_tmp=True)
@@ -127,15 +126,15 @@ def test_a_result_of_fewer_rows_than_lanes_says_the_rest_are_zero(
 
 
 @pytest.mark.parametrize('backend,arch', TARGETS)
-def test_an_operand_with_rows_past_the_window_leaves_the_image_unsaid(
+def test_an_operand_read_through_a_window_reads_zero_past_it(
         monkeypatch, backend, arch):
-    """`U` reads rows 0..9 of `T`'s image, which holds rows 10..19 in the
-    lanes past them: what `U` computes there is no zero, and `U` says
-    nothing.  Nor does `V`, which reads `U`'s image where nobody said what
-    it holds past its rows.  `T` reads `A` from memory, a zero past its rows,
-    and says so."""
+    """`U` reads rows 0..9 of `T` where `T`'s multiplication stored it, a
+    read held to the window (`LeadIndex.valid`) though rows 10..19 follow in
+    the buffer: what `U` computes past the rows is a zero, and `U` says so.
+    So does `V`, which reads `U` where it was stored, and `T`, which reads
+    `A` from memory."""
     seen, _ = _bodies(monkeypatch, backend, arch, _slices())
-    assert sorted(len(v) for v in _said(seen).values()) == [6]
+    assert sorted(len(v) for v in _said(seen).values()) == [3, 4, 6]
 
 
 @pytest.mark.parametrize('backend,arch', TARGETS)

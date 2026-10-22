@@ -172,7 +172,6 @@ PREFERENCES = {
         # longer; `fsgKernel` at order 6, at 255 registers already, spills up
         # to 56 B more.
         placement=VendorPolicy(preload_operands_into_registers=True,
-                               keep_results_in_registers=True,
                                keep_own=True),
         # A 32-bit immediate fits the instruction: a chain of four 9x9
         # operators on sm_120 had 768 instructions instead of 888 by value.
@@ -210,7 +209,6 @@ PREFERENCES = {
         # step's arena halves on gfx942, gfx1250 and gfx1251 (512 elements a
         # multiplication to 256) at the same length of code.
         placement=VendorPolicy(preload_operands_into_registers=True,
-                               keep_results_in_registers=True,
                                atomic_accumulation=True,
                                broadcast_without_staging=True,
                                read_across=True,
@@ -257,7 +255,6 @@ PREFERENCES = {
         # The sub-group broadcast is cheap enough here that an operand whose
         # lane axis is not where a reader expects it can be read in place.
         placement=VendorPolicy(preload_operands_into_registers=True,
-                               keep_results_in_registers=True,
                                broadcast_without_staging=True),
         split_predicated_load=True,
         tune_preload_globals=True,

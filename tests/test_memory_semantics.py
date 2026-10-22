@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Results handed between the operations of a list through memory alone
-(`memory_semantics`), and shared operands staged into registers
-(`stage_shared`).
+"""Results handed between the operations of a list through memory alone.
 
-With both, an operation stages every operand from memory and stores its
-result where its symbol says; nothing it leaves in registers reaches the
+An operation stages every operand from memory -- one in shared memory into
+registers as well, where its placement says registers -- and stores its
+result where its symbol says; nothing it computes in registers reaches the
 next.  Held here: that the build does so -- the second multiplication of a
-chain stages its operand anew -- and that what it computes is what NumPy
-does, on the host oracle, for the shapes the canonical lanes are checked on
-(`test_canonical_lanes.py`).
+chain stages its operand anew -- that the forward of memory runs ahead of
+the cover's count, and that the bias goes out behind the product.  What it
+computes is what NumPy does, on the host oracle (`test_canonical_lanes.py`).
 """
 
 from __future__ import annotations
@@ -27,8 +26,6 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor
 from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.generators.generator import Generator
-
-OPTIONS = dict(memory_semantics=True, stage_shared=True)
 
 
 def _built(descrs, backend='cuda', arch='sm_86', **options):
@@ -62,22 +59,11 @@ def _stagings(monkeypatch, descrs, **options):
     return staged
 
 
-def test_the_next_operation_stages_what_the_last_one_left_in_registers(
-        monkeypatch):
+def test_the_next_operation_stages_what_the_last_one_stored(monkeypatch):
     """`slice_of_a_temporary`: the second multiplication reads the first's
-    result.  With the residency it reads the register image the first left;
-    with memory semantics it stages the result from where it was stored."""
-    held = _stagings(monkeypatch, lanes.slice_of_a_temporary())
-    handed = _stagings(monkeypatch, lanes.slice_of_a_temporary(), **OPTIONS)
-    assert not held[1] and handed[1]
-
-
-@pytest.mark.parametrize('shape', lanes.SHAPES, ids=lambda f: f.__name__)
-def test_what_memory_semantics_computes_is_what_numpy_does(shape, monkeypatch):
-    monkeypatch.setattr(lanes, '_built',
-                        lambda descrs, backend='cuda', arch='sm_86':
-                        _built(descrs, backend, arch, **OPTIONS))
-    assert lanes._worst(shape()) < 1e-9
+    result, and stages it from where the first stored it."""
+    staged = _stagings(monkeypatch, lanes.slice_of_a_temporary())
+    assert staged[1]
 
 
 def accumulation_over_fewer_rows():
@@ -101,18 +87,12 @@ def accumulation_over_fewer_rows():
     ]
 
 
-@pytest.mark.parametrize('options', [OPTIONS, dict(memory_semantics=True)],
-                         ids=['both', 'memory_semantics'])
-def test_an_accumulation_over_fewer_rows_lands_in_the_buffer_as_laid_out(
-        options, monkeypatch):
+def test_an_accumulation_over_fewer_rows_lands_in_the_buffer_as_laid_out():
     """The accumulation's result goes to the temporary's shared buffer as
     rows 0..9 of the twenty the first store laid it out over
-    (`ResidencyEntry.in_buffer`); laid out over its own ten, every access of
-    the buffer would be re-strided to them and `D` would read rows of one
-    column in another."""
-    monkeypatch.setattr(lanes, '_built',
-                        lambda descrs, backend='cuda', arch='sm_86':
-                        _built(descrs, backend, arch, **options))
+    (`MultilinearBuilder._in_buffer`); laid out over its own ten, every
+    access of the buffer would be re-strided to them and `D` would read rows
+    of one column in another."""
     assert lanes._worst(accumulation_over_fewer_rows()) < 1e-9
 
 
@@ -152,11 +132,7 @@ def accumulation_onto_a_value_without_axes():
     ]
 
 
-@pytest.mark.parametrize('options', [OPTIONS, dict(memory_semantics=True),
-                                     {}],
-                         ids=['both', 'memory_semantics', 'residency'])
-def test_an_accumulation_reads_what_its_destination_held(options,
-                                                         monkeypatch):
+def test_an_accumulation_reads_what_its_destination_held(monkeypatch):
     """The instruction that adds onto `r` reads it before it writes it, so
     nothing ahead of it says that `r` holds nothing anybody wants
     (`Generator._declare_buffers`, `mark defines`): told so, the allocator
@@ -167,44 +143,35 @@ def test_an_accumulation_reads_what_its_destination_held(options,
     can be written over unnoticed."""
     monkeypatch.setattr(lanes, '_built',
                         lambda descrs, backend='cuda', arch='sm_86':
-                        _built(descrs, backend, arch, forward_memory=False,
-                               **options))
+                        _built(descrs, backend, arch, forward_memory=False))
     assert lanes._worst(accumulation_onto_a_value_without_axes()) < 1e-9
 
 
 @pytest.mark.parametrize('atomic', [True, False])
-def test_a_transfer_keeps_the_cover_the_round_trips_would_take(atomic):
+def test_the_cover_is_counted_behind_the_forward_of_memory(atomic,
+                                                          monkeypatch):
     """Behind every operation the result goes to memory, and the next stages
     it back: round trips the forward of memory takes away (`pir.forward`).
     The cover a transfer is issued with is counted behind that
-    (`pir.standard_pipeline`, ``cap``), so `chain_three`'s transfers stand at
-    least as far ahead of their first reads as with the residency -- with
-    the atomics, which ask the forward of memory as well, and without."""
-    import test_issue_cover as cover
-    held = cover._gaps(cover._generate('chain_three.py', 'hip', 'gfx942',
-                                       atomic_accumulation=atomic))
-    handed = cover._gaps(cover._generate('chain_three.py', 'hip', 'gfx942',
-                                         atomic_accumulation=atomic,
-                                         **OPTIONS))
-    assert held and handed.keys() == held.keys()
-    assert all(handed[k] >= held[k] for k in held), (held, handed)
+    (`pir.standard_pipeline`, ``cap``) -- in the work the emitter emits, and
+    none of the round trips -- with the atomics, which ask the forward of
+    memory as well, and without."""
+    from tensorforge.backend.pir import pipeline
+    orders = []
+    real = pipeline.standard_pipeline
 
-
-def test_the_forward_of_memory_runs_ahead_of_the_cover_without_atomics(
-        monkeypatch):
-    """The forward of memory runs for the cover's count as much as for the
-    atomics: a build that adds nothing atomically has it as well."""
-    from tensorforge.backend.instructions import abstract_instruction
-    seen = []
-    real = abstract_instruction.pir.optimize
-
-    def spy(body, **kwargs):
-        seen.append(kwargs.get('early_forward'))
-        return real(body, **kwargs)
-    monkeypatch.setattr(abstract_instruction.pir, 'optimize', spy)
-    _built(lanes.slice_of_a_temporary(), backend='hip', arch='gfx942',
-           atomic_accumulation=False, **OPTIONS)
-    assert seen and all(early is not None for early in seen)
+    def spy(*args, **kwargs):
+        pm = real(*args, **kwargs)
+        orders.append([p.name for p in pm.passes])
+        return pm
+    monkeypatch.setattr(pipeline, 'standard_pipeline', spy)
+    _built(lanes.window_from_row_one(), backend='hip', arch='gfx942',
+           atomic_accumulation=atomic)
+    capped = [names for names in orders if 'cap' in names]
+    assert capped
+    for names in capped:
+        assert 'forward-memory' in names, names
+        assert names.index('forward-memory') < names.index('cap'), names
 
 
 def test_the_bias_is_loaded_behind_the_product(monkeypatch):
@@ -220,8 +187,7 @@ def test_the_bias_is_loaded_behind_the_product(monkeypatch):
         return out
     monkeypatch.setattr(multilinear_builder.MultilinearBuilder,
                         'get_instructions', spy)
-    _built(lanes.window_from_row_one(), backend='hip', arch='gfx942',
-           **OPTIONS)
+    _built(lanes.window_from_row_one(), backend='hip', arch='gfx942')
     accumulations = [names for names in built if 'MultilinearEpilogue' in names
                      and names.count('GlbToRegLoader') == 3]
     assert accumulations

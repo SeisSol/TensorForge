@@ -134,9 +134,10 @@ class MultilinearInstruction(ComputeInstruction):
                whole_prev: bool = False):
         super(MultilinearInstruction, self).__init__(context)
         #: `prev` is a register image of the destination's whole box -- the
-        #: one the previous term of an accumulation chain left behind.  The
-        #: result is then written over all of it, the product where this term
-        #: reaches and `prev` elsewhere, so the image stays whole.
+        #: bias, staged from what the previous term of an accumulation chain
+        #: stored.  The result is then written over all of it, the product
+        #: where this term reaches and `prev` elsewhere, so the image stays
+        #: whole.
         self._whole_prev = whole_prev
         self._dest = dest
         self._ops = ops
@@ -158,8 +159,7 @@ class MultilinearInstruction(ComputeInstruction):
         #: contiguous axis *is* `k` is loaded once as a vector of that width.
         self._k_width = k_width
         self._blockcount = blockcount
-        # origin of the lead loop, the builder's: where a pending result it
-        # reads in place has its rows, or else the destination's offset
+        # origin of the lead loop, the builder's: the destination's offset
         # modulo a round of the lanes; the operands are staged to match
         # (MultilinearBuilder._lead_origin_shift).  Only relative offsets
         # matter, so shifting it is free apart from at most one extra slot.
@@ -427,13 +427,11 @@ class MultilinearInstruction(ComputeInstruction):
             # off.  Two things disqualify a neighbor.  A global or shared
             # symbol describes the whole buffer, not the box this operation
             # writes.  And a register image is only usable if it is an image of
-            # the *same* box: the residency is keyed by symbol name and lives
-            # for the whole kernel, so what a later operation finds there may
-            # have been staged for a read of a much wider region.  In the
-            # poroelastic space-time predictor a one-row-one-column write would
-            # pick up the image of the whole 32x13x4 tensor and inherit its
-            # box; the accumulator would then claim elements it never computes,
-            # and the store would write all of them --- reading past the end of
+            # the *same* box: one staged for a read of a much wider region
+            # would hand this operation its box.  A one-row-one-column write
+            # of a 32x13x4 tensor would inherit the box of the whole tensor;
+            # the accumulator would then claim elements it never computes, and
+            # the store would write all of them --- reading past the end of
             # the register array on the way.
             #
             # A whole image of the destination (`whole_prev`) is adopted even

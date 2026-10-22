@@ -74,6 +74,7 @@ OPTIONS = Path('src/tensorforge/common/options.py')
 PTR = Path('src/tensorforge/backend/instructions/ptr_manip.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 MLB = Path('src/tensorforge/backend/instructions/builders/multilinear_builder.py')
+OPB = Path('src/tensorforge/backend/instructions/builders/operation_builder.py')
 TRIPS = Path('src/tensorforge/backend/pir/trips.py')
 ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 PIPE = Path('src/tensorforge/backend/pir/pipeline.py')
@@ -82,7 +83,6 @@ STACKING = Path('src/tensorforge/generators/stacking.py')
 BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
 TUNING = Path('src/tensorforge/generators/tuning.py')
 BOUND = Path('src/tensorforge/analysis/pipeline.py')
-RESIDENCY = Path('src/tensorforge/backend/residency.py')
 CARRY = Path('src/tensorforge/backend/pir/carry.py')
 ATOMICS = Path('src/tensorforge/backend/pir/atomics.py')
 FORWARD = Path('src/tensorforge/backend/pir/forward.py')
@@ -2194,6 +2194,12 @@ GROUPS = {
              '            body[closing + 1:closing + 1] = tails', 1)),
         ('the head ahead of what it reads',
          sub(PREFETCH, '        at = behind_defs(body, head)', '        at = 0', 1)),
+        ('what the element stores ahead of reading it back asked for',
+         sub(PREFETCH, '                    written.get(_buffer(a.base), at) < at\n',
+             '                    False\n', 1)),
+        ('what the element stores asked for until it is stored',
+         sub(PREFETCH, '                    written.get(_buffer(a.base), at) < at\n',
+             '                    _buffer(a.base) in written\n', 1)),
         ('a compressed operand asked for over its view',
          sub(Path('src/tensorforge/backend/instructions/ptr_manip.py'),
              "        or not getattr(obj, 'is_dense', lambda: True)()):",
@@ -2670,28 +2676,6 @@ GROUPS = {
          sub(WRAP, '        if self.kind is not None:\n            writers = tuple(',
              '        if False:\n            writers = tuple(', 1)),
     ]),
-    'closedtrips': ('tests/test_rolling.py::test_a_merged_run_computes_what_the_list_written_out_does '
-                    'tests/test_rolling.py::test_a_closed_trip_stores_a_temporary_the_next_trip_reads '
-                    'tests/test_rolling.py::test_a_closed_trip_stores_what_outlives_it_and_nothing_it_used_up '
-                    'tests/test_residency.py', [
-        ('a closed trip opened on a result still in registers',
-         sub(GEN, '      self._section.ir.extend(self._residency.flush(name))\n'
-                  '      if name not in writes:',
-             '      if name not in writes:', 1)),
-        ('a closed trip that stores nothing at its end',
-         sub(RESIDENCY, '        out = [self._store(entry) for entry in self._entries.values()\n'
-                        '               if not entry.is_preload and outlives(entry)]',
-             '        out = []', 1)),
-        ('a trip that forgets what the next one reads of it',
-         sub(GEN, '      carried.update(id(t) for t in reads if id(t) not in seen)\n', '', 1)),
-        ('a trip that stores the temporaries it used up',
-         sub(GEN, '      return id(tensor) in needed\n', '      return True\n', 1)),
-        ('a trip lets go of a result held around it',
-         sub(RESIDENCY, '                if not entry.is_preload:\n'
-                        '                    raise InternalError(',
-             '                if False:\n'
-                        '                    raise InternalError(', 1)),
-    ]),
     'carry': ('tests/test_carry.py '
               'tests/test_rolling.py::test_the_carry_holds_an_accumulator_in_registers_over_the_trips '
               'tests/test_rolling.py::test_an_atomic_accumulator_is_summed_in_registers_and_added_once '
@@ -2832,9 +2816,9 @@ GROUPS = {
                      '                               keep_own=True),',
              '                               read_across=True),', 1)),
         ('keeping a buffer no lane hands on off on NVIDIA',
-         sub(TARGET, '                               keep_results_in_registers=True,\n'
+         sub(TARGET, '        placement=VendorPolicy(preload_operands_into_registers=True,\n'
                      '                               keep_own=True),',
-             '                               keep_results_in_registers=True),', 1)),
+             '        placement=VendorPolicy(preload_operands_into_registers=True),', 1)),
         ('keeping a buffer no lane hands on asked of no vendor',
          sub(OPTIONS, "        rule=lambda target: target.prefs.placement.keep_own,",
              "        default=False,", 1)),
@@ -2908,22 +2892,12 @@ GROUPS = {
          sub(PIPE, '    if early_forward is not None:\n', '    if False:\n', 1)),
     ]),
     # Every register image of a tensor in the lanes of its rows: the lead
-    # loop's origin, the stagings' shifts, and the images that hold their
-    # rows elsewhere going through memory.
+    # loop's origin, the stagings' shifts, and the copies that hold their
+    # rows elsewhere staged again.
     'lanes': ('tests/test_canonical_lanes.py', [
         ('the lead loop\'s origin left at 0',
          sub(MLB, '    return (self._dest_obj.offset[0] if self._dest_obj.offset else 0) % span\n',
              '    return 0\n', 1)),
-        ('the destination\'s pending result moved to the operands\' lanes',
-         sub(MLB, '    target = self._target_residue()\n'
-                  '    if target is not None:\n'
-                  '      return target\n', '', 1)),
-        ('an operand\'s pending result moved through memory where nothing else decides',
-         sub(MLB, '    if len(pinned) == 1:\n'
-                  '      return pinned.pop()\n', '', 1)),
-        ('a copy taken to decide the origin',
-         sub(MLB, '    if (entry is None or entry.is_preload\n',
-             '    if (entry is None\n', 1)),
         ('a staging that absorbs the whole lower bound',
          sub(MLB, '    shift[lead_pos] = lower - (lower - residue) % span\n',
              '    shift[lead_pos] = lower\n', 1)),
@@ -2992,12 +2966,26 @@ GROUPS = {
          sub(PASSES, '    if (s.op == Op.LOAD and len(s.args) == 2 and len(s.accesses) == 1\n',
              '    if (s.op == Op.LOAD and len(s.accesses) == 1\n', 1)),
     ]),
-    # Results handed between the operations of a list through memory, and
-    # what the pipeline does so that they cost what the residency did.
-    'memsem': ('tests/test_memory_semantics.py', [
-        ('a writeback laid over its own box',
-         sub(RESIDENCY, '        view = self.home.data_view\n        if view is None:\n',
-             '        view = None\n        if view is None:\n', 1)),
+    # Results handed between the operations of a list through memory: each
+    # stored behind the operation that computes it, the cover counted behind
+    # the forward that takes the round trips back, and the bias loaded
+    # behind the product.
+    'memsem': ('tests/test_memory_semantics.py tests/test_memory_ordering.py '
+               'tests/test_canonical_lanes.py::test_the_shape_computes_what_numpy_does', [
+        ('a product\'s result stored nowhere',
+         sub(MLB, '      elif dest_symbol.stype == SymbolType.Global:\n'
+                  '        self._instructions.append(StoreRegToGlb(',
+             '      elif dest_symbol.stype == SymbolType.Global:\n'
+             '        (StoreRegToGlb(', 1)),
+        ('a product\'s temporary stored nowhere',
+         sub(MLB, '\n      self._instructions.append(self._store_whole(dest_symbol))\n',
+             '\n      pass\n', 1)),
+        ('a pointwise result stored nowhere',
+         sub(OPB, '        self._home_store = lambda: StoreRegToShr(\n',
+             '        lambda: StoreRegToShr(\n', 1)),
+        ('a result laid over its own box',
+         sub(MLB, '    view = dest_symbol.data_view\n    if view is None:\n',
+             '    view = None\n    if view is None:\n', 1)),
         ('the cover counted ahead of the forward of memory',
          subs(PIPE, ("    pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))\n",
                      "    pm.add(Rewrite('flatten', flatten_scopes, provides=('flat',)))\n"

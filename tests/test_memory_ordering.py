@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Ordering invariants the residency has to hold in the generated source.
+"""Ordering invariants the stores of an operation have to hold in the
+generated source.
 
 ``mixed_ml_glb_then_ew`` is the shape that needs one.  In the wrong order it
 still generates:
@@ -10,21 +11,13 @@ still generates:
     // glb_m0 = store{r>g}(r2);  <- writes M only then
 
 A snapshot of that would be green, so the order needs stating as an invariant
-instead.  That is this file.
+instead.  That is this file.  It holds because an operation stores what it
+computes behind itself, before the next one runs.
 
-Which targets could get it wrong is worth keeping in mind.  With a global
-destination and register residency enabled, a store deferred to the section
-boundary lets the pointwise read overtake it; where register residency is off
-the store is eager and the order is right regardless.  The same code, sorted
-by a placement decision.
-
-It holds on all four because a descriptor that cannot consult the residency
-has the tensors it touches settled back into memory before it runs.
-
-The section-boundary test is about a different lifetime: a section's
-residency has to empty at the section boundary rather than at the end of the
-kernel, since a writeback emitted after the barrier that was meant to publish
-it is wrong in a way no snapshot would flag.
+The section-boundary test is about a different lifetime: a section's stores
+have to land before the next section runs rather than at the end of the
+kernel, since a store emitted after the barrier that was meant to publish it
+is wrong in a way no snapshot would flag.
 """
 
 from __future__ import annotations
@@ -145,17 +138,11 @@ def test_pointwise_read_follows_the_contraction_store(backend, arch):
                          ids=[b for b, _ in ALL_TARGETS])
 def test_temporary_assembled_from_slices_is_read_after_both_writes(backend,
                                                                    arch):
-    """A mixed shape that is correct without the residency, as a control.
-
-    Two contractions write half a temporary each, so
-    ``SectionPlan.written_in_slices`` forces both into shared memory as they
-    are produced and the residency is empty by the time the pointwise read
-    happens.  That makes this the case which separates "the consumer cannot
-    see the residency" from "the consumer cannot address a shared temporary at
-    all": it is only ever the former.
-
-    It has to hold whatever the residency does, which is the reason it is a
-    test and not only a snapshot.
+    """Two contractions write half a temporary each, and
+    ``SectionPlan.written_in_slices`` lays its buffer out for both: the
+    pointwise read comes behind both stores, of the one buffer they share.
+    Stated as a test and not only a snapshot, since a consumer that cannot
+    address a shared temporary at all fails it.
     """
     gen, _ = _generate("mixed/ml_slices_then_ew", backend, arch)
     lines = gen.get_kernel().splitlines()
@@ -187,14 +174,13 @@ def test_temporary_assembled_from_slices_is_read_after_both_writes(backend,
                          ids=["barrier", "fence"])
 @pytest.mark.parametrize("backend,arch", ALL_TARGETS,
                          ids=[b for b, _ in ALL_TARGETS])
-def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend,
-                                                              arch):
-    """The first section's writeback lands before the second section runs.
+def test_a_sections_stores_land_before_the_next_section(case_stem, backend,
+                                                        arch):
+    """The first section's store lands before the second section runs.
 
-    The first contraction leaves its result in registers.  Nothing in the
-    second section knows about the first section's registers, so the writeback
-    has to have happened by the time the second section starts -- and "by the
-    end of the kernel" is not by then.
+    Nothing in the second section knows about the first section's registers,
+    so the store has to have happened by the time the second section starts
+    -- and "by the end of the kernel" is not by then.
 
     Stated as an access order rather than against the barrier instruction,
     which each backend spells differently.
@@ -210,7 +196,7 @@ def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend
       construction (see ``cases/barrier/fence_two_gemms.py``).  What is left to
       assert there is the boundary itself -- section 0's destination is written
       before section 1's destination is first touched, rather than both being
-      flushed together at the end of the kernel.  That is the part of the
+      stored together at the end of the kernel.  That is the part of the
       invariant that does not need a dependency to be true.
     """
     try:
@@ -235,7 +221,7 @@ def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend
     read = _first(accesses, "r")
     if read is not None:
         # The cross-section dependency the barrier case carries: the readback
-        # in section 1 must not overtake the writeback in section 0.
+        # in section 1 must not overtake the store in section 0.
         assert write[1] < read[1], (
             f"{produced} is read at line {read[1]} by the section after the "
             f"barrier, before the section before it wrote at line "
@@ -243,9 +229,8 @@ def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend
             f"  {read[1]}: {read[2]}\n"
             f"  {write[1]}: {write[2]}")
 
-    # Holds with or without that dependency: the boundary is where the first
-    # section's residency empties, so its writeback precedes anything the
-    # second section does with its own destination.
+    # Holds with or without that dependency: the first section's store
+    # precedes anything the second section does with its own destination.
     consumed = f"glb_{descrs[-1].dest.tensor.name}"
     assert consumed != produced, (
         f"the two sections of this case share destination {consumed}; the "
@@ -255,23 +240,22 @@ def test_a_sections_residency_empties_at_the_section_boundary(case_stem, backend
     assert write[1] < later[0][1], (
         f"{produced} is written at line {write[1]}, after the second section "
         f"first touches {consumed} at line {later[0][1]}, so the first "
-        f"section's residency outlived the section boundary:\n"
+        f"section's store outlived the section boundary:\n"
         f"  {later[0][1]}: {later[0][2]}\n"
         f"  {write[1]}: {write[2]}")
 
 
 @pytest.mark.parametrize("backend,arch", ALL_TARGETS,
                          ids=[b for b, _ in ALL_TARGETS])
-def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
-    """The store the flush emits gets a barrier, without one being emitted.
+def test_a_stored_temporary_is_published_before_it_is_read(backend, arch):
+    """The store behind a product gets a barrier, without one being emitted.
 
-    `tmp = A @ B` leaves the result in an accumulator; the pointwise read
-    cannot see an accumulator, so the tensor is settled into its shared buffer
-    first.  Each lane writes its own part, and nothing says the pointwise
-    operation hands the same elements back to the same lanes, so the store has
-    to be published before the read.
+    `tmp = A @ B` stores its result into its shared buffer, and the pointwise
+    operation reads it there.  Each lane writes its own part, and nothing says
+    the pointwise operation hands the same elements back to the same lanes, so
+    the store has to be published before the read.
 
-    No barrier is emitted next to the flush, deliberately: the barrier
+    No barrier is emitted next to the store, deliberately: the barrier
     placement reads the section's body in its final order and puts one where
     a write of shared memory meets a read of it (`pir.barriers`).  This is
     the assertion that the pair is recognized.
@@ -283,22 +267,14 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     scheduling), so a textual assertion would test the architecture rather
     than the pass.
     """
-    # Asked for explicitly, because the default produces no settle here:
-    # `register_temporaries=all` lets the pointwise read take the
-    # accumulator's image where it is, and then there is no store to publish
-    # and no barrier to find.  What this pins is the pair, for every temporary
-    # an image cannot serve -- one whose lane axis a consumer moves, one whose
-    # type differs from the image's, a global result.
-    #
-    # Without the forwarding as well: here the pointwise operation reads each
-    # element in the lane that stored it, which the forwarding finds, and
-    # then nothing is read through shared memory (`pir.forward`).  And for
-    # the same reason without `keep_own`: a buffer no lane hands on to
-    # another stays in registers where the vendor table says so (AMD), and
-    # then there is no window to publish (`pir.carry.keep_own`).
+    # Without the forwarding: here the pointwise operation reads each element
+    # in the lane that stored it, which the forwarding finds, and then
+    # nothing is read through shared memory (`pir.forward`).  And for the
+    # same reason without `keep_own`: a buffer no lane hands on to another
+    # stays in registers where the vendor table says so, and then there is
+    # no window to publish (`pir.carry.keep_own`).
     gen, _ = _generate("mixed/ml_then_ew", backend, arch,
-                       register_temporaries='scalars', forward_memory=False,
-                       keep_own=False)
+                       forward_memory=False, keep_own=False)
     stream = _flatten(gen._sections[0].stream)
     stores = [i for i in stream if isinstance(i, StoreRegToShr)]
     assert len(stores) == 1, f"expected exactly one shared store, got {stores}"
@@ -326,32 +302,39 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
                     enumerate(body[write:read + 1], write)))
 
 
-@pytest.mark.parametrize("case_stem,expect_shared", [
-    ("mixed/ew_then_ml", False),
-    ("mixed/red_then_ml", False),
-], ids=["elementwise", "reduction"])
-@pytest.mark.parametrize("backend,arch", ALL_TARGETS,
-                         ids=[b for b, _ in ALL_TARGETS])
+#: The targets the forward of memory runs on: not the explicit vector
+#: (`pir.Forward`).
+SPMD_TARGETS = [t for t in ALL_TARGETS if t[0] != "esimd"]
+
+
+def _shared_writes(gen):
+    from tensorforge.backend.pir.core import MemSpace, walk_stmts
+    return sum(1 for s in walk_stmts(gen._sections[0].body)
+               for a in s.accesses
+               if a.space is MemSpace.SHARED and a.kind & Effect.WRITE)
+
+
+@pytest.mark.parametrize("case_stem", ["mixed/ew_then_ml", "mixed/red_then_ml"],
+                         ids=["elementwise", "reduction"])
+@pytest.mark.parametrize("backend,arch", SPMD_TARGETS,
+                         ids=[b for b, _ in SPMD_TARGETS])
 def test_a_contraction_reads_a_produced_temporary_out_of_registers(
-        case_stem, expect_shared, backend, arch):
-    """No memory round trip when the consumer can read the image in place.
+        case_stem, backend, arch):
+    """No memory round trip where every lane reads what it stored.
 
-    A temporary produced pointwise or by a reduction lands in a register array
-    with a pending writeback.  A contraction consuming it consults the
-    residency and takes the array, so the value never reaches shared memory at
-    all -- the writeback is dropped unflushed when nothing else wants it.
-
-    This is the difference between settling a value because a consumer cannot
-    see it and settling it on principle, and it is the reason `materialize`
-    goes through registers rather than writing shared memory directly.
+    A temporary produced pointwise or by a reduction is stored into its
+    shared buffer behind the operation, and the contraction consuming it
+    stages it from there into registers.  Each lane loads the elements it
+    stored, so the pseudo-IR reads the registers the store took them from,
+    and the store, which nothing reads then, goes (`pir.forward`): the value
+    never reaches shared memory at all.  `keep_own`, which keeps such a
+    buffer in registers of every lane's own as well, is off in both builds.
     """
     try:
-        gen, _ = _generate(case_stem, backend, arch)
+        gen, _ = _generate(case_stem, backend, arch, keep_own=False)
+        kept, _ = _generate(case_stem, backend, arch, forward_memory=False,
+                            keep_own=False)
     except UNSUPPORTED as exc:
         pytest.skip(f"{case_stem} does not generate on {backend}: {exc}")
-
-    stream = _flatten(gen._sections[0].stream)
-    shared_stores = [i for i in stream if isinstance(i, StoreRegToShr)]
-    assert bool(shared_stores) is expect_shared, (
-        f"expected {'a' if expect_shared else 'no'} shared store, found "
-        f"{len(shared_stores)}; the temporary should stay in registers")
+    assert _shared_writes(gen) < _shared_writes(kept), (
+        "the temporary still goes through shared memory")

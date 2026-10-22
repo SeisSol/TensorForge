@@ -106,9 +106,8 @@ def _read_twice(transposed, **options):
 
 
 def test_copies_of_one_box_are_one_read(monkeypatch):
-    """Each product stages the operand it reads (`memory_semantics`): two
-    copies of one box of `A` are one read, and take the hint
-    (`load._copies`).  Read the other
+    """Each product stages the operand it reads: two copies of one box of
+    `A` are one read, and take the hint (`load._copies`).  Read the other
     way round by the second product, it is staged into shared memory there
     and into registers by the first -- two different copies, and neither
     takes it."""
@@ -124,7 +123,7 @@ def test_copies_of_one_box_are_one_read(monkeypatch):
 
     def shared(transposed):
         asked.clear()
-        _read_twice(transposed, memory_semantics=True)
+        _read_twice(transposed)
         twice = {id(src) for src, _ in asked
                  if len(src.get_user_list()) > 1}
         assert twice, asked

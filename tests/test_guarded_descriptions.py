@@ -6,7 +6,7 @@
 yateto states, per operation, a conjunction of literals over rank-0 condition
 tensors that decides whether the operation runs.  That guard is a field on the
 descriptor rather than a descriptor wrapping another one, because everything
-that walks a section -- `SectionPlan`, residency, temporaries -- asks each
+that walks a section -- `SectionPlan`, the builders, temporaries -- asks each
 descriptor for its geometry through `reads`, `writes` and `effective_boxes`
 and deliberately does not know what kinds of descriptor there are.  A wrapper
 would have to be unwrapped by each of those walks, and a walk that forgot
@@ -161,24 +161,6 @@ def test_a_region_is_only_mult_uniform():
     descr.condition = [GuardLiteral(_flag("c"))]
     region, = _regions(_generate([descr]))
     assert region.uniform_scope() is Uniformity.MULT
-
-
-def test_a_guard_stops_the_plan_deferring_its_operand():
-    """The condition is not an operand, so no builder resolves it through the
-    residency -- the region loads the symbol.  A value still in a register has
-    no symbol to load, so the tensor a guard reads has to reach memory."""
-    from tensorforge.backend.section_plan import SectionPlan
-
-    flag = _flag("c")
-    descr = _sqrt()
-    descr.condition = [GuardLiteral(flag)]
-
-    class _NoSymbols:
-        def get_symbol(self, tensor):
-            return None
-
-    plan = SectionPlan([descr], _NoSymbols())
-    assert plan.written_in_slices(flag.tensor)
 
 
 def test_the_section_sees_the_tensors_a_guard_reads():

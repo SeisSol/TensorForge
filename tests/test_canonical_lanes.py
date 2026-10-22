@@ -4,18 +4,15 @@
 """Where a multiplication computes its destination's rows, and where its
 operands' rows are staged to meet them.
 
-The origin of the lead loop is what a pending result the operation reads in
-place says -- the destination's own first -- and the destination's offset
-modulo a round of the lanes where nothing does, so that row `r` of a tensor
-sits in lane `(r div w) mod T` (`MultilinearBuilder._lead_origin_shift`).  An
-operand is staged in the lanes the loop reads it in (`_stage_shift`), and an
-image that holds its rows elsewhere is not read there (`_image_serves`,
-`_target_image_fits`): a copy is staged again, a pending result goes through
-memory, which is the one thing that moves a value between lanes.  So two
-register images cannot pin the loop in two places, and each shape below
-builds -- the first three were refused as two pins disagreeing modulo the
-lane count, where every image and every staging set the origin -- and
-computes what NumPy does, on the host oracle.
+The origin of the lead loop is the destination's offset modulo a round of
+the lanes, so that row `r` of a tensor sits in lane `(r div w) mod T`
+(`MultilinearBuilder._lead_origin_shift`).  An operand is staged in the lanes
+the loop reads it in (`_stage_shift`), and a copy that holds its rows
+elsewhere is not read there (`_image_serves`, `_target_image_fits`): it is
+staged again, from memory.  So no register image pins the loop, and each
+shape below builds -- the first three would be refused as two pins
+disagreeing modulo the lane count, were every image and every staging to set
+the origin -- and computes what NumPy does, on the host oracle.
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ import numpy as np
 import pytest
 
 from tensorforge.backend.instructions.builders import multilinear_builder
-from tensorforge.backend.residency import Residency
 from tensorforge.backend.symbol import SymbolType
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context, Options
@@ -144,9 +140,8 @@ def window_from_row_one():
 
 
 def image_read_for_other_rows():
-    """`T = A B` kept in registers, then `D += T[8:16] C` onto `D`'s image:
-    the rows `T` holds in lanes 8..15 are the ones `D` computes in lanes
-    0..7."""
+    """`T = A B`, then `D += T[8:16] C`: the rows `T` holds in lanes 8..15
+    are the ones `D` computes in lanes 0..7."""
     t = _t([16, K], 'T', is_tmp=True)
     d = _t([8, N], 'D')
     return [
@@ -213,8 +208,44 @@ def transposed_rows():
     ]
 
 
+def one_tensor_in_two_row_ranges():
+    """`D = X[0:8] * X[8:16]`, elementwise: the staging of `X` for the first
+    operand holds rows 8..15 in lanes 8..15, and the second reads them in
+    lanes 0..7.  `E = W V` makes the kernel 32 lanes wide."""
+    x = _t([32, N], 'X')
+    return [
+        MultilinearDescr(dest=SubTensor(_t([32, N], 'E')),
+                         ops=[SubTensor(_t([32, K], 'W')),
+                              SubTensor(_t([K, N], 'V'))], **GEMM),
+        MultilinearDescr(dest=SubTensor(_t([8, N], 'D')),
+                         ops=[_rows(x, 0, 8), _rows(x, 8, 16)],
+                         target=[[0, 1], [0, 1]], permute=[[0, 1], [0, 1]]),
+    ]
+
+
+def bias_an_operand_staged_in_other_lanes():
+    """`F = X[8:16] G`, then `X[8:16] += X[12:16] H`: the list reads rows
+    8..15 of `X` as operands, so the second stages all of them for
+    `X[12:16]`, row `r` in lane `r - 4`, and computes the destination's row
+    `r` in lane `r`: the staged rows are the bias's box, in other lanes.
+    `E = W V` makes the kernel 32 lanes wide."""
+    x = _t([32, K], 'X')
+    return [
+        MultilinearDescr(dest=SubTensor(_t([32, N], 'E')),
+                         ops=[SubTensor(_t([32, K], 'W')),
+                              SubTensor(_t([K, N], 'V'))], **GEMM),
+        MultilinearDescr(dest=SubTensor(_t([8, N], 'F')),
+                         ops=[_rows(x, 8, 16), SubTensor(_t([K, N], 'G'))],
+                         **GEMM),
+        MultilinearDescr(dest=_rows(x, 8, 16),
+                         ops=[_rows(x, 12, 16), SubTensor(_t([K, K], 'H'))],
+                         add=True, **GEMM),
+    ]
+
+
 SHAPES = [window_from_row_one, image_read_for_other_rows,
-          bias_staged_for_other_rows, slice_of_a_temporary, transposed_rows]
+          bias_staged_for_other_rows, slice_of_a_temporary, transposed_rows,
+          one_tensor_in_two_row_ranges, bias_an_operand_staged_in_other_lanes]
 
 
 @pytest.mark.parametrize('shape', SHAPES, ids=lambda f: f.__name__)
@@ -232,30 +263,25 @@ def test_the_shape_computes_what_numpy_does(shape):
 # the invariant
 # --------------------------------------------------------------------------- #
 
-#: The shapes where no pending result is read in place for other rows.
-UNPINNED = [window_from_row_one, image_read_for_other_rows,
-            bias_staged_for_other_rows, transposed_rows]
-
-
-@pytest.mark.parametrize('shape', UNPINNED, ids=lambda f: f.__name__)
+@pytest.mark.parametrize('shape', SHAPES, ids=lambda f: f.__name__)
 @pytest.mark.parametrize('backend,arch', TARGETS)
 def test_a_result_nothing_pins_holds_its_rows_in_their_lanes(
         monkeypatch, shape, backend, arch):
-    """What a multiplication leaves in registers for the next one is in the
-    lanes of its tensor's rows: position `r` of the image holds element `r +
-    shift`, and the shift is a whole number of rounds.  A copy staged for
-    other rows decides nothing (`bias_staged_for_other_rows`), and neither
-    does an operand's pending result the destination's own outranks
-    (`image_read_for_other_rows`)."""
+    """What a multiplication stores for the next one is in the lanes of its
+    tensor's rows: position `r` of the image goes to element `r + shift`, and
+    the shift is a whole number of rounds -- where the next one loads it
+    back, each row is in the lane that stored it.  A copy staged for other
+    rows decides nothing (`bias_staged_for_other_rows`), and neither does a
+    result an operand reads (`image_read_for_other_rows`)."""
     held = []
-    real = Residency.record_writeback
+    real = multilinear_builder.MultilinearBuilder._make_store
 
-    def record(self, name, image, home, covered=None, shift=None,
-               promise=None):
-        held.append((name, image, list(shift or [])))
-        return real(self, name, image, home, covered=covered, shift=shift,
-                    promise=promise)
-    monkeypatch.setattr(Residency, 'record_writeback', record)
+    def spy(self):
+        held.append((self._dest_obj.tensor.alias, self._temp_regs,
+                     list(self._store_offset())))
+        return real(self)
+    monkeypatch.setattr(multilinear_builder.MultilinearBuilder, '_make_store',
+                        spy)
     _built(shape(), backend, arch)
     assert held
     for name, image, shift in held:
@@ -264,16 +290,6 @@ def test_a_result_nothing_pins_holds_its_rows_in_their_lanes(
             continue
         span = image.num_threads * getattr(image, 'lead_width', 1)
         assert shift[0] % span == 0, (name, shift, span)
-
-
-@pytest.mark.parametrize('backend,arch', TARGETS)
-def test_a_pending_result_read_in_place_keeps_its_lanes(backend, arch):
-    """`slice_of_a_temporary`: rows 8..15 of `T` are in lanes 8..15, which is
-    where `Q`'s rows 0..7 are computed, and `T` is read there -- no store
-    into its shared buffer, no barrier, no load back.  `Q` holds its rows
-    where `T` did, which nothing after it reads in registers."""
-    src = _built(slice_of_a_temporary(), backend, arch).get_kernel()
-    assert 'store{r>s}' not in src
 
 
 @pytest.mark.parametrize('backend,arch', TARGETS)

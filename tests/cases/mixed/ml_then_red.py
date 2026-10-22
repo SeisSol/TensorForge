@@ -3,12 +3,10 @@
 # SPDX-License-Identifier: MIT
 """``tmp = A @ B`` then ``out[i] = sum_j tmp[i, j]``.
 
-The same residency question as `ml_then_ew`, asked by the other consumer:
-the contraction may leave its result in registers, and the reduction has to
-read the newest copy.  Worth its own case because a reduction resolves its
-operand through `ReductionInstruction`, not `ElementwiseInstruction`, so
-asking the residency in only one of the two would leave the other reading a
-buffer the writeback has not reached.
+The same question as `ml_then_ew`, asked by the other consumer: the
+contraction stores its result, and the reduction has to read it after the
+store.  Worth its own case because a reduction resolves its operand through
+`ReductionInstruction`, not `ElementwiseInstruction`.
 
 The contracted axis is not the lead axis, so this lowers to the register-local
 fold and needs no cross-lane traffic of its own.

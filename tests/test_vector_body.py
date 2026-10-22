@@ -74,15 +74,6 @@ def _narrowing_stores(src):
         if m.group(1) in vectors or m.group(2) in vectors]
 
 
-def test_a_temporary_stored_from_wide_lanes_keeps_its_vectors_whole():
-    """Handed from one product to the next through its shared buffer
-    (`memory_semantics`), the temporary is stored a lane's adjacent rows at
-    a time, and the buffer's permutation keeps them together
-    (`StoreRegToShr.transfer_granule`)."""
-    src = _kernel("sm_86", "cuda", _WIDE, memory_semantics=True)
-    assert "VectorT<float, 4>" in src
-
-
 def test_the_accumulating_face_stores_a_whole_vector():
     src = _kernel("sm_86", "cuda", _WIDE)
     assert "VectorT<float, 4>" in src, "the body did not vectorize at all"

@@ -117,6 +117,28 @@ def test_every_accumulated_term_reaches_the_destination(term):
                 f"accumulated")
 
 
+def _code(src):
+    """The kernel without its comments: they say what each operation asked
+    for, and a store the pseudo-IR took back is still among them."""
+    return re.sub(r"//[^\n]*", "", src)
+
+
+def _accesses(src, name):
+    """`(writes, reads)` of the kernel through the pointer `name`: an
+    element assigned or read through it, or a vector copied to it or from
+    it (ESIMD)."""
+    code = _code(src)
+    writes = reads = 0
+    for m in re.finditer(rf"(?<![\w.]){re.escape(name)}\[[^\]]*\]", code):
+        if re.match(r"\s*=(?!=)", code[m.end():]):
+            writes += 1
+        else:
+            reads += 1
+    writes += len(re.findall(rf"\.copy_to\({re.escape(name)}\b", code))
+    reads += len(re.findall(rf"\.copy_from\({re.escape(name)}\b", code))
+    return writes, reads
+
+
 def test_accumulation_chain_stores_once():
     """The chain stays in registers: one store, no reload of the destination.
 
@@ -126,8 +148,7 @@ def test_accumulation_chain_stores_once():
     it is what makes a stale bias reachable at all.
     """
     src = _generate("accumulate_chain").get_kernel()
-    assert src.count("store{r>g}") == 1, src.count("store{r>g}")
-    assert "load{g>r}(glb_m0)" not in src
+    assert _accesses(src, "glb_m0") == (1, 0), _accesses(src, "glb_m0")
 
 
 # ----------------------------------------------------------------------
@@ -305,10 +326,10 @@ def test_view_write_touches_nothing_outside_its_slice(backend, arch):
 def test_sliced_accumulation_writes_every_term(backend, arch):
     """Slicing and accumulation together still write every term.
 
-    ``Residency`` holds one entry per symbol name.  Deferring an atomic
-    update therefore makes it collide with the next slice of the same tensor:
-    the second would displace the first, and one term would end up in a
-    register array nothing ever reads.
+    Each slice is stored behind the term that computes it.  Held back to be
+    stored later, one per tensor, the next slice of the same tensor would
+    displace it, and one term would end up in a register array nothing ever
+    reads.
     """
     src = _generate("sliced_accumulate", backend, arch).get_kernel()
     dropped = _dropped_results(src)
@@ -498,13 +519,11 @@ def _out_of_range_reads(src):
 
 @pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx90a")])
 def test_narrow_write_does_not_claim_the_whole_tensor(backend, arch):
-    """A write finds the image of an earlier *read* and must not adopt its box.
+    """A write must not adopt the box of an image staged for a wider read.
 
-    ``Residency`` is keyed by symbol name and lives for the whole
-    kernel, so the register image staged for reading ``D`` wide is what the
-    later one-column write finds.  Adopting its data view would make a
-    one-element accumulator claim thirteen, and the store would write all
-    thirteen columns.
+    Adopting the data view of a register image staged for reading ``D``
+    wide would make a one-element accumulator claim thirteen, and the store
+    would write all thirteen columns.
     """
     src = _generate("narrow_write_after_wide_read", backend, arch).get_kernel()
     bad = _out_of_range_reads(src)
@@ -754,7 +773,8 @@ def test_partial_writes_accumulate_into_the_whole_image(backend, arch):
     own; the numbers are `test_kernels`'s to check.
     """
     src = _generate("partial_writes_read_whole", backend, arch).get_kernel()
-    assert src.count("store{r>s}") <= 1, (
+    writes, _ = _accesses(src, "s0")
+    assert writes <= 1, (
         "the partial writes are staged out one by one; the chain should "
         "accumulate into the register image the assignment left")
 
@@ -769,10 +789,9 @@ def test_a_narrowing_accumulation_chain_is_stored_once(backend, arch):
     round trips per element.
     """
     src = _generate("accumulate_narrowing_chain", backend, arch).get_kernel()
-    stores = re.findall(r"//\s*(\w+) = store\{r>g\}", src)
-    assert len(stores) == 1, f"stored {len(stores)} times: {stores}"
-    assert not re.search(rf"= load\{{g>[rs]\}}\({stores[0]}\b", src), (
-        "the output is read back after it was stored")
+    writes, reads = _accesses(src, "glb_m0")
+    assert writes == 1, f"stored {writes} times"
+    assert not reads, "the output is read back after it was stored"
 
 
 # ----------------------------------------------------------------------

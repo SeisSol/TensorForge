@@ -4,13 +4,12 @@
 """``D = A B``, then ``D[:, 0:8] += A0 B0`` and ``D[:, 8:16] += A1 B1``.
 
 Slicing and accumulation at the same time.  Each is handled on its own:
-several writers covering different boxes must go out as they are produced,
-because ``Residency`` holds one entry per symbol name; several writers
-covering the same box are an accumulation chain and belong in registers.
-Together they fall between the two.
+several writers covering different boxes each store their slice in its place;
+several writers covering the same box are an accumulation chain, each adding
+onto what the one before it stored.  Together they fall between the two.
 
-On a vendor with atomic updates, an atomic path that *deferred* the
-accumulating writes would let the second slice's pending update displace the
+On a vendor with atomic updates, an atomic path that held the accumulating
+writes back, one per tensor, would let the second slice's update displace the
 first, and one term's contribution would be computed into a register array
 that nothing ever reads.  Two writes would reach memory where three are
 produced.

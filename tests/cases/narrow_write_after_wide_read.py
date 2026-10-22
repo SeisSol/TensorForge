@@ -8,12 +8,11 @@
     D[:, 4:5]  = t[:, 4:5]         # writes one column back
     O          = D @ C
 
-The residency is keyed by symbol name and outlives the operation that staged
-an entry, so the register image staged for the *read* of ``D`` is what the
-later write finds when it asks where its destination lives.  An accumulator
-that adopted that image's data view --- the whole tensor --- although it only
-ever computes one column would hand the store 13 columns, and the store would
-write all of them, reading past the end of the register array to do it.
+A write must not take its box from a register image staged for a wider *read*
+of the same tensor.  An accumulator that adopted that image's data view ---
+the whole tensor --- although it only ever computes one column would hand the
+store 13 columns, and the store would write all of them, reading past the end
+of the register array to do it.
 
 The space-time predictor has this shape five times, once per quantity: a
 one-row-one-column write after a read of the whole 32x13x4 tensor, whose image

@@ -6,10 +6,10 @@
 Three questions are asked of a whole section rather than of one operation, and
 all three have to be answered before the first instruction is emitted:
 
-* how wide a staging has to be, since the tensor a first operation stages is
-  the one every later operation on that tensor inherits;
+* how wide a staging has to be: every operation that stages a tensor stages
+  as much of it as the section reads;
 * whether a destination is assembled from several partial writes, which decides
-  whether its value may stay in registers between operations;
+  whether its store lands in a buffer laid out for all of them;
 * whether a temporary is used anywhere no earlier write defined it, which is
   zero and has its buffer cleared by the first store (`zero_first`).
 
@@ -67,9 +67,9 @@ class SectionPlan:
         #: answers with its members' (`operand_union`).
         self._operand_tensor_union = {}
         #: id(tensor) -> union of what its writes cover.  A temporary written
-        #: by one operation covering everything can stay in registers until
-        #: someone asks for it; one written in slices has to be assembled in
-        #: memory, since each operation only ever holds its own slice.
+        #: by one operation covering everything is stored into a buffer of
+        #: its box; one written in slices is assembled in a buffer of this
+        #: union, since each operation only ever holds its own slice.
         self._dest_union = {}
         #: id(tensor) -> union of every read, declared.
         self._read_union = {}
@@ -84,11 +84,6 @@ class SectionPlan:
         #: boxes.  These are what coverage is judged on.
         self._eff_reads = {}
         self._eff_writes = {}
-        #: id(tensor) for anything a guard reads, and for anything written
-        #: under one.  Both make a register image unusable, for opposite
-        #: reasons -- see `written_in_slices`.
-        self._guard_reads = set()
-        self._guarded_writes = set()
         #: id(tensor) -> the effective boxes its writes have defined so far,
         #: in section order; and the temporaries an operation uses where no
         #: earlier write defined them -- see `zero_first`.
@@ -113,10 +108,6 @@ class SectionPlan:
     # -- construction ---------------------------------------------------- #
 
     def _add_reads(self, descr, scopes) -> None:
-        for op in descr.condition_reads():
-            tensor = getattr(op, 'tensor', None)
-            if tensor is not None:
-                self._guard_reads.add(id(tensor))
         # The guard's operands are read here too. They are not operands of the
         # operation and no builder resolves them as such, but the section has
         # to stage them all the same, and this is what decides that.
@@ -147,8 +138,6 @@ class SectionPlan:
         tensor = getattr(dest, 'tensor', None) if dest is not None else None
         if tensor is None:
             return None
-        if descr.guarded():
-            self._guarded_writes.add(id(tensor))
         box = dest.storage_box()
         self._dest_union[id(tensor)] = _hull(self._dest_union.get(id(tensor)),
                                              box)
@@ -283,9 +272,9 @@ class SectionPlan:
         A merged run's body is built against stand-ins, which are made after
         this plan and appear in no descriptor it saw: asked about one as
         itself, every query would answer as for a tensor nothing writes or
-        reads, and the body would keep in registers what its members, written
-        out, have to assemble in memory -- the poroelastic time derivative
-        writes `dQ(k+1)` in two boxes, and the loop would lose one of them.  A
+        reads, and the body would store whole what its members, written out,
+        assemble from slices -- the poroelastic time derivative writes
+        `dQ(k+1)` in two boxes, and the loop would lose one of them.  A
         stand-in answers as its members do, all of them: what holds for one
         iteration holds for the body that stands for every one.
         """
@@ -295,15 +284,12 @@ class SectionPlan:
     def operand_union(self, symbol_name, tensor=None) -> Optional[BoundingBox]:
         """Every access to this symbol as an operand, or None if it has none.
 
-        A staging sized to this serves every consumer in the section, which is
-        what lets one be shared rather than refused.
+        A staging sized to this serves every consumer in the section: what one
+        operation staged, the next stages alike, and the pseudo-IR reads it
+        where the first one holds it (`pir.forward`).
 
-        A stand-in answers with its members, as in every other query here.
-        Unanswered, the poroelastic derivative's loop would stage `dQ(k)` for
-        its first reader's columns only; the second reader would re-stage it
-        from row 1, the offset would pin the lead origin at 31, and a temporary
-        would go into shared memory at `lead - 32` -- the previous
-        multiplication's window.
+        A stand-in answers with its members, as in every other query here:
+        the body stages what any of its trips reads.
         """
         members = getattr(tensor, 'variant_members', None)
         if members:
@@ -335,21 +321,17 @@ class SectionPlan:
     def written_in_slices(self, tensor) -> bool:
         """Does this tensor get assembled from several writes?
 
-        Deferring the store is right while one operation writes the whole
-        thing: the value can stay in registers and be handed straight to the
-        next consumer.  With several writers each operation holds only its own
-        slice, so a deferred entry -- there is one per name -- would keep
-        whichever came last and silently lose the rest.  Those have to go into
-        the shared buffer as they are produced.
+        A result one operation writes whole is stored into a buffer of its
+        own box.  With several writers each operation holds only its own
+        slice, and those go into a buffer laid out for all of them, each slice
+        in its place (`dest_union`).
 
         Several writers are *not* by themselves such a case.  An accumulation
         chain -- `d = a1 b1` followed by `d += a2 b2` and so on, which is what
         a yateto flux or ADER derivative kernel looks like -- has every writer
-        covering the same box, each reading what the previous one produced.
-        There the last accumulator holds the whole tensor, deferring is exactly
-        right, and forcing the store out per term costs a global round trip on
-        every term.  So the question is not how many writers there are but
-        whether any of them writes less than the union.
+        covering the same box, each reading what the previous one produced
+        and storing the whole of it.  So the question is not how many writers
+        there are but whether any of them writes less than the union.
 
         Ask it of what each writer *actually* writes, not of what its
         descriptor declares.  `_analyze` intersects the range down to what the
@@ -357,9 +339,9 @@ class SectionPlan:
         that spans half of it writes half -- the elastic ADER kernels are full
         of `t += Q_face * c`, all declaring the whole tensor and each covering
         the rows its own face touches.  Judged on the declared boxes those look
-        like one writer covering everything, and the register image left behind
-        holds only the last one's rows; the read that follows then wants the
-        union and finds half of it.
+        like one writer covering everything, and the register image each of
+        them stores holds only its own rows; the read that follows then wants
+        the union and finds part of it.
         """
         return any(self._assembled(key) for key in self._keys(tensor))
 
@@ -373,8 +355,7 @@ class SectionPlan:
         image back: the product where it reaches, the image elsewhere
         (`MultilinearInstruction`'s `whole_prev`).  The ADER Taylor
         expansion, `I = dQ(0) c_0` then `I += dQ(k) c_k` over fewer rows each
-        time, is the shape; judged as pieces it would go through global memory
-        on every term.
+        time, is the shape; judged as pieces, every term would store a slice.
         """
         declared = self._dest_boxes.get(key, [])
         eff = self._eff_writes.get(key, [])
@@ -403,19 +384,8 @@ class SectionPlan:
 
     def _assembled(self, key) -> bool:
         """`written_in_slices` for one tensor, by its id."""
-        # A guard breaks the deferral in both directions, so neither case gets
-        # as far as looking at boxes.
-        #
-        # Read by a guard: the condition is not an operand, so no builder
-        # resolves it through the residency -- the region loads the symbol.
-        # A value still sitting in a register has no symbol to load.
-        #
-        # Written under a guard: whether the register image holds the new
-        # value or the old one is decided at run time, and a deferred entry
-        # records only that something wrote it.
-        if key in self._guard_reads or key in self._guarded_writes:
-            return True
-        # A cleared buffer holds zeros no register image does.
+        # Only a store into a buffer laid out for its writes clears it
+        # (`MultilinearBuilder._make_store`).
         if key in self._zero_first:
             return True
         boxes = (self._eff_writes.get(key) or self._dest_boxes.get(key, []))

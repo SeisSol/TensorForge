@@ -211,13 +211,11 @@ def test_a_multiplication_that_does_not_fit_is_refused():
     multiplication at all -- height 0, the window never declared -- and the
     source would go out as if nothing had happened.
 
-    Three things have to be off for the damage step to reach that size, and
-    each of them is why it does not by default: `merge_variants`,
-    `register_temporaries` (a temporary read out of its producer's image never
-    reaches a buffer), and `keep_own` (a buffer every lane reads only what it
-    wrote stays in registers).  Then order 8 in double needs 134 KB per
-    multiplication, against 99 KB a block has; with them on, the whole family
-    fits, so what the test pins is the guard, not the order."""
+    Without `merge_variants`, and without `keep_own` (a buffer every lane
+    reads only what it wrote stays in registers), the damage step reaches
+    that size: order 8 in double needs more per multiplication than the 99 KB
+    a block has, where by default the whole family fits -- so what the test
+    pins is the guard, not the order."""
     from tensorforge.common.context import Options
     from tensorforge.common.exceptions import GenerationError
 
@@ -225,7 +223,6 @@ def test_a_multiplication_that_does_not_fit_is_refused():
     gen = Generator(_read(system, f'{system}-o8-d', 'gpu_damageStep'),
                     Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64,
                             options=Options(merge_variants=False,
-                                            register_temporaries='none',
                                             keep_own=False)))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
@@ -274,35 +271,28 @@ def test_packed_buffers_take_what_is_live_and_no_more():
         assert not violations and not opaque
 
 
-def test_a_result_is_stored_once_nothing_reads_it_again():
+def test_a_result_is_stored_behind_the_operation_that_computes_it():
     """The elastic derivative computes `dQ(0)` first and reads it once, at the
-    start of the first level; held to the section's end, it and every later
-    `dQ(k)` would wait in registers for their stores -- `dQ(0)` for nearly
-    the whole kernel."""
+    start of the first level: its store stands right behind it.  Held to the
+    section's end, it and every later `dQ(k)` would wait in registers for
+    their stores -- `dQ(0)` for nearly the whole kernel."""
     import re
 
-    from tensorforge.common.context import Options
-
     system = 'elastic-linearck'
-    where = {}
-    for early in (False, True):
-        gen = Generator(_read(system, f'{system}-o6-s', 'gpu_derivative'),
-                        Context(arch='sm_86', backend='cuda',
-                                fp_type=Datatype.F32,
-                                options=Options(early_writebacks=early)))
-        with contextlib.redirect_stdout(io.StringIO()), \
-                warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            gen.generate()
-        lines = gen.get_kernel().splitlines()
-        dq0 = next(s.name for s in gen._scopes.get_global_scope().values()
-                   if getattr(s.obj, 'alias', None) == 'dQ(0)')
-        # the store names the binding, `glb_m3`, and not the parameter
-        store = next(i for i, l in enumerate(lines)
-                     if re.search(rf'// (?:glb_)?{dq0} = store', l))
-        where[early] = store / len(lines)
-    assert where[False] > 0.9
-    assert where[True] < 0.1
+    gen = Generator(_read(system, f'{system}-o6-s', 'gpu_derivative'),
+                    Context(arch='sm_86', backend='cuda',
+                            fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()), \
+            warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    lines = gen.get_kernel().splitlines()
+    dq0 = next(s.name for s in gen._scopes.get_global_scope().values()
+               if getattr(s.obj, 'alias', None) == 'dQ(0)')
+    # the store names the binding, `glb_m3`, and not the parameter
+    store = next(i for i, l in enumerate(lines)
+                 if re.search(rf'// (?:glb_)?{dq0} = store', l))
+    assert store / len(lines) < 0.1
 
 
 @pytest.mark.parametrize('backend,arch', TARGETS)

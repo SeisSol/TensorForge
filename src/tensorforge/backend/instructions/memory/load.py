@@ -1073,7 +1073,8 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       raise InternalError(f'store: operand `dest` is registers, instead: {type(dest.obj)}')
 
     # Shared memory as well: an operand a shared buffer holds, staged into
-    # the registers of the operation that reads it (`stage_shared`).
+    # the registers of the operation that reads it
+    # (`MultilinearBuilder._make_load_op`).
     if src.stype not in (SymbolType.Global, SymbolType.SharedMem):
       raise InternalError('store: operand `src` is neither in global nor in '
                           'shared memory.')

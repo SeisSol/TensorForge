@@ -1147,8 +1147,8 @@ class _Carrier:
         loop, where nothing needs them where they are.
 
         Which is how a loop whose trips are closed meets the code ahead of
-        it: whatever that left in registers and the body touches is stored
-        ahead of the loop (`Generator._emit_closed_loop`), and the carry has
+        it: whatever that computed and the body touches is stored ahead of
+        the loop, behind the operation that computed it, and the carry has
         just put the load of it there.  An accumulator the list began ahead
         of the run -- SeisSol's Taylor expansion sums its first term there --
         would go to memory and come straight back.  Else as they are."""

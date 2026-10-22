@@ -147,11 +147,11 @@ class TestHoisted:
         reads: a shared window, so the branch computes into registers and a
         store carries the value home.
 
-        That store belongs inside the region that computed the value.  Emitted
-        where the *other* half asks the residency to flush it, it would sit in
-        the region under the opposite condition: the value would be stored
-        when it does not exist and not stored when it does, and the register
-        it names is scoped to the region that declares it.  The window itself
+        That store belongs inside the region that computed the value, as the
+        operation's own (`OperationBuilder.record_result`).  In the region
+        under the opposite condition the value would be stored when it does
+        not exist and not stored when it does, and the register it names is
+        scoped to the region that declares it.  The window itself
         is the mirror image -- declared by whichever half stores first, so it
         has to be hoisted ahead of both.  Either way round the host compiler
         would reject the kernel, which is what this asserts.

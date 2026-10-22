@@ -49,7 +49,7 @@ class Section:
 
     def __init__(self, *, flags=True, element_pointer=False, bindings=1,
                  grouped=False, successor=True, closing_barrier=True,
-                 guard=None):
+                 guard=None, read_back=False, bias=False):
         # A loop over groups of rows has a mask and no guard: the mask holds
         # the global writes alone.
         guard = flags and not grouped if guard is None else guard
@@ -86,6 +86,16 @@ class Section:
             else:
                 guard = nullcontext()
             with guard:
+                if bias:
+                    # What the element holds where it stores, read ahead of
+                    # the store: an operand like any other.
+                    held = b.alloc(F32, (8,), MemSpace.REGISTER, hint='rh',
+                                   extern='rh')
+                    b.Comment('rh = load{g>r}(glb_m1)')
+                    with b.for_(0, 8, 1, unroll=True) as i:
+                        b.store(held, b.load(out, i.induction, hint='g'),
+                                i.induction)
+                    b.store(out, b.load(held, 3, hint='u'), 6)
                 for j in range(bindings):
                     name = f'glb_m0_{j}' if j else 'glb_m0'
                     src = _binding(b, element,
@@ -98,6 +108,16 @@ class Section:
                         b.store(dest, b.load(src, i.induction, hint='g'),
                                 i.induction)
                     b.store(out, b.load(dest, 3, hint='u'), j)
+                if read_back:
+                    # What the element stored, read back the way an
+                    # operation reads the result of the one ahead of it.
+                    back = b.alloc(F32, (8,), MemSpace.REGISTER, hint='rb',
+                                   extern='rb')
+                    b.Comment('rb = load{g>r}(glb_m1)')
+                    with b.for_(0, 8, 1, unroll=True) as i:
+                        b.store(back, b.load(out, i.induction, hint='g'),
+                                i.induction)
+                    b.store(out, b.load(back, 3, hint='u'), 7)
             if closing_barrier:
                 b.barrier(Participants.MULT, threads=32)
         self.body = b.finish()
@@ -189,6 +209,24 @@ def test_the_data_is_asked_for_a_line_at_a_time_behind_the_guard():
     assert pointer.args == (sec.next,)
     assert region.index(pointer) < _guard_at(region)
     assert sec.report == ['+ glb_m0 [data]']
+
+
+def test_what_the_element_stores_ahead_of_reading_it_is_not_asked_for():
+    """The element stores into `glb_m1` and reads it back: what the next
+    element holds there is no operand of it, and only `glb_m0` is asked for."""
+    sec = Section(read_back=True)
+    out = sec.hints(data=True)
+    assert _hints(_loop(out).regions[0].body)
+    assert sec.report == [
+        '+ glb_m0 [data]', '- rb: the body writes what it reads ahead of it']
+
+
+def test_what_the_element_reads_ahead_of_storing_it_is_asked_for():
+    """The element reads `glb_m1` before it stores there: the next element's
+    is an operand of that one, and asked for."""
+    sec = Section(bias=True)
+    sec.hints(data=True)
+    assert sec.report == ['+ glb_m1 [data]', '+ glb_m0 [data]']
 
 
 def test_a_pointer_of_the_elements_own_is_followed_under_its_flag():
