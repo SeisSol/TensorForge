@@ -87,6 +87,7 @@ CARRY = Path('src/tensorforge/backend/pir/carry.py')
 ATOMICS = Path('src/tensorforge/backend/pir/atomics.py')
 FORWARD = Path('src/tensorforge/backend/pir/forward.py')
 FLOW = Path('src/tensorforge/backend/pir/flow.py')
+EPILOGUE = Path('src/tensorforge/backend/instructions/compute/epilogue.py')
 TILING = PKG / 'tiling.py'
 
 
@@ -2801,6 +2802,39 @@ GROUPS = {
          sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
         ('a store the flow cannot place taken for one it can',
          sub(ATOMICS, '    if id(s) in flow.opaque:\n', '    if False:\n', 1)),
+    ]),
+    # Every register image of a tensor in the lanes of its rows: the lead
+    # loop's origin, the stagings' shifts, and the images that hold their
+    # rows elsewhere going through memory.
+    'lanes': ('tests/test_canonical_lanes.py', [
+        ('the lead loop\'s origin left at 0',
+         sub(MLB, '    return (self._dest_obj.offset[0] if self._dest_obj.offset else 0) % span\n',
+             '    return 0\n', 1)),
+        ('the destination\'s pending result moved to the operands\' lanes',
+         sub(MLB, '    target = self._target_residue()\n'
+                  '    if target is not None:\n'
+                  '      return target\n', '', 1)),
+        ('an operand\'s pending result moved through memory where nothing else decides',
+         sub(MLB, '    if len(pinned) == 1:\n'
+                  '      return pinned.pop()\n', '', 1)),
+        ('a copy taken to decide the origin',
+         sub(MLB, '    if (entry is None or entry.is_preload\n',
+             '    if (entry is None\n', 1)),
+        ('a staging that absorbs the whole lower bound',
+         sub(MLB, '    shift[lead_pos] = lower - (lower - residue) % span\n',
+             '    shift[lead_pos] = lower\n', 1)),
+        ('an image of other rows read where it is',
+         sub(MLB, '    return self._in_loop_lanes(i, shift)\n', '    return True\n', 1)),
+        ('a bias staged in other lanes added onto',
+         sub(MLB, '    return (offset - shift - theta) % span == 0\n',
+             '    return True\n', 1)),
+        ('a transposed image of other rows staged into registers',
+         sub(MLB, '    if (placement is Placement.REGISTER and has_lead_dim and transpose\n'
+                  '            and not self._in_loop_lanes(i, 0)):\n'
+                  '      placement = Placement.SHARED\n', '', 1)),
+        ('the accumulator read where its range holds the block\'s first row alone',
+         sub(EPILOGUE, '                return start < hi_i and lo_i < start + var._block * var.width\n',
+             '                return lo_i <= start < hi_i\n', 1)),
     ]),
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.

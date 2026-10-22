@@ -143,24 +143,23 @@ class MultilinearEpilogue(ComputeInstruction):
                 stride *= dimmax - dimmin
 
         def _dim_covered(i, var):
-            """Is position `var` of this dim inside the accumulator's coverage?
+            """Does position `var` of this dim reach into the accumulator?
 
             Static shortcut first: if the accumulator's bounds for this
             dimension already contain dest's *whole* iteration range, the
             answer is yes no matter where in that range the current lane sits
             --- true statically, no need to inspect `var` at all.
 
-            The dynamic fallback (`.lead()`, a block-start value: `nonlead *
-            block`, always a multiple of the block size) only agrees with true
-            per-lane containment while the accumulator's lower bound is itself
-            a multiple of that block size.  A theta-shifted accumulator's
-            bounds need not be: theta is chosen mod num_threads for lane
-            alignment, but here `block` is this loop's own per-dimension stride
-            factor, which can differ.  Comparing a block-start against raw,
-            non-block-aligned bounds would silently answer `False` for a lead
-            dimension whose coverage is in fact exact, which is exactly the
-            case the static check above resolves --- so this fallback is only
-            reached for the genuinely partial-overlap case it is meant for.
+            Otherwise a lead index stands for a block of rows, one a lane,
+            from `.lead()` on, and the lanes of the block read one slot of
+            the accumulator: where the block overlaps the accumulator's range
+            at all.  Its lanes past the range read what the contraction left
+            there -- the accumulator is declared zeroed, and zero is the sum's
+            neutral element -- and a block with no row in the range has no
+            slot in the accumulator to read.  A range that starts inside a
+            block has its first rows in the block before: rows `1..19` of a
+            window whose sparsity leaves row 0 out are all in the block from
+            0, which a test of the block's first row alone would leave out.
             """
             lo_i = self._acc.data_view.get_bbox().lower()[i]
             hi_i = self._acc.data_view.get_bbox().upper()[i]
@@ -172,7 +171,10 @@ class MultilinearEpilogue(ComputeInstruction):
                 return True
             if isinstance(var.nonlead(), (str,)):
                 return True
-            return lo_i <= int(var.lead()) and hi_i > int(var.lead())
+            start = int(var.lead())
+            if isinstance(var, LeadIndex):
+                return start < hi_i and lo_i < start + var._block * var.width
+            return lo_i <= start < hi_i
 
         def nonlead_writer(varlist):
             from tensorforge.backend.symbol import lead_width_of

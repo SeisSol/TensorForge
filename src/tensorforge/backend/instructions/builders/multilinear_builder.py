@@ -72,6 +72,10 @@ class MultilinearBuilder(OperationBuilder):
     self._mem_regions = [None] * len(self._ops)
     # per operand: which of its dimensions is spread across lanes
     self._lead_pos = [0] * len(self._ops)
+    # where the lead loop runs, decided ahead of the operands, which are
+    # staged in the lanes it reads them in
+    self._theta = None
+    self._theta = self._lead_origin_shift()
 
     for i in range(len(self._ops)):
         self._make_load_op(i)
@@ -79,8 +83,13 @@ class MultilinearBuilder(OperationBuilder):
     return self._mem_regions
 
   def alloc_destination(self, descr, operands):
-    """The accumulator, in the shifted origin the lead loop runs in."""
-    self._theta = self._lead_origin_shift()
+    """The accumulator, in the shifted origin the lead loop runs in.
+
+    An accumulation stages what it adds onto first, so its load goes out
+    ahead of the accumulator's declaration (`_get_target_symbol`).
+    """
+    if self._add:
+      self._get_target_symbol()
     self._temp_regs = self._alloc_register_array()
     return self._temp_regs
 
@@ -104,7 +113,8 @@ class MultilinearBuilder(OperationBuilder):
     #
     # Where the operand carries the destination's lead index, that is the
     # dimension, and everything downstream of the staging assumes it:
-    # `_lead_origin_shift` pins the origin on `target[i].index(0)`, and
+    # `_stage_shift` puts the operand's rows in the lanes of the destination's
+    # rows along `target[i].index(0)`, and
     # `MultilinearInstruction._check_offsets` checks the slicing remainder
     # there.  Where it does not, the readers differ.  The loop nest reads
     # fixed elements and broadcasts each from the lane that holds it, which
@@ -152,26 +162,40 @@ class MultilinearBuilder(OperationBuilder):
     name = self._ops[i].symbol.name
 
     # An image already staged for an earlier operation spreads whichever
-    # dimension *that* operation needed across lanes.  Reusing it for an
-    # operand with a different lane axis -- the same tensor used once plainly
-    # and once transposed -- is a cross-lane transpose, which an address
-    # cannot express.  Both cases have a fallback already:
+    # dimension *that* operation needed across lanes, and holds its rows in
+    # the lanes *that* operation read them in.  Reusing it for an operand
+    # with a different lane axis -- the same tensor used once plainly and once
+    # transposed -- is a cross-lane transpose, and for one whose rows this
+    # operation computes in other lanes -- rows `8..16` of an image read for
+    # rows `0..8` of the destination -- a cross-lane move; an address
+    # expresses neither (`_image_serves`).  Both cases have a fallback
+    # already:
     #   * a preload of a global input (`src is dest`) can be dropped, since
     #     global memory still holds the value and the ordinary path re-stages
-    #     it in the orientation this operand wants;
+    #     it in the orientation and the lanes this operand wants;
     #   * a pending store of a temporary has to go out to shared memory first,
     #     which is exactly what a shared placement already does (and what the CUDA
     #     path does for every transposed operand anyway).
     staged = self._residency.get(name)
     scalar = staged is not None and self._scalar_image(i)
     if (staged is not None and not scalar
-            and not self._lane_axis_matches(name, lead_pos)):
+            and not self._image_serves(i, staged, lead_pos)):
       if staged.is_preload:
         self._residency.drop(name)
       else:
         # legality, not preference: the image cannot serve, and only a copy
-        # through shared memory can move the lane axis
+        # through shared memory can move a value between lanes
         placement = Placement.SHARED
+
+    # A register image staged in the tensor's own coordinates -- a transposed
+    # operand, which `_stage_shift` leaves unshifted -- holds the operand's
+    # row `n + offset` in that row's lane, and the lead loop computes the
+    # destination's row `n` in the lane of `n + theta`.  Where the two differ
+    # by part of a round of the lanes, the image would hold every row one
+    # lane group off; the copy through shared memory takes any offset.
+    if (placement is Placement.REGISTER and has_lead_dim and transpose
+            and not self._in_loop_lanes(i, 0)):
+      placement = Placement.SHARED
 
     # The linearized load packs the operand flat --- storage element `f` goes
     # to lane `f % T`, slot `f // T`.  With the lane axis elsewhere the flat
@@ -263,8 +287,8 @@ class MultilinearBuilder(OperationBuilder):
         # An operand that already sits in shared memory or in registers is
         # read where it is.  Deciding to re-stage it in a different
         # orientation would need a record of which orientation the existing
-        # image has; the residency entry carries that, and
-        # `_lane_axis_matches` above is what consults it.
+        # image has; the residency entry carries that, and `_image_serves`
+        # above is what consults it.
         self._mem_regions[i] = self._ops[i]
       else:
         raise InternalError(f'gemm-builder: op{i} ({self._ops[i].symbol.name}) must be either in shr or glb mem, given: {self._ops[i].symbol.stype}')
@@ -326,26 +350,47 @@ class MultilinearBuilder(OperationBuilder):
 
     Position `r` of the image holds tensor element `r + shift`.
 
-    For a register image the lead dimension is spread across lanes and the slot
-    count is `ceil(u/T) - floor(l/T)`, so a union starting mid-block costs an
-    extra slot for nothing: `[8,24)` at T=16 needs two slots where `[0,16)`
-    needs one.  Absorbing the union's lead lower bound while loading --- free,
-    the loader forms a global address per element anyway --- puts the image
-    back at origin 0.  The remaining dimensions stay in storage coordinates,
-    where the offset is a plain constant in the address and absorbing it buys
-    nothing.
+    A register image spreads its lead dimension over the lanes: position `r`
+    sits in lane `(r div w) mod T`.  The lead loop computes the destination's
+    row `n` in the lane of position `n + theta` (`_lead_origin_shift`), and
+    reads the operand's row `n` at position `n + offset - shift`; so the shift
+    is congruent to `offset - theta` modulo a round of the lanes, `T * w`,
+    and every row is read by the lane that holds it.  Where the operand's
+    rows are the destination's and the origin is the destination's own --
+    nothing pending decides it otherwise -- that is a shift by whole rounds,
+    and the image holds row `r` of its tensor in lane `(r div w) mod T`, as
+    the operation's result does.
+
+    Within that, the shift absorbs as much of the union's lead lower bound as
+    it can: free, since the loader forms an address per element anyway, and
+    the slot count is `ceil(u/S) - floor(l/S)` at `S = T * w`, so every round
+    below the union left in the image is a slot nobody reads.  What remains
+    below a round can still cost one: `[8,24)` at T=16 straddles two rounds
+    where `[0,16)` fills one.  The remaining dimensions stay in storage
+    coordinates, where the offset is a plain constant in the address and
+    absorbing it buys nothing.
 
     A shared-memory image is a verbatim copy of the whole storage box, so its
     coordinates already are the tensor's and the shift is zero throughout.  So
     is the linearized register path, which copies flat and cannot express a
-    shift at all.
+    shift at all, and the transposed one, whose lane axis the loader does not
+    shift (`_make_load_op` sends it through shared memory where it would need
+    one).
     """
     rank = self._ops[i].bbox.rank()
     if not absorb_lead or rank == 0:
       return [0] * rank
     lead_pos = self._lead_pos[i]
     shift = [0] * rank
-    shift[lead_pos] = self._union_of(i).lower()[lead_pos]
+    lower = self._union_of(i).lower()[lead_pos]
+    span = self._lane_span()
+    if not span:
+      shift[lead_pos] = lower
+      return shift
+    # the largest shift with the residue the rows need that absorbs no row of
+    # the union
+    residue = (self._ops[i].offset[lead_pos] - self._theta) % span
+    shift[lead_pos] = lower - (lower - residue) % span
     return shift
 
   def _stage_view(self, i, shift):
@@ -367,7 +412,7 @@ class MultilinearBuilder(OperationBuilder):
     """Is operand `i` a temporary without axes, still in its register image?
 
     Such an image has no lane axis to agree with -- it is one value, the same
-    on every lane -- so `_lane_axis_matches`, which asks for one, is not the
+    on every lane -- so `_image_serves`, which asks for one, is not the
     question.  Whether it may be read at all is `image_in_place`'s, and the
     option's (`register_temporaries`).
     """
@@ -375,16 +420,44 @@ class MultilinearBuilder(OperationBuilder):
             and self.image_in_place(self._descr.ops[i], arrays=False)
             is not None)
 
-  def _lane_axis_matches(self, name, lead_pos):
-    """Does the staged image spread the dimension this operand needs?
+  def _lane_span(self) -> int:
+    """Rows of the lead dimension one round of the lanes holds, `T * w`; 0
+    where nothing is spread over lanes."""
+    if not self._num_threads:
+      return 0
+    return self._num_threads * max(1, getattr(self, '_lead_width', 1))
 
-    Only register images have a lane axis at all; a shared-memory staging is
-    a verbatim copy and serves any orientation.
+  def _in_loop_lanes(self, i, shift) -> bool:
+    """Would a register image of operand `i` at lead shift `shift` hold each
+    of its rows in the lane the lead loop computes that row in?
+
+    Only a question for an operand whose lane axis carries the destination's
+    lead index; the reduction's origin is the instruction's to pick
+    (`MultilinearInstruction._reduction_origin_shift`).
     """
-    image = self._residency.get(name).image
+    target = self._descr.target[i]
+    lead_pos = self._lead_pos[i]
+    span = self._lane_span()
+    if not span or 0 not in target or target.index(0) != lead_pos:
+      return True
+    return (self._ops[i].offset[lead_pos] - shift - self._theta) % span == 0
+
+  def _image_serves(self, i, entry, lead_pos) -> bool:
+    """Does the staged image `entry` hold operand `i` where this operation
+    reads it?
+
+    Only register images have lanes at all; a shared-memory staging is a
+    verbatim copy and serves any orientation.  A register image has to spread
+    the dimension this operand needs, and hold each of its rows in the lane
+    that reads it (`_in_loop_lanes`).
+    """
+    image = entry.image
     if image.stype not in (SymbolType.Register, SymbolType.Scratch):
       return True
-    return image.lead_dims == [lead_pos]
+    if image.lead_dims != [lead_pos]:
+      return False
+    shift = entry.shift[lead_pos] if entry.shift else 0
+    return self._in_loop_lanes(i, shift)
 
   def _resolve_reuse(self, i, name):
     """Decide whether the already-staged image can serve this operand.
@@ -442,48 +515,81 @@ class MultilinearBuilder(OperationBuilder):
     return True
 
   def _lead_origin_shift(self):
-    """Pick the origin of the lead loop.
+    """The origin of the lead loop: where the destination's rows compute.
 
-    `n0` is an internal loop variable of this instruction; its absolute origin
-    is arbitrary and only the offsets of the participants *relative* to each
-    other matter.  A register-resident operand is the exception: its lane
-    assignment is already fixed --- element `s` lives in lane `s % T` --- so it
-    pins the origin modulo T.  Choosing that origin makes the slicing offset
-    vanish in lane terms, at a cost of at most one extra slot per non-lead
-    element, where the alternative is a cross-lane shuffle on every read.
+    `n0` is an internal loop variable of this instruction, and its origin
+    decides only which lane computes which row: the destination's row `n`
+    sits at position `n + theta` of the accumulator, in lane
+    `((n + theta) div w) mod T`.  An operand staged for this operation is
+    staged in the lanes the origin says (`_stage_shift`), and so is a bias
+    loaded from memory (`_dest_preload_view`): what decides it is what
+    cannot move without a trip through memory.
 
-    Two register participants that disagree modulo T cannot both be satisfied;
-    that genuinely needs a shuffle and is refused here.  It takes two operands
-    carrying the lead index and both register-resident, which no kernel in the
-    test suite produces.
+    That is a pending result, held in registers alone, which this operation
+    reads where it is: moving it to other lanes means storing it, a barrier,
+    and loading it back (`_image_serves`).  The destination's own, where the
+    operation adds onto one, comes first -- it is the bias where the sum is
+    computed, and an accumulation chain over it stays in registers -- and
+    then the operands', where they agree.  A copy of what memory holds does
+    not decide anything: dropped, it is staged again where it is wanted.
+
+    Where nothing decides, the origin is the destination's offset modulo a
+    round of the lanes, so that the accumulator holds row `r` of its tensor
+    in lane `(r div w) mod T` -- the lanes an operand staged for the same
+    rows takes, so that the next operation reading the result finds each row
+    in the lane that reads it.
     """
-    threads = self._num_threads
-    if not threads:
+    span = self._lane_span()
+    if not span:
       return 0
-    pins = {}
-    for i, view in enumerate(self._mem_regions):
-      if view is None or 0 not in self._descr.target[i]:
-        continue
-      if view.symbol.stype not in (SymbolType.Register, SymbolType.Scratch):
-        continue
-      j = self._descr.target[i].index(0)
-      pins.setdefault(view.offset[j] % threads, []).append(view.symbol.name)
-    if self._add:
-      # accumulating into an array that already exists: its lane assignment is
-      # fixed too, so it pins the origin exactly like an operand does
-      target = self._get_target_symbol()
-      if target is not None and target.stype in (SymbolType.Register,
-                                                 SymbolType.Scratch):
-        pins.setdefault(self._dest_obj.offset[0] % threads,
-                        []).append(target.name)
-    if len(pins) > 1:
-      raise GenerationError(
-          'lead-dimension slicing offsets of register operands disagree modulo '
-          f'{threads}: ' +
-          ', '.join(f'{n} -> {r}' for r, ns in pins.items() for n in ns) +
-          '. Reconciling them needs a cross-lane shuffle, which is not '
-          'implemented; stage one of them separately instead.')
-    return next(iter(pins), 0)
+    target = self._target_residue()
+    if target is not None:
+      return target
+    pinned = {r for r in map(self._image_residue, range(len(self._ops)))
+              if r is not None}
+    if len(pinned) == 1:
+      return pinned.pop()
+    return (self._dest_obj.offset[0] if self._dest_obj.offset else 0) % span
+
+  def _pending(self, symbol):
+    """The register image holding `symbol`'s pending result, as its residency
+    entry, or None."""
+    entry = self._residency.get(symbol.name) if symbol is not None else None
+    if (entry is None or entry.is_preload
+        or entry.image.stype not in (SymbolType.Register, SymbolType.Scratch)
+        or not entry.image.lead_dims):
+      return None
+    return entry
+
+  def _target_residue(self):
+    """The lane residue of the pending result this operation adds onto, or
+    None: where the destination's row `n` sits in it, modulo a round of the
+    lanes."""
+    if not self._add:
+      return None
+    symbol = self._scopes.get_symbol(self._dest_obj.tensor)
+    entry = self._pending(symbol)
+    if entry is None or not self._target_image_fits(symbol.name):
+      return None
+    offset = self._dest_obj.offset[0] if self._dest_obj.offset else 0
+    return (offset - (entry.shift[0] if entry.shift else 0)) % self._lane_span()
+
+  def _image_residue(self, i):
+    """The lane residue of the pending result operand `i` reads where it is,
+    or None: where its row `n` sits in the image, modulo a round of the
+    lanes."""
+    target = self._descr.target[i]
+    view = self._ops[i]
+    if 0 not in target or view.bbox.rank() == 0:
+      return None
+    entry = self._pending(view.symbol)
+    lead_pos = target.index(0)
+    if (entry is None or entry.image.lead_dims != [lead_pos]
+        or (entry.covered is not None
+            and not entry.holds(view.bbox, view.offset))):
+      return None
+    shift = entry.shift[lead_pos] if entry.shift else 0
+    return (view.offset[lead_pos] - shift) % self._lane_span()
 
   def _make_loader_and_symbol_reg(self, opview, linearize,
                                   lead_pos: int = 0,
@@ -617,31 +723,53 @@ class MultilinearBuilder(OperationBuilder):
 
     An accumulation chain onto the same box --- the case the reuse exists for
     --- has the staged region equal to the destination's, so require that.
+
+    And a register image has to hold the box the way the accumulation adds
+    over it: spread along the destination's axis 0, over the whole wave.  An
+    image the accumulator or `_dest_preload_view` left is; an operand's
+    staging of the same box need not be.  Where the build has an origin, its
+    rows have to sit in the lanes the origin computes them in, as well
+    (`_lead_origin_shift`): a copy staged for the rows of another operation
+    need not.
     """
     entry = self._residency.get(name)
     if entry is None or entry.covered is None \
         or entry.covered.rank() != self._dest_obj.bbox.rank():
       return False
     want = self._dest_obj.storage_box()
-    return entry.region() == (list(want.lower()), list(want.upper()))
+    if entry.region() != (list(want.lower()), list(want.upper())):
+      return False
+    image = entry.image
+    span = self._lane_span()
+    if (image.stype not in (SymbolType.Register, SymbolType.Scratch)
+        or not image.lead_dims or not span):
+      return True
+    if image.lead_dims != [0] or getattr(image, 'lead_axes', None) is not None:
+      return False
+    theta = getattr(self, '_theta', None)
+    if theta is None:
+      return True
+    offset = self._dest_obj.offset[0] if self._dest_obj.offset else 0
+    shift = entry.shift[0] if entry.shift else 0
+    return (offset - shift - theta) % span == 0
 
   def _dest_preload_view(self, dest_symbol):
     """The destination, staged in the tensor's own lead coordinates.
 
     `GlbToRegLoader` consumes a slicing offset while loading: it reads
-    `index + offset` and stores at `index`, so the image sits at origin 0 and
-    element `s` lands in lane `s % T`.  For an operand that is fine ---
-    `_stage_shift`/`_staged_region` rebase the offset to match, and
-    `_lead_origin_shift` then reads the rebased one.
+    `index + offset` and stores at `index`.  For an operand that is what
+    `_stage_shift` asks of it, with a shift that keeps each row in the lane
+    the loop reads it in, and `_staged_region` rebases the operand's offset
+    to match.
 
-    The destination has no such rebasing.  `_lead_origin_shift` pins theta on
-    `_dest_obj.offset[0]`, and `_analyze` shifts the whole lead loop by it, so
-    the compute and the store address row `n0` in lane `n0 % T`.  An absorbed
-    offset would put the preloaded bias somewhere else entirely: for
-    `m2[10:20, 12] += ...` the loader would fill lanes 0..9 while lanes 10..19
-    do the arithmetic and store, so every accumulation would read a bias of
-    zero and the destination's previous value would be dropped -- `+=`
-    silently becoming `=`.
+    The destination has no such rebasing.  `_lead_origin_shift` takes theta
+    from `_dest_obj.offset[0]`, and `_analyze` shifts the whole lead loop by
+    it, so the compute and the store address row `n0` in the lane of
+    `n0 + theta`.  An absorbed offset would put the preloaded bias somewhere
+    else entirely: for `m2[10:20, 12] += ...` the loader would fill lanes
+    0..9 while lanes 10..19 do the arithmetic and store, so every
+    accumulation would read a bias of zero and the destination's previous
+    value would be dropped -- `+=` silently becoming `=`.
 
     Folding the *lead* offset into the box instead leaves that axis in tensor
     coordinates, where lane `l` holds row `l` --- which is what theta assumes.
@@ -658,7 +786,11 @@ class MultilinearBuilder(OperationBuilder):
     # the box, which is what puts the image in the loop's frame rather than the
     # tensor's -- `theta` is that remainder, and every other participant is
     # shifted by it too.
-    shift = offset[0] - offset[0] % self._num_threads if self._num_threads else 0
+    span = self._lane_span()
+    theta = getattr(self, '_theta', None)
+    if theta is None:
+      theta = offset[0] % span if span else 0
+    shift = offset[0] - theta if span else 0
     lower, upper = list(bbox.lower()), list(bbox.upper())
     lower[0] += offset[0] - shift
     upper[0] += offset[0] - shift
@@ -727,6 +859,9 @@ class MultilinearBuilder(OperationBuilder):
     self._descr = descr
     self._dest_obj = descr.dest
     self._add = descr.add
+    # no build, so no origin: what is made resident here is staged as the
+    # destination's offset puts it, and the build adds where it finds it
+    self._theta = None
     dest_symbol = self._scopes.get_symbol(self._dest_obj.tensor)
     if (not self._add or dest_symbol is None
         or dest_symbol.stype != SymbolType.Global

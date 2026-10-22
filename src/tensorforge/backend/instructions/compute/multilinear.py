@@ -114,9 +114,10 @@ class MultilinearInstruction(ComputeInstruction):
         #: contiguous axis *is* `k` is loaded once as a vector of that width.
         self._k_width = k_width
         self._blockcount = blockcount
-        # origin of the lead loop, chosen by the builder so that a register-
-        # resident operand's lane assignment lines up (see
-        # MultilinearBuilder._lead_origin_shift).  Only relative offsets
+        # origin of the lead loop, the builder's: where a pending result it
+        # reads in place has its rows, or else the destination's offset
+        # modulo a round of the lanes; the operands are staged to match
+        # (MultilinearBuilder._lead_origin_shift).  Only relative offsets
         # matter, so shifting it is free apart from at most one extra slot.
         self._theta = theta
         # origin of the first reduction loop, chosen in `_analyze` on the same

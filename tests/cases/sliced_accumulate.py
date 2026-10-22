@@ -16,9 +16,9 @@ that nothing ever reads.  Two writes would reach memory where three are
 produced.
 
 The slices are on the second dimension deliberately.  On the lead dimension
-they would pin the accumulator's origin (see
-``MultilinearBuilder._lead_origin_shift``) against the operands' and be
-refused, which is a separate and honest limitation.
+an operand whose rows the accumulator computes in other lanes goes through
+memory (``MultilinearBuilder._image_serves``), which is a path of its own,
+and ``tests/test_canonical_lanes.py`` has it.
 """
 
 import numpy as np
