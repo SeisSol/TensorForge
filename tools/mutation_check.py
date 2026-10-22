@@ -2677,6 +2677,7 @@ GROUPS = {
     'carry': ('tests/test_carry.py '
               'tests/test_rolling.py::test_the_carry_holds_an_accumulator_in_registers_over_the_trips '
               'tests/test_rolling.py::test_an_atomic_accumulator_is_summed_in_registers_and_added_once '
+              'tests/test_accumulate_atomically.py '
               'tests/test_rolling.py::test_an_accumulator_begun_ahead_of_the_run_stays_in_its_registers '
               'tests/test_rolling.py::test_a_temporary_each_lane_adds_onto_is_held_in_its_registers '
               'tests/test_rolling.py::test_a_merged_run_computes_what_the_list_written_out_does', [
@@ -2711,6 +2712,23 @@ GROUPS = {
          sub(CARRY, '        dead = all(set(w) <= c.stored.get(lane, set())\n'
                     '                   for lane, w in written.items())',
              '        dead = True', 1)),
+        ('a load under a guard the store is not under carried',
+         sub(CARRY, '        if any(not spelled(e) <= guards for u in loads for e in u.events):',
+             '        if False:', 1)),
+        ('a guard that names what the trip computes carried',
+         sub(CARRY, "                if re.search(rf'\\b{re.escape(name)}\\b', text):",
+             '                if False:', 1)),
+        ('the trips summed in place under a guard where another output reads them',
+         sub(CARRY, '        if closed or not guards:', '        if True:', 1)),
+        ('a read of the tail besides the copy taken for closed',
+         sub(CARRY, '                if _key(a.base) == _key(tail.image) and not a.writes:\n'
+                    '                    return False\n', '', 1)),
+        ('a store ahead under a guard dropped where the trips read more',
+         sub(CARRY, '        if guards != c.guards or (guards and not c.closed):',
+             '        if guards != c.guards:', 1)),
+        ('a load behind the loop outside the guard taken from registers',
+         sub(CARRY, '            if not (c.guards <= under or (not c.fused and c.loaded <= under)):',
+             '            if False:', 1)),
         ('an address spelled in text left escaping',
          sub(CARRY, '        body = _unescaped(body, spelled)\n', '', 1)),
         ('a slot of the sum written afresh twice',

@@ -61,10 +61,20 @@ hold, besides a loop that runs at least once and is a merged run's
 For an atomic store: nothing else in the loop touches `H`, and each slot of
 the tail's image is added once a trip.
 
+A guard spelled in text -- a batch element's, on AMD -- is not known per
+lane, and what stands under one is taken to run wherever the rest of its
+conditions say.  Which is the same where the guard means the same over the
+whole loop -- it names nothing the trip computes, its counter included --
+and every guard of the load is one of the store's (`_guarded`): where one of
+the store's does not hold, no trip stores and none copies its image back, so
+each reads what the first one loaded, as each did from memory.
+
 Where every slot of the head's image is read before the trip first writes
 that slot of the tail's, the tail is computed in the head's image itself,
 and the copy goes (`_fused`): an accumulation slot by slot, as the list
-written out has it.
+written out has it.  Under a guard spelled in text, only where nothing but
+the images reads their values (`_closed`): where the guard does not hold,
+the trips sum in place what no trip stores and nothing else reads.
 
 And where the code ahead of the loop stored `H` from registers just before
 -- a closed trip stores what the body touches ahead of the loop, and an
@@ -189,8 +199,16 @@ class _Carried:
     load: Set[int]
     behind: Set[int]
     declare: Optional[Stmt] = None
-    #: The guards spelled in text an atomic update stands under.
+    #: The guards spelled in text the store or the atomic update stands
+    #: under (`_guarded`), and those the load stands under, every one of them
+    #: one of the store's.
     guards: frozenset = frozenset()
+    loaded: frozenset = frozenset()
+    #: Whether the images reach nothing but themselves and the store
+    #: (`_closed`), and whether the trips compute in the head's image
+    #: (`_fused`).
+    closed: bool = False
+    fused: bool = False
 
 
 class _Carrier:
@@ -467,8 +485,9 @@ class _Carrier:
                     'the store needs what the trip computes',
                     allowed={_key(tail.operand), _key(tail.image)})
 
-        held = self._head_map(loads)
-        stored, handed = self._check_tail(stores, held)
+        guards = self._guarded(loop, stmts, access, loads, stores)
+        held = self._head_map(loads, text=True)
+        stored, handed = self._check_tail(stores, held, text=True)
 
         ahead = ([stmts[alloc_at]] if alloc_at is not None else [])
         led = {tag(stmts[i]) for u in loads for i in u.at} - {None}
@@ -488,15 +507,63 @@ class _Carrier:
                 body.extend(copied)
                 continue
             body.append(s)
-        body = self._fused(body, copies, head, tail, handed)
+        closed = self._closed(body, copies, head, tail)
+        copied = body
+        if closed or not guards:
+            body = self._fused(body, copies, head, tail, handed)
         behind = self._rebased(
             Clone(self._fresh, 'carry', self._taken).stmts(
                 [stmts[i] for u in stores for i in u.at]),
             tail, head.operand, head.image)
         loaded = {id(stmts[i]) for u in loads for i in u.at}
+        under = frozenset(g for u in loads for e in u.events
+                          for g in _spelled((e,)))
         return ahead, body, behind, _Carried(
             access, 'load', head.operand, head.image, held, stored, loaded,
-            {id(x) for x in behind})
+            {id(x) for x in behind}, None, guards, under, closed,
+            body is not copied)
+
+    def _guarded(self, loop: Stmt, stmts: List[Stmt], access: Access,
+                 loads: List[_Unit], stores: List[_Unit]) -> frozenset:
+        """The guards spelled in text the store stands under -- one set for
+        all of its statements that write the buffer -- where every guard of
+        the load is one of them and none names what the trip computes.
+
+        Such a guard is not known per lane, and the trips are taken to run
+        it.  Where it holds, they do what the per-lane account says.  Where
+        a guard of the store does not, no trip stores and none copies its
+        image back, so every trip reads what the first one loaded -- as each
+        loaded it from memory, where nothing stored it either.  That needs
+        the load to run wherever the store does, and the guard to mean the
+        same over the whole loop, ahead of it and behind it."""
+        def spelled(e):
+            return _spelled((e,))
+
+        stored = {spelled(e) for u in stores for e in u.events
+                  if e.stmt.op is Op.STORE
+                  and any(a.base is access.base for a in e.stmt.accesses)}
+        if len(stored) > 1:
+            raise _Refused('the statements of the store stand under '
+                           'different guards spelled in text')
+        guards = next(iter(stored), frozenset())
+        if any(not spelled(e) <= guards for u in loads for e in u.events):
+            raise _Refused('the load stands under a guard spelled in text '
+                           'the store does not')
+        texts = {cond for cond, _ in guards}
+        texts |= {cond for u in loads for e in u.events
+                  for cond, _ in spelled(e)}
+        if not texts:
+            return guards
+        names = {str(x.attr('extern')) for x in walk_stmts(tuple(stmts))
+                 if x.attr('extern') is not None}
+        if loop.attr('extern') is not None:
+            names.add(str(loop.attr('extern')))
+        for text in texts:
+            for name in names:
+                if re.search(rf'\b{re.escape(name)}\b', text):
+                    raise _Refused('a guard spelled in text names what the '
+                                   'trip computes')
+        return guards
 
     def _fused(self, body: List[Stmt], copies: Set[int], head: _Unit,
                tail: _Unit, handed: Dict[int, Set[int]]) -> List[Stmt]:
@@ -559,6 +626,47 @@ class _Carrier:
             return body
         return out
 
+    def _closed(self, body: List[Stmt], copies: Set[int], head: _Unit,
+                tail: _Unit) -> bool:
+        """Whether `body`, the trip with its copy at the end (`copies`),
+        reads the images for nothing but the tail's slots: a read of the
+        head's image goes, through arithmetic alone, into stores of the
+        tail's, and only the copy reads the tail's.  Then what the images
+        hold reaches nothing but the store behind the loop."""
+        every = list(walk_stmts(tuple(x for x in body if id(x) not in copies)))
+        users: Dict[int, List[Stmt]] = {}
+        for x in every:
+            for v in x.operands():
+                users.setdefault(v.id, []).append(x)
+        work: List[Value] = []
+        for x in every:
+            for a in x.accesses:
+                if _key(a.base) == _key(tail.image) and not a.writes:
+                    return False
+                if _key(a.base) == _key(head.image) and not a.writes:
+                    if x.op is not Op.LOAD:
+                        return False
+                    work.extend(x.target)
+        seen: Set[int] = set()
+        while work:
+            v = work.pop()
+            if v.id in seen:
+                continue
+            seen.add(v.id)
+            for y in users.get(v.id, []):
+                if y.op is Op.STORE:
+                    if (len(y.args) != 3 or y.args[1] is not v
+                            or y.args[2] is v or y.predicate is v
+                            or not any(_key(a.base) == _key(tail.image)
+                                       for a in y.accesses)):
+                        return False
+                    continue
+                if (y.op not in Op.ARITH and y.op != Op.MATH) or y.regions \
+                        or y.accesses or y.effect != Effect.NONE:
+                    return False
+                work.extend(y.target)
+        return True
+
     def _sequence(self, stmts: Sequence[Stmt], head: _Unit, tail: _Unit,
                   env: Dict, conds: tuple, events: List) -> None:
         """The accesses of `stmts` to the two images, in the order a lane
@@ -602,9 +710,10 @@ class _Carrier:
                     events.append((('write ' if a.writes else 'read ')
                                    + which, slot, under, env, s))
 
-    def _head_map(self, loads: List[_Unit]):
+    def _head_map(self, loads: List[_Unit], text: bool = False):
         """Per lane, the slot of the head's image each element goes into:
-        `{lane: {slot: element or _ZERO}}`."""
+        `{lane: {slot: element or _ZERO}}`.  With `text`, a guard spelled in
+        text is taken to hold (`_active`)."""
         held: Dict[int, Dict[int, object]] = {}
         for unit in loads:
             producers = {t.id: e for e in unit.events
@@ -624,23 +733,25 @@ class _Carrier:
                         (index, src_index, src.stmt.predicate,
                          s.predicate, *(c for c, _ in e.conds + src.conds)),
                         loops):
-                    if not self._active(e, env, memo):
+                    if not self._active(e, env, memo, text):
                         continue
                     slot = self._indices.evaluate(index, env, memo)
                     element = (self._indices.evaluate(src_index, env, memo)
-                               if self._active(src, env, memo) else _ZERO)
+                               if self._active(src, env, memo, text)
+                               else _ZERO)
                     lane_held = held.setdefault(lane, {})
                     if slot in lane_held:
                         raise _Refused('the load writes a slot twice')
                     lane_held[slot] = element
         return held
 
-    def _check_tail(self, stores: List[_Unit], held):
+    def _check_tail(self, stores: List[_Unit], held, text: bool = False):
         """Every element the store writes from the tail's image is one the
         load reads into that slot, by the same lane; nothing else it writes
         is read; no lane stores what another loads.  What it writes from the
         image, per lane, is the answer -- with the slots of the image it
-        writes them from, per lane."""
+        writes them from, per lane.  With `text`, a guard spelled in text is
+        taken to hold (`_active`)."""
         owner: Dict[int, int] = {}
         constants: Set[int] = set()
         written: Dict[int, Set[int]] = {}
@@ -657,7 +768,7 @@ class _Carrier:
                     for lane, env, memo in self._domain(
                             (index, s.predicate, *(c for c, _ in e.conds)),
                             e.loops):
-                        if self._active(e, env, memo):
+                        if self._active(e, env, memo, text):
                             constants.add(
                                 self._indices.evaluate(index, env, memo))
                     continue
@@ -672,7 +783,7 @@ class _Carrier:
                 for lane, env, memo in self._domain(
                         (index, src_index, s.predicate,
                          *(c for c, _ in e.conds + src.conds)), loops):
-                    if not self._active(e, env, memo):
+                    if not self._active(e, env, memo, text):
                         continue
                     element = self._indices.evaluate(index, env, memo)
                     slot = self._indices.evaluate(src_index, env, memo)
@@ -804,9 +915,14 @@ class _Carrier:
                                'stand under different guards spelled in text')
             return self._summed(out, ahead, behind, c, source, at, written,
                                 filled)
-        if guards:
-            raise _Refused('the store ahead of the loop stands under a guard '
-                           'spelled in text')
+        # Under a guard spelled in text, the load takes what the store ahead
+        # wrote, and the store goes, only where the two hold for the same
+        # elements -- and where the guard does not hold, what the trips then
+        # compute from those registers is read by nothing else.
+        if guards != c.guards or (guards and not c.closed):
+            raise _Refused('the store ahead of the loop and the one behind it '
+                           'stand under different guards spelled in text, or '
+                           'the trips read the image for more than the store')
 
         for lane, held in c.held.items():
             for slot, element in held.items():
@@ -1145,7 +1261,18 @@ class _Carrier:
                    for a in collect_accesses((out[i],))):
                 raise _Refused('something between writes the image or the '
                                'buffer')
-        for lane, held in self._head_map([unit]).items():
+        # Where a guard of the store behind the loop does not hold, memory
+        # holds what it held ahead of the loop -- and so does the image the
+        # trips copy into, where they copy under that guard and the load
+        # ahead of the loop ran: the load reads the image where it runs only
+        # under the store's guards, or under the load's of an image the
+        # trips did not compute in place.
+        for e in unit.events:
+            under = _spelled((e,))
+            if not (c.guards <= under or (not c.fused and c.loaded <= under)):
+                raise _Refused('the store behind the loop stands under a '
+                               'guard spelled in text the load does not')
+        for lane, held in self._head_map([unit], text=True).items():
             for slot, element in held.items():
                 if element is _ZERO:
                     continue
@@ -1858,8 +1985,9 @@ class _Carrier:
 
     def _active(self, e: _Event, env, memo, text: bool = False) -> bool:
         """Whether `e` runs for the lane and the hops of `env`.  A guard
-        spelled in text is not known per lane: with `text`, the caller
-        answers for it (`_spelled`), and else it is refused."""
+        spelled in text is not known per lane: with `text`, the caller has
+        answered for it and it is taken to hold (`_guarded`, `_spelled`), and
+        else it is refused."""
         for cond, side in e.conds:
             if isinstance(cond, str):
                 if text:
