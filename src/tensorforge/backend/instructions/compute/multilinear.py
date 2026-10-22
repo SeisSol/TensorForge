@@ -492,8 +492,19 @@ class MultilinearInstruction(ComputeInstruction):
         The tensor in global memory, or a copy made verbatim -- the section's
         preloaded image of a batch-constant operand (`verbatim`, set where
         the copy is made).  A per-operation staging window is not: its origin
-        is wherever the window starts."""
-        return (symbol.stype is SymbolType.Global
+        is wherever the window starts.
+
+        And an operand whose numbers are in the code (`SymbolType.Data`, as
+        `inline_constants` makes one): it has no memory at all, and a read of
+        it is `obj.value(index)`, the number at the cell the index names.
+        Asked by type rather than by the `inlined` flag, which the generator
+        sets on the symbol it decides about and an instruction holding a copy
+        does not see.  Left out, every zero of such an operand was
+        multiplied in as `x * 0.0f`, which a compiler may not fold --
+        `NaN * 0` is `NaN` -- so `C = X S` with a permutation `S` cost half
+        of what a dense `S` does.
+        """
+        return (symbol.stype in (SymbolType.Global, SymbolType.Data)
                 or bool(getattr(symbol, 'verbatim', False)))
 
     def _zero_block(self, e_lo, e_hi, k_lo, k_hi, span) -> bool:
