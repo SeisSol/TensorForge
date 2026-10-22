@@ -103,8 +103,11 @@ INPUT_TRANSFORM = {
 
 
 def descr_list():
+    # The boxes SeisSol's description gives: `rT` and `fP` over the ten rows
+    # the face basis has, of the sixteen they are stored with.
     r = SubTensor(Tensor([16, 20], Addressing.NONE, BoundingBox([0, 0], [16, 20]),
-                         alias="R", datatype=DTYPE, data=R_VALUES.copy()))
+                         alias="R", datatype=DTYPE, data=R_VALUES.copy()),
+                  BoundingBox([0, 0], [10, 20]))
     i = SubTensor(Tensor([32, 9], Addressing.STRIDED, BoundingBox([0, 0], [32, 9]),
                          alias="I", datatype=DTYPE), BoundingBox([0, 0], [20, 9]))
     a = SubTensor(Tensor([9, 9], Addressing.STRIDED, BoundingBox([0, 0], [9, 9]),
@@ -115,7 +118,8 @@ def descr_list():
     t = SubTensor(Tensor([16, 9], Addressing.STRIDED, BoundingBox([0, 0], [16, 9]),
                          alias="T", datatype=DTYPE, is_tmp=True))
     d = SubTensor(Tensor([16, 10], Addressing.NONE, BoundingBox([0, 0], [16, 10]),
-                         alias="D", datatype=DTYPE, data=D_VALUES.copy()))
+                         alias="D", datatype=DTYPE, data=D_VALUES.copy()),
+                  BoundingBox([0, 0], [10, 10]))
     u = SubTensor(Tensor([16, 9], Addressing.STRIDED, BoundingBox([0, 0], [16, 9]),
                          alias="U", datatype=DTYPE, is_tmp=True))
     m = SubTensor(Tensor([32, 10], Addressing.NONE, BoundingBox([0, 0], [32, 10]),
@@ -125,9 +129,11 @@ def descr_list():
     t_in = SubTensor(t.tensor, BoundingBox([0, 0], [10, 9]))
     u_in = SubTensor(u.tensor, BoundingBox([0, 0], [10, 9]))
     x_out = SubTensor(x.tensor, BoundingBox([0, 0], [20, 9]))
+    t_out = SubTensor(t.tensor, BoundingBox([0, 0], [10, 9]))
+    u_out = SubTensor(u.tensor, BoundingBox([0, 0], [10, 9]))
     return [GemmDescr(False, False, i, a, x_out, alpha=1.0, beta=0.0),
-            GemmDescr(False, False, r, x_in, t, alpha=1.0, beta=0.0),
-            GemmDescr(False, False, d, t_in, u, alpha=1.0, beta=0.0),
+            GemmDescr(False, False, r, x_in, t_out, alpha=1.0, beta=0.0),
+            GemmDescr(False, False, d, t_in, u_out, alpha=1.0, beta=0.0),
             GemmDescr(False, False, m, u_in, q, alpha=1.0, beta=0.0)]
 
 
