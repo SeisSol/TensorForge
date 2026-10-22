@@ -752,3 +752,30 @@ def test_the_marks_around_a_clearing_store_write_nothing():
     b.store(t.p, b.load(s, t.lane), t.lane)
     out = t.run()
     assert not _loads(out, MemSpace.SHARED)
+
+
+def test_a_chain_of_copies_is_read_where_the_first_read():
+    """`q` loaded back into `r1`, copied into `r2`, that into `r3`, and `r3`
+    read: a round takes one link of the chain, and the rounds run until
+    nothing changes -- the read is `r0`'s, and no copy is left."""
+    t = Body()
+    b = t.b
+    r0, r1, r2, r3 = (t.registers(f'r{i}') for i in range(4))
+    t.fill(r0)
+    t.store_q(r0)
+    with b.if_(t.valid):
+        with b.for_(0, COLS, 1, unroll=True) as hop:
+            j = hop.induction
+            b.store(r1, b.load(t.q, t.element(j)), j)
+    for src, dst in ((r1, r2), (r2, r3)):
+        with b.for_(0, COLS, 1, unroll=True) as hop:
+            b.store(dst, b.load(src, hop.induction), hop.induction)
+    b.store(t.p, b.load(r3, 0), t.lane)
+    body = b.finish()
+    verify(body)
+    out = forward_memory(body, b.scratch, threads=LANES, arena='shrMem')
+    verify(out)
+    assert not _loads(out, MemSpace.GLOBAL, t.q)
+    for r in (r1, r2, r3):
+        assert not _loads(out, MemSpace.REGISTER, r), r
+    assert _loads(out, MemSpace.REGISTER, r0)

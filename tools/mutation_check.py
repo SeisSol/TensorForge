@@ -3039,6 +3039,8 @@ GROUPS = {
          sub(FLOW, '                               if m & r.mask == r.mask\n'
                    '                               and self._holds(cell, store, r.mask, conds)),\n',
              '                               if m & r.mask == r.mask),\n', 1)),
+        ('two rounds where a chain of copies takes more',
+         sub(FORWARD, 'ROUNDS = 4\n', 'ROUNDS = 2\n', 1)),
         ('the last load of an element asked before the first',
          sub(FLOW, '                self._fetched[(r.cell, r.mask)].append((load, r))\n',
              '                self._fetched[(r.cell, r.mask)].insert(0, (load, r))\n', 1)),

@@ -53,17 +53,26 @@ from .passes import _zero_like, dce, substitute
 
 _SPACES = (MemSpace.GLOBAL, MemSpace.SHARED, MemSpace.REGISTER)
 
+#: How many rounds `forward_memory` runs at most.  A round takes one link
+#: of a chain of copies, and a list whose operations hand their results
+#: through memory makes chains of three: an operand staged by every
+#: operation that reads it, a staging copied into a product's image, the
+#: image read by the next product.  Over the corpus no body changes in a
+#: fourth round; the fourth that runs is the one that finds nothing.
+ROUNDS = 4
+
 
 def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
                    arena: Optional[str] = None, masks: bool = True,
-                   rounds: int = 2, registers: bool = True,
+                   rounds: int = ROUNDS, registers: bool = True,
                    report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with its loads taken from what their own lane stored, and its
     stores nothing reads dropped (see the module); `scratch` makes the
     builder new statements are built with.  Until nothing changes, or
     `rounds` times: a load taken from a register may read one that a copy
-    filled, which the next round takes from where the copy did.  A body too
-    large for the flow (`flow.TooLarge`) is left as it is.
+    filled, which the next round takes from where the copy did -- one link
+    of a chain of copies a round (`ROUNDS`).  A body too large for the flow
+    (`flow.TooLarge`) is left as it is.
 
     Without `registers`, only loads of memory, and only from what their own
     lane stored: what the atomics ask runs ahead of the wrap, which counts
