@@ -49,10 +49,12 @@ statements it speaks for are asked where they stand.
 
 Asked with `values`, a store's execution records where its value came from
 (`Flow.origin`), and a load's what it may read instead of its element
-(`Flow.forward`): the value itself, a number, or a register a load read it
-from and that still holds it.  A register array declared zeroed (`{}`)
-holds zeros until something stores into it, as a store of the number would
-leave it.
+(`Flow.forward`): the value the lane's own store put there, a number, or a
+register a load read it from and that still holds it -- and for a load of
+memory, the register an earlier load by the same lanes put the element in,
+where both found the same write there.  A register array declared zeroed
+(`{}`) holds zeros until something stores into it, as a store of the number
+would leave it.
 
 What `Flow` keeps grows with the elements it places, lane by lane and
 execution by execution -- with `values`, some 300 bytes each.  A body that
@@ -248,16 +250,25 @@ class Flow:
         #: for certain besides its element: `('reg', cell, writer)`, a
         #: register that holds still what `writer` wrote; `('const',
         #: number)`; `('value', value)`.  With `values` only, and only where
-        #: the store was the lane's own.
+        #: the store was the lane's own, or where an earlier load by the
+        #: same lanes found the same write and put it in that register.
         self.forward: Dict[int, List[Tuple[int, Tuple]]] = {}
         #: The masks taken to hold (`masks`).
         self.masks: FrozenSet = self._masks() if masks else frozenset()
-        self._forwarded: Dict[int, List[Tuple[int, Tuple, Reach]]] = {}
+        self._forwarded: Dict[int, List[Tuple[int, Tuple, Tuple[Reach, ...]]]] = {}
+        #: Per element of memory and lane group: the last load of it whose
+        #: value went into a register, and what that load found there
+        #: (`_fetches`).
+        self._fetched: Dict[Tuple[Tuple, int], Tuple[int, Reach]] = {}
+        #: Per execution of a load of memory: the registers its value went
+        #: into, `(mask, cell, store)`.
+        self._held: Dict[int, List[Tuple[int, Tuple, int]]] = defaultdict(list)
         self._run(self.body, {}, self.full, frozenset())
         # What a loop's next run hands back (`_wrap`) can make a read
         # uncertain after the fact; what it would read instead goes with it.
         for n, found in self._forwarded.items():
-            kept = [(m, o) for m, o, r in found if r.certain]
+            kept = [(m, o) for m, o, rs in found
+                    if all(r.certain for r in rs)]
             if kept:
                 self.forward[n] = kept
         for cell, layers in self._mem.items():
@@ -613,11 +624,16 @@ class Flow:
         if read:
             self.reach[n] = self._read(n, read, conds)
             if self._values and s.op == Op.LOAD:
-                self._forwarded[n] = self._forwards(n, conds)
+                found = self._forwards(n, conds)
+                taken = 0
+                for m, _, _ in found:
+                    taken |= m
+                self._forwarded[n] = found + self._fetches(n, conds, taken)
         if written:
             self._write(n, written, conds)
             if self._values and s.op == Op.STORE:
                 self.origin[n] = self._origin(s, env, mask)
+                self._holding(s, n, env, written)
 
     def _origin(self, s: Stmt, env, mask: int) -> List[Tuple[int, Tuple]]:
         """Where the value `s` stores came from, lane group by lane group."""
@@ -648,12 +664,12 @@ class Flow:
                 return out
         return [(mask, ('value', v))]
 
-    def _forwards(self, n: int, conds) -> List[Tuple[int, Tuple, Reach]]:
+    def _forwards(self, n: int, conds) -> List[Tuple[int, Tuple, Tuple[Reach, ...]]]:
         """What the load's execution `n` reads for certain, besides its
         element, lane group by lane group: what the lane's own store put
         there, where that is a value, a number, or a register that holds
         it still."""
-        out: List[Tuple[int, Tuple, Reach]] = []
+        out: List[Tuple[int, Tuple, Tuple[Reach, ...]]] = []
         for r in self.reach.get(n, ()):
             if not r.certain or r.writer is None or r.writer < 0 or not r.own:
                 continue
@@ -664,10 +680,58 @@ class Flow:
                 if o[0] == 'reg':
                     _, cell, writer = o
                     if self._holds(cell, writer, hit, conds):
-                        out.append((hit, ('reg', cell, writer), r))
+                        out.append((hit, ('reg', cell, writer), (r,)))
                 else:
-                    out.append((hit, o, r))
+                    out.append((hit, o, (r,)))
         return out
+
+    def _fetches(self, n: int, conds, taken: int) -> List[Tuple[int, Tuple, Tuple[Reach, ...]]]:
+        """What the load's execution `n` of memory reads for certain because
+        an earlier load by the same lanes read it: the element unchanged in
+        between -- both found the same write there -- and the register that
+        earlier load's value went into holding it still.  Not for the lanes
+        in `taken`, which read what their own store put there, and take
+        that."""
+        out: List[Tuple[int, Tuple, Tuple[Reach, ...]]] = []
+        for r in self.reach.get(n, ()):
+            if (not r.certain or not r.cell or r.mask & taken
+                    or r.cell[0][0] is MemSpace.REGISTER):
+                continue
+            last = self._fetched.get((r.cell, r.mask))
+            if last is None:
+                continue
+            earlier, found = last
+            if not found.certain or found.writer != r.writer:
+                continue
+            for m, cell, store in self._held.get(earlier, ()):
+                if m & r.mask == r.mask and self._holds(cell, store, r.mask,
+                                                         conds):
+                    out.append((r.mask, ('reg', cell, store), (r, found)))
+                    break
+        return out
+
+    def _holding(self, s: Stmt, n: int, env, written) -> None:
+        """Where the store into registers `s` puts what a load of memory
+        read: the registers, for the load (`_held`), and the load, for the
+        elements it read (`_fetched`)."""
+        v = s.args[1]
+        if not isinstance(v, Value) or getattr(v.type, 'length', None) is not None:
+            return
+        d = self.defs.get(v.id)
+        if (d is None or d.op != Op.LOAD or len(d.accesses) != 1
+                or d.accesses[0].space is MemSpace.REGISTER):
+            return
+        load = self.inst(d, env)
+        if load is None:
+            return
+        held = [(m, cell, n) for m, cell, _ in written
+                if cell[0][0] is MemSpace.REGISTER]
+        if not held:
+            return
+        self._held[load].extend(held)
+        for r in self.reach.get(load, ()):
+            if r.cell:
+                self._fetched[(r.cell, r.mask)] = (load, r)
 
     def _holds(self, cell, writer: int, lanes: int, conds) -> bool:
         """Does `cell`, a register, hold what `writer` wrote for every lane

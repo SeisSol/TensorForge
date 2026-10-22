@@ -3,12 +3,14 @@
 # SPDX-License-Identifier: MIT
 
 """Pseudo-IR: a load that reads what its own lane stored takes it from where
-the store took it, and a store nothing reads goes.
+the store took it, one that reads what its lanes loaded before from where
+that load put it, and a store nothing reads goes.
 
 A body hands values from one operation to the next through memory -- a
 result stored to global memory and loaded back by the operation that reads
-it, a register image copied into another before it is stored.  Asked of every
-load, execution by execution and lane by lane (`flow.Flow`, with `values`):
+it, a register image copied into another before it is stored, an operand
+each operation loads anew from where it lives.  Asked of every load,
+execution by execution and lane by lane (`flow.Flow`, with `values`):
 where the store it reads for certain was the lane's own, and its value is
 
 * a number, the load is that number;
@@ -18,6 +20,10 @@ where the store it reads for certain was the lane's own, and its value is
   stands, the load reads that register -- at an index the hops of the loops
   around the load give, of loops that are unrolled, so that the compiler
   names the register (`_fit`).
+
+The last holds as well where the lanes loaded the element before and found
+the same write there: the load reads the register that earlier load's value
+went into, where it holds it still.
 
 Every execution and every lane the load runs for has to agree: one number,
 one value, one register array.  Then the stores: one that nothing reads and

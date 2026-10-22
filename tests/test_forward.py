@@ -2,7 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 """A load that reads what its own lane stored, taken from where the store
-took the value, and a store nothing reads, dropped (`pir.forward`), asked of
+took the value, one that reads what its lanes loaded before, from where that
+load put it, and a store nothing reads, dropped (`pir.forward`), asked of
 bodies built by hand.
 
 The generated bodies are asked in `test_rolling.py` and the corpus in
@@ -525,6 +526,112 @@ def test_a_buffer_of_the_arena_read_across_the_lanes_stays():
     assert _loads(out, MemSpace.SHARED, s)
     assert any(x.op == Op.ALLOC and s in x.target for x in walk_stmts(out))
     assert any(x.op == Op.MARK and s in x.args for x in walk_stmts(out))
+
+
+def _reload(t, between=None, lane=None, guard=None):
+    """`r0[j] = q[e(j)]` and `p = r0[0]`, then `between`, then `r1[j] =
+    q[e(j)]` and `p = r1[1]`: the same elements loaded twice by the same
+    lanes -- the first time by the lanes `lane` gives where given, under
+    `guard` where given."""
+    b = t.b
+    r0, r1 = t.registers('r0'), t.registers('r1')
+    with b.if_(t.valid):
+        with (guard() if guard else contextlib.nullcontext()):
+            with b.for_(0, COLS, 1, unroll=True) as hop:
+                j = hop.induction
+                b.store(r0, b.load(t.q, t.element(j, lane)), j)
+    b.store(t.p, b.load(r0, 0), t.lane)
+    if between is not None:
+        between(r0)
+    with b.if_(t.valid):
+        with b.for_(0, COLS, 1, unroll=True) as hop:
+            j = hop.induction
+            b.store(r1, b.load(t.q, t.element(j)), j)
+    b.store(t.p, b.load(r1, 1), t.lane)
+    return r0, r1
+
+
+def test_a_load_of_what_the_lanes_loaded_before_reads_that_register():
+    """Nothing writes `q` between the two loads, and `r0` holds what the
+    first read: the second reads `r0`, and `r1`, which nothing reads any
+    more, goes."""
+    t = Body()
+    _, r1 = _reload(t)
+    out = t.run()
+    assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 1
+    assert not _stores(out, MemSpace.REGISTER, r1)
+
+
+def test_what_the_lane_stored_comes_before_what_it_loaded():
+    """`q = r0`, `r1 = q`, then `q` loaded again: both loads read what the
+    lane stored, from `r0`, in one round, and the second not from `r1`,
+    where the first put it -- the two would be one load taken from two
+    registers."""
+    t = Body()
+    r0 = t.registers('r0')
+    t.fill(r0)
+    t.store_q(r0)
+    _reload(t)
+    out = t.run(rounds=1)
+    assert not _loads(out, MemSpace.GLOBAL, t.q)
+
+
+def test_a_load_behind_a_store_of_the_element_keeps_its_load():
+    t = Body()
+    b = t.b
+
+    def store(r0):
+        with b.if_(t.valid):
+            b.store(t.q, 1.0, t.element(1))
+    _reload(t, store)
+    out = t.run()
+    assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 2
+
+
+def test_a_load_behind_another_lanes_store_of_the_element_keeps_its_load():
+    """Each lane stores into the next lane's element between the loads: the
+    second load finds that store, which the first did not."""
+    t = Body()
+    b = t.b
+    nxt = b.op('rem', INDEX, b.op('add', INDEX, t.lane, 1), LANES, hint='n')
+
+    def store(r0):
+        with b.if_(t.valid):
+            b.store(t.q, 1.0, t.element(1, nxt))
+    _reload(t, store)
+    out = t.run()
+    assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 2
+
+
+def test_a_load_behind_a_write_of_the_register_keeps_its_load():
+    """`r0` written again between the loads, and read behind them: what the
+    second load reads is in memory alone."""
+    t = Body()
+    b = t.b
+    r0, r1 = _reload(t, lambda r0: t.fill(r0, 3.0))
+    b.store(t.p, b.op('add', REAL, b.load(r1, 2), b.load(r0, 2)), t.lane)
+    out = t.run()
+    assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 2
+
+
+def test_an_element_another_lane_loaded_keeps_its_load():
+    """Each lane loads the next lane's elements first: what the second load
+    wants sits in the registers of another lane."""
+    t = Body()
+    nxt = t.b.op('rem', INDEX, t.b.op('add', INDEX, t.lane, 1), LANES,
+                 hint='n')
+    _reload(t, lane=nxt)
+    out = t.run()
+    assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 2
+
+
+def test_an_element_loaded_under_a_guard_spelled_in_text_keeps_its_load():
+    """Where `active` does not hold, `r0` holds nothing the first load
+    read."""
+    t = Body()
+    _reload(t, guard=lambda: t.b.Block('if (active)'))
+    out = t.run()
+    assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 2
 
 
 def test_a_body_past_the_budget_is_left_as_it_is(monkeypatch):

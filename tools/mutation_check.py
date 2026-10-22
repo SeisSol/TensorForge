@@ -2859,6 +2859,19 @@ GROUPS = {
          sub(FORWARD, '            reached |= hit\n', '            pass\n', 1)),
         ('a body past the budget forwarded all the same',
          sub(FLOW, '        if self._budget < 0:\n', '        if False:\n', 1)),
+        ('a load of memory taken from no earlier load',
+         sub(FLOW, '                self._forwarded[n] = found + self._fetches(n, conds, taken)\n',
+             '                self._forwarded[n] = found\n', 1)),
+        ('an earlier load taken whatever write it found',
+         sub(FLOW, '            if not found.certain or found.writer != r.writer:\n',
+             '            if not found.certain:\n', 1)),
+        ('an earlier load taken where the lane\'s own store answers',
+         sub(FLOW, '            if (not r.certain or not r.cell or r.mask & taken\n',
+             '            if (not r.certain or not r.cell\n', 1)),
+        ('the register of an earlier load taken whether it holds it or not',
+         sub(FLOW, '                if m & r.mask == r.mask and self._holds(cell, store, r.mask,\n'
+                   '                                                         conds):\n',
+             '                if m & r.mask == r.mask:\n', 1)),
     ]),
 }
 
