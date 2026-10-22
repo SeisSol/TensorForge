@@ -96,8 +96,13 @@ class Lexic(ABC):
     a lambda does not capture one.  CUDA and HIP say `__device__ const`
     instead, which is unconditional where `constexpr` wants a flag to have
     its address taken.
+
+    `values` are integers, or literals already spelled
+    (`Datatype.literal`) where `elem` is not an integer type -- the weights
+    of a gathered product (`MultilinearInstruction._ell_plan`).
     """
-    numbers = ', '.join(str(int(v)) for v in values)
+    numbers = ', '.join(v if isinstance(v, str) else str(int(v))
+                        for v in values)
     return f'constexpr {elem} {name}[{len(values)}] = {{{numbers}}};'
 
   def pointer_type(self, elem: str, space=None, readonly: bool = False,
@@ -293,6 +298,14 @@ class Lexic(ABC):
     """`variable` as held by the lane whose index differs from this one's in
     the bits of `mask` -- one step of a butterfly -- or None where the target
     has an all-reduce of its own to call instead (`reduction`)."""
+    return None
+
+  def gather(self, variable, lane, block):
+    """`variable` as held by lane `lane` of every `block` consecutive lanes,
+    `lane` a value of each lane's own -- where `broadcast` hands one lane's
+    to all of them.  None where the target has no such read; a gathered
+    product (`MultilinearInstruction._ell_plan`) then reads its operand from
+    memory or not at all."""
     return None
 
   @abstractmethod

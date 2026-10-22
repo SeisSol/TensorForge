@@ -305,6 +305,14 @@ __device__ __forceinline__ T broadcast(T value) {
   }
 }
 
+/// Lane `lane` of every `Block` consecutive lanes, read by each lane of them
+/// with a `lane` of its own: a gather, where `broadcast` hands one lane's
+/// value to all.  The same instruction either way, `SHFL.IDX`.
+template <std::size_t Block, typename T>
+__device__ __forceinline__ T gather(T value, int lane) {
+  return __shfl_sync(FullWarpMask, value, lane, Block);
+}
+
 // `cuda::ptx` spells the cluster-launch-control wrappers from CCCL 2.8 on, and
 // only for PTX ISA 8.6 (CUDA 12.8) or newer; the mbarrier ones used alongside
 // are missing from CCCL 2.3 as well.  Unguarded, every translation unit that

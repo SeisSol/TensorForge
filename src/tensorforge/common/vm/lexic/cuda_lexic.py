@@ -68,7 +68,8 @@ class CudaLexic(Lexic):
     # nvcc materializes a `constexpr` array in device code only with
     # `--expt-relaxed-constexpr`, which a caller need not be passing; the
     # `__device__` spelling asks for nothing.
-    numbers = ', '.join(str(int(v)) for v in values)
+    numbers = ', '.join(v if isinstance(v, str) else str(int(v))
+                        for v in values)
     return (f'__device__ const {elem} {name}[{len(values)}] = '
             f'{{{numbers}}};')
 
@@ -122,6 +123,11 @@ class CudaLexic(Lexic):
 
   def active_sub_group_mask(self):
     return "__activemask()"
+
+  def gather(self, variable, lane, block):
+    # `tensorforge_device`'s, which both headers define: `__shfl_sync` within
+    # `block` lanes on CUDA, `ds_bpermute` on AMD.
+    return f'tensorforge::gather<{block}>({variable}, {lane})'
 
   def broadcast(self, variable, lane, block=None, subblock=1):
     if block is None or block == 32:

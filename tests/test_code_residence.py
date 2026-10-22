@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from tensorforge.common.basic_types import Addressing, Datatype, Residence
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.common.exceptions import GenerationError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
@@ -46,13 +46,14 @@ def operator(residence):
                             residence=residence))
 
 
-def generated(residence):
+def generated(residence, **options):
     """The generated surface for `C[b] = A @ B[b]`, A as given."""
     perBatch = [SubTensor(Tensor([N, N], Addressing.STRIDED,
                                  BoundingBox([0, 0], [N, N]), alias=alias,
                                  datatype=Datatype.F32))
                 for alias in ('B', 'C')]
-    context = Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32)
+    context = Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32,
+                      options=Options(**options))
     generator = Generator([GemmDescr(False, False, operator(residence),
                                      *perBatch, alpha=1.0, beta=0.0)],
                           context)
@@ -61,7 +62,10 @@ def generated(residence):
 
 
 def signature(generator):
-    return generator.get_kernel().split('{')[0]
+    # The kernel's own: what the file defines ahead of it -- a table of
+    # numbers a gathered product reads -- has braces of its own.
+    kernel = generator.get_kernel()
+    return kernel[kernel.index('__global__'):].split('{')[0]
 
 
 class TestResidenceIsStated:
@@ -94,7 +98,12 @@ class TestGeneratedKernel:
         assert inCode.count('float') == inMemory.count('float') - 1
 
     def test_the_same_operator_in_memory_is_a_parameter_and_not_a_literal(self):
-        kernel = generated(Residence.MEMORY).get_kernel()
+        """Read as the dense product reads it.  One nonzero per row against
+        a longer reduction is a product the nest gathers (`ell_gather`), and
+        the gather takes its weights from the description into a table, as
+        `inline_constants` takes a broadcast operand's -- the operator is a
+        parameter all the same (`test_ell_gather`)."""
+        kernel = generated(Residence.MEMORY, ell_gather=0).get_kernel()
         assert '0.5' not in kernel
 
     def test_the_two_kernels_are_not_the_same_kernel(self):

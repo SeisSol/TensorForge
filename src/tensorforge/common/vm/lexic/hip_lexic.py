@@ -21,7 +21,8 @@ class HipLexic(CudaLexic):
   def module_constant(self, elem: str, name: str, values) -> str:
     # A uniform index into a module constant is an `s_load` out of the
     # scalar cache, which is the same read the kernarg segment gives.
-    numbers = ', '.join(str(int(v)) for v in values)
+    numbers = ', '.join(v if isinstance(v, str) else str(int(v))
+                        for v in values)
     return (f'__device__ const {elem} {name}[{len(values)}] = '
             f'{{{numbers}}};')
 

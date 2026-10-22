@@ -118,6 +118,7 @@ class Preferences:
     split_predicated_load: bool = False
     inline_constants: int = 64
     argument_constants: bool = False
+    ell_gather: int = 3
     #: What the autotuner turns (`generators.tuning`): the matrix path,
     tune_matrix_path: bool = False
     #: staging the batch-constant operands,
@@ -156,6 +157,14 @@ PREFERENCES = {
         # operators on sm_120 had 768 instructions instead of 888 by value.
         inline_constants=4096,
         argument_constants=True,
+        # A gather is a shared-memory read at a per-lane address or a
+        # `SHFL.IDX`, the instructions a broadcast takes, so fewer steps are
+        # fewer instructions.  As many as the generator unrolls
+        # (`k_unroll_max`), since the gather is unrolled: at order 8 on
+        # sm_120, `rT` and `fMrT` -- 20 and 36 nonzeros a row against a
+        # reduction of 120, rolled -- gathered took `neighboringFlux` from
+        # 98 to 42 ns an element and `localFlux` from 90 to 42.
+        ell_gather=64,
         tune_matrix_path=True,
         # ptxas sm_100a, 52 builds, residuals within 40.
         register_fit=(51.0, 1.05)),
@@ -171,6 +180,11 @@ PREFERENCES = {
                                atomic_accumulation=True,
                                broadcast_without_staging=True),
         preload_globals=True,
+        # A gather from a register image goes through `ds_bpermute`, where
+        # the broadcast it replaces is fused into the FMA (`fmac_dpp`):
+        # `neighboringFlux` on gfx1150 gathered at up to 8 and 32 nonzeros
+        # was 3 to 5 % faster at order 4 and 6 to 10 % slower at order 8.
+        ell_gather=3,
         # A stack fills the lane-batched tiles one element leaves half
         # empty: over SeisSol's F32 kernels on gfx942 the static model and
         # clang put it 22 to 39 % ahead per configuration (geomean), and

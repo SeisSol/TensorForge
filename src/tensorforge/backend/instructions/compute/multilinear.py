@@ -10,7 +10,7 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List, Tuple
-from tensorforge.common.basic_types import Addressing, Residence
+from tensorforge.common.basic_types import Addressing, Datatype, Residence
 from tensorforge.backend.pir.core import INDEX, MemSpace
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 
@@ -28,11 +28,55 @@ def _vendor_module(context):
     """The target's matrix module (`paths.matrix_paths`), or None."""
     return matrix_paths(context.target)
 
+import dataclasses
+import hashlib
 import itertools
 
 import numpy as np
 
 from copy import copy
+
+
+@dataclasses.dataclass(frozen=True)
+class _EllSource:
+    """Where a gathered step reads the second operand (`_ell_source`):
+    `memory`, or a `register` image moved across `span` lanes, its element
+    `k` in slot `slots[k]` of lane `lanes[k]`."""
+    kind: str
+    span: int = 0
+    slots: dict = None
+    lanes: dict = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _EllPlan:
+    """A product gathered in sliced ELL (`_ell_plan`).
+
+    `steps` maps a slot of lanes to its steps, each a column, a weight and
+    the register image's slot it reads (None in memory): `('k', k)` a column
+    every lane reads, `('table', at)` one per lane, at `at` in the table
+    `cols` -- a reduction index in memory, a source lane in a register image
+    -- and `('one', None)`, `('k', w)` or `('table', at)` in `weights`
+    alike.  `tables` is what `module_tables` hands out."""
+    source: _EllSource
+    steps: dict
+    cols: str = None
+    weights: str = None
+    tables: dict = None
+
+
+def _module_table_name(prefix: str, datatype, values) -> str:
+    """A name that says which numbers it holds.
+
+    yateto appends every kernel of a file to one translation unit, so a
+    name at namespace scope is shared by all of them: two kernels with the
+    same numbers then have one definition between them
+    (`Generator.module_table_definitions`), and two with different ones do
+    not collide."""
+    sha = hashlib.new('md5', usedforsecurity=False)
+    sha.update(repr((str(datatype), tuple(values))).encode())
+    return f'tf_{prefix}_{sha.hexdigest()[:16]}'
+
 
 def _contiguous_first_axis(sym) -> bool:
     """Whether axis 0 of this symbol is the one adjacent in memory.
@@ -502,14 +546,50 @@ class MultilinearInstruction(ComputeInstruction):
         `neighboringFlux[16]` executes on sm_120.
 
         Returns the diagonal's values in the contraction's rows, or None.
-        One reduction, the output's lead on the operand's other dimension,
-        and the lead's range inside the reduction's, so every lane's
-        diagonal step exists and no lane reads a row the reduction does not
-        cover.  `identity_reduction` turns it off, and `skip_known_zeros`
-        with the rest.
+        The lead's range inside the reduction's, so every lane's diagonal
+        step exists and no lane reads a row the reduction does not cover;
+        the rest is `_lane_side_values`'s.  `identity_reduction` turns it
+        off.
         """
-        options = self._context.get_user_options()
-        if not (options.identity_reduction and options.skip_known_zeros):
+        if not self._context.get_user_options().identity_reduction:
+            return None
+        value = self._lane_side_values()
+        if value is None:
+            return None
+        (lo, hi), (klo, khi) = self._ns[0], self._ks[0]
+        if hi <= lo or not (klo <= lo and hi <= khi):
+            return None
+        diagonal = []
+        for r in range(lo, hi):
+            for k in range(klo, khi):
+                v = value(r, k)
+                if k == r:
+                    if v is None:
+                        return None
+                    diagonal.append(v)
+                elif v:
+                    return None
+        return diagonal
+
+    def _lane_side_values(self):
+        """The first operand's numbers by row and reduction step, where the
+        lanes run along its rows and the description gives them.
+
+        What `_identity_reduction` and `_ell_plan` start from: one reduction,
+        the output's lead on the first operand's other dimension and not on
+        the second operand, a batch-constant first operand indexed as its
+        tensor, one element per lane -- and a sum of products, since a zero
+        absorbs `mul` and is neutral to `add` and to no other pair this
+        instruction may carry.
+
+        Returns `value(r, k)` in the contraction's coordinates -- the number,
+        or None for a cell outside the operand's box -- or None.
+        `skip_known_zeros` turns it off.
+        """
+        if not self._context.get_user_options().skip_known_zeros:
+            return None
+        if (self._productOperation.irop() != 'mul'
+                or self._sumOperation.irop() != 'add'):
             return None
         if (len(self._ops) != 2 or len(self._ks) != 1
                 or 0 not in self._lead_dims
@@ -525,28 +605,259 @@ class MultilinearInstruction(ComputeInstruction):
             return None
         if self._lead_width != 1:
             return None
-        (lo, hi), (klo, khi) = self._ns[0], self._ks[0]
-        if hi <= lo or not (klo <= lo and hi <= khi):
+        data = obj.get_values()
+        if data.ndim != 2:
             return None
         nks = self._opdim_to_nks[0]
         lead, red = nks.index('n0'), nks.index('k0')
         o_lead, o_red = self._eff_offset(0, lead), self._eff_offset(0, red)
-        data = obj.get_values()
-        if data.ndim != 2:
+
+        def value(r, k):
+            cell = [0, 0]
+            cell[lead], cell[red] = r + o_lead, k + o_red
+            if not all(0 <= cell[d] < data.shape[d] for d in (0, 1)):
+                return None
+            return float(data[tuple(cell)])
+        return value
+
+    def _ell_plan(self):
+        """The first operand's nonzeros lane by lane, where gathering them is
+        fewer steps than the reduction: sliced ELL.
+
+        The lanes run along the rows of `A`, and a step of the usual nest is
+        issued by every lane of a slot at once -- so a slot costs one step
+        per reduction index any of its rows has a nonzero at, however few
+        each row has (`_known_zero` drops only the steps no row needs).  A
+        lane can instead take its own row's nonzeros in turn: step `t` reads
+        `B` at the column of the lane's `t`-th nonzero and multiplies by it.
+        A slot then costs as many steps as its fullest row has nonzeros, the
+        rows with fewer padded with zero weights -- ELLPACK sliced by the
+        slot's lanes, SELL-C with C the lanes.
+
+        `B` is read at a row of each lane's own, so the read is a gather:
+        at a per-lane address where `B` is in memory, across the lanes where
+        it is a register image (`_ell_source`).  An image over several slots
+        is gathered a slot at a time -- a lane's nonzeros in each slot of
+        `B` are steps of their own, since one gather moves one register --
+        which keeps a lane's sum in the order of the reduction.
+
+        Columns and weights the lanes of a step share are immediates -- a
+        permutation without weights needs no multiply, a column every lane
+        reads is the usual broadcast -- and the others come from a table in
+        the generated file, each lane's entry at its own position
+        (`module_tables`).  The weights too, though the operand may reside
+        in memory: they are the description's, as a broadcast operand's are
+        under `inline_constants`, and the kernel is still handed the
+        operand.
+
+        Taken where it halves the steps at least, and no row has more than
+        `ell_gather` nonzeros.  A step of the gather reads two numbers more
+        than the nest's, and an address of its own: on sm_120 `volume`'s
+        `kDivM(0)` at order 6, 35 steps for 55, was 9 % slower gathered, where
+        products with a third of the steps or fewer were not.  The nest's
+        steps are all of the reduction where it rolls -- its step is a value
+        then, and no zero is known of it -- which is where the gather is
+        worth most: `rT` at order 8, 120 steps a slot rolled against 20 to 36
+        gathered, and `neighboringFlux` twice as fast.  Not under an
+        explicitly vectorized lowering,
+        whose lanes are one vector that a table is not indexed by.  The
+        identity takes precedence (`_identity_reduction`): it needs neither
+        a table nor a read across the lanes.
+
+        Returns an `_EllPlan`, or None.
+        """
+        most = self._context.get_user_options().ell_gather
+        block = self._num_threads
+        if not most or not block or _explicit_simd(self._context):
             return None
-        diagonal = []
+        value = self._lane_side_values()
+        if value is None:
+            return None
+        (lo, hi), (klo, khi) = self._ns[0], self._ks[0]
+        if hi <= lo or khi <= klo:
+            return None
+        source = self._ell_source(klo, khi)
+        if source is None:
+            return None
+        rows = {}
         for r in range(lo, hi):
-            for k in range(klo, khi):
-                cell = [0, 0]
-                cell[lead], cell[red] = r + o_lead, k + o_red
-                inside = all(0 <= cell[d] < data.shape[d] for d in (0, 1))
-                if k == r:
-                    if not inside:
-                        return None
-                    diagonal.append(float(data[tuple(cell)]))
-                elif inside and data[tuple(cell)] != 0:
-                    return None
-        return diagonal
+            rows[r] = [(k, v) for k in range(klo, khi)
+                       if (v := value(r, k))]
+        # The register image's slot each nonzero is read from; memory has
+        # one group for everything.
+        group = ((lambda k: None) if source.kind == 'memory'
+                 else (lambda k: source.slots[k]))
+        groups = sorted({group(k) for k in range(klo, khi)},
+                        key=lambda g: -1 if g is None else g)
+        # The steps the nest would issue instead: a rolled reduction all of
+        # them, since its step is a value and no zero is known of it.
+        options = self._context.get_user_options()
+        step = self._k_width if self._k_width > 1 else 1
+        rolled = self._rollable(
+            len(self._ks) - 1, klo, khi, step,
+            _roll_count(klo, khi, step, options.k_roll, options.k_unroll_max))
+        slots, dense, sparse = {}, 0, 0
+        for s in range(lo // block, (hi - 1) // block + 1):
+            live = [r for r in range(s * block, (s + 1) * block)
+                    if lo <= r < hi]
+            slots[s] = live
+            dense += (-(-(khi - klo) // step) if rolled
+                      else len({k for r in live for k, _ in rows[r]}))
+            sparse += sum(max(sum(1 for k, _ in rows[r] if group(k) == g)
+                              for r in live) for g in groups)
+        widest = max(len(entries) for entries in rows.values())
+        if not widest or widest > most or 2 * sparse > dense:
+            return None
+
+        cols, weights, steps = [], [], {}
+        for s, live in slots.items():
+            lanes = range(s * block, (s + 1) * block)
+            plan = []
+            for g in groups:
+                mine = {r: [e for e in rows[r] if group(e[0]) == g]
+                        for r in live}
+                for t in range(max(len(e) for e in mine.values())):
+                    held = {r: mine[r][t] for r in live if t < len(mine[r])}
+                    ks = sorted({k for k, _ in held.values()})
+                    if len(ks) == 1:
+                        col = ('k', ks[0])
+                    else:
+                        # A row without a `t`-th nonzero, or a lane past the
+                        # rows, reads any column the step reads -- its
+                        # weight is zero, or nothing stores what it computes.
+                        col = ('table', len(cols))
+                        for r in lanes:
+                            k = held[r][0] if r in held else ks[0]
+                            cols.append(k if source.kind == 'memory'
+                                        else source.lanes[k])
+                    ws = {w for _, w in held.values()}
+                    if len(held) == len(live) and len(ws) == 1:
+                        w = ws.pop()
+                        weight = ('one', None) if w == 1.0 else ('k', w)
+                    else:
+                        weight = ('table', len(weights))
+                        weights.extend(held[r][1] if r in held else 0.0
+                                       for r in lanes)
+                    plan.append((col, weight, g))
+            steps[s] = plan
+        tables, names = {}, {}
+        fptype = self._ops[0].symbol.get_fptype()
+        for key, datatype, values in (('cols', Datatype.I32, cols),
+                                      ('weights', fptype, weights)):
+            if values:
+                name = _module_table_name(f'ell{key[0]}', datatype, values)
+                tables[name] = (datatype, tuple(values))
+                names[key] = name
+        return _EllPlan(source, steps, names.get('cols'),
+                        names.get('weights'), tables)
+
+    def _ell_source(self, klo, khi):
+        """Where a gathered step reads the second operand, or None.
+
+        Memory, where `B` is dense and in its logical order there -- what a
+        shifted read asks of an operand (`Symbol.load`), and for the same
+        reason: the address is a value, and a packing or a prepared order
+        would want it translated.  A register image, where its distributed
+        dimension is the reduction: each lane reads its own register of a
+        slot, and the target moves it to the lane that wants it
+        (`Lexic.gather`).  Which slot is the step's (`_ell_plan`), since a
+        gather moves one register and does not choose among them.
+        """
+        symbol = self._ops[1].symbol
+        obj = symbol.obj
+        kpos = self._opdim_to_nks[1].index('k0')
+        if symbol.stype in (SymbolType.SharedMem, SymbolType.Global,
+                            SymbolType.Batch):
+            view = symbol.data_view
+            if (not obj.is_dense() or view is None
+                    or view.elem_parts > 1 or view.part_plane
+                    or getattr(obj, 'storage_order', None) is not None
+                    or getattr(obj, 'simt_interleave', None) is not None
+                    or getattr(obj, 'slot_major', None) is not None
+                    or getattr(obj, 'packing', None) is not None):
+                return None
+            return _EllSource('memory')
+        if symbol.stype is not SymbolType.Register:
+            return None
+        if list(symbol.lead_dims) != [kpos] or symbol.lead_width != 1:
+            return None
+        layout = symbol.register_layout()
+        span = ((layout.block_span() if layout is not None else None)
+                or self._num_threads)
+        if self._context.target.lexic.gather('{0}', '{1}', span) is None:
+            return None
+        block = symbol.lead_block(kpos)
+        shift = self._eff_offset(1, kpos)
+        slots, lanes = {}, {}
+        for k in range(klo, khi):
+            cell = [0] * len(self._opdim_to_nks[1])
+            cell[kpos] = k + shift
+            lanes[k] = symbol.reading_lane(cell)
+            if lanes[k] is None:
+                return None
+            # The slot `load` reads a fixed element from (its broadcast).
+            slots[k] = (k + shift) // block
+        return _EllSource('register', span, slots, lanes)
+
+    def _ell_term(self, writer, plan, lead, step, varlist, loopmap):
+        """One step of a gathered product: `B` at each lane's column, times
+        the lane's weight -- or as it is, where every lane's weight is one."""
+        from tensorforge.backend.pir.core import ScalarType
+        (ckind, col), (wkind, weight), slot = step
+        fp = ScalarType(self._ops[0].symbol.get_fptype())
+        lane = []
+
+        def entry(table, at, type_, hint):
+            # A step's run of the table holds one entry per lane, in the
+            # lanes' order: the index is the lane and a constant.
+            if not lane:
+                lane.append(writer.lane_offset(lead._block, lead._stride,
+                                               hint='lane'))
+            index = (writer.op('add', INDEX, lane[0], at, hint='ell')
+                     if at else lane[0])
+            return writer.rawexpr(f'{table}[{{0}}]', index, type_=type_,
+                                  pure=True, movable=True, hint=hint)
+
+        symbol = self._ops[1].symbol
+        nks = self._opdim_to_nks[1]
+        kpos = nks.index('k0')
+        shift = self._eff_offset(1, kpos)
+        index = [None if nk == 'k0'
+                 else add_offset(varlist[loopmap[nk]], self._eff_offset(1, j))
+                 for j, nk in enumerate(nks)]
+        if ckind == 'k':
+            index[kpos] = add_offset(col, shift)
+            b = symbol.load(writer, self._context, None, index, False)
+        elif plan.source.kind == 'memory':
+            # The row as this axis's address, a value per lane.  Carried by
+            # a lead index (`vaddr`) rather than an integer index so that
+            # the value keeps the lanes' layout: it is one number per lane,
+            # not one number for all of them.
+            index[kpos] = LeadIndex(0, lead._block, lead._stride,
+                                    offset=shift,
+                                    vaddr=entry(plan.cols, col, INDEX, 'col'))
+            b = symbol.load(writer, self._context, None, index, False)
+        else:
+            index[kpos] = LeadIndex(slot, symbol.lead_block(kpos), 1)
+            own = symbol.load(writer, self._context, None, index, False)
+            if own is None:
+                return None
+            text = self._context.target.lexic.gather('{0}', '{1}',
+                                                     plan.source.span)
+            b = writer.rawexpr(text, own, entry(plan.cols, col, INDEX, 'src'),
+                               type_=own.type, hint='g', pure=True,
+                               movable=True, crosslane=True)
+        if b is None or wkind == 'one':
+            return b
+        w = (writer.const(weight, fp) if wkind == 'k'
+             else entry(plan.weights, weight, fp, 'w'))
+        return writer.op('mul', fp, w, b, hint='p')
+
+    def module_tables(self):
+        """Numbers this instruction reads by name from the generated file,
+        `{name: (datatype, values)}` -- the generator defines them
+        (`Generator.module_table_definitions`)."""
+        return dict(getattr(self, '_module_tables', {}))
 
     def _diagonal_term(self, writer, row, b, diagonal):
         """`A[i,i] B[i,j]` for the lane holding row `i`, from the numbers.
@@ -703,11 +1014,14 @@ class MultilinearInstruction(ComputeInstruction):
         loopmap = {}
 
         diagonal = self._identity_reduction()
+        ell = self._ell_plan() if diagonal is None else None
+        self._module_tables = dict(ell.tables) if ell is not None else {}
         for i, (dimmin, dimmax) in enumerate(self._ks):
             loopmap[f'k{i}'] = len(loopstack)
-            if diagonal is not None:
+            if diagonal is not None or ell is not None:
                 # Collapsed: the one live step of a lane is its own row,
-                # which the body takes from the lead index.
+                # which the body takes from the lead index -- or gathered,
+                # each step a column of the lane's own (`_ell_plan`).
                 continue
             if -i-1 not in self._lead_dims:
                 step = 1
@@ -764,6 +1078,14 @@ class MultilinearInstruction(ComputeInstruction):
             if diagonal is not None:
                 # The reduction step a lane reads is the row it holds.
                 steps, kslot = [varlist[loopmap['n0']]], 'k0'
+            elif ell is not None:
+                # The slot's steps, each a column and a weight per lane.
+                lead = varlist[loopmap['n0']]
+                if not isinstance(lead.nonlead(), (int, np.integer)):
+                    raise InternalError(
+                        f'{self}: a gathered product over a slot the kernel '
+                        f'computes; its steps are the slot\'s own')
+                steps, kslot = ell.steps.get(int(lead.nonlead()), []), 'k0'
             else:
                 steps, kslot = self._k_group(varlist, loopmap)
             # A vector body folds its last factor in as one `fma` op rather
@@ -781,11 +1103,18 @@ class MultilinearInstruction(ComputeInstruction):
             # reduction, hoisted out of the group: `B[k,n] .. B[k+V-1,n]` are
             # adjacent, so the `V` steps below take their operand from
             # components of a single load instead of from `V` loads.
-            packs = ({} if diagonal is not None else
+            packs = ({} if diagonal is not None or ell is not None else
                      self._k_packs(writer, varlist, loopmap, kslot, len(steps)))
 
             prods = []
             for c, kval in enumerate(steps):
+                if ell is not None:
+                    term = self._ell_term(writer, ell, lead, kval, varlist,
+                                          loopmap)
+                    if term is None:
+                        return
+                    prods.append(term)
+                    continue
                 idxs = [[add_offset(varlist[loopmap[nk]]
                                     if nk != kslot else kval,
                                     self._eff_offset(i, j))
@@ -1900,8 +2229,11 @@ class MultilinearInstruction(ComputeInstruction):
         # lane, and a different one in each: a matrix path issues every step
         # on every lane and would compute the dense product.  The nest takes
         # the one product a lane needs and reads nothing across the lanes
-        # (`_identity_reduction`).
-        if self._identity_reduction() is not None:
+        # (`_identity_reduction`).  A first operand with few nonzeros per row
+        # is the same case with more than one live step: the nest gathers
+        # them (`_ell_plan`).
+        if (self._identity_reduction() is not None
+                or self._ell_plan() is not None):
             return False
 
         if plan[0].strategy is not Strategy.GENERIC:

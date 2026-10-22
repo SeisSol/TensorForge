@@ -221,6 +221,9 @@ template <int Row> void fmacdpp16(float2 &c, float2 a, float2 b);
 template <std::size_t Block, std::size_t Subblock, std::size_t Lane, typename T>
 T broadcast(T value);
 
+// Lane `lane` of every `Block` lanes, `lane` a value of each lane's own.
+template <std::size_t Block, typename T> T gather(T value, int lane);
+
 // The row, or an address formed from it, read as the wave's where every lane
 // of `Lanes` holds it alike.  Explicit `T` for the row, whose HIP spelling is
 // a coordinate proxy rather than an integer.

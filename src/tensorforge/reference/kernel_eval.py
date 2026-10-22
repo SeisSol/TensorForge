@@ -586,7 +586,11 @@ def _py(expr: str) -> str:
     """Translate a C expression into a Python one."""
     e = expr
     e = re.sub(r'\b(\d+)_i32\b', r'\1', e)
-    e = re.sub(r'(\d)[fF]\b', r'\1', e)
+    # A float literal's suffix, and only a literal's: a name may end in a
+    # digit and an `f` as well -- a table named by its numbers' digest,
+    # `tf_ellw_..c0f` -- which a rule on the last digit alone cut short.
+    e = re.sub(r'(?<![\w.])(\d+(?:\.\d*)?(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?)'
+               r'[fF]\b', r'\1', e)
     # An integer suffix says which type the literal has, which Python's
     # integers do not care about: `0u` is the `0` a `size_t` select holds,
     # and `0x0000ffffu` the mask of a warp barrier.
@@ -619,6 +623,12 @@ def _py(expr: str) -> str:
     e = re.sub(r'\btensorforge::broadcast\s*<\s*(\d+)\s*,\s*(\d+)\s*,'
                r'\s*(\d+)\s*>\s*\(\s*(\w+)\s*\)',
                r'BROADCAST("\4", \1, \2, \3)', e)
+    # `gather<Block>(v, L)`, the same with `L` a value of each lane's own
+    # (`MultilinearInstruction._ell_plan`).  `L` may hold one level of
+    # parentheses -- a table read the emitter inlined.
+    e = re.sub(r'\btensorforge::gather\s*<\s*(\d+)\s*>\s*\(\s*(\w+)\s*,'
+               r'\s*([^()]*(?:\([^()]*\)[^()]*)*)\)',
+               r'GATHER("\2", \1, \3)', e)
     # `tensorforge::fma(a, b, c)`, the vector FMA CUDA's lexic names so that
     # sm_100 can pair it.  The same `a * b + c` the infix spelling computes.
     e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
@@ -803,6 +813,7 @@ class Interp:
         self.lockstep: Optional['Lockstep'] = None
         self.env['READLANE'] = self._readlane
         self.env['BROADCAST'] = self._broadcast
+        self.env['GATHER'] = self._gather
         self.env['WAVE_UNIFORM'] = self._wave_uniform
         self.env['PICK'] = _pick
         self.env['VEC'] = lambda *xs: Vec(xs)
@@ -902,6 +913,13 @@ class Interp:
         src = (me // block) * block + ((subblock * lane + me % subblock)
                                        % block)
         return self._readlane(name, src)
+
+    def _gather(self, name: str, block: int, lane):
+        """`tensorforge::gather<Block>(name, lane)` for this lane: lane
+        `lane` of this lane's own run of `Block` lanes, as `__shfl_sync`
+        with a width resolves it (`include/tensorforge_device/cuda.h`)."""
+        block, me = int(block), self.env['threadIdx'].x
+        return self._readlane(name, (me // block) * block + int(lane) % block)
 
     def ev(self, expr: str):
         self.budget -= 1
@@ -1243,6 +1261,32 @@ def parse(src: str) -> List:
     return block()
 
 
+def _kernel_start(src: str) -> int:
+    """Where the kernel's body opens: the first brace after `__global__`.
+
+    Not the file's first brace -- the generator writes what the kernel
+    reads by name ahead of it, a parameter table's struct or a table of
+    numbers at namespace scope, and either has braces of its own."""
+    at = src.find('__global__')
+    return src.index('{', max(at, 0))
+
+
+#: A table of numbers at namespace scope, as `Lexic.module_constant` spells
+#: one on CUDA and HIP or anywhere else.
+_MODULE_ARRAY = re.compile(
+    r'(?:__device__\s+)?(?:const|constexpr)\s+[\w:]+\s+(?P<name>\w+)\s*'
+    r'\[\s*\d+\s*\]\s*=\s*\{(?P<values>[^}]*)\}\s*;')
+
+
+def _number(text: str):
+    """A literal of such a table: an integer, or a float with its suffix."""
+    text = text.strip()
+    try:
+        return int(text)
+    except ValueError:
+        return float(text.rstrip('fF'))
+
+
 def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
               mults: int = 1, mult: int = 0) -> Dict[str, object]:
     """The names a kernel body starts with, for one lane.
@@ -1266,10 +1310,15 @@ def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
         env.setdefault(name, PtrTable(mem, name))
     # An operand passed by value -- a scalar the whole batch shares -- is the
     # number its one slot holds.
-    head = src[:src.index('{')] if '{' in src else ''
+    head = src[:_kernel_start(src)] if '{' in src else ''
     for name in re.findall(r'[(,]\s*(?:const\s+)?(?:float|double|__float128)'
                            r'\s+(m\d+)\s*(?=[,)])', head):
         env.setdefault(name, mem.read(name, 0))
+    # Numbers the file defines ahead of the kernel, at namespace scope
+    # (`Generator.module_table_definitions`): a list the lanes index.
+    for m in _MODULE_ARRAY.finditer(src[:_kernel_start(src)]):
+        env.setdefault(m.group('name'), [_number(v) for v in
+                                         m.group('values').split(',')])
     for name in re.findall(r'\b(m\d+)\b', src):
         env.setdefault(name, Ptr(mem, name))
     for name in re.findall(r'\b(\w*_extraOffset)\b', src):
@@ -1501,7 +1550,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     other shares read as uninitialized shared memory.  The lanes of each
     multiplication read across their own multiplication only.
     """
-    body = src[src.index('{'):]
+    body = src[_kernel_start(src):]
     mem = Slot(seed)
     if preset:
         _fill(mem, preset)
@@ -1549,7 +1598,7 @@ def evaluate(src: str, tid: int = 0, seed: int = 0,
     test: if the result does not move when a term's operand is zeroed, the
     kernel is not using that term.
     """
-    body = src[src.index('{'):]
+    body = src[_kernel_start(src):]
     mem = Slot(seed)
     if preset:
         _fill(mem, preset)

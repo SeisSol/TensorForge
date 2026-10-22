@@ -282,6 +282,20 @@ __device__ __forceinline__ T broadcast(T value) {
   return value;
 }
 
+/// Lane `lane` of every `Block` consecutive lanes, read by each lane of them
+/// with a `lane` of its own: a gather, where `broadcast` hands one lane's
+/// value to all.  `ds_bpermute` goes through the LDS crossbar and takes any
+/// pattern; DPP and the permlanes take only fixed ones.
+template <std::size_t Block, typename T>
+__device__ __forceinline__ T gather(T value, int lane) {
+  static_assert(Block <= WaveSize, "a gather reaches the lanes of one wave");
+  if constexpr (Block == WaveSize) {
+    return bpermute(value, lane);
+  } else {
+    return bpermute(value, (__lane_id() / Block) * Block + lane);
+  }
+}
+
 /*
 #ifdef __gfx950__
 template <typename T>

@@ -1979,7 +1979,8 @@ class Generator:
     # Ahead of the signature that names them, and ahead of the launcher that
     # builds one: both sit in this translation unit, and the kernel comes
     # first in it.
-    definitions = self.param_table_types() + self.packing_table_definitions()
+    definitions = (self.param_table_types() + self.packing_table_definitions()
+                   + self.module_table_definitions())
     for definition in definitions:
       writer(definition)
     if definitions:
@@ -3836,6 +3837,37 @@ class Generator:
             for name, obj in self._packing_tables(
                 self._scopes.get_global_scope().values())
             if not getattr(obj, 'packing_table_param', True)]
+
+  def module_table_definitions(self) -> List[str]:
+    """The numbers instructions read by name at namespace scope
+    (`module_tables`), as definitions, for whoever writes the file.
+
+    Each guarded by its name.  yateto appends every kernel of a file to one
+    translation unit, and the names say which numbers they hold
+    (`multilinear._module_table_name`): a second kernel with the same numbers
+    finds them defined, and one with other numbers names others.
+    """
+    tables = {}
+
+    def walk(instrs):
+      for instr in instrs:
+        if hasattr(instr, 'module_tables'):
+          tables.update(instr.module_tables())
+        for region in instr.regions():
+          walk(region)
+    for section in self._sections:
+      walk(section.stream)
+    lexic = self._context.target.lexic
+    definitions = []
+    for name in sorted(tables):
+      datatype, values = tables[name]
+      numbers = (list(values) if datatype is Datatype.I32
+                 else [datatype.literal(v) for v in values])
+      guard = f'TENSORFORGE_TABLE_{name.upper()}'
+      definitions.append(
+          f'#ifndef {guard}\n#define {guard}\n'
+          f'{lexic.module_constant(str(datatype), name, numbers)}\n#endif')
+    return definitions
 
   def _write_kernel_meta_data(self, writer):
     writer(f'// generated with TensorForge. Version: {get_version()}')

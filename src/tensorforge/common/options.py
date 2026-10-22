@@ -1140,6 +1140,34 @@ declare('identity_reduction',
             'issued one step per row.  Ones are the second operand as it is, '
             'ones and zeros a select of it.  Needs `skip_known_zeros`.')
 
+declare('ell_gather',
+        rule=lambda target: target.prefs.ell_gather,
+        parse=parse_int,
+        env='TF_ELL_GATHER',
+        doc='Most nonzeros a row of a batch-constant first operand may have '
+            'for its product to be gathered rather than broadcast; 0 turns '
+            'it off.  The lanes run along the rows of `A` in `C = A B`, so '
+            'the usual nest issues every step of the reduction on every lane '
+            'and only the lanes with a nonzero there need it.  Gathered, a '
+            'lane takes its own nonzeros, in sliced ELL: each slot of lanes '
+            'as many steps as its fullest row, and a step reads `B` at a '
+            'row of its own in each lane -- from memory at a per-lane '
+            'address, or from a register image across the lanes '
+            '(`__shfl_sync`, `ds_bpermute`).  Columns and weights the lanes '
+            'do not share come from a table in the generated file.  Taken '
+            'only where it halves the steps the reduction takes with its '
+            'known zeros left out -- all of them where it rolls.\n'
+            '64 on NVIDIA, as many as `k_unroll_max` unrolls, where a gather '
+            'is the instruction a broadcast is (a shared-memory read, '
+            '`SHFL.IDX`): at order 8 on sm_120 `neighboringFlux` and '
+            '`localFlux` ran in less than half the time once `rT` and `fMrT`, '
+            '20 and 36 nonzeros a row against a rolled reduction of 120, were '
+            'gathered.  3 elsewhere: on AMD a gather from a register image is a '
+            '`ds_bpermute` against a broadcast fused into the FMA, and gathered '
+            'at 8 or 32 the same kernels were 3 to 5 % faster at order 4 and 6 '
+            'to 10 % slower at order 8 on gfx1150; Intel is unmeasured.  '
+            'Needs `skip_known_zeros`.')
+
 declare('skip_known_zeros',
         default=True,
         parse=parse_bool,
