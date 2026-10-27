@@ -236,6 +236,9 @@ def _digest(unit: BuildUnit, sources: Dict[str, str], driver: str) -> str:
         h.update(name.encode())
         h.update(sources[name].encode())
     h.update(driver.encode())
+    # The runtime the sources include, which they name and do not hold: keyed
+    # on the text alone, a corrected `hip.h` builds nothing new.
+    h.update(toolchain.runtime_digest(str(INCLUDE)).encode())
     return h.hexdigest()[:16]
 
 

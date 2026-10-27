@@ -204,6 +204,30 @@ def include_dir() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'include')
 
 
+def runtime_digest(root: Optional[str] = None) -> str:
+    """A digest of the device runtime a generated kernel is compiled with:
+    every file under `root` (`include_dir` by default), by path and content.
+
+    For whoever caches a build by what went into it.  The generated source
+    names the runtime's functions and does not hold them, so a cache keyed on
+    that source alone hands back a binary compiled against the runtime as it
+    was -- the test harness did exactly that after `transpose16x16b32` was
+    corrected in `hip.h`, and every product on the sixteen-wide tile kept
+    failing on an MI300A with the fix in place.
+    """
+    import hashlib
+    root = root or include_dir()
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in sorted(os.walk(root)):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = os.path.join(dirpath, name)
+            h.update(os.path.relpath(path, root).encode())
+            with open(path, 'rb') as f:
+                h.update(f.read())
+    return h.hexdigest()[:16]
+
+
 @dataclass
 class Toolchain:
     """Compiler paths a caller names, per vendor.

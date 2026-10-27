@@ -192,6 +192,8 @@ def _cache_hash(b: BuildInputs) -> str:
         h.update(" ".join(_sycl_aot_flags(b.target.arch)).encode())
     for part in (b.includes_src, b.kernel_src, b.header_src, b.launcher_src, b.driver_src):
         h.update(part.encode())
+    # and the runtime those sources include, which they name and do not hold
+    h.update(toolchain.runtime_digest(str(b.tensorforge_include)).encode())
     return h.hexdigest()[:16]
 
 
@@ -199,8 +201,9 @@ def build(b: BuildInputs, cache_root: Path) -> Path:
     """Compile the driver; return the path to the executable.
 
     Uses a content-hash cache so repeated runs of the same case skip
-    compilation. The cache key covers kernel/launcher/driver text and
-    the target, so any generator change invalidates cleanly.
+    compilation. The cache key covers kernel/launcher/driver text, the
+    device runtime they include and the target, so any generator or runtime
+    change invalidates cleanly.
     """
     key = _cache_hash(b)
     out_dir = cache_root / key
