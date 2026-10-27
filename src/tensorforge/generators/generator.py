@@ -129,6 +129,14 @@ def _explicit_simd_lowering(context) -> bool:
   return context.target.explicit_simd
 
 
+#: What a build decides about how an operand is stored, and what the host
+#: reads to lay it out: the order and its siblings on `Tensor`.  The builds of
+#: one list share its tensors, so a build taken over states them again
+#: (`Generator._restore_storage`).
+_STORAGE_FIELDS = ('storage_parts', 'storage_planar', 'storage_order',
+                   'simt_interleave', 'slot_major', 'packing',
+                   'packing_table', 'packing_table_param')
+
 #: Work-items a block holds under the explicit-vector lowering when it
 #: preloads operators into shared memory.  Measured, not a hardware
 #: constant: see `RegmaxBlockPolicy.get_num_mults_per_block`.
@@ -458,6 +466,9 @@ class Generator:
     #: The generator this one handed its build to (`built`), or None where
     #: it builds its own kernel.
     self._built: Optional['Generator'] = None
+    #: How this build left its operands stored (`_stored_operands`), once it
+    #: is built.
+    self._storage: Dict[int, tuple] = {}
     self._context: Context = context
     #: Switches the frontend's caller set on this kernel, or None from a
     #: frontend that has no attribute channel.  Only the flag mask reads
@@ -747,7 +758,9 @@ class Generator:
     self._deduce_num_threads()
 
     with self._lane_mapping():
-      return self._generate_bound()
+      built = self._generate_bound()
+    self._storage = self._stored_operands()
+    return built
 
   @staticmethod
   def trial(descrs, context: Context,
@@ -897,12 +910,46 @@ class Generator:
     return False
 
   def _take_over(self, other: 'Generator') -> bool:
-    """Hand the build to `other`, built, with the operands named as its
-    build named them (`_keep_written_out`), and register its name."""
+    """Hand the build to `other`, built, with the operands named and stored
+    as its build named and stored them (`_keep_written_out`,
+    `_restore_storage`), and register its name."""
     self._hand_over(other)
     other._name_operands(other._descr_list)
+    other._restore_storage()
     self._announce()
     return True
+
+  def _stored_operands(self) -> Dict[int, tuple]:
+    """Each operand of this build with its `_STORAGE_FIELDS` as the build
+    left them -- for a merged run's stand-in, its members too, which are the
+    tensors the host lays out."""
+    stored = {}
+    for matrix in self._matrix_list or ():
+      for tensor in (matrix,) + tuple(getattr(matrix, 'variant_members', ())):
+        stored[id(tensor)] = (tensor, tuple(getattr(tensor, field)
+                                            for field in _STORAGE_FIELDS))
+    return stored
+
+  def _restore_storage(self) -> None:
+    """Store the operands again as this build stored them.
+
+    The probes of the merge decision share the caller's tensors, and the one
+    built last states its storage on them.  The list written out is built
+    after the merged probe, and packs each member of a run by its own numbers
+    where the merged build packed them alike (`pack_union`): taking the
+    merged probe over then left a kernel reading every member through one
+    packing and a host laying each out by another.  SeisSol's order-6
+    `localFluxAll` on gfx942 at 32 lanes, without matrix cores, came out
+    wrong in every value that way -- face operators of 196 and 616 slots read
+    as 812.
+    """
+    for tensor, state in self._storage.values():
+      # Cleared first, as `_offer_packing` replaces one: the order's setter
+      # checks it against the box.
+      tensor.storage_order = None
+      tensor.packing = None
+      for field, value in zip(_STORAGE_FIELDS, state):
+        setattr(tensor, field, value)
 
   def _hand_over(self, other: 'Generator') -> None:
     """Make `other` the generator that builds this one's kernel (`built`).

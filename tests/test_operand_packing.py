@@ -146,6 +146,46 @@ def test_members_of_different_shapes_pack_to_nothing():
                        _tensor(np.ones((9, 2)))], "rows") is None
 
 
+def _faces(rows=24, cols=7, count=4):
+    """`Q += A_f I` for operators whose numbers end at a row of their own: a
+    run the merge rolls into one loop over a stand-in, and each member packed
+    alone a different size."""
+    i = SubTensor(Tensor([cols, 6], Addressing.STRIDED,
+                         BoundingBox([0, 0], [cols, 6]), alias="I",
+                         datatype=Datatype.F32))
+    q = SubTensor(Tensor([rows, 6], Addressing.STRIDED,
+                         BoundingBox([0, 0], [rows, 6]), alias="Q",
+                         datatype=Datatype.F32))
+    faces = [SubTensor(_tensor(_band(rows, cols, runs=[(0, 2 + 6 * f)] * cols,
+                                     seed=f), alias=f"A{f}"))
+             for f in range(count)]
+    return ([GemmDescr(False, False, a, i, q, alpha=1.0, beta=1.0)
+             for a in faces], [a.tensor for a in faces])
+
+
+def test_a_merged_build_taken_over_stores_its_members_as_it_reads_them():
+    """The merge decision builds the list merged and then written out, over
+    the same tensors, and may take the merged build over after all
+    (`Generator._merge_by_written_out`).  Written out, each member is packed
+    by its own numbers; the merged kernel reads every one through the union,
+    so taking it over states the union on them again.  Without that the
+    host laid them out apiece: SeisSol's order-6 `localFluxAll` on gfx942
+    (32 lanes, no matrix cores) came out wrong in every value."""
+    descrs, members = _faces()
+    gen = Generator(descrs, Context(arch="sm_120", backend="cuda",
+                                    fp_type=Datatype.F32,
+                                    options=Options(pack_operands="runs")))
+    merged = gen._sibling(merge_within=Generator.EVERY_RUN)
+    merged.generate()
+    alike = [t.storage_elements() for t in members]
+    assert len(set(alike)) == 1 and members[0].packing is not None
+    gen._sibling().generate()
+    assert len({t.storage_elements() for t in members}) == len(members)
+    gen._take_over(merged)
+    assert [t.storage_elements() for t in members] == alike
+    assert all(t.packing == members[0].packing for t in members)
+
+
 # ---------------------------------------------------------------------------
 # A lane that holds several rows
 # ---------------------------------------------------------------------------
