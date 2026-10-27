@@ -8,7 +8,8 @@
 An interpreter for the subset of CUDA the generator emits: declarations,
 assignments, `if`/`else`, counted `for`, ternaries, array and pointer
 indexing, short vectors (`Vec`), the `cp.async` transfer and the bulk copy,
-atomic accumulation and the cross-lane reads.  `evaluate_wave` runs the lanes of one
+atomic accumulation, the cross-lane reads and the fold over the lanes
+(`tensorforge::reduction`).  `evaluate_wave` runs the lanes of one
 multiplication together over one memory, statement by statement
 (`Lockstep`), which is what a cooperatively staged operand, an atomic and a
 `readlane` need; `evaluate` runs one lane on its own.
@@ -568,6 +569,49 @@ def _wave_reads(e: str) -> str:
         at = j
 
 
+_REDUCTION = re.compile(
+    r'\btensorforge::reduction\s*<\s*tensorforge::ReductionOperation\s*<'
+    r'[^<>]*,\s*tensorforge::Operation::(\w+)\s*>\s*,\s*(\d+)\s*,\s*(\d+)'
+    r'\s*(?:,[^<>()]*)?>\s*\(')
+
+
+def _fold_reads(e: str) -> str:
+    """Every `tensorforge::reduction<ReductionOperation<T, Op>, Block,
+    Subblock, T>(v)` of `e` as `REDUCE("Op", Block, Subblock, key)`, with
+    `key` naming the text of `v` as `_wave_reads` does."""
+    out, at = [], 0
+    while True:
+        m = _REDUCTION.search(e, at)
+        if m is None:
+            out.append(e[at:])
+            return ''.join(out)
+        depth, j = 1, m.end()
+        while j < len(e) and depth:
+            depth += (e[j] == '(') - (e[j] == ')')
+            j += 1
+        text = e[m.end():j - 1]
+        key = _WAVE_KEYS.get(text)
+        if key is None:
+            key = _WAVE_KEYS[text] = len(_WAVE_TEXTS)
+            _WAVE_TEXTS.append(text)
+        out.append(f'{e[at:m.start()]}REDUCE("{m.group(1)}", {m.group(2)}, '
+                   f'{m.group(3)}, {key})')
+        at = j
+
+
+#: What `tensorforge::ReductionOperation<T, Op>::applyOperation` does, by
+#: the operation's name (`include/tensorforge_device/base.h`).
+_FOLDS = {
+    'Add': lambda a, b: a + b,
+    'Mul': lambda a, b: a * b,
+    'Min': lambda a, b: b if b < a else a,
+    'Max': lambda a, b: b if a < b else a,
+    'And': lambda a, b: a & b,
+    'Or': lambda a, b: a | b,
+    'Xor': lambda a, b: a ^ b,
+}
+
+
 def _pick(count, mult, *values):
     """`tensorforge::pick<count>(mult, values...)`."""
     if len(values) != int(count) or not 0 <= int(mult) < len(values):
@@ -605,6 +649,9 @@ def _py(expr: str) -> str:
     # the rewrites below would reach into a string, and evaluated by
     # `Interp._wave_uniform` in every lane of the wave: they have to agree.
     e = _wave_reads(e)
+    # `reduction<..., Block, Subblock, T>(v)`, the all-reduce over the lanes
+    # of a block (`Interp._reduce`): its text by key, as above.
+    e = _fold_reads(e)
     # `pick<G>(m, a, b, ...)`: multiplication `m`'s value among `G`.
     e = re.sub(r'\btensorforge::pick\s*<\s*(\d+)\s*>\s*\(', r'PICK(\1, ', e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
@@ -815,6 +862,7 @@ class Interp:
         self.env['BROADCAST'] = self._broadcast
         self.env['GATHER'] = self._gather
         self.env['WAVE_UNIFORM'] = self._wave_uniform
+        self.env['REDUCE'] = self._reduce
         self.env['PICK'] = _pick
         self.env['VEC'] = lambda *xs: Vec(xs)
         self.env['FMA'] = lambda a, b, c: a * b + c
@@ -828,12 +876,21 @@ class Interp:
         self.env['fmax'] = self.env['max']
         self.env['fmin'] = self.env['min']
         import math
-        for name, fn in (('sqrt', lambda x: abs(x) ** 0.5), ('exp', math.exp),
+        def exp(x):
+            # Past the largest double, what `std::exp` gives: infinity.
+            try:
+                return math.exp(x)
+            except OverflowError:
+                return math.inf
+        for name, fn in (('sqrt', lambda x: abs(x) ** 0.5), ('exp', exp),
                          ('log', lambda x: math.log(abs(x) + 1e-9)),
                          ('pow', lambda a, b: abs(a) ** b),
                          ('tanh', math.tanh), ('sin', math.sin),
                          ('cos', math.cos), ('erf', math.erf)):
             self.env[name] = fn
+        # The neutral element a max- or min-fold starts from (`<cmath>`'s
+        # macro).
+        self.env['INFINITY'] = math.inf
 
     def _readlane(self, name: str, lane):
         """Lane `lane`'s copy of `name`.
@@ -858,6 +915,54 @@ class Interp:
             raise Abort(f'readlane({name!r}, {lane}): lane {lane} never '
                         f'defined it -- it was masked off there')
         return peer.env[name]
+
+    def _reduce(self, op: str, block: int, subblock: int, key: int):
+        """`tensorforge::reduction<ReductionOperation<T, op>, block,
+        subblock, T>(text)`, the text `key` names, for this lane: the fold
+        of every `subblock`-th lane of this lane's run of `block` lanes, as
+        `include/tensorforge_device/cuda.h` computes it -- a butterfly that
+        combines with the lane at distance `block / 2` first, down to
+        `subblock`, in that order, which a floating-point sum depends on;
+        a vote for a flag.  Every lane of the run has to take part: the
+        hardware's exchange reads a register of each.  Once per statement
+        and run of lanes (`Lockstep.wave_cache`)."""
+        fold = _FOLDS.get(op)
+        run = self.lockstep
+        if fold is None:
+            raise Abort(f'reduction over {op!r}')
+        if run is None:
+            raise Abort(f'reduction<{op}> outside a lockstep run')
+        block, subblock = int(block), int(subblock)
+        me = self.env['threadIdx']
+        group = (me.y, me.z, me.x // block)
+        cached = run.wave_cache.get(('reduce', group, block, subblock, key))
+        if cached is None:
+            text = _WAVE_TEXTS[int(key)]
+            values = {}
+            for it in run.current:
+                t = it.env['threadIdx']
+                if (t.y, t.z, t.x // block) == group:
+                    values[t.x] = it.ev(text)
+            if len(values) != block:
+                raise Abort(f'reduction<{op}, {block}> over {len(values)} '
+                            f'lanes taking part')
+            if all(isinstance(v, bool) for v in values.values()):
+                if op not in ('And', 'Or'):
+                    raise Abort(f'reduction<{op}> of flags')
+                cached = {}
+                for x in values:
+                    mine = [values[y] for y in values
+                            if y % subblock == x % subblock]
+                    cached[x] = all(mine) if op == 'And' else any(mine)
+            else:
+                cached = dict(values)
+                step = block // 2
+                while step >= subblock:
+                    cached = {x: fold(v, cached[x ^ step])
+                              for x, v in cached.items()}
+                    step //= 2
+            run.wave_cache[('reduce', group, block, subblock, key)] = cached
+        return cached[me.x]
 
     def _wave_uniform(self, lanes: int, key: int):
         """`tensorforge::wave_uniform<lanes>(text)`, the text `key` names:
