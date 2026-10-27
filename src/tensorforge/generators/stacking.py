@@ -153,6 +153,14 @@ class _Stacker:
     #: The stack, on the twin: its last axis is `k` elements of the batch,
     #: each in memory of its own (`factor`).
     twin.stack = self.k
+    # Which way the data flows, as the tensor says now.  The descriptions
+    # rebuilt over the twins set what their constructors set -- a
+    # destination is a sink -- and a direction given after construction is
+    # not theirs to know: `add=True` promotes its destination to read *and*
+    # written that way, and a twin that was only a sink went unfilled while
+    # the kernel accumulated onto it (NaN on sm_120 and gfx1150 alike).
+    if t.direction is not None:
+        twin.set_data_flow_direction(t.direction)
     self.tensors[id(t)] = twin
     return twin
 
