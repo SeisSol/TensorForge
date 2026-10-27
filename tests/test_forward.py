@@ -722,6 +722,40 @@ def test_a_number_read_as_a_truth_value_is_whether_it_is_zero():
     assert truth.op == 'ne' and truth.args[0] is v
 
 
+def test_a_register_of_numbers_read_as_truth_values_is_whether_they_are_zero():
+    """Comparisons computed into a register image of numbers, stored into a
+    buffer of truth values and read back by the lane that stored each:
+    the load reads the register, as whether its number is not zero."""
+    t = Body()
+    b = t.b
+    r = t.registers('r0')
+    s = b.alloc(Datatype.BOOL, (LANES * COLS,), MemSpace.SHARED, hint='s',
+                extern='s0', arena='shrMem')
+    x = b.load(t.p, t.lane)
+    with b.for_(0, COLS, 1, unroll=True) as hop:
+        b.store(r, b.op('lt', REAL, x, 1.0, hint='e'), hop.induction)
+    with b.for_(0, COLS, 1, unroll=True) as hop:
+        j = hop.induction
+        at = b.op('add', INDEX, t.lane, b.op('mul', INDEX, j, LANES),
+                  hint='a')
+        b.store(s, b.load(r, j), at)
+    with b.if_(t.valid):
+        with b.for_(0, COLS, 1, unroll=True) as hop:
+            j = hop.induction
+            at = b.op('add', INDEX, t.lane, b.op('mul', INDEX, j, LANES),
+                      hint='a')
+            pick = b.op('select', REAL, b.load(s, at), 1.0, 0.0, hint='pick')
+            b.store(t.q, pick, t.element(j))
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED, s)
+    defs = {v.id: x for x in walk_stmts(out) for v in x.target}
+    picked = next(x for x in walk_stmts(out) if x.op == 'select')
+    truth = defs[picked.args[0].id]
+    assert truth.op == 'ne'
+    held = defs[truth.args[0].id]
+    assert held.op == Op.LOAD and held.args[0] is r
+
+
 def _reload(t, between=None, lane=None, guard=None):
     """`r0[j] = q[e(j)]` and `p = r0[0]`, then `between`, then `r1[j] =
     q[e(j)]` and `p = r1[1]`: the same elements loaded twice by the same

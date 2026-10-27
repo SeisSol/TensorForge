@@ -12,6 +12,7 @@ hours, and which is what the analysis passes are checked against.
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import warnings
 
@@ -383,6 +384,18 @@ def test_a_merged_run_carries_the_temporaries_it_reads_back():
                              'edge, though its body reads its integrals back')
 
 
+@functools.lru_cache(maxsize=None)
+def _damage_step(config: str, arch: str) -> str:
+    """The damage step's source at `config` on `arch`, built once."""
+    system = 'damage-nonlinearck'
+    gen = Generator(_read(system, f'{system}-{config}', 'gpu_damageStep'),
+                    Context(arch=arch, backend='hip', fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    return gen.get_kernel()
+
+
 def test_a_value_without_axes_is_read_where_it_was_computed():
     """The damage step at order 2 in single hands values without axes on
     through shared memory -- the products of the material parameters and
@@ -393,12 +406,16 @@ def test_a_value_without_axes_is_read_where_it_was_computed():
     truth value, as whether it is not zero (`pir.forward`)."""
     import re
 
-    system = 'damage-nonlinearck'
-    gen = Generator(_read(system, f'{system}-o2-s', 'gpu_damageStep'),
-                    Context(arch='gfx942', backend='hip', fp_type=Datatype.F32))
-    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        gen.generate()
-    reads = re.findall(r'^\s*(\w+) v\d+_\w+ = s\d+\[0\];', gen.get_kernel(),
-                       re.M)
+    reads = re.findall(r'^\s*(\w+) v\d+_\w+ = s\d+\[0\];',
+                       _damage_step('o2-s', 'gfx942'), re.M)
     assert not reads, reads
+
+
+def test_a_comparison_is_read_where_it_was_computed():
+    """The damage step at order 2 in single compares into thirteen
+    temporaries, row by row, and selects by them: stored into a buffer of
+    truth values from the register images the comparisons computed into,
+    and read back by the lane that stored each row.  Each lane reads
+    whether the number its register holds is not zero (`pir.forward`), and
+    no truth value goes through shared memory."""
+    assert 'bool * __restrict__' not in _damage_step('o2-s', 'gfx942')

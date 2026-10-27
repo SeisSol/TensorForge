@@ -22,7 +22,8 @@ all of them -- and its value is
 * what a load read from a register that holds it still where the load
   stands, the load reads that register -- at an index the hops of the loops
   around the load give, of loops that are unrolled, so that the compiler
-  names the register (`_fit`).
+  names the register (`_fit`); read as a truth value out of a buffer of
+  them, whether the number the register holds is not zero.
 
 The last holds as well where the lanes loaded the element before and found
 the same write there: the load reads the register that earlier load's value
@@ -49,8 +50,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from .core import (BOOL, Access, BufferType, Effect, MemSpace, Op, Stmt,
-                   Value, walk_stmts)
+from .core import (BOOL, Access, BufferType, Effect, MemSpace, Op,
+                   ScalarType, Stmt, Value, walk_stmts)
 from .demand import Demand
 from .flow import Flow, TooLarge
 from .passes import _zero_like, dce, substitute
@@ -368,7 +369,7 @@ class _Forward:
         return True
 
     def _value(self, s: Stmt, v: Value) -> bool:
-        truth = v.type != s.target[0].type and _truth_of(s, v)
+        truth = v.type != s.target[0].type and _truth_of(s, v.type)
         if (v.type != s.target[0].type and not truth) or not self._stands(v, s):
             return False
         b = self.scratch()
@@ -382,7 +383,7 @@ class _Forward:
         return True
 
     def _register(self, s: Stmt, base: int, points, taken) -> bool:
-        read = self._register_read(s, base, points)
+        read = self._register_read(s, base, points, truth=True)
         if read is None:
             return False
         lead, slot, image = read
@@ -393,6 +394,18 @@ class _Forward:
             # the load gives there: the register, in every lane.
             predicate = None
             attrs = tuple((k, v) for k, v in attrs if k != 'other')
+        held = ScalarType(image.type.elem)
+        if held != s.target[0].type:
+            # A number the store made a truth value: the register read as
+            # the number it holds, and whether that is not zero.
+            if predicate is not None:
+                return False
+            b = self.scratch()
+            v = b.load(image, slot, type_=held, hint='fwd')
+            self.mapped[s.target[0].id] = b.op(
+                'ne', BOOL, v, b.const(_zero_like(held), held), hint='fwd')
+            self.rebuilt[id(s)] = lead + list(b.finish())
+            return True
         self.rebuilt[id(s)] = lead + [replace(
             s, args=(image, slot),
             accesses=(Access(Effect.READ, MemSpace.REGISTER, image),),
@@ -504,15 +517,17 @@ class _Forward:
             self._conds = found
         return self._conds
 
-    def _register_read(self, s: Stmt, base: int, points):
+    def _register_read(self, s: Stmt, base: int, points, truth=False):
         """`(statements, index, image)` reading the register of `base` that
-        `points` give at the hops of `s`, or None."""
+        `points` give at the hops of `s`, or None.  An image of numbers, for
+        a load of truth values that a store made of them, with `truth`."""
         alloc = self.allocs.get(base)
         if alloc is None or not self.where.dominates(alloc, s):
             return None
         image = alloc.target[0]
         if getattr(s.target[0].type, 'base', None) != getattr(
-                image.type, 'elem', None):
+                image.type, 'elem', None) and not (
+                    truth and _truth_of(s, ScalarType(image.type.elem))):
             return None
         if any(len(addr) != 1 for _, addr in points):
             return None
@@ -643,11 +658,12 @@ def _slot(b, fit, inductions: Dict[int, Value]):
     return out
 
 
-def _truth_of(s: Stmt, v: Value) -> bool:
-    """Does the load `s` read the number `v` as a truth value: does it read a
-    buffer of truth values, which a store of `v` holds as `v != 0`?"""
+def _truth_of(s: Stmt, stored) -> bool:
+    """Does the load `s` read a number of type `stored` as a truth value:
+    does it read a buffer of truth values, which a store of the number
+    holds as whether it is not zero?"""
     base = s.accesses[0].base if len(s.accesses) == 1 else None
     t = getattr(base, 'type', None)
     return (s.target[0].type == BOOL and isinstance(t, BufferType)
-            and t.elem == BOOL.base and _zero_like(v.type) is not None
-            and v.type != BOOL)
+            and t.elem == BOOL.base and _zero_like(stored) is not None
+            and stored != BOOL)
