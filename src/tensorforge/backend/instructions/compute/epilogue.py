@@ -74,7 +74,8 @@ class MultilinearEpilogue(ComputeInstruction):
                  lead_width: int,
                  product_operation,
                  sum_operation,
-                 empty_product: bool = False):
+                 empty_product: bool = False,
+                 beside=None):
         super().__init__(context)
         self._acc = accumulator
         self._dest = dest
@@ -90,6 +91,11 @@ class MultilinearEpilogue(ComputeInstruction):
         #: The contraction had no tensor operand, so what it accumulated is
         #: the empty product rather than anything in the accumulator.
         self._empty_product = empty_product
+        #: Lead dimension -> `(before, past)`: whether the accumulator's
+        #: lanes before its range and past it hold what the contraction's
+        #: products came to there rather than zeros
+        #: (`MultilinearInstruction._beside`).
+        self._beside = dict(beside or {})
         self._is_ready = True
         self._user_options = context.get_user_options()
         self._gemm_meta_data = None
@@ -153,13 +159,15 @@ class MultilinearEpilogue(ComputeInstruction):
             Otherwise a lead index stands for a block of rows, one a lane,
             from `.lead()` on, and the lanes of the block read one slot of
             the accumulator: where the block overlaps the accumulator's range
-            at all.  Its lanes past the range read what the contraction left
-            there -- the accumulator is declared zeroed, and zero is the sum's
-            neutral element -- and a block with no row in the range has no
-            slot in the accumulator to read.  A range that starts inside a
-            block has its first rows in the block before: rows `1..19` of a
-            window whose sparsity leaves row 0 out are all in the block from
-            0, which a test of the block's first row alone would leave out.
+            at all.  Its lanes beside the range read what the contraction
+            left there -- the zeros the accumulator is declared with, the
+            sum's neutral element, or where the contraction computed on them,
+            what `held_to_range` puts in their place -- and a block with no
+            row in the range has no slot in the accumulator to read.  A range
+            that starts inside a block has its first rows in the block
+            before: rows `1..19` of a window whose sparsity leaves row 0 out
+            are all in the block from 0, which a test of the block's first
+            row alone would leave out.
             """
             lo_i = self._acc.data_view.get_bbox().lower()[i]
             hi_i = self._acc.data_view.get_bbox().upper()[i]
@@ -175,6 +183,46 @@ class MultilinearEpilogue(ComputeInstruction):
             if isinstance(var, LeadIndex):
                 return start < hi_i and lo_i < start + var._block * var.width
             return lo_i <= start < hi_i
+
+        def held_to_range(valvar, varlist, btype):
+            """The accumulator in the lanes of its range, the sum's neutral
+            element in those beside it that the contraction computed on.
+
+            Only in a block the range starts or ends inside of, where the
+            destination reaches beyond the range on that side, and only where
+            the contraction's products came to something there (`_beside`):
+            `R = T[0:56] C` over a destination of 64 rows, with `T`'s rows
+            56..63 in the lanes past the window, or `A[8:56] B` with `A` read
+            whole before the window."""
+            from tensorforge.backend.pir.core import BOOL
+            for i in self._lead_dims:
+                before, past = self._beside.get(i, (False, False))
+                var = varlist[loopmap[f'n{i}']]
+                if (not (before or past) or not isinstance(var, LeadIndex)
+                        or var.width != 1
+                        or isinstance(var.nonlead(), (str,))):
+                    continue
+                acc = self._acc.data_view.get_bbox()
+                dest = self._dest.data_view.get_bbox()
+                start = int(var.lead())
+                end = start + var._block
+                bounds = []
+                if before and dest.lower()[i] < acc.lower()[i] and (
+                        start < acc.lower()[i] < end):
+                    bounds.append(('ge', acc.lower()[i] - start))
+                if past and dest.upper()[i] > acc.upper()[i] and (
+                        start < acc.upper()[i] < end):
+                    bounds.append(('lt', acc.upper()[i] - start))
+                if not bounds:
+                    continue
+                lane = writer.lane_index(var._block, var._stride, hint='lead')
+                neutral = _splat(writer, btype, writer.const(
+                    self._sumOperation.neutral(self._context.fp_type), ftype))
+                for cmp, at in bounds:
+                    inside = writer.op(cmp, BOOL, lane, at, hint='o')
+                    valvar = writer.op('select', btype, inside, valvar,
+                                       neutral, hint='p')
+            return valvar
 
         def nonlead_writer(varlist):
             from tensorforge.backend.symbol import lead_width_of
@@ -196,6 +244,7 @@ class MultilinearEpilogue(ComputeInstruction):
                     ftype))
             elif needsLoad:
                 valvar = self._acc.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
+                valvar = held_to_range(valvar, varlist, btype)
             else:
                 valvar = _splat(writer, btype, writer.const(
                     self._sumOperation.neutral(self._context.fp_type),

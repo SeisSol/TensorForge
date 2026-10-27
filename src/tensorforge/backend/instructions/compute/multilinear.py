@@ -2634,7 +2634,45 @@ class MultilinearInstruction(ComputeInstruction):
                                    self._lead_dims, self._num_threads,
                                    self._lead_width, self._productOperation,
                                    self._sumOperation,
-                                   empty_product=len(self._ops) == 0)
+                                   empty_product=len(self._ops) == 0,
+                                   beside=self._beside())
+
+    def _beside(self):
+        """What the accumulator may hold beside its range, by lead dimension:
+        `(before, past)`, whether the lanes before the window and those past
+        it hold what the products there came to rather than the zeros the
+        accumulator is declared with.
+
+        Only where the window computes on every lane (`_full_lane_tail`).
+        Before it, always: a memory read there may stay whole
+        (`Symbol._memory_first`), and a register image may hold rows of its
+        own.  Past it, where an operand that carries the lead index reads no
+        zero there (`_zero_past`)."""
+        out = {}
+        for i in self._lead_dims:
+            if i >= len(self._ns) or not self._full_lane_tail(i, *self._ns[i]):
+                continue
+            past = any(i in target and not self._zero_past(op, target.index(i))
+                       for op, target in zip(self._ops, self._target))
+            out[i] = (True, past)
+        return out
+
+    @staticmethod
+    def _zero_past(region, axis) -> bool:
+        """Does the operand `region` read a zero past its rows along its
+        `axis`?  Memory does: a read there is held off the lanes past the
+        rows (`LeadIndex.valid`).  A register image where its own rows end
+        there, and whose producer said that it holds a zero past them
+        (`zero_past`: a staging, or a multiplication that leaves those lanes
+        alone or wrote zeros there); not where it holds rows past the
+        window."""
+        sym = region.symbol
+        if sym.stype not in (SymbolType.Register, SymbolType.Scratch):
+            return True
+        if not getattr(sym, 'zero_past', False):
+            return False
+        end = region.offset[axis] + region.bbox.upper()[axis]
+        return sym.data_view.get_bbox().upper()[axis] <= end
 
     def defs(self):
         # the accumulator, where an epilogue writes the destination from it

@@ -90,6 +90,7 @@ FLOW = Path('src/tensorforge/backend/pir/flow.py')
 DEMAND = Path('src/tensorforge/backend/pir/demand.py')
 EPILOGUE = Path('src/tensorforge/backend/instructions/compute/epilogue.py')
 PROMISE = Path('src/tensorforge/backend/instructions/compute/promise.py')
+MULTILINEAR = Path('src/tensorforge/backend/instructions/compute/multilinear.py')
 TILING = PKG / 'tiling.py'
 
 
@@ -2866,18 +2867,37 @@ GROUPS = {
         ('a promise over the rows the multiplication computed',
          sub(PROMISE, "            past = writer.op('ge', BOOL, lane, valid, hint='o')\n",
              '            past = None\n', 1)),
-        ('a register image taken to hold zeros past rows it does not end with',
-         sub(MLB, '    return sym.data_view.get_bbox().upper()[axis] <= end\n',
-             '    return True\n', 1)),
-        ('an image nobody vouched for taken to hold zeros past its rows',
-         sub(MLB, "    if not getattr(sym, 'zero_past', False):\n"
-                  '      return False\n', '', 1)),
         ('a promise left to the emitter',
          sub(PIPE, "    pm.add(Rewrite('promises', drop_promises, preserves=('flat',)))\n",
              '', 1)),
         ('a promise taken for a write nobody can place',
          sub(FLOW, '        elif s.op in (Op.STORE, Op.MARK) and len(s.accesses) == 1:\n',
              '        elif s.op == Op.STORE and len(s.accesses) == 1:\n', 1)),
+    ]),
+    # What a window computed on every lane leaves beside it stays out of the
+    # destination's box: before the window always, past it where an operand
+    # reads no zero there.
+    'beside': ('tests/test_full_lane_tails.py::test_what_a_window_leaves_out_adds_nothing_to_the_destination '
+               'tests/test_full_lane_tails.py::test_an_operand_reads_zero_past_its_window_where_nothing_lies_there '
+               'tests/test_full_lane_tails.py::test_the_lanes_beside_a_window_computed_on_every_lane_are_told', [
+        ('a register image taken to hold zeros past rows it does not end with',
+         sub(MULTILINEAR, '        return sym.data_view.get_bbox().upper()[axis] <= end\n',
+             '        return True\n', 1)),
+        ('an image nobody vouched for taken to hold zeros past its rows',
+         sub(MULTILINEAR, "        if not getattr(sym, 'zero_past', False):\n"
+                          '            return False\n', '', 1)),
+        ('the accumulator read whole beside its range',
+         sub(EPILOGUE, '                valvar = held_to_range(valvar, varlist, btype)\n',
+             '', 1)),
+        ('the lanes before the window taken for zeros',
+         sub(MULTILINEAR, '            out[i] = (True, past)\n',
+             '            out[i] = (False, past)\n', 1)),
+        ('the lanes past the window taken for zeros',
+         sub(MULTILINEAR, '            out[i] = (True, past)\n',
+             '            out[i] = (True, False)\n', 1)),
+        ('the lane before the window\'s first row taken into it',
+         sub(EPILOGUE, "                    bounds.append(('ge', acc.lower()[i] - start))\n",
+             "                    bounds.append(('ge', acc.lower()[i] - start - 1))\n", 1)),
     ]),
     # One register, one read: the forwarding spells a register by the value
     # that declares it, the builder by its symbol, and `load_cse` keys both

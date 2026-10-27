@@ -966,18 +966,16 @@ class MultilinearBuilder(OperationBuilder):
     image then holds the zeros it is declared with there, which the passes
     see.  And only where what it writes there is a zero: every operand that
     carries the destination's lead index reads one past the rows
-    (`_zero_past`), so every product there has a zero factor.  Not before
-    the rows: a head computed on every lane may read whole what lies before
-    a window (`Symbol._memory_first`)."""
+    (`MultilinearInstruction._beside`), so every product there has a zero
+    factor.  Not before the rows: a head computed on every lane may read
+    whole what lies before a window (`Symbol._memory_first`)."""
     image = compute._dest
     if (image.stype not in (SymbolType.Register, SymbolType.Scratch)
         or len(image.lead_dims) != 1 or not self._writes_past(compute)):
       return None
-    d = compute._lead_dims[0]
-    for i, region in enumerate(self._mem_regions):
-      target = self._descr.target[i]
-      if d in target and not self._zero_past(region, target.index(d)):
-        return None
+    _, past = compute._beside().get(compute._lead_dims[0], (True, True))
+    if past:
+      return None
     lead = image.lead_dims[0]
     box = compute._idest.data_view.get_bbox()
     if box.rank() <= lead:
@@ -994,22 +992,6 @@ class MultilinearBuilder(OperationBuilder):
       return False
     d = compute._lead_dims[0]
     return d < len(compute._ns) and compute._full_lane_tail(d, *compute._ns[d])
-
-  @staticmethod
-  def _zero_past(region, axis) -> bool:
-    """Does the operand `region` read a zero past its rows along its `axis`?
-    Memory does: a read there is held off the lanes past the rows
-    (`LeadIndex.valid`).  A register image where its own rows end there,
-    and whose producer said that it holds a zero past them (`zero_past`:
-    a staging, or a multiplication that leaves those lanes alone or wrote
-    zeros there); not where it holds rows past the window."""
-    sym = region.symbol
-    if sym.stype not in (SymbolType.Register, SymbolType.Scratch):
-      return True
-    if not getattr(sym, 'zero_past', False):
-      return False
-    end = region.offset[axis] + region.bbox.upper()[axis]
-    return sym.data_view.get_bbox().upper()[axis] <= end
 
   def _prev_offset(self, prev):
     """Where the accumulation bias sits, relative to the loop indices.
