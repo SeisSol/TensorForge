@@ -39,8 +39,13 @@ def dpp(ctrl: int, vals: Sequence) -> Lanes:
     """`dpp<ctrl, 0xf, 0xf, true>`, quad permute and row rotate.
 
     0x121-0x12F is `row_ror:n`: within each row of sixteen, lane `l` reads
-    lane `(l + n) % 16`. Modeled because `swap<16>` is `row_ror:8` and that
-    is the only way to check what `swap` does.
+    lane `(l - n) % 16` -- a rotate *right* moves a value to the higher lane.
+    Measured on gfx942 (MI300A): under `row_ror:4` lane 4 reads lane 0 and
+    lane 0 reads lane 12.  This model had it the other way round, and
+    `transpose16x16b32` was written against it: every product on CDNA's
+    sixteen-wide tile came out wrong on the hardware and right here.
+    Modeled because `swap<16>` is `row_ror:8` and that is the only way to
+    check what `swap` does.
 
     `row_shl` and `row_shr` stay unmodeled even though they sit next door,
     and the wave controls likewise: nothing names them, and a half-modeled
@@ -48,7 +53,7 @@ def dpp(ctrl: int, vals: Sequence) -> Lanes:
     """
     if 0x121 <= ctrl <= 0x12F:
         n = ctrl - 0x120
-        return [vals[(l & ~15) + ((l + n) % 16)] for l in range(len(vals))]
+        return [vals[(l & ~15) + ((l - n) % 16)] for l in range(len(vals))]
     if ctrl > 0xFF:
         raise NotImplementedError(
             f'dpp ctrl 0x{ctrl:x} is outside the quad-permute and row-rotate '
@@ -101,10 +106,10 @@ def transpose16x16b32(regs: Sequence[Sequence]) -> List[Lanes]:
 
     u = [None] * 16
     for i in range(4):
-        u[i] = dpp_update(0x12c, 0b1111, 0b1010, v[4 + i], v[i])
-        u[4 + i] = dpp_update(0x124, 0b1111, 0b0101, v[i], v[4 + i])
-        u[8 + i] = dpp_update(0x12c, 0b1111, 0b1010, v[12 + i], v[8 + i])
-        u[12 + i] = dpp_update(0x124, 0b1111, 0b0101, v[8 + i], v[12 + i])
+        u[i] = dpp_update(0x124, 0b1111, 0b1010, v[4 + i], v[i])
+        u[4 + i] = dpp_update(0x12c, 0b1111, 0b0101, v[i], v[4 + i])
+        u[8 + i] = dpp_update(0x124, 0b1111, 0b1010, v[12 + i], v[8 + i])
+        u[12 + i] = dpp_update(0x12c, 0b1111, 0b0101, v[8 + i], v[12 + i])
 
     w = [None] * 16
     for i in range(8):
@@ -239,16 +244,16 @@ def transpose16x4(regs: Sequence[Sequence]) -> List[Lanes]:
     Four registers against the top two bits of the lane index inside each row
     of sixteen: an 8x8 butterfly on `row_ror`, then `transpose16x2` on
     `row_ror:8`. The butterfly uses the pair of controls the 8x8 stage of
-    `transpose16x16b32` does, `row_ror:12` and `row_ror:4`, which are each
-    other's inverse and not their own -- a pair that can be swapped.
+    `transpose16x16b32` does, `row_ror:4` and `row_ror:12`, which are each
+    other's inverse and not their own -- a pair that can be swapped, and was.
     """
     if len(regs) != 4:
         raise ValueError(f'transpose16x4 takes 4 registers, got {len(regs)}')
     v = regs
-    u1 = dpp_update(0x12c, 0b1111, 0b1010, v[1], v[0])
-    u2 = dpp_update(0x124, 0b1111, 0b0101, v[0], v[1])
-    u3 = dpp_update(0x12c, 0b1111, 0b1010, v[3], v[2])
-    u4 = dpp_update(0x124, 0b1111, 0b0101, v[2], v[3])
+    u1 = dpp_update(0x124, 0b1111, 0b1010, v[1], v[0])
+    u2 = dpp_update(0x12c, 0b1111, 0b0101, v[0], v[1])
+    u3 = dpp_update(0x124, 0b1111, 0b1010, v[3], v[2])
+    u4 = dpp_update(0x12c, 0b1111, 0b0101, v[2], v[3])
     w1, w3 = transpose16x2([u1, u3])
     w2, w4 = transpose16x2([u2, u4])
     return [w1, w2, w3, w4]

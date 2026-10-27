@@ -978,31 +978,34 @@ transpose16x16b32(T &w1, T &w2, T &w3, T &w4, T &w5, T &w6, T &w7, T &w8, T &w9,
   // transpose 8x8
 
   // Banks 1 and 3 are lanes 4-7 and 12-15, and in an 8x8 butterfly those read
-  // four lanes *back* -- `row_ror:12`, since `(l + 12) % 16 == l - 4`.  Banks
-  // 0 and 2 read four forward, `row_ror:4`.  The other way round, lane 4
-  // would read lane 8 where it wants lane 0 and half the tile would hold
-  // another row's data.  `transpose16x2` has no such choice: `row_ror:8` is
-  // its own inverse over sixteen lanes, so both directions are the same
-  // control.
-  const T u1 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v5, v1);
-  const T u2 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v6, v2);
-  const T u3 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v7, v3);
-  const T u4 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v8, v4);
+  // four lanes *back* -- `row_ror:4`, since a rotate right moves a value to
+  // the higher lane: lane `l` reads lane `(l - n) % 16` under `row_ror:n`
+  // (measured on gfx942: lane 4 reads lane 0, lane 0 reads lane 12).  Banks
+  // 0 and 2 read four forward, `row_ror:12`.  The other way round, lane 4
+  // reads lane 8 where it wants lane 0 and half the tile holds another row's
+  // data -- which is what this did until it ran on an MI300A, written against
+  // a model that had the rotation backwards.  `transpose16x2` has no such
+  // choice: `row_ror:8` is its own inverse over sixteen lanes, so both
+  // directions are the same control.
+  const T u1 = dppUpdate<0x124, 0b1111, 0b1010, true>(v5, v1);
+  const T u2 = dppUpdate<0x124, 0b1111, 0b1010, true>(v6, v2);
+  const T u3 = dppUpdate<0x124, 0b1111, 0b1010, true>(v7, v3);
+  const T u4 = dppUpdate<0x124, 0b1111, 0b1010, true>(v8, v4);
 
-  const T u5 = dppUpdate<0x124, 0b1111, 0b0101, true>(v1, v5);
-  const T u6 = dppUpdate<0x124, 0b1111, 0b0101, true>(v2, v6);
-  const T u7 = dppUpdate<0x124, 0b1111, 0b0101, true>(v3, v7);
-  const T u8 = dppUpdate<0x124, 0b1111, 0b0101, true>(v4, v8);
+  const T u5 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v1, v5);
+  const T u6 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v2, v6);
+  const T u7 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v3, v7);
+  const T u8 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v4, v8);
 
-  const T u9 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v13, v9);
-  const T u10 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v14, v10);
-  const T u11 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v15, v11);
-  const T u12 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v16, v12);
+  const T u9 = dppUpdate<0x124, 0b1111, 0b1010, true>(v13, v9);
+  const T u10 = dppUpdate<0x124, 0b1111, 0b1010, true>(v14, v10);
+  const T u11 = dppUpdate<0x124, 0b1111, 0b1010, true>(v15, v11);
+  const T u12 = dppUpdate<0x124, 0b1111, 0b1010, true>(v16, v12);
 
-  const T u13 = dppUpdate<0x124, 0b1111, 0b0101, true>(v9, v13);
-  const T u14 = dppUpdate<0x124, 0b1111, 0b0101, true>(v10, v14);
-  const T u15 = dppUpdate<0x124, 0b1111, 0b0101, true>(v11, v15);
-  const T u16 = dppUpdate<0x124, 0b1111, 0b0101, true>(v12, v16);
+  const T u13 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v9, v13);
+  const T u14 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v10, v14);
+  const T u15 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v11, v15);
+  const T u16 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v12, v16);
 
   // transpose 16x16
 
@@ -1036,10 +1039,10 @@ __device__ __forceinline__ void transpose16x4(T &w1, T &w2, T &w3, T &w4, T v1,
                                               T v2, T v3, T v4) {
   // Same pair, same directions as the 8x8 stage of `transpose16x16b32`:
   // banks 1 and 3 read back, banks 0 and 2 read forward.
-  const T u1 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v2, v1);
-  const T u2 = dppUpdate<0x124, 0b1111, 0b0101, true>(v1, v2);
-  const T u3 = dppUpdate<0x12c, 0b1111, 0b1010, true>(v4, v3);
-  const T u4 = dppUpdate<0x124, 0b1111, 0b0101, true>(v3, v4);
+  const T u1 = dppUpdate<0x124, 0b1111, 0b1010, true>(v2, v1);
+  const T u2 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v1, v2);
+  const T u3 = dppUpdate<0x124, 0b1111, 0b1010, true>(v4, v3);
+  const T u4 = dppUpdate<0x12c, 0b1111, 0b0101, true>(v3, v4);
 
   transpose16x2(w1, w3, u1, u3);
   transpose16x2(w2, w4, u2, u4);

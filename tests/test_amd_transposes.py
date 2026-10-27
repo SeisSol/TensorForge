@@ -8,10 +8,12 @@ three -- `transpose16x16b32`, `transpose16x4`, `transpose16x2` -- are in
 `hip.h` with nothing else checking them, because no tile reaches them:
 `mfma_tile_for` returns the 4-wide tile and only the 4-wide tile.
 
-With the two rotate controls of an 8x8 stage the wrong way round, lane 4 would
-read lane 8 where it wants lane 0 and half of every tile would come out
-holding another row's data -- and nothing would fail, because nothing calls
-them.
+With the two rotate controls of an 8x8 stage the wrong way round, lane 4
+reads lane 8 where it wants lane 0 and half of every tile comes out holding
+another row's data.  That is what happened: `transpose16x16b32` was written
+against a simulator whose `row_ror` turned the other way, both agreed, and
+every product on CDNA's sixteen-wide tile was wrong on an MI300A.  So the
+direction of the rotate itself is pinned below, to what the hardware did.
 
 Each is simulated from its own source rather than from the map its name
 implies, which is the only way such a defect shows: a simulation written from
@@ -30,6 +32,25 @@ WAVE = 64
 def _tagged(count):
     """`count` registers, each lane carrying where its value came from."""
     return [[(reg, lane) for lane in range(WAVE)] for reg in range(count)]
+
+
+# --------------------------------------------------------------------------- #
+# the instruction underneath
+# --------------------------------------------------------------------------- #
+
+def test_row_ror_moves_a_value_to_the_higher_lane():
+    """`row_ror:n` -- lane `l` reads lane `(l - n) % 16` of its row.
+
+    Measured on gfx942 (MI300A, `__builtin_amdgcn_update_dpp` with the lane
+    id as the value): under `row_ror:4` lane 4 read lane 0 and lane 0 read
+    lane 12, under `row_ror:12` lane 0 read lane 4.  Every transpose model
+    below rests on this, and a model with the rotation the other way round
+    passed all of them with the wrong code.
+    """
+    lanes = list(range(WAVE))
+    assert wavesim.dpp(0x124, lanes)[:16] == [12, 13, 14, 15] + list(range(12))
+    assert wavesim.dpp(0x12c, lanes)[:16] == list(range(4, 16)) + [0, 1, 2, 3]
+    assert wavesim.dpp(0x124, lanes)[16:20] == [28, 29, 30, 31]
 
 
 # --------------------------------------------------------------------------- #
