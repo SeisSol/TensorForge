@@ -17,7 +17,8 @@ all of them -- and its value is
 
 * a number, the load is that number;
 * a value of the body that stands where the load does, the load is that
-  value;
+  value -- read as a truth value out of a buffer of them, whether the value
+  is not zero, as the store made it;
 * what a load read from a register that holds it still where the load
   stands, the load reads that register -- at an index the hops of the loops
   around the load give, of loops that are unrolled, so that the compiler
@@ -48,7 +49,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts
+from .core import (BOOL, Access, BufferType, Effect, MemSpace, Op, Stmt,
+                   Value, walk_stmts)
 from .demand import Demand
 from .flow import Flow, TooLarge
 from .passes import _zero_like, dce, substitute
@@ -366,9 +368,14 @@ class _Forward:
         return True
 
     def _value(self, s: Stmt, v: Value) -> bool:
-        if v.type != s.target[0].type or not self._stands(v, s):
+        truth = v.type != s.target[0].type and _truth_of(s, v)
+        if (v.type != s.target[0].type and not truth) or not self._stands(v, s):
             return False
         b = self.scratch()
+        if truth:
+            # What the store made of the number: whether it is not zero.
+            v = b.op('ne', BOOL, v, b.const(_zero_like(v.type), v.type),
+                     hint='fwd')
         out = v if self._unread_outside(s) else self._select(b, s, v)
         self.rebuilt[id(s)] = list(b.finish())
         self.mapped[s.target[0].id] = out
@@ -634,3 +641,13 @@ def _slot(b, fit, inductions: Dict[int, Value]):
     if c:
         out = b.op('add', out.type, out, c, hint='slot')
     return out
+
+
+def _truth_of(s: Stmt, v: Value) -> bool:
+    """Does the load `s` read the number `v` as a truth value: does it read a
+    buffer of truth values, which a store of `v` holds as `v != 0`?"""
+    base = s.accesses[0].base if len(s.accesses) == 1 else None
+    t = getattr(base, 'type', None)
+    return (s.target[0].type == BOOL and isinstance(t, BufferType)
+            and t.elem == BOOL.base and _zero_like(v.type) is not None
+            and v.type != BOOL)

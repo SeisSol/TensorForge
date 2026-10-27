@@ -389,8 +389,8 @@ def test_a_value_without_axes_is_read_where_it_was_computed():
     of the integrals, each stored by every lane and read back by all of them
     behind a fence.  Every lane computes the same, so each reads the value
     from the register it computed it into (`Symbol.store`,
-    `Flow._forwards`); what still goes through shared memory is read as a
-    truth value, and was stored as a number."""
+    `Flow._forwards`); a comparison, computed as a number and read as a
+    truth value, as whether it is not zero (`pir.forward`)."""
     import re
 
     system = 'damage-nonlinearck'
@@ -401,4 +401,4 @@ def test_a_value_without_axes_is_read_where_it_was_computed():
         gen.generate()
     reads = re.findall(r'^\s*(\w+) v\d+_\w+ = s\d+\[0\];', gen.get_kernel(),
                        re.M)
-    assert set(reads) <= {'bool'}, reads
+    assert not reads, reads

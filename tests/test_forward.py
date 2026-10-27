@@ -685,6 +685,24 @@ def test_what_the_lanes_store_apart_keeps_the_load_of_another_lanes_store(
     assert _loads(out, MemSpace.SHARED, s)
 
 
+def test_a_number_read_as_a_truth_value_is_whether_it_is_zero():
+    """A comparison computed as a number and stored into a buffer of truth
+    values, which the store makes of it: read back, it is `v != 0`."""
+    t = Body()
+    b = t.b
+    s = b.alloc(Datatype.BOOL, (LANES,), MemSpace.SHARED, hint='s',
+                extern='s0', arena='shrMem')
+    v = b.op('lt', REAL, b.load(t.p, t.lane), 1.0, hint='e')
+    b.store(s, v, t.lane)
+    x = b.load(s, t.lane)
+    b.store(t.p, b.op('select', REAL, x, 1.0, 0.0, hint='pick'), t.lane)
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED, s)
+    picked = next(x for x in walk_stmts(out) if x.op == 'select')
+    truth = next(x for x in walk_stmts(out) if picked.args[0] in x.target)
+    assert truth.op == 'ne' and truth.args[0] is v
+
+
 def _reload(t, between=None, lane=None, guard=None):
     """`r0[j] = q[e(j)]` and `p = r0[0]`, then `between`, then `r1[j] =
     q[e(j)]` and `p = r1[1]`: the same elements loaded twice by the same
