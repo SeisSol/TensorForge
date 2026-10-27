@@ -2238,6 +2238,17 @@ class MultilinearInstruction(ComputeInstruction):
         # the matrix paths read.
         if self._window_declines():
             return whole(Strategy.GENERIC, n)
+        # Nor a first operand that carries an output column.  The vendor
+        # paths are `C[m,n] += A[m,k] B[k,n]`: they read `A` by its row and
+        # its step and nothing else, so a column index `A` has as well is
+        # read at one value for every column.  A stack is exactly that for
+        # an operand an element owns (`Options.stack_elements`):
+        # `C[m,n,l] = A[m,k,l] B[k,n,l]` read element 0's `A` for both
+        # elements of the stack on AMD, every product against SeisSol's
+        # flux solver among them.  The nest indexes every axis.
+        if any(nk.startswith('n') and nk != 'n0'
+               for nk in self._opdim_to_nks[0]):
+            return whole(Strategy.GENERIC, n)
         shape = self._shape()
         chosen = choose_strategy(
             legal_strategies(module.strategies(shape, self._context)),

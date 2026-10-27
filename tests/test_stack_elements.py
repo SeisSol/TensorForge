@@ -263,6 +263,24 @@ def test_on_gfx942_the_rows_of_a_group_each_mask_their_stack():
     assert result.ok, result.errors()
 
 
+@pytest.mark.parametrize('arch', ['gfx942', 'gfx1150'])
+def test_on_amd_an_operand_an_element_owns_keeps_its_product_in_the_nest(arch):
+    """`C[m,n,l] = A[m,k,l] B[k,n,l]`: the stack is a column of `A` too.
+
+    The matrix paths read `A` by row and step and nothing else, so they read
+    element 0's `A` for both elements of a stack -- on an MI300A and on a
+    gfx1150 every second element of `square_notrans` came out as its
+    neighbour's product (`gemm_square_16`).  An operator the batch shares
+    stays theirs
+    (`test_the_stack_is_the_last_axis_of_what_an_element_owns`).
+    """
+    kernel, _ = _build('gemm_square_16', arch=arch, backend='hip',
+                       stack_elements=2)
+    assert 'mfma' not in kernel and 'fmacdpp' not in kernel, kernel
+    plain, _ = _build('gemm_square_16', arch=arch, backend='hip')
+    assert 'mfma' in plain or 'fmacdpp' in plain
+
+
 def _gemm(addressing_a=Addressing.NONE):
     def t(shape, alias, addressing=Addressing.STRIDED):
         return SubTensor(Tensor(shape, addressing, BoundingBox([0, 0], shape),
