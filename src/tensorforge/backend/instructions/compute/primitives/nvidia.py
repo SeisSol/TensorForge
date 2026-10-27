@@ -653,7 +653,7 @@ ORDER = (Strategy.MATRIX, Strategy.GENERIC)
 ORDERS_EVERY_READER = False
 
 
-def convergence(strategy, shape):
+def convergence(strategy, shape, n, ctx):
     """How far the threads have to run in step for `strategy` over `shape`.
 
     `mma.sync` is `.aligned`: every lane of the warp issues it together, so

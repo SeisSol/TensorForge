@@ -2162,7 +2162,9 @@ class MultilinearInstruction(ComputeInstruction):
             return None
         ask = module.convergence
         shape = self._shape()
-        levels = [level for level in (ask(span.strategy, shape)
+        n = self._output_extent()
+        levels = [level for level in (ask(span.strategy, shape, n,
+                                          self._context)
                                       for span in self._plan())
                   if level is not None]
         return max(levels) if levels else None

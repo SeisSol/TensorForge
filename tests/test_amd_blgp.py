@@ -118,13 +118,16 @@ def test_two_or_four_multiplications_share_a_wave_of_the_same_rows():
 def test_the_multiplications_handing_it_on_run_in_step():
     """Every multiplication of the wave has to have read its step when the
     MFMA issues, so the batch loop drives the wave together."""
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
     shape = ComputeShape(threads=32, accumulator=Datatype.F32, sparse=False,
                          explicit_simd=False, a_uniform=True)
-    assert amd.convergence(Strategy.MATRIX, shape) is Uniformity.MULTGROUP
-    assert amd.convergence(Strategy.DPP, shape) is None
+    assert (amd.convergence(Strategy.MATRIX, shape, 9, ctx)
+            is Uniformity.MULTGROUP)
+    assert amd.convergence(Strategy.DPP, shape, 9, ctx) is None
+    # Nine columns take the 4-wide tile, which asks nothing of its own.
     per_element = ComputeShape(threads=32, accumulator=Datatype.F32,
                                sparse=False, explicit_simd=False)
-    assert amd.convergence(Strategy.MATRIX, per_element) is None
+    assert amd.convergence(Strategy.MATRIX, per_element, 9, ctx) is None
 
 
 @pytest.mark.parametrize('arch', ['gfx942', 'gfx90a'])

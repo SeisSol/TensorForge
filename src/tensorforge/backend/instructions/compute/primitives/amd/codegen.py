@@ -281,7 +281,7 @@ def _transpose(writer, tile, ftype, threads, regs):
     return out
 
 
-def _accumulator_direct(op) -> bool:
+def accumulator_direct(op) -> bool:
     """Whether element `(m, n)` of block `b` sits in slot `m` of lane
     `b * n + n` -- the way the lane-batched store reads the accumulator, one
     output column a slot and the leading dimension across the lanes.
@@ -289,7 +289,9 @@ def _accumulator_direct(op) -> bool:
     The 4-wide tile has it.  The 16-wide one spreads a block's output over
     the whole wave (`catalog.LANE_BATCHED_BLOCKS`), and its columns are
     gathered back by the epilogue the exchange scheme uses
-    (`accumulator_gathers`).
+    (`accumulator_gathers`) -- out of lanes a multiplication narrower than
+    the wave does not own, which is why the batch loop then drives the wave
+    together (`convergence`).
     """
     row = FRAGMENT_BITS.get(op.builtin)
     if row is None:
@@ -303,7 +305,7 @@ def _accumulator_direct(op) -> bool:
 def _column(writer, tile, acc, column, ftype):
     """Output column `column` of one MFMA accumulator, at the store's layout:
     the slot itself where the layout is direct, gathered where it is not."""
-    if _accumulator_direct(tile.op):
+    if accumulator_direct(tile.op):
         return writer.extract(acc, column, ftype)
     value = _writeback(writer, tile.op, {(0, 0): acc}, 0, column, ftype)
     if value is None:

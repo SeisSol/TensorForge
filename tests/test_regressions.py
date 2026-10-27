@@ -237,6 +237,10 @@ def _store_loops(src):
     statement about *which* elements a store touches --- a slice written at the
     wrong offset, or one that spills past its box, shows up here and nowhere
     else short of running the kernel.
+
+    The loops enclosing the store itself: another transfer may be scheduled
+    between its comment and its body -- the next element's load, in a wave
+    group's loop -- and its loops are not the store's.
     """
     lines = src.splitlines()
     out = []
@@ -244,11 +248,18 @@ def _store_loops(src):
         head = _STORE_HEAD.search(line)
         if not head:
             continue
+        write = re.compile(rf"\b{head.group(1)}\[.*\]\s*=[^=]")
+        at = next((j for j in range(i + 1, min(len(lines), i + 40))
+                   if write.search(lines[j])), None)
         bounds = []
-        for follow in lines[i + 1:i + 12]:
-            m = _FOR_BOUNDS.search(follow)
-            if m:
-                bounds.append((int(m.group(1)), int(m.group(2))))
+        if at is not None:
+            depth = len(lines[at]) - len(lines[at].lstrip())
+            for j in range(at - 1, i, -1):
+                indent = len(lines[j]) - len(lines[j].lstrip())
+                m = _FOR_BOUNDS.search(lines[j])
+                if m and indent < depth:
+                    bounds.insert(0, (int(m.group(1)), int(m.group(2))))
+                    depth = indent
         out.append((head.group(2), bounds))
     return out
 

@@ -224,9 +224,12 @@ class MatrixPaths(Protocol):
         """Emit one span of the plan, or decline and leave the body as it
         was."""
 
-    def convergence(self, strategy: Strategy, shape: ComputeShape) -> Any:
+    def convergence(self, strategy: Strategy, shape: ComputeShape, n: int,
+                    ctx) -> Any:
         """How far the threads have to run in step for `strategy` over
-        `shape`, as a `Uniformity`, or None where it asks nothing."""
+        `shape`, as a `Uniformity`, or None where it asks nothing.  Over the
+        `n` columns `plan` lays out, since which instruction runs can depend
+        on them."""
 
     def prepared_order(self, shape, dtype, ctx, columns=0, lead=0, depth=0,
                        threads=32) -> Any:

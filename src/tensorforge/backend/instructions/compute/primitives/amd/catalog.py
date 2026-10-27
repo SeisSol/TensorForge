@@ -648,7 +648,7 @@ def mfma_tile_for(threads, dtype, ctx):
 #: The tile widths the lane-batched scheme may rank.
 #:
 #: 16 because its accumulator is gathered back to the lanes the store reads
-#: (`codegen._accumulator_direct`): four blocks of 16x16 spread each block's
+#: (`codegen.accumulator_direct`): four blocks of 16x16 spread each block's
 #: output over the whole wave, slot `4b + (m & 3)` of lane `n + 16 (m >> 2)`,
 #: where the 4-wide tile leaves element `(m, n)` of block `b` in slot `m` of
 #: lane `4b + n`.  32 is bound the same way and held back: it takes as many

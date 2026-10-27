@@ -637,7 +637,7 @@ ORDERS_EVERY_READER = True
 ORDER = (Strategy.MATRIX, Strategy.BROADCAST, Strategy.GENERIC)
 
 
-def convergence(strategy, shape):
+def convergence(strategy, shape, n, ctx):
     """None: DPAS is offered only under the explicit vector, where the
     multiplication is one work-item's vector with no neighbors to wait for,
     and the broadcast chain asks nothing of its own."""

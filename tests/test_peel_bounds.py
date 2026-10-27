@@ -49,7 +49,8 @@ def _kernel(case_file: str, backend: str, arch: str, **opt_kwargs) -> str:
 def _before_the_loop(kernel: str) -> list:
     lines = kernel.splitlines()
     stop = next((i for i, l in enumerate(lines)
-                 if re.search(r"for \(size_t v\d+_batchId0\b", l)), None)
+                 if re.search(r"for \(size_t v\d+_batchId(?:Group)?0\b", l)),
+                None)
     assert stop is not None, "no batch loop found"
     return lines[:stop]
 
@@ -82,7 +83,8 @@ def test_peeled_load_does_not_dereference_the_raw_block_id(case_file, backend,
 
 @pytest.mark.parametrize("case_file", PEELING_CASES)
 def test_peeled_load_reads_a_clamped_element(case_file):
-    """The peel should still read *something*, and it should be batchId1."""
+    """The peel should still read *something*, and it should be batchId1 --
+    or, for a wave group, the group's first element, clamped alike."""
     kernel = _kernel(case_file, "hip", "gfx90a",
                      enable_wrap_loads=True, move_distance=2)
     head = _before_the_loop(kernel)
@@ -90,6 +92,15 @@ def test_peeled_load_reads_a_clamped_element(case_file):
     assert subscripts, "expected the wrap to peel at least one transfer"
     named = {v for index in subscripts
              for v in re.findall(r"\bv\d+_batchId1\b", index)}
+    if not named:
+        # A wave group's peel (`BatchLoop._gen_grouped_ir`) reads its row
+        # where the row is in the batch and the group's first element where
+        # it is not, so the clamp to look at is the first element's.
+        rows = {v for index in subscripts
+                for v in re.findall(r"\bv\d+_batchId0\b", index)}
+        named = {first for value in rows
+                 for l in head if re.search(rf"\b{value} = ", l)
+                 for first in re.findall(r"\bv\d+_batchIdGroup0First\b", l)}
     assert named, ("no peeled pointer uses the clamped index:\n  "
                    + "\n  ".join(subscripts))
     # ...and the value is the clamp: the start where it is inside the batch,

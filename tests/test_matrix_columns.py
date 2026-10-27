@@ -30,9 +30,10 @@ from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.common.options import Options
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.generators.generator import Generator
+from tensorforge.generators.lanes import LaneConfig
 
 
-def _product(columns, dtype=Datatype.F32):
+def _product(columns, dtype=Datatype.F32, a=Addressing.NONE):
     """C[56 x columns] = A[56 x 56] B[56 x columns]: an operator the batch
     shares against an element's own, the shape of SeisSol's volume and flux
     products at order 6."""
@@ -40,19 +41,29 @@ def _product(columns, dtype=Datatype.F32):
         return SubTensor(Tensor(shape, addressing, BoundingBox([0, 0], shape),
                                 alias=alias, datatype=dtype))
     return [GemmDescr(trans_a=False, trans_b=False,
-                      a=view([56, 56], Addressing.NONE, 'A'),
+                      a=view([56, 56], a, 'A'),
                       b=view([56, columns], Addressing.STRIDED, 'B'),
                       c=view([56, columns], Addressing.STRIDED, 'C'),
                       alpha=1.0, beta=0.0)]
 
 
-def _tiles(columns, arch='gfx942', **options):
-    gen = Generator(_product(columns),
+def _kernel(columns, arch='gfx942', a=Addressing.NONE, lanes=None,
+            **options):
+    gen = Generator(_product(columns, a=a),
                     Context(arch=arch, backend='hip', fp_type=Datatype.F32,
-                            options=Options(**options)))
+                            options=Options(**options)),
+                    lanes=(None if lanes is None else
+                           LaneConfig(num_threads=lanes,
+                                      num_active_threads=lanes,
+                                      lead_width=1)))
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
-    return set(re.findall(r'mfma_f32_\w+?f32', gen.get_kernel()))
+    return gen.get_kernel()
+
+
+def _tiles(columns, arch='gfx942', **options):
+    return set(re.findall(r'mfma_f32_\w+?f32', _kernel(columns, arch,
+                                                        **options)))
 
 
 FOUR, SIXTEEN = 'mfma_f32_4x4x1f32', 'mfma_f32_16x16x1f32'
@@ -73,6 +84,25 @@ def test_an_asked_width_is_taken_for_every_product_it_serves(columns, asked,
     assert _tiles(columns, matrix_columns=asked) == {tile}
     # and in a stack, whose products are twice as wide
     assert _tiles(columns, matrix_columns=asked, stack_elements=2) == {tile}
+
+
+@pytest.mark.parametrize('lanes', [16, 32])
+def test_the_wide_tile_drives_the_wave_together(lanes):
+    """The 16-wide tile spreads each block's output over the whole wave, and a
+    multiplication narrower than it gathers its columns out of its
+    neighbors' lanes, so the neighbors take the same trips through the batch
+    loop (`amd.convergence`).  In a loop of their own, those past the end
+    had left: on MI300A, sixteen lanes and two elements gave columns 8 to 15
+    zero.  An element's own A, so that no `blgp` asks it instead; the 4-wide
+    tile keeps a block's output in its lanes and asks nothing."""
+    owned = Addressing.STRIDED
+    src = _kernel(9, a=owned, lanes=lanes, matrix_columns=16)
+    assert SIXTEEN in src and 'batchIdGroup0' in src
+    src = _kernel(9, a=owned, lanes=lanes, matrix_columns=4)
+    assert FOUR in src and 'batchIdGroup0' not in src
+    # A whole wave is one multiplication, with no neighbor to wait for.
+    src = _kernel(9, a=owned, lanes=64, matrix_columns=16)
+    assert SIXTEEN in src and 'batchIdGroup0' not in src
 
 
 def test_a_width_the_scheme_has_no_entry_of_leaves_the_count():

@@ -52,7 +52,8 @@ from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       Select, Exchange, a_exchange, accumulator_cost,
                       accumulator_gathers, broadcast_feeds_a,
                       fragment_cost, fragment_moves)
-from .codegen import hfma, matmul32, matmulemu, matmuldpp
+from .codegen import (accumulator_direct, hfma, matmul32, matmulemu,
+                      matmuldpp)
 from .exchange_codegen import exchange_op, exchange_ops, matmul_exchange
 from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
                      candidates, choose, issues, offers, rank,
@@ -229,22 +230,37 @@ def wave_mults(threads, a_uniform, width=1, dtype=Datatype.F32) -> int:
     return mults if mults in (2, 4) else 1
 
 
-def convergence(strategy, shape):
+def convergence(strategy, shape, n, ctx):
     """How far the threads have to run in step for `strategy` over `shape`.
 
-    The lane-batched MFMA asks nothing of its own: each multiplication feeds
-    its blocks, and `cbsz` keeps the broadcast of A inside them.  Handing the
-    lead operand between the multiplications of a wave does ask: every one of
-    them has to have read its part when the instruction issues, so they take
-    the same trips through the batch loop.
+    The 4-wide tile asks nothing of its own: each multiplication feeds its
+    blocks, `cbsz` keeps the broadcast of A inside them, and a block's output
+    stays in its lanes.  Handing the lead operand between the multiplications
+    of a wave does ask: every one of them has to have read its part when the
+    instruction issues, so they take the same trips through the batch loop.
+
+    So does the 16-wide tile wherever a multiplication is narrower than the
+    wave.  It spreads a block's output over all of it, and each
+    multiplication gathers its columns back out of its neighbors' lanes
+    (`accumulator_direct`) -- lanes that are not there to be read once their
+    multiplication has left the loop.  On MI300A, at sixteen lanes and a
+    batch of two, columns 8 to 15 came back zero: those held by the two
+    multiplications past the end.  Which tile runs is asked as `plan` asks
+    it, over the same columns.
     """
+    from tensorforge.backend.pir.core import Uniformity
+    if strategy is not Strategy.MATRIX:
+        return None
     width = (1 << bitlayout.unpacked(shape.lead_layout)[1]
              if bitlayout.packed(shape.lead_layout) else 1)
-    if (strategy is Strategy.MATRIX
-            and wave_mults(shape.threads, shape.a_uniform, width,
-                           shape.accumulator) > 1):
-        from tensorforge.backend.pir.core import Uniformity
+    if wave_mults(shape.threads, shape.a_uniform, width,
+                  shape.accumulator) > 1:
         return Uniformity.MULTGROUP
+    if shape.threads < _MFMA_WAVE:
+        fit = choose(shape.threads, shape.accumulator, ctx,
+                     columns=n, lead=shape.lead, depth=shape.depth)
+        if fit is not None and not accumulator_direct(fit.op):
+            return Uniformity.MULTGROUP
     return None
 
 
