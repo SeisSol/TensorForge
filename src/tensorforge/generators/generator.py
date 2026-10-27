@@ -1125,7 +1125,10 @@ class Generator:
 
     Sections after a barrier restart at the block id; sections that follow
     without one are offset by the preceding element counts so that consecutive
-    sections do not all hammer the same elements.
+    sections do not all hammer the same elements.  Not one whose body needs
+    the multiplications of a wave in step (`_wave_in_step`): a rotated start
+    is no group's (`_group_size`), and such a body cannot do without the
+    group.  The offset spreads the load; nothing is right only because of it.
     """
     lexic = self._context.target.lexic
     offset = []
@@ -1137,7 +1140,7 @@ class Generator:
       idx -= 1
 
     stride = f'({lexic.grid_dim_x} * {lexic.block_dim_y})'
-    if len(offset) == 0:
+    if len(offset) == 0 or self._wave_in_step():
       start = self._get_2d_block_id()
     else:
       start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
@@ -1172,16 +1175,15 @@ class Generator:
         return 1
       return mults_per_group(self._num_threads, wave)
     asked = self._context.get_user_options().wave_group_traversal
-    if self._num_threads < wave and (self._needs_wave_group()
-                                     or not self._mult_met_alone() or asked):
+    if self._wave_in_step() or (self._num_threads < wave and asked):
       # The multiplications of one wave, driven together, because something
       # in the body is issued by the whole wave at once -- or because every
       # rendezvous and every exchange is: SPMD SYCL has no barrier for part
       # of a sub-group, and its broadcasts are sub-group collectives -- or
       # because the caller asked for it.  A rotated start has the same
-      # trouble as below.  Where the body needs the group, that leaves the
-      # verifier to refuse; where only the caller asked, the traversal stays
-      # per row.
+      # trouble as below.  A body that needs the group is given none
+      # (`_section_traversal`); where only the caller asked, the traversal
+      # stays per row.
       if start != self._get_2d_block_id():
         return 1
       return wave // self._num_threads
@@ -1210,6 +1212,15 @@ class Generator:
     if group < 2 or group * self._num_threads != wave:
       return 0
     return wave
+
+  def _wave_in_step(self) -> bool:
+    """Whether the multiplications of a wave have to take the same trips
+    through this section's loop: something in the body is issued by the
+    whole wave at once (`_needs_wave_group`), or a rendezvous of one
+    multiplication reaches its neighbors (`_mult_met_alone`)."""
+    wave = self._context.target.hw.vec_unit_length
+    return self._num_threads < wave and (self._needs_wave_group()
+                                         or not self._mult_met_alone())
 
   def _mult_met_alone(self) -> bool:
     """Whether one multiplication narrower than the wave can be synchronized

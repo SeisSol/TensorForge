@@ -2094,14 +2094,14 @@ GROUPS = {
     # where only the caller asks for it.
     'wavegroups': ('tests/test_wave_group_traversal.py', [
         ('the option read and ignored',
-         sub(GEN, '                                     or not self._mult_met_alone() or asked):',
-             '                                     or not self._mult_met_alone()):', 1)),
+         sub(GEN, '    if self._wave_in_step() or (self._num_threads < wave and asked):',
+             '    if self._wave_in_step():', 1)),
         ('every shared wave grouped, asked or not',
          sub(GEN, '    asked = self._context.get_user_options().wave_group_traversal\n',
              '    asked = True\n', 1)),
         ('a rotated start grouped as well',
-         sub(GEN, '      # per row.\n      if start != self._get_2d_block_id():\n        return 1\n',
-             '      # per row.\n', 1)),
+         sub(GEN, '      # stays per row.\n      if start != self._get_2d_block_id():\n        return 1\n',
+             '      # stays per row.\n', 1)),
         ('the group asked for by default',
          sub(OPTIONS, "declare('wave_group_traversal',\n        default=False,",
              "declare('wave_group_traversal',\n        default=True,", 1)),

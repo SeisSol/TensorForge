@@ -17,7 +17,10 @@ follows another *without* a barrier starts at
 deliberately, "so that consecutive sections do not all hammer the same
 elements".  A case that made section 1 read what section 0 wrote would
 therefore be reading another block's output with no synchronization
-between the two -- racy by construction, and green only by luck.
+between the two -- racy by construction, and green only by luck.  (Not
+where section 1's body needs the multiplications of a wave in step -- on
+gfx942 the 16-wide MFMA tile this case takes at 16 lanes: a rotated start
+is no group's, so that section starts at ``blockId``.)
 
 What the fence does provide, and what this case pins down:
 
