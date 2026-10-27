@@ -612,3 +612,36 @@ def test_fit_tightens_until_the_images_fit():
     assert gen._pack_level == KINDS.index("bits")
     gen._choose_pack_level(candidates, 4 * 32 * 200 * 4 + 4096)
     assert gen._pack_level == KINDS.index("rows")
+
+
+def test_a_window_the_matrix_paths_decline_is_not_stored_for_them():
+    """`packed_boxed_runs` on gfx942: a window from row 9 over 32 lanes, which
+    the matrix paths cannot place.
+
+    The plan said the matrix path all the same, so `settle_storage` stored
+    `A` in k-quads for it, and the nest that computed the product read that
+    buffer by coordinate -- the k-quads of row `r` as rows `4r..4r+3` on an
+    MI300A.  The plan now says the nest, and the packing the case asks for
+    takes the operand.
+    """
+    import contextlib
+    import importlib.util
+    import io
+    from pathlib import Path
+
+    from tensorforge.common.context import Context
+    from tensorforge.common.options import Options
+    from tensorforge.generators.generator import Generator
+
+    path = Path(__file__).parent / 'cases' / 'packed_boxed_runs.py'
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    gen = Generator(mod.descr_list(), Context(
+        arch='gfx942', backend='hip', fp_type=mod.DTYPE,
+        options=Options(**mod.OPTIONS)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    a = next(s.obj for s in gen.built._scopes.get_global_scope().values()
+             if getattr(s.obj, 'alias', None) == 'A')
+    assert getattr(a, 'packing', None) is not None

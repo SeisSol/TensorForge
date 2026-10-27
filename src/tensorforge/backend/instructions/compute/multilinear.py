@@ -2167,6 +2167,44 @@ class MultilinearInstruction(ComputeInstruction):
                   if level is not None]
         return max(levels) if levels else None
 
+    def _window_declines(self) -> bool:
+        """Whether the output's window is one the matrix paths cannot place.
+
+        At lead width `w` a slot is `threads * w` elements, and that is the
+        unit every lead and contraction index of those paths divides by.  At
+        width one the span is the thread count.  A packed operand whose lead
+        or contraction does not start on a whole vector, or a lead that does
+        not start on a slot, goes to the nest, which peels.
+
+        And how many slots the window *touches*, against how many the paths
+        count.  They count `ceil(extent / span)` and put the window at slot
+        `start // span`, so a start inside a slot is rounded away twice: a
+        32-row window at row 9 over 32 lanes touches two slots and is emitted
+        as one, with its first nine rows read from before the buffer and its
+        last nine never computed -- which the destination then stored from
+        registers nothing had assigned.  A window that *fits* inside one
+        slot is not affected, which is why this counts rather than asking
+        whether the start is on a slot: the lane bounds clip such a window
+        and always did.  At width above one the first condition is the
+        stronger one and this adds nothing.
+
+        Asked by `_plan` as well as by the emission.  Asked by the emission
+        alone, the plan still said the matrix path, `settle_storage` stored
+        `A` in k-quads for it, and the nest then read that buffer by
+        coordinate (`packed_boxed_runs` on gfx942).
+        """
+        width = self._lead_width
+        span = self._num_threads * width
+        if not span or not self._ns:
+            return False
+        ks00 = self._ks[0][0] if len(self._ks) > 0 else 0
+        if width > 1 and (self._ns[0][0] % span or ks00 % width
+                          or ks00 >= span):
+            return True
+        lo, hi = self._ns[0]
+        return hi > lo and ((hi - 1) // span - lo // span + 1
+                            != -(-(hi - lo) // span))
+
     def _plan(self) -> Tuple[Span, ...]:
         """Which arrangements compute this operation, over which columns.
 
@@ -2194,6 +2232,11 @@ class MultilinearInstruction(ComputeInstruction):
         # its index is the lane's, and the struct it is passed as is copied
         # into private memory to be indexed at all.
         if passed_by_value(self._ops[1].symbol):
+            return whole(Strategy.GENERIC, n)
+        # A window the matrix paths cannot place: the nest computes it, and
+        # says so here, before `settle_storage` stores `A` in an order only
+        # the matrix paths read.
+        if self._window_declines():
             return whole(Strategy.GENERIC, n)
         shape = self._shape()
         chosen = choose_strategy(
@@ -2247,34 +2290,13 @@ class MultilinearInstruction(ComputeInstruction):
             for mi, mx in self._ns[1:]:
                 N *= mx - mi
 
-            # At lead width `w` a slot is `threads * w` elements, and that is
-            # the unit every lead and contraction index below divides by.  At
-            # width one the span is the thread count.  A packed operand whose
-            # lead or contraction does not start on a whole vector, or a lead
-            # that does not start on a slot, goes to the nest, which peels.
+            # The window conditions, which `_plan` asks as well
+            # (`_window_declines`).
+            if self._window_declines():
+                return False
             width = self._lead_width
             span = self._num_threads * width
             ks00 = self._ks[0][0] if len(self._ks) > 0 else 0
-            if width > 1 and (self._ns[0][0] % span or ks00 % width
-                              or ks00 >= span):
-                return False
-            # How many slots the window *touches*, against how many `M`
-            # counts.  `M` is `ceil(extent / span)` and `unwindI` puts the
-            # window at slot `start // span`, so a start inside a slot is
-            # rounded away twice: a 32-row window at row 9 over 32 lanes
-            # touches two slots and is emitted as one, with its first nine
-            # rows read from before the buffer and its last nine never
-            # computed -- which the destination then stored from registers
-            # nothing had assigned.  A window that *fits* inside one slot
-            # is not affected and stays here, which is why this counts
-            # rather than asking whether the start is on a slot: the lane
-            # bounds clip such a window and always did.  At width above one
-            # the condition above is the stronger one and this adds
-            # nothing.
-            lo, hi = self._ns[0]
-            if hi > lo and ((hi - 1) // span - lo // span + 1
-                            != -(-(hi - lo) // span)):
-                return False
             M *= -(-(self._ns[0][1] - self._ns[0][0]) // span)
             Mx = (self._ns[0][1] - self._ns[0][0])
 
