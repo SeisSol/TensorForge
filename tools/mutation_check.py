@@ -2258,6 +2258,9 @@ GROUPS = {
               SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,
               SymbolType.Batch, SymbolType.Global)):''',
              '      if bc_lane is None:')),
+        ('a value without axes written to shared memory as text',
+         sub(SYM, '    axisless = (not structured and not named',
+             '    axisless = (False and not structured and not named', 1)),
     ]),
 
     'reachability': ('tests/test_amd_reachability.py', [

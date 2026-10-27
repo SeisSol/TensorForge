@@ -381,3 +381,24 @@ def test_a_merged_run_carries_the_temporaries_it_reads_back():
     biggest = max(found, key=lambda loop: len(loop.region))
     assert biggest.carried, ('the longest run carries nothing round its back '
                              'edge, though its body reads its integrals back')
+
+
+def test_a_value_without_axes_is_read_where_it_was_computed():
+    """The damage step at order 2 in single hands values without axes on
+    through shared memory -- the products of the material parameters and
+    of the integrals, each stored by every lane and read back by all of them
+    behind a fence.  Every lane computes the same, so each reads the value
+    from the register it computed it into (`Symbol.store`,
+    `Flow._forwards`); what still goes through shared memory is read as a
+    truth value, and was stored as a number."""
+    import re
+
+    system = 'damage-nonlinearck'
+    gen = Generator(_read(system, f'{system}-o2-s', 'gpu_damageStep'),
+                    Context(arch='gfx942', backend='hip', fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    reads = re.findall(r'^\s*(\w+) v\d+_\w+ = s\d+\[0\];', gen.get_kernel(),
+                       re.M)
+    assert set(reads) <= {'bool'}, reads

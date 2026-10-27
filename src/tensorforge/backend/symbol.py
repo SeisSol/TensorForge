@@ -3816,12 +3816,24 @@ class Symbol:
                       # `test_wrapped_syntax` catches.
                       and not _explicit_simd_writer(writer)))
              and isinstance(variable, _Value) and hasattr(writer, 'store'))
+    # A value without axes in shared memory, for the same reason: it sits in
+    # element zero of its buffer, and every lane writes it there -- no lane
+    # owns an element of an image without a distributed axis.  Written as
+    # text, the store would name its buffer and say nothing more: no pass
+    # could see what it writes, or where, so no read of the buffer could
+    # take the value from the register it is in (`pir.forward`), and a
+    # second store of the same value would stay beside the first.
+    axisless = (not structured and not named
+                and self.stype == SymbolType.SharedMem
+                and not self.lead_dims and not index
+                and not _explicit_simd_writer(writer)
+                and isinstance(variable, _Value) and hasattr(writer, 'store'))
 
     if not structured and self._memory_valid(index) is not None:
       raise InternalError(
           f'{self.name}: a full-lane tail reached a text store, which cannot '
           f'hold itself to the lanes that hold data')
-    if not structured and not named:
+    if not structured and not named and not axisless:
       access = self.access(context, index, writer, addrs)
       fmt = not isinstance(variable, (str, int, float))
       var = '{0}' if fmt else variable
@@ -3880,6 +3892,8 @@ class Symbol:
                      **({} if padded is not None else
                         self._valid_access(writer, index,
                                            self._memory_valid(index))))
+    elif axisless:
+      writer.store(self, variable, self.address_value(writer, context, index))
     elif (self.stype in (SymbolType.Register, SymbolType.Scratch)
           and not isinstance(lead, LeadIndex)):
       # One named element of a dimension that lives in the registers, so

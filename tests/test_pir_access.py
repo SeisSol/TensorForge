@@ -128,6 +128,49 @@ def test_a_value_without_axes_is_stored_structurally_too():
     assert 'store' in seen, 'the reduction still writes its result as text'
 
 
+@pytest.mark.parametrize("backend,arch", [("cuda", "sm_86"), ("hip", "gfx942")])
+def test_a_value_without_axes_in_shared_memory_is_stored_structurally(backend,
+                                                                     arch):
+    """The same value handed on through memory (`memory_semantics`): its
+    buffer is shared, and every lane writes it into element zero.
+
+    Written as text, the store would name its buffer, and that would be all
+    a pass learns of it: not what it writes, nor where.  No read of the
+    buffer would find the store that reaches it (`pir.flow`), so none could
+    take the value from the register it is in, and a second store of the
+    same value into the same element would stay beside the first.
+    """
+    from tensorforge.backend import pir as pirmod
+    from tensorforge.backend.pir.core import Effect, MemSpace, Op, walk_stmts
+    from tensorforge.backend.symbol import SymbolType
+
+    stores, texts = [], []
+    original = pirmod.emit
+
+    def watch(body, writer, context=None, metrics=None):
+        for s in walk_stmts(body):
+            if (s.op == Op.STORE
+                    and getattr(s.args[0], 'stype', None) == SymbolType.SharedMem
+                    and not s.args[0].lead_dims):
+                stores.append(s)
+            elif s.op == Op.RAWSTMT and any(
+                    a.kind & Effect.WRITE and a.space == MemSpace.SHARED
+                    for a in s.accesses or ()):
+                texts.append(s.text)
+        return original(body, writer, context, metrics)
+
+    pirmod.emit = watch
+    try:
+        # Without the forwarding, as above: asked is how the store is written.
+        _generate("red_scalar_then_ew", backend, arch, memory_semantics=True,
+                  forward_memory=False)
+    finally:
+        pirmod.emit = original
+
+    assert stores, 'the value without axes is not stored to shared memory'
+    assert not texts, f'shared memory written as text: {texts}'
+
+
 @pytest.mark.parametrize("case_name", ["chain_three", "accumulate_then_read"])
 def test_one_address_serves_every_access_at_that_index(case_name):
     """`ir1[v1348_a]` read and `r1[v1348_a]` written, computed once.
