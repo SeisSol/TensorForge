@@ -1204,6 +1204,10 @@ class _Alike:
                 out = self._loop(d)
             elif d.regions:
                 out = False
+            elif d.attr('alike'):
+                # The fold of what every lane of the multiplication held,
+                # which each of them holds alike (`IRBuilder.all_reduce`).
+                out = True
             elif v.layout is None and any(
                     a.space in (MemSpace.REGISTER, MemSpace.UNKNOWN)
                     for a in d.accesses):

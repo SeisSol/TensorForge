@@ -829,6 +829,29 @@ class IRBuilder:
                             pure=True, movable=False, layout=SCALAR_LAYOUT,
                             crosslane=True)
 
+    def all_reduce(self, text: str, value: Value, *, type_=None,
+                   hint: str = 'red') -> Value:
+        """`text`, a fold of `value` over every lane of the multiplication
+        that hands each of them the result (`Lexic.reduction`): the same on
+        every lane, whatever `value` is on each.
+
+        The one value whose uniformity is wider than its operand's join, and
+        stated here rather than by a caller (`_stated`): what differs between
+        the lanes is what is folded, and the fold does not.  A fold over a
+        run that leaves lanes of the multiplication out -- the first stage
+        of one wider than a wave, or the lanes that hold data alone -- is
+        not this, nor is an explicitly vectorized one, whose fold is an
+        operation on the vector, kept in its type; those are a `rawexpr`.
+        """
+        type_ = type_ or ScalarType(self._fptype)
+        v = self.value(type_, hint=hint,
+                       uniform=max(Uniformity.MULT, _join((value,))),
+                       layout=SCALAR_LAYOUT)
+        self._emit_op(Op.RAWEXPR, (v,), (value,), pure=True, movable=False,
+                      effect=Effect.NONE, text=text,
+                      attrs=(('alike', True),))
+        return v
+
     def lane_offset(self, block: int, stride: int = 1,
                     hint: str = 'lane') -> Operand:
         """The address contribution of one lane within a distributed dimension.

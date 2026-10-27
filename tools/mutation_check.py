@@ -91,6 +91,7 @@ DEMAND = Path('src/tensorforge/backend/pir/demand.py')
 EPILOGUE = Path('src/tensorforge/backend/instructions/compute/epilogue.py')
 PROMISE = Path('src/tensorforge/backend/instructions/compute/promise.py')
 MULTILINEAR = Path('src/tensorforge/backend/instructions/compute/multilinear.py')
+CROSSLANE = Path('src/tensorforge/backend/instructions/compute/crosslane.py')
 TILING = PKG / 'tiling.py'
 
 
@@ -1796,6 +1797,15 @@ GROUPS = {
                      "        if s.op == Op.BARRIER and s.attr('participants')",
              '    for s in body:\n'
              "        if s.op == Op.BARRIER and s.attr('participants')", 1)),
+        ('a fold over every lane taken for one over some',
+         sub(CROSSLANE, '        if width >= self._num_threads and not writer._explicit_simd():',
+             '        if False:', 1)),
+        ('a fold over some lanes taken for one over every lane',
+         sub(CROSSLANE, '        if width >= self._num_threads and not writer._explicit_simd():',
+             '        if not writer._explicit_simd():', 1)),
+        ('a fold over every lane as lane-varying as what it folds',
+         sub(BUILD, '                       uniform=max(Uniformity.MULT, _join((value,))),\n',
+             '                       uniform=_join((value,)),\n', 1)),
     ]),
 
     # Groups that change places across a loop's back edge are no steady
@@ -3019,6 +3029,9 @@ GROUPS = {
         ('a number never read as a truth value',
          sub(FORWARD, '        truth = v.type != s.target[0].type and _truth_of(s, v)\n',
              '        truth = False\n', 1)),
+        ('a fold every lane holds alike asked of what it folds',
+         sub(FLOW, "            elif d.attr('alike'):\n",
+             '            elif False:\n', 1)),
         ('what every lane stores alike read from memory all the same',
          sub(FLOW, '                if not r.own and not self._same_on_every_lane(o):\n',
              '                if not r.own:\n', 1)),

@@ -685,6 +685,25 @@ def test_what_the_lanes_store_apart_keeps_the_load_of_another_lanes_store(
     assert _loads(out, MemSpace.SHARED, s)
 
 
+@pytest.mark.parametrize('fold', [True, False], ids=['all_reduce', 'text'])
+def test_a_fold_every_lane_holds_alike_is_read_from_its_register(fold):
+    """A fold over every lane of the multiplication hands each of them the
+    fold of all of them (`IRBuilder.all_reduce`): stored by every lane into
+    its element and read from the next lane's, it is read from the lane's
+    own register.  The same text as a raw expression says nothing of the
+    lanes, and the load stays."""
+    t = Body()
+    b = t.b
+    text = ('tensorforge::reduction<tensorforge::ReductionOperation<float, '
+            'tensorforge::Operation::Add>, 32, 1, float>({0})')
+    x = b.load(t.p, t.lane)
+    value = (b.all_reduce(text, x, type_=REAL) if fold
+             else b.rawexpr(text, x, type_=REAL, pure=True, movable=False))
+    s = _across(t, value, 'next')
+    out = t.run()
+    assert bool(_loads(out, MemSpace.SHARED, s)) is not fold
+
+
 def test_a_number_read_as_a_truth_value_is_whether_it_is_zero():
     """A comparison computed as a number and stored into a buffer of truth
     values, which the store makes of it: read back, it is `v != 0`."""

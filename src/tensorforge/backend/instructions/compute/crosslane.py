@@ -90,6 +90,11 @@ class CrossLaneFold:
             return acc
         text = lexic.reduction('{0}', self._operation.operation(),
                                self._dtype, width, subblock=1)
+        if width >= self._num_threads and not writer._explicit_simd():
+            # One run of every lane of the multiplication: each holds the
+            # fold of all of them, the same value (`IRBuilder.all_reduce`).
+            return writer.all_reduce(text, partial,
+                                     type_=ScalarType(self._dtype))
         return writer.rawexpr(text, partial,
                               type_=ScalarType(self._dtype),
                               hint='red', pure=True, movable=False)

@@ -328,6 +328,36 @@ def test_a_fold_wider_than_a_wave_meets_in_shared_memory():
         "a fold inside one wave is in lockstep and needs no barrier")
 
 
+@pytest.mark.parametrize('rows,alike', [(64, True), (16, False)])
+def test_a_fold_over_every_lane_is_the_same_on_all_of_them(rows, alike,
+                                                           monkeypatch):
+    """64 rows over 32 lanes: every lane holds some, the fold runs over all
+    of them, and each lane holds the fold of all -- the same value on every
+    lane of the multiplication (`IRBuilder.all_reduce`), which a branch on
+    it may take as the multiplication's agreement.  16 rows fold over the
+    16 lanes that hold them alone; the others fold their neutral elements,
+    and the result differs between the lanes."""
+    from tensorforge.backend import pir as pirmod
+    from tensorforge.backend.pir.core import Op, Uniformity, walk_stmts
+
+    seen = []
+    real = pirmod.emit
+
+    def watch(body, writer, context=None, metrics=None):
+        seen.extend(s for s in walk_stmts(body)
+                    if s.op == Op.RAWEXPR and 'reduction<' in (s.text or ''))
+        return real(body, writer, context, metrics)
+    monkeypatch.setattr(pirmod, 'emit', watch)
+    _fold(32, rows)
+    assert seen
+    for s in seen:
+        assert bool(s.attr('alike')) is alike, s.text
+        if alike:
+            v, = s.target
+            assert v.uniformity >= Uniformity.MULT
+            assert not v.layout.is_distributed
+
+
 def test_a_fold_over_a_partial_wave_is_refused():
     """Between two multiples of the wave, `MultLayout` interleaves the
     multiplications, so the lanes of one are not the contiguous run that the
