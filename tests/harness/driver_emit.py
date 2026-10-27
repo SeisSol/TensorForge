@@ -25,6 +25,7 @@ from typing import List
 
 from tensorforge.backend.symbol import SymbolType
 from tensorforge.common.basic_types import DataFlowDirection, FlagMode
+from tensorforge.generators import stacking
 
 from .layout import ctype
 
@@ -127,12 +128,24 @@ def collect_operands(generator) -> List[DriverOperand]:
                                DataFlowDirection.SOURCESINK)
         is_snk = direction in (DataFlowDirection.SINK,
                                DataFlowDirection.SOURCESINK)
+        # One element's memory.  A stacked build (`Options.stack_elements`)
+        # gives what an element owns a last axis of `k` elements of the batch,
+        # each in memory of its own (`stacking.factor`), and the kernel still
+        # reaches element `e` through its own pointer or at `e` times one
+        # element's volume.  Sized from the stacked shape, every element of
+        # the host buffer was `k` times as large: the reference read a third
+        # axis it does not have, and the kernel the first `1/k` of each.
+        k = stacking.factor(t)
+        shape = tuple(t.get_actual_shape())
+        volume, storage = int(t.get_actual_volume()), int(t.storage_volume())
+        if k > 1:
+            shape, volume, storage = shape[:-1], volume // k, storage // k
         ops.append(DriverOperand(
             kernel_name=sym.name,
             alias=t.alias,
             is_source=is_src,
             is_sink=is_snk,
-            storage_volume=int(t.storage_volume()),
+            storage_volume=storage,
             storage_parts=int(getattr(t, "storage_parts", 1)),
             storage_planar=bool(getattr(t, "storage_planar", False))
             and int(getattr(t, "storage_parts", 1)) > 1,
@@ -141,8 +154,8 @@ def collect_operands(generator) -> List[DriverOperand]:
             # the kernel addresses the *stored* region: memory spans
             # upper - lower and address 0 is `lower`, so the host buffer is
             # bbox-shaped, not shape-shaped (see DataView.get_dim_strides)
-            shape=tuple(t.get_actual_shape()),
-            volume=int(t.get_actual_volume()),
+            shape=shape,
+            volume=volume,
             ctype=ctype(t.datatype),
             addressing=str(t.addressing),
             residence=("argument" if getattr(t, "passed_by_value", False)
