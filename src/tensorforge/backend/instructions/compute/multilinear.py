@@ -2403,10 +2403,29 @@ class MultilinearInstruction(ComputeInstruction):
 
                 A single lead index, whose `nonlead` names the slot within the
                 lane and whose lane term the class supplies.  The remaining
-                axes are indexed at zero and fold away: the view still
-                describes the operand's shape, because everything else that
-                asks it --- the bound, the batch stride, the element type ---
-                still wants that answer, and only this one read does not.
+                axes fold away: the view still describes the operand's shape,
+                because everything else that asks it --- the bound, the batch
+                stride, the element type --- still wants that answer, and
+                only this one read does not.
+
+                They fold away at the box's lower corner, not at zero.  The
+                address subtracts that corner from every coordinate, and a
+                slot is already counted from the stored window's start: an
+                axis indexed at zero over a box from column 1 moved every
+                read a column back -- `C = A[:, 1:17] B[1:17, :]` read row
+                `l - 4` of its k-quads at sixteen lanes, and lanes 0 to 3
+                read sixteen floats before the buffer (gfx942, MI300A).
+
+                The lead axis is the other way round: a lane holds the row of
+                its own position, counted from zero, and the stored order
+                counts rows from the box's start, so the read does want the
+                corner taken off -- in the order's units, `width` slots a
+                row, where the address takes it off once.  A box from row 9
+                read its k-quads nine floats back where they are thirty-six,
+                misaligned and wrong (`packed_boxed_runs` on gfx942, where
+                the operand is prepared even though the product declines the
+                matrix path).  At width one the two agree, which is every
+                other prepared order.
                 """
                 threads = self._num_threads
                 view = self._ops[0].symbol.data_view
@@ -2426,8 +2445,10 @@ class MultilinearInstruction(ComputeInstruction):
                 nonlead = slot // (threads * width)
                 value = (None if shift is None else
                          writer.op('add', INDEX, shift, nonlead, hint='slot'))
-                index = ([LeadIndex(nonlead, threads, 1, value=value, width=width)]
-                         + [0] * (rank - 1))
+                lower = view.get_dim_offsets()
+                index = ([LeadIndex(nonlead, threads, 1, value=value, width=width,
+                                    offset=lower[0] * (1 - width))]
+                         + [lower[d] for d in range(1, rank)])
                 with writer.speculative() as spec:
                     res = self._ops[0].symbol.load(writer, self._context, None,
                                                    index, False, parts=parts)
