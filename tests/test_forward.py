@@ -600,6 +600,91 @@ def test_a_buffer_of_the_arena_read_across_the_lanes_stays():
     assert any(x.op == Op.MARK and s in x.args for x in walk_stmts(out))
 
 
+def _across(t, value, place):
+    """`s[w] = value` on every lane, then `p = s[r]`: the next lane's
+    element (`w` the lane, `r` the next), or element zero, which every lane
+    writes and the last one wrote last."""
+    b = t.b
+    s = b.alloc(F32, (LANES,), MemSpace.SHARED, hint='s', extern='s0',
+                arena='shrMem')
+    if place == 'next':
+        written = t.lane
+        read = b.op('rem', INDEX, b.op('add', INDEX, t.lane, 1), LANES,
+                    hint='n')
+    else:
+        written = read = 0
+    b.store(s, value, written)
+    b.store(t.p, b.load(s, read), t.lane)
+    return s
+
+
+def _summed(t, term):
+    """`term` added up over a loop of three trips, from zero."""
+    b = t.b
+    with b.for_(0, 3, 1, inits=(b.const(0.0, REAL),), types=(REAL,)) as f:
+        f.yield_(b.op('add', REAL, f.iter_args[0], term, hint='acc'))
+    return f.results[0]
+
+
+@pytest.mark.parametrize('place', ['next', 'zero'])
+@pytest.mark.parametrize('kind', ['number', 'value', 'loop'])
+def test_what_every_lane_stores_alike_is_read_from_another_lanes_store(
+        kind, place):
+    """Every lane stores the same into shared memory -- a number, a value no
+    lane's index went into, or such a value summed up over a loop -- and
+    reads an element another lane wrote: what that lane stored is what this
+    one did, and the load reads it from where the lane's own store took
+    it."""
+    t = Body()
+    b = t.b
+    if kind == 'number':
+        value = 1.5
+    else:
+        alpha = b.extern_value('alpha', REAL, uniform=Uniformity.MULT,
+                               hint='alpha')
+        value = b.op('mul', REAL, alpha, 2.0, hint='u')
+        if kind == 'loop':
+            value = _summed(t, value)
+    s = _across(t, value, place)
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED, s)
+    stored = [x.args[1] for x in walk_stmts(out)
+              if x.op == Op.STORE and x.args[0] is t.p]
+    assert len(stored) == 1
+    if kind == 'number':
+        assert any(x.op == Op.CONST and stored[0] in x.target
+                   and x.attr('value') == value for x in walk_stmts(out))
+    else:
+        assert stored[0] is value
+
+
+@pytest.mark.parametrize('place', ['next', 'zero'])
+@pytest.mark.parametrize('kind', ['lane', 'register', 'loop'])
+def test_what_the_lanes_store_apart_keeps_the_load_of_another_lanes_store(
+        kind, place):
+    """The same with a value that differs between the lanes: the element
+    holds what the other lane stored, which is not what this one did.  One
+    the lane's index went into; one read out of the lane's registers, a read
+    of the same register in every lane, which its uniformity calls the same
+    everywhere, since nothing says how the registers are spread over the
+    lanes; or a sum over a loop of what the lane loaded, which the loop
+    carries from a zero the same everywhere."""
+    t = Body()
+    b = t.b
+    if kind == 'register':
+        r = t.registers('r0')
+        t.fill(r)
+        x = b.load(r, 1)
+    else:
+        x = b.load(t.p, t.lane)
+    value = b.op('mul', REAL, x, 2.0, hint='v')
+    if kind == 'loop':
+        value = _summed(t, x)
+    s = _across(t, value, place)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, s)
+
+
 def _reload(t, between=None, lane=None, guard=None):
     """`r0[j] = q[e(j)]` and `p = r0[0]`, then `between`, then `r1[j] =
     q[e(j)]` and `p = r1[1]`: the same elements loaded twice by the same
@@ -687,14 +772,17 @@ def test_a_load_behind_a_store_of_the_element_keeps_its_load():
 
 def test_a_load_behind_another_lanes_store_of_the_element_keeps_its_load():
     """Each lane stores into the next lane's element between the loads: the
-    second load finds that store, which the first did not."""
+    second load finds that store, which the first did not.  A value that
+    differs between the lanes, so that the lane's own store does not answer
+    for it, as it would for a number."""
     t = Body()
     b = t.b
     nxt = b.op('rem', INDEX, b.op('add', INDEX, t.lane, 1), LANES, hint='n')
 
     def store(r0):
         with b.if_(t.valid):
-            b.store(t.q, 1.0, t.element(1, nxt))
+            b.store(t.q, b.op('mul', REAL, b.load(r0, 2), 3.0, hint='v'),
+                    t.element(1, nxt))
     _reload(t, store)
     out = t.run()
     assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 2

@@ -71,7 +71,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, Set, Tuple
 
-from .core import Effect, MemSpace, Op, Stmt, Value, walk_stmts
+from .core import (BufferType, Effect, MemSpace, Op, Stmt, Uniformity, Value,
+                   walk_stmts)
 from .shards import _Indices, _NotStatic
 
 #: What a cell held before the body wrote it.
@@ -214,6 +215,8 @@ class Flow:
         #: `(buffer key, address)`.
         self._cells: Dict[int, Tuple[Tuple[int, ...], Tuple[Tuple, ...]]] = {}
         self.defs: Dict[int, Stmt] = {}
+        #: Which values are the same on every lane (`_Alike`), once asked.
+        self._alike: Optional[_Alike] = None
         self.uses: Dict[int, List[Stmt]] = defaultdict(list)
         self.loops: Dict[int, Tuple[Stmt, ...]] = {}
         self.parents: Dict[int, Tuple[Stmt, ...]] = {}
@@ -619,10 +622,13 @@ class Flow:
         """What the load's execution `n` reads for certain, besides its
         element, lane group by lane group: what the lane's own store put
         there, where that is a value, a number, or a register that holds
-        it still."""
+        it still -- or, where another lane wrote the element last in a
+        store this lane ran as well, what this lane stored, where that is a
+        number or a value the same on every lane of the multiplication: the
+        other lane stored the same."""
         out: List[Tuple[int, Tuple, Tuple[Reach, ...]]] = []
         for r in self.reach.get(n, ()):
-            if not r.certain or r.writer is None or r.writer < 0 or not r.own:
+            if not r.certain or r.writer is None or r.writer < 0:
                 continue
             for m, o in self.origin.get(r.writer, ()):
                 hit = m & r.mask
@@ -631,6 +637,8 @@ class Flow:
                 if o[0] == 'value' and not self._one_trip(o[1], r.writer, n):
                     # The store took the value in another trip of a loop that
                     # computes it anew in each: here it is another.
+                    continue
+                if not r.own and not self._same_on_every_lane(o):
                     continue
                 if o[0] == 'reg':
                     _, cell, writer = o
@@ -658,6 +666,18 @@ class Flow:
         return all(l.induction.id in here and l.induction.id in there
                    and here[l.induction.id] == there[l.induction.id]
                    for l in loops)
+
+    def _same_on_every_lane(self, origin: Tuple) -> bool:
+        """Is what a store took its value from, in `origin`'s form, the same
+        on every lane of the multiplication: a number, or a value
+        `_Alike` says is?"""
+        if origin[0] == 'const':
+            return True
+        if origin[0] != 'value':
+            return False
+        if self._alike is None:
+            self._alike = _Alike(self.defs)
+        return self._alike(origin[1])
 
     def _fetches(self, n: int, conds, taken: int) -> List[Tuple[int, Tuple, Tuple[Reach, ...]]]:
         """What the load's execution `n` of memory reads for certain because
@@ -1145,6 +1165,71 @@ def _element_free(x: Stmt, written: Set[int], defs: Dict[int, Stmt]) -> bool:
     return (d.op == Op.LOAD and len(d.accesses) == 1
             and d.accesses[0].space is MemSpace.GLOBAL
             and id(d.accesses[0].base) not in written)
+
+
+class _Alike:
+    """Whether a value is the same on every lane of the multiplication: as
+    its uniformity says (`Value.uniformity`), where nothing it is computed
+    from was read out of registers spread over the lanes in a way nobody
+    stated.
+
+    A read's uniformity is joined from its index, and the index of a read
+    of registers is the same in every lane whatever each lane holds there:
+    the answer is the address's, written on the value.  A read whose layout
+    is known has the value's answer (`Value.__post_init__`); one whose
+    layout is not, has none.  What a loop carries is the same on every lane
+    where what it starts from is and what each trip hands the next is,
+    given that what the trip started from was; what any other region yields
+    is not asked here."""
+
+    def __init__(self, defs: Dict[int, Stmt]):
+        self._defs = defs
+        self._memo: Dict[int, bool] = {}
+
+    def __call__(self, v) -> bool:
+        if not isinstance(v, Value):
+            return True
+        if v.uniformity < Uniformity.MULT:
+            return False
+        hit = self._memo.get(v.id)
+        if hit is not None:
+            return hit
+        # A cycle that does not go through what a loop carries proves
+        # nothing.
+        self._memo[v.id] = False
+        d = self._defs.get(v.id)
+        out = True
+        if d is not None:
+            if d.op == Op.FOR:
+                out = self._loop(d)
+            elif d.regions:
+                out = False
+            elif v.layout is None and any(
+                    a.space in (MemSpace.REGISTER, MemSpace.UNKNOWN)
+                    for a in d.accesses):
+                out = False
+            else:
+                out = all(self(x) for x in d.operands()
+                          if not isinstance(x.type, BufferType))
+        self._memo[v.id] = out
+        return out
+
+    def _loop(self, d: Stmt) -> bool:
+        """The induction, what the loop carries and what it leaves: taken to
+        be the same on every lane while what a trip hands the next is asked,
+        and what was concluded from that dropped where it is not."""
+        carried = (d.induction,) + tuple(d.iter_args) + tuple(d.target)
+        before = set(self._memo)
+        for c in carried:
+            self._memo[c.id] = True
+        out = (all(self(x) for x in d.operands())
+               and all(self(y) for y in d.regions[0].yielded))
+        if not out:
+            for k in set(self._memo) - before:
+                del self._memo[k]
+            for c in carried:
+                self._memo[c.id] = False
+        return out
 
 
 class _MemoryReads:

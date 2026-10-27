@@ -2994,8 +2994,24 @@ GROUPS = {
          sub(FLOW, '            if not layer.conds <= conds or layer.writer != writer:\n'
                    '                return False\n', '', 1)),
         ('another lane\'s store taken for the lane\'s own',
-         sub(FLOW, '            if not r.certain or r.writer is None or r.writer < 0 or not r.own:',
-             '            if not r.certain or r.writer is None or r.writer < 0:', 1)),
+         sub(FLOW, '                if not r.own and not self._same_on_every_lane(o):\n'
+                   '                    continue\n', '', 1)),
+        ('a value that differs between the lanes taken for one the same on all',
+         sub(FLOW, '        if v.uniformity < Uniformity.MULT:\n'
+                   '            return False\n', '', 1)),
+        ('a read of registers spread nobody knows how taken for the same on all',
+         sub(FLOW, '            elif v.layout is None and any(\n',
+             '            elif False and any(\n', 1)),
+        ('what a loop carries taken for the same on all whatever a trip hands on',
+         sub(FLOW, '        out = (all(self(x) for x in d.operands())\n'
+                   '               and all(self(y) for y in d.regions[0].yielded))\n',
+             '        out = all(self(x) for x in d.operands())\n', 1)),
+        ('what a loop carries never taken for the same on all',
+         sub(FLOW, '            if d.op == Op.FOR:\n                out = self._loop(d)\n',
+             '            if False:\n                out = self._loop(d)\n', 1)),
+        ('what every lane stores alike read from memory all the same',
+         sub(FLOW, '                if not r.own and not self._same_on_every_lane(o):\n',
+             '                if not r.own:\n', 1)),
         ('a load taken where some of its lanes read something else',
          sub(FORWARD, '            if covered & need != need:\n'
                       '                return False\n', '', 1)),

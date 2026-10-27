@@ -11,7 +11,9 @@ result stored to global memory and loaded back by the operation that reads
 it, a register image copied into another before it is stored, an operand
 each operation loads anew from where it lives.  Asked of every load,
 execution by execution and lane by lane (`flow.Flow`, with `values`):
-where the store it reads for certain was the lane's own, and its value is
+where the store it reads for certain was the lane's own -- or another
+lane's, where every lane stored the same, a number or a value the same on
+all of them -- and its value is
 
 * a number, the load is that number;
 * a value of the body that stands where the load does, the load is that
