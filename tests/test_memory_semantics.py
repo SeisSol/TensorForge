@@ -23,6 +23,7 @@ import pytest
 import test_canonical_lanes as lanes
 from tensorforge.backend.instructions.builders import multilinear_builder
 from tensorforge.common.context import Context, Options
+from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor
 from tensorforge.generators.descriptions import MultilinearDescr
 from tensorforge.generators.generator import Generator
@@ -113,6 +114,57 @@ def test_an_accumulation_over_fewer_rows_lands_in_the_buffer_as_laid_out(
                         lambda descrs, backend='cuda', arch='sm_86':
                         _built(descrs, backend, arch, **options))
     assert lanes._worst(accumulation_over_fewer_rows()) < 1e-9
+
+
+def accumulation_onto_a_value_without_axes():
+    """`r = v[2:5] p[2:5]` and `t = x[2:5] y[2:5]`, values without axes,
+    `E = t B`, then `r += w[2:5] q[2:5]` and `D = r C`: the accumulation
+    onto `r` reads what the first product stored there, and `t` lives in
+    between -- SeisSol's damage step adds onto its values without axes this
+    way."""
+    def vec(alias):
+        return lanes._t([lanes.M], alias)
+
+    def val(alias):
+        return lanes._t([], alias, is_tmp=True)
+
+    def dot(dest, x, y, **extra):
+        window = BoundingBox([2], [5])
+        return MultilinearDescr(dest=SubTensor(dest),
+                                ops=[SubTensor(x, window),
+                                     SubTensor(y, window)],
+                                target=[[-1], [-1]], permute=[[0], [0]],
+                                **extra)
+
+    def scale(dest, s, m):
+        return MultilinearDescr(dest=SubTensor(dest),
+                                ops=[SubTensor(s), SubTensor(m)],
+                                target=[[], [0, 1]], permute=[[], [0, 1]])
+    r, t = val('r'), val('t')
+    return [
+        dot(r, vec('v'), vec('p')),
+        dot(t, vec('x'), vec('y')),
+        scale(lanes._t([lanes.M, lanes.N], 'E'), t,
+              lanes._t([lanes.M, lanes.N], 'B')),
+        dot(r, vec('w'), vec('q'), add=True),
+        scale(lanes._t([lanes.M, lanes.N], 'D'), r,
+              lanes._t([lanes.M, lanes.N], 'C')),
+    ]
+
+
+@pytest.mark.parametrize('options', [OPTIONS, dict(memory_semantics=True),
+                                     {}],
+                         ids=['both', 'memory_semantics', 'residency'])
+def test_an_accumulation_reads_what_its_destination_held(options,
+                                                         monkeypatch):
+    """The instruction that adds onto `r` reads it before it writes it, so
+    nothing ahead of it says that `r` holds nothing anybody wants
+    (`Generator._declare_buffers`, `mark defines`): told so, the allocator
+    gives the stretch before it to `t`, which writes over `r` there."""
+    monkeypatch.setattr(lanes, '_built',
+                        lambda descrs, backend='cuda', arch='sm_86':
+                        _built(descrs, backend, arch, **options))
+    assert lanes._worst(accumulation_onto_a_value_without_axes()) < 1e-9
 
 
 @pytest.mark.parametrize('atomic', [True, False])

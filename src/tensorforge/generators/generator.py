@@ -1346,7 +1346,8 @@ class Generator:
     (`pir.allocate`).  A slice written after an earlier write of the same
     buffer in the same block defines nothing of the kind -- the rest of the
     buffer is still wanted -- and neither does one a block around it already
-    wrote.
+    wrote, nor one that reads the buffer itself: an accumulation reads what
+    it adds onto, after the place its mark would stand.
     """
     from tensorforge.backend.instructions.memory import AbstractShrMemWrite
     from tensorforge.backend.instructions.memory.load import LoadWait
@@ -1433,11 +1434,13 @@ class Generator:
           continue
         kills = []
         partial = {id(d) for d in instr.partial_defs()}
+        read = {id(u) for u in instr.uses()}
         for sym in instr.defs():
           if not tracked(sym) or block_wide(sym):
             continue
           if (not isinstance(instr, LoadWait)
                   and id(sym) not in carried
+                  and id(sym) not in read
                   and not (id(sym) in partial and id(sym) in seen)):
             kills.append(sym)
           seen.add(id(sym))

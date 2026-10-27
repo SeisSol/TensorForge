@@ -2938,6 +2938,8 @@ GROUPS = {
                     '                          registers=False, **carry)\n',
              '      early = pir.Forward(builder.scratch, report=carries,\n'
              '                          registers=False, **carry) if added else None\n', 1)),
+        ('an accumulation says its destination holds nothing ahead of it',
+         sub(GEN, '                  and id(sym) not in read\n', '', 1)),
     ]),
     # Which lanes of a value anything reads, and the loads taken where the
     # lanes they would get wrong are none of those.
