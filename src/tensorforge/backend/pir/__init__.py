@@ -36,8 +36,9 @@ from .passes import (check_barrier_budget, cluster_loads, flatten_scopes,
                      substitute, verify)
 from .barriers import Arena
 from .pipeline import (Atomics, BodyContext, CarryTrips, Forward, GroupRows,
-                       MoveLoads, PlaceBarriers, PlaceBuffers, Prefetch,
-                       ShardLoads, WrapLoads, optimize, standard_pipeline)
+                       KeepOwn, MoveLoads, PlaceBarriers, PlaceBuffers,
+                       Prefetch, ShardLoads, WrapLoads, optimize,
+                       standard_pipeline)
 from .emit import Emitter, emit
 
 __all__ = [
@@ -51,7 +52,8 @@ __all__ = [
     'cse', 'dce', 'cluster_loads', 'flatten_scopes', 'if_convert', 'pressure', 'def_use', 'defined_within', 'dump', 'emit', 'fold',
     'free_values', 'licm', 'load_cse', 'may_alias', 'optimize', 'place_commits',
     'schedule_async', 'standard_pipeline', 'strip_commits',
-    'substitute', 'verify', 'GroupRows', 'MoveLoads', 'PlaceBarriers',
+    'substitute', 'verify', 'GroupRows', 'KeepOwn', 'MoveLoads',
+    'PlaceBarriers',
     'PlaceBuffers',
     'Prefetch', 'ShardLoads', 'WrapLoads',
     'walk',

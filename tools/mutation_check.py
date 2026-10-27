@@ -2777,6 +2777,35 @@ GROUPS = {
          sub(CARRY, "            if counted(s) and s.attr('rolled'):\n",
              "            if False:\n", 1)),
     ]),
+    # A buffer of the arena every lane reads only what it wrote itself, in
+    # registers over the statements that touch it.
+    'keepown': ('tests/test_keep_own.py', [
+        ('what a lane reads before it writes it taken for its own',
+         sub(CARRY, "                if exposed:\n"
+                    "                    raise _Refused('a lane reads what it did not write there '\n",
+             "                if False:\n"
+             "                    raise _Refused('a lane reads what it did not write there '\n", 1)),
+        ('a statement that says nothing of what it touches taken for none',
+         sub(CARRY, '            if any(a.space is MemSpace.UNKNOWN or (\n',
+             '            if False and any(a.space is MemSpace.UNKNOWN or (\n', 1)),
+        ('text that touches it taken for a load or a store',
+         sub(CARRY, "                if x.op not in (Op.LOAD, Op.STORE):\n"
+                    "                    raise _Refused(f'a {x.op} touches it')\n"
+                    "                if any(a.base is not base for a in mine):\n",
+             "                if any(a.base is not base for a in mine):\n", 1)),
+        ("an element another lane writes taken for a lane's own",
+         sub(CARRY, '        if any(len(touched[e]) > 1 for e in written):',
+             '        if False:', 1)),
+        ('the trips of a loop around it not asked',
+         sub(CARRY, "                if (owner is None or owner.op is not Op.FOR\n"
+                    "                        or not counted(owner)):\n",
+             "                if True:\n", 1)),
+        ('a loop that does not hold it asked all the same',
+         sub(CARRY, '                if not any(_touches(y, key) for y in walk_stmts((x,))):\n'
+                    '                    continue\n', '', 1)),
+        ('the declaration of the buffer left',
+         sub(CARRY, '        gone = marks | {id(alloc)}\n', '        gone = marks\n', 1)),
+    ]),
     # An accumulation added atomically where nothing reads the sum, and the
     # per-lane account of which store every load reads that it asks.
     'atomics': ('tests/test_accumulate_atomically.py tests/test_flow.py '

@@ -88,6 +88,15 @@ an image of its own, one register per element, the same for every lane
 with the store behind the loop where anything behind it reads `H` before
 something defines it anew, and the store ahead of it where anything still
 reads what it wrote.
+
+The same holds outside of a merged run's trips: a buffer of the arena that
+every lane reads only what it wrote itself lives in a register image of
+every lane's own, over the statements that touch it -- the innermost list
+around all of them, or a loop around that where the trips hand it on --
+and the arena loses it (`keep_own`).  Over those statements and not across
+them: what a lane reads of it there, the lane wrote there before, and
+nothing ahead of them -- the last element of the batch, say -- hands
+anything in.
 """
 
 from __future__ import annotations
@@ -125,6 +134,38 @@ def carry_trips(body: Tuple[Stmt, ...], scratch, *, threads: int,
                        _own(body, arena), body, body_masks(body, arena))
     out, changed = carrier.stmts(body)
     return out if changed else body
+
+
+def keep_own(body: Tuple[Stmt, ...], scratch, *, threads: int,
+             arena: Optional[str] = None,
+             report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+    """`body` with each buffer of `arena`, the multiplication's own, that
+    every lane reads only what it wrote itself kept in a register image of
+    every lane's own instead (see the module); the arguments are those of
+    `carry_trips`, and `report` collects what was kept and why the rest was
+    not."""
+    if arena is None:
+        return body
+    for alloc in list(_own(body, arena).values()):
+        name = str(alloc.attr('extern') or alloc.target[0])
+        taken = {str(s.attr('extern')) for s in walk_stmts(body)
+                 if s.attr('extern') is not None}
+        constants = {t.id: s.attr('value') for s in walk_stmts(body)
+                     if s.op is Op.CONST for t in s.target}
+        keeper = _Carrier(scratch, _Indices(body, {'x': threads}), threads,
+                          report, taken, constants, _addresses(body),
+                          _own(body, arena), body)
+        try:
+            body, size = keeper._kept(body, alloc)
+        except _Refused as why:
+            keeper._say(f'own: {name} stays in shared memory: {why}')
+            continue
+        except _NotStatic as why:
+            keeper._say(f'own: {name} stays in shared memory: an index or a '
+                        f'condition not known per lane ({why})')
+            continue
+        keeper._say(f'own: {name} in {size} registers of every lane')
+    return body
 
 
 class _Refused(Exception):
@@ -1292,6 +1333,102 @@ class _Carrier:
                       f'behind it reads it')
         return declare + seed, body, behind, None
 
+    def _kept(self, body: Tuple[Stmt, ...], alloc: Stmt):
+        """`(body, registers)`: `body` with the buffer `alloc` declares in a
+        register image of every lane's own, over the innermost list around
+        every statement that touches it -- or the loop around that list,
+        where its trips hand the buffer on -- and without the buffer.
+        Refused where a statement other than a load or a store of one
+        element, through the buffer's own binding, touches it; where a lane
+        reaches an element another lane writes (`_reach`); and where a lane
+        reads an element there that it did not write there before."""
+        base = alloc.target[0]
+        key = _key(base)
+        if base.id in self._addresses:
+            raise _Refused('its binding is handed on, to a table of pointers '
+                           'or the like, and may reach it from anywhere')
+        touching: List[Tuple[int, ...]] = []
+        marks: Set[int] = set()
+
+        def visit(xs, path):
+            for i, x in enumerate(xs):
+                if x is alloc:
+                    continue
+                if x.regions:
+                    for j, r in enumerate(x.regions):
+                        visit(r.body, path + ((i, j),))
+                    continue
+                mine = [a for a in x.accesses
+                        if a.base is not None and _key(a.base) == key]
+                named = any(isinstance(v, Value) and v.id == base.id
+                            for v in x.args)
+                if not mine and not named:
+                    continue
+                if x.op is Op.MARK:
+                    if x.attr('mark') not in ('defines', 'clears', 'cleared'):
+                        raise _Refused(f"a mark {x.attr('mark')} of it")
+                    marks.add(id(x))
+                    continue
+                if x.op not in (Op.LOAD, Op.STORE):
+                    raise _Refused(f'a {x.op} touches it')
+                if any(a.base is not base for a in mine):
+                    raise _Refused('it is reached through another binding')
+                if any(a.kind & Effect.ATOMIC for a in mine):
+                    raise _Refused('an atomic update of it')
+                if len(x.args) != (2 if x.op is Op.LOAD else 3):
+                    raise _Refused('an access of more than one index')
+                value = x.target[0] if x.op is Op.LOAD else x.args[1]
+                if getattr(getattr(value, 'type', None), 'length',
+                           None) is not None:
+                    raise _Refused('a vector access')
+                touching.append(path)
+
+        visit(body, ())
+        if not touching:
+            raise _Refused('nothing reads or writes it')
+        scope = touching[0]
+        for path in touching[1:]:
+            n = 0
+            while n < min(len(scope), len(path)) and scope[n] == path[n]:
+                n += 1
+            scope = scope[:n]
+        while True:
+            stmts = _region(body, scope)
+            if any(a.space is MemSpace.UNKNOWN or (
+                    a.space is MemSpace.SHARED and a.base is None)
+                    for x in walk_stmts(stmts) for a in x.accesses):
+                raise _Refused('a statement around it says nothing about '
+                               'what it touches')
+            owner = _region_owner(body, scope)
+            try:
+                events = {id(e.stmt): e for e in _events_of(stmts, key)}
+                trace: List[Tuple[Stmt, Dict]] = []
+                _trace_of(stmts, {}, events, _around(stmts, events), trace)
+                steps, register = self._reach(trace, events)
+                exposed, _, _ = _uses(steps, register)
+                if exposed:
+                    raise _Refused('a lane reads what it did not write there '
+                                   'before')
+                break
+            except (_Refused, _NotStatic):
+                # The trips of a loop around them may hand it on, or say
+                # what a hop of it is: asked over the loop.
+                if (owner is None or owner.op is not Op.FOR
+                        or not counted(owner)):
+                    raise
+                scope = scope[:-1]
+        size = max(register.values()) + 1
+        fits = self._fits(trace, register, size, _unrolled(stmts))
+        b = self._scratch()
+        extern = Clone(self._fresh, 'own', self._taken).rename(
+            str(alloc.attr('extern', 'own')))
+        image = b.alloc(base.type.elem, (size,), MemSpace.REGISTER,
+                        hint='own', extern=extern, init='{}')
+        inner = list(b.finish()) + self._privatized(
+            stmts, fits, image, _inductions(stmts))
+        gone = marks | {id(alloc)}
+        return _with_region(body, scope, inner, gone), size
+
     def _reach(self, trace: List[Tuple[Stmt, Dict]],
                events: Dict[int, _Event]):
         """What the accesses of `trace` reach, lane by lane: `(steps,
@@ -1934,6 +2071,127 @@ def _repeats(s: Stmt) -> bool:
         return False
     head = (s.text or '').lstrip()
     return bool(re.match(r'(?:#pragma[^\n]*\n\s*)?(?:for|while)\b', head))
+
+
+def _region(body: Sequence[Stmt], path) -> Tuple[Stmt, ...]:
+    """The statement list `path` leads to: a pair per level, the statement
+    and the region of it."""
+    xs = tuple(body)
+    for i, j in path:
+        xs = xs[i].regions[j].body
+    return xs
+
+
+def _region_owner(body: Sequence[Stmt], path) -> Optional[Stmt]:
+    """The statement whose region `path` leads to, or None at the top."""
+    if not path:
+        return None
+    return _region(body, path[:-1])[path[-1][0]]
+
+
+def _with_region(body: Sequence[Stmt], path, inner: List[Stmt],
+                 gone: Set[int]) -> Tuple[Stmt, ...]:
+    """`body` with the list `path` leads to replaced by `inner`, and without
+    the statements of `gone`, by id."""
+    def strip(xs):
+        out = []
+        for x in xs:
+            if id(x) in gone:
+                continue
+            if x.regions:
+                x = replace(x, regions=tuple(replace(r, body=strip(r.body))
+                                             for r in x.regions))
+            out.append(x)
+        return tuple(out)
+
+    def walk(xs, rest):
+        if not rest:
+            return strip(inner)
+        (i, j), rest = rest[0], rest[1:]
+        xs = list(xs)
+        owner = xs[i]
+        regions = list(owner.regions)
+        regions[j] = replace(regions[j], body=walk(regions[j].body, rest))
+        xs[i] = replace(owner, regions=tuple(regions))
+        return tuple(xs)
+    return strip(walk(tuple(body), tuple(path)))
+
+
+def _touches(x: Stmt, key) -> bool:
+    return any(a.base is not None and _key(a.base) == key for a in x.accesses)
+
+
+def _events_of(stmts: Sequence[Stmt], key) -> List[_Event]:
+    """The loads and stores in `stmts` that touch the buffer `key` names,
+    with what they stand under, as `_events` has them.  What does not hold
+    one of them is not asked: a loop of its own that carries values, or a
+    loop the trips of which nothing counts."""
+    out: List[_Event] = []
+
+    def visit(xs, conds, loops):
+        for x in xs:
+            if x.regions:
+                if not any(_touches(y, key) for y in walk_stmts((x,))):
+                    continue
+                if x.op is Op.FOR:
+                    if not counted(x):
+                        raise _NotStatic('a loop of an unknown count')
+                    lo, hi, step = x.loop_bounds
+                    visit(x.regions[0].body, conds,
+                          {**loops, x.induction.id: range(lo, hi, step)})
+                elif x.op is Op.IF:
+                    visit(x.regions[0].body, conds + ((x.cond, True),), loops)
+                    if len(x.regions) > 1:
+                        visit(x.regions[1].body, conds + ((x.cond, False),),
+                              loops)
+                elif (x.op is Op.RAWBLOCK and len(x.regions) == 1
+                      and (x.text or '').startswith('if (')):
+                    visit(x.regions[0].body, conds + ((x.text, True),),
+                          loops)
+                else:
+                    raise _NotStatic(f'a {x.op} whose runs are not known')
+            elif x.op in (Op.LOAD, Op.STORE) and _touches(x, key):
+                out.append(_Event(x, conds, loops))
+
+    visit(stmts, (), {})
+    return out
+
+
+def _around(stmts: Sequence[Stmt], events: Dict[int, _Event]) -> Set[int]:
+    """The statements of `stmts` that are among `events` or hold one, by
+    id."""
+    out: Set[int] = set()
+
+    def visit(xs) -> bool:
+        found = False
+        for x in xs:
+            here = id(x) in events
+            for r in x.regions:
+                here = visit(r.body) or here
+            if here:
+                out.add(id(x))
+                found = True
+        return found
+
+    visit(stmts)
+    return out
+
+
+def _trace_of(xs: Sequence[Stmt], env: Dict, events: Dict[int, _Event],
+              around: Set[int], out: List[Tuple[Stmt, Dict]]) -> None:
+    """`_trace` over the statements of `around` alone."""
+    for x in xs:
+        if id(x) not in around:
+            continue
+        if x.op is Op.FOR:
+            for trip in range(*x.loop_bounds):
+                _trace_of(x.regions[0].body, {**env, x.induction.id: trip},
+                          events, around, out)
+        elif x.regions:
+            for r in x.regions:
+                _trace_of(r.body, env, events, around, out)
+        elif id(x) in events:
+            out.append((x, env))
 
 
 def _key(base):

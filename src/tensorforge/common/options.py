@@ -809,6 +809,17 @@ declare('carry_trips',
             '(`pir.carry`).  A loop whose trips are closed (`closed_trips`) is '
             'one that hands its accumulators over that way.')
 
+declare('keep_own',
+        default=False,
+        parse=parse_bool,
+        doc='Keep a buffer of the multiplication\'s own shared memory in '
+            'registers where every lane reads of it only what it wrote '
+            'itself: one register of a lane\'s own per element it reaches, '
+            'over the statements that touch the buffer, and the arena '
+            'without it (`pir.carry.keep_own`).  Shared memory is for what '
+            'lanes hand each other; a buffer no lane hands on costs a store, '
+            'a load and its bytes of the arena, and registers instead.')
+
 declare('memory_semantics',
         default=False,
         parse=parse_bool,

@@ -518,6 +518,9 @@ class AbstractInstruction(ABC):
       # the cover of a transfer is counted (`pir.standard_pipeline`).
       early = pir.Forward(builder.scratch, report=carries,
                           registers=False, **carry)
+    own = None
+    if carry is not None and options.keep_own:
+      own = pir.KeepOwn(builder.scratch, report=carries, **carry)
     if (options.wave_uniform_group_rows
         and context.target.reads_first_lane()):
       # A no-op on a body whose batch loop reads no group's rows so
@@ -528,7 +531,7 @@ class AbstractInstruction(ABC):
                         place=place, barriers=barriers, prefetch=prefetch,
                         shards=held, rows=rows, carry=carried,
                         atomics=added, forward=forwarded,
-                        early_forward=early, where='shared body')
+                        early_forward=early, own=own, where='shared body')
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)
@@ -542,7 +545,7 @@ class AbstractInstruction(ABC):
       for line in kept:
         print(f'shards: {line}')
     if (carried is not None or added is not None
-        or forwarded is not None) and options.ir_debug:
+        or forwarded is not None or own is not None) and options.ir_debug:
       for line in carries:
         print(line)
     return body

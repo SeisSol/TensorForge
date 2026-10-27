@@ -35,7 +35,7 @@ from .allocate import allocate
 from .atomics import accumulate_atomically
 from .forward import drop_promises, forward_memory
 from .barriers import place_barriers
-from .carry import carry_trips
+from .carry import carry_trips, keep_own
 from .core import Stmt, dump
 from .move import cap_cover, move_loads
 from .transfers import memory_path
@@ -400,6 +400,37 @@ class Forward(Pass):
                                  report=self._report)
 
 
+class KeepOwn(Pass):
+    """Keep a buffer of the multiplication's own arena that every lane reads
+    only what it wrote itself in a register image of every lane's own
+    (`carry.keep_own`).
+
+    Behind the forward of memory and its cleanup, which leave of a buffer
+    the loads that read another lane's store and what no register holds any
+    more; ahead of the allocator, which then lays out the arena without it.
+    Not under the explicit vector, whose register images are vectors a
+    slot does not hold.  The arguments are those of `CarryTrips`.
+    """
+
+    name = 'own'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, scratch, threads: int, arena: Optional[str] = None,
+                 report: Optional[List[str]] = None):
+        self._scratch = scratch
+        self._threads = threads
+        self._arena = arena
+        self._report = report
+
+    def run(self, pc: BodyContext) -> None:
+        if pc.explicit_simd:
+            return
+        pc.body = keep_own(pc.body, self._scratch, threads=self._threads,
+                           arena=self._arena, report=self._report)
+
+
 class ShardLoads(Pass):
     """Read the shards of the batch-constant operands that fit from the
     block's shared memory (`shards.shard_loads`).
@@ -463,7 +494,8 @@ def standard_pipeline(debug: str = '',
                       carry: Optional[CarryTrips] = None,
                       atomics: Optional[Atomics] = None,
                       forward: Optional[Forward] = None,
-                      early_forward: Optional[Forward] = None) -> PassManager:
+                      early_forward: Optional[Forward] = None,
+                      own: Optional[KeepOwn] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -566,6 +598,12 @@ def standard_pipeline(debug: str = '',
     registers with it.  The loads it takes away read what the iteration
     stored, which no wrap moves.
 
+    ``own``, where asked for, runs behind the forward and the promises: a
+    buffer of the multiplication's own arena that every lane reads only what
+    it wrote itself goes into registers (`KeepOwn`), and a ``dce`` takes
+    the address arithmetic of its accesses.  What it finds is what the
+    forward left: no load it took away, and no store nothing reads.
+
     ``rows``, where asked for, runs behind the wrap and its cleanup: the
     copies of the bindings for the first group and the next are there to be
     given a copy per multiplication as well (`GroupRows`).  Each copy holds
@@ -628,6 +666,9 @@ def standard_pipeline(debug: str = '',
     # What the producers promised was said for the forward pass; behind it,
     # it only keeps the lane conditions it stands under alive.
     pm.add(Rewrite('promises', drop_promises, preserves=('flat',)))
+    if own is not None:
+        pm.add(own)
+        pm.add(Rewrite('own-dce', dce, preserves=('flat',)))
     if rows is not None:
         pm.add(rows)
         for name, fn in (('rows-fold', fold), ('rows-dce', dce)):
@@ -653,6 +694,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              atomics: Optional[Atomics] = None,
              forward: Optional[Forward] = None,
              early_forward: Optional[Forward] = None,
+             own: Optional[KeepOwn] = None,
              where: str = '') -> Tuple[Stmt, ...]:
     """`body` through the standard pipeline (`standard_pipeline`).
 
@@ -665,13 +707,14 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     ``atomics`` adds an accumulation atomically where nothing reads the
     sum, and ``forward`` takes a load from where its own lane's store took
     the value -- ``early_forward`` a load of memory, ahead of the atomics
-    and of the cover's count;
+    and of the cover's count; ``own`` keeps a buffer every lane reads only
+    what it wrote itself in registers;
     ``where`` names what built the body in the findings `debug` reports.
     """
     pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
                       shards, rows, carry, atomics, forward,
-                      early_forward).run(pc)
+                      early_forward, own).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body
