@@ -87,6 +87,10 @@ class VendorPolicy:
     #: lane's register across the lanes rather than memory: the default of
     #: `Options.forward_across` (`pir.forward`).
     read_across: bool = False
+    #: A buffer of the multiplication's own shared memory that every lane
+    #: reads only what it wrote is kept in registers of every lane: the
+    #: default of `Options.keep_own` (`pir.carry.keep_own`).
+    keep_own: bool = False
 
 
 # -- legality ------------------------------------------------------------- #

@@ -823,7 +823,7 @@ declare('forward_across',
             'lane read by every lane, would become a shuffle per element.')
 
 declare('keep_own',
-        default=False,
+        rule=lambda target: target.prefs.placement.keep_own,
         parse=parse_bool,
         doc='Keep a buffer of the multiplication\'s own shared memory in '
             'registers where every lane reads of it only what it wrote '
@@ -831,7 +831,9 @@ declare('keep_own',
             'over the statements that touch the buffer, and the arena '
             'without it (`pir.carry.keep_own`).  Shared memory is for what '
             'lanes hand each other; a buffer no lane hands on costs a store, '
-            'a load and its bytes of the arena, and registers instead.')
+            'a load and its bytes of the arena, and registers instead.\n'
+            'The vendor table decides by default -- AMD yes, NVIDIA no: '
+            'where the registers run out, a register more is a spill.')
 
 declare('memory_semantics',
         default=False,

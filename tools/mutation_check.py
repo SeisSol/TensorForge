@@ -2805,6 +2805,13 @@ GROUPS = {
                     '                    continue\n', '', 1)),
         ('the declaration of the buffer left',
          sub(CARRY, '        gone = marks | {id(alloc)}\n', '        gone = marks\n', 1)),
+        ('keeping a buffer no lane hands on off on AMD',
+         sub(TARGET, '                               read_across=True,\n'
+                     '                               keep_own=True),',
+             '                               read_across=True),', 1)),
+        ('keeping a buffer no lane hands on asked of no vendor',
+         sub(OPTIONS, "        rule=lambda target: target.prefs.placement.keep_own,",
+             "        default=False,", 1)),
     ]),
     # An accumulation added atomically where nothing reads the sum, and the
     # per-lane account of which store every load reads that it asks.

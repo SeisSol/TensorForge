@@ -183,11 +183,18 @@ PREFERENCES = {
         # NVIDIA stages through shared memory -- one element of each lane,
         # read by every lane -- into 620 shuffles, and 13760 SASS
         # instructions to 17712.
+        #
+        # Shared memory is for what the lanes hand each other: a buffer every
+        # lane reads only what it wrote is kept in its registers.  The damage
+        # step's arena halves on gfx942, gfx1250 and gfx1251 (512 elements a
+        # multiplication to 256) at the same length of code; on sm_86 1280
+        # become 1024, and it spills a little more.
         placement=VendorPolicy(preload_operands_into_registers=True,
                                keep_results_in_registers=True,
                                atomic_accumulation=True,
                                broadcast_without_staging=True,
-                               read_across=True),
+                               read_across=True,
+                               keep_own=True),
         preload_globals=True,
         # A gather from a register image goes through `ds_bpermute`, where
         # the broadcast it replaces is fused into the FMA (`fmac_dpp`):

@@ -233,6 +233,18 @@ def test_a_loop_that_does_not_touch_it_is_not_asked():
     assert not _shared(out, s)
 
 
+@pytest.mark.parametrize('arch,backend,kept', [
+    ('gfx942', 'hip', True), ('gfx1250', 'hip', True),
+    ('sm_86', 'cuda', False), ('pvc', 'oneapi', False)])
+def test_a_buffer_no_lane_hands_on_is_kept_where_the_vendor_says(
+        arch, backend, kept):
+    """On AMD the arena halves at the same length of code; on NVIDIA, bound
+    by its registers, a register more is a spill."""
+    options = Context(arch=arch, backend=backend,
+                      fp_type=Datatype.F32).get_user_options()
+    assert options.keep_own is kept
+
+
 def _built(case, arch, descrs=None, **options):
     descrs = case.descr_list() if descrs is None else descrs
     gen = Generator(descrs, Context(
