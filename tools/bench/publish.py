@@ -12,6 +12,8 @@ number in the text can be checked against the one in the figure.
 
     python3 tools/bench/publish.py eval/ --out pub/
     python3 tools/bench/publish.py gb200/ mi300a/ lumi/ --out pub/ --compile
+    python3 tools/bench/publish.py eval/ --seissol runs/ --clustering \\
+        mesh-clustering.csv@elastic-4-d --out pub/
     python3 tools/bench/publish.py --out pub/          # the kernels alone
 
 ## What it writes
@@ -24,9 +26,19 @@ number in the text can be checked against the one in the figure.
 | `figures/roofline-*` | runs, ceilings | where does each kernel sit, and how does it move with the order? |
 | `figures/peak-*` | runs, ceilings | how close to the roof, the bus and the FMA rate does a full launch get? |
 | `figures/rampup-*`, `tables/rampup-*` | runs | from how many elements on is a launch worth its cost? |
+| `figures/lts-*` | clusterings, runs | how much of local time stepping do the launch costs leave? |
 | `figures/breakdown-*` | runs | where does one time step's time go, per order? |
-| `tables/portability` | runs, ceilings | how evenly does a kernel reach each machine's roof? |
+| `figures/timesplit-*` | SeisSol runs | where did a simulation's time go? |
+| `figures/throughput-*` | SeisSol runs | what did SeisSol get through on each machine? |
+| `tables/portability`, `figures/cascade-*` | runs, ceilings | how evenly does a kernel reach each machine's roof? |
 | `figures/configs-*` | runs | does a configuration -- or another generator -- help? |
+| `figures/fusion-*` | split runs | what is fusing a kernel's chain worth? |
+| `figures/lanes-*` | runs | how much of what a kernel issues is needed? |
+| `figures/resources-*` | runs | registers, spills and code, against the order |
+| `figures/precision-*` | runs, ceilings | what does double cost against single? |
+| `figures/simulations-*` | runs | what are fused simulations worth? |
+| `figures/traffic-*` | profiles | how much more than it had to did a kernel move? |
+| `tables/buildcost-*` | manifests | what did making the kernels cost? |
 
 Every figure is a bare `tikzpicture` in `figures/`, every table a bare
 `tabular` in `tables/`, both `\\input`-able; `tfstyle.tex` holds what they
@@ -47,6 +59,17 @@ ramp-up wants a sweep of them (`RAMPUP_BATCHES`).
 A kernel is its name and its export (`capture.py`): a figure is drawn for
 one machine, one precision and one equation, and a curve joins the orders
 of one kernel and nothing else.
+
+## What the runs say
+
+`--seissol` reads what SeisSol writes about a run itself (`seissolrun.py`):
+the summary -- configuration, machine, cell updates, the time per compute
+region and SeisSol's own fit of it against the cells a launch carried -- and
+the clustering beside it.  The LTS figure reads a clustering against the
+launch costs the ramp-up measured; `--clustering` names one directly, and
+`synthetic` the series in `clusterings/` until a mesh's is at hand, which
+every figure drawn from it says.  Profiles (`profile.py`) and what the
+builds cost (`build.py`) are found in the campaign trees themselves.
 
 ## What is written by hand
 
@@ -72,8 +95,10 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import texout                                                    # noqa: E402
-from capture import DATATYPE                                     # noqa: E402
+from capture import DATATYPE, Capture, Piece                     # noqa: E402
 from compare import Ceiling, Field, Point, collect               # noqa: E402
+from seissolrun import (Clustering, Run, collect_runs,
+                        measured_speedups, read_clustering)      # noqa: E402
 from plot import (FLOP_FIELD, FLOP_LABEL, fallback_note, flop_basis,
                   flops_of, set_flop_basis)                      # noqa: E402
 
@@ -1225,15 +1250,19 @@ def figure_breakdown(fieldset: Field, kernels: Sequence[str], styles: Styles,
 # Portability and configurations
 # ----------------------------------------------------------------------
 
-def table_portability(fieldset: Field, kernels: Sequence[str]
-                      ) -> Optional[Output]:
-    """Pennycook's performance portability per kernel, order and precision:
-    the harmonic mean over the machines of the fraction of each one's own
-    roof a full launch reaches at the kernel's intensity.  The machines are
-    those with a roof in the precision that ran the equation in it; one of
-    them that tried the kernel and produced no number makes it zero, as the
-    definition has it, and one that was not asked leaves it open -- a gap
-    in a campaign is not a failure of the code."""
+@dataclass
+class Efficiencies:
+    """The fraction of its own roof each machine's full launch of each
+    kernel reached, at the kernel's intensity: (equation, datatype, kernel,
+    order) -> {arch: fraction}.  Beside it, what was tried and produced no
+    number, and the machines each (equation, datatype) is over -- those
+    with a roof in the precision that ran the equation in it."""
+    eff: Dict[Tuple, Dict[str, float]]
+    failed: set
+    platforms: Dict[Tuple[str, str], set]
+
+
+def efficiencies(fieldset: Field, kernels: Sequence[str]) -> Efficiencies:
     ref = fieldset.reference
     full = [p for p in _full(fieldset, kernels)
             if p.config == ref and p.capture.simulations == 1]
@@ -1254,6 +1283,19 @@ def table_portability(fieldset: Field, kernels: Sequence[str]
     for p in full + tried:
         if fieldset.ceiling(p.arch, p.datatype):
             platforms[(p.capture.equation, p.datatype)].add(p.arch)
+    return Efficiencies(eff, failed, platforms)
+
+
+def table_portability(fieldset: Field, kernels: Sequence[str]
+                      ) -> Optional[Output]:
+    """Pennycook's performance portability per kernel, order and precision:
+    the harmonic mean over the machines of the fraction of each one's own
+    roof a full launch reaches at the kernel's intensity (`efficiencies`).
+    One of the machines that tried the kernel and produced no number makes
+    it zero, as the definition has it, and one that was not asked leaves it
+    open -- a gap in a campaign is not a failure of the code."""
+    found = efficiencies(fieldset, kernels)
+    eff, failed, platforms = found.eff, found.failed, found.platforms
     groups = sorted(g for g, archs in platforms.items() if len(archs) > 1)
     if not groups:
         return None
@@ -1355,8 +1397,7 @@ def figure_configs(fieldset: Field, kernels: Sequence[str]
         def per_element(p: Optional[Point]) -> Optional[float]:
             # Per element: two configurations' largest launches need not
             # be the same size.
-            ns = _nanos(p.row, 'event') if p is not None else None
-            return ns / p.batch if ns and p.batch else None
+            return _per_element(p.row, p.batch, 'event') if p else None
 
         rows, plots, ratios = [], [], []
         for n, c in enumerate(others):
@@ -1374,35 +1415,9 @@ def figure_configs(fieldset: Field, kernels: Sequence[str]
                                      r'\texttt{' + texout.escape(c) + '}'))
         if not ratios:
             continue
-        # The ticks a ratio is read off, powers of two around one.
-        lo = 2.0 ** math.floor(math.log2(min(ratios + [1.0]) / 1.05))
-        hi = 2.0 ** math.ceil(math.log2(max(ratios + [1.0]) * 1.05))
-        ticks = [2.0 ** e for e in range(int(math.log2(lo)),
-                                         int(math.log2(hi)) + 1)]
-        labels = [(r'\texttt{' + texout.escape(short(k)) + '} '
-                   if i == 0 or groups[i - 1][0] != k else '') + f'{o}'
-                  for i, (k, o) in enumerate(groups)]
-        ax = texout.Axis(options=[
-            'tf', 'tf legend above', 'xmode=log', 'log basis x=2',
-            'y dir=reverse', f'xmin={lo:g}, xmax={hi:g}',
-            f'xtick={{{",".join(f"{t:g}" for t in ticks)}}}',
-            f'xticklabels={{{",".join(f"{t:g}" for t in ticks)}}}',
-            f'ytick={{{",".join(str(i) for i in range(len(groups)))}}}',
-            'yticklabels={' + ','.join(labels) + '}',
-            'yticklabel style={font=\\scriptsize, color=tfink}',
-            f'ymin=-0.7, ymax={len(groups) - 0.3}', 'ymajorgrids=false',
-            f'height={0.12 + 0.05 * len(groups):.2f}\\tfwidth',
-            f'xlabel={{speed-up over \\texttt{{{texout.escape(ref)}}}}}'])
+        ax = _dot_axis(groups, ratios, 'speed-up over \\texttt{'
+                       + texout.escape(ref) + '}')
         ax.plots = plots
-        # One, and a hairline between one kernel's orders and the next's.
-        ax.raw.append('\\draw[tf rule] ({axis cs:1,0}|-{rel axis cs:0,0}) '
-                      '-- ({axis cs:1,0}|-{rel axis cs:0,1});\n')
-        for i in range(1, len(groups)):
-            if groups[i][0] != groups[i - 1][0]:
-                ax.raw.append(
-                    f'\\draw[tfgrid] ({{rel axis cs:0,0}}|-{{axis cs:1,'
-                    f'{i - 0.5}}}) -- ({{rel axis cs:1,0}}|-{{axis cs:1,'
-                    f'{i - 0.5}}});\n')
         tex = texout.picture([ax], comment=(
             f'generated by tools/bench/publish.py: {arch}, {_dt_name(dt)}, '
             f'{eq}; reference time over candidate time per element, device '
@@ -1415,6 +1430,1174 @@ def figure_configs(fieldset: Field, kernels: Sequence[str]
                    'order; right of one is faster.')
         out.append(Output(f'configs-{arch}-{eq}-{dt.lower()}', 'figure', tex,
                           rows, caption))
+    return out
+
+
+# ----------------------------------------------------------------------
+# A row per kernel and order
+# ----------------------------------------------------------------------
+
+def _ratio_axis_range(values: Sequence[float], rule: float = 1.0
+                      ) -> Tuple[float, float, List[float]]:
+    """A logarithmic axis for ratios: from the power of two below the
+    smallest to the one above the largest, the rule included."""
+    values = [v for v in values if v and v > 0] + [rule]
+    lo = 2.0 ** math.floor(math.log2(min(values) / 1.05))
+    hi = 2.0 ** math.ceil(math.log2(max(values) * 1.05))
+    ticks = [2.0 ** e for e in range(int(round(math.log2(lo))),
+                                     int(round(math.log2(hi))) + 1)]
+    return lo, hi, ticks
+
+
+def _dot_axis(groups: Sequence[Tuple[str, int]], values: Sequence[float],
+              xlabel: str, rule: Optional[float] = 1.0) -> texout.Axis:
+    """A row per kernel and order, so that the names are read across
+    rather than tilted, on a logarithmic axis of ratios -- twice and half
+    are as far from one -- with the rule drawn and a hairline between one
+    kernel's orders and the next's."""
+    lo, hi, ticks = _ratio_axis_range(values, rule or 1.0)
+    labels = [(r'\texttt{' + texout.escape(short(k)) + '} '
+               if i == 0 or groups[i - 1][0] != k else '') + f'{o}'
+              for i, (k, o) in enumerate(groups)]
+    ax = texout.Axis(options=[
+        'tf', 'tf legend above', 'xmode=log', 'log basis x=2',
+        'y dir=reverse', f'xmin={lo:g}, xmax={hi:g}',
+        f'xtick={{{",".join(f"{t:g}" for t in ticks)}}}',
+        f'xticklabels={{{",".join(f"{t:g}" for t in ticks)}}}',
+        f'ytick={{{",".join(str(i) for i in range(len(groups)))}}}',
+        'yticklabels={' + ','.join(labels) + '}',
+        'yticklabel style={font=\\scriptsize, color=tfink}',
+        f'ymin=-0.7, ymax={len(groups) - 0.3}', 'ymajorgrids=false',
+        f'height={max(0.3, 0.12 + 0.05 * len(groups)):.2f}\\tfwidth',
+        f'xlabel={{{xlabel}}}'])
+    if rule:
+        ax.raw.append(f'\\draw[tf rule] ({{axis cs:{rule:g},0}}|-{{rel axis '
+                      f'cs:0,0}}) -- ({{axis cs:{rule:g},0}}|-{{rel axis '
+                      f'cs:0,1}});\n')
+    for i in range(1, len(groups)):
+        if groups[i][0] != groups[i - 1][0]:
+            ax.raw.append(
+                f'\\draw[tfgrid] ({{rel axis cs:0,0}}|-{{axis cs:1,'
+                f'{i - 0.5}}}) -- ({{rel axis cs:1,0}}|-{{axis cs:1,'
+                f'{i - 0.5}}});\n')
+    return ax
+
+
+def _per_element(row: Optional[Dict], batch: int, clock: str
+                 ) -> Optional[float]:
+    ns = _nanos(row, clock) if row else None
+    return ns / batch if ns and batch else None
+
+
+# ----------------------------------------------------------------------
+# What fusing a chain is worth
+# ----------------------------------------------------------------------
+
+def figure_fusion(fieldset: Field, kernels: Sequence[str], clock: str
+                  ) -> Tuple[List[Output], List[str]]:
+    """Each kernel against its pieces -- one launch per operation, the
+    temporaries through memory (`suites/seissolsplit.py`) -- added up per
+    batch: the pieces' time over the whole kernel's, both from one run and
+    one build, at the largest batch and at the smallest, where the pieces'
+    extra launches weigh most.  Beside them, what the pieces move against
+    what the kernel moves, compulsorily.
+
+    The whole kernel is its own single piece (`gpu_volume~0-of-1`), and
+    only that one counts: `seissolbench` times the kernel too, but in
+    another run, which is another clock."""
+    ref = fieldset.reference
+    pieces: Dict[Tuple, Dict[int, Dict[int, Dict]]] = defaultdict(
+        lambda: defaultdict(dict))
+    counts: Dict[Tuple, int] = {}
+    wholes: Dict[Tuple, Dict[int, Dict]] = defaultdict(dict)
+    for p in fieldset.points:
+        if (p.config != ref or p.capture is None
+                or p.capture.simulations != 1):
+            continue
+        piece = Piece.of(p.workload)
+        if piece is None or piece.kernel not in kernels:
+            continue
+        # The run and the binary: within them the pieces and the whole kernel
+        # were timed in the same passes.
+        key = (p.arch, p.datatype, p.capture, piece.kernel, p.run,
+               p.row.get('unit'))
+        if piece.count == 1:
+            wholes[key][p.batch] = p.row
+        else:
+            pieces[key][p.batch][piece.index] = p.row
+            counts[key] = piece.count
+    if not pieces:
+        return [], ['fusion: no kernel measured in pieces '
+                    '(suites/seissolsplit.py)']
+    out, skipped = [], []
+    for arch, dt, eq in sorted({key[:2] + (key[2].equation,)
+                                for key in pieces}):
+        entries = []
+        for key, by_batch in pieces.items():
+            a, d, capture, kernel = key[:4]
+            if (a, d, capture.equation) != (arch, dt, eq):
+                continue
+            whole = wholes.get(key, {})
+            complete = sorted(
+                b for b, rows in by_batch.items()
+                if len(rows) == counts[key] and b in whole
+                and _nanos(whole[b], clock)
+                and all(_nanos(r, clock) for r in rows.values()))
+            if not complete:
+                continue
+
+            def ratio(b: int) -> float:
+                return (sum(_nanos(r, clock) for r in by_batch[b].values())
+                        / _nanos(whole[b], clock))
+
+            big, small = complete[-1], complete[0]
+            moved = sum(r.get('bytes') or 0 for r in by_batch[big].values())
+            entries.append({
+                'kernel': kernel, 'order': capture.order,
+                'pieces': counts[key], 'batch_large': big,
+                'ratio_large': ratio(big), 'batch_small': small,
+                'ratio_small': ratio(small) if small != big else None,
+                'bytes_ratio': (moved / whole[big]['bytes']
+                                if whole[big].get('bytes') else None),
+                'clock': clock})
+        if not entries:
+            skipped.append(f'fusion-{arch}-{eq}-{dt.lower()}: pieces without '
+                           'their whole kernel in the same run '
+                           '(suites/seissolsplit.py times both)')
+            continue
+        entries.sort(key=lambda e: (kernels.index(e['kernel']), e['order']))
+        groups = [(e['kernel'], e['order']) for e in entries]
+        values = [v for e in entries for v in (e['ratio_large'],
+                                               e['ratio_small'],
+                                               e['bytes_ratio']) if v]
+        ax = _dot_axis(groups, values,
+                       'pieces over the fused kernel')
+        ax.plots = [
+            texout.Plot('tf s1, only marks',
+                        [(e['ratio_large'], y)
+                         for y, e in enumerate(entries)],
+                        'time, largest launch'),
+            texout.Plot('tf s2, only marks',
+                        [(e['ratio_small'], y)
+                         for y, e in enumerate(entries)],
+                        'time, smallest launch'),
+            texout.Plot('tfmuted, only marks, mark=|, mark size=3.5pt, '
+                        'line width=1pt',
+                        [(e['bytes_ratio'], y)
+                         for y, e in enumerate(entries)],
+                        'compulsory bytes')]
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {arch}, {_dt_name(dt)}, '
+            f'{eq}; the pieces\' {clock}-clock times summed per batch over '
+            'the whole kernel\'s, both from one run; batches in the CSV'))
+        caption = (f'What fusion is worth on '
+                   f'{texout.escape(fieldset.device_of(arch))}, '
+                   f'{_dt_name(dt)}, {eq}: each kernel taken apart into one '
+                   'launch per operation, its temporaries through global '
+                   'memory, built by the same generator and timed in the '
+                   'same run -- the pieces\' time over the whole kernel\'s '
+                   'at the largest and the '
+                   'smallest launch measured, and the bytes they move '
+                   f'against the kernel\'s. {_clock_sentence(clock)}')
+        out.append(Output(f'fusion-{arch}-{eq}-{dt.lower()}', 'figure', tex,
+                          entries, caption))
+    return out, skipped
+
+
+# ----------------------------------------------------------------------
+# Portability as a cascade
+# ----------------------------------------------------------------------
+
+def figure_cascade(fieldset: Field, kernels: Sequence[str], order: int,
+                   styles: Styles) -> List[Output]:
+    """Sewall et al.'s cascade, per equation and precision at one order:
+    each kernel's efficiency on every machine, most efficient first; the
+    performance portability of the first so many of them, as machines are
+    added in that order; and which machine stands at which place.  The
+    table gives the number; this shows what it is made of."""
+    found = efficiencies(fieldset, kernels)
+    out = []
+    for (eq, dt), machines in sorted(found.platforms.items()):
+        machines = sorted(machines)
+        if len(machines) < 2:
+            continue
+        orders = sorted({o for (e, d, _, o) in found.eff
+                         if (e, d) == (eq, dt)})
+        if not orders:
+            continue
+        o = min(orders, key=lambda x: (abs(x - order), x))
+        series = []
+        for k in kernels:
+            e = found.eff.get((eq, dt, k, o), {})
+            values = [(a, e[a]) for a in machines if a in e]
+            values += [(a, 0.0) for a in machines if a not in e
+                       and (eq, dt, k, o, a) in found.failed]
+            if len(values) < 2:
+                continue
+            values.sort(key=lambda t: (-t[1], t[0]))
+            series.append((k, values))
+        if not series:
+            continue
+        n = len(machines)
+        ticks = ','.join(str(i) for i in range(1, n + 1))
+        common = [f'xmin=0.5, xmax={n + 0.5}', f'xtick={{{ticks}}}',
+                  'xmajorgrids=false']
+        top = texout.Axis(options=common + [
+            'tf legend above', 'ymin=0', 'xticklabels={}',
+            'ylabel={\\% of own roof}', 'height=0.42\\tfwidth'])
+        mid = texout.Axis(options=common + [
+            'ymin=0', 'xticklabels={}', 'ylabel={$\\mathcal{P}$ [\\%]}',
+            'height=0.32\\tfwidth'])
+        low = texout.Axis(options=common + [
+            f'ymin=-0.6, ymax={len(series) - 0.4}', 'y dir=reverse',
+            f'ytick={{{",".join(str(i) for i in range(len(series)))}}}',
+            'yticklabels={' + ','.join(
+                r'\texttt{' + texout.escape(short(k)) + '}'
+                for k, _ in series) + '}',
+            'yticklabel style={font=\\scriptsize, color=tfink}',
+            'ymajorgrids=false', 'xlabel={place, most efficient first}',
+            f'height={max(0.24, 0.1 + 0.05 * len(series)):.2f}\\tfwidth'])
+        rows = []
+        for y, (k, values) in enumerate(series):
+            top.plots.append(texout.Plot(
+                styles(k), [(i + 1, 100 * v)
+                            for i, (_, v) in enumerate(values)],
+                texout.escape(short(k))))
+            cumulative = []
+            for i in range(len(values)):
+                vs = [v for _, v in values[:i + 1]]
+                pp = (len(vs) / sum(1.0 / v for v in vs)
+                      if all(v > 0 for v in vs) else 0.0)
+                cumulative.append((i + 1, 100 * pp))
+                rows.append({'kernel': k, 'order': o, 'place': i + 1,
+                             'arch': values[i][0],
+                             'efficiency': values[i][1], 'pp_first': pp})
+            mid.plots.append(texout.Plot(styles(k) + ', forget plot',
+                                         cumulative))
+            for i, (a, _) in enumerate(values):
+                # Named, not coloured: the colours are the kernels'.
+                low.raw.append(
+                    f'\\node[tf label, font=\\tiny\\ttfamily] at (axis cs:'
+                    f'{i + 1},{y}) {{{texout.escape(a)}}};\n')
+        tex = texout.picture(
+            [top, mid, low], 'group size=1 by 3, vertical sep=0.3cm, '
+                             'x descriptions at=edge bottom',
+            comment=(f'generated by tools/bench/publish.py: {eq}, '
+                     f'{_dt_name(dt)}, order {o}; the cascade of Sewall et '
+                     f'al. (P3HPC 2020) over {", ".join(machines)}\n'
+                     f'{_flops_note()}'))
+        caption = (f'Performance portability of the {eq} kernels at order '
+                   f'{o}, {_dt_name(dt)}, as a cascade (Sewall et al.): each '
+                   'kernel\'s efficiency on every machine, most efficient '
+                   'first; $\\mathcal{P}$ over the first so many of them; '
+                   'and which machine stands at which place. Zero where a '
+                   f'machine produced no number. {_flops_are()}')
+        out.append(Output(f'cascade-{eq}-{dt.lower()}', 'figure', tex, rows,
+                          caption))
+    return out
+
+
+# ----------------------------------------------------------------------
+# What explains the curves
+# ----------------------------------------------------------------------
+
+def _grid(n: int) -> Tuple[int, int]:
+    cols = min(3, n)
+    return cols, -(-n // cols)
+
+
+def figure_lanes(fieldset: Field, kernels: Sequence[str], styles: Styles
+                 ) -> List[Output]:
+    """How much of the arithmetic a kernel issues the operation needs --
+    solid -- and how much a dense implementation would do -- dashed, over
+    the same -- against the order, one panel per machine.  Issued is never
+    below needed; it is below dense where the kernel skips more structural
+    zeros than the lanes of a destination narrower than the warp or the
+    wave leave idle, and above where it is the other way round."""
+    ref = fieldset.reference
+    full = [p for p in _full(fieldset, kernels)
+            if p.config == ref and p.capture.simulations == 1
+            and p.row.get('executed_flops')]
+    out = []
+    for eq, dt in sorted({(p.capture.equation, p.datatype) for p in full}):
+        mine = [p for p in full if (p.capture.equation, p.datatype)
+                == (eq, dt)]
+        archs = sorted({p.arch for p in mine})
+        orders = sorted({p.order for p in mine})
+        if len(orders) < 2:
+            continue
+        cols, nrows = _grid(len(archs))
+        axes, rows = [], []
+        # One scale for every panel: their tick labels are drawn once.
+        top = 1.08 * 100 * max(
+            [1.0] + [max(p.row.get('nonzero_flops') or 0,
+                         p.row.get('flops') or 0) / p.row['executed_flops']
+                     for p in mine])
+        for i, arch in enumerate(archs):
+            here = [p for p in mine if p.arch == arch]
+            lanes = sorted({p.row.get('lanes') for p in here
+                            if p.row.get('lanes')})
+            ax = texout.Axis(options=[
+                f'xtick={{{",".join(map(str, orders))}}}',
+                f'xmin={orders[0] - 0.4}, xmax={orders[-1] + 0.4}',
+                f'ymin=0, ymax={top:.4g}', 'xlabel={order $O$}',
+                'title style={font=\\scriptsize, align=center}',
+                f'title={{\\texttt{{{texout.escape(arch)}}}\\\\'
+                f'{"/".join(map(str, lanes))} lanes}}']
+                + (['ylabel={\\% of issued flops}'] if i % cols == 0
+                   else ['yticklabels={}']))
+            if i == 0:
+                ax.options.append('legend to name=tflanes')
+            for k in kernels:
+                pts = sorted((p.order,
+                              (p.row.get('nonzero_flops') or 0)
+                              / p.row['executed_flops'],
+                              (p.row.get('flops') or 0)
+                              / p.row['executed_flops'])
+                             for p in here if p.workload == k)
+                if not pts:
+                    continue
+                ax.plots.append(texout.Plot(
+                    styles(k), [(o, 100 * n) for o, n, _ in pts],
+                    texout.escape(short(k)) if i == 0 else None))
+                ax.plots.append(texout.Plot(
+                    styles(k) + ', densely dashed, mark=none, forget plot',
+                    [(o, 100 * d) for o, _, d in pts]))
+                rows += [{'arch': arch, 'kernel': k, 'order': o,
+                          'needed_of_issued': n, 'dense_of_issued': d}
+                         for o, n, d in pts]
+            axes.append(ax)
+        tex = texout.picture(
+            axes, f'group size={cols} by {nrows}, horizontal sep=0.25cm, '
+                  'vertical sep=1.1cm',
+            comment=(f'generated by tools/bench/publish.py: {eq}, '
+                     f'{_dt_name(dt)}; flops per element: needed and dense '
+                     'over issued, at the largest launch'),
+            options=[f'width={0.98 / cols + 0.06:.2f}\\tfwidth',
+                     f'height={0.52 if cols > 1 else 0.62}\\tfwidth',
+                     'legend columns=3'])
+        tex = tex.replace('\\end{tikzpicture}\n',
+                          '\\node[anchor=south] at (current bounding box.'
+                          'north) {\\pgfplotslegendfromname{tflanes}};\n'
+                          '\\end{tikzpicture}\n')
+        caption = (f'How much of what the {eq} kernels issue is needed, '
+                   f'{_dt_name(dt)}, per order and machine: solid, the '
+                   'flops the operation needs over those the kernel issues; '
+                   'dashed, those a dense implementation performs over the '
+                   'same -- above 100\\,\\% where the kernel skips more '
+                   'structural zeros than its idle lanes cost, below where a '
+                   'destination narrower than the warp or the wave leaves '
+                   'lanes idle.')
+        out.append(Output(f'lanes-{eq}-{dt.lower()}', 'figure', tex, rows,
+                          caption))
+    return out
+
+
+def _spill_bytes(row: Dict) -> Optional[int]:
+    """What a build spilled, read as `toolchain.resources` reads it: on
+    NVIDIA the spill traffic, stores and loads together -- the stack frame
+    holds more than spills -- on AMD the scratch, on Intel the spill size
+    IGC states."""
+    static = row.get('static')
+    if not static:
+        return None
+    backend = row.get('backend')
+    if backend == 'cuda':
+        return ((static.get('spillstores') or 0)
+                + (static.get('spillloads') or 0))
+    if backend == 'hip':
+        return static.get('scratchsize') or 0
+    return static.get('vgprsspill') or 0
+
+
+def figure_resources(fieldset: Field, kernels: Sequence[str],
+                     styles: Styles) -> List[Output]:
+    """What a kernel takes of the machine, against the order: registers a
+    lane, what spilled, and the code against the instruction cache it has to
+    stay resident in -- which is what the larger orders run out of first."""
+    ref = fieldset.reference
+    full = [p for p in _full(fieldset, kernels)
+            if p.config == ref and p.capture.simulations == 1]
+    out = []
+    for arch, dt, eq in sorted({(p.arch, p.datatype, p.capture.equation)
+                                for p in full}):
+        mine = [p for p in full if (p.arch, p.datatype, p.capture.equation)
+                == (arch, dt, eq)]
+        orders = sorted({p.order for p in mine})
+        if len(orders) < 2:
+            continue
+        registers = [p for p in mine if (p.row.get('static') or {}).get(
+            'vgprs')]
+        spills = [p for p in mine if _spill_bytes(p.row)]
+        code = [p for p in mine if p.row.get('code_bytes')]
+        if not registers and not code:
+            continue
+        common = [f'xtick={{{",".join(map(str, orders))}}}',
+                  f'xmin={orders[0] - 0.4}, xmax={orders[-1] + 0.4}',
+                  'ymin=0', 'height=0.4\\tfwidth']
+        panels = []
+        rows = []
+
+        def panel(points, value, label, legend):
+            ax = texout.Axis(options=common + [f'ylabel={{{label}}}'])
+            if legend:
+                ax.options.append('tf legend above')
+            for k in kernels:
+                pts = sorted((p.order, value(p)) for p in points
+                             if p.workload == k)
+                if pts:
+                    ax.plots.append(texout.Plot(
+                        styles(k), pts,
+                        texout.escape(short(k)) if legend else None))
+            return ax
+
+        if registers:
+            panels.append(panel(
+                registers, lambda p: (p.row['static'].get('vgprs', 0)
+                                      + p.row['static'].get('agprs', 0)),
+                'registers', True))
+        if spills:
+            panels.append(panel(spills, lambda p: _spill_bytes(p.row),
+                                'spills [B]', not panels))
+        kib = None
+        if code:
+            ax = panel(code, lambda p: p.row['code_bytes'] / 1024,
+                       'code [KiB]', not panels)
+            cache = {p.row.get('icache_bytes') for p in code} - {None}
+            if len(cache) == 1:
+                # The rule is named in the caption: the code grows into it
+                # with the order, so a label at either end meets a curve.
+                kib = cache.pop() / 1024
+                ax.raw.append(texout.hrule(kib))
+                highest = max([kib] + [p.row['code_bytes'] / 1024
+                                       for p in code])
+                ax.options.append(f'ymax={1.1 * highest:.4g}')
+            panels.append(ax)
+        for p in mine:
+            static = p.row.get('static') or {}
+            rows.append({'kernel': p.workload, 'order': p.order,
+                         'registers': (static.get('vgprs', 0)
+                                       + static.get('agprs', 0)) or None,
+                         'spilled_bytes': _spill_bytes(p.row),
+                         'code_bytes': p.row.get('code_bytes'),
+                         'icache_bytes': p.row.get('icache_bytes')})
+        tex = texout.picture(
+            panels, f'group size=1 by {len(panels)}, vertical sep=0.25cm, '
+                    'x descriptions at=edge bottom',
+            comment=(f'generated by tools/bench/publish.py: {arch}, '
+                     f'{_dt_name(dt)}, {eq}; registers and spills as the '
+                     'compiler reported them, code as the emitter laid it '
+                     'down (analysis.icache)'))
+        panels[-1].options.append('xlabel={order $O$}')
+        caption = (f'What the {eq} kernels take of '
+                   f'{texout.escape(fieldset.device_of(arch))}, '
+                   f'{_dt_name(dt)}, per order: registers a lane and what '
+                   'spilled, as the compiler reports them, and the code '
+                   'against the instruction cache TensorForge assumes for '
+                   'the target'
+                   + (f', {kib:g}\\,KiB, the rule' if kib else '')
+                   + ', which a kernel\'s batch loop has to stay resident '
+                   'in.')
+        out.append(Output(f'resources-{arch}-{eq}-{dt.lower()}', 'figure',
+                          tex, rows, caption))
+    return out
+
+
+def figure_precision(fieldset: Field, kernels: Sequence[str]
+                     ) -> List[Output]:
+    """Double against single, per kernel and order, on every machine: the
+    ratio of the times per element at a full launch, beside the two
+    ratios it would be if the kernel were bound by one thing -- 2, the
+    bytes, and the machine's own ratio of FMA rates, in its legend."""
+    ref = fieldset.reference
+    full = [p for p in _full(fieldset, kernels)
+            if p.config == ref and p.capture.simulations == 1]
+    times: Dict[Tuple, Dict[str, float]] = defaultdict(dict)
+    for p in full:
+        per = _per_element(p.row, p.batch, 'event')
+        if per:
+            times[(p.capture.equation, p.workload, p.order, p.arch)][
+                p.datatype] = per
+    out = []
+    for eq in sorted({k[0] for k in times}):
+        archs = sorted({a for (e, _, _, a), t in times.items()
+                        if e == eq and len(t) == 2})
+        groups = sorted({(k, o) for (e, k, o, a), t in times.items()
+                         if e == eq and len(t) == 2},
+                        key=lambda t: (kernels.index(t[0]), t[1]))
+        if not archs or not groups:
+            continue
+        rows, values, plots = [], [], []
+        for m, arch in enumerate(archs):
+            pts = []
+            for y, (k, o) in enumerate(groups):
+                t = times.get((eq, k, o, arch), {})
+                r = t['F64'] / t['F32'] if len(t) == 2 else None
+                pts.append((r, y))
+                if r:
+                    values.append(r)
+                    rows.append({'kernel': k, 'order': o, 'arch': arch,
+                                 'f64_over_f32': r})
+            single, double = (fieldset.ceiling(arch, 'F32'),
+                              fieldset.ceiling(arch, 'F64'))
+            fma = (single.flops_per_s / double.flops_per_s
+                   if single and double and double.flops_per_s else None)
+            label = (r'\texttt{' + texout.escape(arch) + '}'
+                     + (f' (FMA {texout.num(fma, 2)}:1)' if fma else ''))
+            plots.append(texout.Plot(f'tf s{m + 1}, only marks', pts, label))
+        ax = _dot_axis(groups, values, 'FP64 time over FP32 time', rule=2.0)
+        ax.raw.append('\\node[tf label, anchor=south west, rotate=90] at '
+                      '({axis cs:2,0}|-{rel axis cs:0,0}) {bytes};\n')
+        ax.plots = plots
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {eq}; double over single '
+            'per element, device clock, largest launch; the legend gives '
+            'each machine\'s measured FMA rates, single over double'))
+        caption = (f'Double against single precision for the {eq} kernels: '
+                   'the time per element at a full launch in FP64 over that '
+                   'in FP32, per kernel, order and machine. A kernel bound '
+                   'by memory sits near 2, the ratio of the bytes; one bound '
+                   'by arithmetic near its machine\'s ratio of FMA rates, '
+                   'given in the legend.')
+        out.append(Output(f'precision-{eq}', 'figure', tex, rows, caption))
+    return out
+
+
+def figure_simulations(fieldset: Field, kernels: Sequence[str], order: int,
+                       styles: Styles) -> List[Output]:
+    """Fused simulations: the speed-up per element and simulation over one
+    simulation, against how many are fused, per kernel at one order -- what
+    an operator read once for several simulations is worth."""
+    ref = fieldset.reference
+    full = [p for p in _full(fieldset, kernels) if p.config == ref]
+    out = []
+    for arch, dt, eq in sorted({(p.arch, p.datatype, p.capture.equation)
+                                for p in full}):
+        mine = [p for p in full if (p.arch, p.datatype, p.capture.equation)
+                == (arch, dt, eq)]
+        counts: Dict[int, set] = defaultdict(set)
+        for p in mine:
+            counts[p.order].add(p.capture.simulations)
+        usable = [o for o, sims in counts.items() if len(sims) > 1
+                  and 1 in sims]
+        if not usable:
+            continue
+        o = min(usable, key=lambda x: (abs(x - order), x))
+        sims = sorted(counts[o])
+        ax = texout.Axis(options=[
+            'tf', 'tf legend above', 'xmode=log', 'log basis x=2',
+            f'xtick={{{",".join(map(str, sims))}}}',
+            f'xticklabels={{{",".join(map(str, sims))}}}',
+            f'xmin={sims[0] / 1.3:g}, xmax={sims[-1] * 1.3:g}', 'ymin=0',
+            'xlabel={fused simulations}',
+            'ylabel={speed-up per simulation}'])
+        ax.raw.append(texout.hrule(1.0))
+        rows = []
+        for k in kernels:
+            per = {}
+            for p in mine:
+                if p.workload == k and p.order == o:
+                    t = _per_element(p.row, p.batch, 'event')
+                    if t:
+                        per[p.capture.simulations] = t / \
+                            p.capture.simulations
+            if 1 not in per or len(per) < 2:
+                continue
+            pts = [(s, per[1] / per[s]) for s in sorted(per)]
+            ax.plots.append(texout.Plot(styles(k), pts,
+                                        texout.escape(short(k))))
+            rows += [{'kernel': k, 'order': o, 'simulations': s,
+                      'speedup': v} for s, v in pts]
+        if not rows:
+            continue
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {arch}, {_dt_name(dt)}, '
+            f'{eq}, order {o}; device clock, largest launch'))
+        caption = (f'Fused simulations of the {eq} kernels at order {o} on '
+                   f'{texout.escape(fieldset.device_of(arch))}, '
+                   f'{_dt_name(dt)}: the time per element and simulation '
+                   'with one simulation over that with several fused into '
+                   'one launch, at a full launch.')
+        out.append(Output(f'simulations-{arch}-{eq}-{dt.lower()}', 'figure',
+                          tex, rows, caption))
+    return out
+
+
+#: A profiled kernel: the architecture it ran on -- None where the profile
+#: does not say -- and its symbol.  The symbol alone is not enough: it is a
+#: digest of the kernel's source, which two architectures of one backend can
+#: share.
+ProfileKey = Tuple[Optional[str], str]
+
+
+def _profiles(paths: Iterable[Path]) -> Dict[ProfileKey, Tuple[float, int]]:
+    """`profile.py`'s measurements by the kernel they are of: the DRAM
+    bytes the longest-running kernel of a workload moved, and the batch it
+    moved them at."""
+    out: Dict[ProfileKey, Tuple[float, int]] = {}
+    for target in paths:
+        target = Path(target)
+        found = ([target] if target.is_file() and target.name ==
+                 'profile.json' else sorted(target.rglob('profile.json'))
+                 if target.is_dir() else [])
+        for path in found:
+            try:
+                blob = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            batch = blob.get('batch')
+            arch = ((blob.get('device') or {}).get('spec') or {}).get('arch')
+            for collection in blob.get('collections') or []:
+                rows = [r for r in collection.get('rows') or [] if r]
+                symbol = collection.get('symbol')
+                if not rows or not symbol or not batch:
+                    continue
+                hottest = max(rows, key=lambda r: r.get('duration_ns') or 0)
+                read = hottest.get('dram_read_bytes')
+                write = hottest.get('dram_write_bytes')
+                if read is None and write is None:
+                    continue
+                out[(arch, symbol)] = ((read or 0.0) + (write or 0.0),
+                                       int(batch))
+    return out
+
+
+def _bytes_at(rows: Sequence[Dict], batch: int) -> Optional[float]:
+    """The compulsory bytes of a launch of `batch`, from the rows of other
+    batches: they are linear in it -- per element, plus what a launch reads
+    once."""
+    pts = sorted({(r['batch'], r['bytes']) for r in rows
+                  if r.get('batch') and r.get('bytes')})
+    for b, v in pts:
+        if b == batch:
+            return float(v)
+    if len(pts) < 2:
+        return None
+    (b0, v0), (b1, v1) = pts[0], pts[-1]
+    per = (v1 - v0) / (b1 - b0)
+    return v0 + per * (batch - b0)
+
+
+def figure_traffic(fieldset: Field,
+                   profiles: Dict[ProfileKey, Tuple[float, int]],
+                   kernels: Sequence[str]) -> List[Output]:
+    """What a kernel moved through DRAM, as the profiler counted it, over
+    what it had to move: near one, the traffic is compulsory and the code is
+    not the lever; far above, the same bytes were fetched again."""
+    if not profiles:
+        return []
+    ref = fieldset.reference
+    by: Dict[Tuple, List[Point]] = defaultdict(list)
+    for p in fieldset.points:
+        if (p.workload in kernels and p.capture is not None
+                and p.config == ref and p.capture.simulations == 1):
+            by[(p.arch, p.datatype, p.capture, p.workload)].append(p)
+    out = []
+    for arch, dt, eq in sorted({(a, d, c.equation) for (a, d, c, _) in by}):
+        entries = []
+        for (a, d, capture, k), points in by.items():
+            if (a, d, capture.equation) != (arch, dt, eq):
+                continue
+            symbol = points[0].row.get('symbol')
+            found = profiles.get((arch, symbol)) or profiles.get((None, symbol))
+            if found is None:
+                continue
+            measured, batch = found
+            needed = _bytes_at([p.row for p in points], batch)
+            if needed:
+                entries.append({'kernel': k, 'order': capture.order,
+                                'batch': batch, 'measured_bytes': measured,
+                                'compulsory_bytes': needed,
+                                'ratio': measured / needed})
+        if not entries:
+            continue
+        entries.sort(key=lambda e: (kernels.index(e['kernel']), e['order']))
+        groups = [(e['kernel'], e['order']) for e in entries]
+        ax = _dot_axis(groups, [e['ratio'] for e in entries],
+                       'DRAM bytes measured over compulsory')
+        ax.options.remove('tf legend above')
+        ax.plots = [texout.Plot('tf s1, only marks',
+                                [(e['ratio'], y)
+                                 for y, e in enumerate(entries)])]
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {arch}, {_dt_name(dt)}, '
+            f'{eq}; profile.py\'s DRAM read and write bytes over the '
+            'compulsory bytes at the profiled batch'))
+        caption = (f'Traffic of the {eq} kernels on '
+                   f'{texout.escape(fieldset.device_of(arch))}, '
+                   f'{_dt_name(dt)}: the DRAM bytes the profiler counted '
+                   'over those the operation has to move, per kernel and '
+                   'order. Near one the traffic is compulsory; below, a '
+                   'cache held what was counted as compulsory.')
+        out.append(Output(f'traffic-{arch}-{eq}-{dt.lower()}', 'figure', tex,
+                          entries, caption))
+    return out
+
+
+def _manifests(paths: Iterable[Path]) -> List[Dict]:
+    """What every run built, from the manifests beside its results: one
+    entry per workload and unit, with the suite it belonged to."""
+    out: List[Dict] = []
+    seen = set()
+    for target in paths:
+        target = Path(target)
+        found = ([target] if target.is_file()
+                 else sorted(target.rglob('bench.json')))
+        for path in found:
+            if path.resolve() in seen:
+                continue
+            seen.add(path.resolve())
+            try:
+                blob = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(blob, dict):
+                continue
+            suite = (blob.get('run') or {}).get('suite')
+            for entry in blob.get('manifest') or []:
+                out.append(dict(entry, suite=suite))
+    return out
+
+
+def table_buildcost(manifests: Sequence[Dict], fieldset: Optional[Field]
+                    ) -> List[Output]:
+    """What making the kernels cost on each machine, per export: how many
+    there were, the seconds generating and compiling them, the objects, and
+    the largest kernel's code -- against the instruction cache, named in
+    the heading.
+
+    Over the kernels a production build makes: a piece of the split suite
+    is none of them, and a kernel two runs of a campaign built -- the
+    timing run's few and the build of the whole configuration
+    (`evaluate.py`) -- is one kernel, counted once, with the compile time
+    where one of them has it."""
+    kernels: Dict[Tuple, Dict[str, Dict]] = defaultdict(dict)
+    for entry in manifests:
+        workload = entry.get('workload') or ''
+        if (entry.get('error') or entry.get('generate_s') is None
+                or Piece.of(workload) is not None):
+            continue
+        capture = Capture.from_tag(entry.get('capture') or '')
+        if capture is None:
+            continue
+        seen = kernels[(entry.get('arch') or '?', entry.get('config') or '',
+                        entry.get('datatype') or '', capture.equation,
+                        capture.simulations, capture.order)]
+        if workload not in seen or (seen[workload].get('compile_s') is None
+                                    and entry.get('compile_s') is not None):
+            seen[workload] = entry
+    groups = {key: list(seen.values()) for key, seen in kernels.items()}
+    out = []
+    for arch in sorted({key[0] for key in groups}):
+        mine = {key: entries for key, entries in groups.items()
+                if key[0] == arch}
+        caches = {e.get('icache_bytes') for entries in mine.values()
+                  for e in entries} - {None}
+        device = fieldset.device_of(arch) if fieldset else arch
+        configs = sorted({key[1] for key in mine})
+        body: List = []
+        rows_csv: List[Dict] = []
+        last = None
+        for key in sorted(mine, key=lambda k: (k[1], k[2] != 'F64', k[3],
+                                                k[4], k[5])):
+            _, config, dt, eq, sims, order = key
+            entries = mine[key]
+            if (config, dt) != last:
+                if body:
+                    body.append(None)
+                body.append([r'\multicolumn{7}{@{}l}{\textit{'
+                             + _dt_name(dt) + '}'
+                             + (r', \texttt{' + texout.escape(config) + '}'
+                                if len(configs) > 1 else '') + '}'])
+                last = (config, dt)
+            generate = sum(e['generate_s'] for e in entries)
+            compiled = [e['compile_s'] for e in entries
+                        if e.get('compile_s') is not None]
+            objects = [e['object_bytes'] for e in entries
+                       if e.get('object_bytes')]
+            code = [e['code_bytes'] for e in entries if e.get('code_bytes')]
+            body.append([
+                texout.escape(eq) + (f', {sims} sim.' if sims > 1 else ''),
+                str(order), str(len(entries)), texout.num(generate),
+                texout.num(sum(compiled)) if compiled else '--',
+                texout.num(sum(objects) / 2 ** 20) if objects else '--',
+                texout.num(max(code) / 1024) if code else '--'])
+            rows_csv.append({'arch': arch, 'config': config, 'datatype': dt,
+                             'equation': eq, 'simulations': sims,
+                             'order': order, 'kernels': len(entries),
+                             'suite': ' '.join(sorted({str(e.get('suite'))
+                                                       for e in entries})),
+                             'generate_s': generate,
+                             'compile_s': sum(compiled) if compiled else None,
+                             'object_bytes': (sum(objects) if objects
+                                              else None),
+                             'largest_code_bytes': max(code) if code
+                             else None})
+        cache = (f'{caches.pop() / 1024:g}\\,KiB'
+                 if len(caches) == 1 else None)
+        tex = texout.table(
+            'l r r r r r r',
+            [['Export', '$O$', 'Kernels', 'Generate [s]', 'Compile [s]',
+              'Objects [MiB]', 'Largest code [KiB]']],
+            body,
+            comment=('generated by tools/bench/publish.py from the run '
+                     'manifests: seconds summed over the kernels, which '
+                     'compile in parallel, so not a build\'s wall time;\n'
+                     'code as the emitter laid it down (analysis.icache)'
+                     + (f'; instruction cache {cache}' if cache else '')))
+        caption = (f'What making the kernels cost on '
+                   f'{texout.escape(device)}, per export: how many there '
+                   'were, the seconds TensorForge spent generating them and '
+                   'the compiler compiling them, summed over the kernels, '
+                   'the size of the objects, and the largest kernel\'s code'
+                   + (f' against an instruction cache of {cache}'
+                      if cache else '') + '.')
+        out.append(Output(f'buildcost-{arch}', 'table', tex, rows_csv,
+                          caption))
+    return out
+
+
+# ----------------------------------------------------------------------
+# What the runs did
+# ----------------------------------------------------------------------
+
+@dataclass
+class LtsSeries:
+    """A clustering to read the launch costs against: the configuration
+    its kernels are at, and the runs it came from, where it did."""
+    clustering: Clustering
+    capture: Capture
+    runs: List[Run] = field(default_factory=list)
+
+
+def lts_series(clusterings: Sequence[Tuple[Clustering, Capture]],
+               runs: Sequence[Run]) -> List[LtsSeries]:
+    """The clusterings given, and those of the runs with more than one
+    cluster -- one series per clustering and configuration, with every run
+    that had it."""
+    out: List[LtsSeries] = [LtsSeries(c, cap) for c, cap in clusterings]
+    by: Dict[Tuple, LtsSeries] = {}
+    for run in runs:
+        if not run.lts or run.clustering is None or run.capture is None:
+            continue
+        key = (tuple(sorted(run.clustering.layers,
+                            key=lambda l: (l.rank, l.cluster, l.copy))),
+               run.capture.tag)
+        if key not in by:
+            by[key] = LtsSeries(run.clustering, run.capture)
+            out.append(by[key])
+        by[key].runs.append(run)
+    return out
+
+
+def figure_lts(series: Sequence[LtsSeries], fits: Sequence[Dict],
+               runs: Sequence[Run], fieldset: Optional[Field]
+               ) -> Tuple[List[Output], List[str]]:
+    """Local time stepping against what a launch costs.  Above, where the
+    cell updates of a clustering fall by the cells a launch carries, with
+    the batch at which a time step reaches half its rate on each machine --
+    from the kernel benchmark (solid) and from SeisSol's own fit of a run
+    (dashed).  Below, the speed-up over global time stepping: the ideal of
+    the clustering, what the measured launch costs leave of it on each
+    machine, and what a pair of runs measured."""
+    out, skipped = [], []
+    measured = measured_speedups(runs)
+    for item in series:
+        clustering, capture = item.clustering, item.capture
+        dt = capture.datatype
+        tag = f'{clustering.name}-{capture.tag}'
+        fit = {}
+        for reading, name in zip(('together', 'serial'), STEP_ROWS):
+            for r in fits:
+                if (r['kernel'] == name and r['equation'] == capture.equation
+                        and r['order'] == capture.order
+                        and r['datatype'] == dt
+                        and r.get('t0_us') is not None
+                        and r.get('ns_per_element')):
+                    fit.setdefault(r['arch'], {})[reading] = r
+        archs = sorted(fit)
+        if not archs:
+            skipped.append(f'lts-{tag}: the clustering alone, no speed-ups -- '
+                           f'no time step was swept at {capture.tag}, and '
+                           'the launch costs come from the ramp-up '
+                           '(--batches)')
+        updates = clustering.updates()
+        total = sum(u for _, u in updates) or 1.0
+        shares: Dict[int, float] = defaultdict(float)
+        for layer, u in updates:
+            shares[int(math.floor(math.log2(layer.cells)))] += u / total
+        ks = list(range(min(shares), max(shares) + 1))
+        hist = ([(2.0 ** k, 100 * shares.get(k, 0.0)) for k in ks]
+                + [(2.0 ** (ks[-1] + 1), 100 * shares.get(ks[-1], 0.0))])
+        top = texout.Axis(options=[
+            'xmode=log', 'log basis x=2', 'ymin=0',
+            f'xmin={2.0 ** ks[0]:g}, xmax={2.0 ** (ks[-1] + 1):g}',
+            'xlabel={cells a launch carries}',
+            'ylabel={\\% of cell updates}', 'height=0.42\\tfwidth',
+            'xmajorgrids=false',
+            'legend style={at={(0.5,1.03)}, anchor=south, legend columns=2, '
+            '/tikz/every even column/.append style={column sep=0.8em}}'])
+        top.plots.append(texout.Plot(
+            'ybar interval, fill=tfgrid, draw=tfaxis, mark=none, forget plot',
+            hist))
+        rows: List[Dict] = []
+        dashed = False
+        for m, arch in enumerate(archs):
+            half = fit[arch].get('together', {}).get('half_fit')
+            app = [r.half() for r in item.runs if r.arch == arch]
+            app = [h for h in app if h]
+            colour = f'tfc{m % len(texout.CATEGORICAL) + 1}'
+            for value, dash, source in ((half, '', 'kernels'),
+                                        (app[0] if app else None,
+                                         ', densely dashed', 'seissol')):
+                if not value:
+                    continue
+                below = sum(u for layer, u in updates
+                            if layer.cells < value) / total
+                top.raw.append(
+                    f'\\draw[{colour}, line width=0.9pt{dash}] '
+                    f'({{axis cs:{value:.6g},0}}|-{{rel axis cs:0,0}}) -- '
+                    f'({{axis cs:{value:.6g},0}}|-{{rel axis cs:0,1}});\n')
+                if dash:
+                    dashed = True
+                else:
+                    # A key rather than labels at the lines: two machines'
+                    # half-rate batches are often a few percent apart.
+                    top.raw.append(
+                        f'\\addlegendimage{{{colour}, line width=0.9pt}}\n'
+                        f'\\addlegendentry{{\\texttt{{{texout.escape(arch)}}}'
+                        f': $n_{{1/2}}={texout.num(value)}$, '
+                        f'{100 * below:.0f}\\,\\% below}}\n')
+                rows.append({'series': clustering.name, 'arch': arch,
+                             'source': source, 'half': value,
+                             'updates_below': below})
+        if dashed:
+            top.raw.append('\\addlegendimage{tfsecondary, densely dashed, '
+                           'line width=0.9pt}\n\\addlegendentry{SeisSol\'s '
+                           'own fit}\n')
+        ideal = clustering.ideal_speedup()
+        axes = [top]
+        if archs:
+            bars = texout.Axis(options=[
+                'ybar=0pt', 'bar width=0.25', 'ymin=0',
+                f'xtick={{{",".join(str(i) for i in range(len(archs)))}}}',
+                'xticklabels={' + ','.join(
+                    r'\texttt{' + texout.escape(a) + '}' for a in archs)
+                + '}',
+                f'xmin=-0.6, xmax={len(archs) - 0.4}', 'xmajorgrids=false',
+                'ylabel={speed-up over GTS}', 'height=0.48\\tfwidth',
+                'tf legend above', 'area legend'])
+            predicted = {}
+            for reading, colour, label in (
+                    ('together', 'tfo6', 'launch costs, overlapped'),
+                    ('serial', 'tfo2', 'one after another')):
+                pts = []
+                for x, arch in enumerate(archs):
+                    r = fit[arch].get(reading)
+                    v = (clustering.predicted_speedup(
+                        r['t0_us'] * 1e3, r['ns_per_element'])
+                        if r else None)
+                    predicted[(arch, reading)] = v
+                    pts.append((x, v))
+                bars.plots.append(texout.Plot(
+                    f'fill={colour}, draw=none, mark=none', pts, label))
+            seen = {}
+            for x, arch in enumerate(archs):
+                for run in item.runs:
+                    key = (run.arch, run.configuration, run.ranks,
+                           round(run.cells))
+                    if run.arch == arch and key in measured:
+                        seen[x] = measured[key]
+                        break
+            if seen:
+                bars.plots.append(texout.Plot(
+                    'fill=tfink, draw=none, mark=none',
+                    [(x, seen.get(x)) for x in range(len(archs))],
+                    'measured'))
+            # Room above the tallest bar and the ideal for the rule's label.
+            shown = [v for v in list(predicted.values()) + list(seen.values())
+                     if v]
+            bars.options.append(f'ymax={1.15 * max([ideal] + shown):.4g}')
+            bars.raw.append(texout.hrule(
+                ideal, f'ideal {texout.num(ideal, 2)}$\\times$'))
+            for arch in archs:
+                rows.append({'series': clustering.name, 'arch': arch,
+                             'source': 'speedup', 'ideal': ideal,
+                             'predicted_together': predicted.get(
+                                 (arch, 'together')),
+                             'predicted_serial': predicted.get(
+                                 (arch, 'serial')),
+                             'measured': seen.get(archs.index(arch))})
+            axes.append(bars)
+        label = (texout.escape(clustering.name)
+                 + (' (synthetic, not from a mesh)'
+                    if clustering.synthetic else ''))
+        tex = texout.picture(
+            axes, f'group size=1 by {len(axes)}, vertical sep=1.3cm',
+            comment=(f'generated by tools/bench/publish.py: clustering '
+                     f'{clustering.name}'
+                     + (' -- SYNTHETIC' if clustering.synthetic else '')
+                     + f', {len(clustering.ranks)} rank(s), kernels at '
+                     f'{capture.tag}; the time step as in STEP; LTS adds the '
+                     'Taylor expansion at cluster borders, which is not '
+                     'counted'))
+        caption = (f'Local time stepping on clustering {label}, '
+                   f'{len(clustering.ranks)} rank(s), {capture.equation} at '
+                   f'order {capture.order}, {_dt_name(dt)}. Above, the cell '
+                   'updates by the cells a launch carries, every layer of '
+                   'every cluster a launch of its own, and the batch at '
+                   'which a time step reaches half its rate on each machine '
+                   '-- from the kernel benchmark, with the share of the '
+                   'updates below it, and dashed from SeisSol\'s own fit of '
+                   'a run. Below, the speed-up over global time stepping: '
+                   'the ideal of the clustering, what the measured launch '
+                   'costs leave of it with the relations of a face '
+                   'overlapped and one after another, and, where both were '
+                   'run, the measured one.')
+        out.append(Output(f'lts-{tag}', 'figure', tex, rows, caption))
+    return out, skipped
+
+
+def _run_label(run: Run) -> str:
+    capture = run.capture
+    return (r'\texttt{' + texout.escape(run.arch) + '}'
+            + (f' $O{capture.order}$ {_dt_name(capture.datatype)}'
+               if capture else ''))
+
+
+def figure_throughput(runs: Sequence[Run]) -> List[Output]:
+    """What SeisSol got through on each machine: cell updates per second
+    and rank, per order and precision, a bar per machine -- the number the
+    kernels are for."""
+    out = []
+    groups: Dict[Tuple[str, bool], List[Run]] = defaultdict(list)
+    for run in runs:
+        if run.capture and run.updates_per_second_per_rank:
+            groups[(run.capture.equation, run.lts)].append(run)
+    for (eq, lts), mine in sorted(groups.items()):
+        archs = sorted({r.arch for r in mine})
+        datatypes = sorted({r.capture.datatype for r in mine},
+                           reverse=True)
+        orders = sorted({r.capture.order for r in mine})
+        # At least three orders wide, so that a single order's bars keep
+        # the width they have among several.
+        middle = (orders[0] + orders[-1]) / 2
+        half = max(orders[-1] - orders[0] + 1.2, 3.0) / 2
+        axes, rows = [], []
+        for i, dt in enumerate(datatypes):
+            ax = texout.Axis(options=[
+                'ybar=0pt', f'bar width={min(0.8 / len(archs), 0.25):.3f}',
+                'ymin=0', f'xtick={{{",".join(map(str, orders))}}}',
+                f'xmin={middle - half:g}, xmax={middle + half:g}',
+                'xmajorgrids=false', f'xlabel={{order $O$, {_dt_name(dt)}}}',
+                'area legend']
+                + (['ylabel={M cell updates/s per rank}', 'tf legend above']
+                   if i == 0 else []))
+            for m, arch in enumerate(archs):
+                pts = []
+                for o in orders:
+                    values = sorted(
+                        r.updates_per_second_per_rank for r in mine
+                        if (r.arch, r.capture.datatype, r.capture.order)
+                        == (arch, dt, o))
+                    v = values[len(values) // 2] if values else None
+                    pts.append((o, v / 1e6 if v else None))
+                    if v:
+                        rows.append({'arch': arch, 'datatype': dt,
+                                     'order': o, 'runs': len(values),
+                                     'updates_per_s_per_rank': v})
+                ax.plots.append(texout.Plot(
+                    f'fill=tfc{m % len(texout.CATEGORICAL) + 1}, draw=none, '
+                    'mark=none', pts,
+                    (r'\texttt{' + texout.escape(arch) + '}')
+                    if i == 0 else None))
+            axes.append(ax)
+        if len(axes) == 1:
+            axes[0].options.insert(0, 'tf')
+            tex = texout.picture(axes, comment='generated by '
+                                 'tools/bench/publish.py from SeisSol\'s '
+                                 'run summaries')
+        else:
+            tex = texout.picture(
+                axes, f'group size={len(axes)} by 1, horizontal sep=1.2cm',
+                comment='generated by tools/bench/publish.py from SeisSol\'s '
+                        'run summaries',
+                options=['width=0.56\\tfwidth', 'height=0.62\\tfwidth'])
+        mode = 'local' if lts else 'global'
+        caption = (f'What SeisSol got through, {eq} with {mode} time '
+                   'stepping: cell updates per second and rank over the '
+                   'whole simulation, per order, precision and machine -- '
+                   'the median where several runs were given -- as the '
+                   'run summaries state them.')
+        out.append(Output(f'throughput-{eq}-{mode}', 'figure', tex, rows,
+                          caption))
+    return out
+
+
+#: The parts of a simulation's time a run summary states, in the order a
+#: bar stacks them, with their colours.
+_SPLIT = (('computeLocalIntegration', 'local', 'tfc1'),
+          ('computeNeighboringIntegration', 'neighbour', 'tfc2'),
+          ('computeDynamicRupture', 'dynamic rupture', 'tfc3'),
+          ('computePointSources', 'point sources', 'tfc4'),
+          ('outsideKernels', 'outside the kernels', 'tfc5'),
+          ('io', 'blocking IO', 'tfc7'),
+          ('other', 'other', 'tfgrid'))
+
+
+def figure_timesplit(runs: Sequence[Run]) -> List[Output]:
+    """Where a simulation's time went, per run: SeisSol's compute regions,
+    the compute outside them -- waiting, communication, scheduling -- and
+    the blocking IO, as shares of the total, means over the ranks."""
+    out = []
+    groups: Dict[Tuple[str, bool], List[Run]] = defaultdict(list)
+    for run in runs:
+        if run.capture and run.split.get('total'):
+            groups[(run.capture.equation, run.lts)].append(run)
+    for (eq, lts), mine in sorted(groups.items()):
+        mine = sorted(mine, key=lambda r: (r.arch, r.capture.order,
+                                           r.capture.datatype, r.name))
+        rows = []
+        shares = []
+        for run in mine:
+            total = run.split['total']
+            parts = {key: run.split.get(key, 0.0) for key, _, _ in _SPLIT
+                     if key != 'other'}
+            parts['other'] = max(0.0, total - sum(parts.values()))
+            shares.append({k: 100 * v / total for k, v in parts.items()})
+            rows.append(dict({'run': run.name, 'arch': run.arch,
+                              'configuration': run.configuration,
+                              'total_s': total},
+                             **{f'{k}_s': v for k, v in parts.items()}))
+        ax = texout.Axis(options=[
+            'tf', 'xbar stacked', 'bar width=0.6', 'xmin=0, xmax=100',
+            'y dir=reverse',
+            f'ytick={{{",".join(str(i) for i in range(len(mine)))}}}',
+            'yticklabels={' + ','.join(_run_label(r) for r in mine) + '}',
+            'yticklabel style={font=\\scriptsize, color=tfink}',
+            f'ymin=-0.6, ymax={len(mine) - 0.4}', 'ymajorgrids=false',
+            'xlabel={\\% of the simulation}', 'tf legend above',
+            'area legend',
+            f'height={max(0.3, 0.16 + 0.07 * len(mine)):.2f}\\tfwidth'])
+        for key, label, colour in _SPLIT:
+            if not any(s.get(key) for s in shares):
+                continue
+            ax.plots.append(texout.Plot(
+                f'fill={colour}, draw=white, line width=0.4pt, mark=none',
+                [(s.get(key, 0.0), y) for y, s in enumerate(shares)],
+                label))
+        tex = texout.picture([ax], comment=(
+            'generated by tools/bench/publish.py from SeisSol\'s run '
+            'summaries: means over the ranks; other is the total less the '
+            'parts'))
+        mode = 'local' if lts else 'global'
+        caption = (f'Where the time of a SeisSol simulation went, {eq} with '
+                   f'{mode} time stepping, per machine and configuration: '
+                   'SeisSol\'s compute regions, the compute outside them -- '
+                   'waiting, communication, scheduling -- and the blocking '
+                   'IO, as shares of the simulation, means over the ranks.')
+        out.append(Output(f'timesplit-{eq}-{mode}', 'figure', tex, rows,
+                          caption))
     return out
 
 
@@ -1472,20 +2655,39 @@ def preview(outputs: Sequence[Output], title: str,
             + '\n'.join(parts) + '\\end{document}\n')
 
 
+@dataclass
+class Extra:
+    """What a publication draws on beside the kernel runs: SeisSol's own run
+    summaries, clusterings to read the launch costs against, the profiler's
+    measurements, and what the builds cost."""
+    runs: List[Run] = field(default_factory=list)
+    clusterings: List[Tuple[Clustering, Capture]] = field(
+        default_factory=list)
+    profiles: Dict[ProfileKey, Tuple[float, int]] = field(
+        default_factory=dict)
+    manifests: List[Dict] = field(default_factory=list)
+
+
 def build(fieldset: Optional[Field], described: Sequence,
-          kernels: Sequence[str], order: int, clock: str
+          kernels: Sequence[str], order: int, clock: str,
+          extra: Optional[Extra] = None
           ) -> Tuple[List[Output], List[str]]:
+    extra = extra or Extra()
     styles = Styles()
     outputs: List[Output] = []
     skipped: List[str] = []
 
     def add(made, why: str = '') -> None:
+        if isinstance(made, tuple):
+            made, reasons = made
+            skipped.extend(reasons)
         if made is None or made == []:
             if why:
                 skipped.append(why)
             return
         outputs.extend(made if isinstance(made, list) else [made])
 
+    # What each kernel is, from the exports alone.
     if described:
         add(table_kernels(described, kernels, order),
             'kernels: no export in double with one simulation')
@@ -1494,28 +2696,56 @@ def build(fieldset: Optional[Field], described: Sequence,
             'intensity figure: fewer than two orders exported')
     else:
         skipped.append('kernels, intensity: no exports (--exports)')
-    if fieldset is None or not fieldset.points:
-        skipped.append('everything measured: no runs given')
-        return outputs, skipped
-    add(table_machines(fieldset), 'machines: no ceilings in the runs')
-    made, why = figure_rooflines(fieldset, kernels, styles)
-    add(made)
-    skipped.extend(why)
-    made, why = figure_peaks(fieldset, kernels)
-    add(made)
-    skipped.extend(why)
-    figs, tabs, why = figure_rampup(fieldset, kernels, styles, clock,
-                                    order)
-    add(figs)
-    add(tabs)
-    skipped.extend(why)
-    made, why = figure_breakdown(fieldset, kernels, styles)
-    add(made)
-    skipped.extend(why)
-    add(table_portability(fieldset, kernels),
-        'portability: fewer than two machines with a ceiling')
-    add(figure_configs(fieldset, kernels),
-        'configs: one configuration only')
+
+    # What the kernels did.
+    fits: List[Dict] = []
+    measured = fieldset is not None and bool(fieldset.points)
+    if measured:
+        add(table_machines(fieldset), 'machines: no ceilings in the runs')
+        add(figure_rooflines(fieldset, kernels, styles))
+        add(figure_peaks(fieldset, kernels))
+        figs, tabs, why = figure_rampup(fieldset, kernels, styles, clock,
+                                        order)
+        add(figs)
+        add(tabs)
+        skipped.extend(why)
+        fits = [r for t in tabs for r in t.rows]
+    else:
+        skipped.append('everything the kernels measured: no runs given')
+
+    # What a time step and a run made of them.
+    add(figure_lts(lts_series(extra.clusterings, extra.runs), fits,
+                   extra.runs, fieldset),
+        'lts: no clustering (--clustering, or a run with several clusters '
+        'in --seissol)')
+    if measured:
+        add(figure_breakdown(fieldset, kernels, styles))
+    add(figure_timesplit(extra.runs),
+        'timesplit: no SeisSol run summaries (--seissol)')
+    add(figure_throughput(extra.runs),
+        'throughput: no SeisSol run summaries (--seissol)')
+
+    # Across machines and configurations, and what explains the curves.
+    if measured:
+        add(table_portability(fieldset, kernels),
+            'portability: fewer than two machines with a ceiling')
+        add(figure_cascade(fieldset, kernels, order, styles),
+            'cascade: fewer than two machines with a ceiling')
+        add(figure_configs(fieldset, kernels),
+            'configs: one configuration only')
+        add(figure_fusion(fieldset, kernels, clock))
+        add(figure_lanes(fieldset, kernels, styles),
+            'lanes: no executed flops, or one order only')
+        add(figure_resources(fieldset, kernels, styles),
+            'resources: no registers or code sizes recorded')
+        add(figure_precision(fieldset, kernels),
+            'precision: no kernel measured in both precisions')
+        add(figure_simulations(fieldset, kernels, order, styles),
+            'simulations: one simulation count only')
+        add(figure_traffic(fieldset, extra.profiles, kernels),
+            'traffic: no profile.json with DRAM counters')
+    add(table_buildcost(extra.manifests, fieldset),
+        'buildcost: no manifest that recorded what a build cost')
     return outputs, skipped
 
 
@@ -1535,6 +2765,28 @@ def write(outputs: Sequence[Output], out: Path, title: str,
                                              manifest.get('skipped', ())))
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2,
                                                   default=str))
+
+
+#: The clustering `--clustering synthetic` stands for: written down to lay
+#: the figures out with until a mesh's is at hand, and named as such in
+#: every figure drawn from it.
+SYNTHETIC_CLUSTERING = HERE / 'clusterings' / 'synthetic-clustering.csv'
+
+
+def clustering_arg(text: str, order: int) -> Tuple[Clustering, Capture]:
+    """`CSV[@TAG]`: a clustering, and the export its kernels are at --
+    `elastic-4-d`, or with the simulations, `elastic-4-d-s1`."""
+    path, _, tag = text.partition('@')
+    source = SYNTHETIC_CLUSTERING if path == 'synthetic' else Path(path)
+    tag = tag or f'elastic-{order}-d'
+    capture = Capture.from_tag(tag if tag.count('-') == 3 else f'{tag}-s1')
+    if capture is None:
+        raise SystemExit(f'--clustering {text}: {tag!r} is no export tag '
+                         '(equation-order-precision, e.g. elastic-4-d)')
+    try:
+        return read_clustering(source), capture
+    except (OSError, ValueError, KeyError) as exc:
+        raise SystemExit(f'--clustering {text}: {exc}') from exc
 
 
 def main() -> int:
@@ -1560,6 +2812,17 @@ def main() -> int:
                     help='the clock of the ramp-up: the wall clock over '
                          'back-to-back launches, launch overhead and all '
                          '(default), or the device\'s')
+    ap.add_argument('--seissol', type=Path, action='append', default=[],
+                    help='SeisSol output directories or <prefix>-summary.json '
+                         'files: what the runs got through, where their time '
+                         'went, and their clusterings (repeatable)')
+    ap.add_argument('--clustering', action='append', default=[],
+                    metavar='CSV[@TAG]',
+                    help='a <prefix>-clustering.csv as SeisSol writes it, or '
+                         '"synthetic" for the series in clusterings/, to read '
+                         'the launch costs against; TAG names the kernels\' '
+                         'export, e.g. elastic-4-d (default: elastic at '
+                         '--order, double) (repeatable)')
     ap.add_argument('--title', default='TensorForge measurements')
     ap.add_argument('--compile', action='store_true',
                     help='run pdflatex on preview.tex and on every '
@@ -1575,14 +2838,23 @@ def main() -> int:
     if args.exports and args.exports.exists():
         described = dsc.describe_all([args.exports], kernels)
 
+    extra = Extra(runs=collect_runs(args.seissol),
+                  clusterings=[clustering_arg(text, args.order)
+                               for text in args.clustering],
+                  profiles=_profiles(args.paths),
+                  manifests=_manifests(args.paths))
     outputs, skipped = build(fieldset, described, kernels, args.order,
-                             args.rampup_clock)
+                             args.rampup_clock, extra)
     if not outputs:
         print('nothing to publish:\n  ' + '\n  '.join(skipped),
               file=sys.stderr)
         return 2
     manifest = {
         'inputs': [str(p) for p in args.paths],
+        'seissol': [str(r.path) for r in extra.runs],
+        'clusterings': [{'name': c.name, 'synthetic': c.synthetic,
+                         'kernels': cap.tag}
+                        for c, cap in extra.clusterings],
         'exports': str(args.exports), 'kernels': kernels,
         'flops': args.flops, 'rampup_clock': args.rampup_clock,
         'step': {eq: {k: asdict(launch) for k, launch in step.items()}

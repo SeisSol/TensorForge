@@ -388,11 +388,11 @@ outside them and the blocking IO for where a simulation's time went, and
 SeisSol's own fit of a region's time against the cells a launch carried, which
 the LTS figure draws dashed beside the benchmark's `n_1/2`.
 
-**Fusion.** `suites/seissolsplit.py` measures every kernel fused and as one
-launch per operation (`split_description`); the figure adds the pieces up per
-batch and sets the sum against the kernel, at the largest launch and at the
-smallest, where the pieces' extra launches weigh most, beside the bytes they
-move against the kernel's.
+**Fusion.** `suites/seissolsplit.py` measures every kernel whole and as one
+launch per operation (`split_description`), in one run; the figure adds the
+pieces up per batch and sets the sum against the whole kernel of the same run,
+at the largest launch and at the smallest, where the pieces' extra launches
+weigh most, beside the bytes they move against the kernel's.
 
 **What explains the curves.** The share of the issued arithmetic the operation
 needs, and what a dense implementation would do against it, per order and
