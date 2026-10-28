@@ -30,9 +30,9 @@ class Recorder:
     """Records the call sequence instead of building IR.
 
     Enough of the writer for this path and no more: it emits calls, statements,
-    declarations, constants and extracts, and nothing else. A recorder that
-    accepted more would let the emitter grow a dependency without the test
-    noticing.
+    declarations, assignments, constants and extracts, and nothing else. A
+    recorder that accepted more would let the emitter grow a dependency without
+    the test noticing.
     """
 
     class _Scope:
@@ -58,6 +58,9 @@ class Recorder:
 
     def const(self, value, type_=None):
         return self._value("zero")
+
+    def assign(self, target, value):
+        self.calls.append(("assign", (target, value)))
 
     def extract(self, vec, slot, type_=None, **kw):
         self.calls.append(("extract", (vec, slot)))
@@ -241,6 +244,24 @@ def test_the_accumulators_are_threaded_not_reused():
     issues = writer.kinds()[op.callee]
     assert read_back == issues - lead_groups, (
         "every issue but the first of each chain reads a produced value")
+
+
+def test_the_transpose_writes_registers_of_its_own():
+    """Never a constant, which a reference parameter cannot bind.
+
+    The transpose writes its operands in place, and a column is a constant in
+    the padding and wherever the operator's numbers are spelled as literals --
+    SeisSol's elastic kernels at order 6 in double stopped at the first k-block
+    on exactly that.  Every operand is a declaration a column was assigned to.
+    """
+    ok, writer, _ = _emit(N=9)
+    assert ok
+    assigned = {args[0] for name, args in writer.calls if name == "assign"}
+    transposes = [args for name, args in writer.calls
+                  if name.startswith("tensorforge::transpose")]
+    assert transposes
+    for args in transposes:
+        assert all(a in assigned for a in args)
 
 
 def test_a_partial_column_block_is_padded_with_zeroes():

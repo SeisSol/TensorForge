@@ -21,15 +21,16 @@ them:
 The contraction runs in stride-`ext` groups, which is what makes the first of
 those free; `Exchange` says why, and says what that costs elsewhere.
 
-**Not routed.**  `offers` does not name this path and `matmul` does not
-dispatch to it, so nothing generates it yet.  Wiring it up changes every F64
-kernel on CDNA 2 and later, and the only check available here is that the
-emitted call sequence matches the plans --- which says the emitter is faithful
-to them and nothing about whether the instruction then computes the right
-thing.  That wants a machine, so the decision to route belongs with someone
-who has one.
+**Not deployed.**  `matmul` dispatches here, but `offers` names the path only
+under `tiling.EXCHANGE`, which is off, so nothing generates it by default.
+Turning it on changes every F64 kernel on CDNA 2 and later that runs at the
+wave's lane count (`mfma_f64_16x16x4f64` takes all 64 lanes); the check
+available here is that the emitted call sequence matches the plans --- which
+says the emitter is faithful to them and nothing about whether the instruction
+then computes the right thing.  That wants a machine.
 """
 
+from functools import lru_cache
 from typing import Optional
 
 from tensorforge.backend.pir.core import ScalarType
@@ -66,16 +67,37 @@ def exchange_ops(dtype, threads, ctx) -> tuple:
             continue
         if threads != op.wave or wave_size(ctx) != op.wave:
             continue
-        if not has_feature(ctx, op.feature) or not covers(op):
-            continue
-        if broadcast_feeds_a(op) or a_exchange(op) is None:
-            continue
-        if fragment_moves(op, 'B', 0) is None:
-            continue
-        if accumulator_gathers(op, 0) is None:
+        if not has_feature(ctx, op.feature) or not _planned(op):
             continue
         out.append(op)
     return tuple(out)
+
+
+@lru_cache(maxsize=None)
+def _planned(op) -> bool:
+    """Whether the three plans exist for `op`: properties of the instruction
+    alone, and searches over its layouts that a storage settlement asking
+    `offers` for every operation would otherwise repeat each time (SeisSol's
+    `localFluxAll` at order 6 did not finish in 25 minutes)."""
+    return (covers(op) and not broadcast_feeds_a(op)
+            and a_exchange(op) is not None
+            and fragment_moves(op, 'B', 0) is not None
+            and accumulator_gathers(op, 0) is not None)
+
+
+@lru_cache(maxsize=None)
+def _b_moves(op, group):
+    """`fragment_moves` for the B fragment of contraction group `group`: the
+    same search for every fragment of every issue, and of every placement the
+    generator tries (4.3 million `locate` calls in two minutes of
+    `localFluxAll` at order 6)."""
+    return fragment_moves(op, 'B', 0, group)
+
+
+@lru_cache(maxsize=None)
+def _gathers(op, column):
+    """`accumulator_gathers`, kept for the same reason as `_b_moves`."""
+    return accumulator_gathers(op, column)
 
 
 def _swapped(writer, value, blocks, ftype):
@@ -184,7 +206,15 @@ def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
                             columns.append(writer.const(0.0, ftype))
                     if any(v is None or v is False for v in columns):
                         return False
-                    fragments = list(columns)
+                    # The transpose writes its operands in place, and a column
+                    # can be a constant: the padding, or an operator whose
+                    # numbers the kernel spells as literals.  Each gets a
+                    # register of its own first.
+                    fragments = []
+                    for column in columns:
+                        own = writer.declare(ftype, hint='xa')
+                        writer.assign(own, column)
+                        fragments.append(own)
                     writer.call_stmt(f'tensorforge::transpose{ext}x{ext}b32',
                                      *fragments, writes=fragments)
 
@@ -219,7 +249,7 @@ def _b_fragment(writer, op, lead, i, group, base, kgroup, exchange, ftype,
                 depth):
     """One B fragment: the plan, emitted."""
     built = None
-    for move in fragment_moves(op, 'B', 0, group):
+    for move in _b_moves(op, group):
         k = base + exchange.stride * move.contraction + kgroup
         if k >= depth:
             value = writer.const(0.0, ftype)
@@ -238,7 +268,7 @@ def _b_fragment(writer, op, lead, i, group, base, kgroup, exchange, ftype,
 def _writeback(writer, op, acc, i, column, ftype):
     """One output column, gathered out of the group accumulators."""
     built = None
-    for gather in accumulator_gathers(op, column):
+    for gather in _gathers(op, column):
         value = writer.extract(acc[(i, gather.group)], gather.slot, ftype)
         built = _merge(writer, built,
                        _swapped(writer, value, gather.swaps, ftype),
