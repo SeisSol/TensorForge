@@ -237,9 +237,12 @@ class MatrixPaths(Protocol):
         otherwise goes first."""
 
     def prepared_order(self, shape, dtype, ctx, columns=0, lead=0, depth=0,
-                       threads=32, corner=(0, 0), rows=None) -> Any:
+                       threads=32, corner=(0, 0), rows=None,
+                       head=0) -> Any:
         """The order this target would read a two-dimensional A operand in,
-        or None (`MultilinearInstruction._offer_order`)."""
+        or None (`MultilinearInstruction._offer_order`).  `head` is where the
+        contraction starts inside the shared operand's first block of
+        `threads` steps, for an order that pairs the two."""
 
     def widths(self, threads: int, accumulator, ctx) -> Tuple[int, ...]:
         """The output columns one issue of the matrix instruction may cover

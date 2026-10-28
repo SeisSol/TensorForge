@@ -55,7 +55,8 @@ from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       fragment_cost, fragment_moves)
 from .codegen import (PACK_BF16, accumulator_direct, hfma, matmul32,
                       matmulemu, matmuldpp)
-from .exchange_codegen import exchange_op, exchange_ops, matmul_exchange
+from .exchange_codegen import (exchange_op, exchange_ops, exchange_order,
+                               matmul_exchange)
 from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
                      candidates, choose, issues, offers, rank,
                      spare_products, widths)
@@ -392,7 +393,7 @@ class QuadOrder(tuple):
 
 
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
-                   threads=32, corner=(0, 0), rows=None):
+                   threads=32, corner=(0, 0), rows=None, head=0):
     """The order this target would read a two-dimensional A operand in, or
     `None` (`multilinear._offer_order`).
 
@@ -406,8 +407,13 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     the instruction multiplies: the operand is split once on the host rather
     than in every step (`matmulemu`), and a quad of a term is the k-vector
     of four the BF16 instruction takes.
+
+    Under the exchange scheme the instruction's B fragments, one read each
+    where the plan swaps and merges (`exchange_order`), whatever the type the
+    scheme serves; `head` is where the contraction starts in the shared
+    operand's first block, which decides the step a fragment lane holds.
     """
-    if not K_QUADS or len(shape) != 2 or dtype != Datatype.F32:
+    if len(shape) != 2:
         return None
     r0, c0 = (int(x) for x in corner)
     if (r0 < 0 or c0 < 0 or not lead or not depth or r0 >= int(shape[0])
@@ -419,6 +425,10 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     window = ((r0, int(rows) if rows else lead), (c0, depth))
     fit = choose(threads, dtype, ctx, columns=columns, lead=lead, depth=depth)
     if fit is None:
+        return None
+    if fit.scheme is Scheme.EXCHANGE:
+        return exchange_order(fit.op, shape, threads, window, head)
+    if not K_QUADS or dtype != Datatype.F32:
         return None
     width = quad_width(dtype)
     if fit.scheme is Scheme.EMULATED:
@@ -494,22 +504,44 @@ def _quad_element(ops, width):
     return A
 
 
+def _exchanged(ops, ctx) -> bool:
+    """Whether a prepared `A` is stored as the exchange scheme's B fragments:
+    the scheme `choose` takes here is the one `prepared_order` answered for."""
+    fit = choose(ops.threads, ops.accumulator, ctx)
+    return fit is not None and fit.scheme is Scheme.EXCHANGE
+
+
+def _exchange_reader(ops):
+    """`lead_slot(writer, index)` for an `A` stored in `exchange_order`: one
+    fragment, each lane its own element."""
+    def read(writer, index):
+        return ops.A_slot(writer, index * ops.threads)
+    return read
+
+
 def matmul(writer, ops, ctx, span):
     """Emit one span of the plan."""
-    width = quad_width(ops.a) if ops.A_slot is not None else 0
+    exchanged = ops.A_slot is not None and _exchanged(ops, ctx)
+    width = (quad_width(ops.a) if ops.A_slot is not None and not exchanged
+             else 0)
     if width:
         ops = replace(ops, A=_quad_element(ops, width))
-    taken = _matmul(writer, ops, ctx, span, width)
-    if not taken and width:
-        # Declining would hand the operation to the nest, which reads `A` by
-        # coordinate out of a buffer stored in k-quads.
+    if exchanged and span.strategy is not Strategy.MATRIX:
         raise InternalError(
-            f'{span.strategy.value} declined an operand stored in k-quads; '
-            f'no other path reads that order')
+            f'{span.strategy.value} cannot read an operand stored as the '
+            f'exchange scheme\'s fragments; the scheme pads its columns and '
+            f'takes every span')
+    taken = _matmul(writer, ops, ctx, span, width, exchanged)
+    if not taken and (width or exchanged):
+        # Declining would hand the operation to the nest, which reads `A` by
+        # coordinate out of a buffer stored in k-quads or as fragments.
+        raise InternalError(
+            f'{span.strategy.value} declined an operand stored in its own '
+            f'order; no other path reads that order')
     return taken
 
 
-def _matmul(writer, ops, ctx, span, width):
+def _matmul(writer, ops, ctx, span, width, exchanged=False):
     C, A, B = ops.C, ops.A, ops.B
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
@@ -554,8 +586,10 @@ def _matmul(writer, ops, ctx, span, width):
         if fit.scheme is Scheme.EXCHANGE:
             # `shared` before `lead`: the instruction's A fragment is fed by
             # this dispatch's `B`, and its B fragment by `A`.
-            return matmul_exchange(writer, C, B, A, M, N, K, kx, threads,
-                                   dtype, sparse, ctx, span.start, span.stop)
+            return matmul_exchange(
+                writer, C, B, A, M, N, K, kx, threads, dtype, sparse, ctx,
+                span.start, span.stop,
+                lead_slot=_exchange_reader(ops) if exchanged else None)
         # `convergence` asked for the wave group on the same condition, less
         # the accessor: a lead operand that turns out not to be addressable
         # reads per step, in a loop that merely runs in step for nothing.
