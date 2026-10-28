@@ -246,6 +246,44 @@ def resources(hw) -> Dict[str, Resource]:
     }
 
 
+def latency_waves(hw) -> Optional[float]:
+    """Waves (warps) an SM or CU needs resident for its pipes to reach the
+    bound, or None where that was never measured.
+
+    NVIDIA: one warp per scheduler, the rate of the `issue` resource
+    (`tuning._shortfall` says how that was measured).  CDNA: one wave per
+    SIMD, the same statement for four SIMDs -- a SIMD with no wave issues
+    nothing.  Not the two a lone dependent chain needs (an F32 FMA chain at
+    one wave a SIMD ran at 14.1 clocks a step against 9.4 at four on gfx942):
+    the kernels carry independent accumulators enough to fill their own
+    gaps, and asking two of them stretched SeisSol's order-6 derivative and
+    volume at 16 lanes past 32, which measured 31 % and 15 % slower.
+    """
+    family = _family(hw)
+    if family == 'nvidia':
+        return resources(hw)['issue'].rate
+    if family == 'gfx9':
+        return 4.0
+    return None
+
+
+def spills_are_a_cliff(hw) -> bool:
+    """Whether a candidate that spills at all ranks behind every one that does
+    not (`tuning.static_score`), or only by what its spilling costs.
+
+    A cliff on NVIDIA and PVC, where it was measured to be one.  Not on CDNA:
+    from gfx90a on the compiler spills into the AGPRs of the unified file
+    before it reaches scratch, and what does reach scratch stays in the
+    caches.  On MI300A the cliff took SeisSol's order-6 FP64 derivative to 64
+    lanes, 44.5 % slower than the 32 that spill 108 bytes, and the
+    viscoelastic derivative to 32 against a spilling 16 that is 6.5 % faster;
+    over 26 kernels at 16, 32 and 64 lanes, ranking by the penalty alone picks
+    the fastest in 18 against 15, at a geometric mean of 1.017 against 1.038
+    of the fastest.
+    """
+    return _family(hw) != 'gfx9'
+
+
 @dataclass(frozen=True)
 class Bound:
     """Clocks one SM or CU needs per element at least, and which pipe."""

@@ -216,3 +216,38 @@ def test_rolling_a_reduction_does_not_change_its_work():
 
     rolled, flat = work(k_roll=28), work()
     assert flat <= rolled <= flat * 1.02
+
+
+# ---------------------------------------------------------------------- #
+# what the static score asks of the machine
+# ---------------------------------------------------------------------- #
+
+def _hw(arch, backend):
+    return Context(arch=arch, backend=backend, fp_type=Datatype.F32).target.hw
+
+
+def test_a_narrow_multiplication_is_its_share_of_a_wave():
+    """Four 16-lane multiplications fill one wave of 64.  Four resident on a
+    CU are one wave, a quarter of what its SIMDs need to issue at all; four
+    of 64 lanes fill them."""
+    cdna = _hw('gfx942', 'hip')
+    assert tuning._shortfall(16, 64, 4, cdna) == 4.0
+    assert tuning._shortfall(64, 64, 4, cdna) == 1.0
+    assert tuning._shortfall(32, 64, 16, cdna) == 1.0
+    # NVIDIA as before wherever a multiplication fills its warps
+    nvidia = _hw('sm_120', 'cuda')
+    assert tuning._shortfall(32, 32, 2, nvidia) == 2.0
+    assert tuning._shortfall(64, 32, 2, nvidia) == 1.0
+    # and an unknown residency stretches nothing
+    assert tuning._shortfall(16, 64, 0, cdna) == 1.0
+
+
+def test_on_cdna_a_spill_costs_what_it_costs_and_is_no_cliff():
+    """From gfx90a on a spill goes to AGPRs first and then to scratch the
+    caches hold: on MI300A two spilling candidates of 26 were the fastest.
+    NVIDIA and PVC keep the cliff they were measured to have."""
+    from tensorforge.analysis import pipeline
+    assert not pipeline.spills_are_a_cliff(_hw('gfx942', 'hip'))
+    assert not pipeline.spills_are_a_cliff(_hw('gfx90a', 'hip'))
+    assert pipeline.spills_are_a_cliff(_hw('sm_120', 'cuda'))
+    assert pipeline.spills_are_a_cliff(_hw('gfx1150', 'hip'))
