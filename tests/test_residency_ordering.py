@@ -292,9 +292,13 @@ def test_a_settled_temporary_is_published_before_it_is_read(backend, arch):
     #
     # Without the forwarding as well: here the pointwise operation reads each
     # element in the lane that stored it, which the forwarding finds, and
-    # then nothing is read through shared memory (`pir.forward`).
+    # then nothing is read through shared memory (`pir.forward`).  And for
+    # the same reason without `keep_own`: a buffer no lane hands on to
+    # another stays in registers where the vendor table says so (AMD), and
+    # then there is no window to publish (`pir.carry.keep_own`).
     gen, _ = _generate("mixed/ml_then_ew", backend, arch,
-                       register_temporaries='scalars', forward_memory=False)
+                       register_temporaries='scalars', forward_memory=False,
+                       keep_own=False)
     stream = _flatten(gen._sections[0].stream)
     stores = [i for i in stream if isinstance(i, StoreRegToShr)]
     assert len(stores) == 1, f"expected exactly one shared store, got {stores}"

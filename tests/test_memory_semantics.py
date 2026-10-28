@@ -160,10 +160,15 @@ def test_an_accumulation_reads_what_its_destination_held(options,
     """The instruction that adds onto `r` reads it before it writes it, so
     nothing ahead of it says that `r` holds nothing anybody wants
     (`Generator._declare_buffers`, `mark defines`): told so, the allocator
-    gives the stretch before it to `t`, which writes over `r` there."""
+    gives the stretch before it to `t`, which writes over `r` there.
+
+    Without the forwarding: every lane stores `r` alike and would read it
+    back from its own register (`pir.forward`), and a buffer nothing reads
+    can be written over unnoticed."""
     monkeypatch.setattr(lanes, '_built',
                         lambda descrs, backend='cuda', arch='sm_86':
-                        _built(descrs, backend, arch, **options))
+                        _built(descrs, backend, arch, forward_memory=False,
+                               **options))
     assert lanes._worst(accumulation_onto_a_value_without_axes()) < 1e-9
 
 

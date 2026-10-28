@@ -25,6 +25,7 @@ from harness import syntax
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.operation import Operation
+from tensorforge.common.options import Options
 from tensorforge.frontend.yateto import DescriptionReader
 from tensorforge.generators.descriptions import (ElementwiseDescr,
                                                  MultilinearDescr)
@@ -309,10 +310,16 @@ def test_a_boolean_staged_in_shared_memory_is_a_window_of_its_own_type(
         backend, arch):
     """The comparison `B >= C^T` is staged in the arena, which is an array of
     the kernel's float: `bool *s = &arena[0]` compiles nowhere, so the window
-    is a reinterpret of the arena's address."""
+    is a reinterpret of the arena's address.
+
+    Staged, that is, where nothing takes it out of the arena again: every
+    lane reads back only the rows it compared, which the forward reads from
+    the register the comparison went into (`pir.forward`), and which AMD
+    keeps in registers anyway (`keep_own`)."""
     descrs = recorded('ternary_tensor_t')
-    generator = Generator(descrs, Context(arch=arch, backend=backend,
-                                          fp_type=Datatype.F32))
+    generator = Generator(descrs, Context(
+        arch=arch, backend=backend, fp_type=Datatype.F32,
+        options=Options(forward_memory=False, keep_own=False)))
     with contextlib.redirect_stdout(io.StringIO()):
         generator.generate()
     kernel = generator.get_kernel()

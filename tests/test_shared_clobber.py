@@ -308,8 +308,14 @@ def test_a_merged_run_reads_the_image_it_carries(backend, arch):
                                   "mixed/ml_then_ew_temp_narrower"])
 @pytest.mark.parametrize("backend,arch", TARGETS, ids=[b for b, _ in TARGETS])
 def test_a_store_and_a_clear_wait_for_each_other(stem, backend, arch):
+    """Built without `keep_own`: in the two slicing cases every lane reads
+    only what it wrote itself, the zeros included, and a buffer like that
+    stays in registers where the vendor table says so (AMD) -- the clear is
+    then a register write, and there is no shared store to order it against
+    (`pir.carry.keep_own`)."""
     mod = _case(stem)
-    gen = _generate(mod.descr_list(), backend, arch, fp=mod.DTYPE)
+    gen = _generate(mod.descr_list(), backend, arch, fp=mod.DTYPE,
+                    keep_own=False)
     assert any(s.op == Op.MARK and s.attr('mark') == 'cleared'
                for section in gen._sections for s in _stmts(section.body)), \
         "nothing is cleared; the test no longer tests a clear"
