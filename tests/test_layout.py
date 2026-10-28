@@ -193,8 +193,10 @@ def test_void_call_verifies():
 
 
 def test_void_call_emits_a_bare_statement():
+    # On a target that keeps the calls: gfx9 writes a run of them as one block
+    # of assembly (`amd.dpp_block`, `test_dpp_block`).
     w = Writer()
-    Emitter(w, Context(arch='gfx90a', backend='hip',
+    Emitter(w, Context(arch='gfx1150', backend='hip',
                        fp_type=Datatype.F32)).run(_acc_kernel())
     src = w.get_src()
     assert 'tensorforge::fmacdpp16<0>(v0_acc, v2_bc, v1_acc);' in src
