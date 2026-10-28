@@ -69,6 +69,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+from capture import Capture, capture_of                        # noqa: E402
 from pdfout import Page, PText, write_pdf, table_page          # noqa: E402
 from plot import (Canvas, FLOP_FIELD, FLOP_LABEL, MARKS, PALETTE, RATE_LABEL,
                   _fmt, _results, flop_basis, flops_of, index_html,
@@ -95,11 +96,12 @@ _ORDER_PATTERNS = (re.compile(r'(?:^|[-_])o(\d+)(?:[-_]|$)'),
 def order_of(path: Path, rows: Sequence[Dict]) -> Optional[int]:
     """The discretisation order this run is of, from the rows or the path.
 
-    A row would be the better place and does not carry it today, so the
-    path is read -- but only the path, never the *content*: guessing an
-    order from a kernel's shapes would be a number nobody recorded.
-    Returns `None` where neither says, and the order views then leave the
-    run out rather than placing it at zero.
+    A row that carries its capture (`run.py` writes `order` beside the rest
+    of `capture.Capture.fields`) is believed first; a run that predates that
+    is placed by its directory -- but only by the path, never by the
+    *content*: guessing an order from a kernel's shapes would be a number
+    nobody recorded.  Returns `None` where neither says, and the order views
+    then leave the run out rather than placing it at zero.
     """
     for row in rows:
         if row.get('order'):
@@ -125,10 +127,21 @@ class Point:
     row: Dict
     order: Optional[int] = None
     run: str = ''
+    #: The export the kernel was captured from, where the row or the run's
+    #: directory says (`capture.capture_of`).
+    capture: Optional[Capture] = None
 
     @property
     def target(self) -> str:
         return f'{self.backend}-{self.arch}'
+
+    @property
+    def kernel(self) -> str:
+        """The kernel this point measured, which the workload name alone
+        does not identify: the same name is a different operation at every
+        order, precision, simulation count and equation."""
+        return (f'{self.workload} @ {self.capture.tag}' if self.capture
+                else self.workload)
 
     @property
     def intensity(self) -> Optional[float]:
@@ -245,11 +258,23 @@ def collect(targets: Sequence[Path]) -> Field:
                         if not r.get('error')]
             except (OSError, ValueError):
                 continue
-            order = order_of(bench.parent, rows)
+            # Per row, since one file may hold several exports; the
+            # directory only for rows that do not say.
+            by_path = capture_of(bench.parent, [])
             run = bench.parent.name
             for row in rows:
                 if not row.get('workload'):
                     continue
+                order = order_of(bench.parent, [row])
+                captured = Capture.from_row(row) or by_path
+                if captured is not None and (
+                        captured.order != order
+                        or (row.get('datatype')
+                            and captured.datatype != row['datatype'])):
+                    # The row states an order or a precision its directory
+                    # contradicts; the row is the record, and a capture that
+                    # disagrees with it identifies nothing.
+                    captured = None
                 out.points.append(Point(
                     workload=row['workload'],
                     config=row.get('config') or 'default',
@@ -258,7 +283,7 @@ def collect(targets: Sequence[Path]) -> Field:
                     device=row.get('device') or '',
                     datatype=row.get('datatype') or '',
                     batch=int(row.get('batch') or 0),
-                    row=row, order=order, run=run))
+                    row=row, order=order, run=run, capture=captured))
             for name in ('ceiling.json', 'roofline.json'):
                 ceiling = _load_ceiling(bench.parent / name)
                 if ceiling:

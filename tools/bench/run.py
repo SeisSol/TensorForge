@@ -154,6 +154,12 @@ def measure(unit_build: bench_build.UnitBuild, device: Device,
             'lanes': record.lanes,
             'static': record.static,
         }
+        # Which export the kernel came from, where it came from one: the
+        # name is shared by every order, precision and equation, and a
+        # reader keying on it alone mixes them (`capture.py`).
+        captured = by_name[record.name].capture
+        if captured is not None:
+            base.update(captured.fields())
         if not record.ok:
             # A refusal always carries a reason: `report` takes a row without
             # an error for a measurement, and a measurement has a batch.
@@ -357,14 +363,17 @@ def main() -> int:
     started = time.time()
     rows: List[Dict] = []
     manifest: List[Dict] = []
+    captures = {w.name: w.capture for w in spec.workloads}
     for device in devices:
         for unit in suite_mod.expand(spec, [device.spec]):
             built = bench_build.build(unit, jobs=args.jobs)
             if built.error:
                 print(f'{unit.label}: {built.error}', file=sys.stderr)
             for record in built.workloads:
+                captured = captures.get(record.name)
                 manifest.append({
                     'unit': unit.label, 'workload': record.name,
+                    'capture': captured.tag if captured else None,
                     'symbol': record.symbol, 'origin': record.origin,
                     'lanes': record.lanes, 'static': record.static,
                     'error': record.error,

@@ -154,10 +154,20 @@ quantities about four machines is something a reader looks a value up in, and
 a chart of it would be six bar charts sharing an axis they have no business
 sharing.
 
-The order is read from the **run directory name** — `elastic-6-s-s1` as
-`evaluate.py` names an export, or `elastic-linearck-o8-s` as the recorded
-suite calls a configuration. A run whose name says neither is left out of the
-order views rather than placed at zero.
+A kernel is its name **and** the export it was captured from. Over the
+exports in `data/`, the compulsory intensity under the one name
+`gpu_localFluxAll` spans 3.6 to 38 flop/byte (dense, per element), and 141 of
+the 142 names spread by more than a factor of two -- the name alone is shared
+by every order, precision, simulation count and equation. So `run.py` writes the
+export's configuration into every row (`capture`, `equation`, `order`,
+`precision`, `simulations`, `mechanisms`; `capture.py`), and the readers key
+a kernel by both.
+
+A run that predates those fields is placed by its **directory name** --
+`elastic-6-s-s1` as `evaluate.py` names an export, or `elastic-linearck-o8-s`
+as the recorded suite calls a configuration. A row is believed over its
+directory, and a run whose name says neither is left out of the order views
+rather than placed at zero.
 
 `archs` and `portability` answer different questions and the difference
 matters. `archs` is absolute and ranks the *machines*; a set holding a laptop

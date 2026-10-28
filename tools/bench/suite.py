@@ -59,6 +59,10 @@ from tensorforge.generators import lanes  # noqa: E402
 from tensorforge.generators.descriptions import MultilinearDescr  # noqa: E402
 from tensorforge.frontend.yateto import DescriptionReader  # noqa: E402
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture import Capture  # noqa: E402
+
 #: Where the case corpus lives.  `TF_TESTS` overrides, so a suite can be run
 #: against the corpus of another checkout.
 CASES = Path(os.environ.get('TF_TESTS', ROOT / 'tests')) / 'cases'
@@ -82,6 +86,10 @@ class Workload:
     attrs: Optional[dict] = None
     #: Free-form, carried into the manifest: where this came from.
     origin: str = ''
+    #: The SeisSol configuration a captured kernel was exported at, where
+    #: the capture says.  Part of what the kernel *is*: the name alone is
+    #: shared by every order, precision and equation (`capture.py`).
+    capture: Optional[Capture] = None
 
     def __post_init__(self):
         if not callable(self.descrs):
@@ -321,6 +329,7 @@ def from_dump(path: Path, pattern: str = '*',
     """
     blob = json.loads(Path(path).read_text())
     datatype = datatype or dump_datatype(blob) or Datatype.F32
+    capture = Capture.from_config(blob.get('config'))
 
     out: List[Workload] = []
 
@@ -332,7 +341,8 @@ def from_dump(path: Path, pattern: str = '*',
             def factory(description=description):
                 return DescriptionReader(arch=None).read(description)[0]
             out.append(Workload(name=symbol, descrs=factory, datatype=datatype,
-                            origin=f'dump:{Path(path).name}'))
+                                origin=f'dump:{Path(path).name}',
+                                capture=capture))
         return out
 
     # "old" method, interface yateto python
@@ -380,7 +390,8 @@ def from_dump(path: Path, pattern: str = '*',
             return built
 
         out.append(Workload(name=symbol, descrs=factory, datatype=datatype,
-                            origin=f'dump:{Path(path).name}'))
+                            origin=f'dump:{Path(path).name}',
+                            capture=capture))
     return out
 
 

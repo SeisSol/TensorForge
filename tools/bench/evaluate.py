@@ -54,6 +54,8 @@ for extra in (str(HERE), str(ROOT / 'src'), str(ROOT / 'tests')):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
+from capture import Capture                                     # noqa: E402
+
 #: The configurations `tools/seissol_export_all.sh` produces, as the data they
 #: are rather than as a shell loop: the same list drives the export and names
 #: the output, so the two cannot drift.
@@ -79,7 +81,10 @@ EXPORT_MATRIX = [
 
 
 def export_name(equation, solver, order, precision, mechanisms, simcount):
-    return f'{equation}-{order}-{precision}-s{simcount}'
+    """The capture's tag: the readers place a run by its directory where the
+    rows do not say, so the two spellings must be one (`capture.py`)."""
+    return Capture(equation, order, precision, simcount, mechanisms,
+                   solver).tag
 
 
 @dataclass
