@@ -141,10 +141,39 @@ _MATRIX_CALL = re.compile(r'(mfma|wmma|smfmac)', re.IGNORECASE)
 _FMA_CALL = re.compile(r'(fmac?dpp|fmadpp|fma_dpp)', re.IGNORECASE)
 
 #: Calls that move a value between lanes (`__shfl_sync`, a DPP move,
-#: `readlane`, a sub-group broadcast, a register transpose).
+#: `readlane`, a sub-group broadcast, a register transpose, a swap or gather
+#: of the runtime's).
 _CROSSLANE_CALL = re.compile(r'(shfl|dpp|readlane|readfirstlane|permute'
                              r'|swizzle|broadcast|select_from_group'
-                             r'|group_broadcast|transpose)', re.IGNORECASE)
+                             r'|group_broadcast|transpose|swap\s*<'
+                             r'|gather\s*<)', re.IGNORECASE)
+
+#: A move between lanes of different 16-lane rows: a broadcast or swap over a
+#: block wider than a row, and anything addressed by lane index.  DPP reaches
+#: only within a row, so on CDNA these are `ds_swizzle` and `ds_bpermute`,
+#: instructions of the LDS pipe and not the VALU's (`analysis.pipeline`).
+_WIDE_BLOCK = re.compile(r'\b(?:broadcast|swap)\s*<\s*(\d+)')
+_WIDE_CALL = re.compile(r'\bgather\s*<|bpermute|ds_permute|swizzle',
+                        re.IGNORECASE)
+
+
+def _crosslane_category(text: str) -> str:
+    """`xlane.wide` for a move that crosses the rows of a wave, `xlane`
+    otherwise -- a reduction's ladder included, which is row-local but for
+    its last steps."""
+    m = _WIDE_BLOCK.search(text)
+    if (m and int(m.group(1)) > 16) or _WIDE_CALL.search(text):
+        return 'xlane.wide'
+    return 'xlane'
+
+
+def _mfma_category(callee: str) -> str:
+    """One AMD matrix builtin as `mfma.<shape>`, the shape as the builtin
+    names it (`mfma.f32_4x4x1f32`): the instructions differ by an order of
+    magnitude in how long they hold the SIMD, and `analysis.pipeline` prices
+    each (`MFMA_CLOCKS`)."""
+    m = re.search(r'mfma_(\w+)', callee)
+    return f'mfma.{m.group(1)}' if m else 'mfma'
 
 #: Calls that constrain the compiler and lay nothing down (`pin` is an empty
 #: `asm volatile` holding a value in a register).
@@ -166,8 +195,10 @@ def _text_category(text: str, fallback: str) -> str:
         return 'global.store'
     if _SHARED_STORE_TEXT.match(text):
         return 'shared.store'
-    if _CROSSLANE_CALL.search(text) or 'reduction<' in text:
+    if 'reduction<' in text:
         return 'xlane'
+    if _CROSSLANE_CALL.search(text):
+        return _crosslane_category(text)
     if _SFU_CALL.search(text) or re.match(r'^\(\s*1\s*/', text):
         return 'sfu'
     if re.search(r'\bfabsf?\b|\babs\b|\bfmaf?\b|\bfminf?\b|\bfmaxf?\b', text):
@@ -388,6 +419,8 @@ class Emitter:
                 return None, []
             if _NO_CODE_CALL.search(callee):
                 return None, []
+            if re.search(r'mfma', callee, re.IGNORECASE):
+                return _mfma_category(callee), []
             if _MATRIX_CALL.search(callee):
                 return 'matrix', []
             if _FMA_CALL.search(callee):
@@ -397,7 +430,7 @@ class Emitter:
             if _SFU_CALL.search(callee):
                 return 'sfu', []
             if _CROSSLANE_CALL.search(callee):
-                return 'xlane', []
+                return _crosslane_category(callee), []
             return _text_category(callee, 'other'), []
         if op == Op.MATH:
             # Read off the target's spelling, as a raw expression's is: which
@@ -411,7 +444,7 @@ class Emitter:
             return _text_category(self._math(s, shape), 'other'), []
         if op == Op.RAWEXPR:
             if s.attr('crosslane'):
-                return 'xlane', []
+                return _crosslane_category(s.text or ''), []
             # a pointer binding computes an address once
             if s.attr('decl') is not None:
                 return 'int', []
