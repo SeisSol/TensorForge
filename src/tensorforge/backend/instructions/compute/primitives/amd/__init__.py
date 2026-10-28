@@ -33,6 +33,7 @@ from dataclasses import replace
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import InternalError
+from tensorforge.common.matrix.prepare import BF16_PARTS
 
 from ... import bitlayout, broadcast, packing
 from ...routes import lead_route as routes_lead_route
@@ -52,8 +53,8 @@ from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       Select, Exchange, a_exchange, accumulator_cost,
                       accumulator_gathers, broadcast_feeds_a,
                       fragment_cost, fragment_moves)
-from .codegen import (accumulator_direct, hfma, matmul32, matmulemu,
-                      matmuldpp)
+from .codegen import (PACK_BF16, accumulator_direct, hfma, matmul32,
+                      matmulemu, matmuldpp)
 from .exchange_codegen import exchange_op, exchange_ops, matmul_exchange
 from .tiling import (EMULATION, EXCHANGE, Fit, Scheme, boundary,
                      candidates, choose, issues, offers, rank,
@@ -364,6 +365,19 @@ def quad_order(shape, threads, width):
     return order
 
 
+class QuadOrder(tuple):
+    """A k-quad order (`quad_order`), and how many scalars an element of it
+    takes: one where the lane-batched MFMA reads the F32 values, three where
+    the emulated one reads the BF16 terms (`prepare.split_bf16`), stored
+    planar, a quad of each term one 16-byte read.
+    `MultilinearInstruction._offer_order` sets both from here."""
+
+    def __new__(cls, order, parts=1):
+        self = super().__new__(cls, order)
+        self.parts = int(parts)
+        return self
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=32):
     """The order this target would read a two-dimensional A operand in, or
@@ -374,15 +388,27 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     16-byte read.  F32 only, like the `blgp` it composes with.  Only where the
     operation reads the whole operand, since the order is laid out over the
     tensor and read by slot, with no coordinate left to offset.
+
+    Under the emulated scheme the same quads, of each of the three BF16 terms
+    the instruction multiplies: the operand is split once on the host rather
+    than in every step (`matmulemu`), and a quad of a term is the k-vector
+    of four the BF16 instruction takes.
     """
     if not K_QUADS or len(shape) != 2 or dtype != Datatype.F32:
         return None
     if tuple(int(x) for x in shape) != (lead, depth):
         return None
     fit = choose(threads, dtype, ctx, columns=columns, lead=lead, depth=depth)
-    if fit is None or fit.scheme is not Scheme.LANE_BATCHED:
+    if fit is None:
         return None
-    return quad_order(shape, threads, quad_width(dtype))
+    width = quad_width(dtype)
+    if fit.scheme is Scheme.EMULATED:
+        if fit.terms != BF16_PARTS or fit.op.k != width:
+            return None
+        return QuadOrder(quad_order(shape, threads, width), parts=fit.terms)
+    if fit.scheme is not Scheme.LANE_BATCHED:
+        return None
+    return quad_order(shape, threads, width)
 
 
 def _quad_reader(ops, width):
@@ -399,6 +425,24 @@ def _quad_reader(ops, width):
             shift = writer.op('mul', INDEX, p, slots, hint='r')
         return ops.A_slot(writer, (q * slots + i) * threads * width,
                           shift=shift, width=width)
+    return read
+
+
+def _term_reader(ops, width, terms):
+    """`read(writer, i, q)`: the `terms` BF16 k-vectors of quad `q` of slot
+    `i` of an operand stored split (`QuadOrder.parts`), each packed from its
+    16-byte read (`packBF16x4`), or `None` where the read declined."""
+    from tensorforge.backend.pir.core import ScalarType
+    threads, slots = ops.threads, ops.lead_slots
+    termtype = ScalarType(Datatype.I16, width)
+
+    def read(writer, i, q):
+        got = ops.A_slot(writer, (q * slots + i) * threads * width,
+                         parts=terms, width=width)
+        if not got:
+            return None
+        return [writer.call(PACK_BF16, termtype, part, hint='bt')
+                for part in got]
     return read
 
 
@@ -461,9 +505,23 @@ def _matmul(writer, ops, ctx, span, width):
             # none of these emitters performs.
             return False
         if fit.scheme is Scheme.EMULATED:
-            return matmulemu(writer, C, A, B, M, N, K, kx, threads, dtype,
-                             sparse, ctx, span.start, span.stop, fit.tile,
-                             fit.terms)
+            stored = width and ops.a_parts == fit.terms
+            if matmulemu(writer, C, A, B, M, N, K, kx, threads, dtype, sparse,
+                         ctx, span.start, span.stop, fit.tile, fit.terms,
+                         lead_terms=(_term_reader(ops, width, fit.terms)
+                                     if stored else None),
+                         lead_zero=ops.A_zero):
+                return True
+            if stored:
+                return False
+            # A window the BF16 quads do not meet (`matmulemu`, `kx`) goes to
+            # the direct tile, the 4-wide one: `convergence` asked for none.
+            fit = next((f for f in rank(candidates(Scheme.LANE_BATCHED,
+                                                   threads, dtype, ctx),
+                                        N, ops.lead_slots * threads, K + kx)
+                        if accumulator_direct(f.op)), None)
+            if fit is None:
+                return False
         if fit.scheme is Scheme.EXCHANGE:
             return matmul_exchange(writer, C, A, B, M, N, K, kx, threads,
                                    dtype, sparse, ctx, span.start, span.stop)

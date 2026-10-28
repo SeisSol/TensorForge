@@ -25,6 +25,10 @@ from .select import (BroadcastForm, packed_broadcast, select_broadcast_form,
 #: which is what lets a layout ride on it and a pass see who consumed it.
 SPLIT_BF16 = 'tensorforge::splitFloatx4BF16'
 
+#: The runtime's packing of four BF16 terms stored as floats into the
+#: k-vector an emulated MFMA takes (`prepare.split_bf16`, `amd.QuadOrder`).
+PACK_BF16 = 'tensorforge::packBF16x4'
+
 #: Whether the moved broadcast (`BroadcastForm.MOVED`, the VOPD form) keeps
 #: its move from being folded back into the FMAs (`movdpp16Kept`).  LLVM's
 #: DPP combine does that from gfx10 on wherever it can, and a DPP-modified
@@ -707,7 +711,7 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
     # TODO: gfx1200, f'__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12'
 
 def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
-              ctx, start, stop, tile, terms):
+              ctx, start, stop, tile, terms, lead_terms=None, lead_zero=None):
     """`C += B@A` through a narrower matrix instruction, one tile per term
     product.
 
@@ -731,10 +735,31 @@ def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
 
     Products come from `split.products` in its order, smallest contribution
     first, so the small terms land before the large one rounds them off.
+
+    Each operand is split once.  The shared matrix's registers of a step where
+    they are transposed, once per block of columns, and the lead operand's
+    quad of a slot once for every block of columns, which is why the columns
+    are the inner loop.  They were split in every step for every slot and
+    every block: on MI300A, SeisSol's order-6 `volume` issued 7543 VALU
+    instructions for 751 direct, most of them the splits.  An operand stored
+    split (`lead_terms`, `amd.QuadOrder`) is read and packed instead, two
+    `v_perm` a term.
+
+    The lead counts its steps from the first one the contraction walks, `kx`
+    after the block's start (`matmul32` says why), and a quad of it has to
+    meet a quad of the shared matrix: a window that starts inside one is
+    declined, for the direct tile to take.  Reading the lead from the block's
+    start had the emulated time derivative wrong in 945 of 2304 values.
+
+    A quad whose rows of the lead are known zero at all its steps
+    (`lead_zero`, as `matmul32` asks it a step at a time) is left out with
+    its reads.
     """
     products = split.products(terms)
     op = tile.op
     width = op.k
+    if kx % width:
+        return False
 
     with writer.AnonymousScope():
         ftype = ScalarType(dtype)
@@ -753,53 +778,67 @@ def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
             writer.call_stmt(SPLIT_BF16, *out, *regs, writes=tuple(out))
             return out
 
-        for j in range(start, stop, block):
+        blocks = list(range(start, stop, block))
+        aterms = {}
+        for j in blocks:
+            for k in range(0, K + kx, threads):
+                regs = []
+                for jj in range(min(block, N - j)):
+                    regs += [A(writer, None, j + jj, k // threads)]
+                for jj in range(min(block, N - j), block):
+                    regs += [writer.const(0.0, ftype)]
+                aterms[(j, k // threads)] = split4(
+                    _transpose(writer, tile, ftype, threads, regs), 'at')
+
+        for i in range(0, M):
             with writer.AnonymousScope():
-                tA = {}
+                vtype = ScalarType(dtype, block)
+                accs = {j: writer.declare(vtype, hint='acc', layout=acclayout)
+                        for j in blocks}
                 for k in range(0, K + kx, threads):
-                    regs = []
+                    dk = min(threads, K + kx - k)
+                    for kk in range(0, dk, width):
+                        dkk = min(width, dk - kk)
+                        # the lead's own step: `kx` is whole quads, so a quad
+                        # lies before the window or within it, whole
+                        r = k + kk - kx
+                        if r < 0:
+                            continue
+                        if (lead_zero is not None
+                                and lead_zero(i * threads, (i + 1) * threads,
+                                              r, r + dkk)):
+                            continue
+                        if lead_terms is not None:
+                            bterms = lead_terms(writer, i, r // width)
+                            if not bterms:
+                                return False
+                        else:
+                            tB = []
+                            for kkk in range(dkk):
+                                tB += [B(writer, None, i, r + kkk)]
+                            if any(v is None or v is False for v in tB):
+                                return False
+                            for kkk in range(dkk, width):
+                                # A real zero rather than a shorter k-vector:
+                                # the instruction reads all of its slots and a
+                                # tail that does not fill them contributes
+                                # nothing only if they hold nothing.
+                                tB += [writer.const(0.0, ftype)]
+                            bterms = split4(tB, 'bt')
+                        kkm = kk // width
+                        for j in blocks:
+                            for ti, tj in products:
+                                accs[j] = writer.call(
+                                    fn, vtype,
+                                    aterms[(j, k // threads)][ti], bterms[tj],
+                                    accs[j], scale, kkm, 0,
+                                    hint='acc', movable=False,
+                                    materialize=True, layout=acclayout)
+
+                for j in blocks:
                     for jj in range(min(block, N - j)):
-                        regs += [A(writer, None, j + jj, k // threads)]
-                    for jj in range(min(block, N - j), block):
-                        regs += [writer.const(0.0, ftype)]
-                    tA[k // threads] = _transpose(writer, tile, ftype, threads,
-                                                  regs)
-                for i in range(0, M):
-                    with writer.AnonymousScope():
-                        vtype = ScalarType(dtype, block)
-                        acc = writer.declare(vtype, hint='acc',
-                                             layout=acclayout)
-                        for k in range(0, K + kx, threads):
-                            dk = min(threads, K + kx - k)
-                            for kk in range(0, dk, width):
-                                dkk = min(width, dk - kk)
-                                tB = []
-                                for kkk in range(dkk):
-                                    tB += [B(writer, None, i, k + kk + kkk)]
-                                if any(v is None or v is False for v in tB):
-                                    return False
-                                for kkk in range(dkk, width):
-                                    # A real zero rather than a shorter
-                                    # k-vector: the instruction reads all of
-                                    # its slots and a tail that does not fill
-                                    # them contributes nothing only if they
-                                    # hold nothing.
-                                    tB += [writer.const(0.0, ftype)]
-                                kkm = kk // width
-
-                                aterms = split4(tA[k // threads], 'at')
-                                bterms = split4(tB, 'bt')
-                                for ti, tj in products:
-                                    acc = writer.call(
-                                        fn, vtype,
-                                        aterms[ti], bterms[tj], acc,
-                                        scale, kkm, 0,
-                                        hint='acc', movable=False,
-                                        materialize=True, layout=acclayout)
-
-                        for jj in range(min(block, N - j)):
-                            C(writer, writer.extract(acc, jj, ftype), i,
-                              j + jj)
+                        C(writer, writer.extract(accs[j], jj, ftype), i,
+                          j + jj)
     return True
 
 

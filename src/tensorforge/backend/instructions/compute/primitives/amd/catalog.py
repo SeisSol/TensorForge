@@ -609,7 +609,12 @@ def emu_tiles(threads, dtype, ctx):
     """
     from ...split import MANTISSA, terms as _terms
     out = []
-    for op in ops_for(dtype, ctx, threads):
+    # Every entry and not those of a whole wave (`MatrixOp.fits`): the tile
+    # is lane-batched, so it is the tile that says which multiplications it
+    # serves (`MfmaTile.fits`) -- at 16 and 32 lanes as at 64, each
+    # multiplication's blocks broadcast within it (`cbsz`).  Asked of the whole
+    # wave, the scheme was never offered where SeisSol runs.
+    for op in ops_for(dtype, ctx):
         if op.arithmetic is not None or op.a.dtype is dtype:
             continue
         if op.a.dtype not in DEFINED_SPLITS or op.a.dtype not in MANTISSA:
