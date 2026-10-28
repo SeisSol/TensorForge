@@ -161,6 +161,8 @@ def test_four_multiplications_take_a_quarter_of_the_wave_each():
 
 def test_without_the_switch_every_multiplication_reads_every_step(monkeypatch):
     monkeypatch.setattr(amd, 'B_DUPLICATION', False)
-    src = _kernel('local_flux', 'gfx942')
+    # Without the members of the merged faces staged: those group the block
+    # too (`stage_members`), for a reason of their own.
+    src = _kernel('local_flux', 'gfx942', stage_members=False)
     assert _blgps(src) and set(_blgps(src)) == {0}
     assert 'batchIdGroup0' not in src

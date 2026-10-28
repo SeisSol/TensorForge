@@ -56,7 +56,8 @@ def test_a_smaller_group_is_asked_for_by_stage_group():
 
 
 def test_without_it_members_are_read_from_global():
-    src = _kernel_at('local_flux', 'gfx942', merge_variants=True)
+    src = _kernel_at('local_flux', 'gfx942', merge_variants=True,
+                     stage_members=False)
     assert not STAGED.search(src)
     assert not BINDING.search(src)
 

@@ -717,7 +717,7 @@ declare('preload_roles',
             '`preload_partial` leaves them.')
 
 declare('preload_shards',
-        default=False,
+        rule=lambda target: target.prefs.preload_shards,
         parse=parse_bool,
         doc='Keep what fits of the batch-constant operands read from global '
             'memory inside the batch loop in the block\'s shared memory, a '
@@ -729,9 +729,12 @@ declare('preload_shards',
             'loads stand nearest their readers first (`pir.shards`).  What '
             'fits: as much as a block can take more and an SM still hold as '
             'many blocks, by shared memory and threads '
-            '(`Generator._shard_budget`), or `preload_shard_budget`.  Off '
-            'until it is measured: at order 8 in double precision no operator '
-            'fits an AMD block whole, and that is what this is for.')
+            '(`Generator._shard_budget`), or `preload_shard_budget`.\n'
+            'On by default on AMD (`Target.prefs`): at order 8 in double '
+            'precision no operator fits a block whole, and on the MI300A the '
+            'shards took SeisSol\'s `volume` from 42.5 to 33.1 ns an element and '
+            'its `derivative` from 166 to 150, with nothing at order 6 slower.  '
+            'Elsewhere unmeasured.')
 
 declare('preload_shard_budget',
         default=0,
@@ -743,7 +746,7 @@ declare('preload_shard_budget',
             'more than that at no cost.  0 is that default.')
 
 declare('stage_members',
-        default=False,
+        rule=lambda target: target.prefs.stage_members,
         parse=parse_bool,
         doc='In a merged run (`merge_variants`), copy each iteration\'s '
             'batch-constant operand into a block-shared buffer and read it '
@@ -755,7 +758,11 @@ declare('stage_members',
             'cooperatively, behind a block barrier and in front of one, and its '
             'multiplications share it.  Needs every multiplication of the block '
             'on the same trips through the batch loop: the block is one group '
-            'of `stage_group` multiplications.')
+            'of `stage_group` multiplications.\n'
+            'On by default on AMD (`Target.prefs`): on the MI300A SeisSol\'s '
+            'merged `localFluxAll` took 13.2 ns an element instead of 19.6 at '
+            'order 6 in double precision, 7.0 instead of 8.0 in single, and '
+            '54.9 instead of 75.2 at order 8.  Elsewhere unmeasured.')
 
 declare('rotate_slots',
         default=0,

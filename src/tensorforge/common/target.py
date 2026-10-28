@@ -115,6 +115,8 @@ class Preferences:
     placement: VendorPolicy = field(default_factory=VendorPolicy)
     #: The defaults of the options of the same names (`common.options`).
     preload_globals: bool = False
+    preload_shards: bool = False
+    stage_members: bool = False
     split_predicated_load: bool = False
     inline_constants: int = 64
     argument_constants: bool = False
@@ -214,6 +216,12 @@ PREFERENCES = {
                                read_across=True,
                                keep_own=True),
         preload_globals=True,
+        # What does not fit whole goes in a shard at a time, and what a
+        # merged run walks a member a trip: on the MI300A SeisSol's order-8
+        # `volume` 22 % faster in double precision, its merged `localFluxAll`
+        # 27 % and at order 6 33 % (12 % in single), nothing slower.
+        preload_shards=True,
+        stage_members=True,
         # A gather from a register image goes through `ds_bpermute`, where
         # the broadcast it replaces is fused into the FMA (`fmac_dpp`):
         # `neighboringFlux` on gfx1150 gathered at up to 8 and 32 nonzeros
