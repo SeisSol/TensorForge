@@ -335,3 +335,63 @@ def test_the_intensity_follows_the_basis(tmp_path):
         assert point.intensity == 10.0
     finally:
         plot.set_flop_basis('executed')
+
+
+# ----------------------------------------------------------------------
+# One kernel, not one name
+# ----------------------------------------------------------------------
+
+def test_two_exports_of_one_name_keep_their_own_intensity(tmp_path):
+    """The view used to take whichever export of a name came first and
+    place every machine's mark at that one intensity."""
+    _write(tmp_path, 'elastic-3-s-s1',
+           [_row('k', 'baseline', 'sm_120', 1024, 100.0, flops=1e9,
+                 byts=1e9)],
+           {'arch': 'sm_120', 'flops_per_s': 1e13, 'bytes_per_s': 1e12})
+    _write(tmp_path, 'elastic-6-s-s1',
+           [_row('k', 'baseline', 'sm_120', 1024, 100.0, flops=8e9,
+                 byts=1e9)])
+    svg = compare.view_intensity(compare.collect([tmp_path]))
+    assert 'k @ elastic-3-s-s1 on sm_120: 1.00 flop/byte' in svg
+    assert 'k @ elastic-6-s-s1 on sm_120: 8.00 flop/byte' in svg
+
+
+def test_the_largest_launch_is_taken_per_export(tmp_path):
+    """Keyed by name, the export with the larger batch stood in for the
+    other."""
+    _write(tmp_path, 'elastic-3-s-s1',
+           [_row('k', 'baseline', 'sm_120', 4096, 100.0)])
+    _write(tmp_path, 'elastic-3-s-s8',
+           [_row('k', 'baseline', 'sm_120', 1024, 100.0)])
+    got = compare.collect([tmp_path])
+    assert sorted(p.batch for p in got.largest_batch(got.points)) == [
+        1024, 4096]
+
+
+def test_a_ratio_is_taken_on_the_machine_both_ran_on(tmp_path):
+    """A reference measured on one machine and a candidate on another is
+    not a comparison of two configurations."""
+    _write(tmp_path, 'a', [_row('k', 'baseline', 'fast', 1024, 100.0)])
+    _write(tmp_path, 'b', [_row('k', 'other', 'slow', 1024, 1000.0,
+                                backend='hip')])
+    assert compare.view_configs(compare.collect([tmp_path])) is None
+
+
+def test_single_and_double_are_two_curves_over_the_order(tmp_path):
+    for order in (3, 6):
+        for prec, dt in (('s', 'F32'), ('d', 'F64')):
+            _write(tmp_path, f'elastic-{order}-{prec}-s1',
+                   [_row('k', 'baseline', 'sm_120', 1024, 100.0 * order,
+                         datatype=dt)])
+    svg = compare.view_order(compare.collect([tmp_path]))
+    assert 'k [f32] @ order 3' in svg and 'k [f64] @ order 3' in svg
+
+
+def test_the_table_has_a_row_per_kernel_and_machine(tmp_path):
+    _write(tmp_path, 'elastic-3-s-s1',
+           [_row('k', 'baseline', 'sm_120', 1024, 100.0),
+            _row('k', 'baseline', 'gfx942', 1024, 100.0, backend='hip')])
+    _write(tmp_path, 'elastic-6-s-s1',
+           [_row('k', 'baseline', 'sm_120', 1024, 100.0)])
+    _, markup = compare.view_kernels(compare.collect([tmp_path]))
+    assert markup.count('<tr>') == 1 + 3

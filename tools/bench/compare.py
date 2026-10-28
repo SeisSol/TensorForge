@@ -188,12 +188,41 @@ class Field:
         return sorted({p.workload for p in self.points})
 
     @property
+    def kernels(self) -> List[str]:
+        """Every kernel measured (`Point.kernel`), by name and then by the
+        export -- equation, simulations, precision, order -- so the orders
+        of one kernel stand side by side."""
+        first: Dict[str, Point] = {}
+        for p in self.points:
+            first.setdefault(p.kernel, p)
+        return sorted(first, key=lambda k: _kernel_order(first[k]))
+
+    @property
+    def captures(self) -> List[str]:
+        return sorted({p.capture.tag for p in self.points if p.capture})
+
+    @property
     def configs(self) -> List[str]:
         return sorted({p.config for p in self.points})
 
     @property
     def orders(self) -> List[int]:
         return sorted({p.order for p in self.points if p.order is not None})
+
+    @property
+    def reference(self) -> Optional[str]:
+        """The configuration a single-configuration view is drawn for:
+        `baseline` where it was run, else the first by name."""
+        configs = self.configs
+        if not configs:
+            return None
+        return 'baseline' if 'baseline' in configs else configs[0]
+
+    def label(self, point: Point) -> str:
+        """A kernel's name in a chart.  The export is spelled out only where
+        the field holds more than one, for the reason `plot.distinguish`
+        gives: a legend repeating the same suffix on every entry is noise."""
+        return point.kernel if len(self.captures) > 1 else point.workload
 
     def device_of(self, arch: str) -> str:
         for p in self.points:
@@ -206,15 +235,43 @@ class Field:
                 if all(getattr(p, k) == v for k, v in keys.items())]
 
     def largest_batch(self, points: Sequence[Point]) -> List[Point]:
-        """One point per (workload, config, arch, order): the biggest launch
-        there is, because a ratio taken on the rising part of a scaling
-        curve is a ratio at an arbitrary place on a slope."""
+        """One point per kernel, configuration and machine: the biggest
+        launch there is, because a ratio taken on the rising part of a
+        scaling curve is a ratio at an arbitrary place on a slope.
+
+        Keyed by the kernel and not by its name, so the orders, precisions
+        and equations of one name stay apart rather than the largest of
+        them standing for all."""
         best: Dict[Tuple, Point] = {}
         for p in points:
-            key = (p.workload, p.config, p.arch, p.order, p.datatype)
+            key = (p.workload, p.capture, p.config, p.arch, p.order,
+                   p.datatype)
             if key not in best or p.batch > best[key].batch:
                 best[key] = p
         return list(best.values())
+
+    def one_per_kernel(self, points: Sequence[Point]) -> Dict[Tuple[str, str],
+                                                              Point]:
+        """`{(kernel, arch): point}` at the largest launch, in the
+        reference configuration where the kernel was run in it.
+
+        One configuration and not a pool of them: what a kernel issues
+        depends on how it was built, and the views that use this draw one
+        mark per kernel and machine.
+        """
+        ref = self.reference
+        out: Dict[Tuple[str, str], Point] = {}
+        for p in sorted(self.largest_batch(points),
+                        key=lambda p: (p.config != ref, p.config)):
+            out.setdefault((p.kernel, p.arch), p)
+        return out
+
+
+def _kernel_order(p: Point) -> Tuple:
+    c = p.capture
+    return (p.workload,
+            (c.equation, c.simulations, c.precision, c.order) if c
+            else ('', 0, '', 0))
 
 
 def _load_ceiling(path: Path) -> Optional[Ceiling]:
@@ -420,21 +477,6 @@ def view_bandwidth_peak(fieldset: Field) -> Optional[str]:
 # Metadata: the kernels
 # ----------------------------------------------------------------------
 
-def _intensity_table(fieldset: Field) -> Dict[str, float]:
-    """Compulsory flops per byte, per workload.
-
-    One number per kernel and not per machine: it is a property of the
-    operation. Taken at the largest launch, where the per-element figures
-    have settled.
-    """
-    out: Dict[str, float] = {}
-    for p in fieldset.largest_batch(fieldset.points):
-        i = p.intensity
-        if i:
-            out.setdefault(p.workload, i)
-    return out
-
-
 def view_intensity(fieldset: Field) -> Optional[str]:
     """Where each kernel sits against each machine's ridge.
 
@@ -445,44 +487,57 @@ def view_intensity(fieldset: Field) -> Optional[str]:
     throws away. A kernel can be memory-bound on one machine and
     compute-bound on the next, which is exactly why the rule cannot be a
     property of the kernel.
+
+    One mark per kernel *and* machine, each from that machine's own run:
+    what a kernel issues depends on what it was built for -- a wave of 64
+    pads differently from a warp of 32 -- so on the default basis the
+    intensity is not one number per kernel either.
     """
-    intensities = _intensity_table(fieldset)
+    per = fieldset.one_per_kernel(fieldset.points)
     archs = [a for a in fieldset.archs
              if a in fieldset.ceilings and fieldset.ceilings[a].ridge]
-    names = [w for w in fieldset.workloads if w in intensities]
-    if not archs or len(names) < 1:
+    names = [k for k in fieldset.kernels
+             if any((k, a) in per and per[(k, a)].intensity for a in archs)]
+    if not archs or not names:
         return None
+    labels = {k: fieldset.label(next(per[(k, a)] for a in archs
+                                     if (k, a) in per)) for k in names}
     colors, marks = _colors(archs), _marks(archs)
     c = Canvas('Memory- or compute-bound, per machine',
                '', 'arithmetic intensity ÷ ridge', ylog=True,
                width=max(760, 46 * len(names) + 220), legend_width=190,
-               tilted_labels=True,
+               tilted_labels=max(len(v) for v in labels.values()),
                note='Below 1 the machine runs out of bandwidth first; above '
                     'it, of arithmetic. The ridge is the measured one.')
-    ratios = [intensities[w] / fieldset.ceilings[a].ridge
-              for w in names for a in archs]
+    ratios = [per[(k, a)].intensity / fieldset.ceilings[a].ridge
+              for k in names for a in archs
+              if (k, a) in per and per[(k, a)].intensity]
     c.fit([0, len(names)], ratios + [1.0], ypad=1.6)
     c.axes(xticks=[])
     c.rule(1.0, 'ridge — bandwidth below, arithmetic above', '#777')
     step = (c.W - c.L - c.R) / max(len(names), 1)
-    for i, w in enumerate(names):
+    for i, k in enumerate(names):
         for a in archs:
+            p = per.get((k, a))
+            if p is None or not p.intensity:
+                continue
             ridge = fieldset.ceilings[a].ridge
-            r = intensities[w] / ridge
+            r = p.intensity / ridge
             x = c.L + step * (i + 0.5)
             c._mark(x, c.py(r), colors[a], marks[a],
-                    f'{w} on {a}: {intensities[w]:.2f} flop/byte against a '
+                    f'{k} on {a}: {p.intensity:.2f} flop/byte against a '
                     f'ridge of {ridge:.1f} — '
                     + ('memory-bound' if r < 1 else 'compute-bound')
                     + f', by {max(r, 1 / r):.1f}x')
-        c.tilted_label(c.L + step * (i + 0.5), w)
+        c.tilted_label(c.L + step * (i + 0.5), labels[k])
     for a in archs:
         c.legend.append((f'{a} (ridge {fieldset.ceilings[a].ridge:.0f})',
                          colors[a]))
     return c.render()
 
 
-def view_flopmix(fieldset: Field) -> Optional[str]:
+def view_flopmix(fieldset: Field, arch: Optional[str] = None
+                 ) -> Optional[str]:
     """What the kernel issues, against what the operation needs.
 
     Three counts and two gaps.  The first gap is the sparsity a dense
@@ -496,19 +551,28 @@ def view_flopmix(fieldset: Field) -> Optional[str]:
     Drawn as a fraction of the issued count, so kernels of wildly
     different size compare: the bar is what the operation needs and the
     space above it is arithmetic spent on nothing.
+
+    One machine per chart: the lanes are the target's, so the same kernel
+    issues differently on a warp of 32 and a wave of 64.  Without `arch`
+    the field must hold one machine.
     """
-    points = fieldset.largest_batch(fieldset.points)
-    by_workload: Dict[str, Point] = {}
-    for p in points:
-        if p.row.get('executed_flops') and p.row.get('nonzero_flops'):
-            by_workload.setdefault(p.workload, p)
-    if not by_workload:
+    archs = [arch] if arch else fieldset.archs
+    if len(archs) != 1:
         return None
-    names = sorted(by_workload)
-    c = Canvas('How much of the issued arithmetic is needed', '',
+    by_kernel: Dict[str, Point] = {}
+    for (kernel, a), p in fieldset.one_per_kernel(fieldset.points).items():
+        if (a == archs[0] and p.row.get('executed_flops')
+                and p.row.get('nonzero_flops')):
+            by_kernel[kernel] = p
+    if not by_kernel:
+        return None
+    names = [k for k in fieldset.kernels if k in by_kernel]
+    labels = {k: fieldset.label(by_kernel[k]) for k in names}
+    where = f' — {archs[0]}' if arch else ''
+    c = Canvas(f'How much of the issued arithmetic is needed{where}', '',
                'fraction of what the kernel issues',
                width=max(760, 54 * len(names) + 200), legend_width=170,
-               tilted_labels=True,
+               tilted_labels=max(len(v) for v in labels.values()),
                note='The bar is what the operation needs; the first segment '
                     'above it is what a dense implementation adds, and the '
                     'rest is the lanes a narrow destination leaves idle. '
@@ -519,23 +583,23 @@ def view_flopmix(fieldset: Field) -> Optional[str]:
     c.axes(xticks=[], ytick_label=lambda v: f'{v:.0%}')
     c.rule(1.0, 'issued', '#777')
     step = (c.W - c.L - c.R) / max(len(names), 1)
-    for i, w in enumerate(names):
-        p = by_workload[w]
+    for i, k in enumerate(names):
+        p = by_kernel[k]
         issued = float(p.row['executed_flops'])
         needed = float(p.row['nonzero_flops']) / issued
         dense = min(float(p.row.get('flops') or 0) / issued, 1.0)
         x = c.L + step * (i + 0.22)
         c.bar(x, step * 0.56, needed, PALETTE[0],
-              f'{w}: needs {needed:.1%} of what it issues')
+              f'{k}: needs {needed:.1%} of what it issues')
         if dense > needed:
             c.bar(x, step * 0.56, dense, PALETTE[1],
-                  f'{w}: a dense implementation would perform {dense:.1%}',
+                  f'{k}: a dense implementation would perform {dense:.1%}',
                   y_base=needed)
         if dense < 1.0:
             c.bar(x, step * 0.56, 1.0, PALETTE[4],
-                  f'{w}: the lanes add the rest, to {issued:,.0f} flop',
+                  f'{k}: the lanes add the rest, to {issued:,.0f} flop',
                   y_base=dense)
-        c.tilted_label(c.L + step * (i + 0.5), w)
+        c.tilted_label(c.L + step * (i + 0.5), labels[k])
     c.legend.extend([('needed', PALETTE[0]), ('dense adds', PALETTE[1]),
                      ('idle lanes add', PALETTE[4])])
     return c.render()
@@ -548,39 +612,38 @@ def view_kernels(fieldset: Field) -> Optional[Tuple[Page, str]]:
     operation needs, what a dense implementation performs, and what the
     built kernel performs are three different things and the generator
     reports the third.
+
+    One row per kernel and machine, since what is issued is the target's;
+    the first two counts and the bytes repeat across the machines of one
+    kernel, which is the check that the rows are of the same operation.
     """
-    points = fieldset.largest_batch(fieldset.points)
-    if not points:
+    per = fieldset.one_per_kernel(fieldset.points)
+    if not per:
         return None
-    archs = [a for a in fieldset.archs
-             if a in fieldset.ceilings and fieldset.ceilings[a].ridge]
-    by_workload: Dict[str, Point] = {}
-    for p in points:
-        by_workload.setdefault(p.workload, p)
-    headers = ['kernel', 'needed', 'dense', 'issued', 'useful',
-               'byte/element', f'flop/byte ({flop_basis()})'] + [
-                   f'bound on {a}' for a in archs]
+    headers = ['kernel', 'machine', 'needed', 'dense', 'issued', 'useful',
+               'byte/element', f'flop/byte ({flop_basis()})', 'bound']
     rows = []
-    for w in sorted(by_workload):
-        p = by_workload[w]
+    order = {k: i for i, k in enumerate(fieldset.kernels)}
+    for (k, a) in sorted(per, key=lambda ka: (order[ka[0]], ka[1])):
+        p = per[(k, a)]
         batch = p.batch or 1
         b = p.row.get('bytes')
         needed = p.row.get('nonzero_flops')
         dense = p.row.get('flops')
         issued = p.row.get('executed_flops')
         inten = p.intensity
-        cells = [w,
+        cells = [fieldset.label(p), a,
                  f'{needed / batch:,.0f}' if needed else '—',
                  f'{dense / batch:,.0f}' if dense else '—',
                  f'{issued / batch:,.0f}' if issued else '—',
                  f'{needed / issued:.0%}' if needed and issued else '—',
                  f'{b / batch:,.0f}' if b else '—',
                  f'{inten:.2f}' if inten else '—']
-        for a in archs:
-            ridge = fieldset.ceilings[a].ridge
-            if not inten or not ridge:
-                cells.append('—')
-                continue
+        ceiling = fieldset.ceilings.get(a)
+        ridge = ceiling.ridge if ceiling else 0.0
+        if not inten or not ridge:
+            cells.append('—')
+        else:
             r = inten / ridge
             cells.append(('memory' if r < 1 else 'compute')
                          + f' {max(r, 1 / r):.1f}x')
@@ -610,58 +673,82 @@ def view_configs(fieldset: Field, what: str = 'ns_per_element',
     kernel reads as a single mark away from the rest. That shape is the
     question -- "does this generalise" -- and a bar chart per kernel buries
     it in a forest.
+
+    A ratio is taken between two builds of the *same* kernel on the *same*
+    machine and only then pooled over machines, as a geometric mean: pooling
+    each configuration's rates first would divide one set of machines by
+    another wherever the two configurations were not run on the same ones.
     """
     configs = fieldset.configs
     if len(configs) < 2:
         return None
-    ref = reference or ('baseline' if 'baseline' in configs else configs[0])
+    ref = reference or fieldset.reference
     if ref not in configs:
         return None
     others = [c for c in configs if c != ref]
-    table: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+    table: Dict[Tuple[str, str, str], float] = {}
+    first: Dict[str, Point] = {}
     for p in fieldset.largest_batch(fieldset.points):
         v = rate(p.row, what)
         if v:
-            table[(p.workload, p.config)].append(v)
-    names = [w for w in fieldset.workloads
-             if (w, ref) in table and any((w, o) in table for o in others)]
+            table[(p.kernel, p.arch, p.config)] = v
+            first.setdefault(p.kernel, p)
+    lower_better = what in LOWER_IS_BETTER
+    pooled: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+    for (k, a, cfg), cand in table.items():
+        base = table.get((k, a, ref))
+        if cfg == ref or not base:
+            continue
+        pooled[(k, cfg)].append(base / cand if lower_better else cand / base)
+    ratios = {key: _geomean(vs) for key, vs in pooled.items()}
+    names = [k for k in fieldset.kernels
+             if any((k, o) in ratios for o in others)]
     if not names:
         return None
-    lower_better = what in LOWER_IS_BETTER
+    labels = {k: fieldset.label(first[k]) for k in names}
     colors, marks = _colors(others), _marks(others)
     c = Canvas(f'Configurations against {ref} — {rate_label(what)}',
                '', f'ratio to {ref}', ylog=True,
                width=max(760, 46 * len(names) + 220), legend_width=190,
-               tilted_labels=True,
+               tilted_labels=max(len(v) for v in labels.values()),
                note='Above 1 is faster. Each mark is one configuration on '
-                    'one kernel, at the largest launch, over every machine '
-                    'that ran it.')
-    ratios: Dict[Tuple[str, str], float] = {}
-    for w in names:
-        base = _geomean(table[(w, ref)])
-        for o in others:
-            cand = _geomean(table.get((w, o), []))
-            if base and cand:
-                ratios[(w, o)] = base / cand if lower_better else cand / base
-    if not ratios:
-        return None
+                    'one kernel, at the largest launch, against the '
+                    'reference on the same machine and pooled over every '
+                    'machine that ran both.')
     c.fit([0, len(names)], list(ratios.values()) + [1.0], ypad=1.4)
     c.axes(xticks=[])
     c.rule(1.0, ref, '#777')
     step = (c.W - c.L - c.R) / max(len(names), 1)
-    for i, w in enumerate(names):
+    for i, k in enumerate(names):
         for j, o in enumerate(others):
-            r = ratios.get((w, o))
+            r = ratios.get((k, o))
             if not r:
                 continue
             x = c.L + step * (i + 0.3 + 0.4 * j / max(len(others) - 1, 1))
             c._mark(x, c.py(r), colors[o], marks[o],
-                    f'{w}: {o} is {r:.3f}x {ref}')
-        c.tilted_label(c.L + step * (i + 0.5), w)
+                    f'{k}: {o} is {r:.3f}x {ref}')
+        c.tilted_label(c.L + step * (i + 0.5), labels[k])
     for o in others:
-        geo = _geomean([v for (w, oo), v in ratios.items() if oo == o])
+        geo = _geomean([v for (k, oo), v in ratios.items() if oo == o])
         c.legend.append((f'{o} (geo {geo:.3f}x)' if geo else o, colors[o]))
     return c.render()
+
+
+def _series_name(p: Point, varying: Sequence[str]) -> str:
+    """A curve's name in the order view: the kernel's, and of its export
+    whichever parts differ between the curves of the chart."""
+    parts = []
+    c = p.capture
+    if c is not None:
+        if 'equation' in varying:
+            parts.append(c.equation)
+        if 'simulations' in varying:
+            parts.append(f's{c.simulations}')
+    if 'datatype' in varying:
+        parts.append(p.datatype.lower())
+    if 'config' in varying:
+        parts.append(p.config)
+    return p.workload + (f' [{" ".join(parts)}]' if parts else '')
 
 
 def view_order(fieldset: Field, what: str = 'ns_per_element',
@@ -673,28 +760,45 @@ def view_order(fieldset: Field, what: str = 'ns_per_element',
     with it -- the operators are larger and there are more of them -- so
     the y axis is logarithmic and a kernel that grows *less* steeply than
     its neighbours is the thing to see.
+
+    A curve is one kernel of one equation, simulation count, precision and
+    configuration; only the order varies along it.  Joining the orders of
+    single and double, or of one and eight simulations, would draw a line
+    through points that are not the same kernel at another order.
     """
     orders = fieldset.orders
     if len(orders) < 2:
         return None
     points = [p for p in fieldset.largest_batch(fieldset.points)
               if p.order is not None and (arch is None or p.arch == arch)]
-    series: Dict[str, Dict[int, List[float]]] = defaultdict(
+
+    def key(p: Point) -> Tuple:
+        c = p.capture
+        return (p.workload, c.equation if c else '',
+                c.simulations if c else 1, p.datatype, p.config)
+
+    varying = [name for name, i in (('equation', 1), ('simulations', 2),
+                                    ('datatype', 3), ('config', 4))
+               if len({key(p)[i] for p in points}) > 1]
+    series: Dict[Tuple, Dict[int, List[float]]] = defaultdict(
         lambda: defaultdict(list))
+    named: Dict[Tuple, str] = {}
     for p in points:
         v = rate(p.row, what)
         if v:
-            series[p.workload][p.order].append(v)
+            series[key(p)][p.order].append(v)
+            named.setdefault(key(p), _series_name(p, varying))
     series = {k: v for k, v in series.items() if len(v) > 1}
     if not series:
         return None
-    names = sorted(series)
+    keys = sorted(series, key=lambda k: named[k])
+    names = [named[k] for k in keys]
     colors, marks = _colors(names), _marks(names)
     # The points first, the axis second: pooling several machines into one
     # curve and then fitting the axis to the *unpooled* values leaves the
     # scale a decade below anything drawn, and half the chart empty.
-    curves = {name: [(o, _geomean(series[name].get(o, [])) or None)
-                     for o in orders] for name in names}
+    curves = {named[k]: [(o, _geomean(series[k].get(o, [])) or None)
+                         for o in orders] for k in keys}
     drawn = [v for pts in curves.values() for _, v in pts if v]
     if not drawn:
         return None
@@ -726,42 +830,45 @@ def view_archs(fieldset: Field, what: str = 'gflops') -> Optional[str]:
     Absolute and unapologetic about it: this says which machine finished
     first, which is a fair question and a different one from which machine
     was used well. `portability` is the second question.
+
+    In the reference configuration: two configurations of one kernel are
+    two builds, and pooling them would rank a machine by whichever it
+    happened to run more of.
     """
     archs = fieldset.archs
     if len(archs) < 2:
         return None
-    table: Dict[Tuple[str, str], List[float]] = defaultdict(list)
-    for p in fieldset.largest_batch(fieldset.points):
-        v = rate(p.row, what)
-        if v:
-            table[(p.workload, p.arch)].append(v)
-    names = [w for w in fieldset.workloads
-             if sum(1 for a in archs if (w, a) in table) > 1]
+    per = fieldset.one_per_kernel(fieldset.points)
+    table = {ka: rate(p.row, what) for ka, p in per.items()}
+    table = {ka: v for ka, v in table.items() if v}
+    names = [k for k in fieldset.kernels
+             if sum(1 for a in archs if (k, a) in table) > 1]
     if not names:
         return None
+    labels = {k: fieldset.label(next(per[(k, a)] for a in archs
+                                     if (k, a) in per)) for k in names}
     colors = _colors(archs)
     c = Canvas(f'Each machine on each kernel — {rate_label(what)}', '',
                rate_label(what), ylog=True,
                width=max(760, 60 * len(names) + 220), legend_width=190,
-               tilted_labels=True,
+               tilted_labels=max(len(v) for v in labels.values()),
                note='At the largest launch each ran. Logarithmic, because a '
                     'set that holds a laptop part and a data-centre one '
                     'spans two orders of magnitude. Absolute rates rank the '
                     'machines, not the code -- see portability.')
-    vals = [v for vs in table.values() for v in vs]
-    c.fit([0, len(names)], vals)
+    c.fit([0, len(names)], list(table.values()))
     c.axes(xticks=[])
     step = (c.W - c.L - c.R) / max(len(names), 1)
     bw = step / (len(archs) + 0.8)
-    for i, w in enumerate(names):
+    for i, k in enumerate(names):
         for j, a in enumerate(archs):
-            v = _geomean(table.get((w, a), []))
+            v = table.get((k, a))
             if not v:
                 continue
             c.bar(c.L + step * i + bw * (j + 0.5), bw * 0.88, v, colors[a],
-                  f'{w} on {fieldset.device_of(a)}: {v:.4g}',
+                  f'{k} on {fieldset.device_of(a)}: {v:.4g}',
                   y_base=c.y0)
-        c.tilted_label(c.L + step * (i + 0.5), w)
+        c.tilted_label(c.L + step * (i + 0.5), labels[k])
     for a in archs:
         c.legend.append((fieldset.device_of(a)[:26], colors[a]))
     return c.render()
@@ -779,45 +886,46 @@ def view_portability(fieldset: Field) -> Optional[str]:
              if a in fieldset.ceilings and fieldset.ceilings[a].bytes_per_s]
     if len(archs) < 2:
         return None
-    table: Dict[Tuple[str, str], List[float]] = defaultdict(list)
-    for p in fieldset.largest_batch(fieldset.points):
-        if p.arch not in fieldset.ceilings:
+    per = fieldset.one_per_kernel(fieldset.points)
+    table: Dict[Tuple[str, str], float] = {}
+    for (k, a), p in per.items():
+        if a not in fieldset.ceilings:
             continue
         achieved, inten = rate(p.row, 'gflops'), p.intensity
         if not achieved or not inten:
             continue
-        roof = fieldset.ceilings[p.arch].bound(inten) / 1e9
+        roof = fieldset.ceilings[a].bound(inten) / 1e9
         if roof > 0:
-            table[(p.workload, p.arch)].append(achieved / roof)
-    names = [w for w in fieldset.workloads
-             if sum(1 for a in archs if (w, a) in table) > 1]
+            table[(k, a)] = achieved / roof
+    names = [k for k in fieldset.kernels
+             if sum(1 for a in archs if (k, a) in table) > 1]
     if not names:
         return None
+    labels = {k: fieldset.label(next(per[(k, a)] for a in archs
+                                     if (k, a) in per)) for k in names}
     colors = _colors(archs)
     c = Canvas('Fraction of its own roof, per machine', '',
                'achieved ÷ roof at this intensity',
                width=max(760, 60 * len(names) + 220), legend_width=190,
-               tilted_labels=True,
+               tilted_labels=max(len(v) for v in labels.values()),
                note='1.0 would be the machine saturated at this kernel\'s '
                     'intensity. Comparable across machines; the absolute '
                     'rates in `archs` are not.')
-    vals = [v for vs in table.values() for v in vs]
-    c.fit([0, len(names)], vals + [1.0], y_from_zero=True)
+    c.fit([0, len(names)], list(table.values()) + [1.0], y_from_zero=True)
     c.axes(xticks=[], ytick_label=lambda v: f'{v:.0%}')
     c.rule(1.0, 'the roof', '#777')
     step = (c.W - c.L - c.R) / max(len(names), 1)
     bw = step / (len(archs) + 0.8)
-    for i, w in enumerate(names):
+    for i, k in enumerate(names):
         for j, a in enumerate(archs):
-            v = _geomean(table.get((w, a), []))
+            v = table.get((k, a))
             if not v:
                 continue
             c.bar(c.L + step * i + bw * (j + 0.5), bw * 0.88, v, colors[a],
-                  f'{w} on {fieldset.device_of(a)}: {v:.1%} of its roof')
-        c.tilted_label(c.L + step * (i + 0.5), w)
+                  f'{k} on {fieldset.device_of(a)}: {v:.1%} of its roof')
+        c.tilted_label(c.L + step * (i + 0.5), labels[k])
     for a in archs:
-        geo = _geomean([v for (w, aa), vs in table.items() if aa == a
-                        for v in vs])
+        geo = _geomean([v for (k, aa), v in table.items() if aa == a])
         c.legend.append((f'{fieldset.device_of(a)[:20]} '
                          f'({geo:.0%})' if geo else a, colors[a]))
     return c.render()
@@ -874,9 +982,13 @@ def build(fieldset: Field, what: str, reference: Optional[str],
     add_chart('intensity', view_intensity(fieldset),
               'no ceilings, so there is no ridge to place a kernel against')
     add_table('kernels', view_kernels(fieldset), 'no runs')
-    add_chart('flopmix', view_flopmix(fieldset),
-              'the runs carry no executed_flops -- the analysis pass could '
-              'not count the bodies')
+    # Per machine where there are several: the lanes a narrow destination
+    # leaves idle are the target's.
+    for arch in (fieldset.archs if len(fieldset.archs) > 1 else [None]):
+        add_chart(f'flopmix-{arch}' if arch else 'flopmix',
+                  view_flopmix(fieldset, arch),
+                  'the runs carry no executed_flops -- the analysis pass '
+                  'could not count the bodies')
     add_chart('configs', view_configs(fieldset, what, reference),
               'one configuration only -- the comparison needs two')
     if per_arch_order:

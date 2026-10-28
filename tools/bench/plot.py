@@ -65,7 +65,8 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (Callable, Dict, Iterable, List, Optional, Sequence, Tuple,
+                    Union)
 
 from pdfout import (Page, PCircle, PLine, PPolygon, PPoly, PRect, PText,
                     Prim, _wrap, write_pdf)
@@ -194,11 +195,16 @@ class Canvas:
     def __init__(self, title: str, xlabel: str, ylabel: str,
                  xlog: bool = False, ylog: bool = False,
                  width: int = 760, height: int = 460, note: str = '',
-                 legend_width: int = 0, tilted_labels: bool = False):
+                 legend_width: int = 0, tilted_labels: Union[bool, int] = False):
         """`legend_width` reserves a column to the right for the key and
         `tilted_labels` a band below for names written at an angle.  Both are
         margins rather than overlays: a legend drawn on top of the data hides
-        exactly the crowded part a reader came to look at."""
+        exactly the crowded part a reader came to look at.
+
+        `tilted_labels` is either a flag, for names of up to thirty
+        characters, or the length of the longest name to be written there:
+        a kernel spelled with the export it came from runs past thirty, and
+        a band cut to the short ones runs it into the axis title."""
         self.title, self.note = title, note
         self.xlabel, self.ylabel = xlabel, ylabel
         self.xlog, self.ylog = xlog, ylog
@@ -210,14 +216,22 @@ class Canvas:
         self._note_lines = _wrap(
             note, max(int((width - 96) / 5.2), 40)) if note else []
         extra = 12 * max(len(self._note_lines) - 1, 0)
-        self.H = height + (58 if tilted_labels else 0) + extra
+        if tilted_labels is True:
+            self.tilt_chars = 30
+        else:
+            self.tilt_chars = min(int(tilted_labels or 0), 60)
+        # About 3.6 pixels of height per character of nine-point text at
+        # forty-five degrees, and never less than the band the flag gives.
+        band = max(58, int(self.tilt_chars * 3.6) + 12) if self.tilt_chars \
+            else 0
+        self.H = height + band + extra
         self.L, self.T = 74, 46
         self.R = 22 + legend_width
         # The bottom margin grows with the note as the sheet does, so the
         # wrapped lines land below the axis label instead of across it.
-        self.B = 62 + (58 if tilted_labels else 0) + extra
+        self.B = 62 + band + extra
         self.legend_width = legend_width
-        self.tilted = tilted_labels
+        self.tilted = bool(self.tilt_chars)
         #: What was drawn, as primitives.  `body` is the same list spelled
         #: as SVG and is appended to in step (`_emit`), so a caller that
         #: puts a string in it directly still draws -- into the SVG only,
@@ -236,8 +250,8 @@ class Canvas:
         collide.  Anchored at its end so the text runs away from the axis
         rather than through it."""
         y = self.H - self.B + 13
-        self._emit(PText(x, y, text[:30], anchor='end', fill='#555', size=9,
-                         rotate=-45))
+        self._emit(PText(x, y, text[:self.tilt_chars or 30], anchor='end',
+                         fill='#555', size=9, rotate=-45))
 
     # -- scales ---------------------------------------------------------
 
