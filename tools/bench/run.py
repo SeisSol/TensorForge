@@ -314,7 +314,9 @@ def main() -> int:
     ap.add_argument('--workloads', default='*',
                     help='glob over workload names')
     ap.add_argument('--configs', default=None,
-                    help='comma-separated subset of the suite\'s configs')
+                    help='comma-separated configurations: the suite\'s, or '
+                         'any other suite.CONFIGS names; a leading + adds '
+                         'them to the suite\'s')
     ap.add_argument('--batches', default=None,
                     help='comma-separated batch sizes, overriding the suite')
     ap.add_argument('--iters', type=int, default=200)
@@ -336,10 +338,11 @@ def main() -> int:
         spec = replace(spec, workloads=tuple(
             w for w in spec.workloads
             if fnmatch.fnmatch(w.name, args.workloads)))
-    if args.configs:
-        wanted = {c.strip() for c in args.configs.split(',')}
-        spec = replace(spec, configs=tuple(
-            c for c in spec.configs if c.label in wanted))
+    try:
+        spec = suite_mod.select_configs(spec, args.configs)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     if args.batches:
         spec = replace(spec, batches=tuple(
             int(b) for b in args.batches.split(',')))

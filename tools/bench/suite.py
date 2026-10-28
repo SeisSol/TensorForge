@@ -41,7 +41,7 @@ import io
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -260,6 +260,32 @@ CONFIGS: Dict[str, Config] = {
     # kernels came out 48 % apart.
     'control': Config('control', Options()),
 }
+
+
+def select_configs(spec: Suite, labels: Optional[str]) -> Suite:
+    """`spec` measured in the configurations a command line names
+    (`--configs a,b`): the suite's own by their labels, and any other
+    `CONFIGS` holds -- so that a campaign can time one the suite does not
+    list, the matrix units where a machine has them, without a suite of its
+    own.  A leading `+` adds the named ones to the suite's (`+tensor-cores`).
+    A label that names neither is an error, not a run of nothing."""
+    if not labels:
+        return spec
+    own = {c.label: c for c in spec.configs}
+    chosen: Dict[str, Config] = {}
+    if labels.startswith('+'):
+        chosen.update(own)
+        labels = labels[1:]
+    for label in (t.strip() for t in labels.split(',')):
+        if not label:
+            continue
+        config = own.get(label) or CONFIGS.get(label)
+        if config is None:
+            raise ValueError(
+                f'unknown configuration {label!r}: the suite has '
+                f'{sorted(own)}, and further ones are {sorted(CONFIGS)}')
+        chosen.setdefault(label, config)
+    return replace(spec, configs=tuple(chosen.values()))
 
 
 # -- workload sources ------------------------------------------------------- #

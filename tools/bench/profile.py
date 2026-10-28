@@ -871,7 +871,10 @@ def main() -> int:
     ap.add_argument('--backend', default=None)
     ap.add_argument('--arch', default=None)
     ap.add_argument('--workloads', default='*')
-    ap.add_argument('--configs', default=None)
+    ap.add_argument('--configs', default=None,
+                    help='comma-separated configurations: the suite\'s, or '
+                         'any other suite.CONFIGS names; a leading + adds '
+                         'them to the suite\'s')
     ap.add_argument('--batch', type=int, default=65536)
     ap.add_argument('--iters', type=int, default=3)
     ap.add_argument('--warmup', type=int, default=5)
@@ -940,10 +943,11 @@ def main() -> int:
         spec = replace(spec, workloads=tuple(
             w for w in spec.workloads
             if fnmatch.fnmatch(w.name, args.workloads)))
-    if args.configs:
-        wanted = {c.strip() for c in args.configs.split(',')}
-        spec = replace(spec, configs=tuple(
-            c for c in spec.configs if c.label in wanted))
+    try:
+        spec = suite_mod.select_configs(spec, args.configs)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     if not spec.workloads or not spec.configs:
         print('nothing left after filtering', file=sys.stderr)
         return 2
