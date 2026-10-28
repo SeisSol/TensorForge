@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tensorforge.analysis import pipeline
+from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
 
@@ -49,7 +50,8 @@ def test_a_build_reports_its_mix_and_what_it_moves(arch, backend):
     assert set(gen.metrics.issue_mix) <= set(pipeline.CATEGORIES)
     issued = {c: v[0] for c, v in gen.metrics.issue_mix.items()}
     # the contraction is the bulk of it, however it is spelled
-    arithmetic = issued.get('fp', 0) + issued.get('matrix', 0)
+    arithmetic = (issued.get('fp', 0) + issued.get('matrix', 0)
+                  + sum(n for c, n in issued.items() if c.startswith('mfma.')))
     assert arithmetic > issued.get('int', 0)
     assert gen.metrics.memory_bytes.get('global.read', 0) > 0
     assert gen.metrics.memory_bytes.get('global.write', 0) > 0
@@ -58,14 +60,65 @@ def test_a_build_reports_its_mix_and_what_it_moves(arch, backend):
 def test_a_dpp_fma_is_arithmetic_and_a_matrix_builtin_is_a_matrix_op():
     """On RDNA the contraction is FMAs with a DPP operand, on CDNA MFMAs:
     counted as a move between lanes and as nothing, they would leave `fp`
-    empty."""
+    empty.  An MFMA counts under its shape, which decides how long it holds
+    the SIMD (`pipeline.MFMA_CLOCKS`)."""
     rdna = {c: v[0] for c, v in _built('local_flux', 'gfx1150', 'hip')
             .metrics.issue_mix.items()}
     cdna = {c: v[0] for c, v in _built('local_flux', 'gfx942', 'hip')
             .metrics.issue_mix.items()}
     assert rdna['fp'] > rdna.get('xlane', 0)
-    assert cdna.get('matrix', 0) > 0
+    assert cdna.get('mfma.f32_4x4x1f32', 0) > 0
     assert 'other' not in rdna or rdna['other'] < rdna['fp'] / 100
+
+
+def test_an_mfma_holds_the_simd_the_valu_issues_to():
+    """gfx942 runs an F32 MFMA and the VALU one after the other, so the two
+    share a pipe, each MFMA at the clocks it holds the SIMD in units of a
+    wave64 VALU instruction (four).  A BF16 one of the multi-block shapes is
+    no faster per instruction than the F32 one, and a single-block one twice
+    as fast per MAC."""
+    hw = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32).target.hw
+    alone = pipeline.bound({'fp': [100, 100]}, None, hw, 64)
+    beside = pipeline.bound({'fp': [100, 100],
+                             'mfma.f32_4x4x1f32': [40, 40]}, None, hw, 64)
+    assert beside.binding == 'valu'
+    assert beside.per_resource['valu'] == pytest.approx(
+        alone.per_resource['valu'] + 40 * 10.0 / 4)
+    macs = lambda shape, n: n / pipeline.MFMA_CLOCKS[shape]
+    assert macs('f32_4x4x4bf16_1k', 1024) < 2 * macs('f32_4x4x1f32', 256) * 2.5
+    assert macs('f32_16x16x16bf16_1k', 4096) > 2 * macs('f32_4x4x4bf16_1k', 1024)
+
+
+def test_a_move_across_the_rows_of_a_wave_waits_for_the_lds_pipe_on_cdna():
+    """DPP reaches within a 16-lane row; across rows CDNA moves values with
+    `ds_swizzle` and `ds_bpermute`, LDS instructions.  Elsewhere the same move
+    is priced as before, which is why the factor is the one `xlane` has."""
+    from tensorforge.backend.pir.emit import _crosslane_category
+    assert _crosslane_category('tensorforge::broadcast<16, 1, 3>') == 'xlane'
+    assert _crosslane_category('tensorforge::broadcast<32, 16, 0>') == 'xlane.wide'
+    assert _crosslane_category('tensorforge::broadcast<64, 32, 1>') == 'xlane.wide'
+    assert _crosslane_category('tensorforge::swap<16>') == 'xlane'
+    assert _crosslane_category('tensorforge::swap<64>') == 'xlane.wide'
+    assert _crosslane_category('tensorforge::gather<16>') == 'xlane.wide'
+    assert _crosslane_category('tensorforge::movdpp16<3>') == 'xlane'
+    cdna = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32).target.hw
+    b = pipeline.bound({'xlane.wide': [64, 64]}, None, cdna, 64)
+    assert set(b.per_resource) == {'lds'}
+    for arch, backend in (('sm_120', 'cuda'), ('gfx1150', 'hip')):
+        hw = Context(arch=arch, backend=backend, fp_type=Datatype.F32).target.hw
+        wide = pipeline.bound({'xlane.wide': [64, 64]}, None, hw, 32)
+        row = pipeline.bound({'xlane': [64, 64]}, None, hw, 32)
+        assert wide.per_resource == row.per_resource
+
+
+def test_the_16_wide_gather_is_counted_as_moves():
+    """The 16-wide tile gathers its columns with `swap<32>` and `swap<64>`,
+    which the mix used to count as integer arithmetic."""
+    mix = {c: v[0] for c, v in _built('square_notrans', 'gfx942', 'hip',
+                                      matrix_columns=16)
+           .metrics.issue_mix.items()}
+    assert mix.get('mfma.f32_16x16x1f32', 0) > 0
+    assert mix.get('xlane.wide', 0) > 0
 
 
 def test_rolling_a_reduction_keeps_what_is_issued_and_shrinks_the_code():

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 from .spp import SparsityPattern, FullSPP, NonzeroSPP
 from .boundingbox import BoundingBox
-from .prepare import TF32_PARTS, split_tf32
+from .prepare import BF16_PARTS, TF32_PARTS, split_bf16, split_tf32
 from functools import reduce
 from typing import List, Union
 
@@ -273,9 +273,14 @@ class Tensor:
             # `nonzero_pattern` falls back to the storage pattern there, so
             # every stored cell counts as present and the rule below refuses
             # exactly as it used to.
+            # A merged run's stand-in stores nothing: its members are the
+            # buffers, and each one answers for its own cells when it takes
+            # the order (`multilinear._offer_order`).  Without numbers of its
+            # own it could prove no cell zero.
             kept = set(seen)
-            held = [c for c in range(cells)
-                    if c not in kept and not self._box_cell_is_zero(c)]
+            held = ([] if self.is_variant else
+                    [c for c in range(cells)
+                     if c not in kept and not self._box_cell_is_zero(c)])
             if held:
                 raise GenerationError(
                     f'Tensor {self.alias}: storage order drops '
@@ -418,8 +423,9 @@ class Tensor:
         Where an element is spread over several slots (`storage_parts`), the
         slots hold arithmetic on the cell's value rather than the value, and
         the arithmetic is done here: two parts of an F32 operand are the TF32
-        halves a matrix instruction multiplies.  `None` without numbers, and
-        for a decomposition nothing computes yet.
+        halves a matrix instruction multiplies, three the BF16 terms an
+        emulated product multiplies.  `None` without numbers, and for a
+        decomposition nothing computes yet.
         """
         if not self.has_values():
             return None
@@ -443,17 +449,19 @@ class Tensor:
         # wants where a lane holds several neighbouring slots; adjacent is
         # right where one lane reads one element.
         planar = int(self.storage_elements()) if self.storage_planar else 0
-        return tuple(float(v) for v in split_tf32(np.asarray(out, dtype=np.float32),
-                                                  planar=planar))
+        split = split_tf32 if self.storage_parts == TF32_PARTS else split_bf16
+        return tuple(float(v) for v in split(np.asarray(out, dtype=np.float32),
+                                             planar=planar))
 
     def _prepares_parts(self):
         """Whether the decomposition this tensor is stored in can be produced.
 
-        The TF32 pair, and nothing else so far: a wider emulation's limbs are
-        a decomposition too, and the routine for them is what is missing
-        rather than the room to put them.
+        The TF32 pair and the three BF16 terms, both of an F32 operand: the
+        count says which, since no target reads three TF32 halves or two BF16
+        terms.
         """
-        return self.storage_parts == TF32_PARTS and self.datatype == Datatype.F32
+        return (self.storage_parts in (TF32_PARTS, BF16_PARTS)
+                and self.datatype == Datatype.F32)
 
     def storage_runs(self):
         """The stored cells as `(slot, cell, length)` runs, or `None`.

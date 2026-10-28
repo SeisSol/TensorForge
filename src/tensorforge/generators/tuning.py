@@ -647,7 +647,8 @@ def _geometry(result: Build) -> Tuple[int, int, int]:
 def static_score(result: Build):
     """What the build alone says, per multiplication rather than per block.
 
-    Past the register file first (`_over_budget`), but only as *whether* and
+    Past the register file first (`_over_budget`) where a spill is a cliff
+    (`pipeline.spills_are_a_cliff`; not on CDNA), but only as *whether* and
     not by how much: a build that spills is worse than one that does not, and
     past that the size of the overshoot is not a better predictor than the
     clocks it costs.  So the overshoot is also priced into the issue estimate
@@ -707,10 +708,12 @@ def static_score(result: Build):
         mults = gen.launch_config().mults_per_block
         resident = min(resident, blocks * mults)
     over = _over_budget(result)
+    hw = result.context.target.hw
     issue = _least_cycles(gen, lanes, wave, spill_bytes=float(over),
-                          resident=resident,
-                          hw=result.context.target.hw)
-    return (over > 0, issue, -resident * _stack_of(gen),
+                          resident=resident, hw=hw)
+    from tensorforge.analysis import pipeline
+    cliff = over > 0 and pipeline.spills_are_a_cliff(hw)
+    return (cliff, issue, -resident * _stack_of(gen),
             _icache_over(result), _granule(gen.metrics.peak_pressure or 0),
             len(gen.get_kernel() or ''))
 
@@ -777,19 +780,26 @@ def _stack_of(gen) -> int:
 def _shortfall(lanes: int, wave: int, resident: int, hw) -> float:
     """How much of the bound the machine cannot reach for want of warps.
 
-    One where the resident warps meet the issue ports, and the ratio short of
-    them otherwise.  `resident` of zero means the caller does not know, and
-    an unknown residency stretches nothing: guessing here would rank by a
-    number nobody measured.
+    One where the resident warps meet what the target needs to keep its
+    pipes fed (`pipeline.latency_waves`), and the ratio short of it
+    otherwise.  `resident` of zero means the caller does not know, and an
+    unknown residency stretches nothing: guessing here would rank by a number
+    nobody measured.
+
+    A multiplication narrower than the wave is that share of a wave, not a
+    whole one: four of sixteen lanes fill one wave of 64.  Counting each as a
+    wave took a CU holding four 64-lane multiplications of SeisSol's order-6
+    `localFluxAll` (one wave a SIMD) for as fed as one holding 24 of 32 lanes,
+    and ranked it ahead at 79 % slower (gfx942).
     """
     if not resident or hw is None:
         return 1.0
     from tensorforge.analysis import pipeline
-    ports = pipeline.resources(hw).get('issue')
-    if ports is None or ports.rate <= 0:
+    target = pipeline.latency_waves(hw)
+    if not target:
         return 1.0
-    warps = max(1, -(-lanes // max(1, wave)))
-    return max(1.0, ports.rate / max(1, resident * warps))
+    waves = resident * lanes / max(1, wave)
+    return max(1.0, target / waves)
 
 
 def _icache_over(result: Build) -> int:

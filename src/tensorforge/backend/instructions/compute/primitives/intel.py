@@ -644,8 +644,13 @@ def convergence(strategy, shape, n, ctx):
     return None
 
 
+def order_before_packing(shape, ctx):
+    """False: the packing goes first here (`MatrixPaths.order_before_packing`)."""
+    return False
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
-                   threads=EXECUTION_SIZE):
+                   threads=EXECUTION_SIZE, corner=(0, 0), rows=None):
     """The order this target reads a two-dimensional A operand in, or `None`
     (`multilinear._offer_order`).
 

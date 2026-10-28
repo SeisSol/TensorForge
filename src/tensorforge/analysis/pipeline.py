@@ -39,18 +39,19 @@ from typing import Dict, Optional, Tuple
 #: barrier.  Missing categories count 1.0; Intel is not fitted.
 INSTRUCTIONS_PER_STATEMENT: Dict[str, Dict[str, float]] = {
     'nvidia': {'fp': 0.69, 'fp64': 0.60, 'int': 0.90, 'sfu': 0.94,
-               'xlane': 18.5, 'global.load': 1.14, 'global.store': 1.05,
+               'xlane': 18.5, 'xlane.wide': 18.5, 'global.load': 1.14,
+               'global.store': 1.05,
                'shared.load': 0.35, 'shared.store': 1.50,
                'async.copy': 4.56, 'barrier': 1.49, 'sync': 2.94,
                'branch': 6.57},
     'gfx9': {'fp': 3.73, 'fp64': 1.30, 'int': 1.10, 'sfu': 1.14,
-             'xlane': 2.28, 'matrix': 1.0, 'global.load': 0.97,
-             'global.store': 1.0, 'shared.load': 0.41, 'shared.store': 0.96,
-             'barrier': 0.08, 'branch': 2.26},
+             'xlane': 2.28, 'xlane.wide': 1.0, 'matrix': 1.0,
+             'global.load': 0.97, 'global.store': 1.0, 'shared.load': 0.41,
+             'shared.store': 0.96, 'barrier': 0.08, 'branch': 2.26},
     'gfx1': {'fp': 1.12, 'fp64': 0.65, 'int': 1.28, 'sfu': 1.14,
-             'xlane': 1.51, 'global.load': 1.01, 'global.store': 1.0,
-             'shared.load': 0.69, 'shared.store': 0.91, 'barrier': 0.08,
-             'branch': 3.14},
+             'xlane': 1.51, 'xlane.wide': 1.51, 'global.load': 1.01,
+             'global.store': 1.0, 'shared.load': 0.69, 'shared.store': 0.91,
+             'barrier': 0.08, 'branch': 3.14},
     # PVC, 81 kernels of the case set (`tools/calibrate_mix.py --arch pvc`,
     # IGC's shader dump, 2026-09-18).  `xlane` is the entry worth naming: 16938
     # cross-lane statements emitted and *no* instruction compiled, because a
@@ -60,8 +61,9 @@ INSTRUCTIONS_PER_STATEMENT: Dict[str, Dict[str, float]] = {
     # kernels carry the difference, so a search ranking by it should know that
     # this row is the least settled of them.
     'intel': {'fp': 0.65, 'fp64': 6.38, 'int': 1.79, 'sfu': 1.31, 'xlane': 0.0,
-              'global.load': 1.21, 'global.store': 0.99, 'shared.load': 0.55,
-              'shared.store': 1.0, 'barrier': 5.13, 'branch': 8.55},
+              'xlane.wide': 0.0, 'global.load': 1.21, 'global.store': 0.99,
+              'shared.load': 0.55, 'shared.store': 1.0, 'barrier': 5.13,
+              'branch': 8.55},
 }
 
 #: The same, at the 10th percentile over the kernels rather than as a ratio
@@ -70,33 +72,83 @@ INSTRUCTIONS_PER_STATEMENT: Dict[str, Dict[str, float]] = {
 #: conservative=True)`), where the totals serve to rank.
 INSTRUCTIONS_PER_STATEMENT_P10: Dict[str, Dict[str, float]] = {
     'nvidia': {'fp': 0.50, 'fp64': 0.50, 'int': 0.33, 'sfu': 0.0,
-               'xlane': 8.0, 'global.load': 1.02, 'global.store': 1.0,
+               'xlane': 8.0, 'xlane.wide': 8.0, 'global.load': 1.02,
+               'global.store': 1.0,
                'shared.load': 0.26, 'shared.store': 1.0, 'async.copy': 1.0,
                'barrier': 1.0, 'sync': 2.0, 'branch': 3.0},
     'gfx9': {'fp': 0.0, 'fp64': 1.0, 'int': 0.64, 'sfu': 0.0, 'xlane': 2.0,
-             'matrix': 1.0, 'global.load': 1.0, 'global.store': 1.0,
+             'xlane.wide': 1.0, 'matrix': 1.0, 'global.load': 1.0,
+             'global.store': 1.0,
              'shared.load': 0.0, 'shared.store': 0.75, 'barrier': 0.0,
              'branch': 1.71},
     'gfx1': {'fp': 0.50, 'fp64': 0.50, 'int': 0.55, 'sfu': 0.0,
-             'xlane': 1.0, 'global.load': 1.01, 'global.store': 1.0,
+             'xlane': 1.0, 'xlane.wide': 1.0, 'global.load': 1.01,
+             'global.store': 1.0,
              'shared.load': 0.0, 'shared.store': 0.50, 'barrier': 0.0,
              'branch': 1.78},
     'intel': {'fp': 0.41, 'fp64': 0.62, 'int': 0.56, 'sfu': 0.0, 'xlane': 0.0,
-              'global.load': 1.02, 'global.store': 1.0, 'shared.load': 0.26,
+              'xlane.wide': 0.0, 'global.load': 1.02, 'global.store': 1.0, 'shared.load': 0.26,
               'shared.store': 1.0, 'barrier': 2.0, 'branch': 1.67},
 }
 
+#: Clocks one MFMA holds its SIMD for, by the shape its builtin names, measured
+#: on gfx942 (MI300A, 2026-10-27; `~/tf-probe/mi300a/coissue.hip`: four
+#: independent accumulators, four waves a SIMD).  The 64-lane entries that
+#: are not listed were not measured and take their nominal passes.  The
+#: multi-block BF16 shapes run at half the rate of the single-block ones --
+#: 109 to 119 MACs a clock against 234 to 244 -- which the catalog's names do
+#: not say.
+MFMA_CLOCKS: Dict[str, float] = {
+    'f32_4x4x1f32': 10.0, 'f32_16x16x1f32': 41.0, 'f32_32x32x1f32': 64.0,
+    'f32_16x16x4f32': 33.0, 'f32_32x32x2f32': 64.0,
+    'f32_4x4x4bf16_1k': 9.4, 'f32_16x16x4bf16_1k': 34.5,
+    'f32_32x32x4bf16_1k': 70.0, 'f32_16x16x16bf16_1k': 16.8,
+    'f32_32x32x8bf16_1k': 35.0,
+    'f64_4x4x4f64': 16.0, 'f64_16x16x4f64': 32.0,
+}
+
 #: Every category the emitter counts under (`pir.emit._mix_category`).
-CATEGORIES = ('fp', 'fp64', 'int', 'sfu', 'xlane', 'matrix',
+CATEGORIES = ('fp', 'fp64', 'int', 'sfu', 'xlane', 'xlane.wide', 'matrix',
               'global.load', 'global.store', 'global.prefetch',
               'constant.load', 'shared.load', 'shared.store',
               'local.load', 'local.store', 'async.copy',
               'barrier', 'sync', 'branch', 'other')
+# ... and each AMD matrix instruction by its shape (`MFMA_CLOCKS`)
+CATEGORIES += tuple(f'mfma.{shape}' for shape in MFMA_CLOCKS)
 
 _MEMORY_INSTRUCTIONS = ('global.load', 'global.store', 'global.prefetch',
                         'constant.load', 'local.load', 'local.store',
                         'async.copy')
 _LDS_INSTRUCTIONS = ('shared.load', 'shared.store')
+
+
+#: Clocks of a SIMD one wave64 VALU instruction takes: the unit the `valu`
+#: resource of CDNA counts in.
+_VALU_CLOCKS = 4.0
+
+
+def mfma_slots(shape: str) -> float:
+    """VALU issue slots one MFMA of `shape` costs on CDNA.
+
+    The two do not overlap on gfx942: an F32 MFMA chain beside a dependent F32
+    FMA chain took 26.4 clocks a step against 10.9 and 9.4 alone, and four
+    independent MFMAs beside four packed FMAs 90 against 40 and 22.  So an
+    MFMA is priced on the pipe the VALU uses, at the clocks it holds the SIMD.
+    An unknown shape counts as the 4x4x1 one.
+    """
+    return MFMA_CLOCKS.get(shape, MFMA_CLOCKS['f32_4x4x1f32']) / _VALU_CLOCKS
+
+
+def _issue_slots(counts: Dict[str, float]) -> Dict[str, float]:
+    """`counts` with every `mfma.<shape>` folded into `mfma`, in VALU issue
+    slots (`mfma_slots`); the rest as it is."""
+    out: Dict[str, float] = {}
+    for category, n in counts.items():
+        if category.startswith('mfma.'):
+            out['mfma'] = out.get('mfma', 0.0) + n * mfma_slots(category[5:])
+        else:
+            out[category] = out.get(category, 0.0) + n
+    return out
 
 
 @dataclass(frozen=True)
@@ -142,7 +194,7 @@ def resources(hw) -> Dict[str, Resource]:
             # the MIO path: shared memory, shuffles, and the LSU's address
             # issue for every other space
             'lsu': Resource(1.0, _uses(*_LDS_INSTRUCTIONS, *_MEMORY_INSTRUCTIONS,
-                                       'xlane')),
+                                       'xlane', 'xlane.wide')),
             'shared_bytes': Resource(128.0, moves=('shared.read',
                                                    'shared.write')),
             'l1_bytes': Resource(128.0, moves=('global.read', 'global.write',
@@ -151,11 +203,14 @@ def resources(hw) -> Dict[str, Resource]:
         }
     if family == 'gfx9':
         # CDNA: four SIMD16 per CU, a wave64 VALU instruction every clock
-        # across them; FP64 FMA at the FP32 rate on gfx90a and later
+        # across them; FP64 FMA at the FP32 rate on gfx90a and later.  An
+        # MFMA holds the SIMD the VALU issues to (`mfma_slots`), and a move
+        # across 16-lane rows is a DS instruction (`ds_swizzle`,
+        # `ds_bpermute`), so it waits for the LDS pipe and not for the VALU.
         return {
-            'valu': Resource(1.0, _uses('fp', 'fp64', 'int', 'xlane')
+            'valu': Resource(1.0, _uses('fp', 'fp64', 'int', 'xlane', 'mfma')
                              + _uses('sfu', weight=4.0)),
-            'lds': Resource(0.5, _uses(*_LDS_INSTRUCTIONS)),
+            'lds': Resource(0.5, _uses(*_LDS_INSTRUCTIONS, 'xlane.wide')),
             'vmem': Resource(0.25, _uses(*_MEMORY_INSTRUCTIONS)),
             'shared_bytes': Resource(128.0, moves=('shared.read',
                                                    'shared.write')),
@@ -167,7 +222,8 @@ def resources(hw) -> Dict[str, Resource]:
         # RDNA: two SIMD32 per CU, a wave32 VALU instruction each per clock
         # (twice that for FP32 pairs under VOPD); FP64 at 1/16 of it
         return {
-            'valu': Resource(4.0, _uses('fp') + _uses('int', 'xlane', weight=2.0)
+            'valu': Resource(4.0, _uses('fp') + _uses('int', 'xlane', 'xlane.wide',
+                                                      weight=2.0)
                              + _uses('sfu', weight=8.0)
                              + _uses('fp64', weight=32.0)),
             'lds': Resource(1.0, _uses(*_LDS_INSTRUCTIONS)),
@@ -180,7 +236,7 @@ def resources(hw) -> Dict[str, Resource]:
         }
     # Intel Xe-HPC, per Xe-core: eight vector engines, SIMD16 instructions
     return {
-        'valu': Resource(8.0, _uses('fp', 'fp64', 'int', 'xlane')
+        'valu': Resource(8.0, _uses('fp', 'fp64', 'int', 'xlane', 'xlane.wide')
                          + _uses('sfu', weight=4.0)),
         'send': Resource(2.0, _uses(*_LDS_INSTRUCTIONS, *_MEMORY_INSTRUCTIONS)),
         'shared_bytes': Resource(128.0, moves=('shared.read', 'shared.write')),
@@ -188,6 +244,44 @@ def resources(hw) -> Dict[str, Resource]:
                                            'local.read', 'local.write',
                                            'constant.read')),
     }
+
+
+def latency_waves(hw) -> Optional[float]:
+    """Waves (warps) an SM or CU needs resident for its pipes to reach the
+    bound, or None where that was never measured.
+
+    NVIDIA: one warp per scheduler, the rate of the `issue` resource
+    (`tuning._shortfall` says how that was measured).  CDNA: one wave per
+    SIMD, the same statement for four SIMDs -- a SIMD with no wave issues
+    nothing.  Not the two a lone dependent chain needs (an F32 FMA chain at
+    one wave a SIMD ran at 14.1 clocks a step against 9.4 at four on gfx942):
+    the kernels carry independent accumulators enough to fill their own
+    gaps, and asking two of them stretched SeisSol's order-6 derivative and
+    volume at 16 lanes past 32, which measured 31 % and 15 % slower.
+    """
+    family = _family(hw)
+    if family == 'nvidia':
+        return resources(hw)['issue'].rate
+    if family == 'gfx9':
+        return 4.0
+    return None
+
+
+def spills_are_a_cliff(hw) -> bool:
+    """Whether a candidate that spills at all ranks behind every one that does
+    not (`tuning.static_score`), or only by what its spilling costs.
+
+    A cliff on NVIDIA and PVC, where it was measured to be one.  Not on CDNA:
+    from gfx90a on the compiler spills into the AGPRs of the unified file
+    before it reaches scratch, and what does reach scratch stays in the
+    caches.  On MI300A the cliff took SeisSol's order-6 FP64 derivative to 64
+    lanes, 44.5 % slower than the 32 that spill 108 bytes, and the
+    viscoelastic derivative to 32 against a spilling 16 that is 6.5 % faster;
+    over 26 kernels at 16, 32 and 64 lanes, ranking by the penalty alone picks
+    the fastest in 18 against 15, at a geometric mean of 1.017 against 1.038
+    of the fastest.
+    """
+    return _family(hw) != 'gfx9'
 
 
 @dataclass(frozen=True)
@@ -339,7 +433,8 @@ def bound(issue_mix: Optional[dict], memory_bytes: Optional[dict], hw,
         return None
     if spill_bytes:
         issue_mix, memory_bytes = spilled(issue_mix, memory_bytes, spill_bytes)
-    counts = instructions_per_element(issue_mix, hw, lanes, conservative)
+    counts = _issue_slots(instructions_per_element(issue_mix, hw, lanes,
+                                                   conservative))
     wave = max(1, getattr(hw, 'vec_unit_length', 32))
     # Per lane, times the lanes that access; a broadcast (`.bcast`) is one
     # transaction per warp, which serves `wave / lanes` elements.  Every key
