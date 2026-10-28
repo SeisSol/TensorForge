@@ -153,6 +153,7 @@ def measure(unit_build: bench_build.UnitBuild, device: Device,
             'config': unit_build.unit.config.label,
             'lanes': record.lanes,
             'static': record.static,
+            **record.cost_fields(),
         }
         # Which export the kernel came from, where it came from one: the
         # name is shared by every order, precision and equation, and a
@@ -373,6 +374,9 @@ def main() -> int:
                 captured = captures.get(record.name)
                 manifest.append({
                     'unit': unit.label, 'workload': record.name,
+                    'backend': unit.target.backend, 'arch': unit.target.arch,
+                    'datatype': unit.datatype.name,
+                    'config': unit.config.label,
                     'capture': captured.tag if captured else None,
                     'symbol': record.symbol, 'origin': record.origin,
                     'lanes': record.lanes, 'static': record.static,
@@ -384,6 +388,7 @@ def main() -> int:
                     'executed_flops_per_element': record.executed_flops,
                     'bytes_per_element': (record.cost.bytes
                                           if record.cost else None),
+                    **record.cost_fields(),
                 })
             if built.exe is None or args.build_only:
                 continue

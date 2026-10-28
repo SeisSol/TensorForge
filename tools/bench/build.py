@@ -29,6 +29,14 @@ The resource remarks cost nothing extra: `-Xptxas=-v`, ROCm's
 by `tensorforge.toolchain`, the parsers every caller of a compiler shares, so
 registers, spills and occupancy land in the manifest beside the timings
 without a second compilation.
+
+## What making a kernel costs
+
+Generating each workload and compiling its translation unit are timed, and
+the object and the code the emitter laid down are sized -- the second against
+the target's instruction cache (`analysis.icache`).  A production build makes
+every kernel of a configuration, so what one costs is part of what a
+generator is, and a cache hit reads back what its compilation cost when it ran.
 """
 
 from __future__ import annotations
@@ -36,9 +44,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +62,7 @@ for extra in (ROOT / 'src', ROOT / 'tests', ROOT / 'tools'):
 from harness import driver_bench                                # noqa: E402
 from tensorforge import toolchain                               # noqa: E402
 from tensorforge.analysis.cost import list_cost                 # noqa: E402
+from tensorforge.analysis.icache import code_bytes              # noqa: E402
 from tensorforge.analysis.pipeline import executed_flops        # noqa: E402
 from tensorforge.common.context import Context, Options         # noqa: E402
 from tensorforge.generators import lanes                        # noqa: E402
@@ -141,7 +152,26 @@ class WorkloadBuild:
     #: padded destination computes on and nobody reads.
     executed_flops: Optional[int] = None
     lanes: Optional[int] = None
+    #: What the workload cost to make, and what it came to: seconds spent
+    #: generating it (the lane deduction and any tuning included) and
+    #: compiling its translation unit, the size of its object, and the code
+    #: the emitter laid down as the instruction cache sees it
+    #: (`analysis.icache`) beside that cache's capacity on the target.
+    #: `None` where a figure was not taken: a generation that failed has no
+    #: code, and a compilation nobody timed has no time rather than zero.
+    generate_s: Optional[float] = None
+    compile_s: Optional[float] = None
+    object_bytes: Optional[int] = None
+    code_bytes: Optional[int] = None
+    icache_bytes: Optional[int] = None
     error: str = ''
+
+    def cost_fields(self) -> Dict[str, Optional[float]]:
+        """The figures above, as a row and a manifest carry them."""
+        return {'generate_s': self.generate_s, 'compile_s': self.compile_s,
+                'object_bytes': self.object_bytes,
+                'code_bytes': self.code_bytes,
+                'icache_bytes': self.icache_bytes}
 
     @property
     def ok(self) -> bool:
@@ -174,6 +204,7 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
     """
     record = WorkloadBuild(name=workload.name, origin=workload.origin)
     options = unit.config.options or Options()
+    started = time.perf_counter()
     try:
         descrs = workload.descrs()
         ctx = Context(arch=unit.target.arch, backend=unit.target.backend,
@@ -210,10 +241,14 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
         record.error = f'{type(exc).__name__}: {exc}'
         return None, record
 
+    record.generate_s = time.perf_counter() - started
     record.symbol = f'kernel_{gen.get_base_name()}'
     # What it was built at, which with nothing asked for is what the generator
     # deduced or the tuner picked.
     record.lanes = gen.lanes.num_threads
+    hw = ctx.target.hw
+    record.code_bytes = code_bytes(gen.metrics.code_units, hw)
+    record.icache_bytes = getattr(hw, 'icache_size', None)
     record.cost = list_cost(workload.descrs(), batch=1,
                             datatype=unit.datatype)
     record.executed_flops = executed_flops(gen)
@@ -240,6 +275,19 @@ def _digest(unit: BuildUnit, sources: Dict[str, str], driver: str) -> str:
     # on the text alone, a corrected `hip.h` builds nothing new.
     h.update(toolchain.runtime_digest(str(INCLUDE)).encode())
     return h.hexdigest()[:16]
+
+
+def _restore_compile_cost(record: WorkloadBuild, path: Path) -> None:
+    """What compiling a cached object cost when it was compiled."""
+    try:
+        stored = json.loads(path.read_text())
+    except (OSError, ValueError):
+        stored = {}
+    record.compile_s = stored.get('compile_s')
+    record.object_bytes = (stored.get('object_bytes')
+                           or (record.obj.stat().st_size
+                               if record.obj and record.obj.exists()
+                               else None))
 
 
 def _compile_one(cc: str, compiler: Compiler, arch: str, src: Path,
@@ -318,6 +366,7 @@ def build(unit: BuildUnit, cache: Path = CACHE,
             if log.exists():
                 record.static = compiler.parse(log.read_text())
                 record.obj = out / f'{tag}.o'
+                _restore_compile_cost(record, out / f'{tag}.cost.json')
             elif not record.error:
                 record.error = f'did not compile; see {out / (tag + ".log")}'
         return UnitBuild(unit, exe, records)
@@ -336,19 +385,29 @@ def build(unit: BuildUnit, cache: Path = CACHE,
     def compile_workload(item):
         name, path = item
         obj = path.with_suffix('.o')
+        started = time.perf_counter()
         ok, message = _compile_one(cc, compiler, unit.target.arch, path, obj)
-        return name, obj, ok, message
+        return name, obj, ok, message, time.perf_counter() - started
 
     with ThreadPoolExecutor(max_workers=jobs or (os.cpu_count() or 1)) as pool:
-        for name, obj, ok, message in pool.map(compile_workload,
-                                               sorted(paths.items())):
+        for name, obj, ok, message, seconds in pool.map(
+                compile_workload, sorted(paths.items())):
             record = by_name[name]
             if not ok:
                 record.error = message
                 continue
             record.obj = obj
             record.static = compiler.parse(message)
-            (out / f'{driver_bench.slug(name)}.remarks').write_text(message)
+            # Seconds of one translation unit while others compile beside
+            # it: what the workload costs a build, not the build's wall time.
+            record.compile_s = seconds
+            record.object_bytes = obj.stat().st_size
+            tag = driver_bench.slug(name)
+            (out / f'{tag}.remarks').write_text(message)
+            # Beside the remarks, so that a cache hit, which compiles
+            # nothing, still says what the compilation cost.
+            (out / f'{tag}.cost.json').write_text(json.dumps(
+                {'compile_s': seconds, 'object_bytes': record.object_bytes}))
 
     objects = [str(r.obj) for r in records if r.ok]
     if not objects:

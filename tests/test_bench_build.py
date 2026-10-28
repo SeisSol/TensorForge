@@ -15,6 +15,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
 for extra in (str(TOOLS / "bench"), str(TOOLS)):
     if extra not in sys.path:
@@ -70,3 +72,48 @@ def test_a_cache_hit_refuses_what_did_not_compile(monkeypatch, tmp_path):
     assert built.exe == out / 'bench'
     assert a.ok
     assert not c.ok and c.error.startswith('did not compile; see ')
+
+
+def test_what_a_workload_cost_to_make_is_recorded(monkeypatch, tmp_path):
+    """Generation is timed and its code sized against the target's
+    instruction cache; compiling is timed per translation unit, and a cache
+    hit, which compiles nothing, reads back what the compilation cost."""
+    import subprocess
+
+    monkeypatch.setattr(bench_build, 'compiler_binary', lambda compiler: 'cc')
+    monkeypatch.setattr(bench_build, '_digest', lambda *args: 'fresh')
+
+    def compile_one(cc, compiler, arch, src, obj):
+        obj.write_bytes(b'x' * 1234)
+        return True, ''
+
+    def link(cmd, **kwargs):
+        Path(cmd[-1]).write_text('')
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+
+    monkeypatch.setattr(bench_build, '_compile_one', compile_one)
+    monkeypatch.setattr(bench_build.subprocess, 'run', link)
+    unit = _unit(('a', 'square_notrans'))
+    built = bench_build.build(unit, cache=tmp_path)
+    a, = built.workloads
+    assert a.ok and a.generate_s > 0 and a.compile_s >= 0
+    assert a.object_bytes == 1234
+    assert a.code_bytes > 0 and a.icache_bytes == 128 * 1024
+    assert set(a.cost_fields()) == {'generate_s', 'compile_s',
+                                    'object_bytes', 'code_bytes',
+                                    'icache_bytes'}
+
+    again, = bench_build.build(unit, cache=tmp_path).workloads
+    assert again.compile_s == pytest.approx(a.compile_s)
+    assert again.object_bytes == 1234
+
+
+def test_a_workload_that_does_not_generate_has_no_cost(monkeypatch):
+    monkeypatch.setattr(bench_build, 'compiler_binary', lambda compiler: None)
+    broken = Workload('broken', lambda: 1 / 0, Datatype.F32)
+    unit = BuildUnit(suite='t', target=TargetSpec('cuda', 'sm_90'),
+                     datatype=Datatype.F32, config=Config('default'),
+                     workloads=(broken,), batches=(4,))
+    record, = bench_build.build(unit).workloads
+    assert record.error.startswith('ZeroDivisionError')
+    assert record.code_bytes is None and record.compile_s is None
