@@ -76,6 +76,17 @@ Captures are not vendored. One is tied to an order, an equation set and a
 memory layout, and a checked-in capture would still be measured long after it
 stopped describing what SeisSol generates.
 
+`from_dump(..., split=True)` takes each kernel of an export apart into one
+workload per operation (`split_description`): the chain a generator launches
+that does not fuse, one kernel per product, every temporary a global array in
+the layout SeisSol's scratch allocator gives it. The pieces are named for the
+kernel and their place in it, `gpu_volume~2-of-5` (`capture.Piece`), and do the
+kernel's arithmetic -- the flops sum to its own -- through memory.
+`suites/seissolsplit.py` measures every kernel whole and in pieces in one run,
+the whole under the name of its own single piece (`gpu_volume~0-of-1`), so that
+no other reader sees a second measurement of the kernel -- and the two are
+what fusion is worth as a number.
+
 ## Symbols and build units
 
 The emitted symbol is `kernel_kernel_<digest>`, a digest of the generated source
@@ -277,6 +288,8 @@ characters the charts use are transliterated rather than dropped.
 ```bash
 python3 tools/bench/publish.py eval/ --out pub/ --compile
 python3 tools/bench/publish.py gh200/ mi300a/ pvc/ --out pub/
+python3 tools/bench/publish.py eval/ --seissol seissol-runs/ \
+    --clustering mesh-clustering.csv@elastic-4-d --out pub/
 python3 tools/bench/publish.py --out pub/           # the kernels alone
 ```
 
@@ -299,9 +312,19 @@ a suggested caption, after a page listing what was not made and why.
 | `figures/roofline-*` | where does each kernel sit, and which way does the order move it? |
 | `figures/peak-*` | how close to the roof, the bus and the FMA rate does a full launch get? |
 | `figures/rampup-*`, `tables/rampup-*` | from how many elements on is a launch worth its cost? |
+| `figures/lts-*` | how much of local time stepping do the launch costs leave? |
 | `figures/breakdown-*` | where does a time step's time go, per order? |
-| `tables/portability` | how evenly does a kernel reach each machine's roof? |
-| `figures/configs-*` | does a configuration -- or another generator -- help? |
+| `figures/timesplit-*` | where did a SeisSol simulation's time go? |
+| `figures/throughput-*` | what did SeisSol get through on each machine? |
+| `tables/portability`, `figures/cascade-*` | how evenly does a kernel reach each machine's roof? |
+| `figures/configs-*` | does a configuration -- the matrix units, another generator -- help? |
+| `figures/fusion-*` | what is fusing a kernel's chain worth? |
+| `figures/lanes-*` | how much of the arithmetic a kernel issues is needed? |
+| `figures/resources-*` | registers, spills and code against the instruction cache, per order |
+| `figures/precision-*` | what does double cost against single, beside what bytes and FMA rates say? |
+| `figures/simulations-*` | what are fused simulations worth per simulation? |
+| `figures/traffic-*` | how much more than it had to did a kernel move through DRAM? |
+| `tables/buildcost-*` | what did generating and compiling the kernels cost? |
 
 A figure is one machine, one precision and one equation, and a line joins the
 orders of one kernel: a kernel is its name and its export (`capture.py`), never
@@ -340,6 +363,49 @@ roof a full launch reaches. A machine that built or ran the kernel and produced
 no number makes it zero, as the definition has it -- `collect` keeps those rows
 in `Field.failed` -- and one that was not asked to run it leaves it open: a
 gap in a campaign is not a failure of the code.
+
+**Local time stepping.** A clustering is what local time stepping makes of a
+mesh, and SeisSol writes it down itself: `<prefix>-clustering.csv`, per rank,
+cluster and layer -- interior or copy -- the cells a launch carries and the
+cluster's timestep. `--clustering FILE[@TAG]` reads one, TAG naming the export
+its kernels are at (`elastic-4-d`); a run under `--seissol` brings its own.
+Every layer is a launch of its own once per step of its cluster, so with a time
+step costing `t0 + c n` the clustering prices itself (`seissolrun.py`): the
+ideal speed-up over global time stepping counts cell updates only -- SeisSol's
+"theoretical speedup" -- and the predicted one adds a launch's fixed cost to
+every layer and step, on the slowest rank. The figure puts the two beside the
+speed-up a pair of runs measured, and the cell updates by launch size beside
+each machine's `n_1/2`. `--clustering synthetic` is the series in
+`clusterings/`, written down to lay the figure out until a mesh's is at hand;
+every figure drawn from it says so. Left out of the model, and said: the Taylor
+expansion a cell computes for a neighbour in another cluster, dynamic rupture,
+and everything outside the kernels.
+
+**What the runs say.** `--seissol` reads SeisSol's run summaries
+(`<prefix>-summary.json`, schema `seissol-run-summary/1`): the cell updates per
+second and rank for the throughput, the time per compute region, the compute
+outside them and the blocking IO for where a simulation's time went, and
+SeisSol's own fit of a region's time against the cells a launch carried, which
+the LTS figure draws dashed beside the benchmark's `n_1/2`.
+
+**Fusion.** `suites/seissolsplit.py` measures every kernel fused and as one
+launch per operation (`split_description`); the figure adds the pieces up per
+batch and sets the sum against the kernel, at the largest launch and at the
+smallest, where the pieces' extra launches weigh most, beside the bytes they
+move against the kernel's.
+
+**What explains the curves.** The share of the issued arithmetic the operation
+needs, and what a dense implementation would do against it, per order and
+machine; registers and spills as the compiler reported them, and the code the
+emitter laid down against the instruction cache TensorForge assumes for the
+target (`analysis.icache`); double against single beside the two ratios a bound
+kernel would show -- 2 for the bytes, the machine's for its FMA rates; fused
+simulations; and, where `profile.py` ran, the DRAM bytes it counted over the
+compulsory ones, matched to the run by the machine and the kernel's symbol.
+`build.py` records what generating and compiling every kernel cost, which the
+build tables sum per export -- for all of a configuration's kernels with
+`suites/seissol.py` and `--build-only`. The matrix units are a configuration of
+their own, `tensor-cores`, drawn against the reference with the rest.
 
 Nothing is drawn that was not measured: no roofline without a ceiling of the
 kernel's own precision, no ramp-up from fewer than three batches, no time step

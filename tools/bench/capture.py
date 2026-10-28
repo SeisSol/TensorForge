@@ -130,3 +130,30 @@ def capture_of(path: Path, rows: Sequence[Mapping]) -> Optional[Capture]:
         if found is not None:
             return found
     return None
+
+
+#: A piece of a kernel split into one launch per operation
+#: (`suite.split_description`): the kernel, the operation's place in its
+#: chain, and how many there are -- `gpu_volume~2-of-5`.  In the name rather
+#: than in a field because the name is what every tool already carries.
+_PIECE = re.compile(r'^(?P<kernel>.+)~(?P<index>\d+)-of-(?P<count>\d+)$')
+
+
+@dataclass(frozen=True)
+class Piece:
+    """Which operation of which kernel a split workload is."""
+    kernel: str
+    index: int
+    count: int
+
+    @property
+    def name(self) -> str:
+        width = len(str(self.count - 1))
+        return f'{self.kernel}~{self.index:0{width}d}-of-{self.count}'
+
+    @classmethod
+    def of(cls, workload: str) -> Optional['Piece']:
+        m = _PIECE.match(workload)
+        if not m:
+            return None
+        return cls(m['kernel'], int(m['index']), int(m['count']))

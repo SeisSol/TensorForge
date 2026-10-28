@@ -26,6 +26,13 @@ CONFIGS = ['baseline'] #['baseline', 'wave', 'wrap1', 'wrap2', 'multibuffer']
 
 DUMP = Path(os.environ.get('TF_BENCH_DUMP', 'descriptors.json'))
 
+#: The kernels of a time step and the Taylor expansion local time stepping
+#: adds, for the elastic and the viscoelastic system.
+KERNELS = ['gpu_derivative', 'gpu_volume', 'gpu_volumeExt', 'gpu_localFluxAll',
+           'gpu_neighboringFlux[0]', 'gpu_derivativeTaylorExpansion',
+           'gpu_derivativeTaylorExpansionEla', 'gpu_neighborFluxExt[0]',
+           'gpu_neighbor', 'gpu_fluxLocalAll']
+
 
 def workloads():
     if not DUMP.exists():
@@ -36,7 +43,5 @@ def workloads():
             f'and point $TF_BENCH_DUMP at it.')
 
     dumpdata = from_dump(DUMP)
-
-    KERNELS = ['gpu_derivative', 'gpu_volume', 'gpu_volumeExt', 'gpu_localFluxAll', 'gpu_neighboringFlux[0]', 'gpu_derivativeTaylorExpansion', 'gpu_derivativeTaylorExpansionEla', 'gpu_neighborFluxExt[0]', 'gpu_neighbor', 'gpu_fluxLocalAll']
 
     return [workload for workload in dumpdata if workload.name in KERNELS]

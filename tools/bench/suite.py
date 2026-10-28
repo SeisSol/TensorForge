@@ -61,7 +61,7 @@ from tensorforge.frontend.yateto import DescriptionReader  # noqa: E402
 
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture import Capture  # noqa: E402
+from capture import Capture, Piece  # noqa: E402
 
 #: Where the case corpus lives.  `TF_TESTS` overrides, so a suite can be run
 #: against the corpus of another checkout.
@@ -239,6 +239,18 @@ CONFIGS: Dict[str, Config] = {
                                                pack_tables='param')),
     'pack-module': Config('pack-module', Options(pack_operands='runs',
                                                  pack_tables='module')),
+    # The matrix units, where a backend reads the option: NVIDIA's
+    # `mma.sync`, DMMA in double, and Intel's DPAS, which takes FP32 at
+    # sixteen lanes only.  Off by default (`primitives.nvidia.ENABLED`), so
+    # this row is what the paths are worth against the vector FMAs.  Over
+    # the time-step kernels of the exports in `data/`, it changes NVIDIA's
+    # builds of one simulation from order 4 on, the viscoelastic ones from
+    # order 3 -- two to four kernels of five or six, in both precisions --
+    # and Intel's ESIMD builds in single precision at order 3; nothing with
+    # eight simulations, no SPMD build for PVC, and nothing on AMD, whose
+    # ranking chooses its matrix path whatever the option says.  Where it
+    # changes nothing, the row times `baseline`'s code again.
+    'tensor-cores': Config('tensor-cores', Options(tensor_cores=True)),
     # A second `baseline` under another name, and the only row here that is
     # not a question about the generator.  It builds the same kernel on
     # every target, so the gap between the two is the machine moving under
@@ -307,8 +319,59 @@ def dump_datatype(blob: dict) -> Optional[Datatype]:
     return PRECISION.get((blob.get('config') or {}).get('precision'))
 
 
+def _names_in(node) -> List[str]:
+    """Every tensor an exported operation refers to: the `name` of each
+    operand reference, wherever in the operation it sits -- the result, the
+    arguments, the scale of a linear update."""
+    found: List[str] = []
+    if isinstance(node, dict):
+        if isinstance(node.get('name'), str):
+            found.append(node['name'])
+        for key, value in node.items():
+            if key != 'name':
+                found.extend(_names_in(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_names_in(value))
+    return found
+
+
+def split_description(description: Dict) -> List[Dict]:
+    """An exported kernel as one description per operation, in order: the
+    chain a generator launches that does not fuse, one kernel per product.
+
+    Every temporary becomes a global array, written by one launch and read
+    by the next, in the layout SeisSol's scratch allocator gives it --
+    strided per element (`n*N+o&`) -- with only the flag that let it live in
+    registers or shared memory taken away.  Nothing else changes: the
+    operations, their operands and the constants are the kernel's own, so
+    the pieces together compute what it computes, through memory.
+    """
+    tensors = description['tensors']
+    pieces = []
+    for op in description['operations']:
+        used = set(_names_in(op))
+        kept = []
+        for tensor in tensors:
+            if tensor['name'] not in used:
+                continue
+            tensor = json.loads(json.dumps(tensor))
+            if tensor.get('flags', {}).get('temporary'):
+                tensor['flags']['temporary'] = False
+            kept.append(tensor)
+        missing = used - {t['name'] for t in kept}
+        if missing:
+            raise ValueError(f'an operation refers to {sorted(missing)}, '
+                             'which the description does not declare')
+        pieces.append({**{k: v for k, v in description.items()
+                          if k not in ('tensors', 'operations')},
+                       'tensors': kept, 'operations': [op]})
+    return pieces
+
+
 def from_dump(path: Path, pattern: str = '*',
-              datatype: Optional[Datatype] = None) -> List[Workload]:
+              datatype: Optional[Datatype] = None,
+              split: bool = False) -> List[Workload]:
     """Workloads from a `tools/host/dump_descriptors.py` capture.
 
     The real corpus: what yateto handed the backend on an actual SeisSol
@@ -326,6 +389,10 @@ def from_dump(path: Path, pattern: str = '*',
     asked for `DATATYPES = (F64,)` got units with no workload in them at all,
     because `expand` admits a workload only where its own datatype matches.
     That is the shape the missing double kernels had.
+
+    `split` takes each kernel apart into one workload per operation
+    (`split_description`), named for the kernel and its place in the chain
+    (`capture.Piece`); the export format only.
     """
     blob = json.loads(Path(path).read_text())
     datatype = datatype or dump_datatype(blob) or Datatype.F32
@@ -338,12 +405,25 @@ def from_dump(path: Path, pattern: str = '*',
         for symbol, description in sorted(blob['descriptions'].items()):
             if not fnmatch.fnmatch(symbol, pattern):
                 continue
+            if split:
+                pieces = split_description(description)
+                for index, piece in enumerate(pieces):
+                    def factory(piece=piece):
+                        return DescriptionReader(arch=None).read(piece)[0]
+                    out.append(Workload(
+                        name=Piece(symbol, index, len(pieces)).name,
+                        descrs=factory, datatype=datatype,
+                        origin=f'split:{Path(path).name}', capture=capture))
+                continue
             def factory(description=description):
                 return DescriptionReader(arch=None).read(description)[0]
             out.append(Workload(name=symbol, descrs=factory, datatype=datatype,
                                 origin=f'dump:{Path(path).name}',
                                 capture=capture))
         return out
+    if split:
+        raise ValueError(f'{path}: only an export (`descriptions`) can be '
+                         'split by operation')
 
     # "old" method, interface yateto python
     kernels = blob['all'] if 'all' in blob else blob
