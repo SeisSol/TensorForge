@@ -131,3 +131,44 @@ def test_copies_of_one_box_are_one_read(monkeypatch):
         return {out for src, out in asked if id(src) in twice}
     assert shared(transposed=False) == {True}
     assert shared(transposed=True) == {False}
+
+
+def _operator_and_element(**options):
+    """`C = A B` with `A` an operator every element multiplies with and `B`,
+    `C` the element's own, for gfx942 -- where a copy into shared memory is a
+    load and a store, which can take the hint, rather than the asynchronous
+    copy sm_90 uses, which takes none; the kernel and the name its parameter
+    for `A` has."""
+    import json
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+
+    def t(shape, alias, addressing=Addressing.STRIDED):
+        return SubTensor(Tensor(shape, addressing,
+                                BoundingBox([0, 0], list(shape)),
+                                alias=alias, datatype=Datatype.F64))
+    descrs = [GemmDescr(False, False, t([24, 24], 'A', Addressing.NONE),
+                        t([24, 9], 'B'), t([24, 9], 'C'))]
+    gen = Generator(descrs, Context(arch="gfx942", backend="hip",
+                                    fp_type=Datatype.F64,
+                                    options=Options(**options)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    src = gen.get_kernel()
+    meta = json.loads(re.search(r"tensorforge-meta: (\{.*\})", src).group(1))
+    names = {o["alias"]: o["name"] for o in meta["operands"]}
+    return src, names["A"]
+
+
+def test_a_batch_constant_operand_never_takes_the_hint():
+    """An operator is read again by the next element whoever reads it now:
+    its image in shared memory is the only user of it, and every block makes
+    one.  So the image is copied plainly, while the element's own operand
+    beside it keeps the hint."""
+    src, a = _operator_and_element(preload_globals=True)
+    hinted = re.findall(r"__builtin_nontemporal_load\(([^;]*)\)", src)
+    assert hinted
+    assert not [h for h in hinted if re.search(rf"\b(?:ptr_)?glb_{a}\b", h)]
+    assert re.search(rf"\b(?:ptr_)?glb_{a}\b", src)
