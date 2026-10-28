@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import contextlib
 
+import pytest
+
 from tensorforge.backend.pir import IRBuilder, verify
 from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, Access,
                                           BufferType, Effect, MemSpace, Op,
@@ -314,6 +316,57 @@ def test_a_value_a_loop_computes_is_not_read_behind_it():
     assert _loads(out, MemSpace.GLOBAL, t.q)
 
 
+def test_a_value_a_branch_computes_is_not_read_behind_it():
+    """Every lane takes the branch, and stores there what it computes
+    there: behind the branch, the value stands nowhere to be read."""
+    t = Body()
+    b = t.b
+    with b.if_(b.op('lt', BOOL, t.lane, LANES, hint='every')):
+        v = b.op('mul', REAL, b.load(t.p, t.lane), 2.0, hint='v')
+        b.store(t.q, v, t.element(0))
+    b.store(t.p, b.load(t.q, t.element(0)), t.lane)
+    out = t.run()
+    assert _loads(out, MemSpace.GLOBAL, t.q)
+
+
+@pytest.mark.parametrize('where', ['first', 'every', 'inner', 'carried'])
+def test_a_value_a_trip_stored_is_read_in_that_trip_only(where):
+    """`v`, which each trip of a loop computes anew, stored into `s` and
+    read back by every trip.  Stored in the first trip only, the second
+    reads what the first stored, and its own `v` is another: the load stays
+    -- the same for `v` the loop hands from trip to trip.  Stored in every
+    trip, every trip reads its own: the value.  Stored in the first trip of
+    a loop inside, the value of the loop around: the same in every trip of
+    the loop inside."""
+    t = Body()
+    b = t.b
+    s = b.alloc(F32, (LANES,), MemSpace.SHARED, hint='s', extern='s0',
+                arena='shrMem')
+
+    def trip(hop, v):
+        first = b.op('eq', BOOL, hop, 0, hint='first')
+        with (b.if_(first) if where != 'every' else contextlib.nullcontext()):
+            b.store(s, v, t.lane)
+        b.store(t.p, b.load(s, t.lane, hint='back'), t.lane)
+
+    if where == 'carried':
+        with b.for_(0, 2, 1, inits=(b.load(t.q, t.element(0)),),
+                    types=(REAL,)) as f:
+            trip(f.induction, f.iter_args[0])
+            f.yield_(b.op('mul', REAL, f.iter_args[0], 2.0, hint='twice'))
+    else:
+        with b.for_(0, 2, 1, unroll=True) as outer:
+            v = b.load(t.q, t.element(outer.induction), hint='v')
+            if where == 'inner':
+                with b.for_(0, 2, 1, unroll=True) as hop:
+                    trip(hop.induction, v)
+            else:
+                trip(outer.induction, v)
+    out = t.run()
+    assert bool(_loads(out, MemSpace.SHARED, s)) == (where in ('first',
+                                                               'carried'))
+
+
 def test_a_predicated_load_keeps_what_its_predicate_gives():
     """Read from the registers, the rows past the load's predicate still
     get what the load gives them."""
@@ -597,13 +650,18 @@ def test_a_third_load_of_an_element_reads_the_register_of_the_first():
 
 
 def test_a_load_behind_a_store_of_the_element_keeps_its_load():
+    """Between the loads, the lanes store into element 1, and behind them
+    read elements 0 and 1: the second load finds that store in element 1,
+    and in element 0 what the first loaded -- a number and a register, which
+    no condition of the lanes tells apart."""
     t = Body()
     b = t.b
 
     def store(r0):
         with b.if_(t.valid):
             b.store(t.q, 1.0, t.element(1))
-    _reload(t, store)
+    _, r1 = _reload(t, store)
+    b.store(t.p, b.op('add', REAL, b.load(r1, 0), b.load(r1, 1)), t.lane)
     out = t.run()
     assert len(_loads(out, MemSpace.GLOBAL, t.q)) == 2
 

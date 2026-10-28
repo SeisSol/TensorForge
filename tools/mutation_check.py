@@ -3076,6 +3076,15 @@ GROUPS = {
         ('the last load of an element asked before the first',
          sub(FLOW, '                self._fetched[(r.cell, r.mask)].append((load, r))\n',
              '                self._fetched[(r.cell, r.mask)].insert(0, (load, r))\n', 1)),
+        ('a value one trip stored read in another',
+         sub(FLOW, "                if o[0] == 'value' and not self._one_trip(o[1], r.writer, n):",
+             '                if False:', 1)),
+        ('a value asked of every loop around the load',
+         sub(FLOW, '        loops = self.loops.get(id(d), ())\n',
+             '        loops = self.loops.get(id(self.insts[n].stmt), ())\n', 1)),
+        ('a value a loop hands on taken for one computed ahead of it',
+         sub(FLOW, '        if d.op == Op.FOR and not any(t is v for t in d.target):\n',
+             '        if False:\n', 1)),
     ]),
 }
 

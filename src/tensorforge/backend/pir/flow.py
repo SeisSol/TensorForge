@@ -628,6 +628,10 @@ class Flow:
                 hit = m & r.mask
                 if not hit:
                     continue
+                if o[0] == 'value' and not self._one_trip(o[1], r.writer, n):
+                    # The store took the value in another trip of a loop that
+                    # computes it anew in each: here it is another.
+                    continue
                 if o[0] == 'reg':
                     _, cell, writer = o
                     if self._holds(cell, writer, hit, conds):
@@ -635,6 +639,25 @@ class Flow:
                 else:
                     out.append((hit, o, (r,)))
         return out
+
+    def _one_trip(self, v: Value, writer: int, n: int) -> bool:
+        """Is `v` at the load's execution `n` what it was at the store's
+        execution `writer`: are both in the same trip of every counted loop
+        that computes it anew in each -- those around its definition, and the
+        loop itself for an argument of its body?"""
+        d = self.defs.get(v.id)
+        if d is None:
+            return True
+        loops = self.loops.get(id(d), ())
+        if d.op == Op.FOR and not any(t is v for t in d.target):
+            loops = loops + (d,)
+        if not loops:
+            return True
+        here = dict(self.insts[n].hops)
+        there = dict(self.insts[writer].hops)
+        return all(l.induction.id in here and l.induction.id in there
+                   and here[l.induction.id] == there[l.induction.id]
+                   for l in loops)
 
     def _fetches(self, n: int, conds, taken: int) -> List[Tuple[int, Tuple, Tuple[Reach, ...]]]:
         """What the load's execution `n` of memory reads for certain because
