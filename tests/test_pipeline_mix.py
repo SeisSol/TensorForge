@@ -170,6 +170,54 @@ def test_executed_flops_counts_the_lanes_the_kernel_runs_on():
         round(gen.metrics.emitted_flops * gen.built._num_threads))
 
 
+def _exported(kernel, export, arch, backend):
+    """A kernel of a SeisSol export (`tools/bench/data`), built."""
+    import json
+    from tensorforge.frontend.yateto import DescriptionReader
+    path = (Path(__file__).resolve().parents[1] / 'tools' / 'bench' / 'data'
+            / f'{export}.json')
+    blob = json.loads(path.read_text())
+    descrs = DescriptionReader(arch=None).read(
+        blob['descriptions'][kernel])[0]
+    dtype = {'s': Datatype.F32, 'd': Datatype.F64}[
+        blob['config']['precision']]
+    gen = Generator(descrs, Context(arch=arch, backend=backend,
+                                    fp_type=dtype, options=Options()))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    return gen
+
+
+def test_a_multiply_add_through_dpp_is_arithmetic_too():
+    """CDNA builds its double-precision contractions from `fmacdpp`, a call
+    and not an `fma`, and the count saw none of them: `gpu_localFluxAll` at
+    elastic order 4 issued 540 flops per element on gfx90a against 90 396
+    once counted -- below even what the operation needs -- while claiming
+    to be exact.  The same kernel on a wave of 32 performs about what it
+    does on a warp of 32, give or take the padding."""
+    from tensorforge.analysis.cost import list_cost
+
+    amd = _exported('gpu_localFluxAll', 'elastic-4-d-s1', 'gfx90a', 'hip')
+    nvidia = _exported('gpu_localFluxAll', 'elastic-4-d-s1', 'sm_90', 'cuda')
+    assert 'fmacdpp' in amd.get_kernel()
+    issued = pipeline.executed_flops(amd)
+    assert issued is not None and amd.metrics.emitted_flops_exact
+    assert issued >= list_cost(amd._given, batch=1).flops
+    assert issued == pytest.approx(pipeline.executed_flops(nvidia), rel=0.1)
+
+
+def test_a_matrix_builtin_leaves_the_count_open_rather_than_short():
+    """An MFMA is one call over a tile the emitter is not told.  Reached as
+    a builtin it was not counted at all and the figure stayed `exact`: the
+    single-precision local flux reported 34 792 flops per element on
+    gfx942, against 259 560 the operation needs.  None says what is known."""
+    gen = _built('local_flux', 'gfx942', 'hip')
+    assert '__builtin_amdgcn_mfma' in gen.get_kernel()
+    assert not gen.metrics.emitted_flops_exact
+    assert pipeline.executed_flops(gen) is None
+
+
 def test_a_guarded_tail_is_not_charged_to_every_lane():
     """A statement under a lane guard issues once and does its arithmetic on
     the lanes the bounds admit.  Charging the whole wave for it would report

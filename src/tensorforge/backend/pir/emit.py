@@ -295,7 +295,8 @@ class Emitter:
         self._inline: set = set()
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
 
-    def _record_work(self, op: Optional[str] = None, value=None) -> None:
+    def _record_work(self, op: Optional[str] = None, value=None,
+                     work: bool = True) -> None:
         # Times the trip counts of the loops around it: a loop the compiler
         # unrolls, or one rolled by `k_roll`, is written once and runs its
         # count.  Counted once, rolling a reduction by ten would make a kernel
@@ -307,6 +308,7 @@ class Emitter:
         # `op` and `value` say what the operation is worth; a caller that
         # passes neither -- the matrix instruction, whose tile the emitter is
         # not told -- leaves the flop figure inexact rather than short.
+        # `work=False` adds the flops alone (see the DPP multiply-add).
         record = getattr(self.metrics, 'record_work', None)
         if record is None:
             return
@@ -315,7 +317,7 @@ class Emitter:
             width = getattr(getattr(value, 'type', None), 'length', None)
             flops = (_WORK_FLOPS.get(op, 0) * (width or 1)
                      * self._work_scale * self._lane_scale)
-        record(self._work_scale, flops)
+        record(self._work_scale if work else 0, flops)
 
     def _record_code(self, op) -> None:
         """What a statement puts into the instruction stream
@@ -1425,6 +1427,27 @@ class Emitter:
                 v = s.target[0]
                 self.bind(v, callee[len('extern_'):])
                 return
+            if callee is not None and _FMA_CALL.search(callee):
+                # A multiply-add whose operand arrives from another lane:
+                # one instruction and two flops a lane, as any `fma`.  The
+                # accumulator is the result, or -- for the void form that
+                # adds into a reference -- the first operand; its type says
+                # how wide the arithmetic is.
+                #
+                # Its flops, and not its work: `lanes.search` ranks the
+                # candidates by the work a lane writes out, and counted
+                # there these would move the lane choice on CDNA towards
+                # the full wave -- which measured slower there at times.  A
+                # change to the search to be measured on its own, not one
+                # to make in passing with a count.
+                acc = s.target[0] if s.target else (s.args[0] if s.args
+                                                    else None)
+                self._record_work('fma', acc, work=False)
+            elif callee is not None and _MATRIX_CALL.search(callee):
+                # A matrix instruction reached as a builtin, as the asm one
+                # above: one operation over a whole tile the emitter is not
+                # told, so the flop figure is left inexact rather than short.
+                self._record_work()
             args = ', '.join(self.operand(a) for a in s.args)
             if not s.target:
                 # A void intrinsic: invoked for what it does to a register it
