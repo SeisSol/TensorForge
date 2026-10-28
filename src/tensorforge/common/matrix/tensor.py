@@ -273,9 +273,14 @@ class Tensor:
             # `nonzero_pattern` falls back to the storage pattern there, so
             # every stored cell counts as present and the rule below refuses
             # exactly as it used to.
+            # A merged run's stand-in stores nothing: its members are the
+            # buffers, and each one answers for its own cells when it takes
+            # the order (`multilinear._offer_order`).  Without numbers of its
+            # own it could prove no cell zero.
             kept = set(seen)
-            held = [c for c in range(cells)
-                    if c not in kept and not self._box_cell_is_zero(c)]
+            held = ([] if self.is_variant else
+                    [c for c in range(cells)
+                     if c not in kept and not self._box_cell_is_zero(c)])
             if held:
                 raise GenerationError(
                     f'Tensor {self.alias}: storage order drops '

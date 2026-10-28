@@ -1479,8 +1479,16 @@ class MultilinearInstruction(ComputeInstruction):
         # is in it says so.
         opts = self._context.get_user_options()
         asked = self._context.get_asked_options().asked()
+        # A packed operator is read a value at a time, which the emulated
+        # matrix scheme then splits in every step: there the order, which
+        # stores it split, goes first (`MatrixPaths.order_before_packing`).
+        module = _vendor_module(self._context)
+        ordered = (plan[0].strategy is Strategy.MATRIX and module is not None
+                   and module.order_before_packing(self._shape(),
+                                                   self._context))
         packing_first = (opts.pack_operands != 'off'
-                         and 'prepare_operands' not in asked)
+                         and 'prepare_operands' not in asked
+                         and not ordered)
         if packing_first:
             self._offer_packing(pack_level)
             if getattr(self._ops[0].symbol.obj, 'packing', None) is not None:
@@ -2017,10 +2025,26 @@ class MultilinearInstruction(ComputeInstruction):
                             and user.get_dest() is sym)]
         if module is None or (readers and not module.ORDERS_EVERY_READER):
             return
+        span = self._num_threads * self._lead_width
+        read = -(-(self._ns[0][1] - self._ns[0][0]) // span) * span
+        corner = self._read_corner(a_obj)
+        # Over the window an operation reads, where the order is worth more
+        # than a packing (`order_before_packing`, the emulated scheme) or the
+        # caller asked for prepared operands.  Elsewhere such an operand is
+        # packed, as before: over SeisSol's orders 4 and 6 on MI300A the two
+        # come out even -- within 3 % either way, `localFluxAll` 5 % slower in
+        # quads -- so the default is not changed for nothing.
+        whole = tuple(int(x) for x in a_obj.get_actual_shape()) == (lead,
+                                                                    depth)
+        if not whole and not (
+                'prepare_operands' in self._context.get_asked_options().asked()
+                or module.order_before_packing(self._shape(), self._context)):
+            return
         order = module.prepared_order(tuple(a_obj.get_actual_shape()),
                       self._idest.get_fptype(), self._context,
                       columns=self._output_extent(), lead=lead, depth=depth,
-                      threads=self._num_threads)
+                      threads=self._num_threads, corner=corner,
+                      rows=read if corner != (0, 0) or lead != read else None)
         if order is None:
             return
         slot_major = getattr(order, 'slot_major', None)
@@ -2064,6 +2088,17 @@ class MultilinearInstruction(ComputeInstruction):
                     or (parts is not None
                         and member.storage_parts not in (1, parts))):
                 return
+        # An order laid over the window an operation reads leaves the cells
+        # outside unstored, which the setter allows only where they are known
+        # zero; where they are not, the operand stays as it is.
+        for member in members:
+            if member.storage_order is not None:
+                continue
+            try:
+                member.storage_order = order
+            except GenerationError:
+                return
+            member.storage_order = None
         # Parts planar with it: the order puts a lane's fragments side by side,
         # and the instruction wants each part's in one register group
         # (`Tensor.storage_planar`).
@@ -2074,6 +2109,27 @@ class MultilinearInstruction(ComputeInstruction):
                 target.slot_major = slot_major
             if parts is not None and parts != 1:
                 target.storage_parts = parts
+
+    def _read_corner(self, a_obj):
+        """Where the rows and steps this operation reads of `A` start, from its
+        box's corner: `(row, step)`, where its first axis is the lead and its
+        second the contraction, and the box's own corner otherwise.
+
+        Not where the window starts: a lane reads the row of its slot's own
+        origin, `ns0 // span` slots in (`unwindI`), so the rows a slot holds
+        start on a multiple of the lanes.  SeisSol's volume computes rows 1 to
+        53 of `kDivM`, and its lane 0 reads row 0; an order counted from row 1
+        put every lane one row off, wrong in 495 of 576 values (MI300A).
+        """
+        if (len(self._opdim_to_nks[0]) != 2
+                or list(self._opdim_to_nks[0]) != ['n0', 'k0']
+                or len(self._ks) != 1):
+            return (0, 0)
+        lower = list(a_obj.get_bbox().lower())
+        span = self._num_threads * self._lead_width
+        row = (self._ns[0][0] // span) * span + self._eff_offset(0, 0)
+        step = self._ks[0][0] + self._eff_offset(0, 1)
+        return (row - lower[0], step - lower[1])
 
     def _slot_major_fits(self, a_obj) -> bool:
         """Whether every read of `A` here names whole slots of its rows.

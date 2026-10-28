@@ -341,7 +341,7 @@ def quad_width(dtype) -> int:
     return 16 // dtype.size()
 
 
-def quad_order(shape, threads, width):
+def quad_order(shape, threads, width, window=None):
     """`Tensor.storage_order` for an operand read in k-quads.
 
     Lane `l`'s row in slot `s` holds steps `width * q .. width * q + width -
@@ -351,8 +351,18 @@ def quad_order(shape, threads, width):
     one aligned vector, and a wave reads one contiguous run -- where the
     column-major operand gives it one scalar per step.  Rows past the end and
     steps past the end are padding (`-1`).
+
+    Over `window` -- `((r0, rows), (c0, cols))`, the rows and steps one
+    operation reads, from the box's corner -- rather than over the box: a lane
+    reads the row of its own position, counted from where the operation's
+    rows start, so that is where the order counts them from.  SeisSol's
+    volume reads `kDivM` from row 1; laid over the box, every lane's quad is
+    its neighbour's.  The cells outside are not stored, which the order may
+    only do where they are known zero (`Tensor.storage_order`).
     """
-    rows, cols = (int(x) for x in shape)
+    box_rows, box_cols = int(shape[0]), int(shape[1])
+    (r0, rows), (c0, cols) = (window if window is not None
+                              else ((0, box_rows), (0, box_cols)))
     slots = -(-rows // threads)
     order = []
     for q in range(-(-cols // width)):
@@ -361,7 +371,10 @@ def quad_order(shape, threads, width):
                 r = s * threads + lane
                 for c in range(width):
                     k = q * width + c
-                    order.append(r + rows * k if r < rows and k < cols else -1)
+                    inside = (r < rows and k < cols and r0 + r < box_rows
+                              and c0 + k < box_cols)
+                    order.append((r0 + r) + box_rows * (c0 + k)
+                                 if inside else -1)
     return order
 
 
@@ -379,15 +392,15 @@ class QuadOrder(tuple):
 
 
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
-                   threads=32):
+                   threads=32, corner=(0, 0), rows=None):
     """The order this target would read a two-dimensional A operand in, or
     `None` (`multilinear._offer_order`).
 
     k-quads for the lane-batched MFMA (`quad_order`): its lanes are rows and
     each step reads one element of the lane's row, so four steps are one
-    16-byte read.  F32 only, like the `blgp` it composes with.  Only where the
-    operation reads the whole operand, since the order is laid out over the
-    tensor and read by slot, with no coordinate left to offset.
+    16-byte read.  F32 only, like the `blgp` it composes with.  Laid over the
+    window the operation reads -- `lead` rows and `depth` steps from `corner`
+    -- since it is read by slot, with no coordinate left to offset.
 
     Under the emulated scheme the same quads, of each of the three BF16 terms
     the instruction multiplies: the operand is split once on the host rather
@@ -396,8 +409,14 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     """
     if not K_QUADS or len(shape) != 2 or dtype != Datatype.F32:
         return None
-    if tuple(int(x) for x in shape) != (lead, depth):
+    r0, c0 = (int(x) for x in corner)
+    if (r0 < 0 or c0 < 0 or not lead or not depth or r0 >= int(shape[0])
+            or c0 + depth > int(shape[1])):
         return None
+    # The rows the lanes read, every slot whole (`rows`), where the operation
+    # does not read the whole box from its corner; the ones past the box are
+    # padding.
+    window = ((r0, int(rows) if rows else lead), (c0, depth))
     fit = choose(threads, dtype, ctx, columns=columns, lead=lead, depth=depth)
     if fit is None:
         return None
@@ -405,10 +424,20 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     if fit.scheme is Scheme.EMULATED:
         if fit.terms != BF16_PARTS or fit.op.k != width:
             return None
-        return QuadOrder(quad_order(shape, threads, width), parts=fit.terms)
+        return QuadOrder(quad_order(shape, threads, width, window),
+                         parts=fit.terms)
     if fit.scheme is not Scheme.LANE_BATCHED:
         return None
-    return quad_order(shape, threads, width)
+    return quad_order(shape, threads, width, window)
+
+
+def order_before_packing(shape, ctx) -> bool:
+    """Whether a matrix span over `shape` runs the emulated scheme, whose
+    operator is worth more stored split than packed: packed, it is read a
+    value at a time and split in every step (`matmulemu`)."""
+    fit = choose(shape.threads, shape.accumulator, ctx, lead=shape.lead,
+                 depth=shape.depth)
+    return fit is not None and fit.scheme is Scheme.EMULATED
 
 
 def _quad_reader(ops, width):

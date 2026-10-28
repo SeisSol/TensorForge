@@ -231,8 +231,13 @@ class MatrixPaths(Protocol):
         `n` columns `plan` lays out, since which instruction runs can depend
         on them."""
 
+    def order_before_packing(self, shape: ComputeShape, ctx) -> bool:
+        """Whether an operand this target offers an order is better stored
+        in it than packed (`MultilinearInstruction.settle_storage`), which
+        otherwise goes first."""
+
     def prepared_order(self, shape, dtype, ctx, columns=0, lead=0, depth=0,
-                       threads=32) -> Any:
+                       threads=32, corner=(0, 0), rows=None) -> Any:
         """The order this target would read a two-dimensional A operand in,
         or None (`MultilinearInstruction._offer_order`)."""
 

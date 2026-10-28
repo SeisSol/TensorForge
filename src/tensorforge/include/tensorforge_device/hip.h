@@ -1301,13 +1301,13 @@ __device__ __forceinline__ void splitFloatx4BF16(VectorT<std::int16_t, 4> &t0,
 /// `splitFloatx4BF16`.
 __device__ __forceinline__ VectorT<std::int16_t, 4>
 packBF16x4(VectorT<float, 4> terms) {
-  const auto bits = [&](int i) {
-    return __builtin_bit_cast(unsigned, terms[i]);
-  };
+  // The whole vector at once: an element read through a lambda's captured
+  // reference came back as element 0 four times (hipcc, ROCm 7.14, gfx942).
+  const auto bits = __builtin_bit_cast(VectorT<unsigned, 4>, terms);
   // byte selectors 2, 3 of the second source and 6, 7 of the first: the upper
   // halves, the lower element in the lower half
-  const unsigned low = __builtin_amdgcn_perm(bits(1), bits(0), 0x07060302u);
-  const unsigned high = __builtin_amdgcn_perm(bits(3), bits(2), 0x07060302u);
+  const unsigned low = __builtin_amdgcn_perm(bits[1], bits[0], 0x07060302u);
+  const unsigned high = __builtin_amdgcn_perm(bits[3], bits[2], 0x07060302u);
   return __builtin_bit_cast(VectorT<std::int16_t, 4>,
                             VectorT<unsigned, 2>{low, high});
 }
