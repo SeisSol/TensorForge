@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: 2026 SeisSol Group
+#
+# SPDX-License-Identifier: MIT
+#
+# The machines a campaign runs on (`campaign.py`); copy it, fill it in, and
+# keep it out of the repository -- it names accounts and paths.  The values
+# here are placeholders, not any site's settings.
+#
+#   python3 tools/bench/campaign.py prepare machines.yaml
+#   python3 tools/bench/campaign.py submit machines.yaml --campaign paper/
+
+# Under every machine; `sbatch` is merged key by key.
+defaults:
+  sbatch:
+    nodes: 1
+    ntasks: 1
+    time: '08:00:00'          # quoted: YAML reads 08:00:00 as a number
+
+machines:
+  # A Slurm cluster with NVIDIA GPUs, reached through an ssh alias that
+  # ~/.ssh/config resolves (ProxyJump, keys, ControlMaster).
+  nvidia-cluster:
+    host: nvidia-login
+    root: /scratch/<user>/tensorforge-bench
+    sbatch:
+      partition: <gpu partition>
+      account: <project>
+      gres: gpu:1             # the site's spelling; some want gpus-per-node
+    setup:
+      - module load <cuda module> <python module>
+      - source $TF_ROOT/venv/bin/activate
+    prepare:                  # once, on the login node: it has the internet
+      - python3 -m venv $TF_ROOT/venv
+      - $TF_ROOT/venv/bin/pip install -r $TF_CODE/requirements.txt
+    args: [--backend, cuda]
+
+  # A Slurm cluster with AMD GPUs whose GPUs are only visible under srun.
+  amd-cluster:
+    host: amd-login
+    root: /scratch/<project>/<user>/tensorforge-bench
+    sbatch:
+      partition: <gpu partition>
+      account: <project>
+      gpus-per-node: 1
+      exclusive: true         # a bare `#SBATCH --exclusive`
+    setup:
+      - module load <rocm module>
+      - source $TF_ROOT/venv/bin/activate
+    prepare:
+      - python3 -m venv $TF_ROOT/venv
+      - $TF_ROOT/venv/bin/pip install -r $TF_CODE/requirements.txt
+    launch: srun --ntasks=1 --gpus=1
+    args: [--backend, hip, --profile]
+
+  # A machine without a scheduler: the evaluation runs in the background
+  # there.  Never a login node.  Without `host`, this machine.
+  workstation:
+    host: my-workstation
+    scheduler: shell
+    root: /home/<user>/tensorforge-bench
+    python: python3

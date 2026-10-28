@@ -30,6 +30,7 @@ the thing timed.
 | `plot.py` | charts over what the two runs wrote, one machine at a time |
 | `compare.py` | charts *across* runs: configurations, orders, machines |
 | `compareall.sh` | `compare.py` over data you already have, in one command |
+| `campaign.py` | `evaluate.py` on several machines -- ssh, Slurm, modules -- from here |
 | `pdfout.py` | the second rendering: every chart as a page of a PDF |
 | `describe.py` | what each captured kernel computes, read off the export |
 | `publish.py` | the figures and tables for a paper, with their numbers |
@@ -53,6 +54,36 @@ The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
 correctness driver and sharing its operand collection and its launcher call —
 two drivers deriving the launcher's parameter order independently is how they
 come to disagree about a signature that changed under one of them.
+
+## Across machines: `campaign.py`
+
+```bash
+cp tools/bench/machines.example.yaml ~/machines.yaml     # and fill it in
+python3 tools/bench/campaign.py prepare ~/machines.yaml  # once: venv, pip
+python3 tools/bench/campaign.py submit ~/machines.yaml --campaign paper/
+python3 tools/bench/campaign.py status paper/
+python3 tools/bench/campaign.py fetch paper/             # whatever is done
+python3 tools/bench/campaign.py publish paper/ -- --clustering mesh.csv
+```
+
+A machine is an entry: an ssh alias, a directory, the scheduler's options as
+`#SBATCH` lines, the setup lines a job needs -- modules, an environment -- a
+launch prefix such as `srun`, and arguments for `evaluate.py`. `submit` ships
+the commit checked out here, once per host, writes each machine's job script,
+keeps a copy beside the campaign and queues it; the job writes a status file
+of its own, which `status` reads beside what the scheduler says, and `fetch`
+copies a finished tree into `paper/<machine>/eval`. `publish` sets every
+fetched tree into `paper/publish`. One campaign is one commit: a tree with
+changes is refused unless `--dirty`, and a second commit needs a second
+campaign.
+
+It does not log in and it does not wait. Every remote call is
+`ssh -o BatchMode=yes` under your own `~/.ssh/config` -- keys, `ProxyJump`,
+and for a site behind a second factor a `ControlMaster` connection opened by
+hand first -- so a call that would prompt fails rather than hangs. A queue
+takes as long as it takes; `fetch` is asked again later. `--dry-run` prints
+every job script without touching a machine; an entry that still has a
+`<placeholder>` in it is printed, but not shipped or submitted.
 
 ## Suites
 
