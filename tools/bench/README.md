@@ -32,6 +32,8 @@ the thing timed.
 | `compareall.sh` | `compare.py` over data you already have, in one command |
 | `pdfout.py` | the second rendering: every chart as a page of a PDF |
 | `describe.py` | what each captured kernel computes, read off the export |
+| `publish.py` | the figures and tables for a paper, with their numbers |
+| `texout.py` | the third rendering: pgfplots and booktabs, as text |
 
 ```bash
 python3 tools/bench/evaluate.py --out eval/                  # measure and plot
@@ -269,6 +271,80 @@ thing that reliably happens. Nothing here is a chart type a library would draw
 better — these are lines, bars, dots and rules — so a library would buy a
 dependency rather than a capability. Latin-1 only, and the typographic
 characters the charts use are transliterated rather than dropped.
+
+## For a paper: `publish.py`
+
+```bash
+python3 tools/bench/publish.py eval/ --out pub/ --compile
+python3 tools/bench/publish.py gh200/ mi300a/ pvc/ --out pub/
+python3 tools/bench/publish.py --out pub/           # the kernels alone
+```
+
+`compare.py` is for looking at a campaign; `publish.py` is for putting one in a
+paper. It reads the same trees through the same `collect` and writes pgfplots
+figures and booktabs tables (`texout.py`) set in the document's own fonts at
+its column width -- a chart drawn here in Helvetica at 760 pixels comes out at
+a third of a point per pixel in a 3.5-inch column. Every output is a bare
+`tikzpicture` or `tabular` to `\input`, beside the CSV of the numbers it draws,
+so that a figure can be set again without being measured again and a number in
+the text can be checked against the figure. `standalone/` has each figure as a
+document of its own for `\includegraphics`; `preview.tex` sets all of them with
+a suggested caption, after a page listing what was not made and why.
+
+| output | the question |
+|---|---|
+| `tables/kernels` | what does each kernel compute? (`describe.py`) |
+| `tables/intensity`, `figures/intensity-*` | how many flops per byte, at each order and precision, against each machine's ridge? |
+| `tables/machines` | what did each machine turn out to do, per precision? |
+| `figures/roofline-*` | where does each kernel sit, and which way does the order move it? |
+| `figures/peak-*` | how close to the roof, the bus and the FMA rate does a full launch get? |
+| `figures/rampup-*`, `tables/rampup-*` | from how many elements on is a launch worth its cost? |
+| `figures/breakdown-*` | where does a time step's time go, per order? |
+| `tables/portability` | how evenly does a kernel reach each machine's roof? |
+| `figures/configs-*` | does a configuration -- or another generator -- help? |
+
+A figure is one machine, one precision and one equation, and a line joins the
+orders of one kernel: a kernel is its name and its export (`capture.py`), never
+its name alone. A run of another generator brought in with its own `config`
+label is drawn against the reference like any configuration.
+
+**The time step.** The breakdown and the ramp-up add the kernels up the way
+SeisSol launches them on a GPU (`STEP`, read off SeisSol's
+`src/Kernels/LinearCK*` with the local fluxes combined, the default): the
+neighbour flux once per face and face relation, sixteen launches of about a
+quarter of the elements each, the four relations of a face on streams of their
+own. Per element that is the neighbour flux four times, which is what the
+breakdown stacks. The ramp-up depends on the launches themselves, and the
+streams are where it is uncertain: the solid line takes the relations of a face
+as one launch, the most the streams can give, the dashed one has them run one
+after another, the least. A measured step lies between the two. Both need every
+batch's quarter measured, which the sweep in `RAMPUP_BATCHES` has:
+
+```bash
+B=$(python3 -c 'print(",".join(str(2 ** e) for e in range(4, 19)))')
+python3 tools/bench/evaluate.py --out rampup/ --exports tools/bench/data \
+    --batches "$B"
+```
+
+**The cost of a launch.** `t(n) = t0 + c n` is fitted per kernel and order,
+weighted by `1/t^2` so that the small launches the fit is about are not drowned
+by the large ones, and `n_1/2 = t0/c` is the batch at which a launch reaches
+half its asymptotic rate (Hockney). The table gives `t0` from the lowest to the
+highest over the orders and `n_1/2` per order; the CSV adds the smallest batch
+that measured half the best rate, and how far the worst point lies from the
+line.
+
+**Portability.** Pennycook's performance portability: the harmonic mean, over
+the machines with a roof in the precision, of the fraction of each one's own
+roof a full launch reaches. A machine that built or ran the kernel and produced
+no number makes it zero, as the definition has it -- `collect` keeps those rows
+in `Field.failed` -- and one that was not asked to run it leaves it open: a
+gap in a campaign is not a failure of the code.
+
+Nothing is drawn that was not measured: no roofline without a ceiling of the
+kernel's own precision, no ramp-up from fewer than three batches, no time step
+with one of its kernels missing at a batch. What was left out is listed, with
+the reason, in `manifest.json` and on the preview's first page.
 
 ## Reading the output
 
