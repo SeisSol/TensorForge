@@ -369,3 +369,83 @@ def test_runs_at_one_distance_are_one_copy():
     ragged = [(_shard(a, 0, 16), 0), (_shard(a, 40, 8), 16),
               (_shard(a, 80, 16), 24)]
     assert [c.count for c in S._copies(ragged)] == [16, 8, 16]
+
+
+def _dense_volume_f64(monkeypatch=None, **options):
+    """SeisSol's volume at order 6, dense and in double precision, for
+    gfx942: `Q += kDivM_d (I star_d)` over three 56 x 56 operators of 25 kB,
+    which a 64 kB block cannot preload whole.  The kernel, its launch, and
+    the blocks the registers leave a CU (`_register_blocks_at_most`)."""
+    import json
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.helper import generate_tmp_matrix
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+
+    def t(shape, alias, addressing=Addressing.STRIDED):
+        return SubTensor(Tensor(list(shape), addressing,
+                                BoundingBox([0, 0], list(shape)),
+                                alias=alias, datatype=Datatype.F64))
+    i, q = t((56, 9), 'I'), t((56, 9), 'Q')
+    descrs = []
+    for d in range(3):
+        star = t((9, 9), f'star{d}')
+        tmp = SubTensor(generate_tmp_matrix(i, star))
+        descrs.append(GemmDescr(False, False, i, star, tmp))
+        descrs.append(GemmDescr(False, False,
+                                t((56, 56), f'kDivM{d}', Addressing.NONE),
+                                tmp, q, alpha=1.0, beta=1.0))
+    seen = []
+    if monkeypatch is not None:
+        real = Generator._register_blocks_at_most
+
+        def spy(self, body, mults):
+            out = real(self, body, mults)
+            seen.append(out)
+            return out
+        monkeypatch.setattr(Generator, '_register_blocks_at_most', spy)
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F64,
+                  options=Options(merge_variants=False, **options))
+    gen = Generator(descrs, ctx)
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        gen.generate()
+    src = gen.get_kernel()
+    launch = json.loads(re.search(r'tensorforge-meta: (\{.*\})',
+                                  src).group(1))['launch']
+    return src, launch, seen, ctx.target.hw
+
+
+def test_on_amd_the_shards_take_what_the_registers_leave(monkeypatch):
+    """Where even the fewest registers hipcc could allocate for the body
+    leave a CU fewer blocks than its shared memory and threads would, those
+    blocks are what the shards leave room for (`Preferences.register_floor`):
+    more than the eighth of a CU that eight blocks of 256 threads would
+    leave each, and never so much that shared memory holds fewer blocks than
+    the registers do."""
+    src, launch, seen, hw = _dense_volume_f64(monkeypatch,
+                                              preload_shards=True)
+    registers = seen[-1]
+    threads = launch['threads_per_mult'] * launch['mults_per_block']
+    assert registers is not None
+    assert registers < hw.max_threads_per_sm // threads
+    shared = launch['shared_bytes']
+    assert hw.max_local_mem_size_per_block // shared >= registers
+    assert shared > hw.max_local_mem_size_per_block // (
+        hw.max_threads_per_sm // threads)
+    assert re.search(r'\bdouble \* v\d+_shard = &totalShrMem\[', src)
+
+
+def test_without_a_floor_the_registers_are_not_asked(monkeypatch):
+    """A target that states no floor sizes the shards by shared memory and
+    threads alone, as before: the registers could not be known to bind."""
+    from dataclasses import replace
+    from tensorforge.common import target as T
+    monkeypatch.setitem(T.PREFERENCES, 'amd',
+                        replace(T.PREFERENCES['amd'], register_floor=None))
+    _, launch, seen, hw = _dense_volume_f64(monkeypatch, preload_shards=True)
+    assert seen and all(s is None for s in seen)
+    threads = launch['threads_per_mult'] * launch['mults_per_block']
+    assert launch['shared_bytes'] <= hw.max_local_mem_size_per_block // (
+        hw.max_threads_per_sm // threads)

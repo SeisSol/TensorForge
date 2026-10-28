@@ -1589,7 +1589,7 @@ class Generator:
           f'lead to, three builds in a row') from None
     if placed is None:
       return False
-    budget = self._shard_budget()
+    budget = self._shard_budget(placed[0])
     if budget:
       try:
         held = self._settle(index, budget)
@@ -1636,17 +1636,22 @@ class Generator:
     self._deduce_mults_per_block()
     self._set_threadconfig()
 
-  def _shard_budget(self) -> int:
+  def _shard_budget(self, body) -> int:
     """The shared memory, in elements, the shards of the section's
     batch-constant operands may take; 0 where it holds none.
 
-    The section is placed: its block's arena and a multiplication's are what
-    they take without shards.  A block holding them is sized as one that
-    holds a copy of operator data (`set_stages`), and it may take as much
-    more as keeps as many of those blocks resident per SM as fit without --
-    by shared memory and threads, the two known exactly (`_resident_blocks`).
-    `Options.preload_shard_budget` puts its bytes in place of that, up to
-    what the block can take at all.
+    The section is placed, as `body`: its block's arena and a
+    multiplication's are what they take without shards.  A block holding them
+    is sized as one that holds a copy of operator data (`set_stages`), and it
+    may take as much more as keeps as many of those blocks resident per SM as
+    fit without -- by shared memory and threads, the two known exactly, and
+    by registers where the fewest the compiler could allocate for `body`
+    leave fewer still (`_register_blocks_at_most`).  At order 8 in double
+    precision a gfx942 SIMD holds one wave of SeisSol's `volume`, and the
+    whole 64 kB a block can take costs it nothing; held to what eight blocks
+    would leave each, the shards got 8 kB.  `Options.preload_shard_budget`
+    puts its bytes in place of all that, up to what the block can take at
+    all.
 
     Not under the explicit vector, where a multiplication is one work-item
     and its lanes are no thread's: an index there is not a function of the
@@ -1678,8 +1683,30 @@ class Generator:
                 hw.max_threads_per_sm // (self._num_threads * mults)]
       if taken:
         limits.append(cap // taken)
+      registers = self._register_blocks_at_most(body, mults)
+      if registers is not None:
+        limits.append(registers)
       allowed = cap // max(1, min(limits)) - taken
     return max(0, allowed // size - (start - block))
+
+  def _register_blocks_at_most(self, body, mults: int) -> Optional[int]:
+    """The most blocks of `mults` multiplications a CU's register file could
+    hold of `body`: at the fewest registers its compiler has allocated for
+    the bytes `body` keeps live (`Preferences.register_floor`).  None where
+    the target states no floor."""
+    from tensorforge.backend.instructions.abstract_instruction import (
+        body_pressure)
+    from tensorforge.generators.tuning import register_blocks
+    prefs = self._context.target.prefs
+    if prefs.register_floor is None or not prefs.rank_by_register_waves:
+      return None
+    peak, _ = body_pressure(self._context, body,
+                            _explicit_simd_lowering(self._context),
+                            self._num_threads)
+    if not peak:
+      return None
+    return register_blocks(self._context, prefs.register_floor * peak / 4,
+                           self._num_threads * mults)
 
   @staticmethod
   def _check_layout(body, index: int) -> None:

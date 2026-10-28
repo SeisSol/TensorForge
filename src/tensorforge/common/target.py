@@ -140,6 +140,12 @@ class Preferences:
     #: the modeled bytes, fitted over builds that did not spill:
     #: `(intercept, slope)` on bytes / 4 (`tuning.register_estimate`).
     register_fit: Optional[Tuple[float, float]] = None
+    #: The fewest registers per lane the compiler allocated for each four
+    #: modeled bytes: below the fit, the bound under which the registers
+    #: cannot be what limits the blocks a CU holds
+    #: (`Generator._shard_budget`).  Only where `rank_by_register_waves`
+    #: counts waves from registers at all.
+    register_floor: Optional[float] = None
 
 
 #: One row per vendor.
@@ -230,7 +236,15 @@ PREFERENCES = {
         rank_by_register_waves=True,
         # hipcc gfx942, 29 builds, residuals within 38 -- no intercept worth
         # the name.
-        register_fit=(0.0, 1.26)),
+        register_fit=(0.0, 1.26),
+        # hipcc gfx942 (ROCm 7.14) over SeisSol's elastic kernels at order 6
+        # in both precisions and order 8 in double, ten builds: 0.75 to 1.43
+        # registers per modeled four bytes.  The fit above came from single
+        # precision and overshoots double by up to 113 registers -- `volume`
+        # at order 6, 279 for 166 -- so it cannot say that registers bind;
+        # this can, where even it leaves fewer blocks than shared memory
+        # would.
+        register_floor=0.74),
     'intel': Preferences(
         # The sub-group broadcast is cheap enough here that an operand whose
         # lane axis is not where a reader expects it can be read in place.

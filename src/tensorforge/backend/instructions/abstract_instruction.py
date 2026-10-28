@@ -15,9 +15,10 @@ from tensorforge.backend.pir.core import (Access, Effect, MemSpace,
                                           Uniformity)
 
 
-def _record_pressure(metrics, context, body, simd: bool,
-                     num_threads: Optional[int] = None) -> None:
-  """Measure `body` and add the figure to the build's, split by file.
+def body_pressure(context, body, simd: bool,
+                  num_threads: Optional[int] = None) -> Tuple[int, List[int]]:
+  """The bytes a lane holds live at `body`'s peak, and the same split by
+  file: the figure a build records (`_record_pressure`).
 
   What separates the two files is whether a whole wave agrees on the value,
   and that is a fact about the geometry rather than about the value: a
@@ -34,6 +35,14 @@ def _record_pressure(metrics, context, body, simd: bool,
                        by_file=split,
                        wave_uniform=Participants.WAVE.arrival(threads, wave),
                        folded_crosslane=context.target.folds_broadcast())
+  return total, split
+
+
+def _record_pressure(metrics, context, body, simd: bool,
+                     num_threads: Optional[int] = None) -> None:
+  """Measure `body` and add the figure to the build's, split by file
+  (`body_pressure`)."""
+  total, split = body_pressure(context, body, simd, num_threads)
   metrics.record_pressure(total, *split)
 
 
