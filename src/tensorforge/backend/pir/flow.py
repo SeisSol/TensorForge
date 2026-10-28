@@ -142,6 +142,8 @@ class Reach:
     own: bool = True
     #: The element read.
     cell: Tuple = ()
+    #: The lane that wrote it, for a read of memory; -1 where none did.
+    by: int = -1
 
     @property
     def certain(self) -> bool:
@@ -176,10 +178,14 @@ class Flow:
     def __init__(self, body: Sequence[Stmt], threads: int,
                  arena: Optional[str] = None, masks: bool = False,
                  values: bool = False, before: bool = True,
-                 budget: Optional[int] = None, fetches: bool = True):
+                 budget: Optional[int] = None, fetches: bool = True,
+                 exchange: bool = False):
         self.body = tuple(body)
         self.threads = threads
         self._values = values
+        #: Whether `forward` lists what another lane stored -- a value, or
+        #: from a register that lane holds it in still (`_forwards`).
+        self._exchange = exchange
         #: Whether `forward` lists what the lanes loaded before as well as
         #: what they stored (`_fetches`).
         self._fetches_too = fetches
@@ -625,18 +631,29 @@ class Flow:
         it still -- or, where another lane wrote the element last in a
         store this lane ran as well, what this lane stored, where that is a
         number or a value the same on every lane of the multiplication: the
-        other lane stored the same."""
+        other lane stored the same.  With `exchange`, where another lane
+        stored a value, or stored it from a register that lane holds still,
+        that value or register of that lane (`('lane', lane, origin)`)."""
         out: List[Tuple[int, Tuple, Tuple[Reach, ...]]] = []
         for r in self.reach.get(n, ()):
             if not r.certain or r.writer is None or r.writer < 0:
                 continue
             for m, o in self.origin.get(r.writer, ()):
-                hit = m & r.mask
-                if not hit:
-                    continue
                 if o[0] == 'value' and not self._one_trip(o[1], r.writer, n):
                     # The store took the value in another trip of a loop that
                     # computes it anew in each: here it is another.
+                    continue
+                if (not r.own and self._exchange and o[0] in ('reg', 'value')
+                        and r.by >= 0 and not self._same_on_every_lane(o)):
+                    # Another lane's store, of a value -- the one it stored,
+                    # on every lane -- or from a register that lane holds it
+                    # in still: read across.
+                    if o[0] == 'value' or self._holds(o[1], o[2], 1 << r.by,
+                                                      conds):
+                        out.append((r.mask, ('lane', r.by, o), (r,)))
+                    continue
+                hit = m & r.mask
+                if not hit:
                     continue
                 if not r.own and not self._same_on_every_lane(o):
                     continue
@@ -675,9 +692,13 @@ class Flow:
             return True
         if origin[0] != 'value':
             return False
+        return self.alike(origin[1])
+
+    def alike(self, v) -> bool:
+        """Is `v` the same on every lane of the multiplication (`_Alike`)?"""
         if self._alike is None:
             self._alike = _Alike(self.defs)
-        return self._alike(origin[1])
+        return self._alike(v)
 
     def _fetches(self, n: int, conds, taken: int) -> List[Tuple[int, Tuple, Tuple[Reach, ...]]]:
         """What the load's execution `n` of memory reads for certain because
@@ -943,7 +964,8 @@ class Flow:
             self.readers[layer.writer].append((n, mask))
             if layer.conds <= conds:
                 return Reach(mask, layer.writer, self._frozen(maybe),
-                             own=layer.lane == lane, cell=cell)
+                             own=layer.lane == lane, cell=cell,
+                             by=layer.lane)
             maybe.add(layer.writer)
         return Reach(mask, INITIAL, self._frozen(maybe), own=False, cell=cell)
 

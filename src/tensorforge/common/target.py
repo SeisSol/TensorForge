@@ -175,10 +175,19 @@ PREFERENCES = {
         # the kernel at either width.  The halved block NVIDIA prefers made
         # `chain_three` 3.6 % and `wide_cascade` 4.1 % slower there.
         widening_keeps_mults=False,
+        # Reading what one lane stored across the lanes is a scalar read
+        # where the multiplication is the wave (`v_readlane_b32`), and a DPP
+        # move where it is half of one.  SeisSol's damage step at order 4 in
+        # single: 13045 instructions to 12709 on gfx942, 19085 to 18631 on
+        # gfx1250, and the scratch shrinks.  On sm_86 it took the operands
+        # NVIDIA stages through shared memory -- one element of each lane,
+        # read by every lane -- into 620 shuffles, and 13760 SASS
+        # instructions to 17712.
         placement=VendorPolicy(preload_operands_into_registers=True,
                                keep_results_in_registers=True,
                                atomic_accumulation=True,
-                               broadcast_without_staging=True),
+                               broadcast_without_staging=True,
+                               read_across=True),
         preload_globals=True,
         # A gather from a register image goes through `ds_bpermute`, where
         # the broadcast it replaces is fused into the FMA (`fmac_dpp`):

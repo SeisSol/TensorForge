@@ -756,6 +756,338 @@ def test_a_register_of_numbers_read_as_truth_values_is_whether_they_are_zero():
     assert held.op == Op.LOAD and held.args[0] is r
 
 
+def _exchange_body(arch='sm_86'):
+    """A body built against a target, which spells the exchange, and `s`, a
+    buffer of the arena with an element a lane: `(t, b, s)`."""
+    from tensorforge.common.context import Context
+    t = Body()
+    b = t.b
+    b.context = Context(arch=arch, backend='cuda' if arch.startswith('sm')
+                        else 'hip', fp_type=F32)
+    s = b.alloc(F32, (LANES,), MemSpace.SHARED, hint='s', extern='s0',
+                arena='shrMem')
+    return t, b, s
+
+
+def _one_lane(store='register', rewrite=False, around=None, arch='sm_86',
+              named=False, predicated=None):
+    """Lane 0 stores into element 0 of `s`, and the lanes load element 0
+    behind it.  Lane 0 stores what its register holds, which the last trip
+    of a loop wrote and no value stands for behind the loop -- or, with
+    `store='value'`, a value computed ahead.  With `rewrite` the register is
+    written again in between by another such loop, and read; `around` gives
+    a block the load stands in; with `named` text names the load's value,
+    and with `predicated` the lanes of a row load, or every lane but lane 0,
+    and the others take zero.  `(t, s, r, value)`."""
+    t, b, s = _exchange_body(arch)
+    r = t.registers('r0', 1)
+    value = None
+    if store == 'value':
+        value = b.op('mul', REAL, b.load(t.p, t.lane), 2.0, hint='v')
+    else:
+        with b.for_(0, 2, 1, unroll=True) as hop:
+            loaded = b.load(t.q, t.element(hop.induction))
+            b.store(r, b.op('mul', REAL, loaded, 2.0, hint='v'), 0)
+    with b.if_(b.op('eq', BOOL, t.lane, 0, hint='w')):
+        b.store(s, b.load(r, 0) if value is None else value, t.lane)
+    if rewrite:
+        with b.for_(0, 2, 1, unroll=True) as hop:
+            loaded = b.load(t.q, t.element(hop.induction))
+            b.store(r, b.op('add', REAL, loaded, 1.0, hint='u'), 0)
+        b.store(t.q, b.load(r, 0), t.element(0))
+    predicate = {'row': lambda: t.valid,
+                 'others': lambda: b.op('ne', BOOL, t.lane, 0, hint='others'),
+                 None: lambda: None}[predicated]()
+    with (around(t) if around else contextlib.nullcontext()):
+        b.store(t.p, b.load(s, 0, extern='named' if named else None,
+                            predicate=predicate,
+                            other=0.0 if predicated else None), t.lane)
+    return t, s, r, value
+
+
+def _exchanged(t, exchange=LANES):
+    body = t.b.finish()
+    verify(body)
+    out = forward_memory(body, t.b.scratch, threads=LANES, arena='shrMem',
+                         exchange=exchange)
+    verify(out)
+    return out
+
+
+@pytest.mark.parametrize('arch,exchange,spelled', [
+    ('sm_86', LANES, 'tensorforge::readlane({0}, 0)'),
+    ('gfx942', 2 * LANES, 'tensorforge::broadcast<32, 1, 0>({0})')],
+    ids=['wave', 'half'])
+@pytest.mark.parametrize('store', ['register', 'value'])
+def test_what_one_lane_stored_is_read_from_it_across_the_lanes(
+        store, arch, exchange, spelled):
+    """Lane 0 stores, every lane reads it: what lane 0 stored, from the
+    register or the value it took it from, handed to every lane -- no store,
+    no load, and nothing of the arena.  The same on every lane of the
+    multiplication, which an exchange of the whole wave is, or of the
+    multiplication's own lanes within a wider one."""
+    t, s, r, value = _one_lane(store, arch=arch)
+    out = _exchanged(t, exchange)
+    assert not _loads(out, MemSpace.SHARED, s)
+    assert not _stores(out, MemSpace.SHARED, s)
+    read, = [x for x in walk_stmts(out)
+             if x.op == Op.RAWEXPR and x.attr('crosslane')]
+    assert read.text == spelled and read.attr('alike')
+    if value is not None:
+        assert read.args[0] is value
+    else:
+        held, = [x for x in walk_stmts(out) if read.args[0] in x.target]
+        assert held.op == Op.LOAD and held.args[0] is r
+
+
+@pytest.mark.parametrize('arch,backend,across', [
+    ('gfx942', 'hip', True), ('gfx1250', 'hip', True),
+    ('sm_86', 'cuda', False), ('pvc', 'oneapi', False)])
+def test_what_one_lane_stored_is_read_across_where_the_vendor_says(
+        arch, backend, across):
+    """On AMD a read across the lanes is a scalar read or a DPP move; on
+    NVIDIA the operands it stages through shared memory would become a
+    shuffle per element, and nothing has been measured on Intel."""
+    from tensorforge.common.context import Context
+    options = Context(arch=arch, backend=backend,
+                      fp_type=F32).get_user_options()
+    assert options.forward_across is across
+
+
+def test_without_an_exchange_one_lanes_store_is_read_from_memory():
+    t, s, _, _ = _one_lane()
+    assert _loads(_exchanged(t, None), MemSpace.SHARED, s)
+
+
+def test_lanes_past_one_exchange_read_one_lanes_store_from_memory():
+    """The multiplication's lanes are more than one exchange reaches."""
+    t, s, _, _ = _one_lane()
+    assert _loads(_exchanged(t, LANES // 2), MemSpace.SHARED, s)
+
+
+def test_lanes_no_block_of_an_exchange_holds_read_one_lanes_store_from_memory():
+    """24 lanes, which a broadcast's block of a power of two does not
+    hold."""
+    t, s, _, _ = _one_lane()
+    body = t.b.finish()
+    out = forward_memory(body, t.b.scratch, threads=24, arena='shrMem',
+                         exchange=LANES)
+    verify(out)
+    assert _loads(out, MemSpace.SHARED, s)
+
+
+@pytest.mark.parametrize('predicated', [None, 'others'])
+def test_a_register_written_since_keeps_the_load_of_one_lanes_store(
+        predicated):
+    """Lane 0's register holds another number by the time the lanes load:
+    what lane 0 stored is in memory alone -- for the other lanes as well,
+    where lane 0 does not read it itself."""
+    t, s, _, _ = _one_lane(rewrite=True, predicated=predicated)
+    assert _loads(_exchanged(t), MemSpace.SHARED, s)
+
+
+def test_a_predicated_load_of_one_lanes_store_is_read_across():
+    """The lanes of a row load, the others take zero: what lane 0 stored,
+    read across by every lane, and zero where the predicate says so."""
+    t, s, r, _ = _one_lane(predicated='row')
+    out = _exchanged(t)
+    assert not _loads(out, MemSpace.SHARED, s)
+    read, = [x for x in walk_stmts(out)
+             if x.op == Op.RAWEXPR and x.attr('crosslane')]
+    picked, = [x for x in walk_stmts(out) if x.op == 'select'
+               and read.target[0] in x.args]
+    assert picked.args[0] is t.valid and picked.args[2] == 0.0
+
+
+def test_a_named_load_of_one_lanes_store_keeps_its_load():
+    """Text names the load's value, and a broadcast is another value."""
+    t, s, _, _ = _one_lane(named=True)
+    assert _loads(_exchanged(t), MemSpace.SHARED, s)
+
+
+@pytest.mark.parametrize('block', ['row', 'apart', 'text', 'loop', 'alike',
+                                   'alike loop'])
+def test_a_load_in_a_block_the_lanes_may_take_apart_keeps_its_load(block):
+    """The lanes load inside a block: of the lanes of a row, which lane 0 may
+    stand outside of; on what each lane loaded, under a head spelled in
+    text, or in a loop of as many trips as the lane's index, which any lane
+    may -- and an exchange reads the registers of the lanes that take part.
+    On a value the same on every lane, or in a loop of a count the same on
+    every lane, every lane runs it as often as the others: read across."""
+    def around(t):
+        b = t.b
+        if block == 'row':
+            return b.if_(t.valid)
+        if block == 'apart':
+            return b.if_(b.op('gt', BOOL, b.load(t.p, t.lane), 0.0,
+                              hint='pos'))
+        if block == 'text':
+            return b.Block('if (active)')
+        if block == 'loop':
+            return b.for_(0, t.lane, 1, hint='n')
+        if block == 'alike loop':
+            count = b.extern_value('count', SIZE, uniform=Uniformity.MULT,
+                                   hint='count')
+            return b.for_(0, count, 1, hint='n')
+        alpha = b.extern_value('alpha', REAL, uniform=Uniformity.MULT,
+                               hint='alpha')
+        return b.if_(b.op('gt', BOOL, alpha, 0.0, hint='pos'))
+    t, s, _, _ = _one_lane(around=around)
+    kept = bool(_loads(_exchanged(t), MemSpace.SHARED, s))
+    assert kept == (block not in ('alike', 'alike loop'))
+
+
+def test_a_value_one_lane_stored_in_a_branch_is_not_read_behind_it():
+    """Every lane takes the branch and computes the value there, and lane 0
+    stores it: behind the branch, no lane holds it to be read across."""
+    t, b, s = _exchange_body()
+    with b.if_(b.op('lt', BOOL, t.lane, LANES, hint='every')):
+        v = b.op('mul', REAL, b.load(t.p, t.lane), 2.0, hint='v')
+        with b.if_(b.op('eq', BOOL, t.lane, 0, hint='w')):
+            b.store(s, v, t.lane)
+    b.store(t.p, b.load(s, 0), t.lane)
+    assert _loads(_exchanged(t), MemSpace.SHARED, s)
+
+
+def test_one_lanes_store_of_what_its_register_held_perhaps_is_read():
+    """Every lane stores what its register holds, which every lane but
+    lane 0 may have written again, and every lane loads lane 0's element:
+    the value lane 0 read from its register, read across -- whatever the
+    register held there, the value is that on every lane."""
+    t, b, s = _exchange_body()
+    r = t.registers('r0', 1)
+    with b.for_(0, 2, 1, unroll=True) as hop:
+        loaded = b.load(t.q, t.element(hop.induction))
+        b.store(r, b.op('mul', REAL, loaded, 2.0, hint='v'), 0)
+    with b.if_(b.op('ne', BOOL, t.lane, 0, hint='others')):
+        with b.if_(b.op('gt', BOOL, b.load(t.p, t.lane), 0.0, hint='pos')):
+            b.store(r, 5.0, 0)
+    b.store(s, b.load(r, 0), t.lane)
+    b.store(t.p, b.load(s, 0), t.lane)
+    out = _exchanged(t)
+    assert not _loads(out, MemSpace.SHARED, s)
+
+
+def test_what_one_lane_stored_in_another_trip_keeps_its_load():
+    """Lane 0 stores what the first trip of a loop computes, and every lane
+    loads it in every trip: in the second, lane 0's value is another than
+    it stored."""
+    t, b, s = _exchange_body()
+    with b.for_(0, 2, 1, unroll=True) as hop:
+        v = b.load(t.q, t.element(hop.induction), hint='v')
+        with b.if_(b.op('eq', BOOL, hop.induction, 0, hint='first')):
+            with b.if_(b.op('eq', BOOL, t.lane, 0, hint='w')):
+                b.store(s, v, t.lane)
+        b.store(t.p, b.load(s, 0), t.lane)
+    assert _loads(_exchanged(t), MemSpace.SHARED, s)
+
+
+@pytest.mark.parametrize('stores', ['registers', 'values', 'both'])
+def test_one_lanes_stores_of_two_things_keep_their_load(stores):
+    """Lane 0 stores one thing in the first trip of a loop and another in
+    the second -- two registers, two values, or a register and a value --
+    and every lane loads what it stored in each trip: no one register or
+    value holds what they read."""
+    t, b, s = _exchange_body()
+    kinds = (('register', 'value') if stores == 'both'
+             else (stores[:-1],) * 2)
+    things = []
+    for k, kind in enumerate(kinds):
+        if kind == 'register':
+            r = t.registers(f'r{k}', 1)
+            with b.for_(0, 2, 1, unroll=True) as hop:
+                loaded = b.load(t.q, t.element(hop.induction))
+                b.store(r, b.op('mul', REAL, loaded, float(k + 2), hint='v'),
+                        0)
+            things.append(lambda r=r: b.load(r, 0))
+        else:
+            v = b.op('mul', REAL, b.load(t.p, t.lane), float(k + 2),
+                     hint='v')
+            things.append(lambda v=v: v)
+    with b.for_(0, 2, 1, unroll=True) as hop:
+        for k, thing in enumerate(things):
+            with b.if_(b.op('eq', BOOL, hop.induction, k, hint='trip')):
+                with b.if_(b.op('eq', BOOL, t.lane, 0, hint='w')):
+                    b.store(s, thing(), t.lane)
+        b.store(t.p, b.op('add', REAL, b.load(t.p, t.lane), b.load(s, 0)),
+                t.lane)
+    assert _loads(_exchanged(t), MemSpace.SHARED, s)
+
+
+@pytest.mark.parametrize('held', ['alike', 'alike apart', 'apart', 'trip'])
+def test_one_lanes_store_of_a_register_every_lane_holds_alike(held):
+    """Lane 0 stores what its register holds, and every lane loads it.  A
+    value the same on every lane: every lane holds it as well, and reads its
+    own -- nothing is exchanged, and so the lanes need not load it together:
+    the same in a branch they take apart.  A value of each lane's own: lane
+    0's register, read across.  In a loop, a value the same on every lane
+    that the first trip stores and both trips load: in the second trip the
+    value is another, and the register, which holds the first trip's still,
+    is read across."""
+    t, b, s = _exchange_body()
+    r = t.registers('r0', 1)
+
+    def store_and_load(first=None):
+        with (b.if_(first) if first is not None
+              else contextlib.nullcontext()):
+            with b.if_(b.op('eq', BOOL, t.lane, 0, hint='w')):
+                b.store(s, b.load(r, 0), t.lane)
+        apart = b.op('gt', BOOL, b.load(t.p, t.lane), 0.0, hint='pos')
+        with (b.if_(apart) if held == 'alike apart'
+              else contextlib.nullcontext()):
+            b.store(t.p, b.op('add', REAL, b.load(t.p, t.lane),
+                              b.load(s, 0)), t.lane)
+
+    value = None
+    if held == 'trip':
+        with b.for_(0, 2, 1, unroll=True) as hop:
+            first = b.op('eq', BOOL, hop.induction, 0, hint='first')
+            with b.if_(first):
+                b.store(r, b.op('mul', REAL, b.load(t.q, hop.induction), 2.0,
+                                hint='u'), 0)
+            store_and_load(first)
+    else:
+        if held == 'apart':
+            value = b.op('mul', REAL, b.load(t.p, t.lane), 2.0, hint='u')
+        else:
+            alpha = b.extern_value('alpha', REAL, uniform=Uniformity.MULT,
+                                   hint='alpha')
+            value = b.op('mul', REAL, alpha, 2.0, hint='u')
+        b.store(r, value, 0)
+        store_and_load()
+    out = _exchanged(t)
+    assert not _loads(out, MemSpace.SHARED, s)
+    across = [x for x in walk_stmts(out)
+              if x.op == Op.RAWEXPR and x.attr('crosslane')]
+    assert bool(across) == (held in ('apart', 'trip'))
+    if held.startswith('alike'):
+        added, = [x for x in walk_stmts(out) if x.op == 'add']
+        assert added.args[1] is value
+
+
+def test_a_lane_reading_its_own_store_beside_one_lanes_keeps_its_load():
+    """Every lane stores into its own element; lane 1 loads its own, every
+    other lane lane 0's: two lanes hold what the lanes read."""
+    t, b, s = _exchange_body()
+    b.store(s, b.op('mul', REAL, b.load(t.p, t.lane), 2.0, hint='v'),
+            t.lane)
+    one = b.op('eq', BOOL, t.lane, 1, hint='one')
+    b.store(t.p, b.load(s, b.op('select', INDEX, one, 1, 0, hint='which')),
+            t.lane)
+    assert _loads(_exchanged(t), MemSpace.SHARED, s)
+
+
+def test_each_lane_reading_another_lanes_store_keeps_its_load():
+    """Every lane stores into its own element and loads the next lane's: no
+    one lane holds what they read."""
+    t, b, s = _exchange_body()
+    b.store(s, b.op('mul', REAL, b.load(t.p, t.lane), 2.0, hint='v'),
+            t.lane)
+    nxt = b.op('rem', INDEX, b.op('add', INDEX, t.lane, 1), LANES, hint='n')
+    b.store(t.p, b.load(s, nxt), t.lane)
+    assert _loads(_exchanged(t), MemSpace.SHARED, s)
+
+
 def _reload(t, between=None, lane=None, guard=None):
     """`r0[j] = q[e(j)]` and `p = r0[0]`, then `between`, then `r1[j] =
     q[e(j)]` and `p = r1[1]`: the same elements loaded twice by the same

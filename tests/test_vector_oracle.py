@@ -144,6 +144,24 @@ def test_a_cross_lane_read_outside_a_wave_run_refuses():
         interp.env['READLANE']('v1', 3)
 
 
+def test_an_expression_read_across_the_lanes_is_the_lane_reads():
+    """`readlane((v9 * 2.0), 1)`, an expression the emitter inlined: what
+    it comes to in lane 1, not in the lane that reads -- and the same for
+    the template form, in the reading lane's own run of lanes."""
+    mem = kernel_eval.Slot(0)
+    lanes = [kernel_eval.Interp(mem, {}) for _ in range(4)]
+    kernel_eval.Lockstep(lanes)
+    for i, it in enumerate(lanes):
+        it.env['v9'] = float(i)
+        it.env['threadIdx'] = type('T', (), {'x': i, 'y': 0, 'z': 0})()
+    assert lanes[0].ev('tensorforge::readlane((v9 * 2.0), 1)') == 2.0
+    assert lanes[3].ev('tensorforge::readlane(v9, 2)') == 2.0
+    form = 'tensorforge::broadcast<2, 1, 1>((v9 + 1.0))'
+    assert [it.ev(form) for it in lanes] == [2.0, 2.0, 4.0, 4.0]
+    own = 'tensorforge::broadcast<1, 1, 0>((v9 + 1.0))'
+    assert [it.ev(own) for it in lanes] == [1.0, 2.0, 3.0, 4.0]
+
+
 def test_a_lane_masked_off_at_the_definition_refuses():
     """On the hardware the register holds whatever it held before, which is
     not something to invent a number for."""

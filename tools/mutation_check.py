@@ -3161,6 +3161,88 @@ GROUPS = {
         ('a value a loop hands on taken for one computed ahead of it',
          sub(FLOW, '        if d.op == Op.FOR and not any(t is v for t in d.target):\n',
              '        if False:\n', 1)),
+        ('another lane\'s register read whether it holds the store still',
+         sub(FLOW, "                    if o[0] == 'value' or self._holds(o[1], o[2], 1 << r.by,",
+             "                    if True or self._holds(o[1], o[2], 1 << r.by,", 1)),
+        ('lanes past one exchange read across',
+         sub(FORWARD, '                        exchange=exchange is not None\n'
+                      '                        and threads <= exchange\n',
+             '                        exchange=exchange is not None\n', 1)),
+        ('a multiplication of lanes no block of a power of two holds read across',
+         sub(FORWARD, '                        and threads <= exchange\n'
+                      '                        and not threads & (threads - 1))',
+             '                        and threads <= exchange)', 1)),
+        ('a load under a branch the lanes take apart read across',
+         sub(FORWARD, '                if not flow.alike(p.cond):\n'
+                      '                    return False\n', '                pass\n', 1)),
+        ('a load in a loop of a count the lanes may not share read across',
+         sub(FORWARD, '                if not all(flow.alike(x) for x in p.loop_bounds):\n'
+                      '                    return False\n', '                pass\n', 1)),
+        ('a block whose head is text taken for one every lane runs',
+         sub(FORWARD, '            elif p.op != Op.RAWBLOCK or p.text:',
+             '            elif p.op != Op.RAWBLOCK:', 1)),
+        ('a lane reading its own store beside one lane\'s read across',
+         sub(FORWARD, '        if own & ~(1 << lane):', '        if False:', 1)),
+        ('the stores of several lanes read across as one lane\'s',
+         sub(FORWARD, '        if len(sources) != 1 or not self._converged(s):\n'
+                      '            return False\n'
+                      '        lane, = sources\n',
+             '        if not sources or not self._converged(s):\n'
+                      '            return False\n'
+                      '        lane = min(sources)\n', 1)),
+        ('one lane\'s stores from two registers read across from the first',
+         sub(FORWARD, "            if any(o[0] != 'reg' for _, o in origins) or len(\n"
+                      "                    {o[1][0][1] for _, o in origins}) != 1:",
+             "            if any(o[0] != 'reg' for _, o in origins):", 1)),
+        ('one lane\'s stores of two values read across as the first',
+         sub(FORWARD, '        if len({o[1].id for _, o in origins}) != 1:\n'
+                      '            return False\n', '', 1)),
+        ('a register every lane holds alike read across',
+         sub(FORWARD, '            held = self._held_alike(origins)\n',
+             '            held = None\n', 1)),
+        ('a register every lane holds alike read only where the lanes go together',
+         sub(FORWARD, "        if all(o[0] == 'reg' for _, o in origins):\n"
+                      "            held = self._held_alike(origins)\n",
+             "        if all(o[0] == 'reg' for _, o in origins) and self._converged(s):\n"
+                      "            held = self._held_alike(origins)\n", 1)),
+        ('a register of a lane\'s own taken for one every lane holds alike',
+         sub(FORWARD, "                if (o[0] != 'value' or not flow.alike(o[1])\n",
+             "                if (o[0] != 'value'\n", 1)),
+        ('a register a trip before wrote taken for this trip\'s value',
+         sub(FORWARD, '                        or not flow._one_trip(o[1], writer, n)):\n',
+             '                        or False):\n', 1)),
+        ('a named load read across',
+         sub(FORWARD, "        if s.attr('extern') is not None:\n"
+                      "            # Text names the load's value, and a broadcast does not keep it.\n"
+                      "            return False\n", '', 1)),
+        ('a value read across where it does not stand',
+         sub(FORWARD, '            if value.type != s.target[0].type or not self._stands(value, s):',
+             '            if value.type != s.target[0].type:', 1)),
+        ('a broadcast of the multiplication\'s lanes taken for one of a lane',
+         sub(FORWARD, "hint='fwd', whole=True)", "hint='fwd')", 1)),
+        ('the read across the lanes off on AMD',
+         sub(TARGET, '                               broadcast_without_staging=True,\n'
+                     '                               read_across=True),',
+             '                               broadcast_without_staging=True),', 1)),
+        ('the read across the lanes asked of no vendor',
+         sub(OPTIONS, "        rule=lambda target: target.prefs.placement.read_across,",
+             "        default=False,", 1)),
+        ('a broadcast of every lane not said to be alike',
+         sub(BUILD, "attrs=(('crosslane', True), ('alike', True)))",
+             "attrs=(('crosslane', True),))", 1)),
+    ]),
+
+    # The host oracle's reads across the lanes of an expression the emitter
+    # inlined.
+    'lanereads': ('tests/test_vector_oracle.py -k expression', [
+        ('an expression read across taken in the reading lane',
+         sub(ORACLE, '            return peer.ev(_WAVE_TEXTS[int(name)])\n',
+             '            return self.ev(_WAVE_TEXTS[int(name)])\n', 1)),
+        ('an expression of the template form not read at all',
+         sub(ORACLE, '            if not isinstance(name, str):\n'
+                     '                return self.ev(_WAVE_TEXTS[int(name)])\n', '', 1)),
+        ('an expression read across taken for a name',
+         sub(ORACLE, "        if re.fullmatch(r'\\w+', text):", '        if True:', 1)),
     ]),
 }
 

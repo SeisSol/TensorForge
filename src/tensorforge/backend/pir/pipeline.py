@@ -371,7 +371,9 @@ class Forward(Pass):
     (`standard_pipeline`).  Not under the explicit vector, whose registers
     are vectors a load of one element does not name.  `scratch` makes the
     builder new statements are built with; `threads`, `arena` and `report`
-    are what the carry takes.
+    are what the carry takes; `exchange` how many lanes one exchange
+    reaches, where a load of what one other lane stored is read from that
+    lane's register.
     """
 
     name = 'forward'
@@ -380,7 +382,8 @@ class Forward(Pass):
     is_transform = True
 
     def __init__(self, scratch, threads: int, arena: Optional[str] = None,
-                 report: Optional[List[str]] = None, registers: bool = True):
+                 report: Optional[List[str]] = None, registers: bool = True,
+                 exchange: Optional[int] = None):
         self._scratch = scratch
         self._threads = threads
         self._arena = arena
@@ -388,6 +391,9 @@ class Forward(Pass):
         #: Whether loads of registers are taken too, or only loads of memory
         #: (`standard_pipeline`, ahead of the atomics).
         self._registers = registers
+        #: How many lanes one exchange reaches, where a load of what another
+        #: lane stored is read across the lanes (`forward_memory`).
+        self._exchange = exchange
         if not registers:
             self.name = 'forward-memory'
 
@@ -397,6 +403,7 @@ class Forward(Pass):
         pc.body = forward_memory(pc.body, self._scratch,
                                  threads=self._threads, arena=self._arena,
                                  registers=self._registers,
+                                 exchange=self._exchange,
                                  report=self._report)
 
 

@@ -599,6 +599,52 @@ def _fold_reads(e: str) -> str:
         at = j
 
 
+_LANE_READ = re.compile(
+    r'\btensorforge::(?:readlane|broadcast\s*<\s*(\d+)\s*,\s*(\d+)\s*,'
+    r'\s*(\d+)\s*>)\s*\(')
+
+
+def _lane_reads(e: str) -> str:
+    """Every `tensorforge::readlane(v, L)` of `e` as `READLANE(v, L)`, and
+    every `tensorforge::broadcast<Block, Subblock, Lane>(v)` as
+    `BROADCAST(v, Block, Subblock, Lane)`: `v` as the name it is, in
+    quotes, or as the key of its text where it is an expression, as
+    `_wave_reads` hands one over.  Either way not as a value: by the time
+    Python evaluated it, it would hold this lane's copy, which is the one
+    thing the call is not asking for."""
+    out, at = [], 0
+    while True:
+        m = _LANE_READ.search(e, at)
+        if m is None:
+            out.append(e[at:])
+            return ''.join(out)
+        depth, j, cut = 1, m.end(), None
+        while j < len(e) and depth:
+            depth += (e[j] == '(') - (e[j] == ')')
+            if e[j] == ',' and depth == 1:
+                cut = j
+            j += 1
+        if m.group(1) is None:
+            text, lane = e[m.end():cut].strip(), e[cut + 1:j - 1].strip()
+        else:
+            text = e[m.end():j - 1].strip()
+        if re.fullmatch(r'\w+', text):
+            ref = f'"{text}"'
+        else:
+            key = _WAVE_KEYS.get(text)
+            if key is None:
+                key = _WAVE_KEYS[text] = len(_WAVE_TEXTS)
+                _WAVE_TEXTS.append(text)
+            ref = str(key)
+        if m.group(1) is None:
+            call = f'READLANE({ref}, {lane})'
+        else:
+            call = (f'BROADCAST({ref}, {m.group(1)}, {m.group(2)}, '
+                    f'{m.group(3)})')
+        out.append(e[at:m.start()] + call)
+        at = j
+
+
 #: What `tensorforge::ReductionOperation<T, Op>::applyOperation` does, by
 #: the operation's name (`include/tensorforge_device/base.h`).
 _FOLDS = {
@@ -657,19 +703,12 @@ def _py(expr: str) -> str:
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__builtin_nontemporal_load\s*\(\s*&', 'DEREF(', e)
-    # `readlane(v, L)` reads lane `L`'s copy of `v`.  Captured as a *name*
-    # rather than a value: by the time Python evaluated the argument it would
-    # already hold this lane's copy, which is the one thing the call is not
-    # asking for.
-    e = re.sub(r'\btensorforge::readlane\s*\(\s*(\w+)\s*,\s*([^),]+)\)',
-               r'READLANE("\1", \2)', e)
-    # `broadcast<Block, Subblock, Lane>(v)`, the template form the operand
-    # broadcast takes on a narrow extent.  Captured as a name for the same
-    # reason `readlane` is, and left to `_broadcast` to resolve, since which
-    # lane it reads depends on the reading lane's own index.
-    e = re.sub(r'\btensorforge::broadcast\s*<\s*(\d+)\s*,\s*(\d+)\s*,'
-               r'\s*(\d+)\s*>\s*\(\s*(\w+)\s*\)',
-               r'BROADCAST("\4", \1, \2, \3)', e)
+    # `readlane(v, L)` reads lane `L`'s copy of `v`, and `broadcast<Block,
+    # Subblock, Lane>(v)`, the template form the operand broadcast takes on
+    # a narrow extent, the copy of a lane `_broadcast` resolves, since which
+    # lane it reads depends on the reading lane's own index.  `v` a name, or
+    # an expression the emitter inlined (`_lane_reads`).
+    e = _lane_reads(e)
     # `gather<Block>(v, L)`, the same with `L` a value of each lane's own
     # (`MultilinearInstruction._ell_plan`).  `L` may hold one level of
     # parentheses -- a table read the emitter inlined.
@@ -892,8 +931,9 @@ class Interp:
         # macro).
         self.env['INFINITY'] = math.inf
 
-    def _readlane(self, name: str, lane):
-        """Lane `lane`'s copy of `name`.
+    def _readlane(self, name, lane):
+        """Lane `lane`'s copy of `name` -- or, where `name` is the key of a
+        text (`_lane_reads`), what that text comes to in lane `lane`.
 
         Requires a lockstep run: the lanes have to have reached this point
         together, or the peer's binding is from a different statement.  In a
@@ -908,6 +948,8 @@ class Interp:
         if not 0 <= lane < len(self.peers):
             raise Abort(f'readlane({name!r}, {lane}): no such lane')
         peer = self.peers[lane]
+        if not isinstance(name, str):
+            return peer.ev(_WAVE_TEXTS[int(name)])
         if name not in peer.env:
             # The lane was masked off where this value was defined.  On the
             # hardware the register holds whatever it held before, which is
@@ -1011,6 +1053,8 @@ class Interp:
         """
         block, subblock, lane = int(block), int(subblock), int(lane)
         if block == 1 or block == subblock:
+            if not isinstance(name, str):
+                return self.ev(_WAVE_TEXTS[int(name)])
             if name not in self.env:
                 raise Abort(f'broadcast({name!r}): not defined in this lane')
             return self.env[name]

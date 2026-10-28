@@ -83,6 +83,10 @@ class VendorPolicy:
     #: A cross-lane broadcast is cheap enough that an operand missing the lane
     #: axis can be read in place instead of staged.
     broadcast_without_staging: bool = False
+    #: A load of what one other lane of the multiplication stored reads that
+    #: lane's register across the lanes rather than memory: the default of
+    #: `Options.forward_across` (`pir.forward`).
+    read_across: bool = False
 
 
 # -- legality ------------------------------------------------------------- #

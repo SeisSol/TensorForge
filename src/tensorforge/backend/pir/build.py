@@ -796,7 +796,7 @@ class IRBuilder:
         return lex.get_simd(INDEX.base.ctype(), block)
 
     def lane_broadcast(self, vec: Value, lane: int, block: int,
-                       hint: str = 'bc') -> Value:
+                       hint: str = 'bc', whole: bool = False) -> Value:
         """The value `vec` holds at `lane`, replicated across the wave.
 
         The fourth question in the family with :meth:`thread_id`,
@@ -816,6 +816,11 @@ class IRBuilder:
         The result is *replicated* in both models -- one value, the same in
         every lane -- which is why this is not `extract`: that one indexes the
         slot axis (`ScalarType.length`) and keeps the lane distribution.
+
+        With `whole`, the run of `block` lanes is every lane of the
+        multiplication, and the value is the same across it whatever `vec`
+        is on each: a uniformity wider than the operand's, which the
+        primitive states, as `all_reduce` does.
         """
         out = self.value(vec.type, hint=hint, uniform=Uniformity.MULT,
                          layout=SCALAR_LAYOUT)
@@ -825,6 +830,14 @@ class IRBuilder:
             return out
         lex = self.context.target.lexic
         text = lex.broadcast('{0}', lane, block)
+        if whole:
+            v = self.value(vec.type, hint=hint,
+                           uniform=max(Uniformity.MULT, _join((vec,))),
+                           layout=SCALAR_LAYOUT)
+            self._emit_op(Op.RAWEXPR, (v,), (vec,), pure=True, movable=False,
+                          effect=Effect.NONE, text=text,
+                          attrs=(('crosslane', True), ('alike', True)))
+            return v
         return self.rawexpr(text, vec, type_=vec.type, hint=hint,
                             pure=True, movable=False, layout=SCALAR_LAYOUT,
                             crosslane=True)

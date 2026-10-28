@@ -511,7 +511,10 @@ class AbstractInstruction(ABC):
       added = pir.Atomics(supported, report=carries, **carry)
     forwarded = early = None
     if carry is not None and options.forward_memory:
-      forwarded = pir.Forward(builder.scratch, report=carries, **carry)
+      exchange = (context.target.exchange_reach(carry['threads'])
+                  if options.forward_across else None)
+      forwarded = pir.Forward(builder.scratch, report=carries,
+                              exchange=exchange, **carry)
       # What the lanes store and load back -- a result handed to the
       # accumulation behind it, or to the next operation -- is read from its
       # registers before the atomics ask what a store adds onto, and before

@@ -809,6 +809,19 @@ declare('carry_trips',
             '(`pir.carry`).  A loop whose trips are closed (`closed_trips`) is '
             'one that hands its accumulators over that way.')
 
+declare('forward_across',
+        rule=lambda target: target.prefs.placement.read_across,
+        parse=parse_bool,
+        doc='Read a load of what one other lane stored from that lane\'s '
+            'register, handed across the lanes, where the lane holds the '
+            'register still and every lane of the multiplication runs the '
+            'load -- within one exchange of the lanes (`pir.forward`).  A '
+            'broadcast instead of a store, a barrier and a load, and nothing '
+            'of the arena.\n'
+            'The vendor table decides by default -- AMD yes, NVIDIA no: an '
+            'operand NVIDIA stages through shared memory, one element of each '
+            'lane read by every lane, would become a shuffle per element.')
+
 declare('keep_own',
         default=False,
         parse=parse_bool,

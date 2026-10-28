@@ -27,7 +27,12 @@ all of them -- and its value is
 
 The last holds as well where the lanes loaded the element before and found
 the same write there: the load reads the register that earlier load's value
-went into, where it holds it still.
+went into, where it holds it still -- and, where the lanes are within one
+exchange and reach the load together, where one other lane stored what
+every lane reads: the value it stored, or the register it stored from and
+holds still, of that lane, handed to every lane (`_Forward._across`).
+Where that register holds a value the same on every lane, every lane reads
+its own.
 
 Every execution and every lane the load runs for has to agree: one number,
 one value, one register array -- every lane anything reads the load's value
@@ -70,6 +75,7 @@ ROUNDS = 4
 def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
                    arena: Optional[str] = None, masks: bool = True,
                    rounds: int = ROUNDS, registers: bool = True,
+                   exchange: Optional[int] = None,
                    report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with its loads taken from what their own lane stored, and its
     stores nothing reads dropped (see the module); `scratch` makes the
@@ -83,19 +89,31 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
     lane stored: what the atomics ask runs ahead of the wrap, which counts
     the register copies this would take away, and a load taken from an
     earlier load keeps that load's registers until here
-    (`pipeline.standard_pipeline`)."""
+    (`pipeline.standard_pipeline`).
+
+    With `exchange`, how many lanes one exchange reaches (`Target.
+    exchange_reach`), a load every lane runs of what one other lane stored
+    from a register it holds still reads that register of that lane
+    (`_Forward._across`), where the multiplication's lanes are within one
+    exchange."""
     for _ in range(rounds):
         # Let the last round's flow go first: two at once would hold twice
         # what the body takes.
         flow = None
         try:
+            # A broadcast within the lanes of the multiplication runs on
+            # blocks of a power of two (`__shfl_sync`'s width).
             flow = Flow(body, threads, arena, masks=masks, values=True,
-                        before=False, fetches=registers)
+                        before=False, fetches=registers,
+                        exchange=exchange is not None
+                        and threads <= exchange
+                        and not threads & (threads - 1))
         except TooLarge as why:
             if report is not None:
                 report.append(f'forward: {why}; left as it is')
             break
-        out = _Forward(flow, scratch, report, registers=registers).run()
+        out = _Forward(flow, scratch, report, registers=registers,
+                       exchange=exchange).run()
         if out is body:
             break
         body = out
@@ -225,12 +243,15 @@ class _Forward:
     """One round over the loads of a body."""
 
     def __init__(self, flow: Flow, scratch, report: Optional[List[str]],
-                 registers: bool = True):
+                 registers: bool = True, exchange: Optional[int] = None):
         self.flow = flow
         self.scratch = scratch
         self.report = report
         #: Whether a load of registers is taken as well as one of memory.
         self.registers = registers
+        #: How many lanes one exchange reaches, where loads are read across
+        #: the lanes (`_across`).
+        self.exchange = exchange
         self.allocs: Dict[int, Stmt] = {
             id(s.target[0]): s for s in walk_stmts(flow.body)
             if s.op == Op.ALLOC and s.target}
@@ -282,6 +303,9 @@ class _Forward:
 
     def _take(self, s: Stmt) -> bool:
         flow = self.flow
+        if any(o[0] == 'lane' for n in flow.executions(s)
+               for _, o in flow.forward.get(n, ())):
+            return self._take_across(s)
         kinds: Set[str] = set()
         consts: Set = set()
         values: Set[int] = set()
@@ -410,6 +434,133 @@ class _Forward:
             s, args=(image, slot),
             accesses=(Access(Effect.READ, MemSpace.REGISTER, image),),
             attrs=attrs, predicate=predicate)]
+        return True
+
+    def _take_across(self, s: Stmt) -> bool:
+        """`s` where its lanes read what another lane stored
+        (`Flow._forwards`, `('lane', ...)`): from registers that hold what
+        every lane holds alike, that value; else where the lanes of the
+        multiplication reach it together (`_converged`), every lane anything
+        reads takes the one lane's value or register -- that lane its own --
+        and one value, or one register image, holds it."""
+        flow = self.flow
+        sources: Set[int] = set()
+        #: The lanes that read what they stored themselves.
+        own = 0
+        origins: List[Tuple] = []
+        points: List[Tuple[Dict[int, int], Tuple]] = []
+        writers: Set[int] = set()
+        for n in flow.executions(s):
+            inst = flow.insts[n]
+            covered = 0
+            found: Set[Tuple] = set()
+            for m, o in flow.forward.get(n, ()):
+                if o[0] == 'lane':
+                    sources.add(o[1])
+                    o = o[2]
+                else:
+                    own |= m
+                covered |= m
+                found.add(o)
+            need = inst.mask & self._read(s, n)
+            if covered & need != need or len(found) != 1:
+                return False
+            o, = found
+            origins.append((n, o))
+            if o[0] == 'reg':
+                points.append((inst.env(), o[1][1]))
+                writers.add(o[2])
+        if all(o[0] == 'reg' for _, o in origins):
+            held = self._held_alike(origins)
+            if held is not None:
+                # The registers hold what every lane holds alike: every lane
+                # reads its own, whichever lane stored it.
+                return self._value(s, held)
+        if len(sources) != 1 or not self._converged(s):
+            return False
+        lane, = sources
+        if own & ~(1 << lane):
+            # A lane other than the one read reads its own: not one lane's.
+            return False
+        if any(o[0] == 'reg' for _, o in origins):
+            if any(o[0] != 'reg' for _, o in origins) or len(
+                    {o[1][0][1] for _, o in origins}) != 1:
+                return False
+            if not self._across(s, lane, None, origins[0][1][1][0][1],
+                                points):
+                return False
+            self.kept |= writers
+            return True
+        if len({o[1].id for _, o in origins}) != 1:
+            return False
+        return self._across(s, lane, origins[0][1][1], None, points)
+
+    def _held_alike(self, origins) -> Optional[Value]:
+        """The value the registers of `origins`, `(execution, ('reg', cell,
+        writer))` each, hold where their stores took one value from the
+        same place, the same on every lane, and in the trip the execution
+        reads it in."""
+        flow = self.flow
+        held: Dict[int, Value] = {}
+        for n, (_, _, writer) in origins:
+            found = flow.origin.get(writer, ())
+            if not found:
+                return None
+            for _, o in found:
+                if (o[0] != 'value' or not flow.alike(o[1])
+                        or not flow._one_trip(o[1], writer, n)):
+                    return None
+                held[o[1].id] = o[1]
+        return next(iter(held.values())) if len(held) == 1 else None
+
+    def _converged(self, s: Stmt) -> bool:
+        """Do the lanes of the multiplication reach `s` together: inside no
+        branch on what differs between them, no loop of a count they may
+        not share, and no block whose head is text?  An exchange reads the
+        registers of the lanes that take part, and a lane a branch leaves
+        out takes no part."""
+        flow = self.flow
+        for p in flow.parents.get(id(s), ()):
+            if p.op == Op.IF:
+                if not flow.alike(p.cond):
+                    return False
+            elif p.op == Op.FOR:
+                if not all(flow.alike(x) for x in p.loop_bounds):
+                    return False
+            elif p.op != Op.RAWBLOCK or p.text:
+                return False
+        return True
+
+    def _across(self, s: Stmt, lane: int, value: Optional[Value],
+                base: Optional[int], points) -> bool:
+        """The load as `value`, or else as the register of `base` that
+        `points` give, of lane `lane`, handed to every lane of the
+        multiplication: a broadcast within its lanes
+        (`IRBuilder.lane_broadcast`).  Every lane runs it, so that the one it
+        reads does too."""
+        if s.attr('extern') is not None:
+            # Text names the load's value, and a broadcast does not keep it.
+            return False
+        b = self.scratch()
+        lead: List[Stmt] = []
+        if value is not None:
+            if value.type != s.target[0].type or not self._stands(value, s):
+                return False
+            v = value
+        else:
+            read = self._register_read(s, base, points)
+            if read is None:
+                return False
+            lead, slot, image = read
+            v = b.load(image, slot, type_=s.target[0].type, hint='fwd')
+        threads = self.flow.threads
+        out = b.lane_broadcast(v, lane,
+                               None if threads == self.exchange else threads,
+                               hint='fwd', whole=True)
+        if not self._unread_outside(s):
+            out = self._select(b, s, out)
+        self.rebuilt[id(s)] = lead + list(b.finish())
+        self.mapped[s.target[0].id] = out
         return True
 
     def _holding(self, number, taken, lanes_of) -> bool:
