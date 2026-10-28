@@ -37,18 +37,38 @@ the thing timed.
 | `texout.py` | the third rendering: pgfplots and booktabs, as text |
 
 ```bash
-python3 tools/bench/evaluate.py --out eval/                  # measure and plot
+python3 tools/bench/evaluate.py --out eval/                  # all of it
 python3 tools/bench/evaluate.py --out eval/ --export --profile
+./runall.sh                                       # the same, into eval/
 ```
 
-`evaluate.py` runs the exporter, the timing run, the ceiling, the profiler and
-the charts in the order they depend on each other, and writes
-`evaluation.json`: what ran, what was skipped and why, and the versions
-involved. The manifest is the reason to do it in one command rather than four
--- a directory of SVGs says what a kernel did, not which generator built it,
-which device ran it, or whether the ceiling beside it came from the same
-machine, and an evaluation nobody can reconstruct is a picture rather than a
-measurement. A step that fails is recorded and the rest goes on.
+`evaluate.py` runs the exporter, the ceilings, the timing runs, the split and
+the build runs, the profiler, the charts, the comparison and the publication
+in the order they depend on each other, and writes `evaluation.json`: what
+ran, what was skipped and why, and the versions involved. The manifest is the
+reason to do it in one command rather than nine -- a directory of SVGs says
+what a kernel did, not which generator built it, which device ran it, or
+whether the ceiling beside it came from the same machine, and an evaluation
+nobody can reconstruct is a picture rather than a measurement. A step that
+fails is recorded and the rest goes on.
+
+What one machine gives the publication, and what it costs, per export:
+
+| run | into | what for |
+|---|---|---|
+| `seissolbench`, the ramp-up sweep (one simulation) or the suite's batches | `runs/` | everything per kernel; the launch cost and the time step |
+| the same run in `tensor-cores` too, where it changes the build (NVIDIA, ESIMD) | `runs/` | the matrix units, against `baseline` on one clock |
+| `seissolsplit`, two batches (one simulation) | `split/` | what fusion is worth |
+| `seissol.py --build-only`, every kernel | `build/` | what making a configuration costs |
+| `profile.py` (`--profile`) | `profiles/` | DRAM traffic against the compulsory bytes |
+
+The sweep is fifteen batches where the suite has four, and a run starts a
+process per measurement, so over the sixteen exports the timing runs start 3210
+processes where the suite's batches alone start 1032 -- twice that with
+`tensor-cores` -- and the split runs 5052 more, one per piece, batch and pass.
+`--no-split`, `--no-buildcost`, `--no-publish`, `--batches` and `--configs`
+take parts out. Across machines, `campaign.py` runs this on each of them
+(below).
 
 The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
 correctness driver and sharing its operand collection and its launcher call —
@@ -372,13 +392,8 @@ breakdown stacks. The ramp-up depends on the launches themselves, and the
 streams are where it is uncertain: the solid line takes the relations of a face
 as one launch, the most the streams can give, the dashed one has them run one
 after another, the least. A measured step lies between the two. Both need every
-batch's quarter measured, which the sweep in `RAMPUP_BATCHES` has:
-
-```bash
-B=$(python3 -c 'print(",".join(str(2 ** e) for e in range(4, 19)))')
-python3 tools/bench/evaluate.py --out rampup/ --exports tools/bench/data \
-    --batches "$B"
-```
+batch's quarter measured, which the sweep in `RAMPUP_BATCHES` has, and which
+`evaluate.py` runs every export of one simulation over.
 
 **The cost of a launch.** `t(n) = t0 + c n` is fitted per kernel and order,
 weighted by `1/t^2` so that the small launches the fit is about are not drowned

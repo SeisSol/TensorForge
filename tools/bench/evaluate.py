@@ -12,26 +12,44 @@ there, it parses, and nothing says it is the wrong one.
     python3 tools/bench/evaluate.py --out eval/
     python3 tools/bench/evaluate.py --out eval/ --export --profile
     python3 tools/bench/evaluate.py --out eval/ --exports tools/bench/data
+    python3 tools/bench/evaluate.py --out eval/ --no-split --no-buildcost
 
 What it does, skipping anything the machine cannot do and saying so:
 
 1. **export** (`--export`): `tools/seissol_export.py` over the configuration
    matrix, into `<out>/exports`. Needs SeisSol's codegen tree; without it the
    step is skipped and existing exports are used.
-2. **run**: `run.py` per export, into `<out>/runs/<export>`.
-3. **roofline**: once per device and precision, into `<out>/ceiling/<F32|F64>`,
+2. **roofline**: once per device and precision, into `<out>/ceiling/<F32|F64>`,
    and joined into every plot of that precision. The ceilings are a property
    of the machine, not of the workload, so measuring them per export would be
    the same measurement a dozen times -- but not of the machine alone: the FMA
    chain is built for one type, and a double-precision export drawn under the
    single-precision roof sits as far below it as the part's two rates differ.
-4. **profile** (`--profile`): `profile.py` per export, into
+3. **run**: `run.py` per export, into `<out>/runs/<export>`.  An export of one
+   simulation over the ramp-up sweep (`publish.RAMPUP_BATCHES`), which the
+   launch cost and a time step's quarter launches need; one of several
+   simulations at the suite's batches, of which only the largest is read.
+   Where the matrix units change what is built -- NVIDIA, Intel's ESIMD
+   (`matrix_paths`) -- in `tensor-cores` as well, in the same run, since
+   two runs differ by the device's clock as much as by the code.
+4. **split** (`--split`, on by default): each kernel of a one-simulation
+   export whole and as one launch per operation (`suites/seissolsplit.py`),
+   into `<out>/split/<export>` -- what fusion is worth.
+5. **buildcost** (`--buildcost`, on by default): every kernel of the export
+   built once, nothing run (`suites/seissol.py`), into `<out>/build/<export>`
+   -- what generating and compiling a configuration costs, not only the few
+   kernels the run times.
+6. **profile** (`--profile`): `profile.py` per export, into
    `<out>/profiles/<export>`.
-5. **plot**: `plot.py` per export with whatever of the above exists.
-6. **manifest**: `<out>/evaluation.json` -- what ran, what was skipped and
+7. **plot**: `plot.py` per export with whatever of the above exists.
+8. **compare** and **publish** (`--publish`, on by default): across
+   everything that ran, the comparison PDF and the paper's figures and tables
+   in `<out>/publish`, compiled where pdflatex is at hand.  `--seissol` and
+   `--clustering` go to `publish.py`.
+9. **manifest**: `<out>/evaluation.json` -- what ran, what was skipped and
    why, and the version of everything involved.
 
-The manifest is the point of doing this in one command rather than four. A
+The manifest is the point of doing this in one command rather than nine. A
 directory of SVGs says what a kernel did; it does not say which generator
 built it, which device ran it, or whether the ceiling beside it came from the
 same machine. A reader a month later cannot reconstruct that, and an
@@ -58,6 +76,7 @@ for extra in (str(HERE), str(ROOT / 'src'), str(ROOT / 'tests')):
         sys.path.insert(0, extra)
 
 from capture import Capture                                     # noqa: E402
+from publish import RAMPUP_BATCHES                              # noqa: E402
 
 #: The configurations `tools/seissol_export_all.sh` produces, as the data they
 #: are rather than as a shell loop: the same list drives the export and names
@@ -169,6 +188,36 @@ def do_exports(out: Path, timeout: float, steps: List[Step]) -> None:
                               out / f'{target.stem}.log', timeout))
 
 
+def matrix_paths(backend: Optional[str], arch: Optional[str]) -> bool:
+    """Whether `tensor-cores` changes what a target builds, and so is worth
+    a second configuration in the timing run: on NVIDIA and in Intel's ESIMD
+    builds it does, for some kernels (`suite.CONFIGS`); AMD's ranking chooses
+    its matrix path whatever the option says, and over the exports it
+    changed no SPMD build for PVC -- there the configuration would time
+    `baseline`'s code again.  The kernels it leaves alone where it changes
+    some are timed twice, which is what `control` is for anyway."""
+    if backend:
+        return backend in ('cuda', 'esimd')
+    if arch:
+        return not arch.startswith('gfx')
+    try:
+        from harness.gpu_detect import detect_all
+    except ImportError:
+        return False
+    return any(gpu.vendor in ('nvidia', 'intel') for gpu in detect_all())
+
+
+def bench_command(suite: Path, out: Path, args, *extra: str) -> List[str]:
+    """`run.py` over `suite` into `out`, on the target asked for."""
+    command = [sys.executable, str(HERE / 'run.py'), str(suite),
+               '--out', str(out), '--repeat', str(args.repeat),
+               '--iters', str(args.iters), *extra]
+    for flag, value in (('--backend', args.backend), ('--arch', args.arch)):
+        if value:
+            command += [flag, value]
+    return command
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--out', type=Path, required=True,
@@ -184,8 +233,30 @@ def main() -> int:
                     default=HERE / 'suites' / 'seissolbench.py')
     ap.add_argument('--backend', default=None)
     ap.add_argument('--arch', default=None)
-    ap.add_argument('--configs', default=None)
-    ap.add_argument('--batches', default=None)
+    ap.add_argument('--configs', default=None,
+                    help='the configurations of the timing run, as run.py '
+                         'takes them (default: the suite\'s, and '
+                         '`tensor-cores` where it changes the build)')
+    ap.add_argument('--batches', default=None,
+                    help='the batches of the timing run, every export '
+                         '(default: the ramp-up sweep for one simulation, '
+                         'the suite\'s for several)')
+    ap.add_argument('--split', action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help='time each kernel whole and in pieces too, for '
+                         'what fusion is worth')
+    ap.add_argument('--buildcost', action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help='build every kernel of each export once, for what '
+                         'making a configuration costs')
+    ap.add_argument('--publish', action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help='write the paper\'s figures and tables at the end')
+    ap.add_argument('--seissol', type=Path, action='append', default=[],
+                    help='SeisSol run output for publish.py (repeatable)')
+    ap.add_argument('--clustering', action='append', default=[],
+                    help='a clustering for publish.py, CSV[@TAG] '
+                         '(repeatable)')
     ap.add_argument('--repeat', type=int, default=3)
     ap.add_argument('--iters', type=int, default=200)
     ap.add_argument('--timeout', type=float, default=7200.0)
@@ -231,24 +302,52 @@ def main() -> int:
                               out / 'logs' / f'roofline-{datatype}.log',
                               args.timeout))
 
-    # 3..5. per export: run, profile, plot
+    # What the timing run is measured in: the matrix units beside the suite's
+    # own where they change the build, in the same run.
+    configs = args.configs
+    if configs is None and matrix_paths(args.backend, args.arch):
+        configs = '+tensor-cores'
+    sweep = ','.join(map(str, RAMPUP_BATCHES))
+
+    # 3..7. per export: run, split, buildcost, profile, plot
     for capture in captures:
         tag = capture.stem
+        captured = _capture_of(capture)
+        single = captured is None or captured.simulations == 1
         env_dump = {'TF_BENCH_DUMP': str(capture)}
         run_dir = out / 'runs' / tag
-        command = [sys.executable, str(HERE / 'run.py'), str(args.suite),
-                   '--out', str(run_dir), '--repeat', str(args.repeat),
-                   '--iters', str(args.iters)]
-        for flag, value in (('--backend', args.backend), ('--arch', args.arch),
-                            ('--configs', args.configs),
-                            ('--batches', args.batches)):
+        batches = args.batches or (sweep if single else None)
+        extra: List[str] = []
+        for flag, value in (('--configs', configs), ('--batches', batches)):
             if value:
-                command += [flag, value]
-        step = run_with_env(f'run {tag}', command, env_dump,
-                            out / 'logs' / f'run-{tag}.log', args.timeout)
+                extra += [flag, value]
+        step = run_with_env(f'run {tag}',
+                            bench_command(args.suite, run_dir, args, *extra),
+                            env_dump, out / 'logs' / f'run-{tag}.log',
+                            args.timeout)
         steps.append(step)
         if step.status != 'ok':
             continue
+
+        if args.split and single:
+            steps.append(run_with_env(
+                f'split {tag}',
+                bench_command(HERE / 'suites' / 'seissolsplit.py',
+                              out / 'split' / tag, args),
+                env_dump, out / 'logs' / f'split-{tag}.log', args.timeout))
+        elif args.split:
+            steps.append(Step(f'split {tag}', [], 'skipped',
+                              note='several simulations: the fusion figure '
+                                   'reads one'))
+
+        if args.buildcost:
+            steps.append(run_with_env(
+                f'buildcost {tag}',
+                bench_command(HERE / 'suites' / 'seissol.py',
+                              out / 'build' / tag, args, '--build-only',
+                              '--configs', 'baseline'),
+                env_dump, out / 'logs' / f'buildcost-{tag}.log',
+                args.timeout))
 
         profile_dir = None
         if args.profile:
@@ -277,18 +376,31 @@ def main() -> int:
         steps.append(run_step(f'plot {tag}', command,
                               out / 'logs' / f'plot-{tag}.log', args.timeout))
 
-    # 6. across everything that ran: the configurations against each other,
+    # 8. across everything that ran: the configurations against each other,
     #    the orders against each other, and the machines against each other.
     #    Last, because it reads what the steps above wrote and nothing else
     #    -- a campaign that half failed still gets the comparison of the
-    #    half that did not.
+    #    half that did not.  The split runs stay out of the comparison, whose
+    #    views know nothing of pieces; the publication reads the whole tree.
     steps.append(run_step(
         'compare',
         [sys.executable, str(HERE / 'compare.py'), str(out / 'runs'),
          str(out / 'ceiling'), '--out', str(out / 'compare'), '--pdf'],
         out / 'logs' / 'compare.log', args.timeout))
+    if args.publish:
+        command = [sys.executable, str(HERE / 'publish.py'), str(out),
+                   '--out', str(out / 'publish'),
+                   '--title', f'TensorForge evaluation {out.name}']
+        for path in args.seissol:
+            command += ['--seissol', str(path)]
+        for text in args.clustering:
+            command += ['--clustering', text]
+        if shutil.which('pdflatex'):
+            command.append('--compile')
+        steps.append(run_step('publish', command,
+                              out / 'logs' / 'publish.log', args.timeout))
 
-    # 7. the manifest
+    # 9. the manifest
     from tensorforge import interop                                 # noqa
     manifest = {
         'evaluation': {
@@ -298,7 +410,12 @@ def main() -> int:
             'exports_from': str(exports),
             'suite': str(args.suite),
             'repeat': args.repeat, 'iters': args.iters,
+            'configs': configs,
+            'batches': args.batches or {'one simulation': sweep,
+                                        'several': 'the suite\'s'},
+            'split': bool(args.split), 'buildcost': bool(args.buildcost),
             'profiled': bool(args.profile),
+            'published': bool(args.publish),
         },
         'steps': [s.to_dict() for s in steps],
     }
