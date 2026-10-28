@@ -87,6 +87,7 @@ CARRY = Path('src/tensorforge/backend/pir/carry.py')
 ATOMICS = Path('src/tensorforge/backend/pir/atomics.py')
 FORWARD = Path('src/tensorforge/backend/pir/forward.py')
 FLOW = Path('src/tensorforge/backend/pir/flow.py')
+SINK = Path('src/tensorforge/backend/pir/sink.py')
 DEMAND = Path('src/tensorforge/backend/pir/demand.py')
 EPILOGUE = Path('src/tensorforge/backend/instructions/compute/epilogue.py')
 PROMISE = Path('src/tensorforge/backend/instructions/compute/promise.py')
@@ -3296,6 +3297,38 @@ GROUPS = {
         ('the forward under the explicit vector asked as under SPMD',
          sub(PIPE, '                                 simd=pc.explicit_simd,\n',
              '                                 simd=False,\n', 1)),
+    ]),
+
+    # A store of a number nothing reads, taken behind the work it stands in.
+    'sink': ('tests/test_sink.py', [
+        ('a store of a value taken for a number',
+         sub(SINK, '            return v.id in self.consts\n',
+             '            return True\n', 1)),
+        ('a number something reads taken down',
+         sub(SINK, '                if (self.flow.readers.get(n) or n in self.flow.escaped\n',
+             '                if (n in self.flow.escaped\n', 1)),
+        ('the stores going down out of their order',
+         sub(SINK, '                going.append((s, cells))\n',
+             '                going.insert(0, (s, cells))\n', 1)),
+        ('an element both touch not asked',
+         sub(SINK, '        return any(mine & cells for _, cells in going)\n',
+             '        return False\n', 1)),
+        ('a barrier passed',
+         sub(SINK, '            if x.op == Op.BARRIER or x.effect & Effect.BARRIER:\n',
+             '            if False:\n', 1)),
+        ('a yield passed',
+         sub(SINK, '        if s.op == Op.YIELD:\n', '        if False:\n', 1)),
+        ('an exit passed',
+         sub(SINK, '            if x.op == Op.EXIT:\n', '            if False:\n', 1)),
+        ('text of an effect the IR does not say passed',
+         sub(SINK, '            if (x.effect & Effect.UNKNOWN and not x.accesses\n',
+             '            if (False\n', 1)),
+        ('an access the flow could not place passed',
+         sub(SINK, '            if id(x) in flow.opaque and any(\n',
+             '            if False and any(\n', 1)),
+        ('the pass not run',
+         sub(PIPE, '        pm.add(SinkNumbers(forward._threads, forward._arena,\n'
+                   '                           report=forward._report))\n', '', 1)),
     ]),
 
     # The host oracle's reads across the lanes of an expression the emitter

@@ -34,6 +34,7 @@ from .asyncmem import schedule_async
 from .allocate import allocate
 from .atomics import accumulate_atomically
 from .forward import drop_promises, forward_memory
+from .sink import sink_numbers
 from .barriers import place_barriers
 from .carry import carry_trips, keep_own
 from .core import Stmt, dump
@@ -406,6 +407,32 @@ class Forward(Pass):
                                  report=self._report)
 
 
+class SinkNumbers(Pass):
+    """Take a store of a number nothing reads to the end of its list
+    (`sink.sink_numbers`).
+
+    Behind the forward, which drops the stores nothing reads and takes the
+    loads that read what a store wrote: what is left of a padding is what
+    the body ends with.  `threads` and `arena` are what the forward takes.
+    """
+
+    name = 'sink'
+    requires = ('flat',)
+    preserves = ('flat',)
+    is_transform = True
+
+    def __init__(self, threads: int, arena: Optional[str] = None,
+                 report: Optional[List[str]] = None):
+        self._threads = threads
+        self._arena = arena
+        self._report = report
+
+    def run(self, pc: BodyContext) -> None:
+        pc.body = sink_numbers(pc.body, threads=self._threads,
+                               arena=self._arena, simd=pc.explicit_simd,
+                               report=self._report)
+
+
 class KeepOwn(Pass):
     """Keep a buffer of the multiplication's own arena that every lane reads
     only what it wrote itself in a register image of every lane's own
@@ -669,6 +696,8 @@ def standard_pipeline(debug: str = '',
         for name, fn in (('forward-fold', fold), ('forward-loads', load_cse),
                          ('forward-cse', cse), ('forward-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',)))
+        pm.add(SinkNumbers(forward._threads, forward._arena,
+                           report=forward._report))
     # What the producers promised was said for the forward pass; behind it,
     # it only keeps the lane conditions it stands under alive.
     pm.add(Rewrite('promises', drop_promises, preserves=('flat',)))
