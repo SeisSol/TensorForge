@@ -185,6 +185,65 @@ class _Indices:
         memo[operand.id] = out
         return out
 
+    def evaluate_lanes(self, operand, env: Dict, lanes: Tuple[int, ...],
+                       memo: Dict, fixed: Dict[int, int]):
+        """`operand` for each thread index `x` of `lanes`, the rest of the
+        leaves as `env` says: a tuple, one value a lane in the order of
+        `lanes` -- or a number, where `x` does not change it, which `fixed`
+        keeps as `evaluate`'s memo.  What a lane would compute is computed
+        for all of them at once, a select's arms for the lanes that take
+        each; `leaves` has read the operand first."""
+        if not isinstance(operand, Value):
+            return int(operand)
+        if operand.id in env:
+            return env[operand.id]
+        if 'x' not in self._leaves[operand.id]:
+            return self.evaluate(operand, env, fixed)
+        key = (operand.id, lanes)
+        known = memo.get(key)
+        if known is not None:
+            return known
+        s = self._defs[operand.id]
+        if s.op == Op.CALL or s.op == Op.RAWEXPR:
+            # The thread index along `x`, or the lanes' own (`_lanes`).
+            out = lanes
+        elif s.op == 'select':
+            cond, a, b = s.args
+            c = self.evaluate_lanes(cond, env, lanes, memo, fixed)
+            if not isinstance(c, tuple):
+                out = self.evaluate_lanes(a if c else b, env, lanes, memo,
+                                          fixed)
+            else:
+                yes = tuple(l for l, v in zip(lanes, c) if v)
+                no = tuple(l for l, v in zip(lanes, c) if not v)
+                va = (self.evaluate_lanes(a, env, yes, memo, fixed)
+                      if yes else ())
+                vb = (self.evaluate_lanes(b, env, no, memo, fixed)
+                      if no else ())
+                ia = iter(va if isinstance(va, tuple) else (va,) * len(yes))
+                ib = iter(vb if isinstance(vb, tuple) else (vb,) * len(no))
+                out = tuple(next(ia) if v else next(ib) for v in c)
+        elif s.op in _UN:
+            f = _UN[s.op]
+            v = self.evaluate_lanes(s.args[0], env, lanes, memo, fixed)
+            out = (tuple(int(f(x)) for x in v) if isinstance(v, tuple)
+                   else int(f(v)))
+        else:
+            f = _BIN[s.op]
+            a, b = s.args
+            va = self.evaluate_lanes(a, env, lanes, memo, fixed)
+            vb = self.evaluate_lanes(b, env, lanes, memo, fixed)
+            if isinstance(va, tuple) and isinstance(vb, tuple):
+                out = tuple(int(f(x, y)) for x, y in zip(va, vb))
+            elif isinstance(va, tuple):
+                out = tuple(int(f(x, vb)) for x in va)
+            elif isinstance(vb, tuple):
+                out = tuple(int(f(va, y)) for y in vb)
+            else:
+                out = int(f(va, vb))
+        memo[key] = out
+        return out
+
     def domain(self, leaves: frozenset,
                loops: Mapping[int, Sequence[int]]) -> Iterator[Dict]:
         """Every combination of `leaves`: the thread indices over the block,

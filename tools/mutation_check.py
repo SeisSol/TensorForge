@@ -3152,14 +3152,14 @@ GROUPS = {
          sub(FLOW, '            if (not r.certain or not r.cell or r.mask & taken\n',
              '            if (not r.certain or not r.cell\n', 1)),
         ('the register of an earlier load taken whether it holds it or not',
-         sub(FLOW, '                               if m & r.mask == r.mask\n'
-                   '                               and self._holds(cell, store, r.mask, conds)),\n',
-             '                               if m & r.mask == r.mask),\n', 1)),
+         sub(FLOW, '                                   if m & bit\n'
+                   '                                   and self._holds(cell, store, bit, conds)),\n',
+             '                                   if m & bit),\n', 1)),
         ('two rounds where a chain of copies takes more',
          sub(FORWARD, 'ROUNDS = 4\n', 'ROUNDS = 2\n', 1)),
         ('the last load of an element asked before the first',
-         sub(FLOW, '                self._fetched[(r.cell, r.mask)].append((load, r))\n',
-             '                self._fetched[(r.cell, r.mask)].insert(0, (load, r))\n', 1)),
+         sub(FLOW, '                    self._fetched[(r.cell, lane)].append((load, r))\n',
+             '                    self._fetched[(r.cell, lane)].insert(0, (load, r))\n', 1)),
         ('a load taken from a load the same round takes read as that one\'s value',
          sub(FORWARD, '            while v.id in mapped:\n'
                       '                v = mapped[v.id]\n', '', 1)),
@@ -3297,6 +3297,35 @@ GROUPS = {
         ('the forward under the explicit vector asked as under SPMD',
          sub(PIPE, '                                 simd=pc.explicit_simd,\n',
              '                                 simd=False,\n', 1)),
+    ]),
+
+    # The flow's broadcasts and what no lane changes, each placed once.
+    'broadcasts': ('tests/test_flow.py', [
+        ('a broadcast whose writing lane reads another lane\'s store',
+         sub(FLOW, '                own = mask & (1 << layer.lane) if layer.lane >= 0 else 0\n',
+             '                own = 0\n', 1)),
+        ('every lane of a broadcast reading its own store',
+         sub(FLOW, '                own = mask & (1 << layer.lane) if layer.lane >= 0 else 0\n',
+             '                own = mask\n', 1)),
+        ('a broadcast counted once against the budget',
+         sub(FLOW, '            spent *= len(self.lanes(mask))\n', '            pass\n', 1)),
+        ('the loads fetched before kept by their lane group',
+         sub(FLOW, '                    self._fetched[(r.cell, lane)].append((load, r))\n',
+             '                    self._fetched[(r.cell, r.mask)].append((load, r))\n', 1)),
+        ('what a lane changes kept for the next lane',
+         sub(SHARDS, "        if 'x' not in self._leaves[operand.id]:\n"
+                     '            return self.evaluate(operand, env, fixed)\n',
+             '        if True:\n'
+             '            return self.evaluate(operand, env, fixed)\n', 1)),
+        ('every lane taken for the first',
+         sub(SHARDS, '            # The thread index along `x`, or the lanes\' own (`_lanes`).\n'
+                     '            out = lanes\n',
+             '            out = (lanes[0],) * len(lanes)\n', 1)),
+        ('a select over the lanes taking one arm for all of them',
+         sub(SHARDS, '            if not isinstance(c, tuple):\n'
+                     '                out = self.evaluate_lanes(a if c else b, env, lanes, memo,\n',
+             '            if True:\n'
+             '                out = self.evaluate_lanes(a if c else b, env, lanes, memo,\n', 1)),
     ]),
 
     # A store of a number nothing reads, taken behind the work it stands in.

@@ -148,6 +148,79 @@ def test_memory_tells_the_lane_that_stored_from_another():
     assert lanes_past and not any(r.own for r in lanes_past)
 
 
+def test_a_broadcast_tells_the_lane_that_stored_from_the_others():
+    """Every lane reads `q[0]`, which lane 5 stored: lane 5 reads its own
+    store, the others what lane 5 stored."""
+    t = Body()
+    b = t.b
+    with b.if_(b.op('eq', BOOL, t.lane, 5)):
+        b.store(t.q, 1.0, 0)
+    b.store(t.p, b.load(t.q, 0), t.lane)
+    f = t.flow()
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    reaches = _reaches(f, load)
+    assert sum(bin(r.mask).count('1') for r in reaches) == LANES
+    own = [r for r in reaches if r.own]
+    assert len(own) == 1 and own[0].mask == 1 << 5
+    assert all(r.by == 5 and r.certain and r.writer != INITIAL
+               for r in reaches)
+
+
+def test_a_broadcast_counts_against_the_budget_lane_by_lane():
+    """A read every lane makes of one element counts as the reads of the
+    lanes: with each lane's store of what it read, 64 run on a budget of
+    64, not on 63."""
+    t = Body()
+    b = t.b
+    b.store(t.p, b.load(t.q, 0), t.lane)
+    body = b.finish()
+    verify(body)
+    assert Flow(body, LANES, budget=2 * LANES).insts
+    with pytest.raises(TooLarge):
+        Flow(body, LANES, budget=2 * LANES - 1)
+
+
+def test_a_broadcast_takes_what_each_lane_loaded_before_lane_by_lane():
+    """Each lane loaded its own element of `q` into `r` before; of the
+    lanes that then all read `q[0]`, lane 0 loaded it, and reads it from
+    `r`, and no other lane does."""
+    t = Body()
+    b = t.b
+    r = t.registers('r', 1)
+    b.store(r, b.load(t.q, t.lane), 0)
+    b.store(t.p, b.load(t.q, 0), t.lane)
+    body = b.finish()
+    verify(body)
+    f = Flow(body, LANES, arena='shrMem', values=True, before=False)
+    load = [s for s in walk_stmts(body) if s.op == Op.LOAD and s.accesses
+            and s.accesses[0].space is MemSpace.GLOBAL][1]
+    found = [(m, o) for n in f.executions(load) for m, o in f.forward.get(n, ())]
+    assert [(m, o[0]) for m, o in found] == [(1, 'reg')]
+
+
+def test_an_index_that_picks_by_lane_is_asked_lane_by_lane():
+    """Lanes below 16 store their own element of `q`, the others the one 32
+    past theirs.  Each then reads the element 32 past its own: a lane above
+    reads its own store, a lane below an element nobody stored."""
+    t = Body()
+    b = t.b
+    low = b.op('lt', BOOL, t.lane, 16, hint='low')
+    past = b.op('add', INDEX, t.lane, 32, hint='past')
+    b.store(t.q, 1.0, b.op('select', INDEX, low, t.lane, past, hint='at'))
+    b.store(t.p, b.load(t.q, past), t.lane)
+    f = t.flow()
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    reaches = _reaches(f, load)
+    lanes = sorted(l for r in reaches for l in range(LANES) if r.mask >> l & 1)
+    assert lanes == list(range(LANES))
+    for r in reaches:
+        if r.mask >> 16:
+            assert r.mask & 0xFFFF == 0
+            assert r.own and r.certain and r.writer != INITIAL
+        else:
+            assert r.writer == INITIAL
+
+
 def test_a_store_through_the_symbol_is_read_through_the_binding():
     """A store names the buffer's symbol, a load the value bound for it:
     one buffer.  Asked of the generator's own shape, where the store's

@@ -77,7 +77,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from .core import (BufferType, Effect, MemSpace, Op, Stmt, Uniformity, Value,
                    walk_stmts)
@@ -264,6 +264,8 @@ class Flow:
         #: Each element, once (`_place_one`): every access to it names the
         #: same cell.
         self._interned: Dict[Tuple, Tuple] = {}
+        #: The lanes of each mask asked of `lanes`, once.
+        self._lane_sets: Dict[int, Tuple[int, ...]] = {}
         #: For a store's execution, lane group by lane group, where what it
         #: stored came from: `('reg', cell, writer)`, a register a load read
         #: it from, holding what `writer` wrote; `('const', number)`; or
@@ -288,8 +290,8 @@ class Flow:
         #: The masks taken to hold (`masks`).
         self.masks: FrozenSet = self._masks() if masks else frozenset()
         self._forwarded: Dict[int, List[Tuple[int, Tuple, Tuple[Reach, ...]]]] = {}
-        #: Per element of memory and lane group: the loads of it whose value
-        #: went into a register, the first first, and what each found there
+        #: Per element of memory and lane: the loads of it whose value went
+        #: into a register, the first first, and what each found there
         #: (`_fetches`).
         self._fetched: Dict[Tuple[Tuple, int], List[Tuple[int, Reach]]] = \
             defaultdict(list)
@@ -366,13 +368,13 @@ class Flow:
     def executions(self, stmt: Stmt) -> List[int]:
         return self.by_stmt.get(id(stmt), [])
 
-    def lanes(self, mask: int) -> Iterator[int]:
-        lane = 0
-        while mask:
-            if mask & 1:
-                yield lane
-            mask >>= 1
-            lane += 1
+    def lanes(self, mask: int) -> Tuple[int, ...]:
+        """The lanes of `mask`, the lowest first."""
+        out = self._lane_sets.get(mask)
+        if out is None:
+            out = self._lane_sets[mask] = tuple(
+                lane for lane in range(mask.bit_length()) if mask >> lane & 1)
+        return out
 
     # -- running ------------------------------------------------------------- #
 
@@ -400,8 +402,12 @@ class Flow:
         uniform = 'x' not in self._ix.leaves(cond)
         if uniform:
             return mask if self._ix.evaluate(cond, dict(env), memo) else 0
-        for lane in self.lanes(mask):
-            if self._ix.evaluate(cond, {**env, 'x': lane}, {}):
+        lanes = self.lanes(mask)
+        found = self._ix.evaluate_lanes(cond, env, lanes, {}, {})
+        if not isinstance(found, tuple):
+            return mask if found else 0
+        for lane, v in zip(lanes, found):
+            if v:
                 out |= 1 << lane
         return out
 
@@ -752,17 +758,28 @@ class Flow:
             if (not r.certain or not r.cell or r.mask & taken
                     or r.cell[0][0] is MemSpace.REGISTER):
                 continue
-            for earlier, found in self._fetched.get((r.cell, r.mask), ()):
-                if not found.certain or found.writer != r.writer:
-                    continue
-                holder = next(((cell, store)
-                               for m, cell, store in self._held.get(earlier, ())
-                               if m & r.mask == r.mask
-                               and self._holds(cell, store, r.mask, conds)),
-                              None)
-                if holder is not None:
-                    out.append((r.mask, ('reg',) + holder, (r, found)))
-                    break
+            # Lane by lane, and the lanes that found the same together: a
+            # broadcast's lanes may each have loaded the element before in
+            # a load of their own.
+            found_by: Dict[Tuple, int] = {}
+            reaches: Dict[Tuple, Reach] = {}
+            for lane in self.lanes(r.mask):
+                bit = 1 << lane
+                for earlier, found in self._fetched.get((r.cell, lane), ()):
+                    if not found.certain or found.writer != r.writer:
+                        continue
+                    holder = next(((cell, store) for m, cell, store
+                                   in self._held.get(earlier, ())
+                                   if m & bit
+                                   and self._holds(cell, store, bit, conds)),
+                                  None)
+                    if holder is not None:
+                        key = (holder, id(found))
+                        found_by[key] = found_by.get(key, 0) | bit
+                        reaches[key] = found
+                        break
+            for key, lanes in found_by.items():
+                out.append((lanes, ('reg',) + key[0], (r, reaches[key])))
         return out
 
     def _holding(self, s: Stmt, n: int, env, written) -> None:
@@ -786,7 +803,8 @@ class Flow:
         self._held[load].extend(held)
         for r in self.reach.get(load, ()):
             if r.cell:
-                self._fetched[(r.cell, r.mask)].append((load, r))
+                for lane in self.lanes(r.mask):
+                    self._fetched[(r.cell, lane)].append((load, r))
 
     def _numbers(self, cell, lanes: int, conds) -> Dict[Any, int]:
         """The numbers `cell`, a register, holds for certain for the lanes of
@@ -882,7 +900,13 @@ class Flow:
         key = self._buffer(a, binding, env)
         if key is None:
             return None
-        uniform = (a.space is MemSpace.REGISTER
+        # An element no lane tells apart from the others' is one cell for
+        # all of them: a register, which each lane holds of its own, and an
+        # element of memory they read -- a broadcast, which `_read_memory`
+        # tells the lane that wrote it apart in.  A write of one element by
+        # several lanes is placed lane by lane: the last of them is what
+        # memory holds.
+        uniform = ((a.space is MemSpace.REGISTER or kind == 'read')
                    and not any('x' in self._ix.leaves(i) for i in index
                                if isinstance(i, Value)))
         out = []
@@ -892,13 +916,24 @@ class Flow:
                 cell = (key, addr)
                 out.append((mask, interned.setdefault(cell, cell), kind))
         else:
-            for lane in self.lanes(mask):
-                here = {**env, 'x': lane}
-                for addr in _span(self._address(index, here), width):
-                    cell = (key, addr)
+            # The index for every lane at once (`_Indices.evaluate_lanes`).
+            lanes = self.lanes(mask)
+            memo: Dict = {}
+            fixed: Dict[int, int] = {}
+            found = [self._ix.evaluate_lanes(i, env, lanes, memo, fixed)
+                     for i in index]
+            for k, lane in enumerate(lanes):
+                addr = tuple(int(v[k]) if isinstance(v, tuple) else int(v)
+                             for v in found)
+                for at in _span(addr, width):
+                    cell = (key, at)
                     out.append((1 << lane, interned.setdefault(cell, cell),
                                 kind))
-        self._budget -= len(out)
+        spent = len(out)
+        if uniform and a.space is not MemSpace.REGISTER:
+            # The budget counts a broadcast as the reads of its lanes.
+            spent *= len(self.lanes(mask))
+        self._budget -= spent
         if self._budget < 0:
             raise TooLarge(f'the body places more than {self._limit} '
                            f'elements')
@@ -1026,18 +1061,22 @@ class Flow:
 
     def _read(self, n: int, placed, conds) -> List[Reach]:
         out: List[Reach] = []
+        #: Per buffer, what a read of it may find besides its layers.
+        others: Dict[Tuple, FrozenSet[int]] = {}
         for m, cell, _ in placed:
             layers = self._layers(cell)
-            smeared = frozenset(self._smeared.get(cell[0][:2], ())) | \
-                frozenset(self._smeared_space.get(cell[0][0], ()))
-            if self._shared_with_others(cell):
-                smeared = smeared | {EXTERNAL}
+            smeared = others.get(cell[0][:2])
+            if smeared is None:
+                smeared = frozenset(self._smeared.get(cell[0][:2], ())) | \
+                    frozenset(self._smeared_space.get(cell[0][0], ()))
+                if self._shared_with_others(cell):
+                    smeared = smeared | {EXTERNAL}
+                others[cell[0][:2]] = smeared
             if cell[0][0] is MemSpace.REGISTER:
                 out.extend(self._read_register(n, m, cell, layers, conds,
                                                smeared))
             else:
-                lane = next(self.lanes(m))
-                out.append(self._read_memory(n, m, lane, cell, layers, conds,
+                out.extend(self._read_memory(n, m, cell, layers, conds,
                                              smeared))
         return out
 
@@ -1064,16 +1103,28 @@ class Flow:
             out.append(Reach(left, fresh, self._frozen(maybe), cell=cell))
         return out
 
-    def _read_memory(self, n, mask, lane, cell, layers, conds, smeared):
+    def _read_memory(self, n, mask, cell, layers, conds,
+                     smeared) -> List[Reach]:
+        """What the lanes of `mask` read of `cell`, an element of memory:
+        the last write of it they stand under for certain, the lane that
+        wrote it apart from the others -- it reads its own store."""
         maybe: Set[int] = set(smeared)
         for layer in reversed(layers):
             self.readers[layer.writer].append((n, mask))
             if layer.conds <= conds:
-                return Reach(mask, layer.writer, self._frozen(maybe),
-                             own=layer.lane == lane, cell=cell,
-                             by=layer.lane)
+                found = self._frozen(maybe)
+                own = mask & (1 << layer.lane) if layer.lane >= 0 else 0
+                out = []
+                if own:
+                    out.append(Reach(own, layer.writer, found, own=True,
+                                     cell=cell, by=layer.lane))
+                if mask & ~own:
+                    out.append(Reach(mask & ~own, layer.writer, found,
+                                     own=False, cell=cell, by=layer.lane))
+                return out
             maybe.add(layer.writer)
-        return Reach(mask, INITIAL, self._frozen(maybe), own=False, cell=cell)
+        return [Reach(mask, INITIAL, self._frozen(maybe), own=False,
+                      cell=cell)]
 
     def _write(self, n: int, placed, conds) -> None:
         before: Dict[Tuple[int, Tuple], Tuple[Optional[int], bool]] = {}
@@ -1109,7 +1160,7 @@ class Flow:
             if register:
                 kept.append(_Layer(n, conds, mask=m))
             else:
-                kept.append(_Layer(n, conds, lane=next(self.lanes(m))))
+                kept.append(_Layer(n, conds, lane=self.lanes(m)[0]))
             if len(kept) > _DEPTH:
                 kept = kept[-_DEPTH:]
             table = self._reg if register else self._mem
