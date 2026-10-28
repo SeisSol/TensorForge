@@ -552,7 +552,9 @@ def _matmul(writer, ops, ctx, span, width):
             if fit is None:
                 return False
         if fit.scheme is Scheme.EXCHANGE:
-            return matmul_exchange(writer, C, A, B, M, N, K, kx, threads,
+            # `shared` before `lead`: the instruction's A fragment is fed by
+            # this dispatch's `B`, and its B fragment by `A`.
+            return matmul_exchange(writer, C, B, A, M, N, K, kx, threads,
                                    dtype, sparse, ctx, span.start, span.stop)
         # `convergence` asked for the wave group on the same condition, less
         # the accessor: a lead operand that turns out not to be addressable

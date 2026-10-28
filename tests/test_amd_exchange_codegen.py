@@ -264,6 +264,44 @@ def test_the_transpose_writes_registers_of_its_own():
         assert all(a in assigned for a in args)
 
 
+def test_the_dispatch_hands_the_shared_operand_to_the_transpose(monkeypatch):
+    """`matmul_exchange` takes `shared` before `lead`; the dispatch holds them
+    as `B` and `A`.
+
+    Handed over in the dispatch's own order, the transpose read the lead
+    operand with a column for its slot and the fragments the shared one with a
+    lead slot for its column -- typed, emitted, compiled for gfx942, and wrong.
+    Nothing ran the routing before SeisSol's order-6 kernels did, and the
+    tests above call the emitter with its own names.
+    """
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.instructions.compute.matmul import MatmulOperands
+    from tensorforge.backend.instructions.compute.primitives import amd
+    from tensorforge.backend.instructions.compute.primitives.amd import tiling
+    from tensorforge.backend.instructions.compute.strategy import Span, Strategy
+    monkeypatch.setattr(tiling, "EXCHANGE", True)
+    reads = {"A": [], "B": []}
+
+    def reader(name):
+        def read(writer, var, first, k):
+            reads[name].append(first)
+            return writer.declare(hint=name.lower())
+        return read
+
+    stores = []
+    M, N = 1, 16
+    ops = MatmulOperands(A=reader("A"), B=reader("B"),
+                         C=lambda writer, value, i, j: stores.append((i, j)),
+                         sparse=None, lead_slots=M, lead_elements=M * 64,
+                         n=N, k=64, kx=0, threads=64, a=Datatype.F64,
+                         b=Datatype.F64, accumulator=Datatype.F64)
+    assert amd.matmul(IRBuilder(Datatype.F64), ops, Ctx(),
+                      Span(Strategy.MATRIX, 0, N))
+    assert set(reads["A"]) == set(range(M)), "A is read by lead slot"
+    assert set(reads["B"]) == set(range(N)), "B is read by column"
+    assert sorted(stores) == [(i, j) for i in range(M) for j in range(N)]
+
+
 def test_a_partial_column_block_is_padded_with_zeroes():
     """Fewer columns than the tile is width, not a reason to decline.
 
