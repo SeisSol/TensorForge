@@ -2808,6 +2808,10 @@ GROUPS = {
          sub(TARGET, '                               read_across=True,\n'
                      '                               keep_own=True),',
              '                               read_across=True),', 1)),
+        ('keeping a buffer no lane hands on off on NVIDIA',
+         sub(TARGET, '                               keep_results_in_registers=True,\n'
+                     '                               keep_own=True),',
+             '                               keep_results_in_registers=True),', 1)),
         ('keeping a buffer no lane hands on asked of no vendor',
          sub(OPTIONS, "        rule=lambda target: target.prefs.placement.keep_own,",
              "        default=False,", 1)),

@@ -235,11 +235,12 @@ def test_a_loop_that_does_not_touch_it_is_not_asked():
 
 @pytest.mark.parametrize('arch,backend,kept', [
     ('gfx942', 'hip', True), ('gfx1250', 'hip', True),
-    ('sm_86', 'cuda', False), ('pvc', 'oneapi', False)])
+    ('sm_86', 'cuda', True), ('pvc', 'oneapi', False)])
 def test_a_buffer_no_lane_hands_on_is_kept_where_the_vendor_says(
         arch, backend, kept):
-    """On AMD the arena halves at the same length of code; on NVIDIA, bound
-    by its registers, a register more is a spill."""
+    """On AMD the arena halves at the same length of code; on NVIDIA a
+    block of the damage step at order 6 holds three multiplications instead
+    of two, and spills less."""
     options = Context(arch=arch, backend=backend,
                       fp_type=Datatype.F32).get_user_options()
     assert options.keep_own is kept
@@ -265,7 +266,7 @@ def test_a_temporary_kept_in_registers_computes_what_numpy_does(stem):
     itself of: in registers of the lane's own, and no more in shared memory;
     and on the host oracle what the kernel computes is what NumPy does."""
     case = _case(stem)
-    held = _built(case, 'sm_86').get_kernel()
+    held = _built(case, 'sm_86', keep_own=False).get_kernel()
     descrs = case.descr_list()
     gen = _built(case, 'sm_86', descrs, keep_own=True)
     src = gen.get_kernel()

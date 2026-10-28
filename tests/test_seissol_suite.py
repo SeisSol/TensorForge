@@ -211,10 +211,11 @@ def test_a_multiplication_that_does_not_fit_is_refused():
     multiplication at all -- height 0, the window never declared -- and the
     source would go out as if nothing had happened.
 
-    Two things have to be off for the damage step to reach that size, and each
-    of them is why it does not by default: `merge_variants`, and
+    Three things have to be off for the damage step to reach that size, and
+    each of them is why it does not by default: `merge_variants`,
     `register_temporaries` (a temporary read out of its producer's image never
-    reaches a buffer).  Then order 8 in double needs 134 KB per
+    reaches a buffer), and `keep_own` (a buffer every lane reads only what it
+    wrote stays in registers).  Then order 8 in double needs 134 KB per
     multiplication, against 99 KB a block has; with them on, the whole family
     fits, so what the test pins is the guard, not the order."""
     from tensorforge.common.context import Options
@@ -224,7 +225,8 @@ def test_a_multiplication_that_does_not_fit_is_refused():
     gen = Generator(_read(system, f'{system}-o8-d', 'gpu_damageStep'),
                     Context(arch='sm_86', backend='cuda', fp_type=Datatype.F64,
                             options=Options(merge_variants=False,
-                                            register_temporaries='none')))
+                                            register_temporaries='none',
+                                            keep_own=False)))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         with pytest.raises(GenerationError, match='shared memory'):

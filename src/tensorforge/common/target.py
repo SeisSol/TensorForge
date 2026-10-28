@@ -151,8 +151,21 @@ PREFERENCES = {
         # `square_notrans` and `wide_cascade` within the noise (+0.1 to
         # +1.5 %).
         unstaged_block_threads=128,
+        # Shared memory is for what the lanes hand each other, here as on
+        # AMD: a buffer every lane reads only what it wrote is kept in its
+        # registers.  SeisSol's damage step at order 6 in double: 50928 SASS
+        # instructions to 43288 on sm_86, 66664 to 54656 on sm_90 and
+        # 154256 to 128984 on sm_120, a third to a half fewer bytes spilled,
+        # and a multiplication's arena from 5184 elements to 4208 -- three
+        # multiplications to a block instead of two on sm_86 and sm_120.  At
+        # order 4 in single the same within 0.2 %.  Of the kernels of
+        # elastic and viscoelastic at orders 4 and 6, those it changes are
+        # up to 5 % shorter, but for viscoelastic `fsgKernel` at order 6, 1 %
+        # longer; `fsgKernel` at order 6, at 255 registers already, spills up
+        # to 56 B more.
         placement=VendorPolicy(preload_operands_into_registers=True,
-                               keep_results_in_registers=True),
+                               keep_results_in_registers=True,
+                               keep_own=True),
         # A 32-bit immediate fits the instruction: a chain of four 9x9
         # operators on sm_120 had 768 instructions instead of 888 by value.
         inline_constants=4096,
@@ -187,8 +200,7 @@ PREFERENCES = {
         # Shared memory is for what the lanes hand each other: a buffer every
         # lane reads only what it wrote is kept in its registers.  The damage
         # step's arena halves on gfx942, gfx1250 and gfx1251 (512 elements a
-        # multiplication to 256) at the same length of code; on sm_86 1280
-        # become 1024, and it spills a little more.
+        # multiplication to 256) at the same length of code.
         placement=VendorPolicy(preload_operands_into_registers=True,
                                keep_results_in_registers=True,
                                atomic_accumulation=True,

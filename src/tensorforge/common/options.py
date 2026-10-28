@@ -816,8 +816,8 @@ declare('keep_own',
             'without it (`pir.carry.keep_own`).  Shared memory is for what '
             'lanes hand each other; a buffer no lane hands on costs a store, '
             'a load and its bytes of the arena, and registers instead.\n'
-            'The vendor table decides by default -- AMD yes, NVIDIA no: '
-            'where the registers run out, a register more is a spill.')
+            'The vendor table decides by default -- AMD and NVIDIA yes, '
+            'Intel no.')
 
 declare('memory_semantics',
         default=False,

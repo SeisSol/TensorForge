@@ -703,8 +703,11 @@ def test_shared_bias_carries_the_destination_offset(backend, arch):
     """
     # The pair asked about is the builder's: the bias it reads and the store
     # of the sum.  Where nothing reads that sum, the body drops the store
-    # (`pir.forward`), which says nothing about either address.
-    src = _predictor_source(backend, arch, forward_memory=False)
+    # (`pir.forward`), which says nothing about either address; and where
+    # every lane reads only what it wrote, the buffer is kept in registers
+    # (`pir.carry.keep_own`), which has no address at all.
+    src = _predictor_source(backend, arch, forward_memory=False,
+                            keep_own=False)
     lines = src.splitlines()
     checked = 0
     for i, line in enumerate(lines):
