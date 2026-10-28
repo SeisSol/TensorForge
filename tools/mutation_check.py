@@ -2786,8 +2786,8 @@ GROUPS = {
              "                if False:\n"
              "                    raise _Refused('a lane reads what it did not write there '\n", 1)),
         ('a statement that says nothing of what it touches taken for none',
-         sub(CARRY, '            if any(a.space is MemSpace.UNKNOWN or (\n',
-             '            if False and any(a.space is MemSpace.UNKNOWN or (\n', 1)),
+         sub(CARRY, '        found = (any(a.space is MemSpace.UNKNOWN or (\n',
+             '        found = (False and any(a.space is MemSpace.UNKNOWN or (\n', 1)),
         ('text that touches it taken for a load or a store',
          sub(CARRY, "                if x.op not in (Op.LOAD, Op.STORE):\n"
                     "                    raise _Refused(f'a {x.op} touches it')\n"
@@ -2801,10 +2801,14 @@ GROUPS = {
                     "                        or not counted(owner)):\n",
              "                if True:\n", 1)),
         ('a loop that does not hold it asked all the same',
-         sub(CARRY, '                if not any(_touches(y, key) for y in walk_stmts((x,))):\n'
-                    '                    continue\n', '', 1)),
+         sub(CARRY, '        for x in ((xs[i] for i in where(xs)) if where is not None else xs):\n'
+                    '            if x.regions:\n'
+                    '                if where is None and not any(\n',
+             '        for x in xs:\n'
+             '            if x.regions:\n'
+             '                if where is None and not any(\n', 1)),
         ('the declaration of the buffer left',
-         sub(CARRY, '        gone = marks | {id(alloc)}\n', '        gone = marks\n', 1)),
+         sub(CARRY, '                     marks | {id(alloc)})\n', '                     marks)\n', 1)),
         ('keeping a buffer no lane hands on off on AMD',
          sub(TARGET, '                               read_across=True,\n'
                      '                               keep_own=True),',
@@ -3326,6 +3330,20 @@ GROUPS = {
                      '                out = self.evaluate_lanes(a if c else b, env, lanes, memo,\n',
              '            if True:\n'
              '                out = self.evaluate_lanes(a if c else b, env, lanes, memo,\n', 1)),
+    ]),
+
+    # keep_own asks the body once, and rewrites it once.
+    'ownonce': ('tests/test_keep_own.py', [
+        ('what is nested left out of what a statement accesses',
+         sub(CARRY, '                _, a, b = self._get(y)\n'
+                    '                accessed |= a\n', '                _, a, b = self._get(y)\n', 1)),
+        ('an access of a kept buffer left as it was',
+         sub(CARRY, '            if fit is not None:\n'
+                    '                instead[id(x)] = keeper._privatized_one(\n',
+             '            if False:\n'
+             '                instead[id(x)] = keeper._privatized_one(\n', 1)),
+        ('a list rewritten without the images declared at its head',
+         sub(CARRY, '        held[:0] = b.finish()\n', '        b.finish()\n', 1)),
     ]),
 
     # A store of a number nothing reads, taken behind the work it stands in.

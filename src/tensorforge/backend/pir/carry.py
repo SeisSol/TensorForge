@@ -147,17 +147,30 @@ def keep_own(body: Tuple[Stmt, ...], scratch, *, threads: int,
     not."""
     if arena is None:
         return body
-    for alloc in list(_own(body, arena).values()):
+    # What every buffer asks of the body, asked once.  Keeping one changes
+    # nothing another asks: the names a new image may not take, which it
+    # adds to (`Clone.rename`); what an index of another buffer computes;
+    # what the body hands on as a pointer.
+    owned = _own(body, arena)
+    taken = {str(s.attr('extern')) for s in walk_stmts(body)
+             if s.attr('extern') is not None}
+    constants = {t.id: s.attr('value') for s in walk_stmts(body)
+                 if s.op is Op.CONST for t in s.target}
+    indices = _Indices(body, {'x': threads})
+    addresses = _addresses(body)
+    touched = _Touched(set(owned))
+    # Whether a buffer is kept, and the registers its accesses take, is
+    # asked of the body as it came: keeping another changes no access of
+    # it, no loop or branch around one, and nothing a statement around them
+    # says of what it touches.  The body is rewritten once, for all of them.
+    plans: List[Tuple['_Carrier', '_Kept']] = []
+    for alloc in list(owned.values()):
         name = str(alloc.attr('extern') or alloc.target[0])
-        taken = {str(s.attr('extern')) for s in walk_stmts(body)
-                 if s.attr('extern') is not None}
-        constants = {t.id: s.attr('value') for s in walk_stmts(body)
-                     if s.op is Op.CONST for t in s.target}
-        keeper = _Carrier(scratch, _Indices(body, {'x': threads}), threads,
-                          report, taken, constants, _addresses(body),
-                          _own(body, arena), body)
+        keeper = _Carrier(scratch, indices, threads, report, taken,
+                          constants, addresses, owned, body,
+                          touched=touched)
         try:
-            body, size = keeper._kept(body, alloc)
+            plan = keeper._kept(body, alloc)
         except _Refused as why:
             keeper._say(f'own: {name} stays in shared memory: {why}')
             continue
@@ -165,12 +178,192 @@ def keep_own(body: Tuple[Stmt, ...], scratch, *, threads: int,
             keeper._say(f'own: {name} stays in shared memory: an index or a '
                         f'condition not known per lane ({why})')
             continue
-        keeper._say(f'own: {name} in {size} registers of every lane')
-    return body
+        keeper._say(f'own: {name} in {plan.size} registers of every lane')
+        plans.append((keeper, plan))
+    return _keep(body, plans, touched) if plans else body
+
+
+@dataclass
+class _Kept:
+    """A buffer `keep_own` keeps: the list its image is declared at the head
+    of (`stmts`, as the body holds it), the register each access takes
+    (`fits`), how many a lane holds (`size`), the inductions of the loops
+    around its accesses, and the statements that go with the buffer -- its
+    declaration and the marks of it."""
+    alloc: Stmt
+    key: tuple
+    stmts: Tuple[Stmt, ...]
+    fits: Dict[int, Tuple[int, Dict[int, int]]]
+    size: int
+    inductions: Dict[int, Value]
+    gone: Set[int]
+
+
+def _keep(body: Tuple[Stmt, ...], plans, touched: '_Touched'
+          ) -> Tuple[Stmt, ...]:
+    """`body` with the buffers of `plans` kept: each image declared at the
+    head of its list -- the last kept first -- each access of the buffer
+    one of its image, and the buffer's declaration and marks gone.  The
+    values the new statements define are made in the order of `plans`, the
+    image first, then the accesses in the order of the body."""
+    heads: Dict[int, Tuple[Tuple[Stmt, ...], List[Stmt]]] = {}
+    instead: Dict[int, List[Stmt]] = {}
+    gone: Set[int] = set()
+    keys: Set[tuple] = set()
+    for keeper, plan in plans:
+        b = keeper._scratch()
+        extern = Clone(keeper._fresh, 'own', keeper._taken).rename(
+            str(plan.alloc.attr('extern', 'own')))
+        base = plan.alloc.target[0]
+        image = b.alloc(base.type.elem, (plan.size,), MemSpace.REGISTER,
+                        hint='own', extern=extern, init='{}')
+        held = heads.setdefault(id(plan.stmts), (plan.stmts, []))[1]
+        held[:0] = b.finish()
+        for x in _accesses_of(plan.stmts, plan.key, touched):
+            fit = plan.fits.get(id(x))
+            if fit is not None:
+                instead[id(x)] = keeper._privatized_one(
+                    x, plan.fits, image, plan.inductions)
+        gone |= plan.gone
+        keys.add(plan.key)
+
+    def rewrite(xs: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        head = heads.get(id(xs))
+        out: List[Stmt] = list(head[1]) if head is not None \
+            and head[0] is xs else []
+        changed = bool(out)
+        for x in xs:
+            if id(x) in gone:
+                changed = True
+                continue
+            new = instead.get(id(x))
+            if new is not None:
+                out.extend(new)
+                changed = True
+                continue
+            if x.regions and touched.reaches(x) & keys:
+                regions = tuple(replace(r, body=rewrite(r.body))
+                                for r in x.regions)
+                if any(n.body is not o.body
+                       for n, o in zip(regions, x.regions)):
+                    x = replace(x, regions=regions)
+                    changed = True
+            out.append(x)
+        return tuple(out) if changed else xs
+
+    return rewrite(tuple(body))
+
+
+def _accesses_of(stmts: Sequence[Stmt], key, touched: '_Touched'
+                 ) -> Iterator[Stmt]:
+    """The statements in `stmts` that access the buffer `key` names and hold
+    none, in the order of the body."""
+    for i in touched.where(stmts, key, accessed=True):
+        x = stmts[i]
+        if x.regions:
+            for r in x.regions:
+                yield from _accesses_of(r.body, key, touched)
+        else:
+            yield x
 
 
 class _Refused(Exception):
     """Why a buffer stays where it is."""
+
+
+#: How many lists `_Touched` keeps what it found in.
+_LISTS = 64
+
+
+class _Touched:
+    """Which of the buffers `keys` names each statement and those in it
+    reach, asked once of each statement for as long as it is part of the
+    body: `keep_own` asks it of every own buffer, and keeping one changes
+    only the statements around it.
+
+    `accessed` is what their accesses reach; `reaches` adds what they name
+    as an operand and what they declare -- what `_Carrier._kept` looks for.
+    `unsaid` is whether a list holds an access that says nothing of where
+    it goes."""
+
+    def __init__(self, keys: Set[tuple]):
+        self._keys = keys
+        self._of: Dict[int, Tuple[Stmt, frozenset, frozenset]] = {}
+        self._unsaid: Dict[int, Tuple[Tuple[Stmt, ...], bool]] = {}
+        self._said: Dict[int, Tuple[Stmt, bool]] = {}
+        #: Per list, by buffer: the positions of the statements that reach
+        #: it, and of those that access it.
+        self._where: Dict[int, Tuple[Sequence[Stmt], Dict, Dict]] = {}
+
+    def _get(self, x: Stmt) -> Tuple[Stmt, frozenset, frozenset]:
+        known = self._of.get(id(x))
+        if known is not None and known[0] is x:
+            return known
+        accessed = {_key(a.base) for a in x.accesses
+                    if a.base is not None} & self._keys
+        reaches = set(accessed)
+        reaches.update(k for k in (('v', v.id) for v in x.args
+                                   if isinstance(v, Value))
+                       if k in self._keys)
+        if x.op is Op.ALLOC and x.target and _key(x.target[0]) in self._keys:
+            reaches.add(_key(x.target[0]))
+        for r in x.regions:
+            for y in r.body:
+                _, a, b = self._get(y)
+                accessed |= a
+                reaches |= b
+        known = (x, frozenset(accessed), frozenset(reaches))
+        self._of[id(x)] = known
+        return known
+
+    def accessed(self, x: Stmt) -> frozenset:
+        return self._get(x)[1]
+
+    def reaches(self, x: Stmt) -> frozenset:
+        return self._get(x)[2]
+
+    def where(self, xs: Sequence[Stmt], key,
+              accessed: bool = False) -> Sequence[int]:
+        """The positions in the list `xs` of the statements that reach
+        `key` -- with `accessed`, that access it -- the first first."""
+        known = self._where.get(id(xs))
+        if known is None or known[0] is not xs:
+            reached: Dict = {}
+            touched: Dict = {}
+            for i, x in enumerate(xs):
+                _, a, r = self._get(x)
+                for k in r:
+                    reached.setdefault(k, []).append(i)
+                for k in a:
+                    touched.setdefault(k, []).append(i)
+            known = (xs, reached, touched)
+            self._where[id(xs)] = known
+            if len(self._where) > _LISTS:
+                # A list a buffer was kept in is gone from the body: what
+                # it held is asked of the lists that took its place.
+                del self._where[next(iter(self._where))]
+        return (known[2] if accessed else known[1]).get(key, ())
+
+    def unsaid(self, stmts: Tuple[Stmt, ...]) -> bool:
+        known = self._unsaid.get(id(stmts))
+        if known is not None and known[0] is stmts:
+            return known[1]
+        found = any(self._unsaid_in(x) for x in stmts)
+        self._unsaid[id(stmts)] = (stmts, found)
+        if len(self._unsaid) > _LISTS:
+            del self._unsaid[next(iter(self._unsaid))]
+        return found
+
+    def _unsaid_in(self, x: Stmt) -> bool:
+        known = self._said.get(id(x))
+        if known is not None and known[0] is x:
+            return known[1]
+        found = (any(a.space is MemSpace.UNKNOWN or (
+            a.space is MemSpace.SHARED and a.base is None)
+            for a in x.accesses)
+            or any(self._unsaid_in(y) for r in x.regions for y in r.body))
+        self._said[id(x)] = (x, found)
+        return found
 
 
 #: The value a predicated load leaves where its predicate does not hold.
@@ -239,7 +432,8 @@ class _Carrier:
                  report: Optional[List[str]], taken: Set[str],
                  constants: Dict[int, object], addresses: Set[int],
                  own: Dict[tuple, Stmt], root: Tuple[Stmt, ...],
-                 masks: frozenset = frozenset()):
+                 masks: frozenset = frozenset(),
+                 touched: Optional['_Touched'] = None):
         self._scratch = scratch
         self._indices = indices
         self._threads = threads
@@ -261,6 +455,8 @@ class _Carrier:
         #: kept, so a read there may be taken from wherever the lane's value
         #: would be where it holds.
         self._masks = masks
+        #: Which of the own buffers each statement reaches (`_kept`).
+        self._touched = touched if touched is not None else _Touched(set())
         self._here: Optional[int] = None
         self._b = None
 
@@ -1334,11 +1530,11 @@ class _Carrier:
                       f'behind it reads it')
         return declare + seed, body, behind, None
 
-    def _kept(self, body: Tuple[Stmt, ...], alloc: Stmt):
-        """`(body, registers)`: `body` with the buffer `alloc` declares in a
-        register image of every lane's own, over the innermost list around
-        every statement that touches it -- or the loop around that list,
-        where its trips hand the buffer on -- and without the buffer.
+    def _kept(self, body: Tuple[Stmt, ...], alloc: Stmt) -> _Kept:
+        """How `body` keeps the buffer `alloc` declares in a register image
+        of every lane's own, over the innermost list around every statement
+        that touches it -- or the loop around that list, where its trips
+        hand the buffer on -- and without the buffer (`_keep`).
         Refused where a statement other than a load or a store of one
         element, through the buffer's own binding, touches it; where a lane
         reaches an element another lane writes (`_reach`); and where a lane
@@ -1350,9 +1546,12 @@ class _Carrier:
                            'or the like, and may reach it from anywhere')
         touching: List[Tuple[int, ...]] = []
         marks: Set[int] = set()
+        touched = self._touched
+        reaches = touched.reaches
 
         def visit(xs, path):
-            for i, x in enumerate(xs):
+            for i in touched.where(xs, key):
+                x = xs[i]
                 if x is alloc:
                     continue
                 if x.regions:
@@ -1393,18 +1592,23 @@ class _Carrier:
             while n < min(len(scope), len(path)) and scope[n] == path[n]:
                 n += 1
             scope = scope[:n]
+        accessed = touched.accessed
+
+        def where(xs):
+            return touched.where(xs, key, accessed=True)
+
         while True:
             stmts = _region(body, scope)
-            if any(a.space is MemSpace.UNKNOWN or (
-                    a.space is MemSpace.SHARED and a.base is None)
-                    for x in walk_stmts(stmts) for a in x.accesses):
+            if touched.unsaid(stmts):
                 raise _Refused('a statement around it says nothing about '
                                'what it touches')
             owner = _region_owner(body, scope)
             try:
-                events = {id(e.stmt): e for e in _events_of(stmts, key)}
+                events = {id(e.stmt): e
+                          for e in _events_of(stmts, key, where)}
                 trace: List[Tuple[Stmt, Dict]] = []
-                _trace_of(stmts, {}, events, _around(stmts, events), trace)
+                _trace_of(stmts, {}, events, _around(stmts, events, where),
+                          trace, where)
                 steps, register = self._reach(trace, events)
                 exposed, _, _ = _uses(steps, register)
                 if exposed:
@@ -1419,16 +1623,12 @@ class _Carrier:
                     raise
                 scope = scope[:-1]
         size = max(register.values()) + 1
-        fits = self._fits(trace, register, size, _unrolled(stmts))
-        b = self._scratch()
-        extern = Clone(self._fresh, 'own', self._taken).rename(
-            str(alloc.attr('extern', 'own')))
-        image = b.alloc(base.type.elem, (size,), MemSpace.REGISTER,
-                        hint='own', extern=extern, init='{}')
-        inner = list(b.finish()) + self._privatized(
-            stmts, fits, image, _inductions(stmts))
-        gone = marks | {id(alloc)}
-        return _with_region(body, scope, inner, gone), size
+        # Its loops, where it is: what is not around one of its accesses
+        # has nothing to say about the registers they take.
+        around = [stmts[i] for i in where(stmts)]
+        fits = self._fits(trace, register, size, _unrolled(around))
+        return _Kept(alloc, key, stmts, fits, size, _inductions(around),
+                     marks | {id(alloc)})
 
     def _reach(self, trace: List[Tuple[Stmt, Dict]],
                events: Dict[int, _Event]):
@@ -1588,31 +1788,37 @@ class _Carrier:
         `image` that its fit gives."""
         out: List[Stmt] = []
         for s in stmts:
-            if s.regions:
-                out.append(replace(s, regions=tuple(
-                    replace(r, body=tuple(self._privatized(
-                        r.body, fits, image, inductions)))
-                    for r in s.regions)))
-                continue
-            fit = fits.get(id(s))
-            if fit is None:
-                out.append(s)
-                continue
-            b = self._scratch()
-            slot = _slot(b, fit, inductions)
-            out.extend(b.finish())
-            if s.op is Op.LOAD:
-                out.append(replace(
-                    s, args=(image, slot),
-                    accesses=(Access(Effect.READ, MemSpace.REGISTER, image),),
-                    attrs=tuple((k, v) for k, v in s.attrs
-                                if k in ('extern', 'other'))))
-            else:
-                out.append(replace(
-                    s, args=(image, s.args[1], slot),
-                    accesses=(Access(Effect.WRITE, MemSpace.REGISTER,
-                                     image),),
-                    attrs=()))
+            out += self._privatized_one(s, fits, image, inductions)
+        return out
+
+    def _privatized_one(self, s: Stmt, fits, image,
+                        inductions: Dict[int, Value]) -> List[Stmt]:
+        """`s` with each access of `fits` in it an access of the register of
+        `image` that its fit gives: what computes the register, and the
+        access."""
+        if s.regions:
+            return [replace(s, regions=tuple(
+                replace(r, body=tuple(
+                    y for x in r.body for y in self._privatized_one(
+                        x, fits, image, inductions)))
+                for r in s.regions))]
+        fit = fits.get(id(s))
+        if fit is None:
+            return [s]
+        b = self._scratch()
+        slot = _slot(b, fit, inductions)
+        out = list(b.finish())
+        if s.op is Op.LOAD:
+            out.append(replace(
+                s, args=(image, slot),
+                accesses=(Access(Effect.READ, MemSpace.REGISTER, image),),
+                attrs=tuple((k, v) for k, v in s.attrs
+                            if k in ('extern', 'other'))))
+        else:
+            out.append(replace(
+                s, args=(image, s.args[1], slot),
+                accesses=(Access(Effect.WRITE, MemSpace.REGISTER, image),),
+                attrs=()))
         return out
 
     def _stored_behind(self, loop: Stmt, stmts: List[Stmt],
@@ -2090,49 +2296,24 @@ def _region_owner(body: Sequence[Stmt], path) -> Optional[Stmt]:
     return _region(body, path[:-1])[path[-1][0]]
 
 
-def _with_region(body: Sequence[Stmt], path, inner: List[Stmt],
-                 gone: Set[int]) -> Tuple[Stmt, ...]:
-    """`body` with the list `path` leads to replaced by `inner`, and without
-    the statements of `gone`, by id."""
-    def strip(xs):
-        out = []
-        for x in xs:
-            if id(x) in gone:
-                continue
-            if x.regions:
-                x = replace(x, regions=tuple(replace(r, body=strip(r.body))
-                                             for r in x.regions))
-            out.append(x)
-        return tuple(out)
-
-    def walk(xs, rest):
-        if not rest:
-            return strip(inner)
-        (i, j), rest = rest[0], rest[1:]
-        xs = list(xs)
-        owner = xs[i]
-        regions = list(owner.regions)
-        regions[j] = replace(regions[j], body=walk(regions[j].body, rest))
-        xs[i] = replace(owner, regions=tuple(regions))
-        return tuple(xs)
-    return strip(walk(tuple(body), tuple(path)))
-
-
 def _touches(x: Stmt, key) -> bool:
     return any(a.base is not None and _key(a.base) == key for a in x.accesses)
 
 
-def _events_of(stmts: Sequence[Stmt], key) -> List[_Event]:
+def _events_of(stmts: Sequence[Stmt], key, where=None) -> List[_Event]:
     """The loads and stores in `stmts` that touch the buffer `key` names,
     with what they stand under, as `_events` has them.  What does not hold
     one of them is not asked: a loop of its own that carries values, or a
-    loop the trips of which nothing counts."""
+    loop the trips of which nothing counts.  `where` gives the positions in
+    a list of the statements that access the buffer, where known
+    (`_Touched.where`)."""
     out: List[_Event] = []
 
     def visit(xs, conds, loops):
-        for x in xs:
+        for x in ((xs[i] for i in where(xs)) if where is not None else xs):
             if x.regions:
-                if not any(_touches(y, key) for y in walk_stmts((x,))):
+                if where is None and not any(
+                        _touches(y, key) for y in walk_stmts((x,))):
                     continue
                 if x.op is Op.FOR:
                     if not counted(x):
@@ -2158,14 +2339,16 @@ def _events_of(stmts: Sequence[Stmt], key) -> List[_Event]:
     return out
 
 
-def _around(stmts: Sequence[Stmt], events: Dict[int, _Event]) -> Set[int]:
+def _around(stmts: Sequence[Stmt], events: Dict[int, _Event],
+            where=None) -> Set[int]:
     """The statements of `stmts` that are among `events` or hold one, by
-    id."""
+    id; with `where` (`_Touched.where`), looking only at the positions of a
+    list that access the buffer of the events."""
     out: Set[int] = set()
 
     def visit(xs) -> bool:
         found = False
-        for x in xs:
+        for x in ((xs[i] for i in where(xs)) if where is not None else xs):
             here = id(x) in events
             for r in x.regions:
                 here = visit(r.body) or here
@@ -2179,18 +2362,20 @@ def _around(stmts: Sequence[Stmt], events: Dict[int, _Event]) -> Set[int]:
 
 
 def _trace_of(xs: Sequence[Stmt], env: Dict, events: Dict[int, _Event],
-              around: Set[int], out: List[Tuple[Stmt, Dict]]) -> None:
-    """`_trace` over the statements of `around` alone."""
-    for x in xs:
+              around: Set[int], out: List[Tuple[Stmt, Dict]],
+              where=None) -> None:
+    """`_trace` over the statements of `around` alone; `where`, as for
+    `_around`, gives the positions of a list to look at."""
+    for x in ((xs[i] for i in where(xs)) if where is not None else xs):
         if id(x) not in around:
             continue
         if x.op is Op.FOR:
             for trip in range(*x.loop_bounds):
                 _trace_of(x.regions[0].body, {**env, x.induction.id: trip},
-                          events, around, out)
+                          events, around, out, where)
         elif x.regions:
             for r in x.regions:
-                _trace_of(r.body, env, events, around, out)
+                _trace_of(r.body, env, events, around, out, where)
         elif id(x) in events:
             out.append((x, env))
 
