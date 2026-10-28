@@ -92,6 +92,21 @@ def test_a_failed_row_is_not_a_point(tmp_path):
     assert [p.workload for p in compare.collect([tmp_path]).points] == ['k']
 
 
+def test_a_failed_row_is_kept_apart_with_what_it_was(tmp_path):
+    """A kernel that was asked for and gave no number is not the same as
+    one nobody asked for, and a portability figure has to tell them apart:
+    the first is zero by definition, the second is not known."""
+    _write(tmp_path, 'elastic-3-s-s1',
+           [_row('k', 'baseline', 'sm_120', 64, 100.0),
+            {'workload': 'broken', 'config': 'baseline', 'arch': 'gfx942',
+             'datatype': 'F64', 'error': 'exit 1: out of registers'}])
+    got = compare.collect([tmp_path])
+    assert [(p.workload, p.arch, p.datatype, p.order, p.batch)
+            for p in got.failed] == [('broken', 'gfx942', 'F64', 3, 0)]
+    assert got.failed[0].row['error'].startswith('exit 1')
+    assert got.archs == ['sm_120']
+
+
 def test_one_bench_file_is_read_once_however_many_paths_name_it(tmp_path):
     d = _write(tmp_path, 'elastic-3-s-s1',
                [_row('k', 'baseline', 'sm_120', 64, 100.0)])

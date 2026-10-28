@@ -205,6 +205,11 @@ class Field:
     keyed by machine and precision (`ceiling`)."""
     points: List[Point] = field(default_factory=list)
     ceilings: Dict[Tuple[str, str], Ceiling] = field(default_factory=dict)
+    #: What was asked for and produced no number -- not built, not run,
+    #: or timed out -- with the row's `error` saying which.  Kept apart
+    #: from `points`, which every view draws, for a reader that has to
+    #: tell a kernel that failed on a machine from one that was not run.
+    failed: List[Point] = field(default_factory=list)
 
     def ceiling(self, arch: str, datatype: str) -> Optional[Ceiling]:
         """The roof a point of this precision on this machine is placed
@@ -367,8 +372,7 @@ def collect(targets: Sequence[Path]) -> Field:
                 continue
             seen.add(bench.resolve())
             try:
-                rows = [r for r in _results(json.loads(bench.read_text()))
-                        if not r.get('error')]
+                rows = _results(json.loads(bench.read_text()))
             except (OSError, ValueError):
                 continue
             # Per row, since one file may hold several exports; the
@@ -388,7 +392,7 @@ def collect(targets: Sequence[Path]) -> Field:
                     # contradicts; the row is the record, and a capture that
                     # disagrees with it identifies nothing.
                     captured = None
-                out.points.append(Point(
+                (out.failed if row.get('error') else out.points).append(Point(
                     workload=row['workload'],
                     config=row.get('config') or 'default',
                     arch=row.get('arch') or '?',
