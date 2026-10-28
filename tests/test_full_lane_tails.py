@@ -65,13 +65,14 @@ def test_on_by_default():
 
 
 def test_the_tail_computes_on_the_whole_wave_under_esimd():
-    """`local_flux`: 56 rows on 32 lanes, a tail of 24.  Off, every update of
-    it is a `select<24>` of the accumulator; on, none is, and the operator's
-    rows are read 24 wide into a zeroed 32-wide vector."""
+    """`local_flux`: 56 rows on 32 lanes, a tail of 24.  Off, the accumulator
+    is written as a `select<24>` of its register array -- an update, or the
+    sum the forward pass leaves of the updates; on, none is, and the
+    operator's rows are read 24 wide into a zeroed 32-wide vector."""
     mod = _module('local_flux')
     off = _kernel(mod.descr_list(), full_lane_tails=False)
     on = _kernel(mod.descr_list(), full_lane_tails=True)
-    narrow_update = re.compile(r'\br\d+\.template select<24, 1>\(\d+\) =')
+    narrow_update = re.compile(r'\bi?r\d+\.template select<24, 1>\(\d+\) =')
     assert narrow_update.search(off)
     assert not narrow_update.search(on), 'the accumulator tail is 32 wide'
     assert 'template select<24, 1>(0) = ' in on, 'the read stays 24 wide'

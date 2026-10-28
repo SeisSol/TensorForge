@@ -56,6 +56,14 @@ where both found the same write there.  A register array declared zeroed
 (`{}`) holds zeros until something stores into it, as a store of the number
 would leave it.
 
+Under the explicit vector (`simd`) one work-item is the whole multiplication
+and a value spread over its lanes is one vector; an access carries no lane
+in its index and reaches an element a lane: lane `l`'s at the index plus
+`l`, in memory, and in a register array at the same element of every vector
+the array is read and written as -- the lane's own, as under SPMD.  What is
+not one element a lane of every lane, a vector of a register array that
+starts elsewhere, or part of a vector is placed nowhere (`_place_vector`).
+
 What `Flow` keeps grows with the elements it places, lane by lane and
 execution by execution -- with `values`, some 300 bytes each.  A body that
 places more than `BUDGET` is not run (`TooLarge`), and a pass that asks
@@ -179,9 +187,12 @@ class Flow:
                  arena: Optional[str] = None, masks: bool = False,
                  values: bool = False, before: bool = True,
                  budget: Optional[int] = None, fetches: bool = True,
-                 exchange: bool = False):
+                 exchange: bool = False, simd: bool = False):
         self.body = tuple(body)
         self.threads = threads
+        #: Whether the lane is in the type rather than the index: one
+        #: work-item, `threads` lanes wide (`_place_vector`).
+        self.simd = simd
         self._values = values
         #: Whether `forward` lists what another lane stored -- a value, or
         #: from a register that lane holds it in still (`_forwards`).
@@ -200,7 +211,7 @@ class Flow:
             if x.op == Op.ALLOC and x.target and arena is not None
             and x.attr('arena') == arena}
         self.full = (1 << threads) - 1
-        self._ix = _Indices(self.body, {'x': threads})
+        self._ix = _Indices(self.body, {'x': threads}, simd=simd)
         self.insts: List[Inst] = []
         self.by_stmt: Dict[int, List[int]] = defaultdict(list)
         self._key: Dict[Tuple[int, Tuple], int] = {}
@@ -601,7 +612,31 @@ class Flow:
                 if inside:
                     out += self._loaded(v, d, env, inside)
                 return out
+        if (self.simd and d is not None and d.op == 'select'
+                and d.predicate is None and self._static(d.args[0], env)):
+            # Under the explicit vector a select over a condition of the
+            # lanes is a merge: the lanes it holds for hold the first arm,
+            # the others the second -- a vector's tail and the zeros past it.
+            inside = self._lanes_where(d.args[0], env, mask)
+            out = []
+            for lanes, arm in ((inside, d.args[1]),
+                               (mask & ~inside, d.args[2])):
+                if lanes:
+                    out += self._arm(arm, env, lanes)
+            return out
         return self._loaded(v, d, env, mask)
+
+    def _arm(self, x, env, mask: int) -> List[Tuple[int, Tuple]]:
+        """Where an arm `x` of a select came from for the lanes of `mask`:
+        a number, or as `_loaded` says."""
+        if not isinstance(x, Value):
+            if isinstance(x, (int, float)) and not isinstance(x, bool):
+                return [(mask, ('const', x))]
+            return []
+        d = self.defs.get(x.id)
+        if d is not None and d.op == Op.CONST:
+            return [(mask, ('const', d.attr('value')))]
+        return self._loaded(x, d, env, mask)
 
     def _loaded(self, v: Value, d: Optional[Stmt], env,
                 mask: int) -> List[Tuple[int, Tuple]]:
@@ -814,6 +849,8 @@ class Flow:
     def _place(self, s: Stmt, env, mask):
         """`[(mask, cell, kind)]` for the elements `s` touches, or None where
         they cannot be told."""
+        if self.simd:
+            return self._place_vector(s, env, mask)
         if s.op == Op.LOAD and len(s.accesses) == 1:
             a = s.accesses[0]
             index = s.args[1:]
@@ -861,6 +898,75 @@ class Flow:
                     cell = (key, addr)
                     out.append((1 << lane, interned.setdefault(cell, cell),
                                 kind))
+        self._budget -= len(out)
+        if self._budget < 0:
+            raise TooLarge(f'the body places more than {self._limit} '
+                           f'elements')
+        return out
+
+    def _place_vector(self, s: Stmt, env, mask):
+        """`_place` under the explicit vector: a load, a store and a promise
+        of a zero in a register array, of one element a lane.
+
+        A value spread over the lanes is one vector, and an access of it
+        reaches an element a lane: lane `l`'s at the index plus `l` -- the
+        vector the emitter reads or writes from the index on (`EsimdEmitter`),
+        as many lanes as the value spans, the first of the multiplication's.
+        In memory that is the element, and every lane may read what another
+        wrote.  A register array is the work-item's own, but where every
+        vector it is read and written as starts at a multiple of the lanes,
+        an element is one lane's in every one of them: the array is placed as
+        under SPMD, a register of every lane's own at the vector's index.  A
+        value every lane holds whole is one element, every lane's, in memory;
+        in a register array it is a scalar part of a vector, and placed
+        nowhere.  So is anything of more than one element a lane, of more
+        lanes than the multiplication's, or of part of its vector -- a
+        window's head, a tail's valid lanes."""
+        if s.op == Op.LOAD and len(s.accesses) == 1 and s.target:
+            value, index, kind = s.target[0], s.args[1:], 'read'
+        elif s.op == Op.STORE and len(s.accesses) == 1:
+            value, index = s.args[1], s.args[2:]
+            kind = 'rmw' if s.accesses[0].kind & Effect.ATOMIC else 'write'
+        elif (s.op == Op.MARK and s.attr('mark') == 'zeros'
+              and len(s.accesses) == 1
+              and s.accesses[0].space is MemSpace.REGISTER):
+            # The zero of a register a lane holds: no value, every lane's.
+            value, index, kind = None, s.args[2:], 'write'
+        else:
+            return None
+        a = s.accesses[0]
+        if (a.space not in _PLACED or a.base is None
+                or s.attr('valid') is not None or s.attr('head') is not None
+                or not all(self._static(i, env) for i in index)):
+            return None
+        if value is not None and (
+                not isinstance(value, Value) or value.layout is None
+                or getattr(value.type, 'length', None) is not None):
+            return None
+        spread = value is None or value.layout.is_distributed
+        if spread and value is not None:
+            span = value.lane_span()
+            if span > self.threads:
+                return None
+            mask &= (1 << span) - 1
+        key = self._buffer(a, s.args[0], env)
+        addr = self._address(index, env)
+        if key is None or not addr:
+            return None
+        interned = self._interned
+        out = []
+        if a.space is MemSpace.REGISTER:
+            if not spread or addr[-1] % self.threads:
+                return None
+            if mask:
+                cell = (key, addr)
+                out.append((mask, interned.setdefault(cell, cell), kind))
+        else:
+            for lane in self.lanes(mask):
+                cell = (key, addr[:-1] + (addr[-1] + lane,) if spread
+                        else addr)
+                out.append((1 << lane, interned.setdefault(cell, cell),
+                            kind))
         self._budget -= len(out)
         if self._budget < 0:
             raise TooLarge(f'the body places more than {self._limit} '

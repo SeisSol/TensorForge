@@ -100,14 +100,29 @@ class _Indices:
     index tells them apart.
     """
 
-    def __init__(self, body: Tuple[Stmt, ...], extents: Mapping[str, int]):
+    def __init__(self, body: Tuple[Stmt, ...], extents: Mapping[str, int],
+                 simd: bool = False):
         self._defs: Dict[int, Stmt] = {}
         for s in walk_stmts(body):
             for t in s.target:
                 self._defs[t.id] = s
         #: Per axis, how many threads a block has along it.
         self._extents = dict(extents)
+        #: Under the explicit vector, the lanes' own index is a vector of
+        #: as many lanes as `x` has (`IRBuilder.lane_index`, `lanes`): the
+        #: thread index, lane by lane.
+        self._simd = simd
         self._leaves: Dict[int, frozenset] = {}
+
+    def _lanes(self, s: Stmt) -> bool:
+        """Is `s` the lanes' own index under the explicit vector -- `0, 1,
+        ...` over every lane of `x`?"""
+        if not self._simd or s.op != Op.RAWEXPR or s.args:
+            return False
+        if s.attr('lanes') != self._extents.get('x'):
+            return False
+        axes = getattr(getattr(s.target[0], 'layout', None), 'axes', ())
+        return len(axes) == 1 and axes[0].stride == 1
 
     def leaves(self, operand) -> frozenset:
         """What `operand` varies over: thread axes, by name, and the ids of
@@ -125,6 +140,8 @@ class _Indices:
         elif (s.op == Op.CALL and not s.args
               and s.attr('callee') in _THREAD):
             found = frozenset((_THREAD[s.attr('callee')],))
+        elif self._lanes(s):
+            found = frozenset(('x',))
         elif s.op == Op.CONST:
             if not isinstance(s.attr('value'), (bool, int)):
                 raise _NotStatic(f'const {s.attr("value")!r}')
@@ -150,6 +167,9 @@ class _Indices:
         s = self._defs[operand.id]
         if s.op == Op.CALL:
             out = env[_THREAD[s.attr('callee')]]
+        elif s.op == Op.RAWEXPR:
+            # The lanes' own index (`_lanes`; `leaves` asked first).
+            out = env['x']
         elif s.op == Op.CONST:
             out = int(s.attr('value'))
         elif s.op == 'select':

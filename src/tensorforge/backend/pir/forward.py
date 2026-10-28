@@ -48,6 +48,13 @@ An element's mask is taken to hold where the body keeps its contract
 (`Flow` with `masks`): the store under a batch element's guard is what the
 load outside it reads, on AMD, where every store to global memory stands
 under one and no load does.
+
+Under the explicit vector (`simd`), a load is one vector, and it takes only
+what is the same vector: the value a store wrote, spread over the lanes as
+the load's is, or the register a store took it from, read as the vector the
+load is.  Not a number, which would stand for a vector; not under a
+predicate, which is a mask of the vector; not as a truth value, whose vector
+is a mask too; and every lane of the vector is read (`Flow.simd`).
 """
 
 from __future__ import annotations
@@ -75,7 +82,7 @@ ROUNDS = 4
 def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
                    arena: Optional[str] = None, masks: bool = True,
                    rounds: int = ROUNDS, registers: bool = True,
-                   exchange: Optional[int] = None,
+                   exchange: Optional[int] = None, simd: bool = False,
                    report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with its loads taken from what their own lane stored, and its
     stores nothing reads dropped (see the module); `scratch` makes the
@@ -95,7 +102,8 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
     exchange_reach`), a load every lane runs of what one other lane stored
     from a register it holds still reads that register of that lane
     (`_Forward._across`), where the multiplication's lanes are within one
-    exchange."""
+    exchange.  With `simd`, the body puts the lane in the type: a load takes
+    only the same vector (see the module), and reads no other lane."""
     for _ in range(rounds):
         # Let the last round's flow go first: two at once would hold twice
         # what the body takes.
@@ -105,9 +113,9 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
             # blocks of a power of two (`__shfl_sync`'s width).
             flow = Flow(body, threads, arena, masks=masks, values=True,
                         before=False, fetches=registers,
-                        exchange=exchange is not None
+                        exchange=exchange is not None and not simd
                         and threads <= exchange
-                        and not threads & (threads - 1))
+                        and not threads & (threads - 1), simd=simd)
         except TooLarge as why:
             if report is not None:
                 report.append(f'forward: {why}; left as it is')
@@ -262,8 +270,9 @@ class _Forward:
         self.mapped: Dict[int, Value] = {}
         #: The stores whose registers a load reads from now on.
         self.kept: Set[int] = set()
-        #: Which lanes of a load's value anything reads.
-        self.demand = Demand(flow)
+        #: Which lanes of a load's value anything reads; under the explicit
+        #: vector, every one (`_read`).
+        self.demand = None if flow.simd else Demand(flow)
 
     def run(self) -> Tuple[Stmt, ...]:
         for s in walk_stmts(self.flow.body):
@@ -303,6 +312,10 @@ class _Forward:
 
     def _take(self, s: Stmt) -> bool:
         flow = self.flow
+        if flow.simd and s.predicate is not None:
+            # A predicate of the vector is a mask over its lanes, which what
+            # the load becomes would have to be merged under.
+            return False
         if any(o[0] == 'lane' for n in flow.executions(s)
                for _, o in flow.forward.get(n, ())):
             return self._take_across(s)
@@ -345,6 +358,9 @@ class _Forward:
                 points.append((inst.env(), cell[1]))
                 taken.append((n, cell, held & inst.mask))
             lanes.append((inst.env(), inst.mask, held & inst.mask))
+        if flow.simd and 'const' in kinds:
+            # A number where the load is a vector.
+            return False
         if (kinds == {'reg', 'const'} and len(consts) == 1 and len(bases) == 1
                 and len(taken) == len(lanes)
                 and self._holding(next(iter(consts)), taken, lambda n, h:
@@ -396,6 +412,10 @@ class _Forward:
         truth = v.type != s.target[0].type and _truth_of(s, v.type)
         if (v.type != s.target[0].type and not truth) or not self._stands(v, s):
             return False
+        if self.flow.simd and (truth or v.layout != s.target[0].layout):
+            # Under the explicit vector only the same vector: spread over
+            # the lanes as the load is, and not a mask for numbers.
+            return False
         b = self.scratch()
         if truth:
             # What the store made of the number: whether it is not zero.
@@ -421,8 +441,9 @@ class _Forward:
         held = ScalarType(image.type.elem)
         if held != s.target[0].type:
             # A number the store made a truth value: the register read as
-            # the number it holds, and whether that is not zero.
-            if predicate is not None:
+            # the number it holds, and whether that is not zero -- but for a
+            # vector, whose truth values are a mask.
+            if predicate is not None or self.flow.simd:
                 return False
             b = self.scratch()
             v = b.load(image, slot, type_=held, hint='fwd')
@@ -600,7 +621,13 @@ class _Forward:
                              & self._read(s, n))
 
     def _read(self, s: Stmt, n: int) -> int:
-        """The lanes of what execution `n` of `s` loads anything reads."""
+        """The lanes of what execution `n` of `s` loads anything reads --
+        under the explicit vector, every lane of the vector."""
+        if self.flow.simd:
+            v = s.target[0]
+            if v.layout is not None and v.layout.is_distributed:
+                return (1 << v.lane_span()) - 1
+            return self.flow.full
         return self.demand.lanes(s.target[0], self.flow.insts[n].env())
 
     def _unread_outside(self, s: Stmt) -> bool:

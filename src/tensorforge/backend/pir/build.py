@@ -785,11 +785,14 @@ class IRBuilder:
             return self.op('rem', INDEX, lane, block, hint=hint)
         # `simd<int, block>(0, 1)`: the ESIMD constructor for a linear
         # progression.  Emitted through `rawexpr` rather than a new op, since
-        # what makes it a lane index is the layout, not the spelling.
+        # what makes it a lane index is the layout, not the spelling -- and
+        # said in an attribute, for a pass that evaluates it lane by lane
+        # (`shards._Indices`), which reads no text.
         return self.rawexpr(
             f'{self._simd_spelling(block)}(0, 1)',
             type_=INDEX, hint=hint, pure=True, movable=True,
-            layout=RegisterLayout((LaneAxis(block, stride),)))
+            layout=RegisterLayout((LaneAxis(block, stride),)),
+            attrs=(('lanes', block),))
 
     def _simd_spelling(self, block: int) -> str:
         lex = self.context.target.lexic
@@ -1976,7 +1979,8 @@ class IRBuilder:
     def rawexpr(self, text: str, *args: Operand, type_=None, hint: str = '',
                 pure: bool = False, movable: bool = False,
                 layout: Optional[RegisterLayout] = None,
-                crosslane: bool = False, uniform=None) -> Value:
+                crosslane: bool = False, uniform=None,
+                attrs: Tuple = ()) -> Value:
         """One escape hatch with a *single* convention: ``{0}`` is ``args[0]``.
 
         The result is declared by the emitter; the text is an expression, never
@@ -1991,6 +1995,9 @@ class IRBuilder:
         operands do not carry -- a thread index spelled in it.  With no
         operands the join answers `GRID`, which is true of a kernel parameter
         and false of `threadIdx.y + blockDim.y * blockIdx.x`.
+
+        ``attrs`` are facts about the value the text does not let a pass see
+        -- that it is the lanes' own index, say (`lane_index`).
         """
         type_ = type_ or ScalarType(self._fptype)
         uniform = _stated(uniform, _join(args), 'rawexpr')
@@ -2007,7 +2014,8 @@ class IRBuilder:
                        layout=layout if layout is not None else join_layout(args))
         self._emit_op(Op.RAWEXPR, (v,), args, pure=pure, movable=movable,
                       effect=Effect.NONE if pure else Effect.UNKNOWN, text=text,
-                      attrs=(('crosslane', True),) if crosslane else ())
+                      attrs=((('crosslane', True),) if crosslane else ())
+                      + tuple(attrs))
         return v
 
     # Both movable, which is not a cosmetic question.  `schedule.touches`

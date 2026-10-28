@@ -368,12 +368,12 @@ class Forward(Pass):
 
     Behind the atomics, whose adds that take the bias alone leave the sum a
     copy of the terms, which this takes from the terms; and behind the wrap
-    (`standard_pipeline`).  Not under the explicit vector, whose registers
-    are vectors a load of one element does not name.  `scratch` makes the
-    builder new statements are built with; `threads`, `arena` and `report`
-    are what the carry takes; `exchange` how many lanes one exchange
-    reaches, where a load of what one other lane stored is read from that
-    lane's register.
+    (`standard_pipeline`).  Under the explicit vector a load takes only the
+    same vector, and never another lane's (`forward_memory` with `simd`).
+    `scratch` makes the builder new statements are built with; `threads`,
+    `arena` and `report` are what the carry takes; `exchange` how many lanes
+    one exchange reaches, where a load of what one other lane stored is read
+    from that lane's register.
     """
 
     name = 'forward'
@@ -398,12 +398,11 @@ class Forward(Pass):
             self.name = 'forward-memory'
 
     def run(self, pc: BodyContext) -> None:
-        if pc.explicit_simd:
-            return
         pc.body = forward_memory(pc.body, self._scratch,
                                  threads=self._threads, arena=self._arena,
                                  registers=self._registers,
                                  exchange=self._exchange,
+                                 simd=pc.explicit_simd,
                                  report=self._report)
 
 

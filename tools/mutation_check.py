@@ -3175,13 +3175,13 @@ GROUPS = {
          sub(FLOW, "                    if o[0] == 'value' or self._holds(o[1], o[2], 1 << r.by,",
              "                    if True or self._holds(o[1], o[2], 1 << r.by,", 1)),
         ('lanes past one exchange read across',
-         sub(FORWARD, '                        exchange=exchange is not None\n'
+         sub(FORWARD, '                        exchange=exchange is not None and not simd\n'
                       '                        and threads <= exchange\n',
-             '                        exchange=exchange is not None\n', 1)),
+             '                        exchange=exchange is not None and not simd\n', 1)),
         ('a multiplication of lanes no block of a power of two holds read across',
          sub(FORWARD, '                        and threads <= exchange\n'
-                      '                        and not threads & (threads - 1))',
-             '                        and threads <= exchange)', 1)),
+                      '                        and not threads & (threads - 1), simd=simd)',
+             '                        and threads <= exchange, simd=simd)', 1)),
         ('a load under a branch the lanes take apart read across',
          sub(FORWARD, '                if not flow.alike(p.cond):\n'
                       '                    return False\n', '                pass\n', 1)),
@@ -3240,6 +3240,62 @@ GROUPS = {
         ('a broadcast of every lane not said to be alike',
          sub(BUILD, "attrs=(('crosslane', True), ('alike', True)))",
              "attrs=(('crosslane', True),))", 1)),
+    ]),
+
+    # The forward under the explicit vector: an access placed an element a
+    # lane, and a load taking only the same vector.
+    'vectors': ('tests/test_forward.py', [
+        ('the vector placed as under SPMD',
+         sub(FLOW, '        if self.simd:\n'
+                   '            return self._place_vector(s, env, mask)\n', '', 1)),
+        ('a vector in memory placed at one element for every lane',
+         sub(FLOW, '                cell = (key, addr[:-1] + (addr[-1] + lane,) if spread\n'
+                   '                        else addr)\n',
+             '                cell = (key, addr)\n', 1)),
+        ('a register vector placed from between two',
+         sub(FLOW, '            if not spread or addr[-1] % self.threads:\n',
+             '            if not spread:\n', 1)),
+        ('an element every lane holds placed in a register vector',
+         sub(FLOW, '            if not spread or addr[-1] % self.threads:\n',
+             '            if addr[-1] % self.threads:\n', 1)),
+        ('a vector of more lanes than the multiplication placed',
+         sub(FLOW, '            if span > self.threads:\n'
+                   '                return None\n', '', 1)),
+        ('a vector placed in lanes past its own',
+         sub(FLOW, '            mask &= (1 << span) - 1\n', '', 1)),
+        ('part of a vector placed whole',
+         sub(FLOW, "                or s.attr('valid') is not None or s.attr('head') is not None\n",
+             '', 1)),
+        ('a vector of several elements a lane placed',
+         sub(FLOW, '                not isinstance(value, Value) or value.layout is None\n'
+                   "                or getattr(value.type, 'length', None) is not None):",
+             '                not isinstance(value, Value) or value.layout is None):', 1)),
+        ('a select over the lanes not told apart',
+         sub(FLOW, "        if (self.simd and d is not None and d.op == 'select'\n",
+             "        if (False and d is not None and d.op == 'select'\n", 1)),
+        ("the lanes' own index not read as the lane",
+         sub(SHARDS, '        if not self._simd or s.op != Op.RAWEXPR or s.args:\n',
+             '        if True:\n', 1)),
+        ("the lanes' own index not said",
+         sub(BUILD, "            attrs=(('lanes', block),))", ')', 1)),
+        ('a load of a vector under a mask taken',
+         sub(FORWARD, '        if flow.simd and s.predicate is not None:\n',
+             '        if False:\n', 1)),
+        ('a number taken for a vector',
+         sub(FORWARD, "        if flow.simd and 'const' in kinds:\n",
+             '        if False:\n', 1)),
+        ('a value of other lanes taken for a vector',
+         sub(FORWARD, '        if self.flow.simd and (truth or v.layout != s.target[0].layout):\n',
+             '        if self.flow.simd and truth:\n', 1)),
+        ('every lane of a vector asked of a tail',
+         sub(FORWARD, '                return (1 << v.lane_span()) - 1\n',
+             '                return self.flow.full\n', 1)),
+        ('another lane read across under the explicit vector',
+         sub(FORWARD, '                        exchange=exchange is not None and not simd\n',
+             '                        exchange=exchange is not None\n', 1)),
+        ('the forward under the explicit vector asked as under SPMD',
+         sub(PIPE, '                                 simd=pc.explicit_simd,\n',
+             '                                 simd=False,\n', 1)),
     ]),
 
     # The host oracle's reads across the lanes of an expression the emitter

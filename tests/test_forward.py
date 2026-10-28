@@ -16,12 +16,14 @@ can name -- and the ways a store is read after all.
 from __future__ import annotations
 
 import contextlib
+import io
 
 import pytest
 
 from tensorforge.backend.pir import IRBuilder, verify
-from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, Access,
-                                          BufferType, Effect, MemSpace, Op,
+from tensorforge.backend.pir.core import (BOOL, INDEX, SCALAR_LAYOUT, SIZE,
+                                          Access, BufferType, Effect, LaneAxis,
+                                          MemSpace, Op, RegisterLayout,
                                           ScalarType, Uniformity, walk_stmts)
 from tensorforge.backend.pir.flow import Flow
 from tensorforge.backend.pir.forward import drop_dead_stores, forward_memory
@@ -1347,3 +1349,277 @@ def test_a_chain_of_copies_is_read_where_the_first_read():
     for r in (r1, r2, r3):
         assert not _loads(out, MemSpace.REGISTER, r), r
     assert _loads(out, MemSpace.REGISTER, r0)
+
+
+# --------------------------------------------------------------------------- #
+# Under the explicit vector
+# --------------------------------------------------------------------------- #
+
+#: The lanes of a multiplication under the explicit vector, and how a value
+#: spread over them is laid out: one vector, lane `l` its `l`-th element --
+#: and a vector of the first half of them, a tail's.
+WIDE = 16
+SPREAD = RegisterLayout((LaneAxis(WIDE, 1),))
+HALF = RegisterLayout((LaneAxis(WIDE // 2, 1),))
+
+
+class Vectors:
+    """A body as the explicit vector writes it (`Flow.simd`): one work-item,
+    its values vectors of `WIDE` lanes and its indices without a lane.  `p`,
+    two vectors of global memory, `s`, two of the multiplication's shared
+    memory, and `r` and `t`, register images of two vectors each."""
+
+    def __init__(self):
+        b = self.b = IRBuilder(fptype=F32, arena='shrMem')
+        k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
+        self.p = b.decl_expr(
+            'float *const __restrict__ glb_m1', '&m1[{0} * 32]',
+            BufferType(F32, (2 * WIDE,), MemSpace.GLOBAL), 'm1', args=(k,),
+            kind=Effect.READ, space=MemSpace.GLOBAL, hint='glb_m1',
+            extern='glb_m1')
+        self.s = b.alloc(F32, (2 * WIDE,), MemSpace.SHARED, hint='s',
+                         extern='s0', arena='shrMem')
+        self.r = b.alloc(F32, (2 * WIDE,), MemSpace.REGISTER, hint='r',
+                         extern='r', init='{}')
+        self.t = b.alloc(F32, (2 * WIDE,), MemSpace.REGISTER, hint='t',
+                         extern='t', init='{}')
+
+    def vector(self, at=0):
+        """A vector no pass knows: twice the one of `p` from `at` on."""
+        b = self.b
+        return b.op('mul', REAL, b.load(self.p, at, layout=SPREAD), 2.0,
+                    hint='v')
+
+    def lanes(self):
+        """The lanes' own index, `0, 1, ...` (`IRBuilder.lane_index`)."""
+        return self.b.rawexpr(f'simd<int32_t, {WIDE}>(0, 1)', type_=INDEX,
+                              hint='lead', pure=True, movable=True,
+                              layout=SPREAD, attrs=(('lanes', WIDE),))
+
+    def through_s(self):
+        """`r` holds a vector, and `s` what `r` held."""
+        b = self.b
+        b.store(self.r, self.vector(), 0)
+        b.store(self.s, b.load(self.r, 0, layout=SPREAD), 0)
+
+    def run(self, exchange=None):
+        body = self.b.finish()
+        verify(body)
+        self.report = []
+        out = forward_memory(body, self.b.scratch, threads=WIDE,
+                             arena='shrMem', simd=True, exchange=exchange,
+                             report=self.report)
+        verify(out)
+        return out
+
+
+def test_a_vector_loaded_back_as_it_was_stored_is_read_from_its_register():
+    """What `r` held, stored to `s` and loaded back as the same vector, is
+    read from `r`: lane `l` reads the element lane `l` stored.  The store
+    nothing reads any more goes."""
+    t = Vectors()
+    b = t.b
+    t.through_s()
+    b.store(t.t, b.load(t.s, 0, layout=SPREAD), 0)
+    b.store(t.p, b.load(t.t, 0, layout=SPREAD), WIDE)
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED, t.s)
+    assert not _stores(out, MemSpace.SHARED, t.s)
+
+
+def test_a_vector_loaded_from_another_element_on_keeps_its_load():
+    """From element 1 on, the vector is lane `l + 1`'s element in lane `l`,
+    and the next vector's first: what no lane stored itself."""
+    t = Vectors()
+    b = t.b
+    t.through_s()
+    b.store(t.s, t.vector(WIDE), WIDE)
+    b.store(t.p, b.load(t.s, 1, layout=SPREAD), WIDE)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_an_element_of_a_vector_every_lane_reads_keeps_its_load():
+    """One element every lane reads is the element one lane stored."""
+    t = Vectors()
+    b = t.b
+    t.through_s()
+    b.store(t.p, b.load(t.s, 3, layout=SCALAR_LAYOUT), WIDE)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_a_vector_of_a_zeroed_image_is_not_read_as_a_number():
+    """Under SPMD a load of a zeroed image is the number; a vector is not
+    one."""
+    t = Vectors()
+    b = t.b
+    b.store(t.p, b.load(t.r, 0, layout=SPREAD), 0)
+    out = t.run()
+    assert _loads(out, MemSpace.REGISTER, t.r)
+
+
+def _stored_to_p(t, out):
+    """The statement that defines what the last store into `p` stores."""
+    defs = {x.target[0].id: x for x in walk_stmts(out) if x.target}
+    last = [x for x in walk_stmts(out)
+            if x.op == Op.STORE and x.args[0] is t.p][-1]
+    return defs.get(getattr(last.args[1], 'id', None))
+
+
+def test_a_register_vector_between_two_is_not_what_was_stored_from_it():
+    """A vector of `r` from half a vector on holds the second half of one
+    and the first of the next, each in other lanes than they are there: `r`
+    is placed nowhere after it, and what `s` holds is not read from `r`,
+    which holds something else by then.  What `r` held stands in a loop,
+    where nothing behind it reads it either."""
+    t = Vectors()
+    b = t.b
+    with b.for_(0, 1, 1, unroll=True):
+        t.through_s()
+    b.store(t.r, t.vector(WIDE), WIDE // 2)
+    b.store(t.p, b.load(t.s, 0, layout=SPREAD), WIDE)
+    out = t.run()
+    d = _stored_to_p(t, out)
+    assert d is not None and d.op == Op.LOAD and d.args[0] is t.s
+
+
+def test_a_tail_reads_the_register_its_lanes_were_stored_from():
+    """A tail stored as the lanes that hold rows and zeros past them -- a
+    select over the lanes' own index -- and loaded back as the lanes that
+    hold rows: read from `r`, which those lanes were stored from."""
+    t = Vectors()
+    b = t.b
+    b.store(t.r, t.vector(), 0)
+    rows = b.op('lt', BOOL, t.lanes(), WIDE // 2, hint='g')
+    pad = b.op('select', REAL, rows, b.load(t.r, 0, layout=SPREAD), 0.0,
+               hint='pad')
+    b.store(t.s, pad, 0)
+    b.store(t.p, b.load(t.s, 0, layout=HALF), WIDE)
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED, t.s)
+    assert any(s.op == Op.LOAD and s.args[0] is t.r
+               and s.target[0].layout == HALF for s in walk_stmts(out))
+
+
+def test_a_vector_loaded_under_a_mask_keeps_its_load():
+    """A predicate of a vector is a mask over its lanes."""
+    t = Vectors()
+    b = t.b
+    t.through_s()
+    rows = b.op('lt', BOOL, t.lanes(), WIDE // 2, hint='g')
+    b.store(t.p, b.load(t.s, 0, layout=SPREAD, predicate=rows, other=0.0),
+            WIDE)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_a_value_spread_over_more_lanes_than_the_load_keeps_its_load():
+    """A vector of every lane is not the vector of the first half of
+    them."""
+    t = Vectors()
+    b = t.b
+    b.store(t.s, t.vector(), 0)
+    b.store(t.p, b.load(t.s, 0, layout=HALF), WIDE)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_a_vector_of_more_lanes_than_the_multiplications_keeps_its_load():
+    """A vector of twice the lanes writes the vector behind the first as
+    well, from lanes the multiplication does not have: what `s` held there
+    before is no more."""
+    t = Vectors()
+    b = t.b
+    b.store(t.s, t.vector(), WIDE)
+    wide = b.load(t.p, 0, layout=RegisterLayout((LaneAxis(2 * WIDE, 1),)))
+    b.store(t.s, wide, 0)
+    b.store(t.p, b.load(t.s, WIDE, layout=SPREAD), 0)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_a_vector_of_two_elements_a_lane_keeps_a_load_of_what_it_wrote():
+    """Two elements a lane write two vectors of one."""
+    t = Vectors()
+    b = t.b
+    b.store(t.s, t.vector(), WIDE)
+    two = b.load(t.p, 0, type_=ScalarType(F32, 2), layout=SPREAD, align=8)
+    b.store(t.s, two, 0, align=8)
+    b.store(t.p, b.load(t.s, WIDE, layout=SPREAD), 0)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_an_element_every_lane_writes_into_a_register_vector_is_one_lanes():
+    """`r[0]` written as an element of `t` every lane holds is the first
+    lane's part of the vector `r` is read as, the others hold what `r` was:
+    the vector is not the vector of `t` that element is part of."""
+    t = Vectors()
+    b = t.b
+    b.store(t.t, t.vector(WIDE), WIDE)
+    b.store(t.r, t.vector(), 0)
+    b.store(t.r, b.load(t.t, WIDE, layout=SCALAR_LAYOUT), 0)
+    b.store(t.p, b.load(t.r, 0, layout=SPREAD), WIDE)
+    out = t.run()
+    d = _stored_to_p(t, out)
+    assert d is not None and d.op == Op.LOAD and d.args[0] is t.r
+
+
+def test_another_lanes_store_is_not_read_across_under_the_explicit_vector():
+    """Every lane reading the element one lane stored is no exchange of
+    registers here: the work-item holds every lane, and the vector the
+    store wrote is no register a lane holds."""
+    t = Vectors()
+    b = t.b
+    t.through_s()
+    b.store(t.p, b.load(t.s, 3, layout=SCALAR_LAYOUT), WIDE)
+    out = t.run(exchange=WIDE)
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_a_vector_read_from_its_second_lane_on_keeps_its_load():
+    """A window's head: the first lane reads nothing, and holds zero."""
+    t = Vectors()
+    b = t.b
+    t.through_s()
+    b.store(t.p, b.load(t.s, 0, layout=SPREAD, head=1), WIDE)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_the_lanes_own_index_says_so_under_the_explicit_vector():
+    """`IRBuilder.lane_index` writes a vector's `0, 1, ...` as text, and
+    says in an attribute what the text is, for the flow to read."""
+    from tensorforge.common.context import Context
+    b = IRBuilder(fptype=F32, context=Context(arch='pvc', backend='esimd',
+                                              fp_type=F32))
+    b.lane_index(WIDE)
+    body = b.finish()
+    assert [s.attr('lanes') for s in walk_stmts(body)
+            if s.op == Op.RAWEXPR] == [WIDE]
+
+
+def test_the_forward_under_the_explicit_vector_asks_for_vectors(monkeypatch):
+    """Built for ESIMD, the forward runs, and asks of vectors."""
+    import importlib.util
+    import pathlib
+    from tensorforge.backend.pir import pipeline
+    from tensorforge.common.context import Context
+    from tensorforge.generators.generator import Generator
+    asked = []
+    real = pipeline.forward_memory
+
+    def spy(body, scratch, **kwargs):
+        asked.append(kwargs.get('simd'))
+        return real(body, scratch, **kwargs)
+    monkeypatch.setattr(pipeline, 'forward_memory', spy)
+    path = pathlib.Path(__file__).parent / 'cases' / 'mixed' / 'ml_then_ew.py'
+    spec = importlib.util.spec_from_file_location('ml_then_ew', path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    gen = Generator(case.descr_list(), Context(arch='pvc', backend='esimd',
+                                               fp_type=case.DTYPE))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    assert asked and all(asked)
