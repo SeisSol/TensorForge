@@ -46,3 +46,55 @@ def test_an_index_outside_the_array_is_reported(index):
     diagnostics = _bounds_diagnostics(_body(index))
     assert len(diagnostics) == 1, diagnostics
     assert f'r0 holds {SIZE} elements' in diagnostics[0]
+
+
+HALF = SIZE // 2
+
+
+class _Symbol:
+    """What an access through a symbol shows the check: a name."""
+    stype = None
+
+    def __init__(self, name):
+        self.name = name
+
+
+def _namesakes(access):
+    """Two register arrays of one name, as every lane's images of its own
+    parts of two buffers are (`pir.carry.keep_own`), and an access `access`
+    makes, given the builder and the larger and the smaller array."""
+    builder = IRBuilder(fptype=Datatype.F32)
+    larger = builder.alloc(Datatype.F32, (SIZE,), MemSpace.REGISTER, hint='own')
+    smaller = builder.alloc(Datatype.F32, (HALF,), MemSpace.REGISTER, hint='own')
+    access(builder, larger, smaller)
+    return builder.finish()
+
+
+@pytest.mark.parametrize("access,reported", [
+    (lambda b, larger, smaller: b.load(larger, SIZE - 1), None),
+    (lambda b, larger, smaller: b.load(smaller, HALF - 1), None),
+    (lambda b, larger, smaller: b.load(smaller, HALF), HALF),
+    (lambda b, larger, smaller: b.store(smaller, 0.0, HALF), HALF),
+], ids=["larger", "smaller", "smaller past its end", "store past its end"])
+def test_an_array_is_bounded_by_its_own_size_and_not_a_namesakes(
+        access, reported):
+    """The larger array's last element is past the end of the smaller one,
+    and the smaller's first past its end lies inside the larger one: either
+    array bounded by the other's size is reported wrongly, or not at all."""
+    diagnostics = _bounds_diagnostics(_namesakes(access))
+    if reported is None:
+        assert diagnostics == []
+    else:
+        assert len(diagnostics) == 1, diagnostics
+        assert f'holds {reported} elements' in diagnostics[0]
+
+
+@pytest.mark.parametrize("index,reported", [(SIZE - 1, False), (SIZE, True)])
+def test_a_name_is_bounded_by_the_largest_array_of_it(index, reported):
+    """Through a symbol, the name is all that says which array is meant, and
+    an index is wrong whichever of two arrays of one name is meant only past
+    the larger."""
+    diagnostics = _bounds_diagnostics(_namesakes(
+        lambda b, larger, smaller: b.load(_Symbol('own'), index,
+                                          space=MemSpace.REGISTER)))
+    assert bool(diagnostics) == reported, diagnostics

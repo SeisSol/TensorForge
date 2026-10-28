@@ -2233,6 +2233,23 @@ GROUPS = {
              "    if True:")),
     ]),
 
+    # `verify` bounds an access by the array it reaches, and a name only by
+    # the largest array of it.
+    'bounds': ('tests/test_pir_bounds.py', [
+        ('an array bounded by the largest array of its name',
+         sub(PASSES, '            name, size = str(base), sizes.get(base.id)\n',
+             '            name, size = str(base), named.get(base.hint)\n', 1)),
+        ('a name bounded by the last array of it',
+         sub(PASSES, '                named[array.hint] = max(named.get(array.hint, 0), count)\n',
+             '                named[array.hint] = count\n', 1)),
+        ('an access through a symbol left unbounded',
+         sub(PASSES, '            size = named.get(name)\n',
+             '            size = None\n', 1)),
+        ('a store bounded by its value rather than its index',
+         sub(PASSES, '            base, index = (s.args + (None,) * 3)[0], (s.args + (None,) * 3)[2]\n',
+             '            base, index = (s.args + (None,) * 3)[0], (s.args + (None,) * 3)[1]\n', 1)),
+    ]),
+
     'access': ('tests/test_pir_access.py', [
         ('the structured store falls back to text',
          sub(SYM, '    structured = (isinstance(variable, _Value)',

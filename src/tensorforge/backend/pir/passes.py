@@ -79,7 +79,8 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
     on how the body was built, so this reports what it can prove wrong rather
     than claiming coverage it does not have.
     """
-    sizes: Dict[str, int] = {}
+    sizes: Dict[int, int] = {}
+    named: Dict[str, int] = {}
     counters: Dict[int, Tuple[int, int]] = {}
     defs: Dict[int, Stmt] = {}
 
@@ -93,7 +94,14 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
                 count = 1
                 for extent in buffer.shape:
                     count *= extent
-                sizes[s.target[0].hint] = count
+                array = s.target[0]
+                sizes[array.id] = count
+                # A name is a debug fragment several arrays can share -- the
+                # image every lane keeps of its own part of a buffer is an
+                # `own`, one per buffer (`pir.carry.keep_own`).  Through a
+                # name, only an index past the largest of them is wrong
+                # whichever is meant.
+                named[array.hint] = max(named.get(array.hint, 0), count)
         if s.op == Op.FOR and s.regions and len(s.args) >= 3:
             start, stop, step = s.args[0], s.args[1], s.args[2]
             if all(isinstance(a, int) for a in (start, stop, step)) and step > 0:
@@ -132,18 +140,22 @@ def _check_buffer_bounds(body: Tuple[Stmt, ...]) -> List[str]:
             base, index = (s.args + (None,) * 3)[0], (s.args + (None,) * 3)[2]
         else:
             continue
-        # A buffer reaches an access either as the symbol it was declared
-        # for or as the `alloc` result itself, and both spell the same
-        # array.
-        name = getattr(base, 'name', None) or getattr(base, 'hint', None)
-        if name not in sizes or index is None:
+        # A buffer reaches an access either as the `alloc` result itself,
+        # which is the array, or as the symbol it was declared for, which
+        # spells it by name.
+        if isinstance(base, Value):
+            name, size = str(base), sizes.get(base.id)
+        else:
+            name = getattr(base, 'name', None)
+            size = named.get(name)
+        if size is None or index is None:
             continue
         span = bounds(index)
         if span is None:
             continue
         low, high = span
-        if low < 0 or high >= sizes[name]:
-            diag.append(f'{s.op}: {name} holds {sizes[name]} elements and is '
+        if low < 0 or high >= size:
+            diag.append(f'{s.op}: {name} holds {size} elements and is '
                         f'addressed at {low}..{high}')
     return diag
 
