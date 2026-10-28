@@ -391,8 +391,22 @@ __device__ __forceinline__ T swap(T value) {
 #define CMFI " fi:1 "
 #endif
 
-// FMAC_DPP inline assembly
-// !! MAY DISREGARD WAIT STATES !!
+// FMAC_DPP inline assembly.  LLVM folds no DPP move into a MAC or FMAC
+// (`GCNDPPCombine`: "this discards MAC/FMA instructions for now"), and an
+// untied FMA takes DPP only as VOP3 from gfx11 on, so the fused form is only
+// to be had as assembly -- which the hazard recognizer does not look into.
+// On gfx9 a DPP instruction reads its first source two wait states after a
+// VALU write of it at the earliest, and a reload of a value spilled to an AGPR
+// (`v_accvgpr_read`) right in front of one read the old register: SeisSol's
+// F64 `gpu_derivative` on gfx942 computed 315 of 1872 values wrong at order 6.
+// So each of these waits by itself on gfx9.  The generator does not call
+// them there: it writes a run of them as one block with one wait in front
+// (`amd.dpp_block`), into which nothing can be scheduled.
+#ifdef __GFX9__
+#define DPPWAIT "s_nop 1\n\t"
+#else
+#define DPPWAIT ""
+#endif
 
 #if defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__) ||          \
     defined(__GFX13__)
@@ -404,14 +418,15 @@ __device__ __forceinline__ T swap(T value) {
 #define ISTRINGIFY(x) #x
 #define STR(x) ISTRINGIFY(x)
 #define FMADPP4(pos, c, a, b)                                                  \
-  __asm("v_fmac_f32_dpp %0, %1, %2 quad_perm:[" STR(pos) "," STR(pos) "," STR( \
+  __asm(DPPWAIT                                                                \
+        "v_fmac_f32_dpp %0, %1, %2 quad_perm:[" STR(pos) "," STR(pos) "," STR( \
             pos) "," STR(pos) "] row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
 #define FMADPP16(pos, c, a, b)                                                 \
-  __asm("v_fmac_f32_dpp %0, %1, %2 " ROW_BCST16                                \
-        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI           \
+  __asm(DPPWAIT "v_fmac_f32_dpp %0, %1, %2 " ROW_BCST16                        \
+                ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI   \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
@@ -425,8 +440,8 @@ __device__ __forceinline__ T swap(T value) {
       : "v"(a), "v"(b)                                                               \
       :)
 #define DMADPP16(pos, c, a, b)                                                 \
-  __asm("v_fmac_f64_dpp %0, %1, %2 " ROW_BCST16                                \
-        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI           \
+  __asm(DPPWAIT "v_fmac_f64_dpp %0, %1, %2 " ROW_BCST16                        \
+                ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI   \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)

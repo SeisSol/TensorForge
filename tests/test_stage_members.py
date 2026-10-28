@@ -56,7 +56,8 @@ def test_a_smaller_group_is_asked_for_by_stage_group():
 
 
 def test_without_it_members_are_read_from_global():
-    src = _kernel_at('local_flux', 'gfx942', merge_variants=True)
+    src = _kernel_at('local_flux', 'gfx942', merge_variants=True,
+                     stage_members=False)
     assert not STAGED.search(src)
     assert not BINDING.search(src)
 
@@ -96,3 +97,66 @@ def test_the_group_stays_within_the_named_barriers():
                                   src).group(1))['launch']
     assert launch['threads_per_mult'] == 64 and 'barrier.sync' in src
     assert launch['block'][1] == 15, launch
+
+
+def _two_operators_a_face(size):
+    """Four faces of `R += D_f (A_f B)` in double precision, with `A_f` and
+    `D_f` operators of `size` x `size`: a merged run with two staged holes,
+    `size * size * 8` bytes each, and the launch it gets on gfx942."""
+    import contextlib
+    import io
+    import json
+    import warnings
+
+    from tensorforge.common.basic_types import Addressing, Datatype
+    from tensorforge.common.context import Context
+    from tensorforge.common.helper import generate_tmp_matrix
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.common.options import Options
+    from tensorforge.generators.descriptions import GemmDescr
+    from tensorforge.generators.generator import Generator
+
+    def t(shape, alias, addressing=Addressing.STRIDED):
+        return SubTensor(Tensor(list(shape), addressing,
+                                BoundingBox([0, 0], list(shape)),
+                                alias=alias, datatype=Datatype.F64))
+    b, r = t((size, 9), 'B'), t((size, 9), 'R')
+    descrs = []
+    for face in range(4):
+        a = t((size, size), f'A{face}', Addressing.NONE)
+        d = t((size, size), f'D{face}', Addressing.NONE)
+        x = SubTensor(generate_tmp_matrix(a, b))
+        descrs.append(GemmDescr(False, False, a, b, x))
+        descrs.append(GemmDescr(False, False, d, x, r, alpha=1.0, beta=1.0))
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F64,
+                      options=Options(merge_variants=True,
+                                      stage_members=True))
+        gen = Generator(descrs, ctx)
+        gen.generate()
+    src = gen.get_kernel()
+    launch = json.loads(re.search(r'tensorforge-meta: (\{.*\})',
+                                  src).group(1))['launch']
+    staged = re.findall(r'double \* __restrict__ glb_(v\d+) = '
+                        r'&totalShrMem\[\d+\];', src)
+    return staged, launch
+
+
+def test_members_too_large_together_stage_what_fits():
+    """Two 40.5 kB operators a trip are 81 kB, and a gfx942 block has 64:
+    the first is staged, the second read from global memory, and the launch
+    asks for what the block has -- rather than for 81 kB, which it does not
+    get, so that no block starts at all."""
+    staged, launch = _two_operators_a_face(72)
+    assert len(staged) == 1, staged
+    assert 72 * 72 * 8 <= launch['shared_bytes'] <= 65536, launch
+
+
+def test_a_member_larger_than_the_block_is_not_staged():
+    """A 72 kB operator does not fit a block at all: nothing is staged, and
+    the run reads its members where they are."""
+    staged, launch = _two_operators_a_face(96)
+    assert not staged
+    assert launch['shared_bytes'] <= 65536, launch

@@ -198,7 +198,9 @@ def test_a_sparse_operand_reaches_the_intrinsic_with_a_layout():
     sparse operand without a layout would take that exemption.
     """
     source = _generate(SPARSE_CASE)
-    assert "fmacdpp" in source, "case no longer reaches the DPP path"
+    # as a call, or as a block of them on gfx9 (`amd.dpp_block`)
+    assert re.search(r"fmacdpp|v_fmac_f(32|64)_dpp", source), \
+        "case no longer reaches the DPP path"
 
     from tensorforge.backend.pir import build as pirbuild
     from tensorforge.backend.pir.core import Value

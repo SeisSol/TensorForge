@@ -88,9 +88,12 @@ def _bodies(monkeypatch, backend, arch, descrs=None):
         seen.append((body, out))
         return out
     monkeypatch.setattr(abstract_instruction.pir, 'optimize', spy)
+    # Without shards: a section that may hold them is placed and built a
+    # second time with them (`Generator._place_section`), and every body
+    # would be seen twice.
     gen = Generator(descrs or _chain(),
                     Context(arch=arch, backend=backend, fp_type=F32,
-                            options=Options()))
+                            options=Options(preload_shards=False)))
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
     return seen, gen.get_kernel()

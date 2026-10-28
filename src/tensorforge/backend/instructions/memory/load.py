@@ -4,6 +4,7 @@
 from typing import List, Union
 import math
 import numpy as np
+from tensorforge.common.basic_types import Addressing
 from tensorforge.common.matrix.tensor import Tensor
 from . import AbstractShrMemWrite, MemoryInstruction
 from tensorforge.backend.symbol import RELAXED, Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, add_offset
@@ -18,15 +19,25 @@ from .hints import cache_hint, readers
 def _hint_allowed(loader) -> bool:
   """Whether a load from global memory may take the cache hint.
 
-  Where it is the only user of its source, or all of its users copy the same
-  of it (`_copies`): operations that each stage what they read stage one box
-  of an operand they share, and the pseudo-IR reads a later copy from the
-  registers of the first where their lanes agree (`pir.forward`).  With
-  `Options.hint_outputs` also where it is the only *reader*, or the readers
-  copy the same: the read of a `+=` destination, whose other users only
-  write it.
+  Never where the source is batch-constant (`Addressing.NONE`): whatever
+  reads it here, every other element reads it again -- a block's image of an
+  operator is made by every block, and a merged run's staged member
+  (`stage_members`) by every block on every trip -- and it is the data the
+  hint is there to keep in the caches.  Streamed, those copies cost SeisSol's
+  order-6 `localFluxAll` 6 % in double precision on gfx942, and a dense
+  56 x 56 volume operator 8 %.
+
+  Elsewhere where it is the only user of its source, or all of its users
+  copy the same of it (`_copies`): operations that each stage what they read
+  stage one box of an operand they share, and the pseudo-IR reads a later
+  copy from the registers of the first where their lanes agree
+  (`pir.forward`).  With `Options.hint_outputs` also where it is the only
+  *reader*, or the readers copy the same: the read of a `+=` destination,
+  whose other users only write it.
   """
   src = loader._src
+  if getattr(src.obj, 'addressing', None) == Addressing.NONE:
+    return False
   users = src.get_user_list()
   if len(users) == 1 or _copies(users, loader):
     return True

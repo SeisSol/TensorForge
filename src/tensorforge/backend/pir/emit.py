@@ -1002,13 +1002,43 @@ class Emitter:
     def _emit_body(self, body: Tuple[Stmt, ...],
                    yield_to: Tuple[Optional[str], ...]) -> None:
         self._record_slack(body)
-        for s in body:
+        blocks = self._dpp_blocks()
+        at = 0
+        while at < len(body):
+            s = body[at]
+            if blocks is not None:
+                end = blocks.runs(body, at)
+                if end > at:
+                    self._emit_dpp_block(body[at:end], blocks)
+                    at = end
+                    continue
             if (s.predicate is not None and s.op != Op.YIELD
                     and not _folds_predicate(s)):
                 with self.writer.If(self.operand(s.predicate)):
                     self._emit_stmt(s, yield_to)
             else:
                 self._emit_stmt(s, yield_to)
+            at += 1
+
+    def _dpp_blocks(self):
+        """`amd.dpp_block` where this target writes runs of fused DPP FMAs as
+        one block, else None."""
+        hw = self._hw()
+        model = getattr(hw, 'model', None)
+        if not isinstance(model, str) or not model.startswith('gfx'):
+            return None
+        from tensorforge.backend.instructions.compute.primitives.amd import (
+            dpp_block)
+        return dpp_block if dpp_block.blocks_for(model) else None
+
+    def _emit_dpp_block(self, run: Tuple[Stmt, ...], blocks) -> None:
+        """A run of fused DPP FMAs as one block (`amd.dpp_block`), counted as
+        the calls it is made of -- and the wait in front of it, one unit."""
+        for s in run:
+            self._record_code(s.op)
+            self._record_mix(s)
+        self._record_code_units(1)
+        self.writer(blocks.render(run, self.operand))
 
     def _record_slack(self, body: Tuple[Stmt, ...]) -> None:
         """How far each load stands from the statement that reads it.

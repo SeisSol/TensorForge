@@ -849,18 +849,25 @@ def _register_blocks(result: Build) -> Optional[int]:
     intercept that the occupancy would inherit, and the eight lanes that GB200
     ran fastest sit right at the limit.
     """
-    hw = result.context.target.hw
     if not result.context.target.prefs.rank_by_register_waves:
         return None
     regs = register_estimate(result)
     if regs is None:
         return None
+    gen = result.generator
+    threads = gen.lanes.num_threads * gen.launch_config().mults_per_block
+    return register_blocks(result.context, regs, threads)
+
+
+def register_blocks(context: Context, regs: float, threads: int) -> int:
+    """Blocks of `threads` a CU holds at `regs` registers a lane: the waves
+    a SIMD's file takes at that allocation, four SIMDs, whole blocks
+    (`_register_blocks`)."""
+    hw = context.target.hw
     file = (hw.max_reg_per_thread or 1024) // 4
     granule = 8
     per_lane = max(granule, -(-int(regs) // granule) * granule)
     waves_per_simd = max(0, min(8, file // per_lane))
-    gen = result.generator
-    threads = gen.lanes.num_threads * gen.launch_config().mults_per_block
     waves_per_block = max(1, -(-threads // hw.vec_unit_length))
     return (4 * waves_per_simd) // waves_per_block
 

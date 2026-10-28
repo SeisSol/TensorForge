@@ -194,7 +194,14 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     if self._global_mem and self._context.target.explicit_simd:
       max_thread_mults = max(max_thread_mults, _ESIMD_WORK_ITEMS)
     if self._mem_per_mult == 0:
-      mults = max_thread_mults
+      # Nothing per multiplication, but the block's own buffers still have to
+      # fit: a merged run's staged members (`stage_members`) are the block's
+      # alone -- at order 8 in double precision two of `localFluxAll`'s face
+      # operators take 73 kB a trip, and the launch would ask gfx942 for more
+      # than its 64 kB.
+      fits = (self._global_mem * self._context.fp_type.size()
+              <= self._max_allowed_mem)
+      mults = max_thread_mults if fits else 0
     else:
       max_mem_mults = (self._max_allowed_mem - self._global_mem * self._context.fp_type.size()) // (self._mem_per_mult * self._context.fp_type.size())
       mults = min(max_mem_mults, max_thread_mults)
@@ -609,6 +616,10 @@ class Generator:
     #: before `rows`; what a level buys on top is the bitset, which is the
     #: one form that costs something.
     self._pack_level = 0
+    #: How many of a section's merged-run holes `stage_members` may stage,
+    #: in the order they are emitted; None for all.  A retry whose block the
+    #: staged copies left without room stages one fewer.
+    self._stage_limit = None
     self._preloaded = set()
     self._preload_left = set()
     #: The launch every section runs under, once the sections are built.
@@ -1057,10 +1068,12 @@ class Generator:
     for codesection, lastbarrier in zip(descrlist, barrier):
       self._preload_drop = 0
       self._pack_level = 0
+      self._stage_limit = None
       # Two attempts, with the operators preloaded and without -- or, under
-      # `preload_partial`, one more per operator dropped.  Each failed attempt
-      # either drops one or gives up preloading, and an attempt without it
-      # ends the loop, so it ends.
+      # `preload_partial`, one more per operator dropped, and under
+      # `stage_members` one more per staged member.  Each failed attempt
+      # either drops one or gives up preloading, and an attempt without
+      # either ends the loop, so it ends.
       while True:
         scopecnt = self._scopes.get_num_scopes()
         self._scopes.add_scope()
@@ -1106,7 +1119,8 @@ class Generator:
         settled = self._settle_storage()
         if self._place_section(index) and settled:
           break
-        if not self._section.preload:
+        staged = len(self._section.stage_loaders)
+        if not self._section.preload and not staged:
           self._refuse_unplaced()
         # The preloaded operators left no room for one multiplication: the
         # check that admitted them compares against the block's limit before
@@ -1116,7 +1130,13 @@ class Generator:
         # wherever they do not fit.
         while scopecnt < self._scopes.get_num_scopes():
           self._scopes.remove_scope()
-        if self._tighten_packing():
+        if staged:
+          # The members a merged run copies in on every trip go first: they
+          # are what `stage_members` asks for on top of what the block holds
+          # anyway, so they take what the images leave.  The last one is read
+          # from global memory, as it is where nothing is staged.
+          self._stage_limit = staged - 1
+        elif self._tighten_packing():
           # A smaller operator before a dropped one: `pack_operands='fit'`
           # asks for the loosest form that still fits, so the answer to
           # "they do not fit" is the next form down -- and only once there
@@ -1329,7 +1349,7 @@ class Generator:
       align = max(self._shared_align(), loader._place_align or 1)
       end = -(-end // align) * align + loader.compute_shared_mem_size()
     obj.set_global_size(end)
-    if not images:
+    if not images and not self._section.stage_loaders:
       return True
     cap = self._context.target.hw.max_local_mem_size_per_block
     return end * self._context.fp_type.size() < cap
@@ -1569,7 +1589,7 @@ class Generator:
           f'lead to, three builds in a row') from None
     if placed is None:
       return False
-    budget = self._shard_budget()
+    budget = self._shard_budget(placed[0])
     if budget:
       try:
         held = self._settle(index, budget)
@@ -1616,17 +1636,22 @@ class Generator:
     self._deduce_mults_per_block()
     self._set_threadconfig()
 
-  def _shard_budget(self) -> int:
+  def _shard_budget(self, body) -> int:
     """The shared memory, in elements, the shards of the section's
     batch-constant operands may take; 0 where it holds none.
 
-    The section is placed: its block's arena and a multiplication's are what
-    they take without shards.  A block holding them is sized as one that
-    holds a copy of operator data (`set_stages`), and it may take as much
-    more as keeps as many of those blocks resident per SM as fit without --
-    by shared memory and threads, the two known exactly (`_resident_blocks`).
-    `Options.preload_shard_budget` puts its bytes in place of that, up to
-    what the block can take at all.
+    The section is placed, as `body`: its block's arena and a
+    multiplication's are what they take without shards.  A block holding them
+    is sized as one that holds a copy of operator data (`set_stages`), and it
+    may take as much more as keeps as many of those blocks resident per SM as
+    fit without -- by shared memory and threads, the two known exactly, and
+    by registers where the fewest the compiler could allocate for `body`
+    leave fewer still (`_register_blocks_at_most`).  At order 8 in double
+    precision a gfx942 SIMD holds one wave of SeisSol's `volume`, and the
+    whole 64 kB a block can take costs it nothing; held to what eight blocks
+    would leave each, the shards got 8 kB.  `Options.preload_shard_budget`
+    puts its bytes in place of all that, up to what the block can take at
+    all.
 
     Not under the explicit vector, where a multiplication is one work-item
     and its lanes are no thread's: an index there is not a function of the
@@ -1658,8 +1683,30 @@ class Generator:
                 hw.max_threads_per_sm // (self._num_threads * mults)]
       if taken:
         limits.append(cap // taken)
+      registers = self._register_blocks_at_most(body, mults)
+      if registers is not None:
+        limits.append(registers)
       allowed = cap // max(1, min(limits)) - taken
     return max(0, allowed // size - (start - block))
+
+  def _register_blocks_at_most(self, body, mults: int) -> Optional[int]:
+    """The most blocks of `mults` multiplications a CU's register file could
+    hold of `body`: at the fewest registers its compiler has allocated for
+    the bytes `body` keeps live (`Preferences.register_floor`).  None where
+    the target states no floor."""
+    from tensorforge.backend.instructions.abstract_instruction import (
+        body_pressure)
+    from tensorforge.generators.tuning import register_blocks
+    prefs = self._context.target.prefs
+    if prefs.register_floor is None or not prefs.rank_by_register_waves:
+      return None
+    peak, _ = body_pressure(self._context, body,
+                            _explicit_simd_lowering(self._context),
+                            self._num_threads)
+    if not peak:
+      return None
+    return register_blocks(self._context, prefs.register_floor * peak / 4,
+                           self._num_threads * mults)
 
   @staticmethod
   def _check_layout(body, index: int) -> None:
@@ -3260,14 +3307,17 @@ class Generator:
 
   def _stages(self, stand_in, written) -> bool:
     """Whether a merged run's hole is staged per iteration (`stage_members`):
-    a batch-constant, dense operand the body only reads."""
+    a batch-constant, dense operand the body only reads -- as long as a retry
+    has not found the block's copies too large for it (`_stage_limit`)."""
     obj = stand_in.obj
     return bool(self._context.get_user_options().stage_members
                 and obj is not None
                 and obj.addressing == Addressing.NONE
                 and obj.is_dense()
                 and id(obj) not in written
-                and stand_in.stype != SymbolType.Data)
+                and stand_in.stype != SymbolType.Data
+                and (self._stage_limit is None
+                     or len(self._section.stage_loaders) < self._stage_limit))
 
   def _stage_member(self, stand_in, table, counter):
     """The current member of a merged run's batch-constant hole, copied by the
