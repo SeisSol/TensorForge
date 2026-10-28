@@ -2852,6 +2852,13 @@ GROUPS = {
         ('a loop that runs again read as running once',
          sub(FLOW, '        self._wrap(s, first)\n', '', 1)),
         ('a write under a guard taken for one that replaces what was there',
+         sub(FLOW, '                    if piece.conds <= conds:\n'
+                   '                        prior = piece.writer\n'
+                   '                        break\n'
+                   '                    certain = False\n',
+             '                    prior = piece.writer\n'
+                   '                    break\n', 1)),
+        ('a write of a register under a guard taken for one that replaces what was there',
          sub(FLOW, '                    if layer.conds <= conds:\n'
                    '                        prior = layer.writer\n'
                    '                        break\n'
@@ -2859,11 +2866,11 @@ GROUPS = {
              '                    prior = layer.writer\n'
                    '                    break\n', 1)),
         ('what text reads not taken as read',
-         sub(FLOW, '                            for layer in table.get(cell, ()):\n'
+         sub(FLOW, '                            for layer in table.get(where, ()):\n'
                    '                                self.readers[layer.writer].append(\n'
                    '                                    (n, self.full))\n'
                    '                                self.escaped.add(layer.writer)\n',
-             '                            for layer in table.get(cell, ()):\n'
+             '                            for layer in table.get(where, ()):\n'
                    '                                pass\n', 1)),
         ('a binding a loop computes taken for one buffer every trip',
          sub(FLOW, '            hops = tuple(env.get(l.induction.id)\n'
@@ -3150,11 +3157,11 @@ GROUPS = {
         ('a load of memory taken from no earlier load',
          sub(FLOW, '                found += self._fetches(n, conds, taken)\n', '', 1)),
         ('an earlier load taken whatever write it found',
-         sub(FLOW, '            if not found.certain or found.writer != r.writer:\n',
-             '            if not found.certain:\n', 1)),
+         sub(FLOW, '                    if (found.writer != r.writer\n'
+                   '                            or not self._part(found, lane).certain):\n',
+             '                    if not self._part(found, lane).certain:\n', 1)),
         ('an earlier load taken where the lane\'s own store answers',
-         sub(FLOW, '            if (not r.certain or not r.cell or r.mask & taken\n',
-             '            if (not r.certain or not r.cell\n', 1)),
+         sub(FLOW, '            left = r.mask & ~taken\n', '            left = r.mask\n', 1)),
         ('the register of an earlier load taken whether it holds it or not',
          sub(FLOW, '                                   if m & bit\n'
                    '                                   and self._holds(cell, store, bit, conds)),\n',
@@ -3162,8 +3169,8 @@ GROUPS = {
         ('two rounds where a chain of copies takes more',
          sub(FORWARD, 'ROUNDS = 4\n', 'ROUNDS = 2\n', 1)),
         ('the last load of an element asked before the first',
-         sub(FLOW, '                    self._fetched[(r.cell, lane)].append((load, r))\n',
-             '                    self._fetched[(r.cell, lane)].insert(0, (load, r))\n', 1)),
+         sub(FLOW, '                    self._fetched[(r.cell_at(lane), lane)].append((load, r))\n',
+             '                    self._fetched[(r.cell_at(lane), lane)].insert(0, (load, r))\n', 1)),
         ('a load taken from a load the same round takes read as that one\'s value',
          sub(FORWARD, '            while v.id in mapped:\n'
                       '                v = mapped[v.id]\n', '', 1)),
@@ -3254,9 +3261,9 @@ GROUPS = {
          sub(FLOW, '        if self.simd:\n'
                    '            return self._place_vector(s, env, mask)\n', '', 1)),
         ('a vector in memory placed at one element for every lane',
-         sub(FLOW, '                cell = (key, addr[:-1] + (addr[-1] + lane,) if spread\n'
-                   '                        else addr)\n',
-             '                cell = (key, addr)\n', 1)),
+         sub(FLOW, '                starts = (tuple(addr[-1] + lane for lane in lanes) if spread\n'
+                   '                          else (addr[-1],) * len(lanes))\n',
+             '                starts = (addr[-1],) * len(lanes)\n', 1)),
         ('a register vector placed from between two',
          sub(FLOW, '            if not spread or addr[-1] % self.threads:\n',
              '            if not spread:\n', 1)),
@@ -3306,16 +3313,19 @@ GROUPS = {
     # The flow's broadcasts and what no lane changes, each placed once.
     'broadcasts': ('tests/test_flow.py', [
         ('a broadcast whose writing lane reads another lane\'s store',
-         sub(FLOW, '                own = mask & (1 << layer.lane) if layer.lane >= 0 else 0\n',
-             '                own = 0\n', 1)),
+         sub(FLOW, '                    own = lanes & (1 << lane) if lane >= 0 else 0\n',
+             '                    own = 0\n', 1)),
         ('every lane of a broadcast reading its own store',
-         sub(FLOW, '                own = mask & (1 << layer.lane) if layer.lane >= 0 else 0\n',
-             '                own = mask\n', 1)),
-        ('a broadcast counted once against the budget',
-         sub(FLOW, '            spent *= len(self.lanes(mask))\n', '            pass\n', 1)),
+         sub(FLOW, '                    own = lanes & (1 << lane) if lane >= 0 else 0\n',
+             '                    own = lanes\n', 1)),
+        ('an access placed for nothing against the budget',
+         sub(FLOW, '                                kind))\n'
+                   '        self._spend(len(out))\n',
+             '                                kind))\n'
+                   '        self._spend(0)\n', 1)),
         ('the loads fetched before kept by their lane group',
-         sub(FLOW, '                    self._fetched[(r.cell, lane)].append((load, r))\n',
-             '                    self._fetched[(r.cell, r.mask)].append((load, r))\n', 1)),
+         sub(FLOW, '                    self._fetched[(r.cell_at(lane), lane)].append((load, r))\n',
+             '                    self._fetched[(r.cell_at(lane), r.mask)].append((load, r))\n', 1)),
         ('what a lane changes kept for the next lane',
          sub(SHARDS, "        if 'x' not in self._leaves[operand.id]:\n"
                      '            return self.evaluate(operand, env, fixed)\n',
@@ -3330,6 +3340,47 @@ GROUPS = {
                      '                out = self.evaluate_lanes(a if c else b, env, lanes, memo,\n',
              '            if True:\n'
              '                out = self.evaluate_lanes(a if c else b, env, lanes, memo,\n', 1)),
+    ]),
+
+    # Memory kept in blocks, an access's lanes as one (`flow._Cells`).
+    'cells': ('tests/test_flow.py', [
+        ('a write taken for one of each element whoever wrote it after',
+         sub(FLOW, '                    piece.bits &= ~bits\n'
+                   '                    if not piece.bits:\n'
+                   '                        continue\n',
+             '                    pass\n', 1)),
+        ('a write of other elements taken for the lanes\' own',
+         sub(FLOW, '                and self.starts == other.starts and self.alone())\n',
+             '                and self.alone())\n', 1)),
+        ('what several lanes of a write store taken for the first lane\'s',
+         sub(FLOW, '            last = self._last = {e2: lane for lane, _, e2 in self.each()}\n',
+             '            last = self._last = {e2: lane for lane, _, e2 in\n'
+             '                                 reversed(list(self.each()))}\n', 1)),
+        ('a write of uncertain standing taken for certain',
+         sub(FLOW, '                        if piece.conds <= conds:\n'
+                   '                            found.append((block, hit, piece, maybe))\n',
+             '                        if True:\n'
+             '                            found.append((block, hit, piece, maybe))\n', 1)),
+        ('an element keeping one write of uncertain standing more',
+         sub(FLOW, '                if seen > _DEPTH:\n', '                if seen > _DEPTH + 1:\n', 1)),
+        ('a lane of a write taken to replace what the lane before stored',
+         sub(FLOW, '            if e in done:\n'
+                   '                prior, certain = n, True\n'
+                   '            else:\n',
+             '            if False:\n'
+             '                prior, certain = n, True\n'
+             '            else:\n', 1)),
+        ('a reach a loop tells apart left whole',
+         sub(FLOW, '                reach.mask = lanes\n', '                pass\n', 1)),
+        ('a forward dropped for every lane where some lanes lose it',
+         sub(FLOW, '                    for part in self._parts(r):\n'
+                   '                        if not part.certain:\n'
+                   '                            m &= ~part.mask\n',
+             '                    if not r.certain:\n'
+             '                        m = 0\n', 1)),
+        ('the run\'s writes of other elements of the block handed on',
+         sub(FLOW, '                            hit = bits & wrote\n',
+             '                            hit = wrote\n', 1)),
     ]),
 
     # keep_own asks the body once, and rewrites it once.

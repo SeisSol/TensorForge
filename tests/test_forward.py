@@ -1228,7 +1228,7 @@ def test_a_body_past_the_budget_is_left_as_it_is(monkeypatch):
     """The body of the first test, too large for the flow to keep track of:
     the load stays where it is, and the report says why."""
     from tensorforge.backend.pir import flow
-    monkeypatch.setattr(flow, 'BUDGET', 50)
+    monkeypatch.setattr(flow, 'BUDGET', 20)
     t = Body()
     r = t.registers('r0')
     t.fill(r)
@@ -1237,7 +1237,7 @@ def test_a_body_past_the_budget_is_left_as_it_is(monkeypatch):
     out = t.run()
     assert out is t.body
     assert _loads(out, MemSpace.GLOBAL, t.q)
-    assert any('more than 50 elements' in line for line in t.report), t.report
+    assert any('more than 20 accesses' in line for line in t.report), t.report
     assert drop_dead_stores(t.body, threads=LANES, arena='shrMem') is t.body
 
 

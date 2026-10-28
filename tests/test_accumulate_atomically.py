@@ -418,7 +418,7 @@ def test_a_body_past_the_budget_keeps_every_store(monkeypatch):
     out = acc.run()
     assert not _atomic(out), acc.report
     assert _loads_of_q(out, acc.q)
-    assert any('more than 10 elements' in line for line in acc.report), \
+    assert any('more than 10 accesses' in line for line in acc.report), \
         acc.report
 
 

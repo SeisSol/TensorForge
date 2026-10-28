@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import bisect
 import itertools
+import operator
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
@@ -84,6 +85,34 @@ _BIN = {
 #: The same for the one-operand ops `_BIN` cannot hold.
 _UN = {'neg': lambda a: -a, 'popcount': lambda a: int(a).bit_count()}
 
+#: The ops of `_BIN` whose result is a number of numbers, as the functions
+#: that compute them for many lanes at once (`_Indices.evaluate_lanes`).
+_BIN_LANES = {
+    'add': operator.add, 'sub': operator.sub, 'mul': operator.mul,
+    'min': min, 'max': max,
+    'bitand': operator.and_, 'bitor': operator.or_, 'bitxor': operator.xor,
+    'shl': operator.lshift, 'shr': operator.rshift,
+}
+
+#: The leaves of an operand of the thread index along `x` alone.
+_X = frozenset(('x',))
+
+
+def _lanewise(op: str, va, vb):
+    """`op` of `va` and `vb`, each a number or one a lane: one a lane where
+    either is."""
+    g = _BIN_LANES.get(op)
+    if isinstance(va, tuple):
+        if isinstance(vb, tuple):
+            return (tuple(map(g, va, vb)) if g is not None else
+                    tuple(int(_BIN[op](x, y)) for x, y in zip(va, vb)))
+        return (tuple(map(g, va, itertools.repeat(vb))) if g is not None
+                else tuple(int(_BIN[op](x, vb)) for x in va))
+    if isinstance(vb, tuple):
+        return (tuple(map(g, itertools.repeat(va), vb)) if g is not None
+                else tuple(int(_BIN[op](va, y)) for y in vb))
+    return int(_BIN[op](va, vb))
+
 #: The thread's indices, by the axis they are leaves for.
 _THREAD = {'thread_idx_x': 'x', 'thread_idx_y': 'y'}
 
@@ -113,6 +142,9 @@ class _Indices:
         #: thread index, lane by lane.
         self._simd = simd
         self._leaves: Dict[int, frozenset] = {}
+        #: Per operand of the thread index alone and tuple of lanes, its
+        #: values (`evaluate_lanes`): the same wherever it is asked.
+        self._by_lane: Dict[Tuple[int, Tuple[int, ...]], Tuple[int, ...]] = {}
 
     def _lanes(self, s: Stmt) -> bool:
         """Is `s` the lanes' own index under the explicit vector -- `0, 1,
@@ -203,6 +235,11 @@ class _Indices:
         known = memo.get(key)
         if known is not None:
             return known
+        alone = self._leaves[operand.id] == _X
+        if alone:
+            known = self._by_lane.get(key)
+            if known is not None:
+                return known
         s = self._defs[operand.id]
         if s.op == Op.CALL or s.op == Op.RAWEXPR:
             # The thread index along `x`, or the lanes' own (`_lanes`).
@@ -229,19 +266,13 @@ class _Indices:
             out = (tuple(int(f(x)) for x in v) if isinstance(v, tuple)
                    else int(f(v)))
         else:
-            f = _BIN[s.op]
             a, b = s.args
             va = self.evaluate_lanes(a, env, lanes, memo, fixed)
             vb = self.evaluate_lanes(b, env, lanes, memo, fixed)
-            if isinstance(va, tuple) and isinstance(vb, tuple):
-                out = tuple(int(f(x, y)) for x, y in zip(va, vb))
-            elif isinstance(va, tuple):
-                out = tuple(int(f(x, vb)) for x in va)
-            elif isinstance(vb, tuple):
-                out = tuple(int(f(va, y)) for y in vb)
-            else:
-                out = int(f(va, vb))
+            out = _lanewise(s.op, va, vb)
         memo[key] = out
+        if alone:
+            self._by_lane[key] = out
         return out
 
     def domain(self, leaves: frozenset,

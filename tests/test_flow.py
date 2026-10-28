@@ -162,22 +162,22 @@ def test_a_broadcast_tells_the_lane_that_stored_from_the_others():
     assert sum(bin(r.mask).count('1') for r in reaches) == LANES
     own = [r for r in reaches if r.own]
     assert len(own) == 1 and own[0].mask == 1 << 5
-    assert all(r.by == 5 and r.certain and r.writer != INITIAL
-               for r in reaches)
+    assert all(r.certain and r.writer != INITIAL for r in reaches)
+    assert all(r.by == 5 for r in reaches if not r.own)
 
 
-def test_a_broadcast_counts_against_the_budget_lane_by_lane():
-    """A read every lane makes of one element counts as the reads of the
-    lanes: with each lane's store of what it read, 64 run on a budget of
-    64, not on 63."""
+def test_an_access_counts_once_against_the_budget():
+    """A read every lane makes of one element, and a store of an element a
+    lane, count once each, whatever their lanes reach: the two run on a
+    budget of 2, not on 1."""
     t = Body()
     b = t.b
     b.store(t.p, b.load(t.q, 0), t.lane)
     body = b.finish()
     verify(body)
-    assert Flow(body, LANES, budget=2 * LANES).insts
+    assert Flow(body, LANES, budget=2).insts
     with pytest.raises(TooLarge):
-        Flow(body, LANES, budget=2 * LANES - 1)
+        Flow(body, LANES, budget=1)
 
 
 def test_a_broadcast_takes_what_each_lane_loaded_before_lane_by_lane():
@@ -219,6 +219,172 @@ def test_an_index_that_picks_by_lane_is_asked_lane_by_lane():
             assert r.own and r.certain and r.writer != INITIAL
         else:
             assert r.writer == INITIAL
+
+
+# -- memory, the lanes of an access as one (`_Cells`) -------------------------
+
+def test_the_lanes_that_read_their_own_stores_alike_read_in_one_reach():
+    """Every valid lane stores its element of a column of `q` and reads it
+    back: one reach for all of them, each lane's own store, and the element
+    each lane read."""
+    t = Body()
+    b = t.b
+    with b.if_(t.valid):
+        b.store(t.q, 1.0, t.element(2))
+        b.store(t.p, b.load(t.q, t.element(2)), t.lane)
+    f = t.flow()
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    (r,) = _reaches(f, load)
+    assert r.mask == (1 << ROWS) - 1 and r.own and r.certain
+    assert r.cell_at(3)[1] == (3 + 2 * ROWS,)
+
+
+def test_a_read_of_another_lanes_store_names_the_lane_that_stored():
+    """Lane `l` reads the element lane `l + 1` stored: each lane apart, with
+    the lane that stored it."""
+    t = Body()
+    b = t.b
+    with b.if_(t.valid):
+        b.store(t.q, 1.0, t.lane)
+    with b.if_(b.op('lt', BOOL, t.lane, ROWS - 1)):
+        b.store(t.p, b.load(t.q, b.op('add', INDEX, t.lane, 1)), t.lane)
+    f = t.flow()
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    reaches = _reaches(f, load)
+    assert sorted(r.mask for r in reaches) == [1 << l for l in range(ROWS - 1)]
+    assert all(not r.own and r.certain and r.by == r.mask.bit_length()
+               for r in reaches)
+
+
+def test_a_store_over_some_elements_of_a_read_tells_its_lanes_apart():
+    """The valid lanes store their elements, those below 8 once more: read
+    back, those find the second store, the others the first."""
+    t = Body()
+    b = t.b
+    with b.if_(t.valid):
+        b.store(t.q, 1.0, t.lane)
+    with b.if_(b.op('lt', BOOL, t.lane, 8)):
+        b.store(t.q, 2.0, t.lane)
+    with b.if_(t.valid):
+        b.store(t.p, b.load(t.q, t.lane), t.lane)
+    f = t.flow()
+    second = _stmts(f, Op.STORE, MemSpace.GLOBAL)[1]
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    by = {f.insts[r.writer].stmt is second: r for r in _reaches(f, load)}
+    assert by[True].mask == 0xFF
+    assert by[False].mask == (1 << ROWS) - 1 & ~0xFF
+    assert all(r.own and r.certain for r in by.values())
+
+
+def test_elements_in_two_blocks_are_read_in_one_reach():
+    """`q[l + 50]`: the lanes' elements lie in two blocks of 64, and the
+    lanes read their own stores in one reach all the same."""
+    t = Body()
+    b = t.b
+    at = b.op('add', INDEX, t.lane, 50)
+    with b.if_(t.valid):
+        b.store(t.q, 1.0, at)
+        b.store(t.p, b.load(t.q, at), t.lane)
+    f = t.flow()
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    (r,) = _reaches(f, load)
+    assert r.mask == (1 << ROWS) - 1 and r.own and r.certain
+
+
+def test_an_element_keeps_its_last_writes_of_uncertain_standing():
+    """Nine stores of `q[l]`, each under a guard of its own: a read under
+    none may read the last eight, and the first has gone out of sight."""
+    t = Body()
+    b = t.b
+    for i in range(9):
+        with b.Block(f'if (flag{i})'):
+            b.store(t.q, float(i), t.lane)
+    b.store(t.p, b.load(t.q, t.lane), t.lane)
+    f = t.flow()
+    stores = _stmts(f, Op.STORE, MemSpace.GLOBAL)[:9]
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    (r,) = _reaches(f, load)
+    assert r.writer == INITIAL and r.mask == f.full
+    assert {id(f.insts[w].stmt) for w in r.maybe} == {id(s) for s in stores[1:]}
+
+
+def test_a_store_of_one_element_by_every_lane_is_the_last_lanes():
+    """Every valid lane stores `q[0]`: memory holds the last lane's, which
+    that lane reads as its own and every other one as lane 23's; and each
+    lane's store replaced the one of the lane before it."""
+    t = Body()
+    b = t.b
+    with b.if_(t.valid):
+        b.store(t.q, 1.0, 0)
+    b.store(t.p, b.load(t.q, 0), t.lane)
+    body = b.finish()
+    verify(body)
+    f = Flow(body, LANES, arena='shrMem')
+    store = _stmts(f, Op.STORE, MemSpace.GLOBAL)[0]
+    load, = _stmts(f, Op.LOAD, MemSpace.GLOBAL)
+    reaches = _reaches(f, load)
+    own = [r for r in reaches if r.own]
+    assert len(own) == 1 and own[0].mask == 1 << (ROWS - 1)
+    assert all(r.by == ROWS - 1 for r in reaches if not r.own)
+    n, = f.executions(store)
+    cell = f.cells_of(n)[0][1]
+    assert f.before[n][(0, cell)] == (INITIAL, True)
+    assert all(f.before[n][(lane, cell)] == (n, True)
+               for lane in range(1, ROWS))
+
+
+def test_a_loop_that_runs_again_tells_the_lanes_it_writes_for_apart():
+    """A batch loop reads `q[l]`, which a store ahead of it wrote, and its
+    lanes below 8 store it anew behind the read: those may read that store
+    of the run before and take nothing; the others take the number of the
+    first."""
+    t = Body()
+    b = t.b
+    with b.if_(t.valid):
+        b.store(t.q, 1.0, t.lane)
+    n = b.extern_value('numElements', SIZE, uniform=Uniformity.GRID, hint='n')
+    with b.for_(0, n, 1):
+        with b.if_(t.valid):
+            b.store(t.p, b.load(t.q, t.lane), t.lane)
+        with b.if_(b.op('lt', BOOL, t.lane, 8)):
+            b.store(t.q, 2.0, t.lane)
+    body = b.finish()
+    verify(body)
+    f = Flow(body, LANES, arena='shrMem', values=True, before=False)
+    load, = [s for s in walk_stmts(body) if s.op == Op.LOAD]
+    reaches = _reaches(f, load)
+    low = [r for r in reaches if r.mask & 0xFF]
+    high = [r for r in reaches if r.mask & ~0xFF]
+    assert [r.mask for r in low] == [0xFF] and not low[0].certain
+    assert [r.mask for r in high] == [(1 << ROWS) - 1 & ~0xFF]
+    assert high[0].certain
+    found = [(m, o) for x in f.executions(load) for m, o in f.forward.get(x, ())]
+    lanes = 0
+    for m, o in found:
+        assert o == ('const', 1.0)
+        lanes |= m
+    assert lanes == (1 << ROWS) - 1 & ~0xFF
+
+
+def test_a_loop_that_runs_again_hands_on_only_the_elements_it_writes():
+    """A batch loop reads `q[l]`, which a store ahead of it wrote, and stores
+    `q[l + 32]` behind the read, in the same block of memory: nothing the
+    loop writes is what the read reads, and it stays certain."""
+    t = Body()
+    b = t.b
+    with b.if_(t.valid):
+        b.store(t.q, 1.0, t.lane)
+    n = b.extern_value('numElements', SIZE, uniform=Uniformity.GRID, hint='n')
+    with b.for_(0, n, 1):
+        with b.if_(t.valid):
+            b.store(t.p, b.load(t.q, t.lane), t.lane)
+            b.store(t.q, 2.0, b.op('add', INDEX, t.lane, 32))
+    body = b.finish()
+    verify(body)
+    f = Flow(body, LANES, arena='shrMem', before=False)
+    load, = [s for s in walk_stmts(body) if s.op == Op.LOAD]
+    (r,) = _reaches(f, load)
+    assert r.certain and r.own and r.mask == (1 << ROWS) - 1
 
 
 def test_a_store_through_the_symbol_is_read_through_the_binding():
@@ -305,6 +471,26 @@ def test_a_store_behind_one_under_a_guard_is_unsure_what_it_replaced():
     assert all(v == (INITIAL, False) for v in f.before[n2].values())
 
 
+def test_a_register_store_behind_one_under_a_guard_is_unsure_what_it_replaced():
+    """The same in a register: what the second store replaces is the
+    first's where the guard holds, and the zeros of the allocation where it
+    does not."""
+    t = Body()
+    b = t.b
+    r = t.registers('r0')
+    with b.Block('if (active)'):
+        b.store(r, 1.0, 0)
+    b.store(r, 2.0, 0)
+    f = t.flow()
+    alloc, = [s for s in walk_stmts(f.body) if s.op == Op.ALLOC
+              and s.target[0] is r]
+    (zeros,) = f.executions(alloc)
+    _, second = _stmts(f, Op.STORE, MemSpace.REGISTER)
+    (n2,) = f.executions(second)
+    assert f.before[n2]
+    assert all(v == (zeros, False) for v in f.before[n2].values())
+
+
 def test_a_buffer_defined_anew_holds_nothing_of_before():
     """After a `mark defines`, a read of the buffer finds no store of
     before it."""
@@ -340,10 +526,10 @@ def test_a_binding_a_loop_computes_is_another_buffer_every_trip():
 
 
 def test_a_body_that_places_more_than_its_budget_is_too_large():
-    """What `Flow` keeps grows with the elements a body places, lane by lane
-    and trip by trip, and they count against its budget: `ROWS` lanes
-    storing `COLS` elements place 96, which a budget of 96 runs and one of
-    95 does not."""
+    """What `Flow` keeps grows with the accesses a body places, trip by
+    trip, and they count against its budget: `ROWS` lanes storing an
+    element each in each of `COLS` trips place 4, which a budget of 4 runs
+    and one of 3 does not."""
     t = Body()
     b = t.b
     with b.if_(t.valid):
@@ -351,6 +537,6 @@ def test_a_body_that_places_more_than_its_budget_is_too_large():
             b.store(t.q, 1.0, t.element(hop.induction))
     body = b.finish()
     verify(body)
-    assert Flow(body, LANES, budget=96).insts
+    assert Flow(body, LANES, budget=COLS).insts
     with pytest.raises(TooLarge):
-        Flow(body, LANES, budget=95)
+        Flow(body, LANES, budget=COLS - 1)

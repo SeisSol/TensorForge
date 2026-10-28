@@ -64,10 +64,16 @@ the array is read and written as -- the lane's own, as under SPMD.  What is
 not one element a lane of every lane, a vector of a register array that
 starts elsewhere, or part of a vector is placed nowhere (`_place_vector`).
 
-What `Flow` keeps grows with the elements it places, lane by lane and
-execution by execution -- with `values`, some 300 bytes each.  A body that
-places more than `BUDGET` is not run (`TooLarge`), and a pass that asks
-leaves it as it is.
+An access is placed once for all the lanes that make it.  A register is an
+element each lane holds its own of: one cell, its writes and reads lane
+groups of it.  Memory is kept in blocks of 64 elements along the last index
+(`_mem`): an access names the elements each of its lanes reaches
+(`_Cells`), a write leaves in every block it lands in the elements it wrote
+there (`_Piece`), and a read finds, element by element, the last write it
+stands under -- the lanes that read alike, the lane's own store or one lane's
+for all of them, in one `Reach`.  What `Flow` keeps grows with the accesses
+it places, execution by execution.  A body that places more than `BUDGET`
+is not run (`TooLarge`), and a pass that asks leaves it as it is.
 
 Nothing here changes the body.  A pass asks, and decides what it may do
 with the answer.
@@ -94,20 +100,22 @@ EXTERNAL = -2
 #: own of, and the memory the lanes of a multiplication share.
 _PLACED = (MemSpace.REGISTER, MemSpace.SHARED, MemSpace.GLOBAL)
 
-#: How many writes of uncertain standing a cell keeps apart before they are
-#: taken as one.
+#: How many writes of uncertain standing an element keeps apart before they
+#: are taken as one.
 _DEPTH = 8
 
-#: The elements one body may place, summed over its executions and lanes,
-#: before `Flow` gives up on it.  The largest body of the corpus places
-#: 263 000 -- the merged derivative at order 6 in double, on sm_86, which
-#: the flow holds in 92 MB -- and SeisSol's damage step written out at
-#: order 5, every temporary in memory, 1.2 million.
-BUDGET = 1_000_000
+#: The accesses one body may place, summed over its executions, before
+#: `Flow` gives up on it: an element of a register, or of memory every lane
+#: reads, one each; the elements of memory the lanes of an access reach, one
+#: a row.  SeisSol's damage step in double, every operation storing its
+#: result, places 0.42 million at order 6, which the flow of the forward
+#: pass holds in 0.8 GB, and 1.7 million at order 8, in 2.8 GB.
+BUDGET = 2_000_000
 
 
 class TooLarge(Exception):
-    """The body places more elements than `Flow` keeps track of (`BUDGET`)."""
+    """The body places more accesses than `Flow` keeps track of
+    (`BUDGET`)."""
 
 #: The one empty set of writers every record without any shares: a
 #: `frozenset()` of its own is 216 bytes, and a body reads a few hundred
@@ -148,25 +156,232 @@ class Reach:
     writer: Optional[int]
     maybe: FrozenSet[int] = EMPTY
     own: bool = True
-    #: The element read.
-    cell: Tuple = ()
-    #: The lane that wrote it, for a read of memory; -1 where none did.
+    #: The element read: a register, every lane's; in memory, each lane's
+    #: (`_At`), which `cell_at` names.
+    cell: Any = ()
+    #: The lane that wrote it, for a read of memory another lane wrote; -1
+    #: for the lane's own store, and where none did.
     by: int = -1
 
     @property
     def certain(self) -> bool:
         return self.writer is not None and not self.maybe
 
+    def cell_at(self, lane: int) -> Tuple:
+        """The element lane `lane` read, `(buffer key, address)`."""
+        cell = self.cell
+        return cell if isinstance(cell, tuple) else cell.at(lane)
+
 
 @dataclass(slots=True)
 class _Layer:
-    """A write still visible in a cell: who, under which conditions, for
-    which lanes (registers), or by which lane (memory)."""
+    """A write still visible in a register: who, under which conditions,
+    for which lanes."""
 
     writer: int
     conds: FrozenSet[Tuple[Any, bool]]
     mask: int = 0
-    lane: int = -1
+
+
+@dataclass(slots=True)
+class _Piece:
+    """What a write left visible in a block of memory: who, under which
+    conditions, the elements it wrote there (`bits`, one a position in the
+    block) that no later write has taken, and the lanes that wrote them
+    (`cells`)."""
+
+    writer: int
+    conds: FrozenSet[Tuple[Any, bool]]
+    cells: '_Cells'
+    bits: int
+
+
+class _Cells:
+    """The elements of memory one access reaches, lane by lane, in one row
+    of its buffer: lane `lanes[i]` at `starts[i]` along the last index and
+    the `width - 1` after it, the other indices `lead` (`None` for a buffer
+    of no index, its one element at 0) -- or, where `starts` is a number,
+    every lane at that one, a read no lane tells apart (`broadcast`).
+    What the flow asks of them it asks once (`blocks`, `readers`,
+    `lane_of`)."""
+
+    __slots__ = ('key', 'lead', 'lanes', 'starts', 'width', 'mask',
+                 'broadcast', '_blocks', '_lanes_in', '_readers', '_last',
+                 '_alone', '_start', '_at', '_lanes_at')
+
+    def __init__(self, key: Tuple, lead: Optional[Tuple[int, ...]],
+                 lanes: Tuple[int, ...], starts, width: int, mask: int):
+        self.key = key
+        self.lead = lead
+        self.lanes = lanes
+        self.starts = starts
+        self.width = width
+        self.mask = mask
+        self.broadcast = isinstance(starts, int)
+        self._blocks: Optional[Dict[int, int]] = None
+        self._lanes_in: Optional[Dict[int, int]] = None
+        self._readers: Optional[Dict[int, List[Tuple[int, int]]]] = None
+        self._last: Optional[Dict[int, int]] = None
+        self._alone = True
+        self._start: Optional[Dict[int, int]] = None
+        self._at: Optional[Dict[int, _At]] = None
+        self._lanes_at: Optional[Dict[int, Dict[int, int]]] = None
+
+    def each(self):
+        """`(lane, k, element)` for every element a lane reaches, `k` past
+        its start, lane by lane in the order the lanes run."""
+        w = self.width
+        if self.broadcast:
+            s = self.starts
+            for lane in self.lanes:
+                for k in range(w):
+                    yield lane, k, s + k
+            return
+        for lane, s in zip(self.lanes, self.starts):
+            for k in range(w):
+                yield lane, k, s + k
+
+    def blocks(self) -> Dict[int, int]:
+        """The elements, block by block of 64: block -> bits."""
+        out = self._blocks
+        if out is not None:
+            return out
+        out = {}
+        lanes_in = self._lanes_in = {}
+        w = self.width
+        if self.broadcast:
+            for e in range(self.starts, self.starts + w):
+                b = e >> 6
+                out[b] = out.get(b, 0) | (1 << (e & 63))
+                lanes_in[b] = self.mask
+        else:
+            alone = True
+            for lane, s in zip(self.lanes, self.starts):
+                bit = 1 << lane
+                for e in range(s, s + w):
+                    b = e >> 6
+                    held = out.get(b, 0)
+                    one = 1 << (e & 63)
+                    if held & one:
+                        alone = False
+                    out[b] = held | one
+                    lanes_in[b] = lanes_in.get(b, 0) | bit
+            self._alone = alone
+        self._blocks = out
+        return out
+
+    def alone(self) -> bool:
+        """Does every element have one lane that reaches it?"""
+        self.blocks()
+        return self._alone and not self.broadcast
+
+    def lanes_in(self, block: int, bits: int) -> int:
+        """The lanes that reach an element of `bits` in `block`."""
+        if self.broadcast:
+            return self.mask
+        if bits == self.blocks()[block]:
+            return self._lanes_in[block]
+        out = 0
+        readers = self.readers()
+        base = block << 6
+        while bits:
+            low = bits & -bits
+            bits ^= low
+            for lanes, _ in readers[base + low.bit_length() - 1]:
+                out |= lanes
+        return out
+
+    def readers(self) -> Dict[int, List[Tuple[int, int]]]:
+        """Per element, `(lanes, k)`: the lanes that reach it `k` past their
+        start."""
+        out = self._readers
+        if out is None and self.broadcast:
+            out = self._readers = {self.starts + k: [(self.mask, k)]
+                                   for k in range(self.width)}
+        if out is None and self.alone():
+            out = self._readers = {e: [(1 << lane, k)]
+                                   for lane, k, e in self.each()}
+        if out is None:
+            out = {}
+            for lane, k, e in self.each():
+                at = out.setdefault(e, [])
+                for i, (lanes, j) in enumerate(at):
+                    if j == k:
+                        at[i] = (lanes | (1 << lane), k)
+                        break
+                else:
+                    at.append((1 << lane, k))
+            self._readers = out
+        return out
+
+    def lanes_at(self, block: int) -> List[Tuple[int, int]]:
+        """`(k, lanes)`: the lanes whose element `k` past their start is in
+        `block`."""
+        found = self._lanes_at
+        if found is None:
+            found = self._lanes_at = {}
+            for lane, k, e in self.each():
+                at = found.setdefault(e >> 6, {})
+                at[k] = at.get(k, 0) | (1 << lane)
+        return list(found.get(block, {}).items())
+
+    def lane_of(self, e: int) -> int:
+        """The lane whose write of element `e` memory holds: the last."""
+        last = self._last
+        if last is None:
+            last = self._last = {e2: lane for lane, _, e2 in self.each()}
+        return last[e]
+
+    def alike(self, other: '_Cells') -> bool:
+        """Does each lane reach the elements here it reaches in `other`, and
+        every element one lane only?  Both in the same row."""
+        return (self.width == other.width
+                and (self.lanes is other.lanes or self.lanes == other.lanes)
+                and self.starts == other.starts and self.alone())
+
+    def cell(self, lane: int, k: int) -> Tuple:
+        """`(key, address)` of the element lane `lane` reaches `k` past its
+        start."""
+        if self.lead is None:
+            return (self.key, ())
+        if self.broadcast:
+            s = self.starts
+        else:
+            start = self._start
+            if start is None:
+                start = self._start = dict(zip(self.lanes, self.starts))
+            s = start[lane]
+        return (self.key, self.lead + (s + k,))
+
+    def at(self, k: int) -> '_At':
+        found = self._at
+        if found is None:
+            found = self._at = {}
+        out = found.get(k)
+        if out is None:
+            out = found[k] = _At(self, k)
+        return out
+
+    def expanded(self) -> List[Tuple[int, Tuple]]:
+        """`(lanes, cell)` element by element: a broadcast's for all its
+        lanes, the others lane by lane."""
+        if self.broadcast:
+            return [(self.mask, self.cell(-1, k)) for k in range(self.width)]
+        return [(1 << lane, self.cell(lane, k)) for lane, k, _ in self.each()]
+
+
+class _At:
+    """The element each lane of a `Reach` read: `k` past its start in
+    `cells`."""
+
+    __slots__ = ('cells', 'k')
+
+    def __init__(self, cells: _Cells, k: int):
+        self.cells = cells
+        self.k = k
+
+    def at(self, lane: int) -> Tuple:
+        return self.cells.cell(lane, self.k)
 
 
 class Flow:
@@ -227,15 +442,17 @@ class Flow:
         #: Executions of stores read by what the analysis cannot place.
         self.escaped: Set[int] = set()
         self.opaque: Set[int] = set()
-        #: Per execution, the elements it touched: the lane groups and the
-        #: cells side by side, which `cells_of` pairs up.  A cell is
-        #: `(buffer key, address)`.
-        self._cells: Dict[int, Tuple[Tuple[int, ...], Tuple[Tuple, ...]]] = {}
+        #: Per execution, what it placed: `(lanes, cell, kind)`, a cell of a
+        #: register `(buffer key, address)`, of memory `_Cells`; `cells_of`
+        #: gives them element by element.
+        self._cells: Dict[int, List[Tuple[int, Any, str]]] = {}
         self.defs: Dict[int, Stmt] = {}
         #: Which values are the same on every lane (`_Alike`), once asked.
         self._alike: Optional[_Alike] = None
         self.uses: Dict[int, List[Stmt]] = defaultdict(list)
         self.loops: Dict[int, Tuple[Stmt, ...]] = {}
+        #: The inductions of `loops`, by id.
+        self._inductions: Dict[int, Tuple[int, ...]] = {}
         self.parents: Dict[int, Tuple[Stmt, ...]] = {}
         #: The values that bind a buffer of memory, by the name their
         #: declaration gives them.
@@ -248,10 +465,20 @@ class Flow:
             id(a.base) for x in walk_stmts(self.body)
             if x.op in (Op.LOAD, Op.STORE, Op.LOAD_ASYNC, Op.COPY_ASYNC)
             for a in x.accesses if a.base is not None}
+        #: Per cell of a register, the writes visible in it.
         self._reg: Dict[Tuple, List[_Layer]] = {}
-        self._mem: Dict[Tuple, List[_Layer]] = {}
-        #: The cells of both tables by buffer, `(space, base)`.
+        #: Per block of memory, `(buffer key, lead, block)`: the writes
+        #: visible in it, the first first.
+        self._mem: Dict[Tuple, List[_Piece]] = {}
+        #: The cells of `_reg` and the blocks of `_mem` by buffer, `(space,
+        #: base)`.
         self._cells_of: Dict[Tuple, Set[Tuple]] = defaultdict(set)
+        self._blocks_of: Dict[Tuple, Set[Tuple]] = defaultdict(set)
+        #: A reach a loop's next run tells lanes apart in (`_wrap`), by id:
+        #: the reach and the reaches its lanes went to -- what a record made
+        #: before holds of it, `_parts` and `_part` find there.
+        self._split: Dict[int, Tuple[Reach, List[Reach]]] = {}
+        self._root: Dict[int, Reach] = {}
         #: Buffers written by what could not be placed: every read of them
         #: may read that write.
         self._smeared: Dict[Tuple, List[int]] = defaultdict(list)
@@ -261,11 +488,13 @@ class Flow:
         self._fresh: Dict[int, int] = {}
         #: Each set of writers a record holds, once (`_frozen`).
         self._sets: Dict[FrozenSet[int], FrozenSet[int]] = {}
-        #: Each element, once (`_place_one`): every access to it names the
-        #: same cell.
+        #: Each cell of a register, once (`_place_one`): every access to it
+        #: names the same cell.
         self._interned: Dict[Tuple, Tuple] = {}
         #: The lanes of each mask asked of `lanes`, once.
         self._lane_sets: Dict[int, Tuple[int, ...]] = {}
+        #: Per statement, what placing it asks on every execution (`_plan`).
+        self._plans: Dict[int, Tuple] = {}
         #: For a store's execution, lane group by lane group, where what it
         #: stored came from: `('reg', cell, writer)`, a register a load read
         #: it from, holding what `writer` wrote; `('const', number)`; or
@@ -300,22 +529,48 @@ class Flow:
         self._held: Dict[int, List[Tuple[int, Tuple, int]]] = defaultdict(list)
         self._run(self.body, {}, self.full, frozenset())
         # What a loop's next run hands back (`_wrap`) can make a read
-        # uncertain after the fact; what it would read instead goes with it.
+        # uncertain after the fact, for some of its lanes; what they would
+        # read instead goes with it.
         for n, found in self._forwarded.items():
-            kept = [(m, o) for m, o, rs in found
-                    if all(r.certain for r in rs)]
+            kept = []
+            for m, o, rs in found:
+                for r in rs:
+                    for part in self._parts(r):
+                        if not part.certain:
+                            m &= ~part.mask
+                if m:
+                    kept.append((m, o))
             if kept:
                 self.forward[n] = kept
-        for cell, layers in self._mem.items():
-            if cell[0][0] is MemSpace.GLOBAL:
-                for layer in layers:
-                    self.final.add(layer.writer)
+        for where, pieces in self._mem.items():
+            if where[0][0] is MemSpace.GLOBAL:
+                for piece in pieces:
+                    self.final.add(piece.writer)
 
     def cells_of(self, n: int) -> List[Tuple[int, Tuple]]:
-        """The elements execution `n` touched, `(lanes, cell)` by lane
-        group."""
-        entry = self._cells.get(n)
-        return list(zip(*entry)) if entry else []
+        """The elements execution `n` touched, `(lanes, cell)`: a register's
+        and what every lane reads of memory for the lanes, the rest of
+        memory lane by lane."""
+        out: List[Tuple[int, Tuple]] = []
+        for m, cell, _ in self._cells.get(n, ()):
+            if isinstance(cell, _Cells):
+                out.extend(cell.expanded())
+            else:
+                out.append((m, cell))
+        return out
+
+    def _parts(self, r: Reach) -> List[Reach]:
+        """The reaches the lanes of `r`, and of the reach it came from, went
+        to: `r`, where no loop told them apart (`_wrap`)."""
+        found = self._split.get(id(self._root.get(id(r), r)))
+        return found[1] if found is not None else [r]
+
+    def _part(self, r: Reach, lane: int) -> Reach:
+        """The reach lane `lane` of `r` went to."""
+        for part in self._parts(r):
+            if part.mask >> lane & 1:
+                return part
+        return r
 
     def _frozen(self, writers) -> FrozenSet[int]:
         """`writers` as the one set every record with these writers holds:
@@ -330,9 +585,11 @@ class Flow:
 
     def _index(self, stmts: Sequence[Stmt], parents: Tuple[Stmt, ...]):
         loops = tuple(p for p in parents if p.op == Op.FOR)
+        inductions = tuple(l.induction.id for l in loops)
         for s in stmts:
             self.parents[id(s)] = parents
             self.loops[id(s)] = loops
+            self._inductions[id(s)] = inductions
             if (s.op == Op.RAWEXPR and s.target and s.attr('decl') is not None
                     and s.attr('extern')):
                 self._bound.setdefault(s.attr('extern'), s.target[0])
@@ -361,8 +618,7 @@ class Flow:
 
     def inst(self, stmt: Stmt, env: Dict[int, int]) -> Optional[int]:
         """The execution of `stmt` at the trips `env` names."""
-        hops = tuple(env.get(l.induction.id)
-                     for l in self.loops.get(id(stmt), ()))
+        hops = tuple(map(env.get, self._inductions.get(id(stmt), ())))
         return self._key.get((id(stmt), hops))
 
     def executions(self, stmt: Stmt) -> List[int]:
@@ -379,12 +635,12 @@ class Flow:
     # -- running ------------------------------------------------------------- #
 
     def _new(self, s: Stmt, env: Dict[int, int], mask: int, conds) -> int:
-        hops = tuple((l.induction.id, env.get(l.induction.id))
-                     for l in self.loops.get(id(s), ()))
+        inductions = self._inductions.get(id(s), ())
+        trips = tuple(map(env.get, inductions))
         n = len(self.insts)
-        self.insts.append(Inst(s, hops, mask, conds))
+        self.insts.append(Inst(s, tuple(zip(inductions, trips)), mask, conds))
         self.by_stmt[id(s)].append(n)
-        self._key[(id(s), tuple(v for _, v in hops))] = n
+        self._key[(id(s), trips)] = n
         return n
 
     def _static(self, operand, env) -> bool:
@@ -481,37 +737,96 @@ class Flow:
         for r in s.regions:
             for a in r.args:
                 local.add(a.id)
-        last: Dict[Tuple, Set[int]] = defaultdict(set)
+        # What the run writes, by the executions that touch it: a register's
+        # cell, and a block of memory with the elements.  Everything a
+        # statement that writes touches, as it may have written it.
+        regs: Dict[Tuple, Set[int]] = defaultdict(set)
+        mems: Dict[Tuple, List[Tuple[int, int]]] = defaultdict(list)
         for n in range(first, len(self.insts)):
-            for _, cell in self.cells_of(n):
-                if self._writes(self.insts[n].stmt) and not self._iteration(
-                        cell, local):
-                    last[cell].add(n)
-        if not last:
+            placed = self._cells.get(n)
+            if not placed or not self._writes(self.insts[n].stmt):
+                continue
+            for _, cell, _ in placed:
+                if isinstance(cell, _Cells):
+                    if not self._iteration(cell.key, local):
+                        for block, bits in cell.blocks().items():
+                            mems[(cell.key, cell.lead, block)].append(
+                                (n, bits))
+                elif not self._iteration(cell[0], local):
+                    regs[cell].add(n)
+        if not regs and not mems:
             return
         for n in range(first, len(self.insts)):
-            if n not in self.reach:
+            reaches = self.reach.get(n)
+            if not reaches or all(r.writer is not None and r.writer >= first
+                                  and not r.maybe for r in reaches):
                 continue
-            for k, (m, cell) in enumerate(self.cells_of(n)):
-                writers = last.get(cell)
-                if not writers:
+            # Per lane, what the run writes of what the execution touches.
+            handed: Dict[int, Set[int]] = defaultdict(set)
+            for m, cell, _ in self._cells[n]:
+                if isinstance(cell, _Cells):
+                    for block, bits in cell.blocks().items():
+                        for w, wrote in mems.get((cell.key, cell.lead, block),
+                                                 ()):
+                            hit = bits & wrote
+                            if hit:
+                                for lane in self.lanes(
+                                        cell.lanes_in(block, hit)):
+                                    handed[lane].add(w)
+                else:
+                    writers = regs.get(cell)
+                    if writers:
+                        for lane in self.lanes(m):
+                            handed[lane].update(writers)
+            if not handed:
+                continue
+            out: List[Reach] = []
+            for reach in reaches:
+                if (reach.writer is not None and reach.writer >= first
+                        and not reach.maybe):
+                    out.append(reach)
                     continue
-                for reach in self.reach[n]:
-                    if not reach.mask & m:
-                        continue
-                    if reach.writer is not None and reach.writer >= first \
-                            and not reach.maybe:
-                        continue
-                    others = frozenset(w for w in writers)
-                    reach.maybe = reach.maybe | others
-                    for w in others:
-                        self.readers[w].append((n, reach.mask & m))
+                groups: Dict[FrozenSet[int], int] = {}
+                for lane in self.lanes(reach.mask):
+                    found = handed.get(lane)
+                    key = self._frozen(found) if found else EMPTY
+                    groups[key] = groups.get(key, 0) | (1 << lane)
+                for part, writers in self._apart(reach, groups):
+                    if writers:
+                        part.maybe = part.maybe | writers
+                        for w in writers:
+                            self.readers[w].append((n, part.mask))
+                    out.append(part)
+            self.reach[n] = out
+
+    def _apart(self, reach: Reach, groups: Dict[FrozenSet[int], int]
+               ) -> List[Tuple[Reach, FrozenSet[int]]]:
+        """`reach` for each lane group of `groups`, writers -> lanes: itself
+        for the first, a reach of its own for each other one (`_parts`)."""
+        items = list(groups.items())
+        if len(items) == 1:
+            return [(reach, items[0][0])]
+        root = self._root.get(id(reach), reach)
+        entry = self._split.get(id(root))
+        if entry is None:
+            entry = self._split[id(root)] = (root, [root])
+        out = []
+        for writers, lanes in items:
+            if not out:
+                part = reach
+                reach.mask = lanes
+            else:
+                part = Reach(lanes, reach.writer, reach.maybe, reach.own,
+                             reach.cell, reach.by)
+                entry[1].append(part)
+                self._root[id(part)] = root
+            out.append((part, writers))
+        return out
 
     @staticmethod
-    def _iteration(cell, local: Set[int]) -> bool:
-        """Is the element one an iteration has to itself: in a buffer bound
-        inside the region, which every run binds anew?"""
-        key = cell[0]
+    def _iteration(key: Tuple, local: Set[int]) -> bool:
+        """Is a buffer one an iteration has to itself: bound inside the
+        region, which every run binds anew?"""
         return len(key) > 2 and key[2] in local
 
     @staticmethod
@@ -564,8 +879,7 @@ class Flow:
             self.opaque.add(id(s))
             self._smear(n, s, conds)
             return
-        self._cells[n] = (tuple(m for m, _, _ in placed),
-                          tuple(cell for _, cell, _ in placed))
+        self._cells[n] = placed
         read = [p for p in placed if p[2] in ('read', 'rmw')]
         written = [p for p in placed if p[2] in ('write', 'rmw')]
         if read:
@@ -577,7 +891,8 @@ class Flow:
                     taken |= m
                 if self._fetches_too:
                     found += self._fetches(n, conds, taken)
-                self._forwarded[n] = found
+                if found:
+                    self._forwarded[n] = found
                 if whole != mask:
                     self.whole[n] = whole
                 cells = {o[1] for _, o, _ in found if o[0] == 'reg'}
@@ -588,7 +903,8 @@ class Flow:
             self._write(n, written, conds)
             if self._values and s.op in (Op.STORE, Op.MARK):
                 self.origin[n] = self._origin(s, env, mask)
-                self._holding(s, n, env, written)
+                if self._fetches_too:
+                    self._holding(s, n, env, written)
 
     def _origin(self, s: Stmt, env, mask: int) -> List[Tuple[int, Tuple]]:
         """Where the value `s` stores came from, lane group by lane group."""
@@ -755,18 +1071,23 @@ class Flow:
         chain one round of the forwarding would leave half done."""
         out: List[Tuple[int, Tuple, Tuple[Reach, ...]]] = []
         for r in self.reach.get(n, ()):
-            if (not r.certain or not r.cell or r.mask & taken
-                    or r.cell[0][0] is MemSpace.REGISTER):
+            if not r.certain or not r.cell or isinstance(r.cell, tuple):
+                # Of a register, which it reads itself.
                 continue
-            # Lane by lane, and the lanes that found the same together: a
-            # broadcast's lanes may each have loaded the element before in
-            # a load of their own.
+            left = r.mask & ~taken
+            if not left:
+                continue
+            # Lane by lane, and the lanes that found the same together: the
+            # lanes may each have loaded their element before in a load of
+            # their own.
             found_by: Dict[Tuple, int] = {}
             reaches: Dict[Tuple, Reach] = {}
-            for lane in self.lanes(r.mask):
+            for lane in self.lanes(left):
                 bit = 1 << lane
-                for earlier, found in self._fetched.get((r.cell, lane), ()):
-                    if not found.certain or found.writer != r.writer:
+                for earlier, found in self._fetched.get(
+                        (r.cell_at(lane), lane), ()):
+                    if (found.writer != r.writer
+                            or not self._part(found, lane).certain):
                         continue
                     holder = next(((cell, store) for m, cell, store
                                    in self._held.get(earlier, ())
@@ -797,14 +1118,14 @@ class Flow:
         if load is None:
             return
         held = [(m, cell, n) for m, cell, _ in written
-                if cell[0][0] is MemSpace.REGISTER]
+                if isinstance(cell, tuple) and cell[0][0] is MemSpace.REGISTER]
         if not held:
             return
         self._held[load].extend(held)
         for r in self.reach.get(load, ()):
             if r.cell:
                 for lane in self.lanes(r.mask):
-                    self._fetched[(r.cell, lane)].append((load, r))
+                    self._fetched[(r.cell_at(lane), lane)].append((load, r))
 
     def _numbers(self, cell, lanes: int, conds) -> Dict[Any, int]:
         """The numbers `cell`, a register, holds for certain for the lanes of
@@ -855,9 +1176,12 @@ class Flow:
         return not left or self._fresh.get(cell[0][1], INITIAL) == writer
 
     def _reset(self, space, base: int, fresh: Optional[int]) -> None:
-        table = self._reg if space is MemSpace.REGISTER else self._mem
-        for cell in self._cells_of.pop((space, base), ()):
-            table.pop(cell, None)
+        if space is MemSpace.REGISTER:
+            for cell in self._cells_of.pop((space, base), ()):
+                self._reg.pop(cell, None)
+        else:
+            for where in self._blocks_of.pop((space, base), ()):
+                self._mem.pop(where, None)
         if fresh is not None:
             self._fresh[base] = fresh
         else:
@@ -869,54 +1193,90 @@ class Flow:
         they cannot be told."""
         if self.simd:
             return self._place_vector(s, env, mask)
+        plan = self._plans.get(id(s))
+        if plan is None:
+            plan = self._plans[id(s)] = self._plan(s, env)
+        if not plan:
+            return None
+        if len(plan) == 1:
+            if plan[0] is None:
+                return None
+            return self._place_one(*plan[0], env, mask)
+        # A copy reads its source and writes its destination; its value is
+        # none a pass could name.
+        found = [None if part is None else self._place_one(*part, env, mask)
+                 for part in plan]
+        if any(f is None for f in found):
+            return None
+        return [p for f in found for p in f]
+
+    def _plan(self, s: Stmt, env) -> Tuple:
+        """What placing `s` asks on every execution of it the same:
+        `(binding, access, index, width, kind, uniform)` an access, None for
+        one placed nowhere -- or nothing, where `s` places none.  The leaves
+        of an index every execution binds are the same: the inductions of
+        the counted loops around `s`."""
         if s.op == Op.LOAD and len(s.accesses) == 1:
             a = s.accesses[0]
-            index = s.args[1:]
-            width = _width(s.target[0] if s.target else None, a, s.args[0])
-            kind = 'read'
+            parts = [(s.args[0], a, s.args[1:],
+                      _width(s.target[0] if s.target else None, a,
+                             s.args[0]), 'read')]
         elif s.op in (Op.STORE, Op.MARK) and len(s.accesses) == 1:
             # A promise of a zero (`mark zeros`) as the store of that zero.
             a = s.accesses[0]
-            index, width = s.args[2:], _width(s.args[1], a, s.args[0])
-            kind = 'rmw' if a.kind & Effect.ATOMIC else 'write'
+            parts = [(s.args[0], a, s.args[2:], _width(s.args[1], a, s.args[0]),
+                      'rmw' if a.kind & Effect.ATOMIC else 'write')]
         elif s.op == Op.LOAD_ASYNC and len(s.accesses) == 1:
             a = s.accesses[0]
-            index = s.load_index
-            width = _width(s.target[0] if s.target else None, a, s.load_base)
-            kind = 'read'
-            return self._place_one(s.load_base, a, index, width, kind, env,
-                                   mask)
+            parts = [(s.load_base, a, s.load_index,
+                      _width(s.target[0] if s.target else None, a,
+                             s.load_base), 'read')]
         elif s.op == Op.COPY_ASYNC:
-            return self._place_copy(s, env, mask)
+            reads = [a for a in s.accesses if a.kind & Effect.READ]
+            writes = [a for a in s.accesses if a.kind & Effect.WRITE]
+            if len(reads) != 1 or len(writes) != 1:
+                return ()
+            elems = s.attr('elems', 1) or 1
+            parts = [(s.copy_src, reads[0], s.copy_src_index, elems, 'read'),
+                     (s.copy_dst, writes[0], s.copy_dst_index, elems,
+                      'write')]
         else:
-            return None
-        return self._place_one(s.args[0], a, index, width, kind, env, mask)
+            return ()
+        out = []
+        for binding, a, index, width, kind in parts:
+            if (a.space not in _PLACED or a.base is None
+                    or not all(self._static(i, env) for i in index)):
+                out.append(None)
+                continue
+            # An element no lane tells apart from the others' is one for
+            # all of them: a register, which each lane holds of its own, and
+            # an element of memory they read -- a broadcast, which a read
+            # tells the lane that wrote it apart in (`_reaches`).  A write of
+            # one element by several lanes is the last lane's: what memory
+            # holds.
+            uniform = ((a.space is MemSpace.REGISTER or kind == 'read')
+                       and not any('x' in self._ix.leaves(i) for i in index
+                                   if isinstance(i, Value)))
+            out.append((binding, a, tuple(index), width, kind, uniform))
+        return tuple(out)
 
-    def _place_one(self, binding, a, index, width, kind, env, mask):
-        if a.space not in _PLACED or a.base is None:
-            return None
-        if not all(self._static(i, env) for i in index):
-            return None
+    def _place_one(self, binding, a, index, width, kind, uniform, env, mask):
+        """One access of `_plan`'s, for the lanes of `mask` at `env`."""
         key = self._buffer(a, binding, env)
         if key is None:
             return None
-        # An element no lane tells apart from the others' is one cell for
-        # all of them: a register, which each lane holds of its own, and an
-        # element of memory they read -- a broadcast, which `_read_memory`
-        # tells the lane that wrote it apart in.  A write of one element by
-        # several lanes is placed lane by lane: the last of them is what
-        # memory holds.
-        uniform = ((a.space is MemSpace.REGISTER or kind == 'read')
-                   and not any('x' in self._ix.leaves(i) for i in index
-                               if isinstance(i, Value)))
-        out = []
-        interned = self._interned
-        if uniform:
+        if a.space is not MemSpace.REGISTER:
+            out = self._memory(key, index, width, kind, env, mask, uniform)
+        elif uniform:
+            out = []
+            interned = self._interned
             for addr in _span(self._address(index, env), width):
                 cell = (key, addr)
                 out.append((mask, interned.setdefault(cell, cell), kind))
         else:
             # The index for every lane at once (`_Indices.evaluate_lanes`).
+            out = []
+            interned = self._interned
             lanes = self.lanes(mask)
             memo: Dict = {}
             fixed: Dict[int, int] = {}
@@ -929,14 +1289,55 @@ class Flow:
                     cell = (key, at)
                     out.append((1 << lane, interned.setdefault(cell, cell),
                                 kind))
-        spent = len(out)
-        if uniform and a.space is not MemSpace.REGISTER:
-            # The budget counts a broadcast as the reads of its lanes.
-            spent *= len(self.lanes(mask))
-        self._budget -= spent
+        self._spend(len(out))
+        return out
+
+    def _spend(self, placed: int) -> None:
+        self._budget -= placed
         if self._budget < 0:
             raise TooLarge(f'the body places more than {self._limit} '
-                           f'elements')
+                           f'accesses')
+
+    def _memory(self, key, index, width: int, kind: str, env, mask: int,
+                uniform: bool) -> List[Tuple[int, _Cells, str]]:
+        """What an access of memory reaches: the elements of its lanes, one
+        `_Cells` a row of the buffer they land in -- the index for every
+        lane at once (`_Indices.evaluate_lanes`)."""
+        lanes = self.lanes(mask)
+        if not lanes:
+            return []
+        if uniform:
+            addr = self._address(index, env)
+            if not addr:
+                return [(mask, _Cells(key, None, lanes, 0, 1, mask), kind)]
+            return [(mask, _Cells(key, addr[:-1], lanes, addr[-1], width,
+                                  mask), kind)]
+        memo: Dict = {}
+        fixed: Dict[int, int] = {}
+        found = [self._ix.evaluate_lanes(i, env, lanes, memo, fixed)
+                 for i in index]
+        if not found:
+            return [(mask, _Cells(key, None, lanes, (0,) * len(lanes), 1,
+                                  mask), kind)]
+        last = found[-1]
+        starts = last if isinstance(last, tuple) else (last,) * len(lanes)
+        lead = found[:-1]
+        if not any(isinstance(v, tuple) for v in lead):
+            return [(mask, _Cells(key, tuple(lead), lanes, starts, width,
+                                  mask), kind)]
+        # The lanes apart by the row they reach, in the order they run.
+        rows: Dict[Tuple[int, ...], List[Tuple[int, int]]] = {}
+        for k, lane in enumerate(lanes):
+            row = tuple(v[k] if isinstance(v, tuple) else v for v in lead)
+            rows.setdefault(row, []).append((lane, starts[k]))
+        out = []
+        for row, members in rows.items():
+            m = 0
+            for lane, _ in members:
+                m |= 1 << lane
+            out.append((m, _Cells(key, row, tuple(l for l, _ in members),
+                                  tuple(s for _, s in members), width, m),
+                        kind))
         return out
 
     def _place_vector(self, s: Stmt, env, mask):
@@ -988,41 +1389,23 @@ class Flow:
         addr = self._address(index, env)
         if key is None or not addr:
             return None
-        interned = self._interned
-        out = []
+        out: List[Tuple[int, Any, str]] = []
         if a.space is MemSpace.REGISTER:
             if not spread or addr[-1] % self.threads:
                 return None
             if mask:
                 cell = (key, addr)
-                out.append((mask, interned.setdefault(cell, cell), kind))
-        else:
-            for lane in self.lanes(mask):
-                cell = (key, addr[:-1] + (addr[-1] + lane,) if spread
-                        else addr)
-                out.append((1 << lane, interned.setdefault(cell, cell),
+                out.append((mask, self._interned.setdefault(cell, cell),
                             kind))
-        self._budget -= len(out)
-        if self._budget < 0:
-            raise TooLarge(f'the body places more than {self._limit} '
-                           f'elements')
+        else:
+            lanes = self.lanes(mask)
+            if lanes:
+                starts = (tuple(addr[-1] + lane for lane in lanes) if spread
+                          else (addr[-1],) * len(lanes))
+                out.append((mask, _Cells(key, addr[:-1], lanes, starts, 1,
+                                         mask), kind))
+        self._spend(len(out))
         return out
-
-    def _place_copy(self, s: Stmt, env, mask):
-        """A copy reads its source and writes its destination, lane by lane;
-        its value is none a pass could name."""
-        reads = [a for a in s.accesses if a.kind & Effect.READ]
-        writes = [a for a in s.accesses if a.kind & Effect.WRITE]
-        if len(reads) != 1 or len(writes) != 1:
-            return None
-        elems = s.attr('elems', 1) or 1
-        src = self._place_one(s.copy_src, reads[0], s.copy_src_index, elems,
-                              'read', env, mask)
-        dst = self._place_one(s.copy_dst, writes[0], s.copy_dst_index, elems,
-                              'write', env, mask)
-        if src is None or dst is None:
-            return None
-        return src + dst
 
     def _address(self, index, env) -> Tuple[int, ...]:
         memo: Dict[int, int] = {}
@@ -1049,35 +1432,36 @@ class Flow:
         return (a.space, id(a.base), binding.id, hops)
 
     def _layers(self, cell) -> List[_Layer]:
-        table = self._reg if cell[0][0] is MemSpace.REGISTER else self._mem
-        layers = table.get(cell)
+        layers = self._reg.get(cell)
         if layers is None:
-            layers = table[cell] = []
+            layers = self._reg[cell] = []
             self._cells_of[cell[0][:2]].add(cell)
         return layers
 
-    def _shared_with_others(self, cell) -> bool:
-        return cell[0][0] is MemSpace.SHARED and cell[0][1] not in self._own
+    def _shared(self, key: Tuple) -> bool:
+        """Is the buffer of `key` shared memory lanes of other
+        multiplications reach?"""
+        return key[0] is MemSpace.SHARED and key[1] not in self._own
 
     def _read(self, n: int, placed, conds) -> List[Reach]:
         out: List[Reach] = []
-        #: Per buffer, what a read of it may find besides its layers.
+        #: Per buffer, what a read of it may find besides what is placed.
         others: Dict[Tuple, FrozenSet[int]] = {}
         for m, cell, _ in placed:
-            layers = self._layers(cell)
-            smeared = others.get(cell[0][:2])
+            memory = isinstance(cell, _Cells)
+            key = cell.key if memory else cell[0]
+            smeared = others.get(key[:2])
             if smeared is None:
-                smeared = frozenset(self._smeared.get(cell[0][:2], ())) | \
-                    frozenset(self._smeared_space.get(cell[0][0], ()))
-                if self._shared_with_others(cell):
+                smeared = frozenset(self._smeared.get(key[:2], ())) | \
+                    frozenset(self._smeared_space.get(key[0], ()))
+                if self._shared(key):
                     smeared = smeared | {EXTERNAL}
-                others[cell[0][:2]] = smeared
-            if cell[0][0] is MemSpace.REGISTER:
-                out.extend(self._read_register(n, m, cell, layers, conds,
-                                               smeared))
+                others[key[:2]] = smeared = self._frozen(smeared)
+            if memory:
+                out.extend(self._read_cells(n, cell, conds, smeared))
             else:
-                out.extend(self._read_memory(n, m, cell, layers, conds,
-                                             smeared))
+                out.extend(self._read_register(n, m, cell, self._layers(cell),
+                                               conds, smeared))
         return out
 
     def _read_register(self, n, mask, cell, layers, conds, smeared):
@@ -1103,72 +1487,182 @@ class Flow:
             out.append(Reach(left, fresh, self._frozen(maybe), cell=cell))
         return out
 
-    def _read_memory(self, n, mask, cell, layers, conds,
-                     smeared) -> List[Reach]:
-        """What the lanes of `mask` read of `cell`, an element of memory:
-        the last write of it they stand under for certain, the lane that
-        wrote it apart from the others -- it reads its own store."""
-        maybe: Set[int] = set(smeared)
-        for layer in reversed(layers):
-            self.readers[layer.writer].append((n, mask))
-            if layer.conds <= conds:
-                found = self._frozen(maybe)
-                own = mask & (1 << layer.lane) if layer.lane >= 0 else 0
-                out = []
-                if own:
-                    out.append(Reach(own, layer.writer, found, own=True,
-                                     cell=cell, by=layer.lane))
-                if mask & ~own:
-                    out.append(Reach(mask & ~own, layer.writer, found,
-                                     own=False, cell=cell, by=layer.lane))
-                return out
-            maybe.add(layer.writer)
-        return [Reach(mask, INITIAL, self._frozen(maybe), own=False,
-                      cell=cell)]
+    def _read_cells(self, n: int, cells: _Cells, conds,
+                    smeared: FrozenSet[int]) -> List[Reach]:
+        """What the lanes read of `cells`, elements of memory: of each
+        element, the last write they stand under for certain, and those of
+        uncertain standing after it, which they may read as well -- the
+        elements that found alike together, block by block."""
+        found: List[Tuple[int, int, Optional[_Piece], FrozenSet[int]]] = []
+        mem = self._mem
+        readers = self.readers
+        key, lead = cells.key, cells.lead
+        for block, bits in cells.blocks().items():
+            pieces = mem.get((key, lead, block))
+            pending = [(bits, smeared)]
+            if pieces:
+                for piece in reversed(pieces):
+                    later = []
+                    for left, maybe in pending:
+                        hit = left & piece.bits
+                        if not hit:
+                            later.append((left, maybe))
+                            continue
+                        readers[piece.writer].append(
+                            (n, cells.lanes_in(block, hit)))
+                        if piece.conds <= conds:
+                            found.append((block, hit, piece, maybe))
+                        else:
+                            later.append((hit, self._frozen(
+                                maybe | {piece.writer})))
+                        if left != hit:
+                            later.append((left & ~hit, maybe))
+                    pending = later
+                    if not pending:
+                        break
+            for left, maybe in pending:
+                found.append((block, left, None, maybe))
+        return self._reaches(cells, found)
+
+    @staticmethod
+    def _reaches(cells: _Cells, found) -> List[Reach]:
+        """`found`, `(block, bits, piece, maybe)` -- what a read of `cells`
+        found of the elements of `bits`: the write of `piece` for certain,
+        or nothing the body wrote where there is none, and those of `maybe`
+        as well -- as the reaches of the lanes: a lane's own store apart
+        from another lane's, by the lane that stored it, the lanes that
+        read alike together, `k` past their start apart."""
+        groups: Dict[Tuple, int] = {}
+        for block, bits, piece, maybe in found:
+            writer = INITIAL if piece is None else piece.writer
+            if not cells.broadcast and (piece is None
+                                        or piece.cells.alike(cells)):
+                # Every lane reads its own elements: ones nothing wrote, or
+                # ones it wrote itself, in a write lane by lane alike.
+                if cells.width == 1:
+                    key = (writer, maybe, piece is not None, -1, 0)
+                    groups[key] = groups.get(key, 0) | cells.lanes_in(block,
+                                                                      bits)
+                    continue
+                if bits == cells.blocks()[block]:
+                    for k, lanes in cells.lanes_at(block):
+                        key = (writer, maybe, piece is not None, -1, k)
+                        groups[key] = groups.get(key, 0) | lanes
+                    continue
+            readers = cells.readers()
+            base = block << 6
+            while bits:
+                low = bits & -bits
+                bits ^= low
+                e = base + low.bit_length() - 1
+                lane = -1 if piece is None else piece.cells.lane_of(e)
+                for lanes, k in readers[e]:
+                    own = lanes & (1 << lane) if lane >= 0 else 0
+                    if own:
+                        key = (writer, maybe, True, -1, k)
+                        groups[key] = groups.get(key, 0) | own
+                    if lanes & ~own:
+                        key = (writer, maybe, False, lane, k)
+                        groups[key] = groups.get(key, 0) | (lanes & ~own)
+        return [Reach(lanes, writer, maybe, own=own, cell=cells.at(k), by=by)
+                for (writer, maybe, own, by, k), lanes in groups.items()]
 
     def _write(self, n: int, placed, conds) -> None:
         before: Dict[Tuple[int, Tuple], Tuple[Optional[int], bool]] = {}
         for m, cell, _ in placed:
+            if isinstance(cell, _Cells):
+                self._write_cells(n, cell, conds,
+                                  before if self._before else None)
+                continue
             layers = self._layers(cell)
-            register = cell[0][0] is MemSpace.REGISTER
             for lane in self.lanes(m) if self._before else ():
                 prior, certain = INITIAL, True
                 for layer in reversed(layers):
-                    if register and not layer.mask & (1 << lane):
+                    if not layer.mask & (1 << lane):
                         continue
                     if layer.conds <= conds:
                         prior = layer.writer
                         break
                     certain = False
-                if prior == INITIAL and register:
+                if prior == INITIAL:
                     prior = self._fresh.get(cell[0][1], INITIAL)
                 if (self._smeared.get(cell[0][:2])
-                        or self._smeared_space.get(cell[0][0])
-                        or self._shared_with_others(cell)):
+                        or self._smeared_space.get(cell[0][0])):
                     certain = False
                 before[(lane, cell)] = (prior, certain)
             kept: List[_Layer] = []
             for layer in layers:
                 if layer.conds >= conds:
-                    if register:
-                        layer.mask &= ~m
-                        if not layer.mask:
-                            continue
-                    else:
+                    layer.mask &= ~m
+                    if not layer.mask:
                         continue
                 kept.append(layer)
-            if register:
-                kept.append(_Layer(n, conds, mask=m))
-            else:
-                kept.append(_Layer(n, conds, lane=self.lanes(m)[0]))
+            kept.append(_Layer(n, conds, mask=m))
             if len(kept) > _DEPTH:
                 kept = kept[-_DEPTH:]
-            table = self._reg if register else self._mem
-            table[cell] = kept
-            if self._shared_with_others(cell):
-                self.escaped.add(n)
+            self._reg[cell] = kept
         if self._before:
             self.before[n] = before
+
+    def _write_cells(self, n: int, cells: _Cells, conds,
+                     before: Optional[Dict]) -> None:
+        """The write of `cells`, elements of memory, block by block: what it
+        leaves of the writes before it, the ones it stands under at least
+        the conditions of gone, as it is the last write of its elements
+        wherever they are; of each element, `_DEPTH` writes at most."""
+        mem = self._mem
+        key, lead = cells.key, cells.lead
+        for block, bits in cells.blocks().items():
+            where = (key, lead, block)
+            pieces = mem.get(where)
+            if pieces is None:
+                pieces = mem[where] = []
+                self._blocks_of[key[:2]].add(where)
+            if before is not None:
+                self._before_cells(n, cells, block, pieces, conds, before)
+            kept: List[_Piece] = []
+            for piece in pieces:
+                if piece.conds >= conds:
+                    piece.bits &= ~bits
+                    if not piece.bits:
+                        continue
+                kept.append(piece)
+            kept.append(_Piece(n, conds, cells, bits))
+            if len(kept) > _DEPTH:
+                kept = _deepest(kept, bits)
+            mem[where] = kept
+        if self._shared(key):
+            self.escaped.add(n)
+
+    def _before_cells(self, n: int, cells: _Cells, block: int,
+                      pieces: List[_Piece], conds, before: Dict) -> None:
+        """`before` for the elements the write of `cells` makes in `block`,
+        lane by lane: the write each held right before, and whether for
+        certain -- a lane's that another lane of the same write wrote ahead
+        of it, that write."""
+        key = cells.key
+        uncertain = bool(self._smeared.get(key[:2])
+                         or self._smeared_space.get(key[0])
+                         or self._shared(key))
+        done: Set[int] = set()
+        for lane, k, e in cells.each():
+            if e >> 6 != block:
+                continue
+            if e in done:
+                prior, certain = n, True
+            else:
+                done.add(e)
+                prior, certain = INITIAL, True
+                bit = 1 << (e & 63)
+                for piece in reversed(pieces):
+                    if not piece.bits & bit:
+                        continue
+                    if piece.conds <= conds:
+                        prior = piece.writer
+                        break
+                    certain = False
+            before[(lane, cells.cell(lane, k))] = (prior,
+                                                    certain and not uncertain)
 
     def _smear(self, n: int, s: Stmt, conds) -> None:
         """An access nothing can place: it reads every element of its buffer
@@ -1186,11 +1680,13 @@ class Flow:
                     continue
                 table = self._reg if space is MemSpace.REGISTER else self._mem
                 if kind & _READ_OR_ATOMIC:
+                    held = (self._cells_of if space is MemSpace.REGISTER
+                            else self._blocks_of)
                     keys = ([(space, base)] if base is not None else
-                            [k for k in self._cells_of if k[0] is space])
+                            [k for k in held if k[0] is space])
                     for key in keys:
-                        for cell in self._cells_of.get(key, ()):
-                            for layer in table.get(cell, ()):
+                        for where in held.get(key, ()):
+                            for layer in table.get(where, ()):
                                 self.readers[layer.writer].append(
                                     (n, self.full))
                                 self.escaped.add(layer.writer)
@@ -1457,6 +1953,21 @@ def _width(v, access, binding) -> int:
     elem = getattr(getattr(buffer, 'type', None), 'elem', None)
     per = getattr(elem, 'length', None) or 1
     return max(1, length // per)
+
+
+def _deepest(pieces: List[_Piece], bits: int) -> List[_Piece]:
+    """`pieces` with each element of `bits` in the `_DEPTH` last of them
+    at most."""
+    while bits:
+        low = bits & -bits
+        bits ^= low
+        seen = 0
+        for piece in reversed(pieces):
+            if piece.bits & low:
+                seen += 1
+                if seen > _DEPTH:
+                    piece.bits &= ~low
+    return [piece for piece in pieces if piece.bits]
 
 
 def _span(addr: Tuple[int, ...], width: int) -> List[Tuple[int, ...]]:

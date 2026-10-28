@@ -300,7 +300,7 @@ def _check_chain(flow: Flow, c: _Chain, heads: Set[int]) -> Optional[str]:
     held: Dict[Tuple[int, Tuple], object] = {}
     for r in flow.reach.get(c.bias, ()):
         for lane in flow.lanes(r.mask & c.mask):
-            held[(lane, r.cell)] = r
+            held[(lane, r.cell_at(lane))] = r
     # The element holds, right before the store, for certain what the load
     # read: whatever the load may have read besides is something the store
     # would find there as well, or not certain to.
