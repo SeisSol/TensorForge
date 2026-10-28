@@ -31,6 +31,7 @@ the thing timed.
 | `compare.py` | charts *across* runs: configurations, orders, machines |
 | `compareall.sh` | `compare.py` over data you already have, in one command |
 | `pdfout.py` | the second rendering: every chart as a page of a PDF |
+| `describe.py` | what each captured kernel computes, read off the export |
 
 ```bash
 python3 tools/bench/evaluate.py --out eval/                  # measure and plot
@@ -214,6 +215,45 @@ What the three counts do *not* appear as is one number: `flopmix` draws all
 three, because the gap between them is the generator's business and a roofline
 drawn honestly about the machine says nothing about it.
 
+## What a kernel is: `describe.py`
+
+A table of kernels written by hand describes the kernels somebody remembered.
+An export carries every operation yateto handed the backend, with the tensors'
+own names and index labels, so the formula is in it, and `describe.py` reads it
+off: temporaries written once and read once are put back into their reader, a
+run of statements that differ only in a family index becomes one sum over it,
+and a regular recursion becomes one rule.
+
+```bash
+python3 tools/bench/describe.py tools/bench/data/elastic-4-d-s1.json \
+    --kernels gpu_localFluxAll,gpu_derivativeTaylorExpansion
+python3 tools/bench/describe.py tools/bench/data --csv kernels.csv
+```
+
+```text
+Q[kp] += sum_i rDivM(i)[km] fMrT(i)[ml] I[lq] AplusTAll(i)[qp]  (i in 0..3)
+I[ab] = sum_i power(i) dQ(i)[ab]  (i in 0..3)
+```
+
+Twelve operations and eight temporaries in the export are that one sum; the
+time derivatives, computed one from the other with the time integral
+accumulated between them, become the rule
+`dQ(j+1)[kp] = sum_i kDivMT(i)[kl] dQ(j)[lq] star(i)[qp]` for each `j` and
+the integral once.
+
+Each formula comes in three spellings: plain text, LaTeX (with the names the
+generated code uses, or a paper's notation through `NOTATION`), and yateto's
+own (`Q['kp'] <= Q['kp'] + sum(... for i in range(4))`). Beside it: the
+operations, temporaries and steps the export has, its operators with their
+shapes and densities, and the cost model's counts per element. The bytes are
+asymptotic -- an operator every element shares is read once per launch -- so
+the intensity is the one a large launch approaches.
+
+What is written by hand is only what no export can say: which step of the
+scheme a kernel is (`ROLES`) and how a paper spells a tensor (`NOTATION`). The
+tests check that every role names a kernel some export has, and that every
+tensor an export names appears in its formula.
+
 ## Everything as a PDF
 
 Both plotters write SVG and PDF from one list of primitives (`pdfout.py`),
@@ -395,7 +435,8 @@ builds nothing.
 ```bash
 python3 tools/bench/plot.py out/bench.json --peak-flops 51.8 --peak-bytes 2100
 python3 tools/bench/plot.py out/bench.json \
-    --roofline-json ceil/F32/roofline.json --roofline-json ceil/F64/roofline.json
+    --roofline-json ceil/F32/roofline.json \
+    --roofline-json ceil/F64/roofline.json
 python3 tools/bench/plot.py a/bench.json b/bench.json --label before --label after
 python3 tools/bench/plot.py out/bench.json --profile prof/ --out plots/
 ```
