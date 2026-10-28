@@ -3098,8 +3098,8 @@ GROUPS = {
                    "                    self.origin[n] = [(mask, ('const', 0))]\n", '', 1)),
         ('a buffer nothing reaches any more left declared',
          sub(FORWARD, '        body = _strip(body, _unreached(body))\n'
-                      '        return substitute(body, self.mapped) if self.mapped else body\n',
-             '        return substitute(body, self.mapped) if self.mapped else body\n', 1)),
+                      '        mapped = self.mapped\n',
+             '        mapped = self.mapped\n', 1)),
         ('a buffer something still reaches taken for unreached',
          sub(FORWARD, '            reached |= hit\n', '            pass\n', 1)),
         ('a body past the budget forwarded all the same',
@@ -3210,9 +3210,9 @@ GROUPS = {
         ('a broadcast of the multiplication\'s lanes taken for one of a lane',
          sub(FORWARD, "hint='fwd', whole=True)", "hint='fwd')", 1)),
         ('the read across the lanes off on AMD',
-         sub(TARGET, '                               broadcast_without_staging=True,\n'
-                     '                               read_across=True),',
-             '                               broadcast_without_staging=True),', 1)),
+         sub(TARGET, '                               read_across=True,\n'
+                     '                               keep_own=True),',
+             '                               keep_own=True),', 1)),
         ('the read across the lanes asked of no vendor',
          sub(OPTIONS, "        rule=lambda target: target.prefs.placement.read_across,",
              "        default=False,", 1)),
