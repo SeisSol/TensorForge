@@ -21,21 +21,22 @@ them:
 The contraction runs in stride-`ext` groups, which is what makes the first of
 those free; `Exchange` says why, and says what that costs elsewhere.
 
-**Not routed.**  `offers` does not name this path and `matmul` does not
-dispatch to it, so nothing generates it yet.  Wiring it up changes every F64
-kernel on CDNA 2 and later, and the only check available here is that the
-emitted call sequence matches the plans --- which says the emitter is faithful
-to them and nothing about whether the instruction then computes the right
-thing.  That wants a machine, so the decision to route belongs with someone
-who has one.
+**Not deployed.**  `matmul` dispatches here, but `offers` names the path only
+under `tiling.EXCHANGE`, which is off, so nothing generates it by default.
+Turning it on changes every F64 kernel on CDNA 2 and later that runs at the
+wave's lane count (`mfma_f64_16x16x4f64` takes all 64 lanes); the check
+available here is that the emitted call sequence matches the plans --- which
+says the emitter is faithful to them and nothing about whether the instruction
+then computes the right thing.  That wants a machine.
 """
 
+from functools import lru_cache
 from typing import Optional
 
 from tensorforge.backend.pir.core import ScalarType
 from .catalog import MATRIX_OPS, Call
 from .features import has_feature, wave_size
-from .layouts import covers
+from .layouts import covers, element_at
 from .reorder import (IDENTITY_DPP, a_exchange, accumulator_gathers,
                       broadcast_feeds_a, fragment_moves)
 
@@ -66,16 +67,37 @@ def exchange_ops(dtype, threads, ctx) -> tuple:
             continue
         if threads != op.wave or wave_size(ctx) != op.wave:
             continue
-        if not has_feature(ctx, op.feature) or not covers(op):
-            continue
-        if broadcast_feeds_a(op) or a_exchange(op) is None:
-            continue
-        if fragment_moves(op, 'B', 0) is None:
-            continue
-        if accumulator_gathers(op, 0) is None:
+        if not has_feature(ctx, op.feature) or not _planned(op):
             continue
         out.append(op)
     return tuple(out)
+
+
+@lru_cache(maxsize=None)
+def _planned(op) -> bool:
+    """Whether the three plans exist for `op`: properties of the instruction
+    alone, and searches over its layouts that a storage settlement asking
+    `offers` for every operation would otherwise repeat each time (SeisSol's
+    `localFluxAll` at order 6 did not finish in 25 minutes)."""
+    return (covers(op) and not broadcast_feeds_a(op)
+            and a_exchange(op) is not None
+            and fragment_moves(op, 'B', 0) is not None
+            and accumulator_gathers(op, 0) is not None)
+
+
+@lru_cache(maxsize=None)
+def _b_moves(op, group):
+    """`fragment_moves` for the B fragment of contraction group `group`: the
+    same search for every fragment of every issue, and of every placement the
+    generator tries (4.3 million `locate` calls in two minutes of
+    `localFluxAll` at order 6)."""
+    return fragment_moves(op, 'B', 0, group)
+
+
+@lru_cache(maxsize=None)
+def _gathers(op, column):
+    """`accumulator_gathers`, kept for the same reason as `_b_moves`."""
+    return accumulator_gathers(op, column)
 
 
 def _swapped(writer, value, blocks, ftype):
@@ -137,14 +159,71 @@ def apply_exchange(writer, regs, groups, ftype):
     return out
 
 
+def fragment_index(op, M, block, group, i, g) -> int:
+    """Which B fragment of the leading operand `matmul_exchange` issues, in
+    the order it issues them: k-block, contraction group, lead slot, lead
+    group.  The order a prepared operand is stored in (`exchange_order`)."""
+    exchange = a_exchange(op)
+    groups = op.wave // (op.n * op.blocks)
+    return ((block * exchange.groups + group) * M + i) * groups + g
+
+
+def exchange_order(op, shape, threads, window, head=0):
+    """`Tensor.storage_order` for a leading operand read as B fragments.
+
+    Fragment `fragment_index(...)` holds, in lane `l`, what the plan would
+    have swapped there (`fragment_moves`): the row of lane `group * span +
+    block * extent + n` of the slot, at the step the lane's contraction index
+    stands for -- position `base + stride * kk + group` of the shared
+    operand's block, which is the lead's step `head` earlier (`matmul32`
+    pairs them the same way).  So one read per fragment, every lane its own
+    element, where the plan took swaps and merges.  Steps and rows outside
+    the window are padding (`-1`).
+
+    `window` is `((r0, rows), (c0, steps))` as `amd.quad_order` takes it, and
+    `head` where the operation's contraction starts inside the shared
+    operand's first block of `threads` steps.
+    """
+    exchange = a_exchange(op)
+    extent, span = op.n, op.n * op.blocks
+    groups = op.wave // span
+    depth = exchange.stride * op.k
+    box_rows, box_cols = int(shape[0]), int(shape[1])
+    (r0, rows), (c0, steps) = window
+    slots = -(-rows // threads)
+    lanes = [element_at(op, 'B', 0, lane) for lane in range(op.wave)]
+    order = []
+    for base in range(0, steps + head, depth):
+        for group in range(exchange.groups):
+            for i in range(slots):
+                for g in range(groups):
+                    for block, kk, n in lanes:
+                        r = base + exchange.stride * kk + group - head
+                        row = i * threads + g * span + block * extent + n
+                        inside = (0 <= r < steps and row < rows
+                                  and r0 + row < box_rows
+                                  and c0 + r < box_cols)
+                        order.append((r0 + row) + box_rows * (c0 + r)
+                                     if inside else -1)
+    return order
+
+
 def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
-                    sparse, ctx, start, stop) -> bool:
+                    sparse, ctx, start, stop, lead_slot=None) -> bool:
     """``C[i,j] += lead[i,k] * shared[j,k]`` through a `k > 1` instruction.
 
     `shared` and `lead` are the accessors under their own names rather than
     `A` and `B`: the instruction's A fragment is fed by the *shared* matrix
     and its B fragment by the *leading* operand, so carrying the caller's
     letters through here would name each one after the other one.
+
+    The shared operand is read a block of `threads` steps at a time from the
+    block holding the contraction's first step, `head = kx % threads` steps
+    before it; the lead accessor counts from that first step.  So position
+    `p` of a block pairs with the lead's step `p - head`, as in `matmul32`.
+
+    `lead_slot(writer, index)`, where the leading operand is stored in
+    `exchange_order`: fragment `index` (`fragment_index`) as one read.
 
     Returns `False` without emitting where the path does not apply.  A caller
     inside `Writer.speculative` may also see it return `False` after it has
@@ -163,6 +242,7 @@ def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
     ext, span = op.m, op.n * op.blocks
     groups = op.wave // span
     depth = exchange.stride * op.k
+    head = kx % threads
 
     with writer.AnonymousScope():
         for j in range(start, stop, ext):
@@ -172,7 +252,7 @@ def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
                 acc = {(i, g): writer.declare(acctype, hint='acc')
                        for i in range(M) for g in range(groups)}
 
-                for base in range(0, K + kx, depth):
+                for base in range(0, K + head, depth):
                     columns = []
                     for jj in range(ext):
                         if j + jj < N:
@@ -184,21 +264,35 @@ def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
                             columns.append(writer.const(0.0, ftype))
                     if any(v is None or v is False for v in columns):
                         return False
-                    fragments = list(columns)
+                    # The transpose writes its operands in place, and a column
+                    # can be a constant: the padding, or an operator whose
+                    # numbers the kernel spells as literals.  Each gets a
+                    # register of its own first.
+                    fragments = []
+                    for column in columns:
+                        own = writer.declare(ftype, hint='xa')
+                        writer.assign(own, column)
+                        fragments.append(own)
                     writer.call_stmt(f'tensorforge::transpose{ext}x{ext}b32',
                                      *fragments, writes=fragments)
 
                     for group in range(exchange.groups):
-                        for local in range(op.k):
-                            if base + exchange.covers(group, op.k)[local] \
-                                    >= K + kx:
-                                break
+                        # A group none of whose steps is the operation's
+                        # multiplies zeros: no issue at all.
+                        if not any(0 <= base + p - head < K
+                                   for p in exchange.covers(group, op.k)):
+                            continue
                         for i in range(M):
                             for g in range(groups):
-                                built = _b_fragment(writer, op, lead, i, g,
-                                                    base, group, exchange,
-                                                    ftype, K + kx)
-                                if built is None:
+                                if lead_slot is not None:
+                                    built = lead_slot(writer, fragment_index(
+                                        op, M, base // depth, group, i, g))
+                                else:
+                                    built = _b_fragment(writer, op, lead, i,
+                                                        g, base, group,
+                                                        exchange, ftype,
+                                                        head, K)
+                                if built is None or built is False:
                                     return False
                                 acc[(i, g)] = writer.call(
                                     op.callee, acctype,
@@ -216,15 +310,17 @@ def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
 
 
 def _b_fragment(writer, op, lead, i, group, base, kgroup, exchange, ftype,
-                depth):
-    """One B fragment: the plan, emitted."""
+                head, steps):
+    """One B fragment: the plan, emitted.  Position `p` of the block is the
+    lead's step `p - head` (`matmul_exchange`); one outside `[0, steps)` is a
+    zero."""
     built = None
-    for move in fragment_moves(op, 'B', 0, group):
-        k = base + exchange.stride * move.contraction + kgroup
-        if k >= depth:
+    for move in _b_moves(op, group):
+        r = base + exchange.stride * move.contraction + kgroup - head
+        if not 0 <= r < steps:
             value = writer.const(0.0, ftype)
         else:
-            value = lead(writer, None, i, k)
+            value = lead(writer, None, i, r)
             if value is None or value is False:
                 return None
         built = _merge(writer, built,
@@ -238,7 +334,7 @@ def _b_fragment(writer, op, lead, i, group, base, kgroup, exchange, ftype,
 def _writeback(writer, op, acc, i, column, ftype):
     """One output column, gathered out of the group accumulators."""
     built = None
-    for gather in accumulator_gathers(op, column):
+    for gather in _gathers(op, column):
         value = writer.extract(acc[(i, gather.group)], gather.slot, ftype)
         built = _merge(writer, built,
                        _swapped(writer, value, gather.swaps, ftype),

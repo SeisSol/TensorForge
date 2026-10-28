@@ -650,7 +650,8 @@ def order_before_packing(shape, ctx):
 
 
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
-                   threads=EXECUTION_SIZE, corner=(0, 0), rows=None):
+                   threads=EXECUTION_SIZE, corner=(0, 0), rows=None,
+                   head=0):
     """The order this target reads a two-dimensional A operand in, or `None`
     (`multilinear._offer_order`).
 

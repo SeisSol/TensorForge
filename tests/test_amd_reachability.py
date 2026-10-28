@@ -69,8 +69,6 @@ KEPT_UNREACHABLE = {
         "the table's decoder; reached only from `position`",
     "established":
         "the strict query an emitter uses to decline a derived layout",
-    "_row":
-        "measured row or derived one; reached only from `position`",
     "AXES":
         "names the operand index order for `index_terms`",
     "FED_BY":
@@ -82,13 +80,8 @@ KEPT_UNREACHABLE = {
         "prices a plan against staging or against not taking the path",
     "Term":
         "one shift-and-mask contribution to a fragment address",
-    "_bit_sources":
-        "reads the table the other way; reached from `element_at` and "
-        "`index_terms`",
     "index_terms":
         "fragment addressing for a staging emitter, which is not written",
-    "element_at":
-        "the inverse of `position`; same call site, not written yet",
     "position":
         "fragment placement; the emitter that stages an operand into one is "
         "not written",

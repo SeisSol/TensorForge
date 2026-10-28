@@ -2040,11 +2040,16 @@ class MultilinearInstruction(ComputeInstruction):
                 'prepare_operands' in self._context.get_asked_options().asked()
                 or module.order_before_packing(self._shape(), self._context)):
             return
+        # Where the contraction starts inside the shared operand's first block,
+        # which a matrix path reads from the block's start (`matmul32`,
+        # `matmul_exchange`).
+        head = self._ks[0][0] % span if self._ks else 0
         order = module.prepared_order(tuple(a_obj.get_actual_shape()),
                       self._idest.get_fptype(), self._context,
                       columns=self._output_extent(), lead=lead, depth=depth,
                       threads=self._num_threads, corner=corner,
-                      rows=read if corner != (0, 0) or lead != read else None)
+                      rows=read if corner != (0, 0) or lead != read else None,
+                      head=head)
         if order is None:
             return
         slot_major = getattr(order, 'slot_major', None)
