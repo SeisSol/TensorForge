@@ -395,3 +395,56 @@ def test_the_table_has_a_row_per_kernel_and_machine(tmp_path):
            [_row('k', 'baseline', 'sm_120', 1024, 100.0)])
     _, markup = compare.view_kernels(compare.collect([tmp_path]))
     assert markup.count('<tr>') == 1 + 3
+
+
+# ----------------------------------------------------------------------
+# A roof per precision
+# ----------------------------------------------------------------------
+
+def _two_precisions(tmp_path, with_f64=True):
+    _write(tmp_path, 'elastic-4-s-s1',
+           [_row('k', 'baseline', 'sm_90', 1024, 100.0, flops=1e9, byts=1e8)],
+           {'arch': 'sm_90', 'datatype': 'F32', 'flops_per_s': 6e13,
+            'bytes_per_s': 3e12})
+    _write(tmp_path, 'elastic-4-d-s1',
+           [_row('k', 'baseline', 'sm_90', 1024, 100.0, flops=1e9, byts=2e8,
+                 datatype='F64')],
+           {'arch': 'sm_90', 'datatype': 'F64', 'flops_per_s': 3e13,
+            'bytes_per_s': 3e12} if with_f64 else None)
+    return compare.collect([tmp_path])
+
+
+def test_a_kernel_is_placed_against_the_ridge_of_its_own_precision(tmp_path):
+    svg = compare.view_intensity(_two_precisions(tmp_path))
+    assert 'k @ elastic-4-s-s1 on sm_90: 10.00 flop/byte against a ridge ' \
+           'of 20.0' in svg
+    assert 'k @ elastic-4-d-s1 on sm_90: 5.00 flop/byte against a ridge ' \
+           'of 10.0' in svg
+
+
+def test_no_roof_of_its_precision_is_no_mark_rather_than_the_other(tmp_path):
+    """A double kernel under the single roof sits as far below it as the
+    part's two rates differ -- sixty-four times on a consumer part."""
+    svg = compare.view_intensity(_two_precisions(tmp_path, with_f64=False))
+    assert 'elastic-4-s-s1 on sm_90' in svg
+    assert 'elastic-4-d-s1 on sm_90' not in svg
+
+
+def test_the_machines_table_has_a_rate_per_precision(tmp_path):
+    _, markup = compare.view_devices(_two_precisions(tmp_path))
+    assert '<th>F32 TFLOP/s</th>' in markup
+    assert '<td>60.00</td>' in markup and '<td>30.00</td>' in markup
+
+
+def test_a_further_roof_is_read_beside_the_measured_one(tmp_path):
+    d = _write(tmp_path, 'elastic-4-d-s1',
+               [_row('k', 'baseline', 'sm_90', 1024, 100.0, datatype='F64')])
+    (d / 'roofline.json').write_text(json.dumps({'ceiling': {
+        'arch': 'sm_90', 'datatype': 'F64', 'flops_per_s': 3e13,
+        'bytes_per_s': 3e12,
+        'units': [{'unit': 'matrix', 'shape': 'm8n8k4',
+                   'flops_per_s': 6e13, 'source': 'supplied'}]}}))
+    got = compare.collect([tmp_path]).ceiling('sm_90', 'F64')
+    assert got.flops_per_s == 3e13
+    assert [(u.name, u.flops_per_s) for u in got.units] == [
+        ('matrix m8n8k4', 6e13)]

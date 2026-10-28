@@ -19,9 +19,12 @@ What it does, skipping anything the machine cannot do and saying so:
    matrix, into `<out>/exports`. Needs SeisSol's codegen tree; without it the
    step is skipped and existing exports are used.
 2. **run**: `run.py` per export, into `<out>/runs/<export>`.
-3. **roofline**: once per device, into `<out>/ceiling`, and joined into every
-   plot. The ceilings are a property of the machine, not of the workload, so
-   measuring them per export would be the same measurement a dozen times.
+3. **roofline**: once per device and precision, into `<out>/ceiling/<F32|F64>`,
+   and joined into every plot of that precision. The ceilings are a property
+   of the machine, not of the workload, so measuring them per export would be
+   the same measurement a dozen times -- but not of the machine alone: the FMA
+   chain is built for one type, and a double-precision export drawn under the
+   single-precision roof sits as far below it as the part's two rates differ.
 4. **profile** (`--profile`): `profile.py` per export, into
    `<out>/profiles/<export>`.
 5. **plot**: `plot.py` per export with whatever of the above exists.
@@ -211,17 +214,22 @@ def main() -> int:
     captures = sorted(exports.glob('*.json'))
     print(f'{len(captures)} exports from {exports}')
 
-    # 2. the ceilings, once for this machine
+    # 2. the ceilings, once for this machine and each precision the exports
+    #    are in.  An export whose configuration does not say is measured
+    #    against both rather than against a guess.
     ceiling = out / 'ceiling'
-    command = [sys.executable, str(HERE / 'roofline.py'), '--ceiling-only',
-               '--out', str(ceiling)]
-    if args.backend:
-        command += ['--backend', args.backend]
-    if args.arch:
-        command += ['--arch', args.arch]
-    steps.append(run_step('roofline', command, out / 'logs' / 'roofline.log',
-                          args.timeout))
-    roofline_json = ceiling / 'roofline.json'
+    datatypes = sorted({c.datatype for c in map(_capture_of, captures) if c}
+                       or {'F32', 'F64'})
+    for datatype in datatypes:
+        command = [sys.executable, str(HERE / 'roofline.py'), '--ceiling-only',
+                   '--datatype', datatype, '--out', str(ceiling / datatype)]
+        if args.backend:
+            command += ['--backend', args.backend]
+        if args.arch:
+            command += ['--arch', args.arch]
+        steps.append(run_step(f'roofline {datatype}', command,
+                              out / 'logs' / f'roofline-{datatype}.log',
+                              args.timeout))
 
     # 3..5. per export: run, profile, plot
     for capture in captures:
@@ -260,7 +268,8 @@ def main() -> int:
 
         command = [sys.executable, str(HERE / 'plot.py'),
                    str(run_dir / 'bench.json'), '--out', str(out / 'plots' / tag)]
-        if roofline_json.exists():
+        # Every precision's roof; `plot.py` draws each row under its own.
+        for roofline_json in sorted(ceiling.glob('*/roofline.json')):
             command += ['--roofline-json', str(roofline_json)]
         if profile_dir is not None:
             command += ['--profile', str(profile_dir)]
@@ -309,6 +318,20 @@ def main() -> int:
                             base_dir=out.name)
         print(f'archive: {base}.tar.xz')
     return 1 if bad else 0
+
+
+def _capture_of(path: Path) -> Optional[Capture]:
+    """The configuration of an export: the one its file name spells, which
+    is how this script names them, else the one it says it was generated
+    at -- read only then, an export being up to twenty megabytes."""
+    named = Capture.from_tag(path.stem)
+    if named is not None:
+        return named
+    try:
+        blob = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return Capture.from_config(blob.get('config'))
 
 
 def run_with_env(name: str, command: List[str], extra: Dict[str, str],

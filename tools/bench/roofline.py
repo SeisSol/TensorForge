@@ -62,7 +62,7 @@ import math
 import os
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -348,6 +348,11 @@ class Ceiling:
     memory_bytes: int = 0
     peak_bytes_per_s: float = 0.0
     clock_khz: int = 0
+    #: Further compute roofs over the same memory roof, as supplied
+    #: (`--unit`): a matrix unit, or a precision emulated on one.  Recorded,
+    #: never measured here -- the chain above is the vector roof -- and
+    #: drawn beside it by the readers rather than in its place.
+    units: Tuple[Dict, ...] = ()
 
     @property
     def ridge(self) -> float:
@@ -556,6 +561,29 @@ def report(points: List[Point], ceiling: Ceiling) -> None:
               f'grid at all.')
 
 
+def parse_unit(text: str) -> Dict:
+    """`matrix:m8n8k4=19.5` as a further roof, in TFLOP/s.
+
+    The kind first and the instruction form after a colon, because the rate
+    of a matrix unit is a property of the form -- the small FP64 MFMA does
+    not issue at the large one's rate -- and a roof that does not say which
+    it is cannot be held against a kernel built from the other.  An
+    emulated precision is a derived figure, the native rate over the
+    scheme's passes, and is supplied the same way and labelled as such.
+    """
+    name, sep, value = text.partition('=')
+    if not sep:
+        raise argparse.ArgumentTypeError(
+            f'{text!r}: a unit is NAME[:FORM]=TFLOPS, e.g. matrix:m8n8k4=19.5')
+    unit, _, shape = name.partition(':')
+    try:
+        tflops = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f'{text!r}: {exc}') from exc
+    return {'unit': unit.strip(), 'shape': shape.strip(),
+            'flops_per_s': tflops * 1e12, 'source': 'supplied'}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('bench', type=Path, nargs='?',
@@ -572,6 +600,13 @@ def main() -> int:
                     help='use this instead of measuring, in flop/s')
     ap.add_argument('--peak-bytes', type=float, default=None,
                     help='use this instead of measuring, in byte/s')
+    ap.add_argument('--unit', type=parse_unit, action='append', default=[],
+                    metavar='NAME[:FORM]=TFLOPS',
+                    help='a further compute roof recorded beside the measured '
+                         'one, for the same precision: a matrix unit '
+                         '(matrix:m8n8k4=19.5, e.g. from rocprof-compute '
+                         '--roof-only), or an emulated precision derived from '
+                         'one (emulated:3xtf32=...); repeatable')
     ap.add_argument('--out', type=Path, default=None)
     args = ap.parse_args()
 
@@ -597,6 +632,9 @@ def main() -> int:
                   'from rocprof-compute --roof-only or Intel Advisor',
                   file=sys.stderr)
             return 2
+
+    if args.unit:
+        ceiling = replace(ceiling, units=tuple(args.unit))
 
     if args.ceiling_only or args.bench is None:
         print(json.dumps(asdict(ceiling), indent=2))

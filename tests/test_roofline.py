@@ -205,3 +205,21 @@ def test_the_triad_counts_three_arrays():
     quotes."""
     assert "3.0 * (double)n * sizeof(T)" in rl.emit_ceiling("cuda",
                                                             Datatype.F32)
+
+
+# -- further roofs ---------------------------------------------------------- #
+
+def test_a_further_roof_names_its_kind_and_its_form():
+    """The rate of a matrix unit is the instruction form's, so a roof that
+    does not say which form it is cannot be held against a kernel."""
+    got = rl.parse_unit("matrix:m8n8k4=19.5")
+    assert got == {"unit": "matrix", "shape": "m8n8k4",
+                   "flops_per_s": pytest.approx(19.5e12),
+                   "source": "supplied"}
+    assert rl.parse_unit("emulated:3xtf32=40")["shape"] == "3xtf32"
+
+
+def test_a_further_roof_without_a_rate_is_refused():
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        rl.parse_unit("matrix:m8n8k4")

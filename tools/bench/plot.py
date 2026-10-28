@@ -1177,7 +1177,37 @@ QUESTIONS = {
 }
 
 
-def build_charts(runs: Sequence[Run], roof: Optional[Roof],
+def roofs_for(run: Run, roof: Union[None, Roof, Dict[str, Roof]]
+              ) -> Tuple[Dict[str, Tuple[Run, Roof]], List[str]]:
+    """`{datatype: (the run's rows of it, its roof)}`, and the precisions
+    of the run that have none.
+
+    A roof is the ceiling of one precision: the FMA chain under it is built
+    for one type, and a double-precision kernel drawn under the
+    single-precision roof sits as far below it as the part's two rates
+    differ.  So rows meet only the roof of their own precision, and a roof
+    that names none -- supplied on the command line -- stands for every
+    precision, which is what giving it there asked for.
+    """
+    if roof is None:
+        return {}, list(run.datatypes)
+    roofs = roof if isinstance(roof, dict) else {roof.datatype: roof}
+    out: Dict[str, Tuple[Run, Roof]] = {}
+    missing: List[str] = []
+    datatypes = run.datatypes or ['']
+    for dt in datatypes:
+        found = roofs.get(dt) or roofs.get('')
+        if found is None:
+            missing.append(dt)
+            continue
+        rows = [r for r in run.rows if (r.get('datatype') or '') == dt] \
+            if len(datatypes) > 1 else run.rows
+        out[dt] = (Run(run.label, run.path, rows), found)
+    return out, missing
+
+
+def build_charts(runs: Sequence[Run],
+                 roof: Union[None, Roof, Dict[str, Roof]],
                  profile: Optional[Dict[str, List[Dict]]],
                  batch: Optional[int]) -> Tuple[List[Tuple[str, str, str]], List[str]]:
     # The views return SVG, which is what the index page wants; the PDF
@@ -1205,15 +1235,22 @@ def build_charts(runs: Sequence[Run], roof: Optional[Roof],
         'only one batch size in the run')
     add('spread', view_spread(primary),
         'the run carries no percentile columns')
-    if roof is None:
+    roofs, missing = roofs_for(primary, roof)
+    for dt in missing:
+        suffix = f'-{dt.lower()}' if len(primary.datatypes) > 1 else ''
+        why = ('no ceilings -- pass --peak-flops and --peak-bytes, or '
+               '--roofline-json' if roof is None else
+               f'no {dt} ceiling -- measure one with roofline.py '
+               f'--datatype {dt}; another precision\'s roof would place '
+               f'these kernels wrongly')
         for name in ('roofline', 'trajectory', 'efficiency'):
-            skipped.append(f'{name}: no ceilings -- pass --peak-flops and '
-                           f'--peak-bytes, or --roofline-json')
-    else:
-        add('roofline', view_roofline(primary, roof))
-        add('trajectory', view_trajectory(primary, roof),
+            skipped.append(f'{name}{suffix}: {why}')
+    for dt, (rows, rf) in roofs.items():
+        suffix = f'-{dt.lower()}' if len(roofs) + len(missing) > 1 else ''
+        add('roofline' + suffix, view_roofline(rows, rf))
+        add('trajectory' + suffix, view_trajectory(rows, rf),
             'only one batch size in the run')
-        add('efficiency', view_efficiency(primary, roof),
+        add('efficiency' + suffix, view_efficiency(rows, rf),
             'only one batch size in the run')
     if len(runs) > 1:
         add('compare', view_compare(runs, 'ns_per_element', batch))
@@ -1224,9 +1261,11 @@ def build_charts(runs: Sequence[Run], roof: Optional[Roof],
             'the profiler reported no DRAM counters')
         add('occupancy', view_occupancy(primary, profile),
             'the profiler reported no occupancy')
-        if roof is not None:
-            add('measured-roofline',
-                view_measured_roofline(primary, roof, profile),
+        for dt, (rows, rf) in roofs.items():
+            suffix = (f'-{dt.lower()}' if len(roofs) + len(missing) > 1
+                      else '')
+            add('measured-roofline' + suffix,
+                view_measured_roofline(rows, rf, profile),
                 'the profiler reported no DRAM counters')
     else:
         for name in ('traffic', 'occupancy', 'measured-roofline'):
@@ -1234,22 +1273,30 @@ def build_charts(runs: Sequence[Run], roof: Optional[Roof],
     return charts, skipped
 
 
-def roof_from(args, runs: Sequence[Run]) -> Optional[Roof]:
-    """Ceilings from the flags, or from a `roofline.py --out` file."""
-    if args.roofline_json:
-        blob = json.loads(Path(args.roofline_json).read_text())
+def roof_from(args, runs: Sequence[Run]) -> Dict[str, Roof]:
+    """Ceilings from `roofline.py --out` files, one per precision, or from
+    the flags -- which name no precision and so stand for every one.
+
+    Keyed by the precision each file says it was measured in, because that
+    is the only roof the run's rows of that precision may be drawn under.
+    """
+    out: Dict[str, Roof] = {}
+    for given in args.roofline_json or []:
+        path = Path(given)
+        blob = json.loads(path.read_text())
         ceiling = blob.get('ceiling', blob)
         flops = ceiling.get('flops_per_s')
         byts = ceiling.get('bytes_per_s')
         if flops and byts:
-            return Roof(float(flops), float(byts),
-                        f'from {Path(args.roofline_json).name}',
-                        ceiling.get('datatype', ''))
+            datatype = ceiling.get('datatype', '')
+            out.setdefault(datatype, Roof(
+                float(flops), float(byts),
+                f'from {path.parent.name}/{path.name}', datatype))
     if args.peak_flops and args.peak_bytes:
-        return Roof(args.peak_flops * 1e12, args.peak_bytes * 1e9,
-                    'given on the command line',
-                    (runs[0].datatypes or [''])[0])
-    return None
+        out.setdefault('', Roof(args.peak_flops * 1e12,
+                                args.peak_bytes * 1e9,
+                                'given on the command line'))
+    return out
 
 
 def main() -> int:
@@ -1265,9 +1312,10 @@ def main() -> int:
     ap.add_argument('--profile', type=Path, default=None,
                     help='profile.json, or the directory profile.py --out '
                          'wrote')
-    ap.add_argument('--roofline-json', default=None,
+    ap.add_argument('--roofline-json', action='append', default=None,
                     help='a file carrying flops_per_s and bytes_per_s, as '
-                         'roofline.py --out writes')
+                         'roofline.py --out writes; once per precision, '
+                         'each run row is drawn under the roof of its own')
     ap.add_argument('--peak-flops', type=float, default=None,
                     help='compute ceiling in TFLOP/s, where no file has it')
     ap.add_argument('--peak-bytes', type=float, default=None,
@@ -1313,7 +1361,7 @@ def main() -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             print(f'{args.profile}: {exc}', file=sys.stderr)
 
-    roof = roof_from(args, runs)
+    roof = roof_from(args, runs) or None
     charts, skipped = build_charts(runs, roof, profile, args.batch)
 
     args.out.mkdir(parents=True, exist_ok=True)

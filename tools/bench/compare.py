@@ -151,10 +151,34 @@ class Point:
         return intensity_of(self.row)
 
 
+@dataclass(frozen=True)
+class Unit:
+    """A further compute roof over the same memory roof: a matrix unit, or
+    a precision emulated on one (`roofline.py --unit`).
+
+    Drawn beside the vector roof and never instead of it.  Which one a
+    kernel is answerable to depends on the instructions it was built from,
+    and nothing in a row says that yet -- so the fraction of the roof stays
+    taken against the FMA chain, and these are the lines a kernel built for
+    the unit could reach.
+    """
+    name: str
+    flops_per_s: float
+    source: str = ''
+
+
 @dataclass
 class Ceiling:
     """What one machine turned out to do (`roofline.py`), and what it is
-    built to do where the device says so."""
+    built to do where the device says so.
+
+    One per machine *and precision*: the FMA chain is built for one type,
+    and a double-precision kernel placed under a single-precision roof sits
+    as far below it as the part's two rates differ -- twice on a data-centre
+    part, sixty-four times on a consumer one.  `datatype` is empty only for
+    a ceiling that did not say, which then stands for every precision of
+    its machine: what somebody supplied by hand, as asked.
+    """
     arch: str
     backend: str = ''
     device: str = ''
@@ -164,6 +188,8 @@ class Ceiling:
     memory_bytes: int = 0
     peak_bytes_per_s: float = 0.0
     peak_flops_per_s: float = 0.0
+    datatype: str = ''
+    units: Tuple[Unit, ...] = ()
 
     @property
     def ridge(self) -> float:
@@ -175,9 +201,31 @@ class Ceiling:
 
 @dataclass
 class Field:
-    """Every point of a campaign, and the ceilings that go with them."""
+    """Every point of a campaign, and the ceilings that go with them,
+    keyed by machine and precision (`ceiling`)."""
     points: List[Point] = field(default_factory=list)
-    ceilings: Dict[str, Ceiling] = field(default_factory=dict)
+    ceilings: Dict[Tuple[str, str], Ceiling] = field(default_factory=dict)
+
+    def ceiling(self, arch: str, datatype: str) -> Optional[Ceiling]:
+        """The roof a point of this precision on this machine is placed
+        under: the one measured for it, else one that named no precision.
+        Never the other precision's -- that is the error this is keyed
+        against."""
+        return (self.ceilings.get((arch, datatype))
+                or self.ceilings.get((arch, '')))
+
+    def machine(self, arch: str) -> Optional[Ceiling]:
+        """Any ceiling of the machine, for what does not depend on the
+        precision: its name, its memory, its bus.  The fastest memory roof
+        measured on it, since a triad over doubles and one over floats
+        measure the same bus."""
+        have = [c for (a, _), c in self.ceilings.items() if a == arch]
+        return max(have, key=lambda c: c.bytes_per_s) if have else None
+
+    @property
+    def ceiling_archs(self) -> List[str]:
+        return sorted({a for (a, _) in self.ceilings
+                       if a in set(self.archs)})
 
     @property
     def archs(self) -> List[str]:
@@ -228,7 +276,8 @@ class Field:
         for p in self.points:
             if p.arch == arch and p.device:
                 return p.device
-        return self.ceilings.get(arch, Ceiling(arch)).device or arch
+        found = self.machine(arch)
+        return (found.device if found else '') or arch
 
     def at(self, **keys) -> List[Point]:
         return [p for p in self.points
@@ -280,8 +329,14 @@ def _load_ceiling(path: Path) -> Optional[Ceiling]:
     except (OSError, ValueError):
         return None
     c = blob.get('ceiling', blob)
-    if not c.get('arch'):
+    if not isinstance(c, dict) or not c.get('arch'):
         return None
+    units = tuple(
+        Unit(name=str(u.get('unit') or 'unit')
+             + (f" {u['shape']}" if u.get('shape') else ''),
+             flops_per_s=float(u['flops_per_s']),
+             source=str(u.get('source') or ''))
+        for u in c.get('units') or [] if u.get('flops_per_s'))
     return Ceiling(
         arch=c['arch'], backend=c.get('backend', ''),
         device=c.get('device', ''),
@@ -290,7 +345,8 @@ def _load_ceiling(path: Path) -> Optional[Ceiling]:
         bytes_per_s=float(c.get('bytes_per_s') or 0.0),
         memory_bytes=int(c.get('memory_bytes') or 0),
         peak_bytes_per_s=float(c.get('peak_bytes_per_s') or 0.0),
-        peak_flops_per_s=float(c.get('peak_flops_per_s') or 0.0))
+        peak_flops_per_s=float(c.get('peak_flops_per_s') or 0.0),
+        datatype=str(c.get('datatype') or ''), units=units)
 
 
 def collect(targets: Sequence[Path]) -> Field:
@@ -344,7 +400,8 @@ def collect(targets: Sequence[Path]) -> Field:
             for name in ('ceiling.json', 'roofline.json'):
                 ceiling = _load_ceiling(bench.parent / name)
                 if ceiling:
-                    out.ceilings.setdefault(ceiling.arch, ceiling)
+                    out.ceilings.setdefault(
+                        (ceiling.arch, ceiling.datatype), ceiling)
         # A tree `evaluate.py` wrote keeps its ceilings in one place rather
         # than beside every run, which is the point of measuring them once.
         if target.is_dir():
@@ -353,7 +410,8 @@ def collect(targets: Sequence[Path]) -> Field:
                         'ceiling.json', 'roofline.json'):
                     ceiling = _load_ceiling(name)
                     if ceiling:
-                        out.ceilings.setdefault(ceiling.arch, ceiling)
+                        out.ceilings.setdefault(
+                            (ceiling.arch, ceiling.datatype), ceiling)
     return out
 
 
@@ -411,28 +469,35 @@ def view_devices(fieldset: Field) -> Optional[Tuple[Page, str]]:
     archs = fieldset.archs
     if not archs:
         return None
-    headers = ['device', 'arch', 'backend', 'CUs', 'memory',
-               'FLOP/s measured', 'GB/s measured', 'GB/s peak', 'ridge']
+    datatypes = sorted({p.datatype for p in fieldset.points if p.datatype}
+                       | {dt for (_, dt) in fieldset.ceilings if dt})
+    headers = (['device', 'arch', 'backend', 'CUs', 'memory']
+               + [f'{dt} TFLOP/s' for dt in datatypes]
+               + ['GB/s measured', 'GB/s peak']
+               + [f'ridge {dt}' for dt in datatypes])
     rows = []
     for arch in archs:
-        c = fieldset.ceilings.get(arch)
+        c = fieldset.machine(arch)
+        per = [fieldset.ceiling(arch, dt) for dt in datatypes]
         rows.append([
             fieldset.device_of(arch), arch,
             next((p.backend for p in fieldset.points if p.arch == arch), '?'),
             str(c.compute_units or '?') if c else '?',
             f'{c.memory_bytes / 2 ** 30:.0f} GiB' if c and c.memory_bytes
-            else 'unknown',
-            f'{c.flops_per_s / 1e12:.2f} T' if c and c.flops_per_s else '—',
-            f'{c.bytes_per_s / 1e9:.0f}' if c and c.bytes_per_s else '—',
-            f'{c.peak_bytes_per_s / 1e9:.0f}' if c and c.peak_bytes_per_s
-            else 'unknown',
-            f'{c.ridge:.1f} F/B' if c and c.ridge else '—',
-        ])
-    note = ('"measured" is what `roofline.py` got out of the machine; "peak" '
-            'is what the memory bus allows, where the device reports its '
-            'clock and width. A theoretical FLOP/s is not listed: it needs '
-            'a cores-per-unit table per architecture, which would be a '
-            'guess for any part newer than the table.')
+            else 'unknown']
+            + [f'{x.flops_per_s / 1e12:.2f}' if x and x.flops_per_s else '—'
+               for x in per]
+            + [f'{c.bytes_per_s / 1e9:.0f}' if c and c.bytes_per_s else '—',
+               f'{c.peak_bytes_per_s / 1e9:.0f}' if c and c.peak_bytes_per_s
+               else 'unknown']
+            + [f'{x.ridge:.1f} F/B' if x and x.ridge else '—' for x in per])
+    note = ('"measured" is what `roofline.py` got out of the machine, an FMA '
+            'chain per precision and a triad; "peak" is what the memory bus '
+            'allows, where the device reports its clock and width. A '
+            'theoretical FLOP/s is not listed: it needs a cores-per-unit '
+            'table per architecture, which would be a guess for any part '
+            'newer than the table. A precision with no ceiling of its own '
+            'is a dash rather than the other precision\'s figure.')
     return table_page('Machines', headers, rows, note)
 
 
@@ -446,10 +511,10 @@ def view_bandwidth_peak(fieldset: Field) -> Optional[str]:
     what a chart is for here is the comparison, and a streaming loop
     reaching 84 % of the bus against one reaching 45 % is the finding.
     """
-    have = [(a, fieldset.ceilings[a]) for a in fieldset.archs
-            if a in fieldset.ceilings
-            and fieldset.ceilings[a].bytes_per_s
-            and fieldset.ceilings[a].peak_bytes_per_s]
+    have = [(a, fieldset.machine(a)) for a in fieldset.archs
+            if fieldset.machine(a) is not None
+            and fieldset.machine(a).bytes_per_s
+            and fieldset.machine(a).peak_bytes_per_s]
     if not have:
         return None
     c = Canvas('What each machine delivers of its own memory bus', '',
@@ -494,10 +559,15 @@ def view_intensity(fieldset: Field) -> Optional[str]:
     intensity is not one number per kernel either.
     """
     per = fieldset.one_per_kernel(fieldset.points)
-    archs = [a for a in fieldset.archs
-             if a in fieldset.ceilings and fieldset.ceilings[a].ridge]
+
+    def ridge_of(k: str, a: str) -> float:
+        p = per.get((k, a))
+        roof = fieldset.ceiling(a, p.datatype) if p is not None else None
+        return roof.ridge if roof is not None and p.intensity else 0.0
+
+    archs = fieldset.ceiling_archs
     names = [k for k in fieldset.kernels
-             if any((k, a) in per and per[(k, a)].intensity for a in archs)]
+             if any(ridge_of(k, a) for a in archs)]
     if not archs or not names:
         return None
     labels = {k: fieldset.label(next(per[(k, a)] for a in archs
@@ -508,20 +578,21 @@ def view_intensity(fieldset: Field) -> Optional[str]:
                width=max(760, 46 * len(names) + 220), legend_width=190,
                tilted_labels=max(len(v) for v in labels.values()),
                note='Below 1 the machine runs out of bandwidth first; above '
-                    'it, of arithmetic. The ridge is the measured one.')
-    ratios = [per[(k, a)].intensity / fieldset.ceilings[a].ridge
-              for k in names for a in archs
-              if (k, a) in per and per[(k, a)].intensity]
+                    'it, of arithmetic. The ridge is the measured one, of '
+                    'the kernel\'s own precision; a kernel with no ceiling '
+                    'of its precision on a machine has no mark there.')
+    ratios = [per[(k, a)].intensity / ridge_of(k, a)
+              for k in names for a in archs if ridge_of(k, a)]
     c.fit([0, len(names)], ratios + [1.0], ypad=1.6)
     c.axes(xticks=[])
     c.rule(1.0, 'ridge — bandwidth below, arithmetic above', '#777')
     step = (c.W - c.L - c.R) / max(len(names), 1)
     for i, k in enumerate(names):
         for a in archs:
-            p = per.get((k, a))
-            if p is None or not p.intensity:
+            ridge = ridge_of(k, a)
+            if not ridge:
                 continue
-            ridge = fieldset.ceilings[a].ridge
+            p = per[(k, a)]
             r = p.intensity / ridge
             x = c.L + step * (i + 0.5)
             c._mark(x, c.py(r), colors[a], marks[a],
@@ -531,8 +602,10 @@ def view_intensity(fieldset: Field) -> Optional[str]:
                     + f', by {max(r, 1 / r):.1f}x')
         c.tilted_label(c.L + step * (i + 0.5), labels[k])
     for a in archs:
-        c.legend.append((f'{a} (ridge {fieldset.ceilings[a].ridge:.0f})',
-                         colors[a]))
+        ridges = '/'.join(f'{fieldset.ceilings[(aa, dt)].ridge:.0f}'
+                          for (aa, dt) in sorted(fieldset.ceilings)
+                          if aa == a and fieldset.ceilings[(aa, dt)].ridge)
+        c.legend.append((f'{a} (ridge {ridges})', colors[a]))
     return c.render()
 
 
@@ -639,7 +712,7 @@ def view_kernels(fieldset: Field) -> Optional[Tuple[Page, str]]:
                  f'{needed / issued:.0%}' if needed and issued else '—',
                  f'{b / batch:,.0f}' if b else '—',
                  f'{inten:.2f}' if inten else '—']
-        ceiling = fieldset.ceilings.get(a)
+        ceiling = fieldset.ceiling(a, p.datatype)
         ridge = ceiling.ridge if ceiling else 0.0
         if not inten or not ridge:
             cells.append('—')
@@ -882,19 +955,20 @@ def view_portability(fieldset: Field) -> Optional[str]:
     rewarding the one that is simply larger, and it is the number a
     generator is answerable for.
     """
-    archs = [a for a in fieldset.archs
-             if a in fieldset.ceilings and fieldset.ceilings[a].bytes_per_s]
+    archs = [a for a in fieldset.ceiling_archs
+             if fieldset.machine(a).bytes_per_s]
     if len(archs) < 2:
         return None
     per = fieldset.one_per_kernel(fieldset.points)
     table: Dict[Tuple[str, str], float] = {}
     for (k, a), p in per.items():
-        if a not in fieldset.ceilings:
+        ceiling = fieldset.ceiling(a, p.datatype)
+        if ceiling is None or not ceiling.bytes_per_s:
             continue
         achieved, inten = rate(p.row, 'gflops'), p.intensity
         if not achieved or not inten:
             continue
-        roof = fieldset.ceilings[a].bound(inten) / 1e9
+        roof = ceiling.bound(inten) / 1e9
         if roof > 0:
             table[(k, a)] = achieved / roof
     names = [k for k in fieldset.kernels

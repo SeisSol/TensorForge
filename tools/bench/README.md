@@ -343,8 +343,26 @@ the divisor.
 
 ```bash
 python3 tools/bench/roofline.py --ceiling-only            # just the roof
+python3 tools/bench/roofline.py --ceiling-only --datatype F64 --out ceil/F64
 python3 tools/bench/roofline.py out/bench.json --out roof/
 ```
+
+A roof is one precision's. The FMA chain is built for one type, and a
+double-precision kernel placed under the single-precision roof sits as far
+below it as the part's two rates differ -- twice on a data-centre part,
+sixty-four times on a consumer one. So `evaluate.py` measures one ceiling per
+precision its exports are in (`ceiling/F32`, `ceiling/F64`), and the readers
+place a row only under the roof of its own precision; where there is none, the
+row has no roofline point rather than the other precision's.
+
+A matrix unit, or a precision emulated on one, is a further roof over the same
+memory roof, and is recorded beside the measured one rather than in its place:
+`--unit matrix:m8n8k4=19.5` (TFLOP/s; from `rocprof-compute --roof-only`, say)
+or `--unit emulated:3xtf32=...` (the native rate over the scheme's passes). The
+form is part of the name because the rate is the form's. The fraction of the
+roof stays taken against the vector roof: nothing in a row says yet which unit
+a kernel was built for, and `executed_flops` is absent for a build with a
+matrix instruction in it.
 
 Two microbenchmarks, built with the same recipe as everything else here: an FMA
 chain with enough independent accumulators to cover the pipeline, and a STREAM
@@ -376,6 +394,8 @@ builds nothing.
 
 ```bash
 python3 tools/bench/plot.py out/bench.json --peak-flops 51.8 --peak-bytes 2100
+python3 tools/bench/plot.py out/bench.json \
+    --roofline-json ceil/F32/roofline.json --roofline-json ceil/F64/roofline.json
 python3 tools/bench/plot.py a/bench.json b/bench.json --label before --label after
 python3 tools/bench/plot.py out/bench.json --profile prof/ --out plots/
 ```

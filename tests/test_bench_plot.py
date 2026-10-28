@@ -347,3 +347,35 @@ def test_every_drawn_chart_parses_and_the_page_carries_all_of_them():
     page = plot.index_html(charts, "t")
     for name, _, _ in charts:
         assert name in page
+
+
+# ----------------------------------------------------------------------
+# A roof per precision
+# ----------------------------------------------------------------------
+
+def test_a_run_meets_only_the_roof_of_its_own_precision():
+    """A double-precision run under a single-precision roof is placed as
+    far too low as the part's two rates differ; it is skipped, and says
+    which ceiling would draw it."""
+    single = plot.Roof(flops_per_s=1e13, bytes_per_s=1e12, source="t",
+                       datatype="F32")
+    charts, skipped = plot.build_charts(
+        [run([row(datatype="F64")])], single, None, None)
+    assert "roofline" not in {name for name, _, _ in charts}
+    assert any(s.startswith("roofline: no F64 ceiling") for s in skipped)
+
+
+def test_a_run_of_two_precisions_gets_a_roofline_each():
+    roofs = {"F32": plot.Roof(1e13, 1e12, "t", "F32"),
+             "F64": plot.Roof(5e12, 1e12, "t", "F64")}
+    charts, _ = plot.build_charts(
+        [run([row(datatype="F32"), row(workload="j", datatype="F64")])],
+        roofs, None, None)
+    drawn = {name for name, _, _ in charts}
+    assert {"roofline-f32", "roofline-f64"} <= drawn
+
+
+def test_a_roof_given_without_a_precision_stands_for_every_one():
+    charts, _ = plot.build_charts([run([row(datatype="F64")])], ROOF,
+                                  None, None)
+    assert "roofline" in {name for name, _, _ in charts}
