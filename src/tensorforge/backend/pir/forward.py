@@ -258,7 +258,14 @@ class _Forward:
                                    f'reads go')
         body = _strip(self._rewrite(self.flow.body), dead)
         body = _strip(body, _unreached(body))
-        return substitute(body, self.mapped) if self.mapped else body
+        mapped = self.mapped
+        for k, v in mapped.items():
+            # A load taken from the value of another load the same round
+            # takes: what that one became, which stands where it stood.
+            while v.id in mapped:
+                v = mapped[v.id]
+            mapped[k] = v
+        return substitute(body, mapped) if mapped else body
 
     @staticmethod
     def _candidate(s: Stmt) -> bool:

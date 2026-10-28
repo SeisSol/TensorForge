@@ -367,6 +367,25 @@ def test_a_value_a_trip_stored_is_read_in_that_trip_only(where):
                                                                'carried'))
 
 
+def test_a_load_taken_from_a_load_the_same_round_takes_reads_what_that_became():
+    """`s = x`, `r0 = s` and `p = r0`: the load of `s` reads `x`, and the
+    load of `r0` the value the load of `s` gave -- which the same round takes
+    away.  The second reads `x` as well."""
+    t = Body()
+    b = t.b
+    s = b.alloc(F32, (LANES,), MemSpace.SHARED, hint='s', extern='s0',
+                arena='shrMem')
+    r = t.registers('r0', 1)
+    x = b.op('mul', REAL, b.load(t.p, t.lane), 2.0, hint='x')
+    b.store(s, x, t.lane)
+    b.store(r, b.load(s, t.lane), 0)
+    b.store(t.p, b.load(r, 0), t.lane)
+    out = t.run(rounds=1)
+    stored = [y.args[1] for y in walk_stmts(out)
+              if y.op == Op.STORE and y.args[0] is t.p]
+    assert stored == [x]
+
+
 def test_a_predicated_load_keeps_what_its_predicate_gives():
     """Read from the registers, the rows past the load's predicate still
     get what the load gives them."""

@@ -3076,6 +3076,9 @@ GROUPS = {
         ('the last load of an element asked before the first',
          sub(FLOW, '                self._fetched[(r.cell, r.mask)].append((load, r))\n',
              '                self._fetched[(r.cell, r.mask)].insert(0, (load, r))\n', 1)),
+        ('a load taken from a load the same round takes read as that one\'s value',
+         sub(FORWARD, '            while v.id in mapped:\n'
+                      '                v = mapped[v.id]\n', '', 1)),
         ('a value one trip stored read in another',
          sub(FLOW, "                if o[0] == 'value' and not self._one_trip(o[1], r.writer, n):",
              '                if False:', 1)),
