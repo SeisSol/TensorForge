@@ -233,13 +233,15 @@ class Own:
     trip; `outer` puts it all in a loop of its own, whose body `defines`
     begins with a `mark defines` of `S`.  `raw` puts text in the trip that
     touches nothing and says nothing of it; `inner` declares `S` in the
-    trip, and the code ahead of the loop stores nothing.
+    trip, and the code ahead of the loop stores nothing.  `again` has the
+    code ahead of the loop store the columns the trips reach once more,
+    from registers of another image.
     """
 
     def __init__(self, *, across=False, other=False, parity=False,
                  readonly=False, plain=False, partial=False, extra=False,
                  mark=False, outer=False, defines=False, trips=3,
-                 raw=False, inner=False):
+                 raw=False, inner=False, again=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         p = b.decl_expr(
@@ -298,6 +300,16 @@ class Own:
                     with b.for_(0, COLS - 1 if partial else COLS, 1,
                                 unroll=True) as hop:
                         b.store(s, b.load(before, hop.induction),
+                                element(hop.induction))
+            if again:
+                second = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r1',
+                                 extern='r1', init='{}')
+                with b.for_(0, COLS, 1, unroll=True) as hop:
+                    b.store(second, b.op('mul', real, 4.0, 5.0),
+                            hop.induction)
+                with b.if_(inside):
+                    with b.for_(0, cols, 1, unroll=True) as hop:
+                        b.store(s, b.load(second, hop.induction),
                                 element(hop.induction))
             with b.for_(0, trips, 1, rolled=True, hint='i'):
                 if inner:
@@ -810,6 +822,33 @@ def test_a_store_ahead_of_more_than_the_trips_reach_keeps_it_in_memory():
     run = Own(extra=True)
     assert run.carry() == run.body
     assert any('do not reach' in line for line in run.report)
+
+
+def test_a_store_ahead_that_a_later_one_writes_over_seeds_nothing():
+    """The code ahead of the loop stores every column of `S` and then the
+    columns the trips reach once more, from another image: the trips read
+    first what the second store wrote, which seeds their image and goes.
+    The first seeds nothing, and stays for the column the trips leave
+    alone."""
+    run = Own(extra=True, again=True)
+    ahead, loop, _ = _split(run.carry())
+    assert not _shared(loop.regions[0].body, run.s)
+    stores = [s for s in walk_stmts(tuple(ahead)) if s.op is Op.STORE
+              and any(a.base is run.s for a in s.accesses)]
+    assert len(stores) == 1
+    images = {s.attr('extern'): s.target[0] for s in ahead
+              if s.op is Op.ALLOC}
+    defs = {t.id: s for s in walk_stmts(tuple(ahead)) for t in s.target}
+
+    def source(store):
+        return {a.base for a in defs[store.args[1].id].accesses}
+
+    assert source(stores[0]) == {images['r0']}
+    seeds = [s for s in walk_stmts(tuple(ahead)) if s.op is Op.STORE
+             and any(a.base is images['carry_s0'] for a in s.accesses)]
+    assert seeds and all(source(s) == {images['r1']} for s in seeds)
+    assert any('taken from registers ahead of the loop, and not stored '
+               'there' in line for line in run.report)
 
 
 def test_a_temporary_the_trip_declares_stays_in_memory():

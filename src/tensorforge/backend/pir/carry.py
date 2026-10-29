@@ -1801,8 +1801,13 @@ class _Carrier:
         the trip before it writes it there -- and `seed`, the same stores
         into the registers of `image` instead (`own`: per lane, element to
         register), behind them and ahead of the loop; `seeded` holds per
-        lane the elements they write.  Refused where they do not write all
-        of that, or write an element the trips do not reach."""
+        lane the elements they write.
+
+        An element is seeded by the last of those stores that writes it.  A
+        store every element of which the trips do not reach, or a later
+        store writes again, seeds nothing and stays where it is.  Refused
+        where the stores do not write all the trips read first, or where one
+        that seeds an element writes one the trips do not reach."""
         if not exposed:
             return [], [], {}
         units = self._last_stores(out, access)
@@ -1810,18 +1815,10 @@ class _Carrier:
             raise _Refused('nothing ahead of the loop stores it from '
                            'registers')
         units.reverse()
-        for u in units:
-            if u.image is None:
-                continue
-            for i in range(min(u.at), len(out)):
-                if i not in u.at and any(
-                        a.writes and _key(a.base) == _key(u.image)
-                        for a in collect_accesses((out[i],))):
-                    raise _Refused('an image it is stored from ahead of the '
-                                   'loop is written again there')
         base = access.base
-        seeded: Dict[int, Set[int]] = {}
-        seed: List[Stmt] = []
+        # What each store writes: the statement and loop counters it writes
+        # from, and the element of each lane it writes there.
+        traced = []
         for u in units:
             nests = tuple(out[i] for i in sorted(u.at))
             events = {id(e.stmt): e for e in u.events
@@ -1829,7 +1826,7 @@ class _Carrier:
                       and any(a.base is base for a in e.stmt.accesses)}
             trace: List[Tuple[Stmt, Dict]] = []
             _trace(nests, {}, events, trace)
-            register: Dict = {}
+            writes = []
             for x, env in trace:
                 e = events[id(x)]
                 node = (id(x), tuple(sorted(env.items())))
@@ -1841,16 +1838,39 @@ class _Carrier:
                     memo: Dict = {}
                     if not self._active(e, full, memo):
                         continue
-                    element = self._indices.evaluate(index, full, memo)
-                    r = own.get(lane, {}).get(element)
-                    if r is None:
-                        raise _Refused('the code ahead of the loop stores '
-                                       'what the trips do not reach')
-                    if register.setdefault(node, r) != r:
-                        raise _Refused('the code ahead of the loop stores '
-                                       'into registers that differ between '
-                                       'lanes')
-                    seeded.setdefault(lane, set()).add(element)
+                    writes.append((node, lane,
+                                   self._indices.evaluate(index, full, memo)))
+            traced.append((u, nests, trace, writes))
+        last: Dict[Tuple[int, int], int] = {}
+        for k, (_, _, _, writes) in enumerate(traced):
+            for _, lane, element in writes:
+                if element in own.get(lane, {}):
+                    last[(lane, element)] = k
+        seeding = sorted(set(last.values()))
+        units = [traced[k][0] for k in seeding]
+        for u in units:
+            if u.image is None:
+                continue
+            for i in range(min(u.at), len(out)):
+                if i not in u.at and any(
+                        a.writes and _key(a.base) == _key(u.image)
+                        for a in collect_accesses((out[i],))):
+                    raise _Refused('an image it is stored from ahead of the '
+                                   'loop is written again there')
+        seeded: Dict[int, Set[int]] = {}
+        seed: List[Stmt] = []
+        for k in seeding:
+            _, nests, trace, writes = traced[k]
+            register: Dict = {}
+            for node, lane, element in writes:
+                r = own.get(lane, {}).get(element)
+                if r is None:
+                    raise _Refused('the code ahead of the loop stores what '
+                                   'the trips do not reach')
+                if register.setdefault(node, r) != r:
+                    raise _Refused('the code ahead of the loop stores into '
+                                   'registers that differ between lanes')
+                seeded.setdefault(lane, set()).add(element)
             fits = self._fits(trace, register, size, _unrolled(nests))
             seed += self._privatized(list(nests), fits, image,
                                      _inductions(nests))

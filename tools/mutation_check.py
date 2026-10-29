@@ -2765,6 +2765,18 @@ GROUPS = {
         ('a lane\'s first read taken from what nothing stored',
          sub(CARRY, '            if not set(first.values()) <= seeded.get(lane, set()):',
              '            if False:', 1)),
+        ('an element seeded by the first store ahead of the loop, not the last',
+         sub(CARRY, '                    last[(lane, element)] = k\n',
+             '                    last.setdefault((lane, element), k)\n', 1)),
+        ('every store ahead of the loop seeding',
+         sub(CARRY, '        seeding = sorted(set(last.values()))\n',
+             '        seeding = list(range(len(traced)))\n', 1)),
+        ('a store ahead seeding what the trips do not reach',
+         sub(CARRY, "                if r is None:\n"
+                    "                    raise _Refused('the code ahead of the loop stores what '\n",
+             "                if r is None:\n"
+             "                    continue\n"
+             "                    raise _Refused('the code ahead of the loop stores what '\n", 1)),
         ('the store ahead of a lane\'s own buffer always dropped',
          sub(CARRY, '        elif (again or not read_behind) and self._movable(out, at):',
              '        elif self._movable(out, at):', 1)),
