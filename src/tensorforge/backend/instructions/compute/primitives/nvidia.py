@@ -440,8 +440,22 @@ def fragment_order(shape, atom, threads=32):
 
 
 def order_before_packing(shape, ctx):
-    """False: the packing goes first here (`MatrixPaths.order_before_packing`)."""
-    return False
+    """True: an operand `mma.sync` reads is stored in its fragment order, the
+    window of it an operation reads included (`MatrixPaths.order_before_packing`).
+
+    There is nothing to weigh the order against here.  A packing is a layout
+    for the nest, and the matrix path reads `A` by coordinate either way; what
+    an operand without an order costs this path is the staging tile, every
+    element copying the operator from global memory through shared memory
+    into the fragments, three accesses per value.  SeisSol's operators are
+    read over windows -- `kDivM` from row one, a row short of its box -- so
+    until a caller passed `prepare_operands` itself, none of them had an
+    order.  Measured on GH200 (sm_90, batch 262144), staged against ordered:
+    `localFluxAll` o6 16.6 -> 11.9 ns per element in single, `volume` 8.1 ->
+    6.6, viscoelastic `fluxLocalAll` 29.0 -> 21.5 and `volumeExt` 10.5 ->
+    8.8; in double the viscoelastic flux 40.5 -> 37.2, the rest within 1 %.
+    """
+    return True
 
 
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,

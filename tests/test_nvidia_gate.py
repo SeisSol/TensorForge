@@ -158,6 +158,41 @@ def test_a_deep_atom_reads_zero_past_b(config):
     assert "mma.sync" in gen.get_kernel()
 
 
+@pytest.mark.parametrize("config, kernel, dtype", [
+    ("elastic-linearck-o6-s", "gpu_volume", Datatype.F32),
+    ("elastic-linearck-o6-s", "gpu_localFluxAll", Datatype.F32),
+    ("elastic-linearck-o6-d", "gpu_volume", Datatype.F64),
+])
+def test_an_operator_read_over_a_window_is_stored_in_fragment_order(
+        config, kernel, dtype):
+    """SeisSol's operators are read over windows -- `kDivM` from row one --
+    and an operand read over less than its box got no order unless the caller
+    passed `prepare_operands` itself.  Without one, every element copied the
+    operator through the staging tile into the fragments; measured on GH200,
+    that was most of what the matrix path lost against the vector FMAs
+    (`localFluxAll` o6 in single 16.6 against 11.9 ns per element ordered).
+    So the order is the default wherever `mma.sync` reads the operand
+    (`nvidia.order_before_packing`), and no staging tile is left."""
+    import contextlib
+    import io
+
+    import seissol_suite as fx
+    from tensorforge.common.context import Options
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    descrs = DescriptionReader(None, {}).read(
+        fx.description("elastic-linearck", config, kernel))[0]
+    ctx = Context(arch="sm_90", backend="cuda", fp_type=dtype,
+                  options=Options(tensor_cores=True))
+    gen = Generator(descrs, ctx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    source = gen.get_kernel()
+    assert "mma.sync" in source
+    assert "atile" not in source
+
+
 def test_the_switch_is_off():
     """Not an opinion about whether it should be -- a place where the
     deployment decision is written down once, so flipping it is a diff."""
