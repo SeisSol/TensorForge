@@ -1060,6 +1060,49 @@ declare('launch_control_depth',
             'started, which costs at the tail: depth 4 measured worse than '
             'depth 2 in every configuration.')
 
+declare('resident_grid',
+        default=0.0,
+        parse=parse_float,
+        doc='Size the grid-stride traversal\'s grid to this many times what '
+            'the device holds at once, so that a work-group loops over its '
+            'share of the batch; 0 leaves it to the target '
+            '(`Target.bounds_grid`): what the occupancy query answers on CUDA '
+            'and HIP, and on SYCL a grid that covers the batch in one round.\n'
+            'SYCL has no occupancy query, and what the device holds there is '
+            'counted in `max_compute_units` -- one work-group per vector engine, '
+            '1024 on a Data Center GPU Max 1550.  A grid that loops is what '
+            'lets `enable_wrap_loads` and `prefetch_data` cover the next '
+            'element with the current one.  See `batch_parts` for the order '
+            'the elements are visited in, which on a two-stack GPU decides '
+            'whether looping costs anything at all.')
+
+declare('batch_parts',
+        rule=lambda target: 2 if target.sycl else 1,
+        parse=parse_int,
+        doc='Cut the batch into this many contiguous parts, and give each '
+            'part a contiguous share of the grid that strides over it alone; '
+            '0 makes every work-group its own part, a contiguous run of '
+            'elements.  1, the grid stride over the whole batch; 2 under '
+            'SYCL by default, 1 elsewhere.  A grid that covers the batch in '
+            'one round makes every row one trip whatever the parts, and is '
+            'left as it is.\n'
+            'For a GPU of several stacks driven as one device.  Under implicit '
+            'scaling the driver hands the first half of the work-groups to one '
+            'stack and the second half to the other, and places the first '
+            'half of an allocation in the first stack\'s memory: a grid that '
+            'covers the batch in one round reads its own stack\'s memory '
+            'only.  A grid that strides over the whole batch reads the other '
+            'stack\'s every second round, and on a Max 1550 that is 3.4 to '
+            '3.9x slower than one round (2.7-3.0 ns against 0.80 per element '
+            'of a 2 kB streaming kernel); in two parts it is 3 % slower, and '
+            'one part per work-group 8-25 %.  SeisSol\'s elastic kernels at '
+            'orders 4 and 6 on a grid of what the device holds '
+            '(`resident_grid=1`): 1.69x the one round\'s time in geometric '
+            'mean striding over the batch, 1.02x in two parts.  On one stack '
+            'two parts cost nothing measurable, one part per work-group up to '
+            '25 %.  Only the grid-stride traversal, and not where sections '
+            'share it rotated or a loop drives groups of rows.')
+
 declare('merge_variants',
         default='auto',
         parse=parse_bool_or_auto,

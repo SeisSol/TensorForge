@@ -1138,6 +1138,20 @@ class Generator:
     group.  The offset spreads the load; nothing is right only because of it.
     """
     lexic = self._context.target.lexic
+    offset = self._rotation(index)
+    stride = f'({lexic.grid_dim_x} * {lexic.block_dim_y})'
+    if not offset:
+      start = self._get_2d_block_id()
+    else:
+      start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
+    return start, stride
+
+  def _rotation(self, index: int) -> List[str]:
+    """The element counts section `index` starts rotated by
+    (`_section_traversal`): those of the sections ahead of it back to the
+    last barrier, none where a body needs its wave in step."""
+    if self._wave_in_step():
+      return []
     offset = []
     idx = index - 1
     for ssection in reversed(self._sections[:index]):
@@ -1145,13 +1159,93 @@ class Generator:
         break
       offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
       idx -= 1
+    return offset
 
-    stride = f'({lexic.grid_dim_x} * {lexic.block_dim_y})'
-    if len(offset) == 0 or self._wave_in_step():
-      start = self._get_2d_block_id()
+  def _one_round(self, cooperative: bool) -> bool:
+    """Whether the grid-stride launch covers the batch in one round -- every
+    row one trip -- rather than looping over what the device holds: where
+    the target runs a looping block slowly (`Target.bounds_grid`), nobody
+    asked for a resident grid (`resident_grid`) and no section waits on the
+    whole grid, which has to be resident."""
+    return not (cooperative
+                or self._context.get_user_options().resident_grid > 0
+                or self._context.target.bounds_grid())
+
+  def _batch_parts(self, index: int, loop) -> int:
+    """How many contiguous parts section `index`'s traversal cuts the batch
+    into (`batch_parts`): what the option asks for where `loop` is the grid
+    stride of `_section_traversal`, unrotated, with every row its own
+    traversal -- 1 otherwise, the stride over the whole batch.  1 as well
+    for a grid that covers the batch in one round (`_one_round`), where
+    every row makes one trip whatever the parts.
+
+    Not under a rotated start, whose modulo spreads sections over the grid's
+    stride and would have to spread them over a part's instead; not for a
+    loop over groups of rows, whose traversal (`BatchLoop._gen_grouped`)
+    spells its own index."""
+    parts = self._context.get_user_options().batch_parts
+    if parts < 0:
+      raise GenerationError(f'batch_parts={parts}: a count of parts, or 0 '
+                            f'for one per work-group')
+    if (parts == 1 or not self._persistent_threading or loop is None
+        or loop._group_size > 1 or self._rotation(index)
+        or self._one_round(any(s.barrier for s in self._sections))):
+      return 1
+    return parts
+
+  def _parted_traversal(self, body, count, parts: int):
+    """`(start, stride, end)` of a grid-stride traversal over `parts`
+    contiguous parts of the batch (`batch_parts`), as values: the first
+    `groups / parts` work-groups stride over the first part, the next as many
+    over the second, the last part's take the rest of the grid; 0 parts, one
+    per work-group.  A part is a whole number of rounds of the rows of a
+    work-group, so every row starts on its own element and a part ends where
+    the next one starts -- or at the end of the batch.
+
+    Fewer work-groups than parts -- a batch smaller than one round -- stride
+    over the batch as one part, and every row runs once."""
+    from tensorforge.backend.pir.core import BOOL, SIZE, Uniformity
+    lexic = self._context.target.lexic
+    groups = body.extern_value(lexic.grid_dim_x, SIZE,
+                               uniform=Uniformity.GRID, hint='groups')
+    rows = body.extern_value(lexic.block_dim_y, SIZE,
+                             uniform=Uniformity.GRID, hint='rows')
+    block = body.extern_value(lexic.block_idx_x, SIZE,
+                              uniform=Uniformity.BLOCK, hint='block')
+    row = body.extern_value(lexic.thread_idx_y, SIZE,
+                            uniform=Uniformity.MULT, hint='row')
+    if parts == 0:
+      cut, part = groups, block
     else:
-      start = f'({self._get_2d_block_id()} + {" + ".join(offset)}) % {stride}'
-    return start, stride
+      enough = body.op('ge', BOOL, groups, parts, hint='partsFit')
+      cut = body.op('select', SIZE, enough, parts, 1, hint='parts')
+      per = body.op('div', SIZE, groups, cut, hint='partGroups')
+      last = body.op('sub', SIZE, cut, 1, hint='lastPart')
+      part = body.op('min', SIZE, body.op('div', SIZE, block, per), last,
+                     hint='part')
+      first = body.op('mul', SIZE, part, per, hint='partFirst')
+      rest = body.op('sub', SIZE, groups, first, hint='partRest')
+      final = body.op('eq', BOOL, part, last, hint='finalPart')
+      share = body.op('select', SIZE, final, rest, per, hint='partShare')
+      local = body.op('sub', SIZE, block, first, hint='partBlock')
+    span = body.op('mul', SIZE, rows, cut, hint='partSpan')
+    rounds = body.op('div', SIZE,
+                     body.op('sub', SIZE, body.op('add', SIZE, count, span),
+                             1),
+                     span, hint='partRounds')
+    size = body.op('mul', SIZE, rounds, rows, hint='partSize')
+    lo = body.op('mul', SIZE, part, size, hint='partStart')
+    name = f'{GeneralLexicon.BATCH_ID_NAME}_start'
+    if parts == 0:
+      start = body.op('add', SIZE, lo, row, hint=name)
+    else:
+      start = body.op('add', SIZE, body.op('add', SIZE, lo, row),
+                      body.op('mul', SIZE, rows, local), hint=name)
+    stride = (rows if parts == 0
+              else body.op('mul', SIZE, rows, share, hint='partStride'))
+    end = body.op('min', SIZE, count, body.op('add', SIZE, lo, size),
+                  hint='partEnd')
+    return start, stride, end
 
   def _group_size(self, index: int, start: str) -> int:
     """How many rows this section's traversal drives together.
@@ -1932,14 +2026,15 @@ class Generator:
     """
     from tensorforge.backend.instructions.allocate import ShrMemAlloc
     self._declare_lane_mapping(body)
+    loop = next((i for i in section.stream if isinstance(i, BatchLoop)), None)
     with BatchLoop.batch_indices(body) as bound:
-      bound.update(self._traversal_indices(body, index))
+      bound.update(self._traversal_indices(body, index, loop))
       for instruction in section.stream:
         # Declared once the launch is decided (`_with_arena`).
         if not isinstance(instruction, ShrMemAlloc):
           instruction.gen_code(body)
 
-  def _traversal_indices(self, body, index: int) -> dict:
+  def _traversal_indices(self, body, index: int, loop=None) -> dict:
     """Where this thread's traversal of section `index` starts, and the first
     two elements it visits.
 
@@ -1961,17 +2056,29 @@ class Generator:
     # past the batch (`stacking.count`).
     count = body.extern_value(stacking.count(index, self._stack), SIZE,
                               uniform=Uniformity.GRID)
-    # The launch geometry's spelling, bound where it is read and declared
-    # nowhere.  `threadIdx.y` is in it: every thread of one multiplication
-    # starts at the same element, and the multiplications of a block do not.
-    start = body.extern_value(start_text, SIZE, uniform=Uniformity.MULT,
-                              hint=f'{name}_start')
-    inside = body.op('lt', BOOL, start, count, hint='startInBatch')
+    out = {}
+    parts = self._batch_parts(index, loop)
+    if parts == 1:
+      # The launch geometry's spelling, bound where it is read and declared
+      # nowhere.  `threadIdx.y` is in it: every thread of one multiplication
+      # starts at the same element, and the multiplications of a block do
+      # not.
+      start = body.extern_value(start_text, SIZE, uniform=Uniformity.MULT,
+                                hint=f'{name}_start')
+      end = count
+    else:
+      # The loop reads its stride and its end off these as well
+      # (`BatchLoop._gen_code_inner`): a part ends ahead of the batch.
+      start, stride, end = self._parted_traversal(body, count, parts)
+      out = {f'{name}_stride': stride, f'{name}_end': end}
+    inside = body.op('lt', BOOL, start, end, hint='startInBatch')
     first = body.op('select', SIZE, inside, start, 0, hint=f'{name}1')
     ahead = body.op('add', SIZE, first, stride, hint='firstAhead')
-    inside = body.op('lt', BOOL, ahead, count, hint='firstAheadInBatch')
+    inside = body.op('lt', BOOL, ahead, end, hint='firstAheadInBatch')
     second = body.op('select', SIZE, inside, ahead, first, hint=f'{name}2')
-    return {f'{name}_start': start, f'{name}1': first, f'{name}2': second}
+    out.update({f'{name}_start': start, f'{name}1': first,
+                f'{name}2': second})
+    return out
 
   def _wave_uniform_row(self, layout: MultLayout) -> bool:
     """Whether this build reads the row of the block as the wave's
@@ -2270,13 +2377,19 @@ class Generator:
         num_blocks = f'({stacks} + {mults_per_block} - 1) / {mults_per_block}'
       else:
         # Bounded by what the device holds, or covering the batch in one round
-        # where the target runs a looping block slowly (`Target.bounds_grid`).
+        # where the target runs a looping block slowly (`Target.bounds_grid`)
+        # and the caller did not ask for a resident grid (`resident_grid`).
         # A cooperative launch is bounded either way.
-        bounded = coop or self._context.target.bounds_grid()
+        resident = self._context.get_user_options().resident_grid
+        bounded = not self._one_round(coop)
         if bounded:
           writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize, resident=coop)}')
         if coop:
           num_blocks = 'gridsize'
+        elif resident > 0:
+          held = (f'std::max<std::size_t>(1, static_cast<std::size_t>('
+                  f'{float(resident)!r} * gridsize))')
+          num_blocks = f'std::min<std::size_t>({held}, {stacks})'
         elif bounded:
           num_blocks = f'std::min(gridsize, {stacks})'
         else:
