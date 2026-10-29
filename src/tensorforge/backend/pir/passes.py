@@ -1973,6 +1973,13 @@ def _flat_slot(index, shape) -> Optional[int]:
     return flat
 
 
+#: The words of raw text.  An array's name is an identifier, so a text names
+#: it where it is one of the text's words -- where `\b<name>\b` finds it.  A
+#: body has more arrays than `re` keeps patterns compiled, and a pattern of
+#: each name would be compiled again for every text that is searched with it.
+_WORDS = re.compile(r'\w+')
+
+
 def _register_slot_events(order, span, enclosing, values, reach):
     """Register arrays as the registers they become: one interval per slot.
 
@@ -2036,8 +2043,9 @@ def _register_slot_events(order, span, enclosing, values, reach):
             # Comments name arrays all the time (`// r1 = +(r0 * s0)`) and
             # touch none of them.
             code = re.sub(r'//[^\n]*|/\*.*?\*/', '', st.text, flags=re.S)
+            words = set(_WORDS.findall(code))
             for vid, name in names.items():
-                if re.search(rf'\b{re.escape(name)}\b', code):
+                if name in words:
                     whole.setdefault(vid, []).extend((0, end))
         base = st.args[0] if st.args else None
         vid = (array_of(base) if st.op in (Op.LOAD, Op.STORE) else None)

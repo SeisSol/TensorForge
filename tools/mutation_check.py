@@ -2586,6 +2586,22 @@ GROUPS = {
              'return self._emit_op(Op.RAWSTMT, (), tuple(args),', 1)),
     ]),
 
+    # Which register arrays raw text names, to the pressure: the words of the
+    # text outside its comments.
+    'rawnames': ('tests/test_pressure_offsets.py::'
+                 'test_raw_text_names_an_array_by_its_whole_name', [
+        ('a name found inside a longer word',
+         sub(PASSES, '                if name in words:',
+             '                if name in code:', 1)),
+        ('a comment naming an array',
+         sub(PASSES,
+             r"            code = re.sub(r'//[^\n]*|/\*.*?\*/', '', st.text, flags=re.S)",
+             '            code = st.text', 1)),
+        ('a word of letters only',
+         sub(PASSES, r"_WORDS = re.compile(r'\w+')",
+             r"_WORDS = re.compile(r'[A-Za-z_]+')", 1)),
+    ]),
+
     # Where the threads meet, from the order of the final body.
     'barriers': ('tests/test_pir_barriers.py tests/test_ternary.py', [
         ('a read of what another lane wrote not met',

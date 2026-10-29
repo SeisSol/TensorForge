@@ -113,6 +113,29 @@ def test_a_peeled_element_is_one_slot_and_not_the_whole_array():
     assert _peak(mod, 2) < 2 * _peak(mod, 1)
 
 
+def _named(text):
+    """`r1`, sixteen floats, and `r12`, forty-eight, in registers, and a raw
+    statement `text` the only thing touching either."""
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    b.alloc(Datatype.F32, (16,), MemSpace.REGISTER, hint='r', extern='r1')
+    b.alloc(Datatype.F32, (48,), MemSpace.REGISTER, hint='r', extern='r12')
+    b(text)
+    return passes.pressure(b.finish(), in_bytes=True, explicit_simd=False)
+
+
+def test_raw_text_names_an_array_by_its_whole_name():
+    """The rule a peeled element written as text would fall under: an array
+    raw text names is live whole for the whole body.  A word of the text
+    outside its comments names it: `r12` does not name `r1`, nor do `r123`
+    and `r1x` name either."""
+    assert _named('opaque();') == 0
+    assert _named('r12[0] = 0.f;') == 48 * 4
+    assert _named('r1[0] = r12[1];') == (16 + 48) * 4
+    assert _named('r12[0] = 0.f;  // r1') == 48 * 4
+    assert _named('/* r1 */ r12[2] = 1.f;') == 48 * 4
+    assert _named('r123[0] = r1x;') == 0
+
+
 def _mixed(uniform: int, lane: int):
     """`uniform` values read from one address and `lane` values read from a
     lane-dependent one, all live at once and summed at the end."""
