@@ -223,9 +223,10 @@ class Section:
     #: The operators preloaded into shared memory, with their waits and the
     #: barrier after them: a run of `global_ir` that is emitted as one body.
     self.preload: List[AbstractInstruction] = []
-    #: The block-wide copies of merged runs' members (`stage_members`), which
-    #: take their buffers from the same arena, after the images.
-    self.stage_loaders: List[AbstractInstruction] = []
+    #: Whether the members of the section's merged runs are copied into
+    #: shared memory a trip at a time (`stage_members`, `pir.shards`): the
+    #: block is then one group, every multiplication on the same trips.
+    self.streams = False
     #: The section as one PIR body, built and optimized, and not yet written:
     #: what the launch is decided from and the kernel emitted from.
     self.body = None
@@ -616,10 +617,6 @@ class Generator:
     #: before `rows`; what a level buys on top is the bitset, which is the
     #: one form that costs something.
     self._pack_level = 0
-    #: How many of a section's merged-run holes `stage_members` may stage,
-    #: in the order they are emitted; None for all.  A retry whose block the
-    #: staged copies left without room stages one fewer.
-    self._stage_limit = None
     self._preloaded = set()
     self._preload_left = set()
     #: The launch every section runs under, once the sections are built.
@@ -718,8 +715,7 @@ class Generator:
 
   def _set_threadconfig(self):
     # Into the regions as well: the default is a no-op, and only a blockwide
-    # GlbToShrLoader overrides it -- the prologue's, and a staged member's
-    # inside a merged run (`_stage_member`).
+    # GlbToShrLoader overrides it -- the prologue's.
     mults = self._section.shr_mem_obj.get_mults_per_block()
 
     def walk(instrs):
@@ -1068,12 +1064,10 @@ class Generator:
     for codesection, lastbarrier in zip(descrlist, barrier):
       self._preload_drop = 0
       self._pack_level = 0
-      self._stage_limit = None
       # Two attempts, with the operators preloaded and without -- or, under
-      # `preload_partial`, one more per operator dropped, and under
-      # `stage_members` one more per staged member.  Each failed attempt
-      # either drops one or gives up preloading, and an attempt without
-      # either ends the loop, so it ends.
+      # `preload_partial`, one more per operator dropped.  Each failed attempt
+      # either drops one or gives up preloading, and an attempt without it
+      # ends the loop, so it ends.
       while True:
         scopecnt = self._scopes.get_num_scopes()
         self._scopes.add_scope()
@@ -1119,8 +1113,7 @@ class Generator:
         settled = self._settle_storage()
         if self._place_section(index) and settled:
           break
-        staged = len(self._section.stage_loaders)
-        if not self._section.preload and not staged:
+        if not self._section.preload:
           self._refuse_unplaced()
         # The preloaded operators left no room for one multiplication: the
         # check that admitted them compares against the block's limit before
@@ -1130,13 +1123,7 @@ class Generator:
         # wherever they do not fit.
         while scopecnt < self._scopes.get_num_scopes():
           self._scopes.remove_scope()
-        if staged:
-          # The members a merged run copies in on every trip go first: they
-          # are what `stage_members` asks for on top of what the block holds
-          # anyway, so they take what the images leave.  The last one is read
-          # from global memory, as it is where nothing is staged.
-          self._stage_limit = staged - 1
-        elif self._tighten_packing():
+        if self._tighten_packing():
           # A smaller operator before a dropped one: `pack_operands='fit'`
           # asks for the loosest form that still fits, so the answer to
           # "they do not fit" is the next form down -- and only once there
@@ -1227,9 +1214,10 @@ class Generator:
     a change to what the offset means rather than to how it is spelled.
     """
     wave = self._context.target.hw.vec_unit_length
-    if self._section.stage_loaders:
-      # A staged member is shared by every multiplication of the block and
-      # fenced by block barriers, so the block is one group on the same trips.
+    if self._section.streams:
+      # A member a trip copied in is shared by every multiplication of the
+      # block and fenced by block barriers (`pir.shards`), so the block is one
+      # group on the same trips.
       if start != self._get_2d_block_id():
         return 1
       return self._stage_group()
@@ -1338,18 +1326,18 @@ class Generator:
     walk(self._section.stream)
     images = [instr for instr in self._section.preload
               if getattr(instr, '_verbatim', False)]
-    for loader in images + list(self._section.stage_loaders):
+    for loader in images:
       loader._get_bounding_box_dense()
     # What the block's arena comes to: its buffers back to back, which is how
     # the allocator lays them out (`pir.allocate`).  Known before the body is,
     # and the launch is guessed from it.
     obj = self._section.shr_mem_obj
     end = 0
-    for loader in images + list(self._section.stage_loaders):
+    for loader in images:
       align = max(self._shared_align(), loader._place_align or 1)
       end = -(-end // align) * align + loader.compute_shared_mem_size()
     obj.set_global_size(end)
-    if not images and not self._section.stage_loaders:
+    if not images:
       return True
     cap = self._context.target.hw.max_local_mem_size_per_block
     return end * self._context.fp_type.size() < cap
@@ -1381,8 +1369,7 @@ class Generator:
 
     def block_wide(sym) -> bool:
       first = sym.get_first_user()
-      return bool(getattr(sym, 'block_shared', False)
-                  or getattr(first, '_global_offset', False))
+      return bool(getattr(first, '_global_offset', False))
 
     declared = set()
 
@@ -1660,7 +1647,8 @@ class Generator:
     thread's (`_lane_mapping`).
     """
     options = self._context.get_user_options()
-    if not options.preload_shards or _explicit_simd_lowering(self._context):
+    if (not (options.preload_shards or self._section.streams)
+        or _explicit_simd_lowering(self._context)):
       return 0
     hw = self._context.target.hw
     layout = MultLayout(self._num_threads, hw.vec_unit_length)
@@ -1678,6 +1666,14 @@ class Generator:
     cap = hw.max_local_mem_size_per_block
     if options.preload_shard_budget:
       allowed = min(options.preload_shard_budget, cap - taken)
+    elif self._section.streams:
+      # A merged run's members a trip at a time take what the block has left:
+      # every multiplication would read them from global memory on every trip
+      # otherwise, and that costs more than the blocks the room would keep.
+      # On the MI300A `localFluxAll` at order 8 in double precision ran 52.5 ns
+      # an element so, and 58.5 under the budget that keeps them; the copy of
+      # whole members that came before took the block too.
+      allowed = cap - taken
     else:
       limits = [hw.max_block_per_sm,
                 hw.max_threads_per_sm // (self._num_threads * mults)]
@@ -1884,7 +1880,22 @@ class Generator:
                 align=self._shared_align(), budget=section.shards,
                 mults=section.shr_mem_obj.get_mults_per_block(),
                 threads=self._num_threads, fptype=self._context.fp_type,
+                static=self._context.get_user_options().preload_shards,
+                stream=section.streams, aligns=self._proven_alignments(),
                 report=section.shard_report)
+
+  def _proven_alignments(self) -> dict:
+    """What the frontend proves of the batch-constant operands' bases, in
+    bytes, by the name of their binding (`Symbol.linear_align_bytes`): how
+    wide the shards may copy them."""
+    out = {}
+    for symbol in self._scopes.get_global_scope().values():
+      obj = symbol.obj
+      if (getattr(obj, 'addressing', None) == Addressing.NONE
+          and symbol.stype != SymbolType.Data):
+        out[f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{symbol.name}'] = (
+            symbol.linear_align_bytes())
+    return out
 
   def _with_arena(self, section, body):
     """`body` behind the declarations of the arena it addresses, which are
@@ -3087,9 +3098,11 @@ class Generator:
     bindings that open its body: `(tables, region)`.
 
     One table per hole that selects anything, over the members' symbols, and
-    a binding that reads it at `counter` -- or the copy a staged hole makes
-    of its member (`_stage_member`).  `written` holds id() of the stand-ins
-    the body writes, whose tables are not `const`.
+    a binding that reads it at `counter`.  A hole whose member the block
+    copies in a trip at a time (`_stages`) is bound the same: the copy is the
+    shards' (`pir.shards`), at the head of the trip and of what its body
+    reads.  `written` holds id() of the stand-ins the body writes, whose
+    tables are not `const`.
     """
     from tensorforge.backend.instructions.ptr_manip import (
         DeclareOperandTable, TableForm)
@@ -3148,9 +3161,9 @@ class Generator:
                 else TableForm.ARRAY),
           variant=counter)
       tables.append(table)
-      if self._stages(stand_in, written):
-        region.extend(self._stage_member(stand_in, table, counter))
-        continue
+      streamed = self._stages(stand_in, written)
+      if streamed:
+        self._section.streams = True
       # A rotated stand-in resolves to its family's first slot, so two
       # holes of one family share a symbol and would name one pointer
       # twice -- the hole that reads `dQane_d` and the hole that writes
@@ -3163,6 +3176,9 @@ class Generator:
                            if rotated else None),
                      obj=variant.stand_in.tensor if rotated else None)
       region.extend(pointers.get_instructions())
+      # On the binding, which is what the run's operations find for the
+      # stand-in from here on, not on the stand-in it replaces in the scope.
+      self._scopes.get_symbol(variant.stand_in.tensor).streamed = streamed
 
     return tables, region
 
@@ -3306,65 +3322,22 @@ class Generator:
     return symbol
 
   def _stages(self, stand_in, written) -> bool:
-    """Whether a merged run's hole is staged per iteration (`stage_members`):
-    a batch-constant, dense operand the body only reads -- as long as a retry
-    has not found the block's copies too large for it (`_stage_limit`)."""
+    """Whether the block copies a merged run's hole in a trip at a time
+    (`stage_members`): a batch-constant operand the body only reads, in a
+    kernel whose blocks loop over the batch -- the copy is the shards', at
+    the head of a trip of that loop (`pir.shards`), which decide what of it
+    and how much."""
     obj = stand_in.obj
+    split = MultLayout(self._num_threads,
+                       self._context.target.hw.vec_unit_length)
     return bool(self._context.get_user_options().stage_members
+                and self._persistent_threading
+                and not _explicit_simd_lowering(self._context)
+                and (split.contiguous or split.whole_waves)
                 and obj is not None
                 and obj.addressing == Addressing.NONE
-                and obj.is_dense()
                 and id(obj) not in written
-                and stand_in.stype != SymbolType.Data
-                and (self._stage_limit is None
-                     or len(self._section.stage_loaders) < self._stage_limit))
-
-  def _stage_member(self, stand_in, table, counter):
-    """The current member of a merged run's batch-constant hole, copied by the
-    whole block into a buffer its multiplications share.
-
-    The table still selects between the members' global bindings, now under a
-    name of their own (`glb_v0g`); the shared copy takes the stand-in's name
-    and, added after it, is what the body's builders find -- the arrangement
-    `GlobalLoaderBuilder` uses for the prologue's images, which is also why
-    the members stay out of the preload: a table over shared copies would
-    claim global memory.  One barrier in front, since the previous iteration's
-    readers -- or the previous element's last -- may still be in the buffer,
-    and one behind, since every multiplication reads what the whole block
-    wrote.  The buffer is in the prologue's arena and out of the liveness
-    that places the per-multiplication windows (`block_shared`).
-    """
-    from tensorforge.backend.scopes import Symbol
-    from tensorforge.backend.instructions.memory.load import (GlbToShrLoader,
-                                                              LoadWait)
-    pointers = GetElementPtrBuilder(self._context, self._scopes)
-    pointers.build(stand_in, table=table, variant=counter,
-                   name=f'{stand_in.name}g')
-    binding = list(pointers.get_instructions())
-    src = self._scopes.get_symbol(stand_in.obj)
-    dest = Symbol(name=f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{stand_in.name}',
-                  stype=SymbolType.SharedMem, obj=stand_in.obj)
-    dest.block_shared = True
-    # a verbatim copy, indexed and laid out as the member is
-    # (`GlobalLoaderBuilder`)
-    dest.verbatim = True
-    self._scopes.add_symbol(dest)
-    loader = GlbToShrLoader(context=self._context, src=src, dest=dest,
-                            shr_mem=self._scopes.get_symbol(
-                                self._section.shr_mem_obj),
-                            num_threads=self._num_threads, permute=None,
-                            blockwide=True, max_load_offset=0, verbatim=True)
-    # on 16 bytes where an order may be offered, as `GlobalLoaderBuilder`
-    align = 1
-    dtype = getattr(stand_in.obj, 'datatype', None)
-    if self._context.get_user_options().prepare_operands and dtype is not None:
-      align = max(1, 16 // dtype.size())
-    loader.set_window(True, True, align)
-    self._section.stage_loaders.append(loader)
-    # Retired before the second barrier publishes it: a barrier orders the
-    # threads, not the copies they issued.
-    return binding + [SyncBlock(self._context), loader, LoadWait(loader),
-                      SyncBlock(self._context)]
+                and stand_in.stype != SymbolType.Data)
 
   def _stage_group(self) -> int:
     """Multiplications per block under `stage_members`: `stage_group`,
@@ -3394,8 +3367,12 @@ class Generator:
                                             self._num_threads,
                                             self._lead_width
                                             * self._context.get_user_options().lead_blocking)
-    policy.set_has_barrier(self._has_barrier(self._section.stream))
-    if self._section.stage_loaders:
+    # The barriers of the members a trip copies in come with the shards, after
+    # the block is sized (`pir.shards`): the block is one group for them, or a
+    # second group's last trip of the batch would leave the first waiting.
+    policy.set_has_barrier(self._has_barrier(self._section.stream)
+                           or self._section.streams)
+    if self._section.streams:
       policy.set_barrier_group(self._stage_group())
     if stages:
       policy.set_stages()

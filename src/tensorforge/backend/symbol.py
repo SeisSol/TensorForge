@@ -1320,6 +1320,12 @@ class Symbol:
     #: reading back what the compute wrote, `build` double-scaling a slot, a
     #: peeled tail element asking the wrong lane for its value.
     self.lead_width = 1
+    #: Whether this is a merged run's stand-in whose members the block copies
+    #: into its shared memory a trip at a time (`stage_members`, `pir.shards`):
+    #: bound and read as global memory, and read from shared memory once the
+    #: shards have moved its loads -- which is what a reader choosing how to
+    #: share a read between multiplications has to go by.
+    self.streamed = False
     #: How this symbol's register image is distributed across the wave, when
     #: that is known.  Set by whoever fills it -- `store_linear` is the only
     #: filler that does so today -- and reported by `load_linear`, so that a

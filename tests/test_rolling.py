@@ -1247,7 +1247,8 @@ def _written_by_alias(gen, descrs, numbering):
 
 def _staged(count=4):
     """`Q += K_i I` over batch-constant operators, which `stage_members`
-    stages a block barrier apart in the loop, and `O = I S` behind it."""
+    copies in a trip at a time where the blocks loop over the batch, and
+    `O = I S` behind it."""
     operator = Addressing.NONE
     out = []
     for i in range(count):
@@ -1416,12 +1417,13 @@ def test_the_next_trips_level_is_fetched_behind_this_trips_write_of_it():
 
 
 def test_a_window_the_loop_fills_is_declared_ahead_of_it():
-    """A barrier in the run keeps the staging of what every iteration shares
-    in the body (`pir.move`), and the operation behind the loop reads the
-    staged copy: its window is declared ahead of the header, or the name
-    would be scoped to the loop (`VariantLoop._declare_windows_early`)."""
+    """A barrier in the run -- a multiplication wider than a warp meets on one
+    of its own -- keeps the staging of what every iteration shares in the
+    body (`pir.move`), and the operation behind the loop reads the staged
+    copy: its window is declared ahead of the header, or the name would be
+    scoped to the loop (`VariantLoop._declare_windows_early`)."""
     import re
-    gen = _merged_build(roll(_staged()), stage_members=True)
+    gen = _merged_build(roll(_staged()), lanes_per_mult=64)
     _, loop, behind = _around_the_loop(gen)
     staged = [i.get_dest() for i in loop.region
               if type(i).__name__ == 'GlbToShrLoader'

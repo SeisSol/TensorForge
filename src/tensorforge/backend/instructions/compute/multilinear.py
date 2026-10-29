@@ -2684,7 +2684,9 @@ class MultilinearInstruction(ComputeInstruction):
                 a_uniform=uniform,
                 A_wave=A_wave if k_stride is not None else None,
                 lockstep=self.convergence_scope() is not None,
-                a_shared=self._ops[0].symbol.stype is SymbolType.SharedMem,
+                # in shared memory, or headed there a trip at a time
+                a_shared=(self._ops[0].symbol.stype is SymbolType.SharedMem
+                          or self._ops[0].symbol.streamed),
                 a_resident=self._ops[0].symbol.stype in (SymbolType.Register,
                                                          SymbolType.Scratch),
                 mult_stride=self._ask_mult_stride,
