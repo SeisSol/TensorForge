@@ -663,6 +663,9 @@ PREFETCH = 1
 #: round of the product per multiplication.
 WAVE = 32
 
+#: One pass over the shared-memory banks: 32 of four bytes.
+BANK_ROW_BYTES = 128
+
 #: The matrix path where it is offered, the nest otherwise
 #: (`strategy.MatrixPaths.ORDER`).
 ORDER = (Strategy.MATRIX, Strategy.GENERIC)
@@ -1098,9 +1101,16 @@ def matmul(writer, ops, ctx, span):
     #   C store    2-w    2-w    2-w    1-w
     #
     # `tools/bank_conflicts.py` is what keeps those honest.
+    #
+    # Those are four-byte elements, whose row of 32 fills the banks once.  An
+    # eight-byte element fills them in sixteen, and a row of the wave then
+    # spans two: the XOR over 32 sends rows two apart to the same bank, and
+    # FP64's store and read were both 2-way (`ctile` was 72 of the 124
+    # conflicting accesses of `localFluxAll` o6 on sm_90).  So the width is
+    # the elements of one pass over the banks, which for FP32 is the wave.
     Cshm = writer.alloc(atom.d, (tailbase + tailed * ntail * tailcol + room,),
                         MemSpace.SHARED, hint='ctile',
-                        swizzle=XorSwizzle(wave))
+                        swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size()))
 
     # Every step of the contraction, per block of rows.
     steps = [(k, kk) for k in range(0, K, wave)

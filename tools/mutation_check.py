@@ -289,6 +289,10 @@ GROUPS = {
     # The bank model.  A mistake in it that over-reports is the kind that gets
     # a check ignored.
     'banks': ('tests/test_bank_conflicts.py', [
+        ('the C tile swizzled over the wave whatever the element size',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size()))",
+             "swizzle=XorSwizzle(WAVE))", 1)),
         ('the arena counted as a window again',
          sub(Path('tools/bank_conflicts.py'),
              '    for name in arenas:\n        windows.pop(name, None)',
@@ -354,11 +358,11 @@ GROUPS = {
              '        m = None', 1)),
         ('the C tile loses its swizzle',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "hint='ctile',\n                        swizzle=XorSwizzle(wave))",
+             "hint='ctile',\n                        swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size()))",
              "hint='ctile')", 1)),
         ('the C tile takes the B tile\'s width',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
-             "hint='ctile',\n                        swizzle=XorSwizzle(wave))",
+             "hint='ctile',\n                        swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size()))",
              "hint='ctile',\n                        swizzle=XorSwizzle(atom.k))", 1)),
         ('a named load falls back to text',
          sub(Path('src/tensorforge/backend/pir/build.py'),
@@ -2475,6 +2479,12 @@ GROUPS = {
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
+        ('an operator read over a window staged per element again',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    8.8; in double the viscoelastic flux 40.5 -> 37.2, the rest within 1 %.\n'
+             '    """\n    return True',
+             '    8.8; in double the viscoelastic flux 40.5 -> 37.2, the rest within 1 %.\n'
+             '    """\n    return False', 1)),
         ('the i8 entries let into the candidates',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              'EMITTED_MODES = (MMAMode.TF32, MMAMode.DIRECT)',
