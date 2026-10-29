@@ -1704,21 +1704,35 @@ class Symbol:
           f'{self.name}: a packed operand has rows of stride one and one '
           f'scalar per element; this one is {view}')
     lead = unwrap_lead(index[0])
+    row = None
     if lead is None:
-      raise InternalError(f'{self.name}: packed rows need a lead index')
-    li, shift = lead
-    grain = int(packing.granule)
-    wide = int(li.width)
-    if li._value is not None or wide < 1 or grain % wide:
-      raise InternalError(
-          f'{self.name}: a packing at granule {grain} is read a divisor of '
-          f'{grain} rows to a lane at a named slot; this read is {li!r}')
-    base = li.nonlead()
-    if not isinstance(base, (int, np.integer)):
-      raise InternalError(
-          f'{self.name}: a packed read needs its slot as a number, not '
-          f'{base!r}')
-    block = li._block
+      # A row every lane reads alike, at a number: what a lead loop at a
+      # width leaves of a ragged extent to a body of its own (`_packed_row`).
+      row, shifted = index[0], 0
+      while isinstance(row, VarOffset):
+        shifted += row.offset
+        row = row.variable
+      if isinstance(row, Immediate):
+        row = row._value
+      if not isinstance(row, (int, np.integer)):
+        raise InternalError(
+            f'{self.name}: packed rows need a lead index or a number, not '
+            f'{index[0]!r}')
+      row = int(row) + shifted
+    else:
+      li, shift = lead
+      grain = int(packing.granule)
+      wide = int(li.width)
+      if li._value is not None or wide < 1 or grain % wide:
+        raise InternalError(
+            f'{self.name}: a packing at granule {grain} is read a divisor of '
+            f'{grain} rows to a lane at a named slot; this read is {li!r}')
+      base = li.nonlead()
+      if not isinstance(base, (int, np.integer)):
+        raise InternalError(
+            f'{self.name}: a packed read needs its slot as a number, not '
+            f'{base!r}')
+      block = li._block
     # The column, as the packing numbers them: the non-lead axes flattened in
     # F-order over the box, which is the unit `Packing` is built in.
     column, extent, computed = 0, 1, None
@@ -1766,6 +1780,8 @@ class Symbol:
     if computed is None and not 0 <= column < packing.columns:
       raise InternalError(
           f'{self.name}: packed column {column} of {packing.columns}')
+    if row is not None:
+      return self._packed_row(index, packing, column, computed, row, lower)
     if computed is not None:
       if packing.uniform:
         return self._uniform_packed_index(writer, index, packing, computed,
@@ -1806,6 +1822,34 @@ class Symbol:
                            offset=shift + packing.offsets[column] - start,
                            valid=valid, pad=False, first=first)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
+
+  def _packed_row(self, index, packing, column, computed, row, lower):
+    """A read of a packed operand at a row every lane takes alike.
+
+    A lead loop at width `w` (`Options.lead_vectorize`) over a window whose
+    rows are no multiple of `w` reads the rows no whole vector covers in a
+    body of their own, at a number rather than a lane: SeisSol's `volume`
+    at order 6 reads row 53 of `kDivM` so.  The slot is `off_c + r - start_c`
+    as for a lane, a number here as well, handed back in the coordinates of
+    the view as the lead index is.  A row the column does not hold has no
+    slot: the number there is zero, and so is the read -- None, which is
+    what `load` hands its callers for a factor with no data.
+    """
+    if computed is not None:
+      raise InternalError(
+          f'{self.name}: a packed read at row {row} needs its column as a '
+          f'number, not {computed!r}')
+    if packing.kind == 'bits':
+      # The slot is a population count of the column's rows below `row`,
+      # which the bitset holds and this does not read.
+      raise InternalError(
+          f'{self.name}: a bits packing is read at row {row}, which needs '
+          f'its population count')
+    start = packing.starts[column]
+    if not start <= row - lower[0] < start + packing.lengths[column]:
+      return None
+    return ([row + packing.offsets[column] - start]
+            + [lower[d] for d in range(1, len(index))])
 
   def _uniform_packed_index(self, writer, index, packing, computed, column,
                             li, shift, lower):
@@ -3472,6 +3516,9 @@ class Symbol:
                    or (self.stype is SymbolType.SharedMem
                        and getattr(self, 'verbatim', False)))):
         read_index = self._packed_index(writer, context, read_index)
+        if read_index is None:
+          # A row the packing does not store (`_packed_row`): zero.
+          return None
 
       if variable is None and self.stype in (
               SymbolType.Register, SymbolType.Scratch, SymbolType.SharedMem,

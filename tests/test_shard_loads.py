@@ -166,9 +166,13 @@ def test_every_thread_of_the_block_copies_its_share(stem):
     assert flat and int(flat.group(2)) == lanes
     steps = re.findall(rf'{flat.group(1)} < (\d+); v\d+_s \+= (\d+)\)', src)
     guards = re.findall(rf'if \({flat.group(1)} < (\d+)\)', src)
-    assert steps or guards
+    # Or written out (`shards.UNROLL`): the passes after the first at the
+    # block's threads and its multiples.
+    passes = re.findall(rf'int32_t v\d+_s = {flat.group(1)} \+ (\d+);', src)
+    assert steps or guards or passes
     assert all(int(step) == lanes * mults for _, step in steps)
     assert all(int(n) <= lanes * mults for n in guards)
+    assert all(int(n) % (lanes * mults) == 0 for n in passes)
 
 
 def test_the_budget_bounds_what_is_held():
