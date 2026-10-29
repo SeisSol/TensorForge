@@ -52,13 +52,15 @@ def _variant_loop(src):
 
 @pytest.mark.parametrize('arch', ['gfx942', 'gfx1150'])
 def test_the_current_member_is_copied_by_the_block_between_barriers(arch):
+    """Behind the binding of the trip's member: a barrier, the copy, a
+    barrier.  This trip reads its member in its first product, so the copy
+    is not split (`shards.SPLIT_COVER`) where it would be."""
     src = _kernel_at('local_flux', arch, merge_variants=True,
                      preload_shard_budget=65536)
     body = _variant_loop(src)
     # the buffer is the arena's, declared ahead of the batch loop
     shards = SHARD.findall(src[:src.index('for (int32_t batchIdv')])
     assert len(shards) == 1, shards
-    # behind the binding of the trip's member: a barrier, the copy, a barrier
     first = body.index('__syncthreads();')
     second = body.index('__syncthreads();', first + 1)
     copy = body[first:second]
@@ -237,6 +239,136 @@ def test_a_member_stored_past_its_box_is_held_to_its_storage():
     assert want and set(want) == set(got)
     for key in want:
         assert np.array_equal(np.asarray(got[key]), np.asarray(want[key]))
+
+
+def _member_behind_a_product(size=24, **options):
+    """`C += A_d (B E_d)` four times on sm_86: `E_d` the element's own,
+    `A_d` an operator of `size` x `size` -- `localFluxAll`'s shape, whose
+    trip multiplies by an operand of the element's first and reads its
+    member only then -- merged into one run, with blocks that loop over the
+    batch, which the host oracle runs whole."""
+    def t(shape, alias, addressing=Addressing.STRIDED):
+        return SubTensor(Tensor(list(shape), addressing,
+                                BoundingBox([0, 0], list(shape)),
+                                alias=alias, datatype=Datatype.F32))
+    b, c = t((size, 8), 'B'), t((size, 8), 'C')
+    descrs = []
+    for d in range(4):
+        e = t((8, 8), f'E{d}')
+        x = SubTensor(generate_tmp_matrix(b, e))
+        descrs.append(GemmDescr(False, False, b, e, x))
+        descrs.append(GemmDescr(False, False,
+                                t((size, size), f'A{d}', Addressing.NONE),
+                                x, c, alpha=1.0, beta=1.0))
+    out = io.StringIO()
+    with warnings.catch_warnings(), contextlib.redirect_stdout(out):
+        warnings.simplefilter('ignore')
+        gen = Generator(descrs, Context(
+            arch='sm_86', backend='cuda', fp_type=Datatype.F32,
+            options=Options(merge_variants=True, launch_control=False,
+                            preload_globals=False, preload_shards=False,
+                            ir_debug='report', **options)))
+        gen.generate()
+    report = [line for line in out.getvalue().splitlines()
+              if line.startswith('shards: + ')]
+    return gen.get_kernel(), ke.launch_geometry(gen.get_launcher()), report
+
+
+@pytest.mark.parametrize('lead', [0, 16], ids=['head', 'lead'])
+def test_a_split_copy_computes_what_the_global_member_does(lead):
+    """Split (`split_member_copies`), the member's loads stand ahead of the
+    product of the element's own operand -- at the head of the trip, or no
+    further ahead of the first read of the copy than `split_member_lead`,
+    which puts the product's first statements ahead of them -- and the
+    stores between the barriers ahead of the product that reads the copy.
+    The numbers are the global member's, and no two lanes write a slot
+    between two barriers."""
+    plain, plain_geo, _ = _member_behind_a_product(stage_members=False)
+    split, geo, report = _member_behind_a_product(
+        stage_members=True, preload_shard_budget=65536,
+        split_member_copies=True, split_member_lead=lead)
+    assert report and ' a trip:' in report[0], report
+    body = _variant_loop(split)
+    first = body.index('__syncthreads();')
+    second = body.index('__syncthreads();', first + 1)
+    shard = SHARD.search(split).group(1)
+    member = [b for b in re.findall(r'\b(glb_v\d+) = ', body[:first])
+              if f'{b}[' in body[:first]]
+    assert len(member) == 1, member
+    # the product of the element's operand: ahead of the loads in part with
+    # a lead, behind all of them at the head
+    product = re.search(r'// r\d+ = \+\(r\d+ \* s\d+\)', body[:first])
+    first_load = body.index(f'{member[0]}[')
+    assert product and (product.start() < first_load) == bool(lead)
+    assert body.rindex(f'{member[0]}[', 0, first) < first
+    assert f'{shard}[' not in body[:first]
+    assert f'{shard}[' in body[first:second] and f'{shard}[' in body[second:]
+    want, got = _written(plain, plain_geo), _written(split, geo)
+    assert want and set(want) == set(got)
+    for key in want:
+        assert np.array_equal(np.asarray(got[key]), np.asarray(want[key]))
+    lanes, mults = geo
+    found = []
+    ke.evaluate_wave(split, lanes, seed=3, races=found, elements=8,
+                     mults=mults, block=True)
+    assert found == []
+
+
+@pytest.mark.parametrize('lead', [None, 0], ids=['default', 'head'])
+def test_seissol_s_local_flux_copies_its_member_around_its_first_product(
+        lead):
+    """SeisSol's `localFluxAll` at order 6 on gfx942, as AMD compiles it: a
+    trip multiplies `I` by the face's `AplusT` first, which is the element's
+    own -- 81 FMAs a lane -- and only then reads the face's two members.  The
+    barriers with the stores stand ahead of the first read of a shard, the
+    copy's loads ahead of them: at the head of the trip, the whole product
+    between, or by default (`split_member_lead`) inside the product, with
+    part of it behind them and part ahead."""
+    from tensorforge.frontend.yateto import DescriptionReader
+
+    import seissol_suite as fx
+
+    descrs = DescriptionReader(None, {}).read(fx.description(
+        'elastic-linearck', 'elastic-linearck-o6-d', 'gpu_localFluxAll'))[0]
+    options = {} if lead is None else dict(split_member_lead=lead)
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        gen = Generator(descrs, Context(arch='gfx942', backend='hip',
+                                        fp_type=Datatype.F64,
+                                        options=Options(**options)))
+        gen.generate()
+    src = gen.get_kernel()
+    body = _variant_loop(src)
+    shards = SHARD.findall(src[:src.index('for (int32_t batchIdv')])
+    assert len(shards) == 2, shards
+    first = body.index('__syncthreads();')
+    second = body.index('__syncthreads();', first + 1)
+    members = [b for b in BINDING.findall(body[:first]) if f'{b}[' in body]
+    loaded = [body.index(f'{b}[') for b in members]
+    assert len(members) == 2 and max(loaded) < first, members
+    ahead = body.count('v_fmac_f64_dpp', 0, min(loaded))
+    behind = body.count('v_fmac_f64_dpp', max(loaded), first)
+    assert ahead + behind >= 81
+    assert (ahead == 0) == (lead == 0) and behind > 0
+    assert not any(f'{s}[' in body[:first] for s in shards)
+    assert all(f'{s}[' in body[first:second] for s in shards)
+
+
+def test_a_copy_read_right_away_stays_whole():
+    """Where the trip reads the copy at once -- `C += A_d B`, nothing ahead
+    of it to compute -- a split copy's loads would only hold their registers
+    up to the barrier (`shards.SPLIT_COVER`): the copy stays whole, between
+    its barriers."""
+    split, _, report = _four_products(stage_members=True,
+                                      preload_shard_budget=65536,
+                                      split_member_copies=True)
+    assert report and ' a trip:' in report[0], report
+    body = _variant_loop(split)
+    first = body.index('__syncthreads();')
+    second = body.index('__syncthreads();', first + 1)
+    member = [b for b in re.findall(r'\b(glb_v\d+) = ', body[:first])]
+    assert member and not any(f'{b}[' in body[:first] for b in member)
+    assert any(f'{b}[' in body[first:second] for b in member)
 
 
 def _two_operators_a_face(size):

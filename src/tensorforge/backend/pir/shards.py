@@ -55,6 +55,7 @@ from tensorforge.common.basic_types import Datatype
 from .core import (BOOL, INDEX, Access, BufferType, Effect, MemSpace, Op,
                    Participants, ScalarType, Stmt, Uniformity, Value,
                    accesses_conflict, walk_stmts)
+from .transfers import executed
 
 
 class _NotStatic(Exception):
@@ -341,7 +342,7 @@ class _Shard:
 def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                 arena: str, align: int, budget: int, mults: int,
                 threads: int, fptype: Datatype, static: bool = True,
-                stream: bool = False,
+                stream: bool = False, split: bool = False, lead: int = 0,
                 aligns: Optional[Mapping[str, int]] = None,
                 extents: Optional[Mapping[str, int]] = None,
                 report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
@@ -356,7 +357,9 @@ def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     copied in once ahead of it; `stream` the members of a merged run, copied
     in at the head of every trip (`_streamed`) -- which the caller promises
     every multiplication of the block takes together.  Both are held under
-    the one budget.  `aligns` is what the caller proves of the operands'
+    the one budget.  `split` puts a trip's stores, and the barriers around
+    them, ahead of the first read of its shards and leaves the loads at the
+    head (`_rewrite`).  `aligns` is what the caller proves of the operands'
     bases, in bytes, by the name of their binding: how wide the copies may
     read them.  `extents` is how many elements one of them is stored over,
     by the same name, where that is more than its binding's type says
@@ -385,7 +388,8 @@ def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
         note('- no shard fits' if shards else '- no load to hold')
         return body
     return _rewrite(body, at, held, shards, scratch, arena, threads, mults,
-                    align, _alignments(body, at, aligns or {}), note)
+                    align, _alignments(body, at, aligns or {}), note, split,
+                    lead)
 
 
 def _bindings(body: Tuple[Stmt, ...], upto: int, fptype: Datatype
@@ -808,13 +812,17 @@ UNROLL = 16
 
 
 def _stage(b, operand: Value, buf: Value, copy: _Copy, flat: Value,
-           block: int, width: int = 1) -> None:
+           block: int, width: int = 1, stores=None) -> None:
     """`copy` by the threads of the block, `flat` the thread's place among
     them: each thread its share of `block` accesses of `width` elements
     (`_width`), under a guard where the block covers the copy at once, and
     written out pass by pass where it takes up to `UNROLL` passes -- every
     load ahead of the stores, and the lanes past the end of the last pass on
-    their access of the first."""
+    their access of the first.
+
+    `stores`, a builder of its own, takes the stores of a copy written out --
+    `b` its loads, to stand apart from them -- and all of a copy that is one
+    guarded pass or a loop, whose loads and stores go together."""
     def plus(a: Value, c, hint: str) -> Value:
         if isinstance(c, int) and c == 0:
             return a
@@ -850,17 +858,21 @@ def _stage(b, operand: Value, buf: Value, copy: _Copy, flat: Value,
             return b.load(operand, src, hint='sh')
         return b.load(operand, src, type_=wide, align=nbytes, hint='sh')
 
+    after = b if stores is None else stores
+
     def put(dst: Value, value: Value) -> None:
         if wide is None:
-            b.store(buf, value, dst)
+            after.store(buf, value, dst)
         else:
-            b.store(buf, value, dst, align=nbytes)
+            after.store(buf, value, dst, align=nbytes)
 
     def one(u: Value) -> None:
         src, dst = place(u)
         put(dst, fetch(src))
 
     units = copy.total // width
+    if units <= block or -(-units // block) > UNROLL:
+        b = after
     if units <= block:
         with b.if_(b.op('lt', BOOL, flat, units, hint='s')):
             one(flat)
@@ -924,9 +936,39 @@ def _width(copy: _Copy, elem: int, proven: int) -> int:
     return width
 
 
+#: The least a split trip copy has to have between its loads and the first
+#: read of the copy, in the units `transfers.executed` counts the code in.
+#: Short of it the loads have nothing to hide their round trip behind and
+#: only hold their registers longer: SeisSol's viscoelastic `fluxLocalAll`
+#: has 13 units there -- the transposes of the product that reads the copy --
+#: and split it went from 160 VGPRs to 193 under ROCm 7.14 on gfx942, from
+#: three waves a SIMD to two, 7 % slower.  The elastic `localFluxAll` has 130
+#: to 723, its first product reading no member.
+SPLIT_COVER = 64
+
+
+@dataclass(frozen=True)
+class _Head:
+    """What a trip copies its members' shards in with: `whole`, the barrier,
+    the copy and the barrier, behind the bindings of the `members`.  Split,
+    `loads` stand there instead, and `stores` -- between the barriers --
+    ahead of the first statement that reads one of the `buffers`, where at
+    least `SPLIT_COVER` stands between the two; `loads` is empty where the
+    copy is not split."""
+    members: frozenset
+    buffers: frozenset
+    whole: Tuple[Stmt, ...]
+    loads: Tuple[Stmt, ...] = ()
+    stores: Tuple[Stmt, ...] = ()
+    #: How far ahead of the first read the loads stand at most, in the units
+    #: of `transfers.executed`; 0 is right behind the bindings.
+    lead: int = 0
+
+
 def _rewrite(body, at: int, held: List[_Shard], shards: List[_Shard],
              scratch, arena: str, threads: int, mults: int, align: int,
-             proven: Dict[int, int], note) -> Tuple[Stmt, ...]:
+             proven: Dict[int, int], note, split: bool = False,
+             lead: int = 0) -> Tuple[Stmt, ...]:
     """`body` with the held shards copied in ahead of the loop at `at`, by
     every thread of the block and behind a barrier, and their loads reading
     them there."""
@@ -961,19 +1003,29 @@ def _rewrite(body, at: int, held: List[_Shard], shards: List[_Shard],
     # bindings of the trip's members: behind a barrier, since the previous
     # trip's readers may still be in the buffer -- or the previous element's
     # last -- and in front of one, since every multiplication of the block
-    # reads what the whole block copied.
-    heads: Dict[int, Tuple[frozenset, Tuple[Stmt, ...]]] = {}
+    # reads what the whole block copied.  Split (`split`), the loads stand at
+    # the head and the stores between the two barriers just ahead of the
+    # first statement that reads a shard of the trip (`_substitute`): what
+    # the trip computes before that -- `localFluxAll`'s `I AplusT`, which
+    # reads no member -- goes on under the loads' round trip.
+    heads: Dict[int, _Head] = {}
     for trip, items in streamed.items():
-        h = scratch()
-        h.barrier(Participants.BLOCK)
-        for operand, buf, placed in items:
-            for copy in _copies(placed):
-                _stage(h, operand, buf, copy, flat, block,
-                       _width(copy, operand.type.elem.size(),
-                              proven.get(operand.id, 0)))
-        h.barrier(Participants.BLOCK)
-        heads[trip] = (frozenset(operand.id for operand, _, _ in items),
-                       tuple(h.finish()))
+        parts = []
+        for apart in ((False, True) if split else (False,)):
+            h, t = scratch(), scratch()
+            t.barrier(Participants.BLOCK)
+            for operand, buf, placed in items:
+                for copy in _copies(placed):
+                    _stage(h if apart else t, operand, buf, copy, flat, block,
+                           _width(copy, operand.type.elem.size(),
+                                  proven.get(operand.id, 0)),
+                           stores=t if apart else None)
+            t.barrier(Participants.BLOCK)
+            parts.append((tuple(h.finish()), tuple(t.finish())))
+        loads, stores = parts[-1] if split else ((), ())
+        heads[trip] = _Head(frozenset(operand.id for operand, _, _ in items),
+                            frozenset(buf.id for _, buf, _ in items),
+                            parts[0][1], loads, stores, lead)
 
     moved: Dict[int, List[Stmt]] = {}
     for key, (_, placed) in layout.items():
@@ -1017,10 +1069,12 @@ def _moved(stmt: Stmt, buf: Value, shift: int, scratch) -> List[Stmt]:
 
 
 def _substitute(stmts: Tuple[Stmt, ...], moved: Dict[int, List[Stmt]],
-                heads: Optional[Dict[int, Tuple[frozenset, Tuple[Stmt, ...]]]]
-                = None) -> Tuple[Stmt, ...]:
+                heads: Optional[Dict[int, _Head]] = None) -> Tuple[Stmt, ...]:
     """`stmts` with the loads in `moved` replaced, and a trip in `heads`
-    with its head behind the last binding of the members it copies."""
+    with its head behind the last binding of the members it copies -- split,
+    the loads there and the stores between their barriers ahead of the first
+    statement of the trip that reads one of its shards, where at least
+    `SPLIT_COVER` comes between."""
     out: List[Stmt] = []
     for s in stmts:
         new = moved.get(id(s))
@@ -1033,11 +1087,32 @@ def _substitute(stmts: Tuple[Stmt, ...], moved: Dict[int, List[Stmt]],
             for k, r in enumerate(s.regions):
                 inner = _substitute(r.body, moved, heads)
                 if head is not None and k == 0:
-                    operands, copies = head
                     at = max(n for n, x in enumerate(inner)
-                             if any(t.id in operands for t in x.target))
-                    inner = inner[:at + 1] + copies + inner[at + 1:]
+                             if any(t.id in head.members for t in x.target))
+                    first = next((n for n in range(at + 1, len(inner))
+                                  if _reads(inner[n], head.buffers)),
+                                 at + 1)
+                    if (head.loads and executed(inner[at + 1:first])
+                            >= SPLIT_COVER):
+                        # no further ahead of the first read than `lead`
+                        p, ahead = first, 0
+                        while head.lead and p > at + 1 and ahead < head.lead:
+                            p -= 1
+                            ahead += executed(inner[p:p + 1])
+                        if not head.lead:
+                            p = at + 1
+                        inner = (inner[:p] + head.loads + inner[p:first]
+                                 + head.stores + inner[first:])
+                    else:
+                        inner = inner[:at + 1] + head.whole + inner[at + 1:]
                 regions.append(replace(r, body=inner))
             s = replace(s, regions=tuple(regions))
         out.append(s)
     return tuple(out)
+
+
+def _reads(stmt: Stmt, buffers: frozenset) -> bool:
+    """Whether `stmt`, or a statement inside it, reads one of `buffers`."""
+    return any(a.space is MemSpace.SHARED
+               and getattr(a.base, 'id', None) in buffers
+               for x in walk_stmts((stmt,)) for a in x.accesses)

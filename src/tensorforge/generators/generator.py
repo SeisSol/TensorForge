@@ -1834,7 +1834,10 @@ class Generator:
                 mults=section.shr_mem_obj.get_mults_per_block(),
                 threads=self._num_threads, fptype=self._context.fp_type,
                 static=self._context.get_user_options().preload_shards,
-                stream=section.streams, aligns=self._proven_alignments(),
+                stream=section.streams,
+                split=self._context.get_user_options().split_member_copies,
+                lead=self._context.get_user_options().split_member_lead,
+                aligns=self._proven_alignments(),
                 extents=self._operand_extents(),
                 report=section.shard_report)
 

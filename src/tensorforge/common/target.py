@@ -117,6 +117,7 @@ class Preferences:
     preload_globals: bool = False
     preload_shards: bool = False
     stage_members: bool = False
+    split_member_copies: bool = False
     split_predicated_load: bool = False
     inline_constants: int = 64
     argument_constants: bool = False
@@ -220,6 +221,11 @@ PREFERENCES = {
         # 27 % and at order 6 33 % (12 % in single), nothing slower.
         preload_shards=True,
         stage_members=True,
+        # A trip's member copy split around what the trip computes before it
+        # reads the copy: on the MI300A SeisSol's `localFluxAll` 2.7 % faster
+        # at order 6 in single precision, 0.6 % in double, 1.0 % at order 8
+        # in single and 0.6 % slower in double (two runs alike to 0.3 %).
+        split_member_copies=True,
         # A gather from a register image goes through `ds_bpermute`, where
         # the broadcast it replaces is fused into the FMA (`fmac_dpp`):
         # `neighboringFlux` on gfx1150 gathered at up to 8 and 32 nonzeros

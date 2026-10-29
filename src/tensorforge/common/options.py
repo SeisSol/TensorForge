@@ -764,6 +764,37 @@ declare('stage_members',
             'order 6 in double precision, 7.0 instead of 8.0 in single, and '
             '54.9 instead of 75.2 at order 8.  Elsewhere unmeasured.')
 
+declare('split_member_copies',
+        rule=lambda target: target.prefs.split_member_copies,
+        parse=parse_bool,
+        doc='Under `stage_members`, split the copy of a trip\'s members: its '
+            'stores -- and the two block barriers around them -- just ahead '
+            'of the first statement of the trip that reads the copy, and its '
+            'loads up to `split_member_lead` ahead of that (`pir.shards`).  '
+            'What the trip computes in between goes on while the loads are in '
+            'flight: SeisSol\'s `localFluxAll` multiplies `I` by the face\'s '
+            '`AplusT` first, which is no member.  Where a trip has little '
+            'ahead of its first read (`shards.SPLIT_COVER`), the copy stays '
+            'whole.\n'
+            'On by default on AMD (`Target.prefs`): on the MI300A '
+            '`localFluxAll` took 6.77 ns an element instead of 6.96 at order 6 '
+            'in single precision, 13.04 instead of 13.12 in double, 24.81 '
+            'instead of 25.06 at order 8 in single and 48.16 instead of 47.88 '
+            'in double; at order 4 the same.  Elsewhere unmeasured.')
+
+declare('split_member_lead',
+        default=192,
+        parse=parse_int,
+        doc='How far ahead of the first read of the copy a split member copy '
+            '(`split_member_copies`) issues its loads at most, in the units '
+            'the emitter counts code in (`issue_cover`); 0 is the head of the '
+            'trip.  Further ahead than a load\'s latency needs, the loads only '
+            'hold their registers: SeisSol\'s `localFluxAll` at order 8 in '
+            'single precision on the MI300A, with 478 of them between the '
+            'head and the first read, took 25.46 ns an element with its loads '
+            'at the head and 24.81 at most 96 or 192 ahead, where the copy '
+            'whole took 25.06.')
+
 declare('rotate_slots',
         default=0,
         parse=parse_int,
