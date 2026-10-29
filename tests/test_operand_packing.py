@@ -362,6 +362,37 @@ def test_a_wide_lead_is_packed_at_its_own_width():
     assert a.tensor.storage_elements() == a.tensor.packing.elements
 
 
+@pytest.mark.parametrize("arch,backend", [("sm_120", "cuda"),
+                                          ("gfx942", "hip")])
+def test_the_rows_a_wide_lead_leaves_over_are_read_packed_at_a_number(
+        arch, backend):
+    """SeisSol's `volume` at order 6 in single precision reads `kDivM` over
+    a window of rows no multiple of four, and `lead_vectorize` gives a lane
+    four adjacent rows: the rows no whole vector covers are read in a body
+    of their own, at a number rather than a lane (`Symbol._packed_row`).
+    The packing addressed a lane alone and refused that -- "packed rows need
+    a lead index" -- on every target.
+
+    The numbers are `gpu_check`'s to say: the host oracle does not evaluate
+    the peeled batch element this kernel starts with (a `VectorT{}` in a
+    conditional), packed or not."""
+    from tensorforge.frontend.yateto import DescriptionReader
+
+    import seissol_suite as fx
+
+    descrs = DescriptionReader(None, {}).read(fx.description(
+        'elastic-linearck', 'elastic-linearck-o6-s', 'gpu_volume'))[0]
+    gen = Generator(descrs, Context(arch=arch, backend=backend,
+                                    fp_type=Datatype.F32,
+                                    options=Options(lead_vectorize=True)))
+    gen.generate()
+    packed = {t.alias for d in descrs for v in d.reads()
+              if (t := getattr(v, 'tensor', None)) is not None
+              and t.packing is not None}
+    assert packed, 'no operand packed: nothing to test'
+    assert '"lead_width":4' in gen.get_kernel()
+
+
 def test_a_rolled_reduction_takes_a_uniform_form_without_a_table():
     """The column is a loop variable then, so the slot has to be affine in
     it: `rows` is, `runs` with unequal columns is not -- and without
