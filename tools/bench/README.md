@@ -385,6 +385,11 @@ a suggested caption, after a page listing what was not made and why.
 | `figures/timesplit-*` | where did a SeisSol simulation's time go? |
 | `figures/throughput-*` | what did SeisSol get through on each machine? |
 | `tables/portability`, `figures/cascade-*` | how evenly does a kernel reach each machine's roof? |
+| `figures/machines-peak-*` | at one order, how close does each machine come to its own roof, triad and FMA chain, kernel by kernel? |
+| `figures/machines-rate-*` | at one order, what rate and bandwidth does each machine reach, kernel by kernel? |
+| `figures/machines-step-*` | what does a time step cost per element on each machine? |
+| `figures/machines-rampup-*` | from how many elements on is a time step worth its launches, on each machine? |
+| `figures/machines-roofline-*` | where does each kernel sit under each machine's own roof? |
 | `figures/configs-*` | does a configuration -- the matrix units, another generator -- help? |
 | `figures/fusion-*` | what is fusing a kernel's chain worth? |
 | `figures/lanes-*` | how much of the arithmetic a kernel issues is needed? |
@@ -396,8 +401,9 @@ a suggested caption, after a page listing what was not made and why.
 
 A figure is one machine, one precision and one equation, and a line joins the
 orders of one kernel: a kernel is its name and its export (`capture.py`), never
-its name alone. A run of another generator brought in with its own `config`
-label is drawn against the reference like any configuration.
+its name alone; the figures across machines are the exception (below). A run
+of another generator brought in with its own `config` label is drawn against
+the reference like any configuration.
 
 **The time step.** The breakdown and the ramp-up add the kernels up the way
 SeisSol launches them on a GPU (`STEP`, read off SeisSol's
@@ -426,6 +432,19 @@ roof a full launch reaches. A machine that built or ran the kernel and produced
 no number makes it zero, as the definition has it -- `collect` keeps those rows
 in `Field.failed` -- and one that was not asked to run it leaves it open: a
 gap in a campaign is not a failure of the code.
+
+**Across machines.** The figures named `machines-*` turn the others round: one
+equation, one precision and one order -- every order measured, each a figure
+of its own -- and the machines side by side, each in the place and the colour
+it keeps in all of them, by name with its numbers by value (`sm_80` before
+`sm_100`). The peak's bars stand per machine rather than per order, as shares
+of the machine's own roof, triad and FMA chain (`machines-peak`) and as the
+rates themselves (`machines-rate`); a cross at the foot of a bar is a kernel
+the machine built or ran and got no number from. The time step is the
+breakdown's stack per machine, the ramp-up the step's rate per machine, and
+the roofline divides each machine's ridge and FMA chain out, so that one roof
+stands for all of them, a panel per kernel. A figure needs two machines; the
+shares and the roofline, two with a ceiling in the precision.
 
 **Local time stepping.** A clustering is what local time stepping makes of a
 mesh, and SeisSol writes it down itself: `<prefix>-clustering.csv`, per rank,

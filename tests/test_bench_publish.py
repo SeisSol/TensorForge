@@ -213,6 +213,156 @@ def test_one_machine_makes_no_portability(tmp_path):
 
 
 # ----------------------------------------------------------------------
+# Across machines
+# ----------------------------------------------------------------------
+
+#: The kernels of an elastic time step (`publish.STEP`).
+ELASTIC_STEP = ('gpu_derivative', 'gpu_volume', 'gpu_localFluxAll',
+                'gpu_neighboringFlux[0]')
+
+
+def test_machines_keep_one_order_and_colour_by_their_numbers(tmp_path):
+    rows = [_point('gpu_volume', a, 4, 0.5)
+            for a in ('sm_100', 'sm_80', 'gfx90a', 'sm_90')]
+    look = publish.Machines(_tree(tmp_path, rows))
+    assert look.names == ['gfx90a', 'sm_80', 'sm_90', 'sm_100']
+    assert look.fill('sm_100') == 'tfc4' and look('gfx90a') == 'tf s1'
+
+
+def test_the_peak_turned_round_is_a_bar_per_machine(tmp_path):
+    """At one order, each kernel on every machine, as shares of the
+    machine's own ceilings: at intensity 1 a kernel at half the roof moves
+    half the triad and does a twentieth of the FMA chain (`CEILING`).  A
+    kernel that failed on a machine is a cross; one not asked of it, a
+    gap."""
+    rows = [_point('gpu_volume', 'A', 4, 0.5),
+            _point('gpu_volume', 'B', 4, 0.25),
+            _point('gpu_volume', 'C', 4, error='exit 1: out of registers'),
+            _point('gpu_derivative', 'A', 4, 0.5),
+            _point('gpu_derivative', 'C', 4, 0.5),
+            _point('gpu_volume', 'A', 6, 0.5),
+            _point('gpu_volume', 'B', 6, 0.5)]
+    field = _tree(tmp_path, rows)
+    peaks, rates, skipped = publish.figure_machines(
+        field, ['gpu_volume', 'gpu_derivative'], publish.Machines(field))
+    assert not skipped
+    assert [o.name for o in peaks] == ['machines-peak-elastic-f64-o4',
+                                       'machines-peak-elastic-f64-o6']
+    assert [o.name for o in rates] == ['machines-rate-elastic-f64-o4',
+                                       'machines-rate-elastic-f64-o6']
+    o4 = peaks[0]
+    by = {(r['kernel'], r['arch']): r for r in o4.rows}
+    assert by[('gpu_volume', 'A')]['fraction_of_roof'] == pytest.approx(0.5)
+    assert by[('gpu_volume', 'A')]['fraction_of_triad'] == pytest.approx(0.5)
+    assert by[('gpu_volume', 'A')]['fraction_of_fma'] == pytest.approx(0.05)
+    assert by[('gpu_volume', 'B')]['fraction_of_roof'] == pytest.approx(0.25)
+    assert by[('gpu_volume', 'C')]['failed'] is True
+    assert ('gpu_derivative', 'B') not in by
+    assert o4.tex.count('$\\times$') == 3          # one per panel
+    assert o4.tex.count('\\addlegendentry') == 3   # A, B, C
+    assert 'A cross marks' in o4.caption
+    assert 'A cross marks' not in peaks[1].caption
+    rate = {(r['kernel'], r['arch']): r for r in rates[0].rows}
+    assert rate[('gpu_volume', 'A')]['gflops'] == pytest.approx(500.0)
+
+
+def test_a_machine_without_a_ceiling_has_rates_but_no_shares(tmp_path):
+    rows = [_point('gpu_volume', a, 4, 0.5) for a in 'AB']
+    field = _tree(tmp_path, rows)
+    del field.ceilings[('B', 'F64')]
+    peaks, rates, skipped = publish.figure_machines(
+        field, ['gpu_volume'], publish.Machines(field))
+    assert not peaks and len(rates) == 1
+    assert skipped == ['machines-peak: fewer than two machines with a '
+                       'ceiling ran at elastic-f64-o4']
+
+
+def test_a_time_step_per_element_on_every_machine(tmp_path):
+    """Each kernel's time per element, the neighbour flux four times; a
+    machine that misses one of the step's kernels has no step."""
+    rows = [_point(k, a, 4, e) for k in ELASTIC_STEP
+            for a, e in (('A', 0.5), ('B', 0.25))]
+    rows += [_point(k, 'C', 4, 0.5) for k in ELASTIC_STEP[:3]]
+    field = _tree(tmp_path, rows)
+    out, skipped = publish.figure_machines_step(
+        field, list(ELASTIC_STEP), publish.Styles(),
+        publish.Machines(field))
+    assert not skipped
+    fig, = out
+    assert fig.name == 'machines-step-elastic-f64-o4'
+    assert {r['arch'] for r in fig.rows} == {'A', 'B'}
+    ns = {(r['kernel'], r['arch']): r['ns_per_element'] for r in fig.rows}
+    # 1 GFLOP at intensity 1 and half of a 1 TFLOP/s roof: 2 ms a launch.
+    assert ns[('gpu_volume', 'A')] == pytest.approx(2e6 / 65536)
+    assert ns[('gpu_neighboringFlux[0]', 'A')] == pytest.approx(
+        4 * 2e6 / 65536)
+    assert texout.num(7 * 2e6 / 65536) in fig.tex
+    assert '\\texttt{C}' not in fig.tex
+
+
+def test_the_time_step_ramps_up_on_every_machine(tmp_path):
+    rows = []
+    for a, t0 in (('A', 5000.0), ('B', 20000.0)):
+        for k in ELASTIC_STEP:
+            for b in (1024, 4096, 16384):
+                r = _point(k, a, 4, 0.5, batch=b)
+                r['wall_ns'] = t0 + 2.0 * b
+                rows.append(r)
+    field = _tree(tmp_path, rows)
+    out, skipped = publish.figure_machines_rampup(
+        field, list(ELASTIC_STEP), publish.Machines(field), 'wall')
+    assert not skipped
+    fig, = out
+    assert fig.name == 'machines-rampup-elastic-f64-o4'
+    half = {r['arch']: r['half_fit'] for r in fig.rows}
+    # Seven launches of t0 + 2 n (the neighbour flux four times, its
+    # relations taken together as one launch of n), so n-half is t0 / 2.
+    assert half['A'] == pytest.approx(5000.0 / 2)
+    assert half['B'] == pytest.approx(20000.0 / 2)
+
+
+def test_one_roof_stands_for_every_machine(tmp_path):
+    """The intensity over the machine's ridge and the rate over its FMA
+    chain: under a ridge of 10, intensity 1 is a tenth of the way, and
+    half the roof there is 5 % of A's FMA chain -- 2.5 % of B's, whose
+    chain is twice as fast and whose ridge is twice as far."""
+    import dataclasses
+    rows = [_point('gpu_volume', a, 4, 0.5) for a in 'AB']
+    rows.append(_point('gpu_derivative', 'B', 4, 0.5))
+    field = _tree(tmp_path, rows)
+    c = field.ceilings[('B', 'F64')]
+    field.ceilings[('B', 'F64')] = dataclasses.replace(
+        c, flops_per_s=2 * c.flops_per_s)
+    out, skipped = publish.figure_machines_roofline(
+        field, ['gpu_derivative', 'gpu_volume'], publish.Machines(field))
+    assert not skipped
+    fig, = out
+    by = {(r['kernel'], r['arch']): r for r in fig.rows}
+    assert by[('gpu_volume', 'A')]['intensity_over_ridge'] == \
+        pytest.approx(0.1)
+    assert by[('gpu_volume', 'A')]['fraction_of_fma'] == pytest.approx(0.05)
+    assert by[('gpu_volume', 'B')]['intensity_over_ridge'] == \
+        pytest.approx(0.05)
+    assert by[('gpu_volume', 'B')]['fraction_of_fma'] == pytest.approx(0.025)
+    # Both machines in the key, though A did not run the first panel's
+    # kernel.
+    assert fig.tex.count('\\addlegendentry') == 2
+    assert '\\texttt{derivative}' in fig.tex
+
+
+def test_a_long_kernel_name_breaks_where_a_word_starts():
+    assert publish._breakable('derivativeTaylorExpansion') == (
+        '\\texttt{derivative\\allowbreak{}Taylor\\allowbreak{}Expansion}')
+
+
+def test_one_machine_is_compared_with_nothing(tmp_path):
+    field = _tree(tmp_path, [_point('gpu_volume', 'A', 4, 0.5)])
+    outputs, skipped = publish.build(field, [], ['gpu_volume'], 4, 'wall')
+    assert not [o for o in outputs if o.name.startswith('machines-')]
+    assert 'machines-*: one machine only' in skipped
+
+
+# ----------------------------------------------------------------------
 # A kernel is its export
 # ----------------------------------------------------------------------
 
@@ -775,9 +925,9 @@ def test_the_preview_compiles(tmp_path):
     outputs, skipped = publish.build(field, described, kernels, 4, 'wall',
                                      extra)
     kinds = {o.name.split('-')[0] for o in outputs}
-    assert {'lts', 'timesplit', 'throughput', 'cascade', 'fusion', 'lanes',
-            'resources', 'precision', 'simulations', 'traffic',
-            'buildcost'} <= kinds, sorted(kinds)
+    assert {'lts', 'timesplit', 'throughput', 'cascade', 'machines',
+            'fusion', 'lanes', 'resources', 'precision', 'simulations',
+            'traffic', 'buildcost'} <= kinds, sorted(kinds)
     out = tmp_path / 'pub'
     publish.write(outputs, out, 'test', {'skipped': skipped})
     ok, why = texout.compile_tex(out / 'preview.tex')
@@ -792,3 +942,31 @@ def test_the_preview_compiles(tmp_path):
         assert fonts
         assert not [f for f in fonts if 'Type 3' in f]
         assert all(f.split()[-5] == 'yes' for f in fonts)
+
+
+@pytest.mark.skipif(not _tex_with_pgfplots(),
+                    reason='needs pdflatex with pgfplots')
+def test_the_figures_across_machines_compile(tmp_path):
+    """Each figure across machines, with the time step the bars and the
+    ramp-up need and a failure among them, set as the preview sets it."""
+    rows = []
+    for i, a in enumerate(('sm_80', 'gfx942', 'esimd-pvc')):
+        for k in ELASTIC_STEP:
+            for b in (1024, 4096, 16384, 65536):
+                if (a, k) == ('gfx942', 'gpu_volume'):
+                    continue
+                r = _point(k, a, 4, 0.3 + 0.2 * i, batch=b)
+                r['wall_ns'] = 4000.0 * (i + 1) + 2.0 * b
+                rows.append(r)
+    rows.append(_point('gpu_volume', 'gfx942', 4, error='exit 1'))
+    field = _tree(tmp_path / 'runs', rows)
+    outputs, skipped = publish.build(field, [], list(ELASTIC_STEP), 4,
+                                     'wall')
+    names = {o.name for o in outputs if o.name.startswith('machines-')}
+    assert names == {f'machines-{kind}-elastic-f64-o4' for kind in
+                     ('peak', 'rate', 'step', 'rampup', 'roofline')}
+    out = tmp_path / 'pub'
+    publish.write([o for o in outputs if o.name in names], out, 'test',
+                  {'skipped': skipped})
+    ok, why = texout.compile_tex(out / 'preview.tex')
+    assert ok, why

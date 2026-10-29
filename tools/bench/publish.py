@@ -33,6 +33,11 @@ number in the text can be checked against the one in the figure.
 | `figures/timesplit-*` | SeisSol runs | where did a simulation's time go? |
 | `figures/throughput-*` | SeisSol runs | what did SeisSol get through on each machine? |
 | `tables/portability`, `figures/cascade-*` | runs, ceilings | how evenly does a kernel reach each machine's roof? |
+| `figures/machines-peak-*` | runs, ceilings | at one order, how close does each machine come to its own ceilings? |
+| `figures/machines-rate-*` | runs | at one order, what does each machine reach, kernel by kernel? |
+| `figures/machines-step-*` | runs | what does a time step cost per element on each machine? |
+| `figures/machines-rampup-*` | runs | from how many elements on is a step worth it, on each machine? |
+| `figures/machines-roofline-*` | runs, ceilings | where does each kernel sit under each machine's own roof? |
 | `figures/configs-*` | runs | does a configuration -- or another generator -- help? |
 | `figures/fusion-*` | split runs | what is fusing a kernel's chain worth? |
 | `figures/lanes-*` | runs | how much of what a kernel issues is needed? |
@@ -60,7 +65,9 @@ ramp-up wants a sweep of them (`RAMPUP_BATCHES`).
 
 A kernel is its name and its export (`capture.py`): a figure is drawn for
 one machine, one precision and one equation, and a curve joins the orders
-of one kernel and nothing else.
+of one kernel and nothing else.  The figures across machines are drawn for
+one precision, one equation and one order instead, every machine in the
+place and the colour it keeps in all of them (`Machines`).
 
 ## What the runs say
 
@@ -2141,6 +2148,504 @@ def figure_cascade(fieldset: Field, kernels: Sequence[str], order: int,
 
 
 # ----------------------------------------------------------------------
+# Across machines
+# ----------------------------------------------------------------------
+
+def _natural(text: str) -> Tuple:
+    """A name's sort key with its numbers by value: `sm_80` before
+    `sm_100`."""
+    return tuple(int(t) if t.isdigit() else t
+                 for t in re.split(r'(\d+)', text))
+
+
+class Machines:
+    """Every machine, in the order and with the colour and mark it keeps in
+    every figure across machines: by name, its numbers by value."""
+
+    def __init__(self, fieldset: Field) -> None:
+        self.fieldset = fieldset
+        every = fieldset.points + fieldset.failed
+        self.names = sorted({p.arch for p in every}, key=_natural)
+
+    def slot(self, machine: str) -> int:
+        return self.names.index(machine)
+
+    def __call__(self, machine: str) -> str:
+        """The line-and-mark style (`tf s<n>` in `tfstyle.tex`)."""
+        return f'tf s{self.slot(machine) % (2 * len(texout.CATEGORICAL)) + 1}'
+
+    def fill(self, machine: str) -> str:
+        """The same identity as a fill, for a bar."""
+        return f'tfc{self.slot(machine) % len(texout.CATEGORICAL) + 1}'
+
+    @staticmethod
+    def label(machine: str) -> str:
+        return r'\texttt{' + texout.escape(machine) + '}'
+
+    def which(self, machines: Sequence[str]) -> str:
+        """The sentence a caption names the devices in."""
+        named = [f'{self.label(m)} is '
+                 f'{texout.escape(self.fieldset.device_of(m))}'
+                 for m in machines if self.fieldset.device_of(m) != m]
+        return ' ' + '; '.join(named) + '.' if named else ''
+
+
+#: The full launches across machines, by (equation, precision, order) and
+#: then by (kernel, machine).
+Across = Dict[Tuple[str, str, int], Dict[Tuple[str, str], Point]]
+
+
+def _across(fieldset: Field, kernels: Sequence[str]) -> Tuple[Across, set]:
+    """The full launches of the reference configuration with one
+    simulation, as the figures across machines compare them; beside them,
+    what a machine built or ran and got no number from, as (equation,
+    precision, order, kernel, machine)."""
+    ref = fieldset.reference
+    groups: Across = defaultdict(dict)
+    for p in _full(fieldset, kernels):
+        if p.config == ref and p.capture.simulations == 1:
+            groups[(p.capture.equation, p.datatype, p.order)][
+                (p.workload, p.arch)] = p
+    failed = {(p.capture.equation, p.datatype, p.order, p.workload, p.arch)
+              for p in fieldset.failed
+              if p.workload in kernels and p.capture is not None
+              and p.config == ref and p.capture.simulations == 1}
+    return groups, failed
+
+
+def _across_tag(eq: str, dt: str, order: int) -> str:
+    return f'{eq}-{dt.lower()}-o{order}'
+
+
+def _too_few(kind: str, tags: Sequence[str], what: str) -> List[str]:
+    """One line for the preview's list of what was not made, however many
+    equations, precisions and orders it was not made for."""
+    return ([f'machines-{kind}: fewer than two machines {what} at '
+             + ', '.join(tags)] if tags else [])
+
+
+def _crosses(broke: set) -> str:
+    return (' A cross marks a kernel the machine built or ran and got no '
+            'number from.' if broke else '')
+
+
+def _machine_bars(names: Sequence[str], machines: Sequence[str],
+                  look: Machines,
+                  panels: Sequence[Tuple[str, Dict[Tuple[str, str], float],
+                                         bool]],
+                  broke: set) -> List[texout.Axis]:
+    """Kernels along x and a bar per machine, a panel per quantity: its
+    label, its values by (kernel, machine), and whether it is a share of
+    the machine's own ceiling, read against 100 %.  A cross at the foot of
+    a bar is a kernel the machine built or ran and got no number from."""
+    common = ['ybar=0pt', 'area legend',
+              f'bar width={min(0.8 / len(machines), 0.22):.3f}',
+              f'xtick={{{",".join(str(i) for i in range(len(names)))}}}',
+              'xticklabels={}', f'xmin=-0.6, xmax={len(names) - 0.4}',
+              'ymin=0', 'xmajorgrids=false', 'height=0.36\\tfwidth']
+    axes = []
+    for j, (label, values, share) in enumerate(panels):
+        ax = texout.Axis(options=list(common) + [f'ylabel={{{label}}}'])
+        for m in machines:
+            pts, crosses = [], []
+            for x, k in enumerate(names):
+                failed = (k, m) in broke and (k, m) not in values
+                # A bar of no height carries the cross: pgfplots places it
+                # where the machine's bar would stand.
+                pts.append((x, 0.0 if failed else values.get((k, m))))
+                crosses.append('$\\times$' if failed else '')
+            ax.plots.append(texout.Plot(
+                f'fill={look.fill(m)}, draw=none, mark=none', pts,
+                look.label(m) if j == 0 else None,
+                labels=crosses if any(crosses) else (),
+                label_anchor='south'))
+        if share:
+            top = max(values.values(), default=0.0)
+            ax.options.append(f'ymax={max(100.0, top) * 1.06:.4g}')
+            ax.raw.append(texout.hrule(100))
+        else:
+            ax.options.append('enlarge y limits={upper, value=0.12}')
+        if j == 0:
+            ax.options += ['tf legend above',
+                           'legend style={legend columns=4}']
+        if j == len(panels) - 1:
+            ax.options.remove('xticklabels={}')
+            ax.options += [
+                'xticklabels={' + ','.join(
+                    r'\strut\texttt{' + texout.escape(short(k)) + '}'
+                    for k in names) + '}',
+                'xticklabel style={rotate=30, anchor=north east, '
+                'inner sep=1pt}']
+        axes.append(ax)
+    return axes
+
+
+def figure_machines(fieldset: Field, kernels: Sequence[str], look: Machines
+                    ) -> Tuple[List[Output], List[Output], List[str]]:
+    """The peak figure turned round: at one order, each kernel on every
+    machine, a bar per machine.  How close each came to its own roof, its
+    own triad and its own FMA chain (`machines-peak`), and the rates as
+    measured (`machines-rate`) -- a machine's ceilings are its own, so the
+    first is read against one rule and the second against none."""
+    groups, failed = _across(fieldset, kernels)
+    peaks: List[Output] = []
+    rates: List[Output] = []
+    few: Dict[str, List[str]] = defaultdict(list)
+    for (eq, dt, o), mine in sorted(groups.items()):
+        tag = _across_tag(eq, dt, o)
+        broke = {(k, m) for (e, d, oo, k, m) in failed if (e, d, oo)
+                 == (eq, dt, o) and (k, m) not in mine}
+        values: Dict[Tuple[str, str], Tuple[float, float, float]] = {}
+        for key, p in mine.items():
+            g, b, i = (_gflops(p.row, 'event'), _gbytes(p.row, 'event'),
+                       _intensity(p.row))
+            if g and b and i:
+                values[key] = (g, b, i)
+        seen = list(values) + list(broke)
+        ran = [m for m in look.names if any(mm == m for _, mm in seen)]
+        names = [k for k in kernels if any(kk == k for kk, _ in seen)]
+
+        def roof(m: str) -> Optional[Ceiling]:
+            c = fieldset.ceiling(m, dt)
+            return c if c is not None and c.ridge else None
+
+        rows: List[Dict] = []
+        for k in names:
+            for m in ran:
+                c = roof(m)
+                if (k, m) in values:
+                    g, b, i = values[(k, m)]
+                    rows.append({
+                        'kernel': k, 'order': o, 'arch': m,
+                        'device': fieldset.device_of(m),
+                        'batch': mine[(k, m)].batch, 'gflops': g,
+                        'gbytes': b, 'intensity': i,
+                        'fraction_of_roof': (g * 1e9 / c.bound(i)
+                                             if c else None),
+                        'fraction_of_triad': (b * 1e9 / c.bytes_per_s
+                                              if c else None),
+                        'fraction_of_fma': (g * 1e9 / c.flops_per_s
+                                            if c else None),
+                        'flops': flop_basis()})
+                elif (k, m) in broke:
+                    rows.append({'kernel': k, 'order': o, 'arch': m,
+                                 'device': fieldset.device_of(m),
+                                 'failed': True})
+        note = fallback_note([p.row for p in mine.values()]).strip()
+        comment = (f'generated by tools/bench/publish.py: {eq}, '
+                   f'{_dt_name(dt)}, order {o}; the largest launch, device '
+                   f'clock\n{_flops_note()}' + (f'\n{note}' if note else ''))
+        roofed = [m for m in ran if roof(m)]
+        if len(roofed) < 2:
+            few['peak'].append(tag)
+        else:
+            under = [k for k in names
+                     if any(m in roofed for kk, m in seen if kk == k)]
+            fell = {(k, m) for k, m in broke if m in roofed}
+            shares: List[Dict[Tuple[str, str], float]] = [{}, {}, {}]
+            for (k, m), (g, b, i) in values.items():
+                c = roof(m)
+                if c is not None:
+                    shares[0][(k, m)] = 100 * g * 1e9 / c.bound(i)
+                    shares[1][(k, m)] = 100 * b * 1e9 / c.bytes_per_s
+                    shares[2][(k, m)] = 100 * g * 1e9 / c.flops_per_s
+            axes = _machine_bars(
+                under, roofed, look,
+                [(r'\% of roof', shares[0], True),
+                 (r'\% of triad', shares[1], True),
+                 (r'\% of FMA', shares[2], True)], fell)
+            tex = texout.picture(
+                axes, 'group size=1 by 3, vertical sep=0.25cm, '
+                      'x descriptions at=edge bottom', comment=comment)
+            caption = (f'A full launch of each {eq} kernel at order {o} on '
+                       f'each machine, {_dt_name(dt)}: the share of the '
+                       'machine\'s own roof at the kernel\'s intensity, of '
+                       'its own triad -- the bytes the kernel has to move -- '
+                       'and of its own FMA chain, each measured on the '
+                       f'machine.{_crosses(fell)}{look.which(roofed)} '
+                       f'{_flops_are()}')
+            peaks.append(Output(f'machines-peak-{tag}', 'figure', tex,
+                                [r for r in rows if r['arch'] in roofed],
+                                caption))
+        if len(ran) < 2:
+            few['rate'].append(tag)
+            continue
+        axes = _machine_bars(
+            names, ran, look,
+            [(f'TFLOP/s ({_basis_label()})',
+              {key: g / 1e3 for key, (g, _, _) in values.items()}, False),
+             ('GB/s', {key: b for key, (_, b, _) in values.items()}, False)],
+            broke)
+        tex = texout.picture(
+            axes, 'group size=1 by 2, vertical sep=0.25cm, '
+                  'x descriptions at=edge bottom', comment=comment)
+        caption = (f'A full launch of each {eq} kernel at order {o} on each '
+                   f'machine, {_dt_name(dt)}: the arithmetic rate and the '
+                   'bandwidth of the bytes the kernel has to move, as '
+                   f'measured.{_crosses(broke)}{look.which(ran)} '
+                   f'{_flops_are()}')
+        rates.append(Output(f'machines-rate-{tag}', 'figure', tex, rows,
+                            caption))
+    skipped = (_too_few('peak', few['peak'], 'with a ceiling ran')
+               + _too_few('rate', few['rate'], 'ran'))
+    return peaks, rates, skipped
+
+
+def figure_machines_step(fieldset: Field, kernels: Sequence[str],
+                         styles: Styles, look: Machines, clock: str = 'event'
+                         ) -> Tuple[List[Output], List[str]]:
+    """One time step per element on every machine, at one order: the
+    kernels stacked as the breakdown stacks them (`STEP`), the total above
+    each bar."""
+    groups, _ = _across(fieldset, kernels)
+    out, few = [], []
+    for (eq, dt, o), mine in sorted(groups.items()):
+        step = STEP.get(eq)
+        if not step:
+            continue
+        machines = [m for m in look.names
+                    if all((k, m) in mine and _nanos(mine[(k, m)].row, clock)
+                           for k in step)]
+        tag = _across_tag(eq, dt, o)
+        if len(machines) < 2:
+            few.append(tag)
+            continue
+        ax = texout.Axis(options=[
+            'tf', 'ybar stacked', 'bar width=0.5',
+            f'xtick={{{",".join(str(i) for i in range(len(machines)))}}}',
+            'xticklabels={' + ','.join(look.label(m) for m in machines)
+            + '}',
+            'xticklabel style={rotate=30, anchor=north east, inner sep=1pt}',
+            f'xmin=-0.7, xmax={len(machines) - 0.3}', 'xmajorgrids=false',
+            'ymin=0', 'enlarge y limits={upper, value=0.14}',
+            'ylabel={ns per element and step}',
+            'tf legend above', 'reverse legend', 'area legend'])
+        rows = []
+        totals = [0.0] * len(machines)
+        for k, launch in step.items():
+            w = launch.per_element
+            pts = []
+            for x, m in enumerate(machines):
+                p = mine[(k, m)]
+                ns = _nanos(p.row, clock) / p.batch * w
+                totals[x] += ns
+                pts.append((x, ns))
+                rows.append({'kernel': k, 'order': o, 'arch': m,
+                             'device': fieldset.device_of(m), 'weight': w,
+                             'batch': p.batch, 'ns_per_element': ns})
+            label = texout.escape(short(k)) + (f' $\\times{w:g}$'
+                                               if w != 1 else '')
+            ax.plots.append(texout.Plot(
+                f'fill={styles.fill(k)}, draw=white, line width=0.6pt, '
+                'mark=none', pts, label))
+        for x, total in enumerate(totals):
+            ax.raw.append(f'\\node[tf label, anchor=south] at (axis cs:{x},'
+                          f'{total:.6g}) {{{texout.num(total)}}};\n')
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {eq}, {_dt_name(dt)}, '
+            f'order {o}; {clock} clock at the largest launch\nthe time step: '
+            f'{step_text(step)}'))
+        caption = (f'One time step of the {eq} system at order {o}, '
+                   f'{_dt_name(dt)}, per element on each machine: each '
+                   'kernel\'s time per element at a full launch, times how '
+                   'many times an element passes through it in a step of '
+                   'global time stepping -- the neighbour flux once per face '
+                   '-- and the whole step above the bar.'
+                   f'{look.which(machines)}')
+        out.append(Output(f'machines-step-{tag}', 'figure', tex, rows,
+                          caption))
+    return out, _too_few('step', few, 'measured every kernel of the step')
+
+
+def figure_machines_rampup(fieldset: Field, kernels: Sequence[str],
+                           look: Machines, clock: str
+                           ) -> Tuple[List[Output], List[str]]:
+    """The time step's ramp-up on every machine, at one order: the rate of
+    a step of `n` elements, with the launches SeisSol puts on streams of
+    their own taken as one (`step_series`)."""
+    ref = fieldset.reference
+    by: Dict[Tuple[str, str, int, str], List[Point]] = defaultdict(list)
+    for p in fieldset.points:
+        if (p.workload in kernels and p.capture is not None
+                and p.config == ref and p.capture.simulations == 1):
+            by[(p.capture.equation, p.datatype, p.order, p.arch)].append(p)
+    out, few = [], []
+    for eq, dt, o in sorted({key[:3] for key in by}):
+        step = STEP.get(eq)
+        if not step:
+            continue
+        series = {}
+        for m in look.names:
+            at = {k: v for k, v in _by_batch(by.get((eq, dt, o, m), ()),
+                                             clock).items() if len(v) > 2}
+            seq = step_series(at, step, clock, True)
+            if len(seq) > 2:
+                series[m] = seq
+        tag = _across_tag(eq, dt, o)
+        if len(series) < 2:
+            few.append(tag)
+            continue
+        top, low = _rampup_axes('elements per time step $n$')
+        rows = []
+        for m, seq in series.items():
+            _rampup_pair(top, low, look(m), [(n, f / t) for n, t, f in seq],
+                         look.label(m))
+            fit = launch_fit([(n, t) for n, t, _ in seq])
+            rows += [{'arch': m, 'device': fieldset.device_of(m),
+                      'order': o, 'batch': n, 'gflops': f / t,
+                      'ns_per_element': t / n,
+                      't0_us': fit.t0_ns / 1e3 if fit else None,
+                      'half_fit': fit.half if fit else None}
+                     for n, t, f in seq]
+        tex = texout.picture(
+            [top, low], 'group size=1 by 2, vertical sep=0.25cm, '
+                        'x descriptions at=edge bottom',
+            comment=(f'generated by tools/bench/publish.py: {eq}, '
+                     f'{_dt_name(dt)}, order {o}; {clock} clock\n'
+                     f'{_flops_note()}\nthe time step: {step_text(step)}, '
+                     'the launches on streams of their own taken as one'))
+        caption = (f'Ramp-up of one {eq} time step at order {o}, '
+                   f'{_dt_name(dt)}, on each machine: the rate of a step of '
+                   '$n$ elements, and below it as a fraction of the '
+                   'machine\'s best, with the relations of a face, which '
+                   'SeisSol puts on streams of their own, taken as one '
+                   f'launch. {_clock_sentence(clock)}'
+                   f'{look.which(list(series))}')
+        out.append(Output(f'machines-rampup-{tag}', 'figure', tex, rows,
+                          caption))
+    return out, _too_few('rampup', few,
+                         'swept every kernel of the step over three batches')
+
+
+def _breakable(name: str) -> str:
+    """A kernel's name in typewriter that may break where a word of it
+    starts, for a title narrower than the name."""
+    return (r'\texttt{' + re.sub(r'(?<=[a-z])(?=[A-Z])', r'\\allowbreak{}',
+                                 texout.escape(name)) + '}')
+
+
+def _pow2_ticks(lo: float, hi: float, most: int = 5
+                ) -> Tuple[float, float, List[float], List[str]]:
+    """A logarithmic axis of ratios from the power of two below `lo` to the
+    one above `hi`, with at most `most` ticks, one of them at 1, labelled
+    as fractions."""
+    e0 = math.floor(math.log2(lo))
+    e1 = math.ceil(math.log2(hi))
+    every = max(1, math.ceil((e1 - e0) / (most - 1)))
+    exps = [e for e in range(e0, e1 + 1) if e % every == 0]
+    labels = [f'{2.0 ** e:g}' if e >= 0 else f'1/{2.0 ** -e:g}' for e in exps]
+    return 2.0 ** e0, 2.0 ** e1, [2.0 ** e for e in exps], labels
+
+
+def figure_machines_roofline(fieldset: Field, kernels: Sequence[str],
+                             look: Machines
+                             ) -> Tuple[List[Output], List[str]]:
+    """Every machine under one roof, at one order: the intensity over the
+    machine's ridge and the rate over its FMA chain, so that each machine's
+    roof is `min(x, 1)` -- a panel per kernel, a point per machine."""
+    groups, _ = _across(fieldset, kernels)
+    out, few = [], []
+    for (eq, dt, o), mine in sorted(groups.items()):
+        tag = _across_tag(eq, dt, o)
+        coords: Dict[Tuple[str, str], Tuple[float, float]] = {}
+        rows = []
+        for k in kernels:
+            for m in look.names:
+                p, c = mine.get((k, m)), fieldset.ceiling(m, dt)
+                if p is None or c is None or not c.ridge:
+                    continue
+                g, i = _gflops(p.row, 'event'), _intensity(p.row)
+                if not (g and i):
+                    continue
+                coords[(k, m)] = (i / c.ridge, 100 * g * 1e9 / c.flops_per_s)
+                rows.append({'kernel': k, 'order': o, 'arch': m,
+                             'device': fieldset.device_of(m),
+                             'batch': p.batch, 'intensity': i,
+                             'ridge': c.ridge, 'gflops': g,
+                             'intensity_over_ridge': i / c.ridge,
+                             'fraction_of_fma': g * 1e9 / c.flops_per_s,
+                             'fraction_of_roof': g * 1e9 / c.bound(i),
+                             'flops': flop_basis()})
+        machines = [m for m in look.names if any(mm == m for _, mm in coords)]
+        if len(machines) < 2:
+            few.append(tag)
+            continue
+        names = [k for k in kernels if any(kk == k for kk, _ in coords)]
+        xs = [x for x, _ in coords.values()]
+        ys = [y for _, y in coords.values()]
+        x0, x1, xticks, xlabels = _pow2_ticks(min(min(xs) / 1.5, 1 / 4),
+                                              max(max(xs) * 1.5, 4.0))
+        y0 = 10.0 ** math.floor(math.log10(min(ys) / 1.5))
+        # Every power of ten down from 100, or every other where that is
+        # more than five.
+        decades = range(2, round(math.log10(y0)) - 1, -1)
+        yticks = sorted(10.0 ** e for e in decades[::-(-len(decades) // 5)])
+        cols, nrows = _grid(len(names))
+        # The axes themselves sized, square, so that the panels of a row
+        # fill the column whatever their tick labels take.
+        side = {1: 0.6, 2: 0.4}.get(cols, 0.26)
+        axes = []
+        for n, k in enumerate(names):
+            ax = texout.Axis(options=[
+                'xmode=log', 'ymode=log', f'xmin={x0:g}, xmax={x1:g}',
+                f'ymin={y0:g}, ymax={max(200.0, 1.3 * max(ys)):.4g}',
+                'xtick={' + ','.join(f'{t:g}' for t in xticks) + '}',
+                'xticklabels={' + ','.join(xlabels) + '}',
+                'ytick={' + ','.join(f'{t:g}' for t in yticks) + '}',
+                'xminorticks=false', 'yminorticks=false',
+                'title style={font=\\scriptsize, align=center, '
+                f'text width={side}\\tfwidth}}',
+                'title={' + _breakable(short(k)) + '}']
+                + (['ylabel={\\% of FMA chain}',
+                    'yticklabels={' + ','.join(f'{t:g}' for t in yticks)
+                    + '}'] if n % cols == 0 else ['yticklabels={}']))
+            ax.raw.append(f'\\addplot[tf roof, forget plot] coordinates {{'
+                          f'({x0:g},{100 * x0:g}) (1,100) ({x1:g},100)}};\n')
+            for m in machines:
+                if (k, m) in coords:
+                    ax.plots.append(texout.Plot(
+                        look(m) + ', only marks, forget plot',
+                        [coords[(k, m)]]))
+            if n == 0:
+                # Every machine of the figure in the key, whichever kernels
+                # it ran.
+                ax.options.append('legend to name=tfmachines')
+                ax.raw += [f'\\addlegendimage{{{look(m)}, only marks}}\n'
+                           f'\\addlegendentry{{{look.label(m)}}}\n'
+                           for m in machines]
+            axes.append(ax)
+        tex = texout.picture(
+            axes, f'group size={cols} by {nrows}, horizontal sep=0.15cm, '
+                  'vertical sep=1.5cm',
+            comment=(f'generated by tools/bench/publish.py: {eq}, '
+                     f'{_dt_name(dt)}, order {o}; the largest launch, '
+                     'device clock; intensity over the machine\'s ridge, '
+                     f'rate over its FMA chain\n{_flops_note()}'),
+            options=['scale only axis', f'width={side}\\tfwidth',
+                     f'height={side}\\tfwidth', 'legend columns=4',
+                     'legend style={/tikz/every even column/.append '
+                     'style={column sep=0.6em}}'])
+        # The panels share both axes: one name for x below them all, one
+        # key above.
+        tex = tex.replace('\\end{tikzpicture}\n',
+                          '\\node[anchor=south] at (current bounding box.'
+                          'north) {\\pgfplotslegendfromname{tfmachines}};\n'
+                          '\\node[anchor=north, font=\\footnotesize, '
+                          'text=tfink] at (current bounding box.south) '
+                          '{intensity / ridge};\n\\end{tikzpicture}\n')
+        caption = (f'The {eq} kernels at order {o}, {_dt_name(dt)}, each '
+                   'under every machine\'s own roof: the intensity over the '
+                   'machine\'s ridge and the rate as a share of its FMA '
+                   'chain, so that one roof stands for every machine -- '
+                   'left of 1 a kernel is bound by the memory there, right '
+                   'of it by the arithmetic. A panel per kernel.'
+                   f'{look.which(machines)} {_flops_are()}')
+        out.append(Output(f'machines-roofline-{tag}', 'figure', tex, rows,
+                          caption))
+    return out, _too_few('roofline', few, 'with a ceiling ran')
+
+
+# ----------------------------------------------------------------------
 # What explains the curves
 # ----------------------------------------------------------------------
 
@@ -3187,6 +3692,17 @@ def build(fieldset: Optional[Field], described: Sequence,
             'portability: fewer than two machines with a ceiling')
         add(figure_cascade(fieldset, kernels, order, styles),
             'cascade: fewer than two machines with a ceiling')
+        look = Machines(fieldset)
+        if len(look.names) < 2:
+            skipped.append('machines-*: one machine only')
+        else:
+            peaks, rates, why = figure_machines(fieldset, kernels, look)
+            add(peaks)
+            add(rates)
+            skipped.extend(why)
+            add(figure_machines_step(fieldset, kernels, styles, look))
+            add(figure_machines_rampup(fieldset, kernels, look, clock))
+            add(figure_machines_roofline(fieldset, kernels, look))
         add(figure_configs(fieldset, kernels),
             'configs: one configuration only')
         add(figure_fusion(fieldset, kernels, clock))
