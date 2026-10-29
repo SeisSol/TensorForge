@@ -119,6 +119,9 @@ class Point:
     """One measurement, flattened out of whichever file carried it."""
     workload: str
     config: str
+    #: The machine, as every view names it: the architecture the row
+    #: gives, or where one architecture ran under several backends, the
+    #: backend and the architecture (`Field.split_backends`).
     arch: str
     backend: str
     device: str
@@ -130,10 +133,6 @@ class Point:
     #: The export the kernel was captured from, where the row or the run's
     #: directory says (`capture.capture_of`).
     capture: Optional[Capture] = None
-
-    @property
-    def target(self) -> str:
-        return f'{self.backend}-{self.arch}'
 
     @property
     def kernel(self) -> str:
@@ -210,6 +209,42 @@ class Field:
     #: from `points`, which every view draws, for a reader that has to
     #: tell a kernel that failed on a machine from one that was not run.
     failed: List[Point] = field(default_factory=list)
+    #: The machines that are one architecture under one of several
+    #: backends, by name: their architecture and backend.
+    split: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+
+    def split_backends(self) -> None:
+        """An architecture measured under more than one backend -- SPMD and
+        ESIMD on an Intel GPU -- is a machine per backend, `esimd-pvc`
+        beside `oneapi-pvc`, each under the architecture's ceilings: every
+        view keys a measurement by its machine, and one machine of both
+        would hold one backend's kernel and drop the other's."""
+        backends: Dict[str, set] = defaultdict(set)
+        for p in self.points + self.failed:
+            backends[p.arch].add(p.backend)
+        for arch, found in sorted(backends.items()):
+            if len(found) < 2:
+                continue
+            for backend in sorted(found):
+                name = f'{backend}-{arch}'
+                self.split[name] = (arch, backend)
+                for (a, datatype), ceiling in list(self.ceilings.items()):
+                    if a == arch:
+                        self.ceilings.setdefault((name, datatype), ceiling)
+            for p in self.points + self.failed:
+                if p.arch == arch:
+                    p.arch = f'{p.backend}-{arch}'
+
+    def machine_name(self, arch: str, backend: str) -> str:
+        """What the views call the machine of a row of `arch` and
+        `backend` (`split_backends`)."""
+        name = f'{backend}-{arch}'
+        return name if name in self.split else arch
+
+    def architecture(self, machine: str) -> str:
+        """The architecture a machine is, as a row or a profile names it
+        (`split_backends`)."""
+        return self.split.get(machine, (machine, ''))[0]
 
     def ceiling(self, arch: str, datatype: str) -> Optional[Ceiling]:
         """The roof a point of this precision on this machine is placed
@@ -278,11 +313,16 @@ class Field:
         return point.kernel if len(self.captures) > 1 else point.workload
 
     def device_of(self, arch: str) -> str:
-        for p in self.points:
-            if p.arch == arch and p.device:
-                return p.device
-        found = self.machine(arch)
-        return (found.device if found else '') or arch
+        """The device a machine is, by name; with its backend where the
+        device is several machines (`split_backends`)."""
+        device = next((p.device for p in self.points
+                       if p.arch == arch and p.device), '')
+        if not device:
+            found = self.machine(arch)
+            device = (found.device if found else '') or arch
+        if arch in self.split and device != arch:
+            device += f' ({self.split[arch][1]})'
+        return device
 
     def at(self, **keys) -> List[Point]:
         return [p for p in self.points
@@ -416,6 +456,7 @@ def collect(targets: Sequence[Path]) -> Field:
                     if ceiling:
                         out.ceilings.setdefault(
                             (ceiling.arch, ceiling.datatype), ceiling)
+    out.split_backends()
     return out
 
 

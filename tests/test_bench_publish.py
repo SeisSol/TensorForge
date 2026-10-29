@@ -509,6 +509,30 @@ def test_traffic_is_matched_to_the_run_by_arch_and_symbol(tmp_path):
     assert row['ratio'] == pytest.approx(811400 / 410600)
 
 
+def test_a_profile_counts_for_the_machine_of_its_backend(tmp_path):
+    """One GPU under two backends is two machines; the profile names the
+    GPU, and the kernel's symbol tells the backends apart."""
+    rows = [dict(_point('gpu_volume', 'pvc', 4, 0.5, batch=b,
+                        symbol=f'kernel_{backend}'), backend=backend)
+            for backend in ('oneapi', 'esimd') for b in (1024, 65536)]
+    for r in rows:
+        r['bytes'] = 1000.0 + 100.0 * r['batch']
+    fieldset = _tree(tmp_path, rows)
+    profile = tmp_path / 'pvc' / 'profiles' / 'profile.json'
+    profile.parent.mkdir(parents=True)
+    profile.write_text(json.dumps({
+        'batch': 4096,
+        'device': {'spec': {'backend': 'oneapi', 'arch': 'pvc'}},
+        'collections': [
+            {'workload': 'gpu_volume', 'symbol': 'kernel_esimd',
+             'rows': [{'duration_ns': 5.0, 'dram_read_bytes': 600000.0,
+                       'dram_write_bytes': 211400.0}]}]}))
+    out, = publish.figure_traffic(fieldset, publish._profiles([tmp_path]),
+                                  ['gpu_volume'])
+    assert out.name == 'traffic-esimd-pvc-elastic-f64'
+    assert '(esimd)' in out.caption
+
+
 def test_what_making_the_kernels_cost_is_summed_per_export(tmp_path):
     manifest = [{'workload': w, 'arch': 'A', 'datatype': 'F64',
                  'config': 'baseline', 'capture': 'elastic-4-d-s1',
@@ -534,6 +558,25 @@ def test_what_making_the_kernels_cost_is_summed_per_export(tmp_path):
             row['object_bytes'], row['largest_code_bytes']) == (
         3, 6.5, 30.0, 3 * 2 ** 20, 4096)
     assert '128' in out.caption and row['suite'] == 'test'
+
+
+def test_the_builds_of_two_backends_on_one_gpu_cost_apart(tmp_path):
+    """SPMD and ESIMD make kernels of the same names on one GPU: each
+    machine its own build cost (`compare.Field.split_backends`)."""
+    rows = [dict(_point('gpu_volume', 'pvc', 4, 0.5), backend=b)
+            for b in ('oneapi', 'esimd')]
+    manifest = [{'workload': 'gpu_volume', 'arch': 'pvc', 'backend': b,
+                 'datatype': 'F64', 'config': 'baseline',
+                 'capture': 'elastic-4-d-s1', 'error': '', 'generate_s': g,
+                 'compile_s': 10.0, 'object_bytes': 2 ** 20,
+                 'code_bytes': 1024, 'icache_bytes': 131072}
+                for b, g in (('oneapi', 1.0), ('esimd', 3.0))]
+    fieldset = _tree(tmp_path, rows, manifest=manifest)
+    out = {o.name: o for o in publish.table_buildcost(
+        publish._manifests([tmp_path]), fieldset)}
+    assert sorted(out) == ['buildcost-esimd-pvc', 'buildcost-oneapi-pvc']
+    assert out['buildcost-esimd-pvc'].rows[0]['generate_s'] == 3.0
+    assert '(esimd)' in out['buildcost-esimd-pvc'].caption
 
 
 # ----------------------------------------------------------------------

@@ -124,6 +124,33 @@ def test_the_largest_launch_is_the_one_compared(tmp_path):
     assert [p.batch for p in got.largest_batch(got.points)] == [4096]
 
 
+def test_one_gpu_under_two_backends_is_two_machines(tmp_path):
+    """SPMD and ESIMD on one Intel GPU: the same kernel at the same launch,
+    which one machine of both would keep once."""
+    _write(tmp_path, 'elastic-4-d-s1',
+           [_row('k', 'baseline', 'pvc', 4096, 100.0, backend='oneapi',
+                 device='Max 1550', datatype='F64'),
+            _row('k', 'baseline', 'pvc', 4096, 80.0, backend='esimd',
+                 device='Max 1550', datatype='F64'),
+            _row('k', 'baseline', 'sm_90', 4096, 50.0, datatype='F64')],
+           {'arch': 'pvc', 'datatype': 'F64', 'flops_per_s': 2e13,
+            'bytes_per_s': 2e12})
+    got = compare.collect([tmp_path])
+    kept = got.largest_batch(got.points)
+    assert sorted((p.arch, p.row['event_ns']) for p in kept) == [
+        ('esimd-pvc', 80.0), ('oneapi-pvc', 100.0), ('sm_90', 50.0)]
+    assert got.split == {'esimd-pvc': ('pvc', 'esimd'),
+                         'oneapi-pvc': ('pvc', 'oneapi')}
+    # Each under the architecture's roof, and told apart by name.
+    assert got.ceiling('esimd-pvc', 'F64') is got.ceiling('pvc', 'F64')
+    assert got.ceiling('oneapi-pvc', 'F64') is not None
+    assert got.device_of('esimd-pvc') == 'Max 1550 (esimd)'
+    assert got.device_of('sm_90') == 'sm_90'
+    assert got.machine_name('pvc', 'esimd') == 'esimd-pvc'
+    assert got.machine_name('sm_90', 'cuda') == 'sm_90'
+    assert got.ceiling_archs == ['esimd-pvc', 'oneapi-pvc']
+
+
 # ----------------------------------------------------------------------
 # What the views say
 # ----------------------------------------------------------------------

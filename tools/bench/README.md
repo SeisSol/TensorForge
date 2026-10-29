@@ -234,6 +234,12 @@ as the recorded suite calls a configuration. A row is believed over its
 directory, and a run whose name says neither is left out of the order views
 rather than placed at zero.
 
+A machine is its architecture, unless one architecture ran under more than one
+backend -- SPMD and ESIMD on an Intel GPU. Then each backend is a machine of
+its own, `oneapi-pvc` beside `esimd-pvc`, under the architecture's ceilings:
+both make kernels of the same names, and one machine of the two would keep one
+backend's measurement and drop the other's.
+
 `archs` and `portability` answer different questions and the difference
 matters. `archs` is absolute and ranks the *machines*; a set holding a laptop
 part and a data-centre one spans two orders of magnitude, which is why its

@@ -2542,7 +2542,9 @@ def figure_traffic(fieldset: Field,
             if (a, d, capture.equation) != (arch, dt, eq):
                 continue
             symbol = points[0].row.get('symbol')
-            found = profiles.get((arch, symbol)) or profiles.get((None, symbol))
+            # A profile names the architecture, not the machine.
+            found = (profiles.get((fieldset.architecture(arch), symbol))
+                     or profiles.get((None, symbol)))
             if found is None:
                 continue
             measured, batch = found
@@ -2623,7 +2625,10 @@ def table_buildcost(manifests: Sequence[Dict], fieldset: Optional[Field]
         capture = Capture.from_tag(entry.get('capture') or '')
         if capture is None:
             continue
-        seen = kernels[(entry.get('arch') or '?', entry.get('config') or '',
+        arch = entry.get('arch') or '?'
+        if fieldset is not None:
+            arch = fieldset.machine_name(arch, entry.get('backend') or '?')
+        seen = kernels[(arch, entry.get('config') or '',
                         entry.get('datatype') or '', capture.equation,
                         capture.simulations, capture.order)]
         if workload not in seen or (seen[workload].get('compile_s') is None
@@ -2783,11 +2788,14 @@ def figure_lts(series: Sequence[LtsSeries], fits: Sequence[Dict],
         top.plots.append(texout.Plot(
             'ybar interval, fill=tfgrid, draw=tfaxis, mark=none, forget plot',
             hist))
+        # A run names the architecture; every machine of it gets the run.
+        under = {a: fieldset.architecture(a) if fieldset is not None else a
+                 for a in archs}
         rows: List[Dict] = []
         dashed = False
         for m, arch in enumerate(archs):
             half = fit[arch].get('together', {}).get('half_fit')
-            app = [r.half() for r in item.runs if r.arch == arch]
+            app = [r.half() for r in item.runs if r.arch == under[arch]]
             app = [h for h in app if h]
             colour = f'tfc{m % len(texout.CATEGORICAL) + 1}'
             for value, dash, source in ((half, '', 'kernels'),
@@ -2849,7 +2857,7 @@ def figure_lts(series: Sequence[LtsSeries], fits: Sequence[Dict],
                 for run in item.runs:
                     key = (run.arch, run.configuration, run.ranks,
                            round(run.cells))
-                    if run.arch == arch and key in measured:
+                    if run.arch == under[arch] and key in measured:
                         seen[x] = measured[key]
                         break
             if seen:
