@@ -733,6 +733,28 @@ PROFILERS: Dict[str, Profiler] = {
 #: vtune` is the way to the memory counters.
 BY_VENDOR = {'nvidia': 'ncu', 'amd': 'rocprofv3', 'intel': 'unitrace'}
 
+#: What a vendor's run reaches for where its default is not installed.
+#: VTune comes with oneAPI's base toolkit and unitrace only where somebody
+#: built it -- BEAST's PVC nodes have the one and not the other -- and a
+#: profile with the kernel's time and occupancy is worth more than none.
+FALLBACK = {'intel': ('vtune',)}
+
+
+def choose_tool(vendor: str, named: Optional[str] = None) -> Optional[str]:
+    """The profiler for a device of `vendor`: the one `named`, else the
+    vendor's default (`BY_VENDOR`), else, where that is not installed, the
+    first of its others that is (`FALLBACK`).  Where none is, the default --
+    whose absence the caller reports."""
+    if named:
+        return named
+    tool = BY_VENDOR.get(vendor)
+    if tool is None or PROFILERS[tool].binary() is not None:
+        return tool
+    for other in FALLBACK.get(vendor, ()):
+        if PROFILERS[other].binary() is not None:
+            return other
+    return tool
+
 
 # ----------------------------------------------------------------------
 # Driving one suite
@@ -917,7 +939,10 @@ def main() -> int:
         suite_mod.TargetSpec(args.backend or 'cuda', args.arch or 'sm_80'),
         'nvidia', 0, 'none')
 
-    tool = args.tool or BY_VENDOR.get(device.vendor)
+    tool = choose_tool(device.vendor, args.tool)
+    if tool != (args.tool or BY_VENDOR.get(device.vendor)):
+        print(f'note: {BY_VENDOR.get(device.vendor)} not found; {tool} '
+              f'instead', file=sys.stderr)
     profiler = PROFILERS.get(tool)
     if profiler is None:
         print(f'no profiler for vendor {device.vendor!r}; pass --tool',

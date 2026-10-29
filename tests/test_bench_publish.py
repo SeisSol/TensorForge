@@ -873,6 +873,36 @@ def test_what_is_written_is_complete_and_says_what_it_left_out(tmp_path):
     assert 'kernels, intensity' in (out / 'preview.tex').read_text()
 
 
+def test_a_publish_over_an_earlier_one_leaves_none_of_its_figures(tmp_path):
+    """`--compile` sets every standalone figure in the directory: one that an
+    earlier publish wrote and this one does not came out beside the new ones,
+    freshly dated and drawn from the older tree."""
+    out = tmp_path / 'pub'
+
+    def publish_machines(machines):
+        rows = [_point(k, a, o, 0.4 + 0.1 * i, batch=b)
+                for i, a in enumerate(machines) for o in (3, 4)
+                for k in ('gpu_volume', 'gpu_derivative')
+                for b in (256, 4096, 65536)]
+        field = _tree(tmp_path / machines, rows)
+        outputs, skipped = publish.build(field, [], ['gpu_volume',
+                                                     'gpu_derivative'], 4,
+                                         'wall')
+        publish.write(outputs, out, 'test', {'skipped': skipped})
+        return {o.name for o in outputs}
+
+    first = publish_machines('AB')
+    (out / 'standalone' / 'peak-B-elastic-f64.pdf').write_text('set before')
+    second = publish_machines('A')
+    assert 'peak-B-elastic-f64' in first - second
+    assert 'peak-A-elastic-f64' in second
+    left = [p.name for sub in ('figures', 'tables', 'data', 'standalone')
+            for p in (out / sub).iterdir()]
+    assert left
+    assert all(name.startswith(tuple(f'{n}.' for n in second))
+               for name in left), sorted(left)
+
+
 @pytest.mark.skipif(not _tex_with_pgfplots(),
                     reason='needs pdflatex with pgfplots')
 def test_the_preview_compiles(tmp_path):
@@ -970,3 +1000,17 @@ def test_the_figures_across_machines_compile(tmp_path):
                   {'skipped': skipped})
     ok, why = texout.compile_tex(out / 'preview.tex')
     assert ok, why
+
+
+def test_a_tree_without_its_manifest_is_named_partial(tmp_path):
+    """`evaluate.py` writes `evaluation.json` last: a campaign tree with runs
+    and none stopped early, and the preview says so beside what it drew."""
+    for machine, finished in (('aac7', True), ('pvc', False)):
+        (tmp_path / machine / 'eval' / 'runs').mkdir(parents=True)
+        if finished:
+            (tmp_path / machine / 'eval' / 'evaluation.json').write_text('{}')
+    trees = sorted(tmp_path.glob('*/eval'))
+    assert publish.partial_trees(trees) == ['pvc']
+    tex = publish.preview([], 'title', partial=['pvc'])
+    assert r'\textbf{Partial:} \texttt{pvc}' in tex
+    assert 'Partial' not in publish.preview([], 'title')

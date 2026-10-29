@@ -98,10 +98,19 @@ _CUDAHIP = r'''
 
 using T = %(ctype)s;
 
+/* The factors once as constants, which the compiler keeps in scalar
+   registers, and once per lane.  gfx90a runs an FMA with a scalar operand at
+   a third of its rate -- 6.9 against 20.0 TFLOP/s in single precision on an
+   MI250X GCD, 13.2 against 16.2 in double -- and gfx942 the other way round
+   by a few per cent; the ceiling is the better of the two (`main`). */
+template <bool PerLane>
 __global__ void tfc_fma(T* out, unsigned long long iters) {
   T a[%(acc)d];
   for (int k = 0; k < %(acc)d; ++k) a[k] = (T)(threadIdx.x + k) * (T)1e-3;
-  const T b = (T)1.0000001, c = (T)0.9999999;
+  const T b = PerLane ? (T)1.0000001 + (T)(threadIdx.x & 1) * (T)1e-9
+                      : (T)1.0000001;
+  const T c = PerLane ? (T)0.9999999 - (T)(threadIdx.x & 2) * (T)1e-9
+                      : (T)0.9999999;
   for (unsigned long long i = 0; i < iters; ++i) {
 #pragma unroll
     for (int k = 0; k < %(acc)d; ++k) a[k] = a[k] * b + c;
@@ -139,16 +148,22 @@ int main(int argc, char** argv) {
   CHK(%(prefix)sMalloc(&out, (size_t)grid * block * sizeof(T)));
 
   double fma_best = 0.0;
-  for (int rep = 0; rep < 5; ++rep) {
+  for (int rep = 0; rep < 10; ++rep) {
+    /* The two forms of the factors alternate; the first of each is the
+       warm-up. */
+    const bool per_lane = rep %% 2;
     CHK(%(prefix)sDeviceSynchronize());
     auto t0 = std::chrono::steady_clock::now();
-    tfc_fma<<<grid, block>>>(out, iters);
+    if (per_lane)
+      tfc_fma<true><<<grid, block>>>(out, iters);
+    else
+      tfc_fma<false><<<grid, block>>>(out, iters);
     CHK(%(prefix)sDeviceSynchronize());
     auto t1 = std::chrono::steady_clock::now();
     double s = std::chrono::duration<double>(t1 - t0).count();
     /* Two flops per fused multiply-add. */
     double flops = 2.0 * %(acc)d * (double)iters * (double)grid * block;
-    if (rep > 0) fma_best = fma_best > flops / s ? fma_best : flops / s;
+    if (rep > 1) fma_best = fma_best > flops / s ? fma_best : flops / s;
   }
 
   /* Far past any last-level cache on current parts. */

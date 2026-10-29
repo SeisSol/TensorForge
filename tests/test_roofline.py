@@ -171,6 +171,20 @@ def test_the_first_repetition_is_discarded():
         assert "if (rep > 0)" in rl.emit_ceiling(backend, Datatype.F32)
 
 
+def test_the_fma_is_timed_with_its_factors_scalar_and_per_lane():
+    """gfx90a runs an FMA with a scalar operand at a third of its rate: the
+    chain measured 6.9 TFLOP/s in single precision on an MI250X GCD with its
+    factors as constants and 20.0 with them per lane, and gfx942 the other
+    way round by a few per cent.  Both forms run, the first of each is a
+    warm-up, and the better is the ceiling."""
+    for backend in ("cuda", "hip"):
+        src = rl.emit_ceiling(backend, Datatype.F32)
+        assert "tfc_fma<false><<<grid, block>>>" in src
+        assert "tfc_fma<true><<<grid, block>>>" in src
+        assert "(threadIdx.x & 1)" in src
+        assert "if (rep > 1) fma_best" in src
+
+
 def test_repetitions_are_reduced_with_a_maximum_and_not_a_mean():
     """A ceiling is the best the machine did. A mean over a run that was
     descheduled once reports the scheduler."""

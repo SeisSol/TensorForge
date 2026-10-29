@@ -258,6 +258,22 @@ def test_the_intel_default_needs_no_license():
     `--tool vtune`, and that is a choice the caller makes knowingly."""
     assert bench_profile.BY_VENDOR["intel"] == "unitrace"
 
+
+def test_an_intel_run_without_unitrace_takes_vtune(monkeypatch, tmp_path):
+    """BEAST's PVC nodes have VTune with oneAPI and no unitrace: the default
+    not being there is no reason to profile nothing.  A tool named stays the
+    tool, and with neither installed the default is kept for the caller to
+    report."""
+    vtune = tmp_path / "vtune"
+    vtune.write_text("")
+    monkeypatch.delenv("TF_UNITRACE", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setenv("TF_VTUNE", str(vtune))
+    assert bench_profile.choose_tool("intel") == "vtune"
+    assert bench_profile.choose_tool("intel", "unitrace") == "unitrace"
+    monkeypatch.delenv("TF_VTUNE")
+    assert bench_profile.choose_tool("intel") == "unitrace"
+
 def test_the_vtune_summary_is_read_as_a_table_and_not_as_long_format():
     """VTune does not write the long format ncu and rocprofv3 do.  It writes
     an indented document flattened into CSV, and the kernel's own figures are

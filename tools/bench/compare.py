@@ -313,13 +313,17 @@ class Field:
         return point.kernel if len(self.captures) > 1 else point.workload
 
     def device_of(self, arch: str) -> str:
-        """The device a machine is, by name; with its backend where the
-        device is several machines (`split_backends`)."""
-        device = next((p.device for p in self.points
-                       if p.arch == arch and p.device), '')
-        if not device:
-            found = self.machine(arch)
-            device = (found.device if found else '') or arch
+        """The device as its runtime named it to the roofline, which ran on
+        it; with its backend where the device is several machines
+        (`split_backends`).  A run's name is what detection made of the
+        host: `requested <arch>` where `--arch` named the target,
+        `fake-<arch>` where the environment declared the GPU
+        (`TF_TEST_FAKE_GPUS`) -- true of the run, and no name for a
+        caption."""
+        found = self.machine(arch)
+        device = (found.device if found else '') or next(
+            (p.device for p in self.points if p.arch == arch and p.device),
+            arch)
         if arch in self.split and device != arch:
             device += f' ({self.split[arch][1]})'
         return device
@@ -382,14 +386,23 @@ def _load_ceiling(path: Path) -> Optional[Ceiling]:
              flops_per_s=float(u['flops_per_s']),
              source=str(u.get('source') or ''))
         for u in c.get('units') or [] if u.get('flops_per_s'))
+    measured = float(c.get('bytes_per_s') or 0.0)
+    bus = float(c.get('peak_bytes_per_s') or 0.0)
+    if bus and measured > bus:
+        # A bus a streaming loop outran is not the bus.  The figure is twice
+        # the memory clock the runtime reports, which is HBM2e's data rate
+        # and half of it for the HBM3 of an MI300A, whose runtime reports
+        # 1.3 GHz for 5.2 Gbit/s a pin -- 2.7 TB/s against a measured 3.1.
+        # Left out rather than drawn at 115 % of itself.
+        bus = 0.0
     return Ceiling(
         arch=c['arch'], backend=c.get('backend', ''),
         device=c.get('device', ''),
         compute_units=int(c.get('compute_units') or c.get('cus') or 0),
         flops_per_s=float(c.get('flops_per_s') or 0.0),
-        bytes_per_s=float(c.get('bytes_per_s') or 0.0),
+        bytes_per_s=measured,
         memory_bytes=int(c.get('memory_bytes') or 0),
-        peak_bytes_per_s=float(c.get('peak_bytes_per_s') or 0.0),
+        peak_bytes_per_s=bus,
         peak_flops_per_s=float(c.get('peak_flops_per_s') or 0.0),
         datatype=str(c.get('datatype') or ''), units=units)
 

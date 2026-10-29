@@ -3084,6 +3084,21 @@ def figure_traffic(fieldset: Field,
     return out
 
 
+def partial_trees(paths: Iterable[Path]) -> List[str]:
+    """The trees whose evaluation stopped before its end: runs in them and
+    no `evaluation.json`, which `evaluate.py` writes last -- a job cancelled
+    or out of time.  What such a tree measured is drawn like the rest, and
+    the preview says it is not all.  Named by the machine, the directory
+    above `eval` in a campaign."""
+    out: List[str] = []
+    for target in map(Path, paths):
+        if (target.is_dir() and (target / 'runs').is_dir()
+                and not (target / 'evaluation.json').exists()):
+            out.append(target.parent.name if target.name == 'eval'
+                       else target.name)
+    return out
+
+
 def _manifests(paths: Iterable[Path]) -> List[Dict]:
     """What every run built, from the manifests beside its results: one
     entry per workload and unit, with the suite it belonged to."""
@@ -3562,9 +3577,10 @@ def figure_timesplit(runs: Sequence[Run]) -> List[Output]:
 # ----------------------------------------------------------------------
 
 def preview(outputs: Sequence[Output], title: str,
-            skipped: Sequence[str] = ()) -> str:
+            skipped: Sequence[str] = (), partial: Sequence[str] = ()) -> str:
     """A document with every output and its suggested caption, after a
-    page that names them and says what was not made, and why."""
+    page that names them, the machines whose evaluation stopped early, and
+    what was not made, and why."""
     def names(kind: str) -> str:
         return ', '.join(r'\texttt{' + texout.escape(o.name) + '}'
                          for o in outputs if o.kind == kind) or 'none'
@@ -3573,6 +3589,13 @@ def preview(outputs: Sequence[Output], title: str,
     contents = ('{\\raggedright\\noindent\\textbf{Tables:} '
                 + names('table') + '\n\n\\noindent\\textbf{Figures:} '
                 + names('figure') + '\\par}\n')
+    if partial:
+        contents += ('\n\\noindent\\textbf{Partial:} '
+                     + ', '.join(r'\texttt{' + texout.escape(p) + '}'
+                                 for p in partial)
+                     + ' -- the evaluation stopped before its end (no '
+                     '\\texttt{evaluation.json}): what it measured is in '
+                     'the figures, the rest is missing.\\par\n')
     if skipped:
         # The math bullet: the text one is a bitmap font where the
         # document has no Type 1 one for it (`_rampup_table`).
@@ -3709,7 +3732,8 @@ def build(fieldset: Optional[Field], described: Sequence,
         add(figure_lanes(fieldset, kernels, styles),
             'lanes: no executed flops, or one order only')
         add(figure_resources(fieldset, kernels, styles),
-            'resources: no registers or code sizes recorded')
+            'resources: no registers or code sizes recorded, or one order '
+            'only')
         add(figure_precision(fieldset, kernels),
             'precision: no kernel measured in both precisions')
         add(figure_simulations(fieldset, kernels, order, styles),
@@ -3723,8 +3747,16 @@ def build(fieldset: Optional[Field], described: Sequence,
 
 def write(outputs: Sequence[Output], out: Path, title: str,
           manifest: Dict) -> None:
+    """The outputs into `out`.  What an earlier publish there wrote and this
+    one does not is removed: `--compile` sets every standalone figure it
+    finds, and a figure of an older tree -- `pvc` before its backends were
+    two machines -- came out of it beside the new ones, freshly dated."""
+    ours = tuple(f'{o.name}.' for o in outputs)
     for sub in ('figures', 'tables', 'data', 'standalone'):
         (out / sub).mkdir(parents=True, exist_ok=True)
+        for path in (out / sub).iterdir():
+            if path.is_file() and not path.name.startswith(ours):
+                path.unlink()
     (out / 'tfstyle.tex').write_text(texout.style())
     for o in outputs:
         where = 'figures' if o.kind == 'figure' else 'tables'
@@ -3734,7 +3766,8 @@ def write(outputs: Sequence[Output], out: Path, title: str,
             (out / 'standalone' / f'{o.name}.tex').write_text(
                 texout.standalone(f'../figures/{o.name}', '../tfstyle'))
     (out / 'preview.tex').write_text(preview(outputs, title,
-                                             manifest.get('skipped', ())))
+                                             manifest.get('skipped', ()),
+                                             manifest.get('partial', ())))
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2,
                                                   default=str))
 
@@ -3834,8 +3867,11 @@ def main() -> int:
         'outputs': [{'name': o.name, 'kind': o.kind, 'rows': len(o.rows)}
                     for o in outputs],
         'skipped': skipped,
+        'partial': partial_trees(args.paths),
     }
     write(outputs, args.out, args.title, manifest)
+    for name in manifest['partial']:
+        print(f'partial: {name} -- no evaluation.json; what it measured is in')
     for o in outputs:
         print(f'written: {o.kind} {o.name}')
     for s in skipped:
