@@ -1882,7 +1882,22 @@ class Generator:
                 threads=self._num_threads, fptype=self._context.fp_type,
                 static=self._context.get_user_options().preload_shards,
                 stream=section.streams, aligns=self._proven_alignments(),
+                extents=self._operand_extents(),
                 report=section.shard_report)
+
+  def _operand_extents(self) -> dict:
+    """How many elements each batch-constant operand is stored over, by the
+    name of its binding (`Tensor.storage_volume`): an order a multiplication
+    chose for it reaches past its box, and the binding was typed from the
+    box before that."""
+    out = {}
+    for symbol in self._scopes.get_global_scope().values():
+      obj = symbol.obj
+      if (getattr(obj, 'addressing', None) == Addressing.NONE
+          and symbol.stype != SymbolType.Data):
+        out[f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{symbol.name}'] = int(
+            obj.storage_volume())
+    return out
 
   def _proven_alignments(self) -> dict:
     """What the frontend proves of the batch-constant operands' bases, in

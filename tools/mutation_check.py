@@ -1791,6 +1791,13 @@ GROUPS = {
              '                       uniform=_join((value,)),\n', 1)),
     ]),
 
+    # A merged run's members streamed through the shards: the shards as long
+    # as the members are stored, not as their box.
+    'members': ('tests/test_stage_members.py', [
+        ("a member's storage taken for its box",
+         sub(GEN, '                extents=self._operand_extents(),\n', '', 1)),
+    ]),
+
     # Groups that change places across a loop's back edge are no steady
     # state.
     'swap': ('tests/test_loop_carried.py', [

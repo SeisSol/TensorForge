@@ -135,16 +135,18 @@ def test_the_element_s_own_members_stay_where_they_are():
     assert len(held) == 1 and ' a trip:' in held[0], held
 
 
-def _four_products(**options):
-    """`C += A_d B` four times, `A_d` an operator, merged into one run, on
-    sm_86 with blocks that loop over the batch -- which the host oracle runs
-    whole, every multiplication of the block and its barriers."""
+def _four_products(size=32, **options):
+    """`C += A_d B` four times, `A_d` an operator of `size` x `size`, merged
+    into one run, on sm_86 with blocks that loop over the batch -- which the
+    host oracle runs whole, every multiplication of the block and its
+    barriers."""
     def t(shape, alias, addressing=Addressing.STRIDED):
         return SubTensor(Tensor(list(shape), addressing,
                                 BoundingBox([0, 0], list(shape)),
                                 alias=alias, datatype=Datatype.F32))
-    b, c = t((32, 8), 'B'), t((32, 8), 'C')
-    descrs = [GemmDescr(False, False, t((32, 32), f'A{d}', Addressing.NONE),
+    b, c = t((size, 8), 'B'), t((size, 8), 'C')
+    descrs = [GemmDescr(False, False,
+                        t((size, size), f'A{d}', Addressing.NONE),
                         b, c, alpha=1.0, beta=1.0) for d in range(4)]
     out = io.StringIO()
     with warnings.catch_warnings(), contextlib.redirect_stdout(out):
@@ -181,6 +183,25 @@ def test_a_streamed_member_computes_what_the_global_one_does(budget):
                                            preload_shard_budget=budget)
     assert report and ' a trip:' in report[0]
     assert streamed.count('__syncthreads();') == 2
+    want, got = _written(plain, plain_geo), _written(streamed, geo)
+    assert want and set(want) == set(got)
+    for key in want:
+        assert np.array_equal(np.asarray(got[key]), np.asarray(want[key]))
+
+
+def test_a_member_stored_past_its_box_is_held_to_its_storage():
+    """A 48 x 48 member read by 32 lanes takes two lead slots a lane, stored
+    as a pair and padded to 64 rows: 3072 floats where the box has 2304.
+    The binding is typed from the box, before the multiplication chose that
+    order, so the shards reach as far as the generator says the member is
+    stored (`Generator._operand_extents`) -- clamped to the box, the last
+    third of every trip's copy was left out, and every number came out
+    wrong."""
+    plain, plain_geo, _ = _four_products(48, stage_members=False)
+    streamed, geo, report = _four_products(48, stage_members=True,
+                                           preload_shard_budget=65536)
+    assert report == ['shards: + ' + report[0][len('shards: + '):]]
+    assert '3072 of 3072 element(s)' in report[0], report
     want, got = _written(plain, plain_geo), _written(streamed, geo)
     assert want and set(want) == set(got)
     for key in want:

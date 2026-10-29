@@ -253,6 +253,7 @@ def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                 threads: int, fptype: Datatype, static: bool = True,
                 stream: bool = False,
                 aligns: Optional[Mapping[str, int]] = None,
+                extents: Optional[Mapping[str, int]] = None,
                 report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with the shards that fit into `budget` elements of shared
     memory read from there.
@@ -267,8 +268,10 @@ def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     every multiplication of the block takes together.  Both are held under
     the one budget.  `aligns` is what the caller proves of the operands'
     bases, in bytes, by the name of their binding: how wide the copies may
-    read them.  `report` collects a line per operand: `+` and how much of it
-    is held, `-` and why nothing is.
+    read them.  `extents` is how many elements one of them is stored over,
+    by the same name, where that is more than its binding's type says
+    (`_extents`).  `report` collects a line per operand: `+` and how much of
+    it is held, `-` and why nothing is.
     """
     def note(line: str) -> None:
         if report is not None:
@@ -281,10 +284,11 @@ def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
         note(f'- {len(loops)} batch loops in the body, where one is held')
         return body
     at = loops[0]
-    loads = (_candidates(body, at, threads, mults, fptype, note) if static
-             else [])
+    reach = _extents(body, extents or {})
+    loads = (_candidates(body, at, threads, mults, fptype, reach, note)
+             if static else [])
     if stream:
-        loads += _streamed(body, at, threads, mults, fptype, note)
+        loads += _streamed(body, at, threads, mults, fptype, reach, note)
     shards = _shards(loads)
     held = _choose(shards, budget, align)
     if not held:
@@ -318,8 +322,49 @@ def _first_reads(stmts: Tuple[Stmt, ...]) -> Dict[int, int]:
     return out
 
 
+def _extents(body: Tuple[Stmt, ...],
+             extents: Mapping[str, int]) -> Dict[int, int]:
+    """How many elements the buffers in `body` are stored over, by value,
+    where the caller knows better than their types: an operand bound ahead
+    of the batch loop by the name of its binding (`extents`), and a pointer
+    chosen among such operands -- a merged run's member, through its table --
+    by the largest of them.
+
+    A binding is typed when it is bound, from the box, and a multiplication
+    may store its operand in an order of its own after that
+    (`storage_order`): two lead slots of a lane as a pair, the rows padded to
+    the lanes, longer than the box.  A shard clamped to the type would leave
+    out what the loads read past it."""
+    out: Dict[int, int] = {}
+    for s in walk_stmts(body):
+        if len(s.target) != 1 or not isinstance(s.target[0].type, BufferType):
+            continue
+        # A merged run's binding has a name of its own as well, the stand-in's,
+        # whose box the members' orders do not reach the stand-in through.
+        known = [extents[s.attr('extern')]] if s.attr('extern') in extents \
+            else []
+        sources = [a for a in s.args if isinstance(a, Value)
+                   and isinstance(a.type, BufferType)]
+        if (s.op is Op.RAWEXPR and sources
+                and all(a.id in out for a in sources)):
+            known.append(max(out[a.id] for a in sources))
+        if known:
+            out[s.target[0].id] = max(known)
+    return out
+
+
+def _within(buffer: Value, span: Tuple[int, int, bool],
+            reach: Mapping[int, int]) -> Optional[Tuple[int, int]]:
+    """`span` clamped to what `buffer` is stored over -- the elements a load
+    reads past it belong to lanes its guard leaves out -- or None where
+    nothing of it is left."""
+    last = max(buffer.type.volume, reach.get(buffer.id, 0)) - 1
+    lo, hi = max(0, span[0]), min(span[1], last)
+    return (lo, hi) if lo <= hi else None
+
+
 def _candidates(body, at: int, threads: int, mults: int, fptype: Datatype,
-                note) -> List[_Load]:
+                reach: Mapping[int, int], note) -> List[_Load]:
     """The loads of the loop at `at` that read a batch-constant operand at
     an index known per thread and varying over the lanes, each with the
     span it reads."""
@@ -353,13 +398,17 @@ def _candidates(body, at: int, threads: int, mults: int, fptype: Datatype,
             continue
         if span is None:
             continue
+        held = _within(buffer, span, reach)
+        if held is None:
+            why = 'an index past the end of the operand'
+            refused[why] = refused.get(why, 0) + 1
+            continue
         first = reads.get(id(stmts))
         if first is None:
             first = reads[id(stmts)] = _first_reads(stmts)
         cover = first.get(stmt.target[0].id, len(stmts)) - n - 1
-        out.append(_Load(stmt, buffer, max(0, span[0]),
-                         min(span[1], buffer.type.volume - 1), cover,
-                         position, span[2]))
+        out.append(_Load(stmt, buffer, held[0], held[1], cover, position,
+                         span[2]))
     for why, count in sorted(refused.items()):
         note(f'- {count} load(s): {why}')
     return out
@@ -402,7 +451,7 @@ def _members(trip: Stmt, bound: Mapping[int, Value],
 
 
 def _streamed(body, at: int, threads: int, mults: int, fptype: Datatype,
-              note) -> List[_Load]:
+              reach: Mapping[int, int], note) -> List[_Load]:
     """The loads of a merged run's members (`_members`), each with the span
     one trip reads -- the same for every trip, since only the member moves.
 
@@ -457,13 +506,17 @@ def _streamed(body, at: int, threads: int, mults: int, fptype: Datatype,
                 continue
             if span is None:
                 continue
+            held = _within(buffer, span, reach)
+            if held is None:
+                why = 'an index past the end of the operand'
+                refused[why] = refused.get(why, 0) + 1
+                continue
             first = reads.get(id(stmts))
             if first is None:
                 first = reads[id(stmts)] = _first_reads(stmts)
             cover = first.get(stmt.target[0].id, len(stmts)) - n - 1
-            out.append(_Load(stmt, buffer, max(0, span[0]),
-                             min(span[1], buffer.type.volume - 1), cover,
-                             position, span[2], trip=trip))
+            out.append(_Load(stmt, buffer, held[0], held[1], cover, position,
+                             span[2], trip=trip))
     for why, count in sorted(refused.items()):
         note(f'- {count} member load(s): {why}')
     return out
