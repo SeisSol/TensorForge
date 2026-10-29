@@ -190,3 +190,40 @@ def test_the_arena_a_window_is_cut_from_is_not_itself_a_window():
               "float x = tile[threadIdx.x];\n")
     names = {name for name, _i, _b, _w, _k, _d, _l in bc.accesses(source)}
     assert names == {'tile'}, names
+
+
+@pytest.mark.parametrize("config, dtype", [
+    ("elastic-linearck-o6-d", "F64"),
+    ("elastic-linearck-o6-s", "F32"),
+])
+def test_the_mma_epilogue_tile_is_conflict_free_in_either_precision(config,
+                                                                    dtype):
+    """The epilogue tile's swizzle was chosen over four-byte elements, whose
+    row of 32 is one pass over the banks.  A row of 32 doubles is two, and
+    rows two apart then met in one bank: on sm_90, FP64's epilogue stores and
+    reads were all 2-way, and Nsight counted 170 times the shared-memory bank
+    conflicts of the vector build in `localFluxAll` o6.  The width is the
+    elements of one pass, so the two precisions get the same pattern."""
+    import contextlib
+    import io
+
+    sys.path.insert(0, str(TOOLS.parent / "tests"))
+    import seissol_suite as fx
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.common.context import Context, Options
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    descrs = DescriptionReader(None, {}).read(
+        fx.description("elastic-linearck", config, "gpu_localFluxAll"))[0]
+    ctx = Context(arch="sm_90", backend="cuda",
+                  fp_type=getattr(Datatype, dtype),
+                  options=Options(tensor_cores=True))
+    gen = Generator(descrs, ctx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    found = [(kind, bc.ways(bc._resolve(index, defs), base, width, lanes))
+             for name, index, base, width, kind, defs, lanes
+             in bc.accesses(gen.get_kernel()) if name.endswith("ctile")]
+    assert {kind for kind, _ in found} == {"store", "load"}
+    assert all(w == 1 for _, w in found), found
