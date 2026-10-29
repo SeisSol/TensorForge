@@ -220,10 +220,13 @@ def test_nothing_to_hold_leaves_the_kernel_as_it_was():
         return re.sub(r'kernel_\w*?_[0-9a-f]{16}', 'K', '\n'.join(
             line for line in src.splitlines() if '// options:' not in line))
 
+    # Neither copies a merged run's members a trip at a time: that is
+    # `stage_members`' question (`test_stage_members`), not this one.
     report = []
     with_, _ = _build('local_flux', 'gfx942', 'hip', report=report,
-                      preload_shards=True)
-    without, _ = _build('local_flux', 'gfx942', 'hip')
+                      preload_shards=True, stage_members=False)
+    without, _ = _build('local_flux', 'gfx942', 'hip', preload_shards=False,
+                        stage_members=False)
     assert report and all(r.startswith('- ') for r in report)
     assert normal(with_) == normal(without)
 

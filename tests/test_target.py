@@ -149,6 +149,15 @@ def test_only_nvidia_stages_through_async_copies():
     assert not Target('gfx942', 'hip').async_staging()
 
 
+def test_global_load_lds_reads_through_a_pointer_to_non_const():
+    """ROCm 7.14's clang (23) declares the builtin's source `void __global *`,
+    and a pointer to const does not convert to it: the kernel fails to build.
+    ROCm 7.2's clang (22) took either, so only the spelling can tell."""
+    text = Target('gfx942', 'hip').lexic.copy_async('dst', 'src', 4)
+    assert text.startswith('__builtin_amdgcn_global_load_lds(')
+    assert 'const __attribute__((address_space(1)))' not in text
+
+
 def test_one_wait_counter_on_amd():
     assert Target('gfx942', 'hip').one_wait_counter()
     assert not Target('sm_86', 'cuda').one_wait_counter()

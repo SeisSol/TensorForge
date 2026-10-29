@@ -1249,9 +1249,8 @@ class VariantLoop(AbstractInstruction):
   def barrier_scope(self):
     """A loop containing a barrier synchronizes, seen from outside -- as
     `BatchLoop` says of its own body, which asks this of its instructions.
-    Silent, it would leave a staged member's block barriers
-    (`Generator._stage_member`) invisible to the block sizing that has to
-    allow them."""
+    Silent, it would leave the barriers of its body invisible to the block
+    sizing that has to allow them."""
     inner = [i.barrier_scope() for i in self._region]
     return max((s for s in inner if s is not None), default=None)
 

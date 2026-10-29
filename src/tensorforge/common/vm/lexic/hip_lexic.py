@@ -209,9 +209,12 @@ class HipLexic(CudaLexic):
       # them.  Refused rather than approximated, so the caller narrows.
       return None
 
+    # The source is cast to a pointer to non-const: ROCm 7.14's clang (23)
+    # declares the parameter `void __global *`, and a pointer to const does
+    # not convert to it; ROCm 7.2's clang took either.
     # TODO: use address space templates from tensorforge_device/hip.h
     return (f'__builtin_amdgcn_global_load_lds('
-            f'(const __attribute__((address_space(1))) uint32_t*)({src}), '
+            f'(__attribute__((address_space(1))) uint32_t*)({src}), '
             f'(__attribute__((address_space(3))) uint32_t*)({dst}), '
             f'{nbytes}, 0, 0);')
 

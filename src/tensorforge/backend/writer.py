@@ -124,7 +124,7 @@ class Writer:
     # text has no use for them.
     return Block(self, 'if ({})'.format(expression))
 
-  def For(self, argument, unroll=False, uniform=None):
+  def For(self, argument, unroll=False, uniform=None, batch=False):
     # `unroll` is `True` for the bare pragma or a count for `#pragma unroll N`;
     # see `pir.build._unroll_pragma`, which both writers share.
     from tensorforge.backend.pir.build import _unroll_pragma

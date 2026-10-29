@@ -52,8 +52,8 @@ from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, 
 from tensorforge.common.basic_types import Datatype
 
 from .core import (BOOL, INDEX, Access, BufferType, Effect, MemSpace, Op,
-                   Participants, Stmt, Uniformity, Value, accesses_conflict,
-                   walk_stmts)
+                   Participants, ScalarType, Stmt, Uniformity, Value,
+                   accesses_conflict, walk_stmts)
 
 
 class _NotStatic(Exception):
@@ -216,6 +216,9 @@ class _Load:
     position: int
     #: Whether its span is over the trips of a counted loop it stands in.
     trips: bool = False
+    #: The trip of a merged run whose member it reads, a member a trip
+    #: (`_streamed`); None for an operand bound ahead of the batch loop.
+    trip: Optional[Stmt] = None
 
 
 @dataclass
@@ -232,6 +235,11 @@ class _Shard:
         return self.hi - self.lo + 1
 
     @property
+    def trip(self) -> Optional[Stmt]:
+        """The trip it is copied in at the head of, where it is a member's."""
+        return self.loads[0].trip
+
+    @property
     def cover(self) -> int:
         return min(load.cover for load in self.loads)
 
@@ -242,7 +250,9 @@ class _Shard:
 
 def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                 arena: str, align: int, budget: int, mults: int,
-                threads: int, fptype: Datatype,
+                threads: int, fptype: Datatype, static: bool = True,
+                stream: bool = False,
+                aligns: Optional[Mapping[str, int]] = None,
                 report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with the shards that fit into `budget` elements of shared
     memory read from there.
@@ -251,7 +261,13 @@ def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     alignment its first element has in the operand modulo `align`.
     `threads` is how many lanes one multiplication spans and `mults` how
     many multiplications the block holds, whose threads together copy the
-    shards in.  `report` collects a line per operand: `+` and how much of it
+    shards in.  `static` takes the operands bound ahead of the batch loop,
+    copied in once ahead of it; `stream` the members of a merged run, copied
+    in at the head of every trip (`_streamed`) -- which the caller promises
+    every multiplication of the block takes together.  Both are held under
+    the one budget.  `aligns` is what the caller proves of the operands'
+    bases, in bytes, by the name of their binding: how wide the copies may
+    read them.  `report` collects a line per operand: `+` and how much of it
     is held, `-` and why nothing is.
     """
     def note(line: str) -> None:
@@ -259,18 +275,23 @@ def shard_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
             report.append(line)
 
     loops = [i for i, s in enumerate(body)
-             if s.op is Op.FOR and s.attr('next') is not None]
+             if (s.op is Op.FOR and s.attr('next') is not None)
+             or (s.op is Op.RAWBLOCK and s.attr('batch'))]
     if len(loops) != 1:
         note(f'- {len(loops)} batch loops in the body, where one is held')
         return body
     at = loops[0]
-    shards = _shards(_candidates(body, at, threads, mults, fptype, note))
+    loads = (_candidates(body, at, threads, mults, fptype, note) if static
+             else [])
+    if stream:
+        loads += _streamed(body, at, threads, mults, fptype, note)
+    shards = _shards(loads)
     held = _choose(shards, budget, align)
     if not held:
         note('- no shard fits' if shards else '- no load to hold')
         return body
     return _rewrite(body, at, held, shards, scratch, arena, threads, mults,
-                    align, note)
+                    align, _alignments(body, at, aligns or {}), note)
 
 
 def _bindings(body: Tuple[Stmt, ...], upto: int, fptype: Datatype
@@ -309,7 +330,7 @@ def _candidates(body, at: int, threads: int, mults: int, fptype: Datatype,
     writes = [a for s in walk_stmts(body) for a in s.accesses
               if a.writes and a.space is MemSpace.GLOBAL]
     indices = _Indices(body, {'x': threads, 'y': mults})
-    batch = loop.regions[0].args[0].id
+    batch = _batch(loop)
     reads: Dict[int, Dict[int, int]] = {}
     out: List[_Load] = []
     refused: Dict[str, int] = {}
@@ -341,6 +362,110 @@ def _candidates(body, at: int, threads: int, mults: int, fptype: Datatype,
                          position, span[2]))
     for why, count in sorted(refused.items()):
         note(f'- {count} load(s): {why}')
+    return out
+
+
+def _batch(loop: Stmt) -> Optional[int]:
+    """The batch loop's induction, or None for a traversal spelled as text
+    (`BatchLoop._gen_grouped`), whose element no index reaches but through
+    text -- which `_Indices` does not read, and refuses."""
+    args = loop.regions[0].args
+    return args[0].id if args else None
+
+
+def _members(trip: Stmt, bound: Mapping[int, Value],
+             fptype: Datatype) -> Dict[int, int]:
+    """The buffers `trip` binds out of its counter and the operands in
+    `bound` alone, at the top of its body -- a merged run's member of the
+    trip, its table and its binding as the stand-in (`DeclareOperandTable`),
+    which every element reads alike -- with where each is bound."""
+    region = trip.regions[0]
+    counter = region.args[0]
+    known = set(bound) | {counter.id}
+    varying = {counter.id}
+    out: Dict[int, int] = {}
+    for n, s in enumerate(region.body):
+        if s.op is not Op.RAWEXPR or len(s.target) != 1 or not s.args:
+            continue
+        if not all(isinstance(a, Value) and a.id in known for a in s.args):
+            continue
+        t = s.target[0]
+        known.add(t.id)
+        if not any(a.id in varying for a in s.args):
+            continue
+        varying.add(t.id)
+        ty = t.type
+        if (isinstance(ty, BufferType) and ty.space is MemSpace.GLOBAL
+                and ty.readonly and ty.elem == fptype):
+            out[t.id] = n
+    return out
+
+
+def _streamed(body, at: int, threads: int, mults: int, fptype: Datatype,
+              note) -> List[_Load]:
+    """The loads of a merged run's members (`_members`), each with the span
+    one trip reads -- the same for every trip, since only the member moves.
+
+    A trip is a counted loop at the top of the batch loop's body, whose
+    trips the caller promises every multiplication of the block takes
+    together: its head holds the block's copy of the trip's members, between
+    two barriers.  A load reads the member of its trip at an index known per
+    thread and not moving with the trip, and stands behind every binding the
+    head goes after.
+    """
+    loop = body[at]
+    bound = _bindings(body, at, fptype)
+    if not bound:
+        return []
+    indices = _Indices(body, {'x': threads, 'y': mults})
+    batch = _batch(loop)
+    out: List[_Load] = []
+    refused: Dict[str, int] = {}
+    for trip in loop.regions[0].body:
+        if trip.op is not Op.FOR or not trip.regions:
+            continue
+        bounds = trip.loop_bounds
+        if not all(isinstance(x, int) for x in bounds) or not bounds[2]:
+            continue
+        members = _members(trip, bound, fptype)
+        if not members:
+            continue
+        top = trip.regions[0].body
+        head = max(members.values())
+        place = {id(s): n for n, s in enumerate(top)}
+        counter = trip.regions[0].args[0].id
+        reads: Dict[int, Dict[int, int]] = {}
+        for position, (stmt, stmts, n, parents) in enumerate(_inside(trip)):
+            if stmt.op != Op.LOAD or len(stmt.args) != 2:
+                continue
+            buffer = stmt.args[0]
+            if not isinstance(buffer, Value) or buffer.id not in members:
+                continue
+            where = place[id(parents[1])] if len(parents) > 1 else n
+            why = None
+            if where <= head:
+                why = 'a member read ahead of the bindings of its trip'
+            else:
+                try:
+                    if counter in indices.leaves(stmt.args[1]):
+                        raise _NotStatic('an index moving with the trip')
+                    span = _span(stmt, (loop,) + parents, indices, batch)
+                except _NotStatic as error:
+                    why = f'an index not known per thread ({error})'
+            if why is not None:
+                refused[why] = refused.get(why, 0) + 1
+                continue
+            if span is None:
+                continue
+            first = reads.get(id(stmts))
+            if first is None:
+                first = reads[id(stmts)] = _first_reads(stmts)
+            cover = first.get(stmt.target[0].id, len(stmts)) - n - 1
+            out.append(_Load(stmt, buffer, max(0, span[0]),
+                             min(span[1], buffer.type.volume - 1), cover,
+                             position, span[2], trip=trip))
+    for why, count in sorted(refused.items()):
+        note(f'- {count} member load(s): {why}')
     return out
 
 
@@ -530,10 +655,10 @@ def _copies(placed: List[Tuple[_Shard, int]]) -> List[_Copy]:
 
 
 def _stage(b, operand: Value, buf: Value, copy: _Copy, flat: Value,
-           block: int) -> None:
+           block: int, width: int = 1) -> None:
     """`copy` by the threads of the block, `flat` the thread's place among
-    them: each thread its share of `block` elements, under a guard where
-    the block covers the copy at once."""
+    them: each thread its share of `block` accesses of `width` elements
+    (`_width`), under a guard where the block covers the copy at once."""
     def plus(a: Value, c, hint: str) -> Value:
         if isinstance(c, int) and c == 0:
             return a
@@ -550,25 +675,73 @@ def _stage(b, operand: Value, buf: Value, copy: _Copy, flat: Value,
             out = plus(out, b.op('mul', INDEX, k, step - copy.count), hint)
         return out
 
-    def one(i: Value) -> None:
+    elem = operand.type.elem
+    wide = ScalarType(elem, width) if width > 1 else None
+
+    def one(u: Value) -> None:
+        # Access `u` moves elements `width * u` on, which never straddle a
+        # run: `width` divides every run's length.
+        i = u if width == 1 else b.op('mul', INDEX, u, width, hint='e')
         k = (b.op('div', INDEX, i, copy.count, hint='k')
              if copy.times > 1 else None)
         src = at(i, k, copy.src, copy.src_step, 'g')
         dst = at(i, k, copy.dst, copy.dst_step, 'l')
-        b.store(buf, b.load(operand, src, hint='sh'), dst)
+        if wide is None:
+            b.store(buf, b.load(operand, src, hint='sh'), dst)
+            return
+        nbytes = width * elem.size()
+        b.store(buf, b.load(operand, src, type_=wide, align=nbytes,
+                            hint='sh'), dst, align=nbytes)
 
-    if copy.total <= block:
-        with b.if_(b.op('lt', BOOL, flat, copy.total, hint='s')):
+    units = copy.total // width
+    if units <= block:
+        with b.if_(b.op('lt', BOOL, flat, units, hint='s')):
             one(flat)
         return
-    with b.for_(flat, copy.total, block, hint='s',
+    with b.for_(flat, units, block, hint='s',
                 uniform=Uniformity.LANE) as f:
         one(f.induction)
 
 
+def _alignments(body: Tuple[Stmt, ...], at: int,
+                aligns: Mapping[str, int]) -> Dict[int, int]:
+    """What is proven of the bases of the buffers in `body`, in bytes, by
+    value: an operand bound ahead of the batch loop by the name of its
+    binding (`aligns`), and a pointer chosen among such operands -- a merged
+    run's member, through its table -- by the least of them."""
+    out: Dict[int, int] = {}
+    for s in walk_stmts(body):
+        if len(s.target) != 1 or not isinstance(s.target[0].type, BufferType):
+            continue
+        name = s.attr('extern')
+        if name in aligns:
+            out[s.target[0].id] = aligns[name]
+            continue
+        sources = [a for a in s.args if isinstance(a, Value)
+                   and isinstance(a.type, BufferType)]
+        if (s.op is Op.RAWEXPR and sources
+                and all(a.id in out for a in sources)):
+            out[s.target[0].id] = min(out[a.id] for a in sources)
+    return out
+
+
+def _width(copy: _Copy, elem: int, proven: int) -> int:
+    """How many elements a thread moves at once in `copy`: as many as one
+    access of 16 bytes takes, as the operand's base is proven aligned for,
+    and as every run's start, length and distance allow -- the buffer keeps
+    the operand's alignment (`_layout`), so its side follows."""
+    width = max(1, min(16, proven) // elem)
+    while width > 1 and any(x % width for x in (
+            copy.src, copy.dst, copy.count,
+            copy.src_step if copy.times > 1 else 0,
+            copy.dst_step if copy.times > 1 else 0)):
+        width //= 2
+    return width
+
+
 def _rewrite(body, at: int, held: List[_Shard], shards: List[_Shard],
              scratch, arena: str, threads: int, mults: int, align: int,
-             note) -> Tuple[Stmt, ...]:
+             proven: Dict[int, int], note) -> Tuple[Stmt, ...]:
     """`body` with the held shards copied in ahead of the loop at `at`, by
     every thread of the block and behind a barrier, and their loads reading
     them there."""
@@ -579,15 +752,43 @@ def _rewrite(body, at: int, held: List[_Shard], shards: List[_Shard],
                 hint='flat')
     block = threads * mults
     buffers: Dict[int, Value] = {}
+    streamed: Dict[int, List] = {}
+    copied = False
     for key, (size, placed) in layout.items():
         operand = placed[0][0].buffer
         buf = b.alloc(operand.type.elem, (size,), MemSpace.SHARED,
                       hint='shard', arena=arena)
         buffers[key] = buf
+        trip = placed[0][0].trip
+        if trip is not None:
+            streamed.setdefault(id(trip), []).append((operand, buf, placed))
+            continue
         for copy in _copies(placed):
-            _stage(b, operand, buf, copy, flat, block)
-    b.barrier(Participants.BLOCK)
+            _stage(b, operand, buf, copy, flat, block,
+                   _width(copy, operand.type.elem.size(),
+                          proven.get(operand.id, 0)))
+            copied = True
+    if copied:
+        b.barrier(Participants.BLOCK)
     staging = tuple(b.finish())
+
+    # A member's shards are copied in at the head of every trip, behind the
+    # bindings of the trip's members: behind a barrier, since the previous
+    # trip's readers may still be in the buffer -- or the previous element's
+    # last -- and in front of one, since every multiplication of the block
+    # reads what the whole block copied.
+    heads: Dict[int, Tuple[frozenset, Tuple[Stmt, ...]]] = {}
+    for trip, items in streamed.items():
+        h = scratch()
+        h.barrier(Participants.BLOCK)
+        for operand, buf, placed in items:
+            for copy in _copies(placed):
+                _stage(h, operand, buf, copy, flat, block,
+                       _width(copy, operand.type.elem.size(),
+                              proven.get(operand.id, 0)))
+        h.barrier(Participants.BLOCK)
+        heads[trip] = (frozenset(operand.id for operand, _, _ in items),
+                       tuple(h.finish()))
 
     moved: Dict[int, List[Stmt]] = {}
     for key, (_, placed) in layout.items():
@@ -599,17 +800,19 @@ def _rewrite(body, at: int, held: List[_Shard], shards: List[_Shard],
         mine = [s for s in shards if s.buffer.id == key]
         kept = [s for s in held if s.buffer.id == key]
         operand = mine[0].buffer
+        what = f'{operand} a trip' if mine[0].trip is not None else operand
         total = sum(s.size for s in mine)
         if kept:
-            note(f'+ {operand}: {len(kept)} of {len(mine)} shard(s), '
+            note(f'+ {what}: {len(kept)} of {len(mine)} shard(s), '
                  f'{sum(s.size for s in kept)} of {total} element(s)')
         else:
-            note(f'- {operand}: 0 of {len(mine)} shard(s), 0 of {total} '
+            note(f'- {what}: 0 of {len(mine)} shard(s), 0 of {total} '
                  f'element(s)')
 
     loop = body[at]
     loop = replace(loop, regions=tuple(
-        replace(r, body=_substitute(r.body, moved)) for r in loop.regions))
+        replace(r, body=_substitute(r.body, moved, heads))
+        for r in loop.regions))
     return body[:at] + staging + (loop,) + body[at + 1:]
 
 
@@ -628,8 +831,11 @@ def _moved(stmt: Stmt, buf: Value, shift: int, scratch) -> List[Stmt]:
     return out
 
 
-def _substitute(stmts: Tuple[Stmt, ...], moved: Dict[int, List[Stmt]]
-                ) -> Tuple[Stmt, ...]:
+def _substitute(stmts: Tuple[Stmt, ...], moved: Dict[int, List[Stmt]],
+                heads: Optional[Dict[int, Tuple[frozenset, Tuple[Stmt, ...]]]]
+                = None) -> Tuple[Stmt, ...]:
+    """`stmts` with the loads in `moved` replaced, and a trip in `heads`
+    with its head behind the last binding of the members it copies."""
     out: List[Stmt] = []
     for s in stmts:
         new = moved.get(id(s))
@@ -637,8 +843,16 @@ def _substitute(stmts: Tuple[Stmt, ...], moved: Dict[int, List[Stmt]]
             out.extend(new)
             continue
         if s.regions:
-            s = replace(s, regions=tuple(
-                replace(r, body=_substitute(r.body, moved))
-                for r in s.regions))
+            head = heads.get(id(s)) if heads else None
+            regions = []
+            for k, r in enumerate(s.regions):
+                inner = _substitute(r.body, moved, heads)
+                if head is not None and k == 0:
+                    operands, copies = head
+                    at = max(n for n, x in enumerate(inner)
+                             if any(t.id in operands for t in x.target))
+                    inner = inner[:at + 1] + copies + inner[at + 1:]
+                regions.append(replace(r, body=inner))
+            s = replace(s, regions=tuple(regions))
         out.append(s)
     return tuple(out)

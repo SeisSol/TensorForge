@@ -2332,9 +2332,14 @@ class IRBuilder:
                          guard=guard)
 
     def For(self, argument, unroll=False,
-            uniform: Optional[Uniformity] = None) -> '_RawBlock':
+            uniform: Optional[Uniformity] = None,
+            batch: bool = False) -> '_RawBlock':
+        """A loop whose head is text.  `batch` says it is the traversal of
+        the batch -- the block's group spelled as text (`BatchLoop`) -- which
+        the passes that place something ahead of that loop look for
+        (`shards.shard_loads`)."""
         return _RawBlock(self, f'{_unroll_pragma(unroll)}for ({argument})',
-                         uniform=uniform)
+                         uniform=uniform, batch=batch)
 
     def While(self, argument) -> '_RawBlock':
         return _RawBlock(self, f'while ({argument})')
@@ -2426,12 +2431,13 @@ class _RawBlock:
 
     def __init__(self, builder: IRBuilder, text: str, pragma: Optional[str] = None,
                  uniform: Optional[Uniformity] = None,
-                 guard: Optional[str] = None):
+                 guard: Optional[str] = None, batch: bool = False):
         self.builder = builder
         self.text = text
         self.pragma = pragma
         self.uniform = uniform
         self.guard = guard
+        self.batch = batch
 
     def __enter__(self):
         self.builder.push(kind='rawblock')
@@ -2446,6 +2452,8 @@ class _RawBlock:
             attrs = attrs + (('uniform', self.uniform),)
         if self.guard is not None:
             attrs = attrs + (('guard', self.guard),)
+        if self.batch:
+            attrs = attrs + (('batch', True),)
         self.builder.emit(Stmt(op=Op.RAWBLOCK, regions=(region,), text=self.text,
                                pure=False, movable=False, effect=Effect.NONE,
                                attrs=attrs))
