@@ -2804,6 +2804,23 @@ GROUPS = {
         ('a statement in the trip that says nothing of what it touches unseen',
          sub(CARRY, '                    self.unsaid = True\n',
              '                    pass\n', 1)),
+        ('the forward of memory behind the carry',
+         sub(PIPE, "    if early_forward is not None:\n"
+                   "        pm.add(early_forward)\n"
+                   "        for name, fn in (('forward-memory-fold', fold),\n"
+                   "                         ('forward-memory-dce', dce)):\n"
+                   "            pm.add(Rewrite(name, fn, preserves=('flat',)))\n"
+                   "    if carry is not None:\n"
+                   "        pm.add(carry)\n"
+                   "        pm.add(Rewrite('carry-dce', dce, preserves=('flat',)))\n",
+             "    if carry is not None:\n"
+             "        pm.add(carry)\n"
+             "        pm.add(Rewrite('carry-dce', dce, preserves=('flat',)))\n"
+             "    if early_forward is not None:\n"
+             "        pm.add(early_forward)\n"
+             "        for name, fn in (('forward-memory-fold', fold),\n"
+             "                         ('forward-memory-dce', dce)):\n"
+             "            pm.add(Rewrite(name, fn, preserves=('flat',)))\n", 1)),
     ]),
     # A buffer of the arena every lane reads only what it wrote itself, in
     # registers over the statements that touch it.

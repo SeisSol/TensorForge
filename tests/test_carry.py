@@ -68,6 +68,8 @@ class Run:
     memory of that space through no buffer it names, and `number` one that
     stores a number into the other output.  `spelled` writes the head out a
     column at a time, a load and a store each, all of one transfer.
+    `round_trip` stores the sum in the trip and stages it back for one more
+    add, as an operation hands its result to the next.
     """
 
     def __init__(self, *, table=False, elsewhere=False, other_rows=False,
@@ -77,7 +79,7 @@ class Run:
                  guarded=False, guarded_load=False, guard='if (active)',
                  tail_read=False, overwrite=False, split=False, wide=False,
                  masked=False, stray=False, unseen=None, number=False,
-                 spelled=False):
+                 spelled=False, round_trip=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
 
         def guarding(on):
@@ -177,6 +179,23 @@ class Run:
                     with b.for_(cols, COLS, 1, unroll=True) as hop:
                         j = hop.induction
                         b.store(tail, b.op('add', real, b.load(head, j), 1.0),
+                                j)
+            if round_trip:
+                with b.if_(valid):
+                    with b.for_(0, COLS, 1, unroll=True) as hop:
+                        j = hop.induction
+                        b.store(q, b.load(tail, j), element(j))
+                back = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r4',
+                               extern='r4', init='{}')
+                with b.transfer():
+                    with b.for_(0, COLS, 1, unroll=True) as hop:
+                        j = hop.induction
+                        b.store(back, b.load(q, element(j), predicate=valid),
+                                j)
+                with b.if_(valid):
+                    with b.for_(0, COLS, 1, unroll=True) as hop:
+                        j = hop.induction
+                        b.store(tail, b.op('add', real, b.load(back, j), 1.0),
                                 j)
             if writes_head:
                 b.store(head, 0.0, 0)
@@ -426,6 +445,30 @@ def test_a_head_written_out_a_column_at_a_time_is_one_transfer():
     _, loop, _ = _split(out)
     assert not _touches(loop.regions[0].body, _q_root(run))
     assert any('in registers over 4 trips' in line for line in run.report)
+
+
+def test_what_a_trip_stages_back_itself_is_taken_away_ahead_of_the_carry():
+    """The trip stores its sum and stages it back for one more add before
+    the tail stores it.  Alone, the carry finds a store ahead of a load and
+    keeps `Q` in memory; in the pipeline the forward of memory runs ahead of
+    it (`standard_pipeline`), reads the sum where the store took it, and the
+    carry finds a load at the head of the trip and a store at its tail."""
+    from tensorforge.backend.pir import optimize
+    from tensorforge.backend.pir.pipeline import CarryTrips, Forward
+    run = Run(round_trip=True)
+    assert run.carry() == run.body
+    assert any('a store ahead of a load' in line for line in run.report)
+    report = []
+    out = optimize(run.body,
+                   carry=CarryTrips(run.b.scratch, threads=LANES,
+                                    report=report),
+                   early_forward=Forward(run.b.scratch, threads=LANES,
+                                         registers=False, report=report))
+    verify(out)
+    loop = next(s for s in walk_stmts(out) if s.op is Op.FOR
+                and s.attr('rolled'))
+    assert not _touches(loop.regions[0].body, run.q)
+    assert any('in registers over' in line for line in report), report
 
 
 def test_a_binding_handed_on_keeps_the_buffer_in_memory():

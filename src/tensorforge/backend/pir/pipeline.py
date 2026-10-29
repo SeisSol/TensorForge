@@ -298,8 +298,10 @@ class CarryTrips(Pass):
 
     Behind everything that cleans the body up -- the load at the head of a
     trip and the store at its tail are transfers and nests the loaders and
-    the stores open, which `flatten` brings out -- and ahead of the wrap,
-    which would otherwise issue the next trip's load at the tail of this one.
+    the stores open, which `flatten` brings out -- and behind the forward of
+    memory, which takes away what a trip stores and loads back itself; ahead
+    of the wrap, which would otherwise issue the next trip's load at the
+    tail of this one.
     Not under the explicit vector, whose register images are vectors a slot
     does not hold.  `threads` is how many lanes a multiplication spans,
     `arena` the multiplication's own arena in shared memory, whose buffers a
@@ -598,18 +600,21 @@ def standard_pipeline(debug: str = '',
     for the next element are statements of the body like any other, and go
     through the cleanup with it (`Prefetch`).
 
-    ``carry``, where asked for, runs behind the cleanup as well: what the
+    ``early_forward``, where asked for, runs behind the cleanup as well: a
+    load of memory that reads what its own lane stored is read from the
+    registers the store took it from (`Forward` without registers).  Ahead
+    of the carry, which then finds what a trip hands the next one and not
+    the round trips the trip makes itself -- a result stored and staged back
+    by the next operation stands between the load at the head of a trip and
+    the store at its tail; of the atomics, which see a result handed to the
+    accumulation behind it as the chain it is; and of ``cap`` and the wrap,
+    which count the work ahead of a transfer's first read.
+
+    ``carry``, where asked for, runs behind the forward of memory: what the
     trips of a merged run hand each other through memory goes into registers
     where it may (`CarryTrips`), and a ``dce`` takes the address arithmetic
     of the stores it took out.  Ahead of ``shards`` and the wrap, which see
     the load it moved ahead of the loop as a load of the body like any other.
-
-    ``early_forward``, where asked for, runs behind the carry: a load of
-    memory that reads what its own lane stored is read from the registers
-    the store took it from (`Forward` without registers).  Ahead of the
-    atomics, which see a result handed to the accumulation behind it as the
-    chain it is, and of ``cap`` and the wrap, which count the work ahead of a
-    transfer's first read.
 
     ``atomics``, where asked for, runs behind the carry: the accumulator a
     merged run's trips hand each other in registers is then one load ahead
@@ -663,14 +668,14 @@ def standard_pipeline(debug: str = '',
     for name, fn in (('loads', load_cse), ('licm', licm), ('cse2', cse),
                      ('dce', dce)):
         pm.add(Rewrite(name, fn, preserves=('flat',)))
-    if carry is not None:
-        pm.add(carry)
-        pm.add(Rewrite('carry-dce', dce, preserves=('flat',)))
     if early_forward is not None:
         pm.add(early_forward)
         for name, fn in (('forward-memory-fold', fold),
                          ('forward-memory-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',)))
+    if carry is not None:
+        pm.add(carry)
+        pm.add(Rewrite('carry-dce', dce, preserves=('flat',)))
     if move is not None and move.cover > 0:
         pm.add(Rewrite('cap', move.cap, requires=('flat',),
                        preserves=('flat',)))

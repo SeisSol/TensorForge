@@ -485,8 +485,9 @@ class AbstractInstruction(ABC):
                               exchange=exchange, **carry)
       # What the lanes store and load back -- a result handed to the
       # accumulation behind it, or to the next operation -- is read from its
-      # registers before the atomics ask what a store adds onto, and before
-      # the cover of a transfer is counted (`pir.standard_pipeline`).
+      # registers before the carry asks what the trips hand each other, the
+      # atomics what a store adds onto, and before the cover of a transfer
+      # is counted (`pir.standard_pipeline`).
       early = pir.Forward(builder.scratch, report=carries,
                           registers=False, **carry)
     own = None
