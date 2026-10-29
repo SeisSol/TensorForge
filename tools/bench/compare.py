@@ -313,13 +313,17 @@ class Field:
         return point.kernel if len(self.captures) > 1 else point.workload
 
     def device_of(self, arch: str) -> str:
-        """The device a machine is, by name; with its backend where the
-        device is several machines (`split_backends`)."""
-        device = next((p.device for p in self.points
-                       if p.arch == arch and p.device), '')
-        if not device:
-            found = self.machine(arch)
-            device = (found.device if found else '') or arch
+        """The device as its runtime named it to the roofline, which ran on
+        it; with its backend where the device is several machines
+        (`split_backends`).  A run's name is what detection made of the
+        host: `requested <arch>` where `--arch` named the target,
+        `fake-<arch>` where the environment declared the GPU
+        (`TF_TEST_FAKE_GPUS`) -- true of the run, and no name for a
+        caption."""
+        found = self.machine(arch)
+        device = (found.device if found else '') or next(
+            (p.device for p in self.points if p.arch == arch and p.device),
+            arch)
         if arch in self.split and device != arch:
             device += f' ({self.split[arch][1]})'
         return device

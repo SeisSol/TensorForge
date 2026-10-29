@@ -507,3 +507,20 @@ def test_a_bus_the_streaming_loop_outran_is_left_out(tmp_path, bus, kept):
     assert field.ceiling('gfx942', 'F64').peak_bytes_per_s == kept
     drawn = compare.view_bandwidth_peak(field)
     assert (drawn is None) == (not kept)
+
+
+@pytest.mark.parametrize('named, expected', [
+    ('AMD Instinct MI300A', 'AMD Instinct MI300A'),
+    ('', 'requested gfx942'),
+])
+def test_a_device_is_named_as_its_runtime_names_it(tmp_path, named,
+                                                   expected):
+    """A run under `--arch` is on `requested gfx942`, and one where the
+    environment declared the GPU on `fake-pvc`; the roofline asked the
+    device itself, and a caption takes its name where it has one."""
+    _write(tmp_path, 'elastic-4-s-s1',
+           [_row('k', 'baseline', 'gfx942', 1024, 100.0,
+                 device='requested gfx942')],
+           ceiling={'arch': 'gfx942', 'datatype': 'F32', 'device': named,
+                    'flops_per_s': 8e13, 'bytes_per_s': 3e12})
+    assert compare.collect([tmp_path]).device_of('gfx942') == expected
