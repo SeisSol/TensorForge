@@ -318,6 +318,15 @@ scheme a kernel is (`ROLES`) and how a paper spells a tensor (`NOTATION`). The
 tests check that every role names a kernel some export has, and that every
 tensor an export names appears in its formula.
 
+The export also says how much of each tensor a kernel reaches -- the bounding
+boxes of its operations: `dQ(3)` at order 4 is one row of the twenty it has --
+and where an operator's nonzeros are (`extents`). `publish.py` draws the
+formulas with that, to scale: each tensor a box of what the kernel reaches of
+it, filled where every element has its own, framed with its nonzeros where all
+elements share it (`figures/operations-*`, in parts where a time step is
+taller than a page), and the shared operators beside each other
+(`figures/operators-*`).
+
 ## Everything as a PDF
 
 Both plotters write SVG and PDF from one list of primitives (`pdfout.py`),
@@ -359,6 +368,8 @@ a suggested caption, after a page listing what was not made and why.
 |---|---|
 | `tables/kernels` | what does each kernel compute? (`describe.py`) |
 | `tables/intensity`, `figures/intensity-*` | how many flops per byte, at each order and precision, against each machine's ridge? |
+| `figures/operations-*` | what does each kernel multiply, drawn to scale, per equation and order? |
+| `figures/operators-*` | where are the nonzeros of the operators the elements share? |
 | `tables/machines` | what did each machine turn out to do, per precision? |
 | `figures/roofline-*` | where does each kernel sit, and which way does the order move it? |
 | `figures/peak-*` | how close to the roof, the bus and the FMA rate does a full launch get? |

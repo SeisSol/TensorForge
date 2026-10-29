@@ -22,6 +22,8 @@ number in the text can be checked against the one in the figure.
 |---|---|---|
 | `tables/kernels` | exports | what does each kernel compute? |
 | `tables/intensity`, `figures/intensity` | exports | how many flops per byte, at each order and precision? |
+| `figures/operations-*` | exports | what does each kernel multiply, drawn to scale? |
+| `figures/operators-*` | exports | where are the shared operators' nonzeros? |
 | `tables/machines` | ceilings | what did each machine turn out to do, per precision? |
 | `figures/roofline-*` | runs, ceilings | where does each kernel sit, and how does it move with the order? |
 | `figures/peak-*` | runs, ceilings | how close to the roof, the bus and the FMA rate does a full launch get? |
@@ -84,6 +86,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import sys
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -522,6 +525,446 @@ def figure_intensity(described: Sequence, kernels: Sequence[str],
                    'precision; above it the machine runs out of arithmetic '
                    'before bandwidth.')
         out.append(Output(f'intensity-{eq}', 'figure', tex, drawn, caption))
+    return out
+
+
+# ----------------------------------------------------------------------
+# The kernels drawn: the formula to scale, the operators' nonzeros
+# ----------------------------------------------------------------------
+
+#: The width the drawings are laid out at -- a two-column paper's column,
+#: 8.6 cm -- and shrunk to `\tfwidth` where that is narrower.  Text keeps its
+#: size where the drawing would only stretch to fill a wider one.
+_OPS_WIDTH = 244.0
+#: A matrix entry, at most, in points: an order-3 operator of ten columns
+#: stays the size of a word rather than of the figure.
+_OPS_CELL = 4.0
+#: A character of `\scriptsize`, a little over the average, for placing
+#: labels apart.
+_OPS_CHAR = 3.9
+_OPS_GAP = 5.0
+_OPS_LABEL = 17.0
+_OPS_HEADER = 11.0
+#: Room below a statement's labels, before the next statement.
+_OPS_BELOW = 7.0
+
+
+def _visible(tex: str) -> int:
+    """How many characters a short piece of LaTeX shows, a times sign and a
+    thin space counted as the room they take."""
+    text = tex.replace('\\times', '++').replace('\\,', ' ')
+    text = re.sub(r'\\[a-zA-Z]+', '', text)
+    return len(re.sub(r'[{}^_$\\]', '', text))
+
+
+@dataclass
+class _Tensor:
+    """One factor as drawn: its reach, how deep it goes past two axes, and
+    what is shared by every element -- with its nonzeros -- against what
+    every element has its own of."""
+    tex: str
+    rows: int
+    cols: int
+    depth: int
+    constant: bool
+    nonzeros: Tuple[Tuple[int, int], ...]
+    members: Tuple[str, ...]
+    densities: Tuple[float, ...]
+
+    def label(self, densities: bool = True) -> str:
+        sizes = [self.rows, self.cols] + ([self.depth] if self.depth > 1
+                                          else [])
+        text = '$\\times$'.join(str(s) for s in sizes)
+        if densities and self.densities:
+            lo, hi = min(self.densities), max(self.densities)
+            text += (f', {100 * lo:.0f}\\,\\%' if round(100 * lo)
+                     == round(100 * hi) else
+                     f', {100 * lo:.0f}--{100 * hi:.0f}\\,\\%')
+        return text
+
+    #: Whether the label gives the operator's share of nonzeros: the
+    #: drawing of the formula leaves that to the drawing of the operators.
+    show_density: bool = True
+
+    def text(self) -> str:
+        return self.label(self.show_density)
+
+    def label_width(self) -> float:
+        return _OPS_CHAR * max(_visible(self.tex), _visible(self.text())) + 3
+
+    def width(self, cell: float) -> float:
+        return self.cols * cell + 1.5 * min(self.depth - 1, 2)
+
+    def height(self, cell: float) -> float:
+        return self.rows * cell + 1.5 * min(self.depth - 1, 2)
+
+
+def _ops_tensor(d, name: str, bindings: Dict[str, Sequence[int]],
+                notation) -> Optional[_Tensor]:
+    """A folded name as drawn: the reach of all the members it stands for,
+    and the nonzeros of the first -- the one the label names."""
+    import describe as dsc
+    names = dsc.members(name, bindings)
+    found = [(n, d.extents[n]) for n in names if n in d.extents]
+    if not found:
+        return None
+    sizes = [max(e.sizes[a] if a < len(e.sizes) else 1 for _, e in found)
+             for a in range(max(len(e.sizes) for _, e in found))]
+    rows = sizes[0] if sizes else 1
+    cols = sizes[1] if len(sizes) > 1 else 1
+    depth = 1
+    for size in sizes[2:]:
+        depth *= size
+    first = found[0][1]
+    nonzeros = tuple((ix[0], ix[1] if len(ix) > 1 else 0)
+                     for ix in first.nonzeros)
+    densities = tuple(e.density for _, e in found if e.density is not None)
+    return _Tensor(dsc._tex_name(name, notation), rows, cols, depth,
+                   first.constant, nonzeros, tuple(n for n, _ in found),
+                   densities, show_density=False)
+
+
+def _ops_sum(sym: str, values: Tuple[int, ...]) -> str:
+    """A sum over a family, its range on the symbol: `\\sum_{i=0}^{3}`."""
+    if values == tuple(range(values[0], values[0] + len(values))):
+        return f'$\\sum_{{{sym}={values[0]}}}^{{{values[-1]}}}$'
+    return (f'$\\sum_{{{sym}\\in\\{{{",".join(map(str, values))}'
+            '\\}}$')
+
+
+def _ops_rows(d, notation) -> Tuple[List[List], List[str]]:
+    """The statements of a kernel as rows of things to draw -- a tensor,
+    or a piece of text: the relation, a sum, a scale factor -- and the
+    ranges of its recursions, which a row draws at their first step."""
+    import describe as dsc
+    out: List[List] = []
+    steps: List[str] = []
+    for item in d.formula:
+        loop = item if isinstance(item, dsc.Loop) else None
+        if loop:
+            steps.append(f'${loop.symbol} = 0,\\dots,{loop.count - 1}$')
+        for s in (item.body if loop else (item,)):
+            bindings: Dict[str, Sequence[int]] = {}
+            for sym, values, moves in s.over:
+                bindings[sym] = values[:1] if moves else values
+                if moves:
+                    steps.append(f'${sym} = '
+                                 + dsc._range(values).replace(
+                                     '..', r',\dots,') + '$')
+            if loop:
+                bindings[loop.symbol] = (0,)
+            row: List = []
+            dest = _ops_tensor(d, s.dest.name, bindings, notation)
+            if dest is None:
+                continue
+            row += [dest, ('$\\mathrel{+}=$' if s.add else '$=$')]
+            row += [_ops_sum(sym, values) for sym, values, moves in s.over
+                    if not moves]
+            row += [f'${dsc._tex_name(x, notation)}$'
+                    if not re.match(r'^-?[\d.]', x) else f'${x}$'
+                    for x in s.scalars]
+            if s.op:
+                row.append(r'$\operatorname{' + s.op.lower() + '}$')
+            for i, f in enumerate(s.factors):
+                if i:
+                    row.append(r'$\cdot$')
+                factor = _ops_tensor(d, f.name, bindings, notation)
+                row.append(factor if factor is not None
+                           else f'${dsc._tex_name(f.name, notation)}$')
+            out.append(row)
+    return out, list(dict.fromkeys(steps))
+
+
+def _ops_symbol(tex: str) -> float:
+    """The width of a relation, a sum or a scale factor, set in `\\small`."""
+    return 5.1 * max(_visible(tex), 1) + 4.0
+
+
+def _ops_width(row: Sequence, cell: float) -> float:
+    total = 0.0
+    for item in row:
+        if isinstance(item, _Tensor):
+            total += max(item.width(cell), item.label_width()) + _OPS_GAP
+        else:
+            total += _ops_symbol(item) + _OPS_GAP
+    return total
+
+
+def _ops_cell(rows: Sequence[Sequence], width: float = _OPS_WIDTH) -> float:
+    """The largest entry, up to `_OPS_CELL`, at which every row fits -- or,
+    where a row's labels alone are wider, at which it is no wider than they
+    make it: a smaller entry would only shrink the drawing, not the row."""
+    floor = 0.6
+    limits = [max(width, _ops_width(r, floor)) for r in rows]
+    cell = _OPS_CELL
+    while cell > floor and any(_ops_width(r, cell) > limit + 0.01
+                               for r, limit in zip(rows, limits)):
+        cell *= 0.92
+    return max(cell, floor)
+
+
+def _ops_draw(t: _Tensor, x: float, top: float, cell: float) -> List[str]:
+    """One tensor at (x, top): a stack behind it where it has more than two
+    axes, then the tensor -- filled where each element has its own, framed
+    with its nonzeros where all elements share it."""
+    out = []
+    w, h = t.cols * cell, t.rows * cell
+    for k in range(min(t.depth - 1, 2), 0, -1):
+        out.append(f'\\draw[{"tfmuted" if t.constant else "tfc3"}, '
+                   f'line width=0.3pt] ({x + 1.5 * k:.2f},{top + 1.5 * k:.2f})'
+                   f' rectangle +({w:.2f},{-h:.2f});')
+    if t.constant:
+        out.append(f'\\draw[tfmuted, line width=0.3pt, fill=white] '
+                   f'({x:.2f},{top:.2f}) rectangle +({w:.2f},{-h:.2f});')
+        inset = 0.12 * cell if cell > 1.5 else 0.0
+        cells = [f'({x + c * cell + inset:.2f},{top - r * cell - inset:.2f})'
+                 f' rectangle +({cell - 2 * inset:.2f},'
+                 f'{-(cell - 2 * inset):.2f})'
+                 for r, c in t.nonzeros if r < t.rows and c < t.cols]
+        if cells:
+            out.append('\\fill[tfc7] ' + ' '.join(cells) + ';')
+    else:
+        out.append(f'\\draw[tfc3, line width=0.3pt, fill=tfc3!22] '
+                   f'({x:.2f},{top:.2f}) rectangle +({w:.2f},{-h:.2f});')
+    return out
+
+
+def _ops_legend(y: float) -> List[str]:
+    return [f'\\draw[tfc3, line width=0.3pt, fill=tfc3!22] (0,{y:.2f}) '
+            f'rectangle +(6,-6);',
+            f'\\node[tf label, anchor=west] at (8,{y - 3:.2f}) '
+            '{each element its own};',
+            f'\\draw[tfmuted, line width=0.3pt] (90,{y:.2f}) '
+            'rectangle +(6,-6);',
+            f'\\fill[tfc7] (91.5,{y - 1.5:.2f}) rectangle +(3,-3);',
+            f'\\node[tf label, anchor=west] at (98,{y - 3:.2f}) '
+            '{shared by all elements, its nonzeros};']
+
+
+def _ops_picture(body: Sequence[str], comment: str) -> str:
+    """A TikZ picture laid out at `_OPS_WIDTH`, shrunk to `\\tfwidth`
+    where that is narrower."""
+    return ('% ' + comment.replace('\n', '\n% ') + '\n'
+            '\\sbox0{\\begin{tikzpicture}[x=1pt, y=1pt, '
+            'font=\\scriptsize]\n' + '\n'.join(body)
+            + '\n\\end{tikzpicture}}%\n'
+            '\\ifdim\\wd0>\\tfwidth\\resizebox{\\tfwidth}{!}{\\usebox0}'
+            '\\else\\usebox0\\fi\n')
+
+
+def _ops_choice(described: Sequence, kernels: Sequence[str]
+                ) -> Dict[Tuple[str, int], Dict[str, object]]:
+    """The kernels by equation and order, in double with one simulation --
+    a drawing has no precision, and one simulation is the one SeisSol
+    runs."""
+    chosen: Dict[Tuple[str, int], Dict[str, object]] = defaultdict(dict)
+    for d in described:
+        c = d.capture
+        if (c is None or d.workload not in kernels or c.simulations != 1
+                or c.precision != 'd' or not getattr(d, 'extents', None)):
+            continue
+        chosen[(c.equation, c.order)][d.workload] = d
+    return chosen
+
+
+#: How tall a drawing may be, in points: a column of a two-column paper
+#: less a caption.  A time step that needs more goes into further parts.
+_OPS_HEIGHT = 560.0
+
+
+def _ops_header(k: str, steps: Sequence[str], y: float,
+                continued: bool) -> str:
+    note = []
+    if continued:
+        note.append('continued')
+    if steps:
+        note.append(f'drawn at the first step, {", ".join(steps)}')
+    return (f'\\node[anchor=north west, inner sep=0pt, text=tfink] at '
+            f'(0,{y:.2f}) {{\\footnotesize\\texttt{{'
+            f'{texout.escape(short(k))}}}'
+            + (f'\\quad\\scriptsize\\color{{tfsecondary}}{"; ".join(note)}'
+               if note else '') + '};')
+
+
+def _ops_row(row: Sequence, y: float, cell: float) -> Tuple[List[str], float]:
+    """One statement at `y`, its tensors centred on one line and their
+    labels on one line below the tallest; the TikZ and the height."""
+    body: List[str] = []
+    tall = max((t.height(cell) for t in row if isinstance(t, _Tensor)),
+               default=8.0)
+    middle = y - tall / 2
+    x = 0.0
+    for item in row:
+        if isinstance(item, _Tensor):
+            slot = max(item.width(cell), item.label_width())
+            body += _ops_draw(item, x + (slot - item.width(cell)) / 2,
+                              middle + item.height(cell) / 2, cell)
+            body.append(f'\\node[tf label, anchor=north, align=center] at '
+                        f'({x + slot / 2:.2f},{y - tall - 1.5:.2f}) '
+                        f'{{${item.tex}$\\\\{item.text()}}};')
+            x += slot + _OPS_GAP
+        else:
+            wide = _ops_symbol(item)
+            body.append(f'\\node[text=tfink, font=\\small] at '
+                        f'({x + wide / 2:.2f},{middle:.2f}) {{{item}}};')
+            x += wide + _OPS_GAP
+    return body, tall + _OPS_LABEL + _OPS_BELOW
+
+
+def figure_operations(described: Sequence, kernels: Sequence[str]
+                      ) -> List[Output]:
+    """Every kernel of a time step as its formula drawn to scale, per
+    equation and order: each tensor as the box of what the kernel reaches
+    of it, the ones every element has its own of filled, the operators all
+    elements share framed with their nonzeros.  A sum over a family is
+    drawn with its first member and the reach of all of them, a recursion
+    at its first step.  What does not fit a page goes into further parts,
+    at the same scale."""
+    import describe as dsc
+    out = []
+    for (eq, order), mine in sorted(_ops_choice(described, kernels).items()):
+        blocks = [(k,) + _ops_rows(mine[k], dsc.NOTATION) for k in kernels
+                  if k in mine]
+        blocks = [(k, rows, steps) for k, rows, steps in blocks if rows]
+        if not blocks:
+            continue
+        cell = _ops_cell([r for _, rows, _ in blocks for r in rows])
+        csv_rows: List[Dict] = []
+        for k, rows, _ in blocks:
+            for n, row in enumerate(rows):
+                for item in row:
+                    if isinstance(item, _Tensor):
+                        csv_rows.append({
+                            'equation': eq, 'order': order, 'kernel': k,
+                            'statement': n, 'tensor': item.members[0],
+                            'members': ' '.join(item.members),
+                            'rows': item.rows, 'cols': item.cols,
+                            'depth': item.depth, 'shared': item.constant,
+                            'nonzeros': len(item.nonzeros),
+                            'densities': ' '.join(
+                                f'{v:.4f}' for v in item.densities)})
+
+        def lay_out(limit: float) -> List[List[str]]:
+            """Into parts no taller than `limit`, a kernel continued where
+            it has to be, its header drawn again."""
+            parts: List[List[str]] = [[]]
+            y = 0.0
+            for k, rows, steps in blocks:
+                parts[-1].append(_ops_header(k, steps, y, False))
+                y -= _OPS_HEADER
+                for row in rows:
+                    drawn, height = _ops_row(row, y, cell)
+                    # The legend below the last row takes a line of its own.
+                    if y - height < 14.0 - limit and len(parts[-1]) > 1:
+                        if parts[-1][-1].startswith('\\node[anchor=north west'):
+                            parts[-1].pop()
+                            y += _OPS_HEADER
+                        parts[-1] += _ops_legend(y)
+                        parts.append([])
+                        y = 0.0
+                        parts[-1].append(_ops_header(
+                            k, steps, y, continued=row is not rows[0]))
+                        y -= _OPS_HEADER
+                        drawn, height = _ops_row(row, y, cell)
+                    parts[-1] += drawn
+                    y -= height
+                y -= 4.0
+            parts[-1] += _ops_legend(y)
+            return parts
+
+        parts = lay_out(_OPS_HEIGHT)
+        if len(parts) > 1:
+            # As even as that many parts allow: the least height at which
+            # there are no more of them.
+            low, high = 0.0, _OPS_HEIGHT
+            for _ in range(20):
+                middle = (low + high) / 2
+                if len(lay_out(middle)) > len(parts):
+                    low = middle
+                else:
+                    high = middle
+            parts = lay_out(high)
+        for i, body in enumerate(parts):
+            name = f'operations-{eq}-o{order}' + (f'-{i + 1}' if len(parts)
+                                                   > 1 else '')
+            tex = _ops_picture(body, (
+                f'generated by tools/bench/publish.py from the export: '
+                f'{eq}, order {order}, double, one simulation; an entry is '
+                f'{cell:.2f}pt\nreach and nonzeros per tensor in the CSV'))
+            caption = (f'The {eq} kernels of one time step at order {order}'
+                       + (f', part {i + 1} of {len(parts)}'
+                          if len(parts) > 1 else '')
+                       + ', each statement drawn to scale: a box is the part '
+                       'of a tensor the kernel reaches, below it its extent. '
+                       'Filled, what every element has its own of; framed, '
+                       'the operators all elements share, with their '
+                       'nonzeros. A sum over a family is drawn with its first '
+                       'member and the reach of all of them, a recursion at '
+                       'its first step.')
+            out.append(Output(name, 'figure', tex,
+                              csv_rows if i == 0 else [], caption))
+    return out
+
+
+def figure_operators(described: Sequence, kernels: Sequence[str]
+                     ) -> List[Output]:
+    """The operators the kernels of a time step share, per equation and
+    order, each with its nonzeros: what the kernels skip, and how that
+    changes from one face or direction to the next."""
+    import describe as dsc
+    out = []
+    for (eq, order), mine in sorted(_ops_choice(described, kernels).items()):
+        seen: Dict[str, object] = {}
+        for k in kernels:
+            d = mine.get(k)
+            if d is None:
+                continue
+            for name, e in d.extents.items():
+                if e.constant and e.nonzeros and name not in seen:
+                    seen[name] = e
+        if not seen:
+            continue
+        # A family together, its members in order, the families as they
+        # first appear.
+        families = list(dict.fromkeys(dsc.Ref(n, ()).base for n in seen))
+        seen = dict(sorted(seen.items(), key=lambda item: (
+            families.index(dsc.Ref(item[0], ()).base),
+            dsc.Ref(item[0], ()).family)))
+        thumbs = [_Tensor(dsc._tex_name(n, dsc.NOTATION), e.sizes[0],
+                          e.sizes[1] if len(e.sizes) > 1 else 1, 1, True,
+                          tuple((i[0], i[1] if len(i) > 1 else 0)
+                                for i in e.nonzeros), (n,),
+                          (e.density,) if e.density is not None else ())
+                  for n, e in seen.items()]
+        widest = max(t.cols for t in thumbs)
+        cell = min(_OPS_CELL, (_OPS_WIDTH / 4 - _OPS_GAP) / widest)
+        body: List[str] = []
+        csv_rows: List[Dict] = []
+        x, y, tall = 0.0, 0.0, 0.0
+        for t in thumbs:
+            slot = max(t.width(cell), t.label_width())
+            if x and x + slot > _OPS_WIDTH:
+                y -= tall + _OPS_LABEL + 6.0
+                x, tall = 0.0, 0.0
+            body += _ops_draw(t, x + (slot - t.width(cell)) / 2, y, cell)
+            tall = max(tall, t.height(cell))
+            body.append(f'\\node[tf label, anchor=north, align=center] at '
+                        f'({x + slot / 2:.2f},{y - t.height(cell) - 1.5:.2f})'
+                        f' {{${t.tex}$\\\\{t.text()}}};')
+            csv_rows.append({'equation': eq, 'order': order,
+                             'operator': t.members[0], 'rows': t.rows,
+                             'cols': t.cols, 'nonzeros': len(t.nonzeros),
+                             'density': t.densities[0] if t.densities
+                             else None})
+            x += slot + _OPS_GAP
+        tex = _ops_picture(body, (
+            f'generated by tools/bench/publish.py from the export: {eq}, '
+            f'order {order}, double; an entry is {cell:.2f}pt'))
+        caption = (f'The operators the {eq} kernels share at order {order}, '
+                   'each over the part the kernels reach of it, with its '
+                   'nonzeros, its extent and their share.')
+        out.append(Output(f'operators-{eq}-o{order}', 'figure', tex,
+                          csv_rows, caption))
     return out
 
 
@@ -2694,8 +3137,13 @@ def build(fieldset: Optional[Field], described: Sequence,
         add(table_intensity(described, kernels), 'intensity: no exports')
         add(figure_intensity(described, kernels, fieldset, styles),
             'intensity figure: fewer than two orders exported')
+        add(figure_operations(described, kernels),
+            'operations: no export in double with one simulation')
+        add(figure_operators(described, kernels),
+            'operators: no operator with its numbers in the exports')
     else:
-        skipped.append('kernels, intensity: no exports (--exports)')
+        skipped.append('kernels, intensity, operations, operators: no '
+                       'exports (--exports)')
 
     # What the kernels did.
     fits: List[Dict] = []

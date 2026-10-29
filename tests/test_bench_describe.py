@@ -166,3 +166,30 @@ def test_an_operator_every_element_shares_is_not_an_element_s_byte():
     assert d.shared_bytes > 0
     assert at.bytes == 1000 * d.bytes + d.shared_bytes
     assert d.intensity == pytest.approx(d.flops / d.bytes)
+
+
+# ----------------------------------------------------------------------
+# What a kernel reaches of each tensor
+# ----------------------------------------------------------------------
+
+def test_a_kernel_reaches_what_its_operations_bound():
+    """The derivatives shrink with the degree: of the twenty rows `dQ(3)`
+    has, the order-4 kernel reaches one.  An operator's nonzeros are the
+    export's, inside that reach."""
+    e = _one('elastic-4-d-s1', 'gpu_derivative').extents
+    assert [e[f'dQ({j})'].sizes for j in range(4)] == [
+        (20, 9), (10, 9), (4, 9), (1, 9)]
+    k = e['kDivMT(0)']
+    assert k.constant and k.sizes == (10, 18) and len(k.nonzeros) == 33
+    assert all(r < 10 and c < 18 for r, c in k.nonzeros)
+    assert k.density == pytest.approx(33 / 180)
+    assert not e['star(0)'].constant and e['star(0)'].density is None
+
+
+def test_a_folded_name_stands_for_its_members():
+    assert describe.members('kDivM(i)', {'i': (0, 1, 2)}) == [
+        'kDivM(0)', 'kDivM(1)', 'kDivM(2)']
+    assert describe.members('dQ(j+1)', {'j': (0,)}) == ['dQ(1)']
+    assert describe.members('V3mTo2n(0,0)', {}) == ['V3mTo2n(0,0)']
+    assert describe.members('dQ(k)', {'j': (0,)}) == ['dQ(k)']
+    assert describe.members('Q', {'i': (0, 1)}) == ['Q']

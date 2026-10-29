@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -533,6 +534,70 @@ def test_what_making_the_kernels_cost_is_summed_per_export(tmp_path):
             row['object_bytes'], row['largest_code_bytes']) == (
         3, 6.5, 30.0, 3 * 2 ** 20, 4096)
     assert '128' in out.caption and row['suite'] == 'test'
+
+
+# ----------------------------------------------------------------------
+# The kernels drawn
+# ----------------------------------------------------------------------
+
+def _described(*kernels):
+    import describe
+    return describe.describe_all([BENCH / 'data'], kernels, costs=False)
+
+
+def test_a_formula_is_drawn_with_what_the_kernel_reaches():
+    """The volume kernel at order 4: the stiffness matrices as one family
+    over the reach of all three, drawn with the first one's nonzeros; the
+    time integral as the ten rows the kernel reads of it."""
+    out = {o.name: o for o in publish.figure_operations(
+        _described('gpu_volume', 'gpu_derivative'),
+        ['gpu_derivative', 'gpu_volume'])}
+    assert 'operations-elastic-o4' in out
+    assert any(n.startswith('operations-viscoelastic-o4') for n in out)
+    rows = [r for r in out['operations-elastic-o4'].rows
+            if r['kernel'] == 'gpu_volume']
+    by = {r['tensor']: r for r in rows}
+    assert (by['Q']['rows'], by['Q']['cols']) == (20, 9)
+    k = by['kDivM(0)']
+    assert k['members'] == 'kDivM(0) kDivM(1) kDivM(2)'
+    assert (k['rows'], k['cols'], k['shared'], k['nonzeros']) == (
+        20, 10, True, 33)
+    assert (by['I']['rows'], by['I']['cols'], by['I']['shared']) == (
+        10, 9, False)
+    # The recursion at its first step: the first derivative is ten rows.
+    first = [r for r in out['operations-elastic-o4'].rows
+             if r['kernel'] == 'gpu_derivative' and r['tensor'] == 'dQ(1)']
+    assert first and first[0]['rows'] == 10
+    assert '\\sum_{i=0}^{2}' in out['operations-elastic-o4'].tex
+
+
+def test_a_time_step_taller_than_a_page_comes_in_parts():
+    kernels = list(publish.DEFAULT_KERNELS)
+    parts = [o for o in publish.figure_operations(_described(*kernels),
+                                                  kernels)
+             if o.name.startswith('operations-viscoelastic-o6')]
+    assert [o.name for o in parts] == [
+        f'operations-viscoelastic-o6-{i + 1}' for i in range(len(parts))]
+    assert len(parts) > 1 and parts[0].rows and not parts[-1].rows
+    # Every part says whose rows it holds, and what the colours mean.
+    assert all('\\texttt{' in o.tex and 'each element its own' in o.tex
+               for o in parts)
+    # As even as that many parts can be: none of them a leftover.
+    heights = [-min(float(y) for y in re.findall(r'\(-?[\d.]+,(-?[\d.]+)\)',
+                                                  o.tex)) for o in parts]
+    assert max(heights) <= publish._OPS_HEIGHT
+    assert min(heights) > 0.75 * max(heights)
+
+
+def test_the_shared_operators_are_drawn_by_family():
+    out = {o.name: o for o in publish.figure_operators(
+        _described('gpu_volume', 'gpu_localFluxAll'),
+        ['gpu_volume', 'gpu_localFluxAll'])}
+    rows = out['operators-elastic-o4'].rows
+    assert [r['operator'] for r in rows] == [
+        'kDivM(0)', 'kDivM(1)', 'kDivM(2)', 'fMrT(0)', 'fMrT(1)', 'fMrT(2)',
+        'fMrT(3)', 'rDivM(0)', 'rDivM(1)', 'rDivM(2)', 'rDivM(3)']
+    assert [r['nonzeros'] for r in rows[:3]] == [33, 77, 92]
 
 
 # ----------------------------------------------------------------------

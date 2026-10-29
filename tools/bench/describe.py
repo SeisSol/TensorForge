@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import csv
 import fnmatch
+import itertools
 import json
 import re
 import sys
@@ -286,6 +287,91 @@ def statements(description: dict) -> List[Statement]:
 def temporaries(description: dict) -> List[str]:
     return [t['name'] for t in description.get('tensors', [])
             if (t.get('flags') or {}).get('temporary')]
+
+
+@dataclass(frozen=True)
+class Extent:
+    """A tensor as one kernel uses it: how far along each axis its
+    operations reach -- `dQ(3)` of an order-4 kernel is one row of the
+    twenty it has -- and, for an operator whose numbers the export carries,
+    where its nonzeros lie within that reach."""
+    sizes: Tuple[int, ...]
+    constant: bool
+    nonzeros: Tuple[Tuple[int, ...], ...] = ()
+
+    @property
+    def density(self) -> Optional[float]:
+        """Nonzeros over the reach, for an operator with numbers."""
+        if not self.constant or not self.nonzeros:
+            return None
+        volume = 1
+        for size in self.sizes:
+            volume *= size
+        return len(self.nonzeros) / volume if volume else None
+
+
+def extents(description: dict) -> Dict[str, Extent]:
+    """Every tensor an operation of the kernel reads or writes, by name,
+    with the reach of its bounding boxes over all of them."""
+    tensors = {t['name']: t for t in description.get('tensors', [])}
+    reach: Dict[str, List[int]] = {}
+    for op in description.get('operations', []):
+        for ref in [op.get('result')] + list(op.get('args') or []):
+            if not ref or not ref.get('bbox'):
+                continue
+            ends = [int(end) for end in ref['bbox'][1]]
+            sizes = reach.setdefault(ref['name'], [0] * len(ends))
+            for axis, end in enumerate(ends[:len(sizes)]):
+                sizes[axis] = max(sizes[axis], end)
+    out: Dict[str, Extent] = {}
+    for name, sizes in reach.items():
+        tensor = tensors.get(name) or {}
+        constant = bool((tensor.get('flags') or {}).get('constant'))
+        values = tensor.get('values') or {}
+        nonzeros: Tuple[Tuple[int, ...], ...] = ()
+        if values.get('kind') == 'entries':
+            nonzeros = tuple(sorted(
+                tuple(int(i) for i in index)
+                for index, value in values.get('data') or []
+                if value != 0 and len(index) == len(sizes)
+                and all(i < size for i, size in zip(index, sizes))))
+        out[name] = Extent(tuple(sizes), constant, nonzeros)
+    return out
+
+
+def _evaluate(expression: str) -> Optional[int]:
+    """`0+1`, `2-1`: the arithmetic a folded family index is written in."""
+    if not re.fullmatch(r'\s*\d+(\s*[+-]\s*\d+)*\s*', expression):
+        return None
+    return sum(int(term.replace(' ', ''))
+               for term in re.findall(r'[+-]?\s*\d+', expression))
+
+
+def members(name: str, bindings: Dict[str, Sequence[int]]) -> List[str]:
+    """The family members a folded name stands for, its symbols running
+    through `bindings`: `kDivM(i)` with i in 0..2 is `kDivM(0)` to
+    `kDivM(2)`, and `dQ(j+1)` with j at 0 is `dQ(1)`.  A name without a
+    family, or with one no binding resolves, stands for itself."""
+    m = _ANY_FAMILY.match(name)
+    if not m:
+        return [name]
+    parts = m['values'].split(',')
+    symbols = sorted({c for part in parts for c in re.findall(r'[a-z]', part)
+                      if c in bindings})
+    out: List[str] = []
+    for values in itertools.product(*(bindings[c] for c in symbols)):
+        bound = dict(zip(symbols, values))
+        indices = []
+        for part in parts:
+            expression = re.sub(r'[a-z]',
+                                lambda x: str(bound.get(x.group(), x.group())),
+                                part)
+            value = _evaluate(expression)
+            indices.append(part if value is None else str(value))
+        member = f'{m["base"]}({",".join(indices)})'
+        if member not in out:
+            out.append(member)
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -811,6 +897,9 @@ class Described:
     bytes: Optional[int] = None
     shared_bytes: Optional[int] = None
     notes: List[str] = field(default_factory=list)
+    #: What the kernel uses of each tensor (`extents`), for a figure that
+    #: draws the formula to scale.
+    extents: Dict[str, Extent] = field(default_factory=dict)
 
     @property
     def family(self) -> str:
@@ -882,7 +971,8 @@ def describe(workload: str, description: dict,
     out = Described(
         workload=workload, capture=capture, formula=formula(description),
         operations=len(stmts), temporaries=len(temps), depth=_depth(stmts),
-        operators=operators, operands=operands)
+        operators=operators, operands=operands,
+        extents=extents(description))
     if costs:
         _attach_cost(out, description)
     return out
