@@ -1588,6 +1588,89 @@ def test_a_vector_read_from_its_second_lane_on_keeps_its_load():
     assert _loads(out, MemSpace.SHARED, t.s)
 
 
+#: The lanes of a full-lane tail, fewer than the vector's.
+TAIL = 10
+
+
+def test_a_tail_loaded_back_is_read_from_its_register_with_zeros_past_it():
+    """What `r` held, stored to `s` and loaded back as a full-lane tail of
+    `TAIL` lanes: those read what their own lanes stored, from `r`, and the
+    read of `r` that takes the load's place gives the lanes past them zeros,
+    as the load did.  The store nothing reads any more goes."""
+    t = Vectors()
+    b = t.b
+    t.through_s()
+    b.store(t.t, b.load(t.s, 0, layout=SPREAD, valid=TAIL), 0)
+    b.store(t.p, b.load(t.t, 0, layout=SPREAD), WIDE)
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED, t.s)
+    assert not _stores(out, MemSpace.SHARED, t.s)
+    tails = [s for s in walk_stmts(out) if s.op == Op.LOAD
+             and s.accesses[0].base is t.r and s.attr('valid') == TAIL]
+    assert tails, 'the read of `r` gives zeros past the tail'
+
+
+def test_a_tail_reads_nothing_past_its_lanes():
+    """`s` holds a vector, then a tail of what `r` held over it, and a tail
+    loads it back: the load reads the lanes the second store wrote, and
+    what the first left past them nothing reads -- both stores go."""
+    t = Vectors()
+    b = t.b
+    b.store(t.r, t.vector(), 0)
+    b.store(t.s, t.vector(WIDE), 0)
+    b.store(t.s, b.load(t.r, 0, layout=SPREAD), 0, valid=TAIL)
+    b.store(t.p, b.load(t.s, 0, layout=SPREAD, valid=TAIL), WIDE)
+    out = t.run()
+    assert not _loads(out, MemSpace.SHARED, t.s)
+    assert not _stores(out, MemSpace.SHARED, t.s)
+
+
+def test_a_load_behind_a_tail_store_reads_what_was_there_past_it():
+    """`s` holds a vector, then a tail of what `r` held over it, and the
+    whole vector is loaded back: its lanes up to the tail's read the tail,
+    those past them the vector before -- two stores, no one vector to take
+    instead.  The load stays, and both stores with it."""
+    t = Vectors()
+    b = t.b
+    b.store(t.r, t.vector(), 0)
+    b.store(t.s, t.vector(WIDE), 0)
+    b.store(t.s, b.load(t.r, 0, layout=SPREAD), 0, valid=TAIL)
+    b.store(t.p, b.load(t.s, 0, layout=SPREAD), WIDE)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+    assert len(_stores(out, MemSpace.SHARED, t.s)) == 2
+
+
+def test_a_tail_loaded_back_from_a_value_keeps_its_load():
+    """A vector no register holds, stored to `s` and loaded back as a tail:
+    the value holds what it holds past the tail's lanes, where the load
+    gives zeros, so the load stays."""
+    t = Vectors()
+    b = t.b
+    b.store(t.s, t.vector(), 0)
+    b.store(t.p, b.load(t.s, 0, layout=SPREAD, valid=TAIL), WIDE)
+    out = t.run()
+    assert _loads(out, MemSpace.SHARED, t.s)
+
+
+def test_a_tail_store_into_a_register_array_writes_every_lane():
+    """A store into a register array writes every lane of its value, a
+    full-lane tail's as well: a load behind it reads the store in every
+    lane, and none what the allocation left."""
+    t = Vectors()
+    b = t.b
+    b.store(t.r, t.vector(), 0, valid=TAIL)
+    b.store(t.p, b.load(t.r, 0, layout=SPREAD), WIDE)
+    body = b.finish()
+    verify(body)
+    f = Flow(body, WIDE, arena='shrMem', simd=True)
+    load = next(x for x in walk_stmts(body) if x.op == Op.LOAD
+                and x.accesses[0].base is t.r)
+    reach = [r for n in f.executions(load) for r in f.reach[n]]
+    assert [r.mask for r in reach] == [(1 << WIDE) - 1]
+    assert f.insts[reach[0].writer].stmt.op == Op.STORE
+
+
 def test_the_lanes_own_index_says_so_under_the_explicit_vector():
     """`IRBuilder.lane_index` writes a vector's `0, 1, ...` as text, and
     says in an attribute what the text is, for the flow to read."""

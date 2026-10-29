@@ -1356,8 +1356,12 @@ class Flow:
         value every lane holds whole is one element, every lane's, in memory;
         in a register array it is a scalar part of a vector, and placed
         nowhere.  So is anything of more than one element a lane, of more
-        lanes than the multiplication's, or of part of its vector -- a
-        window's head, a tail's valid lanes."""
+        lanes than the multiplication's, or of part of its vector that
+        starts past its first lane -- a window's head.  A full-lane tail
+        touches its lanes up to `valid`, in memory and in a load of a
+        register array, which gives the lanes past it zeros; a store into
+        a register array writes every lane of the value whatever `valid`
+        says, and is placed as one that does."""
         if s.op == Op.LOAD and len(s.accesses) == 1 and s.target:
             value, index, kind = s.target[0], s.args[1:], 'read'
         elif s.op == Op.STORE and len(s.accesses) == 1:
@@ -1372,7 +1376,7 @@ class Flow:
             return None
         a = s.accesses[0]
         if (a.space not in _PLACED or a.base is None
-                or s.attr('valid') is not None or s.attr('head') is not None
+                or s.attr('head') is not None
                 or not all(self._static(i, env) for i in index)):
             return None
         if value is not None and (
@@ -1385,6 +1389,12 @@ class Flow:
             if span > self.threads:
                 return None
             mask &= (1 << span) - 1
+        valid = s.attr('valid')
+        if valid is not None and not (
+                a.space is MemSpace.REGISTER and kind != 'read'):
+            if not spread:
+                return None
+            mask &= (1 << valid) - 1
         key = self._buffer(a, s.args[0], env)
         addr = self._address(index, env)
         if key is None or not addr:

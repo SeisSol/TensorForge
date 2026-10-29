@@ -11,6 +11,8 @@ generated kernel.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tensorforge.backend.pir.core import (SCALAR_LAYOUT, IRError, LaneAxis,
@@ -953,6 +955,23 @@ def test_a_register_array_read_in_ranges_is_one_simd():
     assert 'simd<float, 32> r9(' in src, src
     assert 'r9.template select<16, 1>(16)' in src, src
     assert 'copy_from' not in src and 'copy_to' not in src, src
+
+
+def test_a_tail_read_of_a_register_array_is_zero_past_its_lanes():
+    """A full-lane tail read out of a register array, as the forward pass
+    leaves one in the place of a tail's load: its lanes up to `valid` from
+    the array, zeros past them -- what the load of memory gave."""
+    from tensorforge.backend.pir import MemSpace
+
+    def build(b):
+        acc = b.alloc(Datatype.F32, (32,), MemSpace.REGISTER, extern='r9',
+                      init='{}')
+        part = b.load(acc, 0, hint='part', layout=SPREAD16, valid=10)
+        b.store(acc, part, 16)
+    src = _esimd_src(build)
+    assert re.search(r'simd<float, 16> (\w+)\(0\.0f\);\n'
+                     r'\1\.template select<10, 1>\(0\) = '
+                     r'r9\.template select<10, 1>\(0\);', src), src
 
 
 def test_a_register_array_named_in_raw_text_stays_an_array():

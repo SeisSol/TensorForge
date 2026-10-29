@@ -731,8 +731,15 @@ class EsimdEmitter(Emitter):
         w = self._width(v)
         named = s.attr('extern')
         nm = named or self.name(v)
+        part = self._valid_width(s, v) if w > 1 else None
         if w == 1:
             self.writer(f'{self.ctype(v.type, v)} {nm} = {self.base_name(buf)}[{addr}];')
+        elif part is not None:
+            # A full-lane tail: the lanes up to `valid`, zeros past them, as
+            # a load of memory gives them.
+            self.writer(f'{self.ctype(v.type, v)} {nm}({self.zero(v.type)});')
+            self.writer(f'{nm}.template select<{part}, 1>(0) = '
+                        f'{self.base_name(buf)}.template select<{part}, 1>({addr});')
         else:
             self.writer(f'{self.ctype(v.type, v)} {nm}({self.base_name(buf)}'
                         f'.template select<{w}, 1>({addr}));')

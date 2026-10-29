@@ -3256,7 +3256,8 @@ GROUPS = {
 
     # The forward under the explicit vector: an access placed an element a
     # lane, and a load taking only the same vector.
-    'vectors': ('tests/test_forward.py', [
+    'vectors': ('tests/test_forward.py tests/test_esimd_emitter.py::'
+                'test_a_tail_read_of_a_register_array_is_zero_past_its_lanes', [
         ('the vector placed as under SPMD',
          sub(FLOW, '        if self.simd:\n'
                    '            return self._place_vector(s, env, mask)\n', '', 1)),
@@ -3275,9 +3276,14 @@ GROUPS = {
                    '                return None\n', '', 1)),
         ('a vector placed in lanes past its own',
          sub(FLOW, '            mask &= (1 << span) - 1\n', '', 1)),
-        ('part of a vector placed whole',
-         sub(FLOW, "                or s.attr('valid') is not None or s.attr('head') is not None\n",
-             '', 1)),
+        ('a window\'s head placed whole',
+         sub(FLOW, "                or s.attr('head') is not None\n", '', 1)),
+        ('a tail placed past its lanes',
+         sub(FLOW, '            mask &= (1 << valid) - 1\n', '', 1)),
+        ('a tail stored into a register array placed for its lanes alone',
+         sub(FLOW, '        if valid is not None and not (\n'
+                   "                a.space is MemSpace.REGISTER and kind != 'read'):\n",
+             '        if valid is not None:\n', 1)),
         ('a vector of several elements a lane placed',
          sub(FLOW, '                not isinstance(value, Value) or value.layout is None\n'
                    "                or getattr(value.type, 'length', None) is not None):",
@@ -3297,11 +3303,25 @@ GROUPS = {
          sub(FORWARD, "        if flow.simd and 'const' in kinds:\n",
              '        if False:\n', 1)),
         ('a value of other lanes taken for a vector',
-         sub(FORWARD, '        if self.flow.simd and (truth or v.layout != s.target[0].layout):\n',
-             '        if self.flow.simd and truth:\n', 1)),
-        ('every lane of a vector asked of a tail',
-         sub(FORWARD, '                return (1 << v.lane_span()) - 1\n',
-             '                return self.flow.full\n', 1)),
+         sub(FORWARD, '        if self.flow.simd and (truth or v.layout != s.target[0].layout\n'
+                      "                               or s.attr('valid') is not None):\n",
+             '        if self.flow.simd and (truth\n'
+             "                               or s.attr('valid') is not None):\n", 1)),
+        ('a value taken for a tail',
+         sub(FORWARD, "                               or s.attr('valid') is not None):\n",
+             '                               ):\n', 1)),
+        ('every lane of a vector asked of a vector of fewer',
+         sub(FORWARD, '                lanes = (1 << v.lane_span()) - 1\n',
+             '                lanes = self.flow.full\n', 1)),
+        ('a tail asked of every lane of its vector',
+         sub(FORWARD, '                return lanes if valid is None else lanes & ((1 << valid) - 1)\n',
+             '                return lanes\n', 1)),
+        ('the register read in a tail\'s place giving what it holds past it',
+         sub(FORWARD, "                      or (k == 'valid' and self.flow.simd))\n",
+             "                      or False)\n", 1)),
+        ('a tail of a register array read whole',
+         sub(Path('src/tensorforge/backend/pir/emit_esimd.py'), '        part = self._valid_width(s, v) if w > 1 else None\n',
+             '        part = None\n', 1)),
         ('another lane read across under the explicit vector',
          sub(FORWARD, '                        exchange=exchange is not None and not simd\n',
              '                        exchange=exchange is not None\n', 1)),

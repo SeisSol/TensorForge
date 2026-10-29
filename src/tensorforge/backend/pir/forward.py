@@ -54,7 +54,9 @@ what is the same vector: the value a store wrote, spread over the lanes as
 the load's is, or the register a store took it from, read as the vector the
 load is.  Not a number, which would stand for a vector; not under a
 predicate, which is a mask of the vector; not as a truth value, whose vector
-is a mask too; and every lane of the vector is read (`Flow.simd`).
+is a mask too; and every lane of the vector is read (`Flow.simd`) -- but
+those past a full-lane tail's `valid`, which the load gives zeros, and the
+register read that takes its place as well.
 """
 
 from __future__ import annotations
@@ -412,9 +414,12 @@ class _Forward:
         truth = v.type != s.target[0].type and _truth_of(s, v.type)
         if (v.type != s.target[0].type and not truth) or not self._stands(v, s):
             return False
-        if self.flow.simd and (truth or v.layout != s.target[0].layout):
+        if self.flow.simd and (truth or v.layout != s.target[0].layout
+                               or s.attr('valid') is not None):
             # Under the explicit vector only the same vector: spread over
-            # the lanes as the load is, and not a mask for numbers.
+            # the lanes as the load is, and not a mask for numbers -- nor
+            # for a full-lane tail, which gives zeros past `valid` where the
+            # value holds what it holds.
             return False
         b = self.scratch()
         if truth:
@@ -431,7 +436,11 @@ class _Forward:
         if read is None:
             return False
         lead, slot, image = read
-        attrs = tuple((k, v) for k, v in s.attrs if k in ('other', 'extern'))
+        # Under the explicit vector a full-lane tail's lanes past `valid`
+        # are zeros, and the register read gives them zeros as well.
+        attrs = tuple((k, v) for k, v in s.attrs
+                      if k in ('other', 'extern')
+                      or (k == 'valid' and self.flow.simd))
         predicate = s.predicate
         if predicate is not None and self._idle(s, taken):
             # Where the predicate leaves a lane out, the register holds what
@@ -622,11 +631,14 @@ class _Forward:
 
     def _read(self, s: Stmt, n: int) -> int:
         """The lanes of what execution `n` of `s` loads anything reads --
-        under the explicit vector, every lane of the vector."""
+        under the explicit vector, every lane of the vector, but those past
+        a full-lane tail's `valid`: zeros, whatever the load reads."""
         if self.flow.simd:
             v = s.target[0]
             if v.layout is not None and v.layout.is_distributed:
-                return (1 << v.lane_span()) - 1
+                lanes = (1 << v.lane_span()) - 1
+                valid = s.attr('valid')
+                return lanes if valid is None else lanes & ((1 << valid) - 1)
             return self.flow.full
         return self.demand.lanes(s.target[0], self.flow.insts[n].env())
 
