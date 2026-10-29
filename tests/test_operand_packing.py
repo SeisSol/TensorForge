@@ -371,11 +371,8 @@ def test_the_rows_a_wide_lead_leaves_over_are_read_packed_at_a_number(
     four adjacent rows: the rows no whole vector covers are read in a body
     of their own, at a number rather than a lane (`Symbol._packed_row`).
     The packing addressed a lane alone and refused that -- "packed rows need
-    a lead index" -- on every target.
-
-    The numbers are `gpu_check`'s to say: the host oracle does not evaluate
-    the peeled batch element this kernel starts with (a `VectorT{}` in a
-    conditional), packed or not."""
+    a lead index" -- on every target.  What the kernel computes is
+    `test_lead_width`'s to check, on the host oracle."""
     from tensorforge.frontend.yateto import DescriptionReader
 
     import seissol_suite as fx

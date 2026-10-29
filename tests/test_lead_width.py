@@ -570,3 +570,38 @@ def test_the_peeled_write_is_now_exact_too():
     """
     from tensorforge.backend import placement
     assert not hasattr(placement, 'atomic_write_is_exact')
+
+
+# --------------------------------------------------------------------------- #
+# A window that starts inside a lane's own run of rows
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize('config', ['elastic-linearck-o4-s',
+                                    'elastic-linearck-o6-s'])
+def test_a_window_off_its_runs_is_computed_at_width_four(config):
+    """SeisSol's `volume` adds into the rows of `Q` from 1 on, a window that
+    starts inside a lane's own run of four.  While an image of the
+    destination pinned the lead loop's origin, every whole run came out wrong
+    -- every row but those of a multiplication's first lane, 144 of 288 at
+    order 4, with the operators packed or not -- until the origin became the
+    destination's offset modulo a round of the lanes.  On the host oracle,
+    against NumPy."""
+    import importlib.util
+    import io
+    from pathlib import Path
+
+    import seissol_suite as fx
+
+    path = (Path(__file__).resolve().parents[1] / 'tools' / 'host'
+            / 'corpus_check.py')
+    spec = importlib.util.spec_from_file_location('lead_corpus_check', path)
+    host = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(host)
+    kernel = host.Kernel(fx.description('elastic-linearck', config,
+                                        'gpu_volume'),
+                         Datatype.F32, 'sm_120')
+    out = io.StringIO()
+    assert host.check(kernel, [
+        ('packed', dict(lead_vectorize=True)),
+        ('unpacked', dict(lead_vectorize=True, pack_operands='off')),
+    ], out=out), out.getvalue()
