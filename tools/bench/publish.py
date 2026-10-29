@@ -3747,8 +3747,16 @@ def build(fieldset: Optional[Field], described: Sequence,
 
 def write(outputs: Sequence[Output], out: Path, title: str,
           manifest: Dict) -> None:
+    """The outputs into `out`.  What an earlier publish there wrote and this
+    one does not is removed: `--compile` sets every standalone figure it
+    finds, and a figure of an older tree -- `pvc` before its backends were
+    two machines -- came out of it beside the new ones, freshly dated."""
+    ours = tuple(f'{o.name}.' for o in outputs)
     for sub in ('figures', 'tables', 'data', 'standalone'):
         (out / sub).mkdir(parents=True, exist_ok=True)
+        for path in (out / sub).iterdir():
+            if path.is_file() and not path.name.startswith(ours):
+                path.unlink()
     (out / 'tfstyle.tex').write_text(texout.style())
     for o in outputs:
         where = 'figures' if o.kind == 'figure' else 'tables'
