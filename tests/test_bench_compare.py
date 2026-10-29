@@ -490,3 +490,20 @@ def test_a_further_roof_is_read_beside_the_measured_one(tmp_path):
     assert got.flops_per_s == 3e13
     assert [(u.name, u.flops_per_s) for u in got.units] == [
         ('matrix m8n8k4', 6e13)]
+
+
+@pytest.mark.parametrize('bus, kept', [(5.3e12, 5.3e12), (2.66e12, 0.0)])
+def test_a_bus_the_streaming_loop_outran_is_left_out(tmp_path, bus, kept):
+    """The bus is twice the memory clock the runtime reports, which an
+    MI300A's HBM3 halves: a triad of 3.05 TB/s against a bus of 2.66 is no
+    fraction of anything, and the machine drops out of the bus figure rather
+    than standing at 115 % of it."""
+    d = _write(tmp_path, 'elastic-4-d-s1',
+               [_row('k', 'baseline', 'gfx942', 1024, 100.0, datatype='F64')])
+    (d / 'roofline.json').write_text(json.dumps({'ceiling': {
+        'arch': 'gfx942', 'datatype': 'F64', 'flops_per_s': 4e13,
+        'bytes_per_s': 3.05e12, 'peak_bytes_per_s': bus}}))
+    field = compare.collect([tmp_path])
+    assert field.ceiling('gfx942', 'F64').peak_bytes_per_s == kept
+    drawn = compare.view_bandwidth_peak(field)
+    assert (drawn is None) == (not kept)
