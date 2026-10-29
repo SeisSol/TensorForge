@@ -39,9 +39,15 @@ BINDING = re.compile(r'const (glb_v\d+) = ')
 
 
 def _variant_loop(src):
-    """The merged run's loop body, up to the end of the first product."""
+    """The merged run's loop, to its closing brace: what a trip does, its
+    copy and every product."""
     start = src.index('for (int32_t batchIdv')
-    return src[start:start + 4000]
+    depth = 0
+    for at in range(src.index('{', start), len(src)):
+        depth += {'{': 1, '}': -1}.get(src[at], 0)
+        if depth == 0:
+            return src[start:at + 1]
+    raise AssertionError('the merged run\'s loop does not close')
 
 
 @pytest.mark.parametrize('arch', ['gfx942', 'gfx1150'])
