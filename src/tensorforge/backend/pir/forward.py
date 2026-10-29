@@ -25,6 +25,11 @@ all of them -- and its value is
   names the register (`_fit`); read as a truth value out of a buffer of
   them, whether the number the register holds is not zero.
 
+A value a select picks over a condition of the lanes is, for each lane,
+the arm that lane takes (`Flow._origin`): a store that pads the rows it
+writes with zeros past them is read as the register in the lanes that hold
+rows, and as the zero in the others.
+
 The last holds as well where the lanes loaded the element before and found
 the same write there: the load reads the register that earlier load's value
 went into, where it holds it still -- and, where the lanes are within one

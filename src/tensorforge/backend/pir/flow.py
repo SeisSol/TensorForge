@@ -934,11 +934,12 @@ class Flow:
                 if inside:
                     out += self._loaded(v, d, env, inside)
                 return out
-        if (self.simd and d is not None and d.op == 'select'
+        if (d is not None and d.op == 'select'
                 and d.predicate is None and self._static(d.args[0], env)):
-            # Under the explicit vector a select over a condition of the
-            # lanes is a merge: the lanes it holds for hold the first arm,
-            # the others the second -- a vector's tail and the zeros past it.
+            # A select over a condition of the lanes: the lanes it holds for
+            # hold the first arm, the others the second -- the rows a store
+            # writes and the zeros it pads them with past them, and under the
+            # explicit vector a merge, a vector's tail and the zeros past it.
             inside = self._lanes_where(d.args[0], env, mask)
             out = []
             for lanes, arm in ((inside, d.args[1]),

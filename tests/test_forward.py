@@ -42,7 +42,8 @@ class Body:
 
     def __init__(self):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
-        k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
+        k = self.k = b.extern_value('element', SIZE,
+                                    uniform=Uniformity.MULT, hint='k')
         self.q = b.decl_expr(
             'float *const __restrict__ glb_m0', '&m0[{0} * 96]',
             BufferType(F32, (ROWS * COLS,), MemSpace.GLOBAL), 'm0', args=(k,),
@@ -243,6 +244,36 @@ def test_a_branch_on_what_memory_holds_takes_no_mask_to_hold():
         t.load_q(t.registers('r1'), guard=mask)
     body = b.finish()
     assert not Flow(body, LANES, 'shrMem', masks=True).masks
+
+
+def test_a_store_padded_with_zeros_is_read_from_the_register_it_took():
+    """`w[l + 32 j] = valid ? r0[j] : 0` by every lane -- the rows a lane
+    holds and the zeros past them, as an operation stores its result into a
+    buffer laid out for every lane -- loaded back under `valid`: the lanes
+    that load it took the select's first arm, and read `r0`."""
+    t = Body()
+    b = t.b
+    w = b.decl_expr(
+        'float *const __restrict__ glb_m2', '&m2[{0} * 128]',
+        BufferType(F32, (LANES * COLS,), MemSpace.GLOBAL), 'm2', args=(t.k,),
+        kind=Effect.READ, space=MemSpace.GLOBAL, hint='glb_m2',
+        extern='glb_m2')
+    r0, r1 = t.registers('r0'), t.registers('r1')
+    t.fill(r0)
+    with b.for_(0, COLS, 1, unroll=True) as hop:
+        j = hop.induction
+        at = b.op('add', INDEX, t.lane, b.op('mul', INDEX, j, LANES))
+        b.store(w, b.op('select', REAL, t.valid, b.load(r0, j), 0.0,
+                        hint='pad'), at)
+    with b.if_(t.valid):
+        with b.for_(0, COLS, 1, unroll=True) as hop:
+            j = hop.induction
+            at = b.op('add', INDEX, t.lane, b.op('mul', INDEX, j, LANES))
+            b.store(r1, b.load(w, at), j)
+    b.store(t.p, b.load(r1, 0), t.lane)
+    out = t.run()
+    assert not _loads(out, MemSpace.GLOBAL, w)
+    assert _stores(out, MemSpace.GLOBAL, w), 'what the body ends with stays'
 
 
 def test_a_number_stored_is_read_as_the_number():

@@ -3072,6 +3072,9 @@ GROUPS = {
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.
     'forward': ('tests/test_forward.py', [
+        ('a select over the lanes told apart under the explicit vector alone',
+         sub(FLOW, "        if (d is not None and d.op == 'select'\n",
+             "        if (self.simd and d is not None and d.op == 'select'\n", 1)),
         ('a register written since taken for what it held',
          sub(FLOW, '            if not layer.conds <= conds or layer.writer != writer:\n'
                    '                return False\n', '', 1)),
@@ -3307,7 +3310,7 @@ GROUPS = {
                    "                or getattr(value.type, 'length', None) is not None):",
              '                not isinstance(value, Value) or value.layout is None):', 1)),
         ('a select over the lanes not told apart',
-         sub(FLOW, "        if (self.simd and d is not None and d.op == 'select'\n",
+         sub(FLOW, "        if (d is not None and d.op == 'select'\n",
              "        if (False and d is not None and d.op == 'select'\n", 1)),
         ("the lanes' own index not read as the lane",
          sub(SHARDS, '        if not self._simd or s.op != Op.RAWEXPR or s.args:\n',

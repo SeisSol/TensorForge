@@ -198,8 +198,10 @@ def test_a_zero_filled_tail_is_written_whole():
     under ESIMD a merge and a 32-wide write where off has 16 + 8 and a fill
     nest -- and the fill nest has nothing left to do.  Under SPMD the run's
     trips keep `R` in a register and store it whole behind the last: its rows
-    past the 56 are the zeros it holds there, the tail on every lane or not,
-    and the first face's write ahead of the run is a select where it is."""
+    past the 56 are the zeros it holds there, the tail on every lane or not.
+    What the first face writes ahead of the run, the rows a lane holds and
+    the zeros past them, the first trip reads from the registers it came
+    from, and that write goes."""
     off = _kernel(_padded_local_flux(), full_lane_tails=False)
     on = _kernel(_padded_local_flux(), full_lane_tails=True)
     assert 'v' not in re.findall(r'v\d+_pad', off) and not re.search(r'v\d+_pad', off)
@@ -212,8 +214,8 @@ def test_a_zero_filled_tail_is_written_whole():
     zeros = re.compile(r'glb_m2\[[^\]]*\] = 0\.0f;')
     assert not zeros.search(cuda_off) and not zeros.search(cuda), 'no fill nest left'
     assert len(re.findall(r'glb_m2\[[^\]]*\] = ', cuda_off)) == 1, cuda_off
-    assert re.search(r'glb_m2\[[^\]]*\] = \(v\d+_g \? .*: 0\.0f\);',
-                     cuda), cuda
+    assert len(re.findall(r'glb_m2\[[^\]]*\] = ', cuda)) == 1, cuda
+    assert not re.search(r'= glb_m2\[', cuda), cuda
 
 
 def test_a_tensor_stored_as_its_box_keeps_its_narrow_write():
