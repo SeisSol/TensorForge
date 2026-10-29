@@ -3709,7 +3709,8 @@ def build(fieldset: Optional[Field], described: Sequence,
         add(figure_lanes(fieldset, kernels, styles),
             'lanes: no executed flops, or one order only')
         add(figure_resources(fieldset, kernels, styles),
-            'resources: no registers or code sizes recorded')
+            'resources: no registers or code sizes recorded, or one order '
+            'only')
         add(figure_precision(fieldset, kernels),
             'precision: no kernel measured in both precisions')
         add(figure_simulations(fieldset, kernels, order, styles),
