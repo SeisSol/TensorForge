@@ -113,7 +113,11 @@ class Preferences:
     #: A vendor without a row reads everything in place, which is correct and
     #: slow.
     placement: VendorPolicy = field(default_factory=VendorPolicy)
-    #: The defaults of the options of the same names (`common.options`).
+    #: The defaults of the options of the same names (`common.options`):
+    #: `enable_move_loads` and `enable_wrap_loads`,
+    move_loads: bool = True
+    wrap_loads: bool = True
+    #: and the rest under their own names.
     preload_globals: bool = False
     preload_shards: bool = False
     stage_members: bool = False
@@ -262,6 +266,20 @@ PREFERENCES = {
         # lane axis is not where a reader expects it can be read in place.
         placement=VendorPolicy(preload_operands_into_registers=True,
                                broadcast_without_staging=True),
+        # A transfer moved up its statements, or ahead across the back edge,
+        # holds its registers over what it is moved past, and under SPMD a
+        # sub-group of 32 lanes holds half of what one of 16 does: IGC spilled
+        # more than 2 kB for 13 of the 16 SeisSol elastic kernels at orders 4
+        # and 6, up to 44 kB, in 256-GRF mode.  Without either, the Max 1550
+        # ran all
+        # sixteen 23 % faster in geometric mean at a batch of 262144 (25 % at
+        # 65536); wrap off alone 15 %, move off alone 10 %;
+        # `neighboringFlux` at order 6 in double 3.8x, its spill 25 to 5 kB.
+        # Slower only `localFluxAll` at order 4 in single, by 4 %.  The
+        # explicit vector is not measured and keeps both
+        # (`_explicit_simd`).
+        move_loads=False,
+        wrap_loads=False,
         split_predicated_load=True,
         tune_preload_globals=True,
         lanes_down_to_wave=True),
@@ -286,7 +304,8 @@ def _explicit_simd(prefs: Preferences) -> Preferences:
                    placement=replace(prefs.placement,
                                      broadcast_without_staging=False),
                    preload_globals=True, tune_preload_globals=False,
-                   lanes_down_to_wave=False)
+                   lanes_down_to_wave=False,
+                   move_loads=True, wrap_loads=True)
 
 
 class Target:

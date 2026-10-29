@@ -352,7 +352,7 @@ declare('enable_multibuffer',
             'backend/pir/wrap.py.')
 
 declare('enable_move_loads',
-        default=True,
+        rule=lambda target: target.prefs.move_loads,
         parse=parse_bool,
         doc='Issue a transfer early and wait where the value is needed.\n'
             'The transfer moves up its statement list to hide its latency, '
@@ -363,17 +363,22 @@ declare('enable_move_loads',
             '*priced*, not because it is in doubt. A pass with '
             'no way to be turned off is a pass whose contribution nobody has '
             'measured, and the same argument that put `preload_globals` behind '
-            'a question applies to it.')
+            'a question applies to it.  Off under Intel\'s SPMD lowering, '
+            'where what it moves spills (`Preferences.move_loads`).')
 
 declare('enable_wrap_loads',
-        default=True,
+        rule=lambda target: target.prefs.wrap_loads,
+        parse=parse_bool,
         doc='Prefetch across the back edge: issue each transfer for the next '
             'element at the tail of the current iteration, after the last '
             'instruction that touches its buffer -- where '
             '`enable_move_loads` would put it in the loop unrolled once.  One '
             'buffer copy, register and shared destinations alike.  The same '
             'in any loop over constant bounds -- a merged run, a rolled '
-            'reduction -- for its next trip; see backend/pir/wrap.py.')
+            'reduction -- for its next trip; see backend/pir/wrap.py.  Off '
+            'under Intel\'s SPMD lowering, where what it moves spills and a '
+            'grid that covers the batch in one round has no next element '
+            '(`Preferences.wrap_loads`).')
 
 declare('move_distance',
         default=1,

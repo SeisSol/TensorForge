@@ -159,3 +159,22 @@ def test_a_grid_that_covers_the_batch_in_one_round_takes_no_parts():
     """Asked for parts on SYCL without a resident grid: one round, no parts."""
     src = _generate(arch="pvc", backend="oneapi", batch_parts=2).get_kernel()
     assert "partEnd" not in src
+
+
+@pytest.mark.parametrize("arch,backend,expected", [
+    ("pvc", "oneapi", False),
+    ("pvc", "esimd", True),
+    ("sm_120", "cuda", True),
+    ("gfx942", "hip", True),
+])
+def test_moving_and_wrapping_are_off_under_intels_spmd_lowering(
+        arch, backend, expected):
+    """What they move spills under SPMD on PVC, and the grid there covers
+    the batch in one round; the explicit vector is not measured and keeps
+    both."""
+    resolved = Options().resolve(Context(arch=arch, backend=backend,
+                                         fp_type=DT).target)
+    assert resolved.enable_move_loads is expected
+    assert resolved.enable_wrap_loads is expected
+    src = _generate(arch=arch, backend=backend).get_kernel()
+    assert ("wrap_glb_" in src) is expected
