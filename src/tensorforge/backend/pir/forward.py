@@ -89,6 +89,7 @@ ROUNDS = 4
 def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
                    arena: Optional[str] = None, masks: bool = True,
                    rounds: int = ROUNDS, registers: bool = True,
+                   fetches: Optional[bool] = None,
                    exchange: Optional[int] = None, simd: bool = False,
                    report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with its loads taken from what their own lane stored, and its
@@ -103,7 +104,12 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
     lane stored: what the atomics ask runs ahead of the wrap, which counts
     the register copies this would take away, and a load taken from an
     earlier load keeps that load's registers until here
-    (`pipeline.standard_pipeline`).
+    (`pipeline.standard_pipeline`).  `fetches`, where it is given, says
+    apart from that whether a load of memory is taken from what its lanes
+    loaded before as well: ahead of the wrap, an operand every operation of
+    the body loads anew -- an element's numbers each of SeisSol's `volume`
+    products reads -- is loaded once there, since behind it the first load
+    is the next element's and no longer the same location.
 
     With `exchange`, how many lanes one exchange reaches (`Target.
     exchange_reach`), a load every lane runs of what one other lane stored
@@ -119,7 +125,8 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
             # A broadcast within the lanes of the multiplication runs on
             # blocks of a power of two (`__shfl_sync`'s width).
             flow = Flow(body, threads, arena, masks=masks, values=True,
-                        before=False, fetches=registers,
+                        before=False,
+                        fetches=registers if fetches is None else fetches,
                         exchange=exchange is not None and not simd
                         and threads <= exchange
                         and not threads & (threads - 1), simd=simd)

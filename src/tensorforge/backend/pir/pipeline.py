@@ -386,7 +386,8 @@ class Forward(Pass):
 
     def __init__(self, scratch, threads: int, arena: Optional[str] = None,
                  report: Optional[List[str]] = None, registers: bool = True,
-                 exchange: Optional[int] = None):
+                 exchange: Optional[int] = None,
+                 fetches: Optional[bool] = None):
         self._scratch = scratch
         self._threads = threads
         self._arena = arena
@@ -394,6 +395,9 @@ class Forward(Pass):
         #: Whether loads of registers are taken too, or only loads of memory
         #: (`standard_pipeline`, ahead of the atomics).
         self._registers = registers
+        #: Whether a load of memory is taken from what its lanes loaded
+        #: before; None, as `registers` says (`forward_memory`).
+        self._fetches = fetches
         #: How many lanes one exchange reaches, where a load of what another
         #: lane stored is read across the lanes (`forward_memory`).
         self._exchange = exchange
@@ -404,6 +408,7 @@ class Forward(Pass):
         pc.body = forward_memory(pc.body, self._scratch,
                                  threads=self._threads, arena=self._arena,
                                  registers=self._registers,
+                                 fetches=self._fetches,
                                  exchange=self._exchange,
                                  simd=pc.explicit_simd,
                                  report=self._report)

@@ -487,9 +487,13 @@ class AbstractInstruction(ABC):
       # accumulation behind it, or to the next operation -- is read from its
       # registers before the carry asks what the trips hand each other, the
       # atomics what a store adds onto, and before the cover of a transfer
-      # is counted (`pir.standard_pipeline`).
+      # is counted (`pir.standard_pipeline`).  So is what they load again:
+      # an operand every operation loads anew is the same location only
+      # until the wrap makes the first load the next element's -- SeisSol's
+      # `volume` at order 6 on MI300A loaded the element's numbers once a
+      # product, 9 % slower in single precision.
       early = pir.Forward(builder.scratch, report=carries,
-                          registers=False, **carry)
+                          registers=False, fetches=True, **carry)
     own = None
     if carry is not None and options.keep_own:
       own = pir.KeepOwn(builder.scratch, report=carries, **carry)

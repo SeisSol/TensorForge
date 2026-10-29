@@ -1737,3 +1737,32 @@ def test_the_forward_under_the_explicit_vector_asks_for_vectors(monkeypatch):
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()
     assert asked and all(asked)
+
+
+def test_an_operand_every_product_loads_is_loaded_once_ahead_of_the_wrap():
+    """SeisSol's `volume` multiplies the element's numbers `I` by three star
+    matrices, and every product loads its operands anew (`StagedCopy`).  The
+    forward of memory ahead of the wrap takes the later loads from where the
+    first put them (`Forward(fetches=True)`); behind the wrap the first is
+    the next element's, no longer the same location, and every product
+    loaded `I` again -- at order 6 on MI300A, 9 % of the kernel in single
+    precision.  `I` is read where the wrap and the peel put it, and nowhere
+    else."""
+    import re
+
+    from tensorforge.common.context import Context
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    import seissol_suite as fx
+
+    descrs = DescriptionReader(None, {}).read(fx.description(
+        'elastic-linearck', 'elastic-linearck-o6-s', 'gpu_volume'))[0]
+    gen = Generator(descrs, Context(arch='gfx942', backend='hip',
+                                    fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    src = gen.get_kernel()
+    element = re.search(r'\bpeel_(glb_m\d+)\b', src).group(1)
+    assert re.search(rf'\bwrap_{element}\[', src), 'nothing wrapped to test'
+    assert not re.search(rf'(?<!\w){element}\[', src)

@@ -3064,9 +3064,10 @@ GROUPS = {
                   "    self._bias_loads = []\n", "", 1)),
         ('no forward of memory ahead of the cover without atomics',
          sub(ABSTR, '      early = pir.Forward(builder.scratch, report=carries,\n'
-                    '                          registers=False, **carry)\n',
+                    '                          registers=False, fetches=True, **carry)\n',
              '      early = pir.Forward(builder.scratch, report=carries,\n'
-             '                          registers=False, **carry) if added else None\n', 1)),
+             '                          registers=False, fetches=True,\n'
+             '                          **carry) if added else None\n', 1)),
         ('an accumulation says its destination holds nothing ahead of it',
          sub(GEN, '                  and id(sym) not in read\n', '', 1)),
     ]),
@@ -3119,6 +3120,9 @@ GROUPS = {
     # A load taken from where its own lane's store took the value, a store
     # nothing reads dropped, and the masks taken to hold for it.
     'forward': ('tests/test_forward.py', [
+        ('an operand every product loads, loaded again behind the wrap',
+         sub(ABSTR, '                          registers=False, fetches=True, **carry)\n',
+             '                          registers=False, fetches=False, **carry)\n', 1)),
         ('a select over the lanes told apart under the explicit vector alone',
          sub(FLOW, "        if (d is not None and d.op == 'select'\n",
              "        if (self.simd and d is not None and d.op == 'select'\n", 1)),
