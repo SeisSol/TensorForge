@@ -742,6 +742,16 @@ def _py(expr: str) -> str:
                    + e[m.end():j - 1] + ')')
         i = j
     e = ''.join(out)
+    # A vector value-initialized inside an expression -- the zero a guarded
+    # wide read selects where its guard fails, `g ? *(VectorT<float, 4>*)&p[i]
+    # : tensorforge::VectorT<float, 4>{}` -- is that many zeros; with numbers
+    # in the braces it is the literal below, its type said once more.
+    e = re.sub(r'\btensorforge::Vector(?:Relaxed)?T\s*<[^<>]*?,\s*(\d+)\s*>'
+               r'\s*\{\s*\}',
+               lambda m: 'VEC(' + ', '.join(['0.0'] * int(m.group(1))) + ')',
+               e)
+    e = re.sub(r'\btensorforge::Vector(?:Relaxed)?T\s*<[^<>]*>\s*(?=\{)', '',
+               e)
     # `{a, b}` in an expression is a vector literal.  A bare `{}` is
     # zero-initialization and is handled by `_DECL`, so it never reaches here.
     e = re.sub(r'\{\s*([^{}]+?)\s*\}', r'VEC(\1)', e)

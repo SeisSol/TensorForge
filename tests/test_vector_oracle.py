@@ -162,6 +162,20 @@ def test_an_expression_read_across_the_lanes_is_the_lane_reads():
     assert [it.ev(own) for it in lanes] == [1.0, 2.0, 3.0, 4.0]
 
 
+def test_a_vector_initialized_in_an_expression_is_its_zeros():
+    """`g ? *(VectorT<float, 4>*)&p[i] : tensorforge::VectorT<float, 4>{}`,
+    the guarded wide read a lead-vectorized kernel peels its first element
+    with: the empty braces are four zeros, and braces with numbers in them
+    the literal they always were.  Untranslated, the oracle could not run
+    such a kernel at all."""
+    interp = kernel_eval.Interp(kernel_eval.Slot(0), {})
+    interp.env['g'] = False
+    zero = interp.ev('g ? (1.0f) : (tensorforge::VectorT<float, 4>{})')
+    assert tuple(zero) == (0.0, 0.0, 0.0, 0.0)
+    assert tuple(interp.ev('tensorforge::VectorT<double, 2>{1.5, 2.0}')) == (
+        1.5, 2.0)
+
+
 def test_a_lane_masked_off_at_the_definition_refuses():
     """On the hardware the register holds whatever it held before, which is
     not something to invent a number for."""
