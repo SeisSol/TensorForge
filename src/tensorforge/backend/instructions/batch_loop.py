@@ -1089,7 +1089,7 @@ class BatchLoop(AbstractInstruction):
                             f'{self._group_start()}; '
                             f'{self._group_batch()} < {self._stacks()}; '
                             f'{self._group_batch()} += {self._stride}',
-                            uniform=uniform):
+                            uniform=uniform, batch=True):
                 mask = self._declare_row_element(writer)
                 self._lookahead_bindings(writer)
                 with self._spelled_indices(writer), \
