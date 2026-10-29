@@ -730,6 +730,57 @@ def test_the_builds_of_two_backends_on_one_gpu_cost_apart(tmp_path):
 
 
 # ----------------------------------------------------------------------
+# Which side of a machine's ridge
+# ----------------------------------------------------------------------
+
+def test_a_mark_says_which_side_of_the_ridge_and_how_far():
+    ratios = (0.01, 0.125, 0.3, 0.5, 0.99, 1.0, 1.99, 2.0, 7.9, 8.0, 100.0)
+    assert [publish.bound_step(r) for r in ratios] == \
+        [1, 2, 2, 3, 3, 5, 5, 6, 6, 7, 7]
+
+
+def test_the_intensity_is_marked_against_each_machines_ridge(tmp_path):
+    """The volume kernel at order 6 needs 5.56 flop per byte in double:
+    under A's ridge of 10, by less than half, and over B's of 2.5, by more
+    than twice -- and B, the lower ridge, stands first."""
+    import dataclasses
+    import describe
+    kernels = ['gpu_volume', 'gpu_derivative']
+    field = _tree(tmp_path, [_point('gpu_volume', a, 4, 0.5) for a in 'AB'],
+                  datatypes=('F64', 'F32'))
+    c = field.ceilings[('B', 'F64')]
+    field.ceilings[('B', 'F64')] = dataclasses.replace(
+        c, flops_per_s=c.flops_per_s / 4)
+    described = describe.describe_all([BENCH / 'data'], kernels)
+    out, skipped = publish.table_bound(described, kernels, field)
+    assert not skipped
+    assert [o.name for o in out] == ['bound-f32', 'bound-f64']
+    f64 = out[1]
+    at = {(r['kernel'], r['order'], r['arch']): r for r in f64.rows
+          if r['equation'] == 'elastic'}
+    assert at[('gpu_volume', 6, 'A')]['intensity'] == pytest.approx(
+        5.56, rel=1e-2)
+    assert at[('gpu_volume', 6, 'A')]['step'] == 3
+    assert at[('gpu_volume', 6, 'B')]['step'] == 6
+    assert '\\tfbound{6}\\tfbound{3}' in f64.tex
+    assert f64.caption.index('\\texttt{B}') < f64.caption.index(
+        '\\texttt{A}')
+    assert 'the operation needs' in f64.caption
+
+
+def test_the_backends_of_one_gpu_share_its_ridge_and_its_mark(tmp_path):
+    import describe
+    rows = [dict(_point('gpu_volume', 'pvc', 4, 0.5), backend=b)
+            for b in ('oneapi', 'esimd')]
+    field = _tree(tmp_path, rows)
+    described = describe.describe_all([BENCH / 'data'], ['gpu_volume'])
+    out, skipped = publish.table_bound(described, ['gpu_volume'], field)
+    assert skipped == ['bound-f32: no FP32 ceiling measured']
+    f64, = out
+    assert {r['arch'] for r in f64.rows} == {'pvc'}
+
+
+# ----------------------------------------------------------------------
 # The kernels drawn
 # ----------------------------------------------------------------------
 
@@ -955,9 +1006,9 @@ def test_the_preview_compiles(tmp_path):
     outputs, skipped = publish.build(field, described, kernels, 4, 'wall',
                                      extra)
     kinds = {o.name.split('-')[0] for o in outputs}
-    assert {'lts', 'timesplit', 'throughput', 'cascade', 'machines',
-            'fusion', 'lanes', 'resources', 'precision', 'simulations',
-            'traffic', 'buildcost'} <= kinds, sorted(kinds)
+    assert {'bound', 'lts', 'timesplit', 'throughput', 'cascade',
+            'machines', 'fusion', 'lanes', 'resources', 'precision',
+            'simulations', 'traffic', 'buildcost'} <= kinds, sorted(kinds)
     out = tmp_path / 'pub'
     publish.write(outputs, out, 'test', {'skipped': skipped})
     ok, why = texout.compile_tex(out / 'preview.tex')

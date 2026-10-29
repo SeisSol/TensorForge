@@ -374,6 +374,7 @@ a suggested caption, after a page listing what was not made and why.
 |---|---|
 | `tables/kernels` | what does each kernel compute? (`describe.py`) |
 | `tables/intensity`, `figures/intensity-*` | how many flops per byte, at each order and precision, against each machine's ridge? |
+| `tables/bound-*` | is a kernel memory- or compute-bound on each machine, per order, and how far from the ridge? |
 | `figures/operations-*` | what does each kernel multiply, drawn to scale, per equation and order? |
 | `figures/operators-*` | where are the nonzeros of the operators the elements share? |
 | `tables/machines` | what did each machine turn out to do, per precision? |
@@ -404,6 +405,15 @@ orders of one kernel: a kernel is its name and its export (`capture.py`), never
 its name alone; the figures across machines are the exception (below). A run
 of another generator brought in with its own `config` label is drawn against
 the reference like any configuration.
+
+**Which side of the ridge.** `tables/bound-*` is the intensity table made lean
+for a paper: one precision, the orders as columns, the flops the operation needs
+per compulsory byte (`--flops dense` for a dense implementation's) -- and beside
+each number a mark per machine, in the order of the machines' ridges: a circle
+below the ridge, where the memory bounds the kernel, a square above it, where
+the arithmetic does, the darker the further from the ridge -- within a factor
+of two, of eight, or beyond (`BOUND_STEPS`). The backends of one GPU share its
+ridge and its mark.
 
 **The time step.** The breakdown and the ramp-up add the kernels up the way
 SeisSol launches them on a GPU (`STEP`, read off SeisSol's
