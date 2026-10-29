@@ -707,11 +707,24 @@ def _copies(placed: List[Tuple[_Shard, int]]) -> List[_Copy]:
     return out
 
 
+#: Passes over the block a copy is written out to rather than looped over
+#: (`_stage`).  The loop runs by lane -- its trips are `flat`'s -- so the
+#: compiler cannot count the loads in flight and waits on each one before its
+#: store: a round trip to memory a pass, twelve at the head of every trip of
+#: SeisSol's order-8 `localFluxAll` on gfx942.  Written out, the passes'
+#: loads are in flight together.  Past this many the loop stays, its code
+#: size the bound.
+UNROLL = 16
+
+
 def _stage(b, operand: Value, buf: Value, copy: _Copy, flat: Value,
            block: int, width: int = 1) -> None:
     """`copy` by the threads of the block, `flat` the thread's place among
     them: each thread its share of `block` accesses of `width` elements
-    (`_width`), under a guard where the block covers the copy at once."""
+    (`_width`), under a guard where the block covers the copy at once, and
+    written out pass by pass where it takes up to `UNROLL` passes -- every
+    load ahead of the stores, and the lanes past the end of the last pass on
+    their access of the first."""
     def plus(a: Value, c, hint: str) -> Value:
         if isinstance(c, int) and c == 0:
             return a
@@ -731,29 +744,58 @@ def _stage(b, operand: Value, buf: Value, copy: _Copy, flat: Value,
     elem = operand.type.elem
     wide = ScalarType(elem, width) if width > 1 else None
 
-    def one(u: Value) -> None:
+    nbytes = width * elem.size()
+
+    def place(u: Value) -> Tuple[Value, Value]:
         # Access `u` moves elements `width * u` on, which never straddle a
         # run: `width` divides every run's length.
         i = u if width == 1 else b.op('mul', INDEX, u, width, hint='e')
         k = (b.op('div', INDEX, i, copy.count, hint='k')
              if copy.times > 1 else None)
-        src = at(i, k, copy.src, copy.src_step, 'g')
-        dst = at(i, k, copy.dst, copy.dst_step, 'l')
+        return (at(i, k, copy.src, copy.src_step, 'g'),
+                at(i, k, copy.dst, copy.dst_step, 'l'))
+
+    def fetch(src: Value) -> Value:
         if wide is None:
-            b.store(buf, b.load(operand, src, hint='sh'), dst)
-            return
-        nbytes = width * elem.size()
-        b.store(buf, b.load(operand, src, type_=wide, align=nbytes,
-                            hint='sh'), dst, align=nbytes)
+            return b.load(operand, src, hint='sh')
+        return b.load(operand, src, type_=wide, align=nbytes, hint='sh')
+
+    def put(dst: Value, value: Value) -> None:
+        if wide is None:
+            b.store(buf, value, dst)
+        else:
+            b.store(buf, value, dst, align=nbytes)
+
+    def one(u: Value) -> None:
+        src, dst = place(u)
+        put(dst, fetch(src))
 
     units = copy.total // width
     if units <= block:
         with b.if_(b.op('lt', BOOL, flat, units, hint='s')):
             one(flat)
         return
-    with b.for_(flat, units, block, hint='s',
-                uniform=Uniformity.LANE) as f:
-        one(f.induction)
+    passes = -(-units // block)
+    if passes > UNROLL:
+        with b.for_(flat, units, block, hint='s',
+                    uniform=Uniformity.LANE) as f:
+            one(f.induction)
+        return
+    fetched = []
+    for p in range(passes):
+        u = plus(flat, p * block, 's')
+        if (p + 1) * block > units:
+            # The last pass, which some lanes are past the end of.  They take
+            # their access of the first pass again -- the same value to the
+            # same place, by the same lane, so no other lane's write races it
+            # -- rather than branch: a guard around the store would draw the
+            # load in behind it and wait on it there.
+            u = b.op('select', INDEX, b.op('lt', BOOL, u, units, hint='s'),
+                     u, flat, hint='s')
+        src, dst = place(u)
+        fetched.append((dst, fetch(src)))
+    for dst, value in fetched:
+        put(dst, value)
 
 
 def _alignments(body: Tuple[Stmt, ...], at: int,

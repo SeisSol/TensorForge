@@ -1791,11 +1791,18 @@ GROUPS = {
              '                       uniform=_join((value,)),\n', 1)),
     ]),
 
-    # A merged run's members streamed through the shards: the shards as long
-    # as the members are stored, not as their box.
+    # A merged run's members streamed through the shards: the copy written
+    # out pass by pass, the lanes past the end of its last pass back on their
+    # first, and the shards as long as the members are stored, not as their
+    # box.
     'members': ('tests/test_stage_members.py', [
         ("a member's storage taken for its box",
          sub(GEN, '                extents=self._operand_extents(),\n', '', 1)),
+        ('the last pass reaching past the end of the copy',
+         sub(SHARDS, "            u = b.op('select', INDEX, b.op('lt', BOOL, u, units, hint='s'),\n"
+                     "                     u, flat, hint='s')\n", '            pass\n', 1)),
+        ('the copy looped by lane, a round trip a pass',
+         sub(SHARDS, 'UNROLL = 16\n', 'UNROLL = 0\n', 1)),
     ]),
 
     # Groups that change places across a loop's back edge are no steady

@@ -189,6 +189,31 @@ def test_a_streamed_member_computes_what_the_global_one_does(budget):
         assert np.array_equal(np.asarray(got[key]), np.asarray(want[key]))
 
 
+def test_a_member_copied_in_passes_computes_what_the_global_one_does():
+    """A 24 x 24 member is 576 floats, three passes of a block of 256
+    threads, the last one short: written out (`shards.UNROLL`), every pass's
+    load ahead of the stores, and the lanes past the end on their access of
+    the first pass.  The copy gives the very numbers the global member does,
+    and no two lanes write a slot between two barriers."""
+    plain, plain_geo, _ = _four_products(24, stage_members=False)
+    streamed, geo, report = _four_products(24, stage_members=True,
+                                           preload_shard_budget=65536)
+    assert report and ' a trip:' in report[0]
+    flat = re.search(r'int32_t (v\d+_flat) = ', streamed).group(1)
+    assert re.findall(rf'v\d+_s = {flat} \+ (\d+);', streamed) == ['256', '512']
+    assert re.search(rf'\(v\d+_s < 576\) \? v\d+_s : {flat}\b', streamed)
+    assert ' += 256' not in streamed
+    want, got = _written(plain, plain_geo), _written(streamed, geo)
+    assert want and set(want) == set(got)
+    for key in want:
+        assert np.array_equal(np.asarray(got[key]), np.asarray(want[key]))
+    lanes, mults = geo
+    found = []
+    ke.evaluate_wave(streamed, lanes, seed=3, races=found, elements=8,
+                     mults=mults, block=True)
+    assert found == []
+
+
 def test_a_member_stored_past_its_box_is_held_to_its_storage():
     """A 48 x 48 member read by 32 lanes takes two lead slots a lane, stored
     as a pair and padded to 64 rows: 3072 floats where the box has 2304.
