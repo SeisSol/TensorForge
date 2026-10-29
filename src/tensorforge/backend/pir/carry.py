@@ -271,6 +271,86 @@ class _Refused(Exception):
     """Why a buffer stays where it is."""
 
 
+class _Trip:
+    """What each statement of a list touches, asked of it once for the list
+    as it stands: a loop's trip, which `_Carrier._loop` asks of every buffer
+    it stores, or the code behind it.
+
+    `touching` is where the statements are that may reach a buffer
+    (`may_alias`), `transfer` where those of a transfer are, and
+    `stored_from_registers` whether a statement writes a buffer and reads a
+    register image.  `declared` holds the declarations in the list, and
+    `unsaid` whether it holds a statement that says nothing about what it
+    touches."""
+
+    def __init__(self, stmts: Sequence[Stmt]):
+        self.stmts: List[Stmt] = list(stmts)
+        #: Positions of the statements that access a buffer, by its space
+        #: and identity; of those that access a space through no buffer, by
+        #: the space; and of those that access a space nobody knows.
+        self._of: Dict[Tuple[MemSpace, int], List[int]] = {}
+        self._unnamed: Dict[MemSpace, List[int]] = {}
+        self._anywhere: List[int] = []
+        #: Positions of the statements of a transfer, by its tag, but text
+        #: that touches nothing (`neutral`).
+        self._transfers: Dict[int, List[int]] = {}
+        #: The buffers a statement that reads a register image writes.
+        self._from_registers: Set[int] = set()
+        self.declared: Set[int] = set()
+        self.unsaid = False
+        for i, s in enumerate(self.stmts):
+            t = tag(s)
+            if t is not None and not neutral(s):
+                self._transfers.setdefault(t, []).append(i)
+            keys: Set[Optional[Tuple[MemSpace, Optional[int]]]] = set()
+            written: Set[int] = set()
+            registers = False
+            for x in walk_stmts((s,)):
+                if x.op is Op.ALLOC:
+                    self.declared.add(id(x))
+                if x.effect & Effect.UNKNOWN:
+                    self.unsaid = True
+                for a in x.accesses:
+                    if a.space is MemSpace.UNKNOWN:
+                        keys.add(None)
+                    else:
+                        keys.add((a.space, None if a.base is None
+                                  else id(a.base)))
+                    if a.writes and a.base is not None:
+                        written.add(id(a.base))
+                    elif a.space is MemSpace.REGISTER and not a.writes:
+                        registers = True
+            for key in keys:
+                if key is None:
+                    self._anywhere.append(i)
+                elif key[1] is None:
+                    self._unnamed.setdefault(key[0], []).append(i)
+                else:
+                    self._of.setdefault(key, []).append(i)
+            if registers:
+                self._from_registers |= written
+
+    def touching(self, access: Access) -> List[int]:
+        """Where the statements are that may reach the buffer `access`
+        names, in order: those that access it, those that access its space
+        through no buffer, and those that access a space nobody knows."""
+        found = set(self._anywhere)
+        found.update(self._unnamed.get(access.space, ()))
+        found.update(self._of.get((access.space, id(access.base)), ()))
+        return sorted(found)
+
+    def transfer(self, t: int) -> List[int]:
+        """Where the statements of transfer `t` are, in order."""
+        return self._transfers.get(t, [])
+
+    def stored_from_registers(self, access: Access) -> bool:
+        """Does a statement write `access`'s buffer and read a register
+        image -- the store at the tail of a trip it would take, if any?
+        What is not one of those, nothing here carries, and nothing
+        reports."""
+        return id(access.base) in self._from_registers
+
+
 #: How many lists `_Touched` keeps what it found in.
 _LISTS = 64
 
@@ -520,16 +600,17 @@ class _Carrier:
         self._here = id(loop)
         while True:
             body = loop.regions[0].body
+            trip = _Trip(body)
             found = None
             for access in _stored(body):
                 if id(access.base) in tried:
                     continue
                 tried.add(id(access.base))
-                if not _stored_from_registers(body, access):
+                if not trip.stored_from_registers(access):
                     continue
                 name = getattr(access.base, 'name', str(access.base))
                 try:
-                    found = self._carry(loop, access, out)
+                    found = self._carry(loop, trip, access, out)
                 except _Refused as why:
                     self._say(f'carry: {name} stays in memory: {why}')
                     continue
@@ -552,30 +633,27 @@ class _Carrier:
 
     # -- one buffer ---------------------------------------------------------- #
 
-    def _carry(self, loop: Stmt, access: Access, out: List[Stmt]):
-        stmts = list(loop.regions[0].body)
-        probe = Access(Effect.READ, access.space, access.base)
-        touching = [i for i, s in enumerate(stmts)
-                    if any(may_alias(a, probe)
-                           for a in collect_accesses((s,)))]
+    def _carry(self, loop: Stmt, trip: '_Trip', access: Access,
+               out: List[Stmt]):
+        touching = trip.touching(access)
         try:
-            return self._shaped(loop, stmts, touching, access)
+            return self._shaped(loop, trip, touching, access)
         except _Refused as why:
             if (access.space is not MemSpace.SHARED
                     or _key(access.base) not in self._own):
                 raise
             try:
-                return self._private(loop, stmts, touching, access, out)
+                return self._private(loop, trip, touching, access, out)
             except _Refused as other:
                 if str(other) == str(why):
                     raise
                 raise _Refused(f"{why}; and it is not each lane's own: "
                                f"{other}") from other
 
-    def _shaped(self, loop: Stmt, stmts: List[Stmt], touching: List[int],
+    def _shaped(self, loop: Stmt, trip: '_Trip', touching: List[int],
                 access: Access):
         """A load at the head and a store at the tail."""
-        units = self._units(stmts, touching, access)
+        units = self._units(trip, touching, access)
         kinds = {u.kind for u in units}
         loads = [u for u in units if u.kind == 'load']
         stores = [u for u in units if u.kind == 'store']
@@ -588,27 +666,28 @@ class _Carrier:
         if len({_key(u.image) for u in loads}) != 1 \
                 or len({_key(u.image) for u in stores}) != 1:
             raise _Refused('more than one register image')
-        return self._loaded(loop, stmts, loads, stores, access)
+        return self._loaded(loop, trip.stmts, loads, stores, access)
 
-    def _units(self, stmts: List[Stmt], touching: List[int],
+    def _units(self, trip: '_Trip', touching: List[int],
                access: Access) -> List[_Unit]:
         """The statements at `touching`, grouped into the transfers they are
         part of (`transfers.tag`), as units of the loop that move `access`'s
         buffer through one register image."""
+        stmts = trip.stmts
         groups: List[List[int]] = []
         done: Set[int] = set()
         for i in touching:
             if i in done:
                 continue
             t = tag(stmts[i])
-            group = ([j for j, s in enumerate(stmts) if tag(s) == t
-                      and not neutral(s)] if t is not None else [i])
+            group = list(trip.transfer(t)) if t is not None else [i]
             if i not in group:
                 group.append(i)
             group.sort()
             done.update(group)
             groups.append(group)
-        if any(j not in touching and _touches_memory(stmts[j])
+        inside = set(touching)
+        if any(j not in inside and _touches_memory(stmts[j])
                for group in groups for j in group):
             raise _Refused('a transfer of it moves something else as well')
         return [self._unit(stmts, group, access) for group in groups]
@@ -1379,12 +1458,11 @@ class _Carrier:
             return out
         access = c.access
         probe = Access(Effect.READ, access.space, access.base)
-        touching = [i for i in range(max(stored) + 1, len(out))
-                    if any(may_alias(a, probe)
-                           for a in collect_accesses((out[i],)))]
+        behind = _Trip(out)
+        touching = [i for i in behind.touching(access) if i > max(stored)]
         if not touching:
             return out
-        unit = self._units(out, touching, access)[0]
+        unit = self._units(behind, touching, access)[0]
         if unit.kind != 'load':
             return out
         first = min(unit.at)
@@ -1425,7 +1503,7 @@ class _Carrier:
 
     # -- a buffer each lane keeps to itself ---------------------------------- #
 
-    def _private(self, loop: Stmt, stmts: List[Stmt], touching: List[int],
+    def _private(self, loop: Stmt, trip: '_Trip', touching: List[int],
                  access: Access, out: List[Stmt]):
         """`access`'s buffer in a register image of every lane's own over the
         trips: an element a lane writes in the trip, no other lane reads or
@@ -1441,9 +1519,10 @@ class _Carrier:
         behind it reads the buffer (`_read_behind`).  The stores ahead go
         where nothing reads what they wrote any more: the loop does not, and
         behind it the buffer is defined anew or written again."""
+        stmts = trip.stmts
         base = access.base
         alloc = self._own[_key(base)]
-        if any(x is alloc for x in walk_stmts(tuple(stmts))):
+        if id(alloc) in trip.declared:
             raise _Refused('it is declared in the trip')
         probe = Access(Effect.READ, access.space, base)
         nests = tuple(stmts[i] for i in touching)
@@ -1471,7 +1550,7 @@ class _Carrier:
         if named & self._addresses:
             raise _Refused('its binding is handed on, to a table of pointers '
                            'or the like, and may reach it from anywhere')
-        if any(x.effect & Effect.UNKNOWN for x in walk_stmts(tuple(stmts))):
+        if trip.unsaid:
             raise _Refused('the trip holds a statement that says nothing '
                            'about what it touches')
 
@@ -1502,9 +1581,10 @@ class _Carrier:
                                          register, fits, image)
 
         inductions = _inductions(nests)
+        inside = set(touching)
         body: List[Stmt] = []
         for i, s in enumerate(stmts):
-            if i in set(touching):
+            if i in inside:
                 body.extend(self._privatized([s], fits, image, inductions))
             else:
                 body.append(s)
@@ -2395,18 +2475,6 @@ def _stored(body: Sequence[Stmt]) -> List[Access]:
                 and not any(b.base is a.base for b in out)):
             out.append(a)
     return out
-
-
-def _stored_from_registers(body: Sequence[Stmt], access: Access) -> bool:
-    """Does a statement of `body` write `access`'s buffer and read a register
-    image -- the store at the tail of a trip it would take, if any?  What
-    is not one of those, nothing here carries, and nothing reports."""
-    for s in body:
-        found = collect_accesses((s,))
-        if any(a.writes and a.base is access.base for a in found) and any(
-                a.space is MemSpace.REGISTER and not a.writes for a in found):
-            return True
-    return False
 
 
 def _touches_memory(s: Stmt) -> bool:

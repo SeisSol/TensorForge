@@ -20,9 +20,9 @@ import contextlib
 
 from tensorforge.backend.pir import IRBuilder, verify
 from tensorforge.backend.pir.carry import carry_trips
-from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, BufferType,
-                                          Effect, MemSpace, Op, ScalarType,
-                                          Uniformity, walk_stmts)
+from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, Access,
+                                          BufferType, Effect, MemSpace, Op,
+                                          ScalarType, Uniformity, walk_stmts)
 from tensorforge.common.basic_types import Datatype
 
 F32 = Datatype.F32
@@ -64,7 +64,10 @@ class Run:
     `masked` makes `guard` an element's mask (`elementmask`) and puts every
     store of the other output under it as well, so that the body keeps the
     mask's contract; `stray` stores into that output once outside it, so
-    that it does not.
+    that it does not.  `unseen` puts a statement in the trip that reads
+    memory of that space through no buffer it names, and `number` one that
+    stores a number into the other output.  `spelled` writes the head out a
+    column at a time, a load and a store each, all of one transfer.
     """
 
     def __init__(self, *, table=False, elsewhere=False, other_rows=False,
@@ -73,7 +76,8 @@ class Run:
                  head_cols=COLS, rows=ROWS, padded=False, read_behind=False,
                  guarded=False, guarded_load=False, guard='if (active)',
                  tail_read=False, overwrite=False, split=False, wide=False,
-                 masked=False, stray=False):
+                 masked=False, stray=False, unseen=None, number=False,
+                 spelled=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
 
         def guarding(on):
@@ -131,19 +135,33 @@ class Run:
                     with guarding(guarded):
                         b.store(q, value, element(j))
             self.before = before
+        # Where the spelled head reads each column, computed ahead of the
+        # loop: the tail's index of the first column is the same value, and
+        # the store that goes behind the loop needs nothing the trip computes.
+        columns = [b.op('add', INDEX, lane, j * ROWS, hint='a')
+                   for j in range(head_cols)] if spelled else []
         with b.for_(0, trips, 1, rolled=True, hint='i'):
             head = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r1',
                            extern='r1', init='{}')
             with b.transfer():
-                with b.for_(0, head_cols, 1, unroll=True) as hop:
-                    j = hop.induction
-                    with guarding(guarded_load):
-                        value = b.load(q, element(j), predicate=valid)
-                        slot = (b.op('add', INDEX, j, 0, hint='s')
-                                if late_slot else j)
-                        b.store(head, value, slot)
+                if spelled:
+                    for j, at in enumerate(columns):
+                        value = b.load(q, at, predicate=valid)
+                        b.store(head, value, j)
+                else:
+                    with b.for_(0, head_cols, 1, unroll=True) as hop:
+                        j = hop.induction
+                        with guarding(guarded_load):
+                            value = b.load(q, element(j), predicate=valid)
+                            slot = (b.op('add', INDEX, j, 0, hint='s')
+                                    if late_slot else j)
+                            b.store(head, value, slot)
             if elsewhere:
                 b.store(head, b.load(q, element(0), predicate=inside), 0)
+            if unseen is not None:
+                b.touches([Access(Effect.READ, unseen, None)])
+            if number:
+                output(b.op('mul', real, 2.0, 3.0))
             if early_read:
                 output(b.load(head, 0))
             tail = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r2',
@@ -213,12 +231,15 @@ class Own:
     last column out of the store ahead of the loop, and
     `extra` has the trips leave it alone; `mark` defines `S` anew in the
     trip; `outer` puts it all in a loop of its own, whose body `defines`
-    begins with a `mark defines` of `S`.
+    begins with a `mark defines` of `S`.  `raw` puts text in the trip that
+    touches nothing and says nothing of it; `inner` declares `S` in the
+    trip, and the code ahead of the loop stores nothing.
     """
 
     def __init__(self, *, across=False, other=False, parity=False,
                  readonly=False, plain=False, partial=False, extra=False,
-                 mark=False, outer=False, defines=False, trips=3):
+                 mark=False, outer=False, defines=False, trips=3,
+                 raw=False, inner=False):
         b = self.b = IRBuilder(fptype=F32, arena='shrMem')
         k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
         p = b.decl_expr(
@@ -228,8 +249,10 @@ class Own:
             extern='glb_m1')
         lane = b.op('rem', INDEX, b.thread_id('x'), LANES, hint='lead')
         inside = b.op('lt', BOOL, lane, ROWS, hint='g')
-        s = self.s = b.alloc(F32, (ROWS * COLS,), MemSpace.SHARED, hint='s',
-                             extern='s0')
+        def declare():
+            return b.alloc(F32, (ROWS * COLS,), MemSpace.SHARED, hint='s',
+                           extern='s0')
+        s = self.s = None if inner else declare()
         real = ScalarType(F32)
         cols = COLS - 1 if extra else COLS
 
@@ -263,18 +286,24 @@ class Own:
                     b.store(s, b.load(temp, col), element(col))
 
         def run():
+            nonlocal s
             if defines:
                 b.mark('defines', s)
             before = b.alloc(F32, (COLS,), MemSpace.REGISTER, hint='r0',
                              extern='r0', init='{}')
             with b.for_(0, COLS, 1, unroll=True) as hop:
                 b.store(before, b.op('mul', real, 2.0, 3.0), hop.induction)
-            with b.if_(inside):
-                with b.for_(0, COLS - 1 if partial else COLS, 1,
-                            unroll=True) as hop:
-                    b.store(s, b.load(before, hop.induction),
-                            element(hop.induction))
+            if not inner:
+                with b.if_(inside):
+                    with b.for_(0, COLS - 1 if partial else COLS, 1,
+                                unroll=True) as hop:
+                        b.store(s, b.load(before, hop.induction),
+                                element(hop.induction))
             with b.for_(0, trips, 1, rolled=True, hint='i'):
+                if inner:
+                    s = self.s = declare()
+                if raw:
+                    b('/* nothing */', accesses=())
                 if mark:
                     b.mark('defines', s)
                 adds(0, 1, 1 if other else 0, odd=parity)
@@ -376,6 +405,17 @@ def test_rows_computed_and_not_stored_keep_their_own_image():
     assert any(s.op is Op.ALLOC for s in walk_stmts(loop.regions[0].body))
 
 
+def test_a_head_written_out_a_column_at_a_time_is_one_transfer():
+    """The head's loads and the stores into its image are statements of
+    their own, each load apart from the store it feeds: one transfer, which
+    moves `Q` through one image, and is carried as the loop of them is."""
+    run = Run(spelled=True)
+    out = run.carry()
+    _, loop, _ = _split(out)
+    assert not _touches(loop.regions[0].body, _q_root(run))
+    assert any('in registers over 4 trips' in line for line in run.report)
+
+
 def test_a_binding_handed_on_keeps_the_buffer_in_memory():
     """A table of pointers holding `Q`'s binding reaches `Q` from wherever it
     is read, which no access naming `Q` says."""
@@ -387,6 +427,29 @@ def test_a_binding_handed_on_keeps_the_buffer_in_memory():
 def test_a_buffer_the_trip_reads_elsewhere_stays_in_memory():
     run = Run(elsewhere=True)
     assert run.carry() == run.body
+
+
+def test_a_statement_that_reads_a_space_nobody_knows_keeps_it_in_memory():
+    """A statement in the trip that reads memory of a space nobody knows
+    may read `Q` there: the trip keeps its load and its store."""
+    run = Run(unseen=MemSpace.UNKNOWN)
+    assert run.carry() == run.body
+
+
+def test_a_statement_that_reads_global_memory_unnamed_keeps_it_there():
+    """A statement in the trip that reads global memory through no buffer it
+    names may read `Q` as well."""
+    run = Run(unseen=MemSpace.GLOBAL)
+    assert run.carry() == run.body
+
+
+def test_a_buffer_the_trip_stores_no_register_image_into_is_not_asked():
+    """The trip stores a number into the other output, from no register
+    image: nothing would carry it, and the report says nothing of it."""
+    run = Run(number=True)
+    run.carry()
+    assert any('in registers over 4 trips' in line for line in run.report)
+    assert not any('m1' in line for line in run.report), run.report
 
 
 def test_a_lane_that_stores_another_element_keeps_it_in_memory():
@@ -747,6 +810,23 @@ def test_a_store_ahead_of_more_than_the_trips_reach_keeps_it_in_memory():
     run = Own(extra=True)
     assert run.carry() == run.body
     assert any('do not reach' in line for line in run.report)
+
+
+def test_a_temporary_the_trip_declares_stays_in_memory():
+    """`S` declared in the trip is the trip's own: nothing it holds is
+    handed to the next trip."""
+    run = Own(inner=True)
+    assert run.carry() == run.body
+    assert any('it is declared in the trip' in line for line in run.report)
+
+
+def test_text_in_the_trip_that_says_nothing_keeps_the_temporary_in_memory():
+    """Text in the trip that says nothing of what it touches may touch `S`
+    -- though it says it touches no memory."""
+    run = Own(raw=True)
+    assert run.carry() == run.body
+    assert any('says nothing about what it touches' in line
+               for line in run.report)
 
 
 def test_a_temporary_the_trip_defines_anew_stays_in_memory():
