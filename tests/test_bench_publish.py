@@ -970,3 +970,17 @@ def test_the_figures_across_machines_compile(tmp_path):
                   {'skipped': skipped})
     ok, why = texout.compile_tex(out / 'preview.tex')
     assert ok, why
+
+
+def test_a_tree_without_its_manifest_is_named_partial(tmp_path):
+    """`evaluate.py` writes `evaluation.json` last: a campaign tree with runs
+    and none stopped early, and the preview says so beside what it drew."""
+    for machine, finished in (('aac7', True), ('pvc', False)):
+        (tmp_path / machine / 'eval' / 'runs').mkdir(parents=True)
+        if finished:
+            (tmp_path / machine / 'eval' / 'evaluation.json').write_text('{}')
+    trees = sorted(tmp_path.glob('*/eval'))
+    assert publish.partial_trees(trees) == ['pvc']
+    tex = publish.preview([], 'title', partial=['pvc'])
+    assert r'\textbf{Partial:} \texttt{pvc}' in tex
+    assert 'Partial' not in publish.preview([], 'title')
