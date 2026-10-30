@@ -1031,6 +1031,11 @@ class Generator:
         self._emit_global_ir()
         self._emit_ir(codesection)
         self._section.ir = _wait_for_transfers(self._section.ir)
+        if self._context.get_user_options().mma_d_layout:
+          # The products that add into one output, summed in the matrix
+          # instruction's layout from the first to the last (`dchain`).
+          from tensorforge.backend.instructions.compute import dchain
+          self._section.ir = dchain.link(self._context, self._section.ir)
 
         index = len(self._sections)
         start, stride = self._section_traversal(index)

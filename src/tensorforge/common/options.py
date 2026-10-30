@@ -1340,6 +1340,19 @@ declare('mma_prefetch_across',
             '`mmaosm` 7 % slower -- same instructions, L1 hits 95.2 % against '
             '93.1 % -- so it is a question per kernel, not a constant.')
 
+declare('mma_d_layout',
+        default=False,
+        env='TF_MMA_D_LAYOUT',
+        parse=parse_bool,
+        doc='Keep the matrix path\'s accumulator in the instruction\'s D '
+            'layout across the products that add into one output in global '
+            'memory: the output is read into that layout once, before the '
+            'first of them, and written once, after the last, each lane at '
+            'the rows and columns its fragment holds -- with no epilogue tile '
+            '(`ctile`) and no rows in between (`compute.dchain`).  NVIDIA, '
+            'one multiplication per warp; a product it does not reach keeps '
+            'its epilogue.')
+
 declare('mma_min_depth',
         default=None,
         env='TF_MMA_MIN_DEPTH',

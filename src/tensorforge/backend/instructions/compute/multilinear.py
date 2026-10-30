@@ -176,6 +176,10 @@ class MultilinearInstruction(ComputeInstruction):
         # `set_mult_stride`.
         self._mult_stride = None
         self._mult_stride_asked = False
+        #: The chain of products adding into one output this one is a member
+        #: of (`dchain.DChain`), set by `dchain.link`; None for a product on
+        #: its own.
+        self._dchain = None
 
         assert num_threads % blockcount == 0
 
@@ -962,6 +966,209 @@ class MultilinearInstruction(ComputeInstruction):
                  else data[np.ix_(ks, rows)])
         return not np.any(block)
 
+    def _matrix_extents(self):
+        """`(lead, columns, depth, start)` as the matrix paths see the
+        operation: the window's rows, the output columns flattened, the
+        contraction flattened and where it starts (`_nonleading_dim_test`)."""
+        lead = self._ns[0][1] - self._ns[0][0]
+        columns = 1
+        for lo, hi in self._ns[1:]:
+            columns *= hi - lo
+        depth = 1
+        for lo, hi in self._ks:
+            depth *= hi - lo
+        start = self._ks[0][0] if self._ks else 0
+        return lead, columns, depth, start
+
+    def _d_atom(self, module):
+        """The instruction the target's matrix path issues for this
+        operation, as it selects it (`instr_for`)."""
+        lead, columns, depth, start = self._matrix_extents()
+        return module.instr_for(self._idest.get_fptype(), columns=columns,
+                                lead=lead, depth=depth + start,
+                                sm=module.sm_of(self._context))
+
+    def d_chain_refusal(self, module):
+        """Why this product cannot be a member of a chain (`dchain`), or
+        None where it can.
+
+        What the chain's emitter assumes, asked before anything is taken out
+        of the stream: the target keeps chains, the product takes its matrix
+        path -- every condition `_nonleading_dim_test` asks on the way there,
+        since a member that fell back to the nest would leave the chain's
+        accumulators nobody adds into -- one multiplication per warp, and the
+        result reaches its output through exactly the companions the builder
+        recorded: the old value loaded into an image of its own, added by an
+        epilogue without a factor, stored to global memory.
+        """
+        from tensorforge.backend.instructions.memory.load import GlbToRegLoader
+        from tensorforge.backend.instructions.memory.store import StoreRegToGlb
+        if module is None or not getattr(module, 'D_CHAINS', False):
+            return 'the target keeps no chains'
+        if self._context.get_user_options().atomic_accumulation:
+            return 'an accumulation may be added atomically'
+        if self._num_threads != module.WAVE or self._lead_width != 1:
+            return 'not one multiplication per warp, one row per lane'
+        if len(self._ns) != 2 or len(self._ks) != 1 or len(self._ops) != 2:
+            return 'not a product of two matrices'
+        if self._scalar or self._prev is None:
+            return 'a factor, or nothing to add onto'
+        if self._next is not None and self._next is not self._prev:
+            # The image whose layout the result takes, where it is not the
+            # one the old value was loaded into, which the chain drops.
+            return 'a neighbor whose layout the result takes'
+        if not self._has_epilogue:
+            return 'no epilogue'
+        plan = self._plan()
+        if len(plan) != 1 or plan[0].strategy is not Strategy.MATRIX:
+            return 'not on the matrix path'
+        if ('n0' in self._opdim_to_nks[1]
+                or not self._lane_readable_by_reduction(1)
+                or self._identity_reduction() is not None
+                or self._ell_plan() is not None
+                or self._window_declines()
+                or self._second_operand_is_sparse()):
+            return 'the matrix path would decline it'
+        atom = self._d_atom(module)
+        if atom is None or atom.mode not in module.EMITTED_MODES:
+            return 'no instruction'
+        parts = self.companions
+        store, epilogue = parts.store, parts.epilogue
+        if (not isinstance(store, StoreRegToGlb) or store._zero_fill
+                or store._src is not self._dest
+                or store._dest.stype is not SymbolType.Global
+                or store._dest.stack() > 1):
+            return 'the result is not added into global memory'
+        if (epilogue._acc is not self._idest or epilogue._dest is not self._dest
+                or epilogue._prev is not self._prev or epilogue._scalars):
+            return 'an epilogue of another shape'
+        loads = [x for x in parts.bias if isinstance(x, GlbToRegLoader)]
+        if (len(loads) != 1 or loads[0]._dest is not self._prev
+                or getattr(loads[0]._src, 'obj', None) is not store._dest.obj):
+            return 'the old value is not loaded into an image of its own'
+        return None
+
+    def d_chain_dest(self):
+        """The global symbol a member adds into."""
+        return self.companions.store._dest
+
+    def d_chain_symbols(self):
+        """The registers only the companions a chain replaces touch: the
+        image of the old value and the result's."""
+        return (self._prev, self._dest)
+
+    def d_chain_rows(self):
+        """The window of the lead dimension, in the accumulator's frame."""
+        return tuple(self._ns[0])
+
+    def d_chain_columns(self):
+        return tuple(self._ns[1])
+
+    def d_chain_key(self, module):
+        """What the members of one chain have in common: the output and
+        where the frame sits in it, the columns, the slot the window starts
+        in, the type, and the accumulator's shape -- one D layout for all of
+        them."""
+        atom = self._d_atom(module)
+        span = self._num_threads * self._lead_width
+        return (id(self.d_chain_dest()), tuple(self.companions.store._dest_offset),
+                self._theta, self.d_chain_columns(), self._ns[0][0] // span,
+                self._idest.get_fptype(), atom.m, atom.n, atom.d, atom.mode)
+
+    def d_chain_tile_rows(self, module):
+        """The rows the matrix path's tiles cover, in the frame: the walk from
+        the first slot's start to the window's end (`matmul`)."""
+        atom = self._d_atom(module)
+        span = self._num_threads * self._lead_width
+        base = (self._ns[0][0] // span) * span
+        walk = self._ns[0][1] - base
+        rows = []
+        for i in range(0, walk, module.WAVE):
+            for ii in range(0, min(module.WAVE, walk - i), atom.m):
+                rows.extend(base + i + ii + r for r in range(atom.m))
+        return rows
+
+    def join_d_chain(self, chain) -> None:
+        self._dchain = chain
+
+    def _known_zero_rows(self, rows) -> bool:
+        """Whether `A` is known to be zero in these rows of the lead
+        dimension -- in the accumulator's frame -- over the whole
+        contraction: what a member of a chain adds to the rows of the chain
+        it does not own (`dchain`).
+
+        `_zero_block` without its window: that one answers which tiles
+        hold nothing worth an instruction, where the rows outside the
+        window are the epilogue's to drop; here they are stored.
+        """
+        if not rows:
+            return True
+        symbol = self._ops[0].symbol
+        obj = getattr(symbol, 'obj', None)
+        if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
+                or obj.addressing is not Addressing.NONE or not obj.has_values()
+                or len(self._ks) != 1
+                or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']):
+            return False
+        nks = self._opdim_to_nks[0]
+        lead, red = nks.index('n0'), nks.index('k0')
+        rows = [r + self._eff_offset(0, lead) for r in rows]
+        ks = [k + self._eff_offset(0, red) for k in range(*self._ks[0])]
+        data = obj.get_values()
+        if (min(rows) < 0 or max(rows) >= data.shape[lead]
+                or min(ks) < 0 or max(ks) >= data.shape[red]):
+            return False
+        block = (data[np.ix_(rows, ks)] if lead == 0
+                 else data[np.ix_(ks, rows)])
+        return not np.any(block)
+
+    def _d_chain_ops(self, span):
+        """What the target's emitter is handed for this member's place in
+        its chain (`MatmulOperands.chain`): its role, the state the members
+        share, the chain's window counted from the first slot's start, and
+        the reads and writes of the output at a row of that walk and a
+        column of the flattened output."""
+        from tensorforge.backend import elementmask
+        from tensorforge.backend.pir.core import ScalarType
+        from tensorforge.backend.symbol import Variable
+        from .dchain import check
+        from .matmul import AccumulatorChain
+        chain = self._dchain
+        check(chain, self)
+        base = (self._ns[0][0] // span) * span
+        dest = chain.dest
+        offset = chain.offset
+        first = chain.columns[0]
+        ftype = ScalarType(self._idest.get_fptype())
+
+        def index(writer, row, col):
+            r = writer.op('add', INDEX, row, base + offset[0], hint='dr')
+            c = writer.op('add', INDEX, col, first + offset[1], hint='dc')
+            return dest.address_value(writer, self._context,
+                                      [Variable('dr', INDEX, r),
+                                       Variable('dc', INDEX, c)])
+
+        def load(writer, row, col, predicate=None):
+            # Zero where the predicate is false: what a load without an
+            # `other` gives there.
+            return writer.load(dest, index(writer, row, col), type_=ftype,
+                               hint='q', predicate=predicate)
+
+        def store(writer, value, row, col):
+            # Under the mask of a batch element, as `Symbol.store` writes.
+            mask = elementmask.active()[1]
+            if mask is not None:
+                with writer.If(mask, guard='element'):
+                    writer.store(dest, value, index(writer, row, col))
+            else:
+                writer.store(dest, value, index(writer, row, col))
+
+        return AccumulatorChain(
+            opens=chain.opens(self), closes=chain.closes(self),
+            state=chain.state,
+            rows=(chain.rows[0] - base, chain.rows[1] - base),
+            load=load, store=store)
+
     def gen_code_inner(self, writer: Writer):
         # A comment touches nothing.  Left conservative it would be read as
         # touching every buffer, and this one sits above them all.
@@ -973,6 +1180,15 @@ class MultilinearInstruction(ComputeInstruction):
             raise InternalError(
                 f'{self}: whether it needs an epilogue changed after the '
                 f'builder decided it')
+        if self._dchain is not None:
+            # The chain's accumulators are the result, and the output is
+            # where it goes: there is no image to write (`dchain`).
+            self._vdest = None
+            if not self._nonleading_dim_test(writer):
+                raise InternalError(
+                    f'{self}: a member of a {self._dchain} declined the matrix '
+                    f'path it was linked for')
+            return
         if not self._has_epilogue:
             self._vdest = self._dest
         elif hasattr(writer, 'alloc') and callable(getattr(writer, 'alloc')):
@@ -2706,6 +2922,9 @@ class MultilinearInstruction(ComputeInstruction):
                 A_zero=A_zero if width == 1 else None,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
                 threads=self._num_threads, lead_width=width,
+                lead_first=self._ns[0][0] % span,
+                chain=(None if self._dchain is None
+                       else self._d_chain_ops(span)),
                 a=self._ops[0].symbol.get_fptype(),
                 b=self._ops[1].symbol.get_fptype(),
                 accumulator=self._idest.get_fptype())
@@ -2724,8 +2943,12 @@ class MultilinearInstruction(ComputeInstruction):
         return False
 
     def get_operands(self):
-        # The scalar factors and the previous value are the epilogue's.
-        return [op.symbol for op in self._ops]
+        # The scalar factors and the previous value are the epilogue's -- or,
+        # in a chain, its first member's, which reads the output.
+        out = [op.symbol for op in self._ops]
+        if self._dchain is not None and self._dchain.opens(self):
+            out.append(self._dchain.dest)
+        return out
 
     def needs_epilogue(self) -> bool:
         """Whether the accumulator is not the destination.
@@ -2792,6 +3015,11 @@ class MultilinearInstruction(ComputeInstruction):
         return sym.data_view.get_bbox().upper()[axis] <= end
 
     def defs(self):
+        if self._dchain is not None:
+            # A chain's last member writes the output; the others hand their
+            # sums on in registers (`dchain`).
+            return ((self._dchain.dest,) if self._dchain.closes(self)
+                    else ())
         # the accumulator, where an epilogue writes the destination from it
         return (self._idest,) if self._has_epilogue else (self._dest,)
 

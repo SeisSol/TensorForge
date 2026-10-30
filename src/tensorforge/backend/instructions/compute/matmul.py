@@ -43,9 +43,35 @@ was kept (`pir.allocate`), so a declined path holds none.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 from tensorforge.common.basic_types import Datatype
+
+
+@dataclass(frozen=True)
+class AccumulatorChain:
+    """This product's place among the products that add into one output
+    and keep the sum in the instruction's accumulator layout
+    (`compute.dchain`).
+
+    `opens` and `closes` say whether it is the first -- which declares the
+    accumulators and reads the output into them -- and the last, which
+    writes them back.  `state` is what the members of one build share,
+    keyed as the emitter keys it; the first member starts it over.
+
+    `rows` is the chain's window of the lead dimension, counted from the
+    start of this product's first slot as the walk counts, and `load` and
+    `store` read and write the output at such a row and a column of the
+    flattened output: ``load(writer, row, col, predicate=None) -> value``,
+    zero where the predicate is false, and ``store(writer, value, row,
+    col)``.  Both indices are values, the lane's row and column in the
+    accumulator layout; which lane holds which is the emitter's to say."""
+    opens: bool
+    closes: bool
+    state: Dict
+    rows: Tuple[int, int]
+    load: Callable
+    store: Callable
 
 
 @dataclass(frozen=True)
@@ -147,6 +173,23 @@ class MatmulOperands:
     #: a block holds `width * t + c`.  One for every path not told otherwise;
     #: a path that cannot take more declines.
     lead_width: int = 1
+
+    #: Where the window starts, in elements from the first slot the
+    #: accessors read.  A window that starts inside a slot -- SeisSol's
+    #: `kDivM` products write from row one -- has its first row this far into
+    #: the slot and its last :attr:`lead_elements` after that, so a path that
+    #: walks elements from the slot's start walks ``lead_first +
+    #: lead_elements`` of them.  :attr:`lead_elements` alone stops that many
+    #: rows short of the window's end, which a tile boundary hides until the
+    #: window ends in a tile of its own.
+    lead_first: int = 0
+
+    #: Where this product adds into an output together with others and the
+    #: sum stays in the instruction's accumulator layout from the first to
+    #: the last (`AccumulatorChain`), or ``None``.  A path that is handed one
+    #: writes neither `C` nor anything else for its result: the chain's last
+    #: member writes the output.
+    chain: Optional[AccumulatorChain] = None
 
     #: ``mult_stride() -> int``: shared memory one multiplication owns, in
     #: elements -- the distance from its copy of a staging tile to its

@@ -110,7 +110,11 @@ class MultilinearBuilder(OperationBuilder):
                   for x in staged)):
         self._bias_loads = staged
         del self._instructions[mark:]
+    mark = len(self._instructions)
     self._temp_regs = self._alloc_register_array()
+    #: What a chain would take out with the product (`dchain.Companions`).
+    self._result_alloc = tuple(self._instructions[mark:])
+    self._companions = None
     return self._temp_regs
 
   def emit_compute(self, descr, operands, dest) -> None:
@@ -760,7 +764,8 @@ class MultilinearBuilder(OperationBuilder):
                                      k_width=self._k_width(self._descr))
     self._instructions.append(compute)
     # The bias, behind the product it is no operand of (`alloc_destination`).
-    self._instructions.extend(getattr(self, '_bias_loads', ()))
+    bias = tuple(getattr(self, '_bias_loads', ()))
+    self._instructions.extend(bias)
     self._bias_loads = []
     # What the multiplication does with its result -- scale it, add the
     # previous value, write the destination's box -- is an instruction of its
@@ -771,6 +776,14 @@ class MultilinearBuilder(OperationBuilder):
     promise = self._promised_zeros(compute)
     if promise is not None:
       self._instructions.append(promise)
+    if self._add and self._context.get_user_options().mma_d_layout:
+      # Recorded for `dchain.link`, which may replace all of it with a chain
+      # of products that keep the sum in the matrix instruction's layout;
+      # the store joins in `_make_store`.
+      from tensorforge.backend.instructions.compute.dchain import Companions
+      compute.companions = self._companions = Companions(
+          alloc=getattr(self, '_result_alloc', ()), bias=bias,
+          epilogue=epilogue, promise=promise)
     compute._dest.zero_past = promise is not None or not self._writes_past(
         compute)
 
@@ -931,14 +944,17 @@ class MultilinearBuilder(OperationBuilder):
           return
         self._instructions.append(self._store_whole(dest_symbol))
       elif dest_symbol.stype == SymbolType.Global:
-        self._instructions.append(StoreRegToGlb(context=self._context,
-                                                src=self._temp_regs,
-                                                dest=dest_symbol,
-                                                num_threads=self._num_threads,
-                                                lead_width=self._lead_width,
-                                                dest_offset=self._store_offset(),
-                                                dest_bbox=self._promised_box(),
-                                                zero_fill=not self._add))
+        store = StoreRegToGlb(context=self._context,
+                              src=self._temp_regs,
+                              dest=dest_symbol,
+                              num_threads=self._num_threads,
+                              lead_width=self._lead_width,
+                              dest_offset=self._store_offset(),
+                              dest_bbox=self._promised_box(),
+                              zero_fill=not self._add)
+        self._instructions.append(store)
+        if getattr(self, '_companions', None) is not None:
+          self._companions.store = store
       else:
         raise InternalError(f'gemm-builder: `res` must be either in shr. or glb. mem., given: {dest_symbol.stype}')
     else:

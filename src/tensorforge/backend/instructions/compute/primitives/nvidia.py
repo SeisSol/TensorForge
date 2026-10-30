@@ -5,6 +5,7 @@ import contextlib
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
+from tensorforge.common.operation import Operation
 from .. import ranking
 from ..bitlayout import Bit, BitLayout, Place
 from ..routes import lead_route as routes_lead_route
@@ -287,6 +288,33 @@ def d_fragment_bits(atom, threads: int = 32) -> BitLayout:
     return BitLayout((rows, cols))
 
 
+def d_lane_cells(atom):
+    """`slot -> (row, column)` of lane 0's accumulator registers.
+
+    The rest of the D layout is a shift: lane `l` holds the cell `l / 4`
+    rows and `2 (l % 4)` columns past lane 0's.  That is what a chain reads
+    and writes its output by (`matmul`, `_chain_cell`), and it is checked
+    here against `d_fragment_bits` for every lane and register rather than
+    assumed -- a chain that read the output in another layout than the
+    instruction writes would add every product to the wrong cells.
+    """
+    bits = d_fragment_bits(atom)
+    cells = {}
+    for row in range(atom.m):
+        for col in range(atom.n):
+            at = bits.locate(row, col)
+            cells[at.slot, at.lane] = (row, col)
+    first = {slot: cell for (slot, lane), cell in cells.items() if lane == 0}
+    for (slot, lane), (row, col) in cells.items():
+        row0, col0 = first[slot]
+        if (row, col) != (row0 + lane // 4, col0 + 2 * (lane % 4)):
+            raise GenerationError(
+                f'the D layout of {atom.name} puts register {slot} of lane '
+                f'{lane} at {(row, col)}, which is not a shift of lane 0\'s '
+                f'{(row0, col0)}')
+    return dict(sorted(first.items()))
+
+
 def tile_starts(extent, threads, atom):
     """Where the emitter's nest puts tile origins along one axis.
 
@@ -489,9 +517,10 @@ def widths(threads, accumulator, ctx):
     return ()
 
 
-def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
-           atom, threads):
-    """One `B` fragment read where it lies, with the column range guarded.
+def _bfrag(writer, ops, nbase, kbase, ktile, ntile, N, depth, atom,
+           threads):
+    """One `B` fragment read where it lies, with the column range guarded,
+    and the rows past the operand's depth.
 
     The guard is the whole difference between this and the staged read, and it
     is easy to leave out: staged, the columns past the end of the operand are
@@ -507,14 +536,40 @@ def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
     themselves are independent --- column `c` of the product comes from column
     `c` of `B` --- so the values the guarded-off lanes would hold are never
     read; it is the access that has to not happen.
+
+    The same holds for the rows.  An atom deeper than what is left of the
+    contraction -- sm_90's FP64 steps sixteen at a time, 35 deep in the order-6
+    volume -- reads rows `depth` and on, which the staged read gives zeros
+    (`breg`).  Read where they lie, they are the next column's, or past the
+    operand altogether in its last column: the column carried on the
+    fragments (`TAIL_MAX`, `ntile == 1`, every lane in the one column) read
+    five rows of shared memory nothing had written, or that a transfer was
+    still landing in.  `A`'s padding makes every such product zero, unless
+    what was read was not a number.
+
+    `depth` is where the operand's rows end, in `kbase`'s units.
     """
-    live = min(ntile, N - nbase) * ktile
-    if live >= threads:
+    rows = min(ktile, depth - kbase)
+    if rows <= 0:
+        # No row of the fragment is the operand's: the staged read's zero.
+        return writer.declare(ScalarType(atom.d), hint='bs')
+    # Every lane holds the one column where the fragment is a column wide.
+    live = threads if ntile == 1 else min(ntile, N - nbase) * ktile
+    if live >= threads and rows >= ktile:
         return ops.B_frag(writer, nbase, kbase, ktile, ntile)
+    tid = writer.thread_id('x')
+    cond = None
+    if live < threads:
+        cond = writer.op('lt', BOOL, tid, live, hint='g')
+    if rows < ktile:
+        deep = writer.op('lt', BOOL, _index(writer, mod=ktile), rows, hint='g')
+        cond = deep if cond is None else writer.op('and', BOOL, cond, deep,
+                                                   hint='g')
     # Declared outside the guard: a value defined inside one is not visible to
     # the instruction that follows, and a slot nothing writes reads zero.
-    value = writer.declare(ScalarType(atom.d), hint='bs')
-    with threadrange(0, live):
+    # Lane by lane, as every value the guard assigns it (`_PER_LANE`).
+    value = writer.declare(ScalarType(atom.d), hint='bs', uniform=_PER_LANE)
+    with writer.if_(cond):
         writer.assign(value, ops.B_frag(writer, nbase, kbase, ktile, ntile))
     return value
 
@@ -627,6 +682,20 @@ CHAINS_MIN = 2
 BSPLIT_STAGED = False
 
 
+#: The uniformity of a register `matmul` declares and then writes lane by
+#: lane -- an accumulator `mma.sync` writes through its `"+f"` operand, a
+#: register an epilogue read assigns under a lane guard.  A declaration is
+#: taken to be the same everywhere unless it says otherwise
+#: (`IRBuilder.declare`), and the zero it starts as is; what is written into
+#: it afterwards is not, and a pass that believes the declaration takes a
+#: load of another lane's store of it for one of its own.  `pir.forward` did
+#: exactly that with the epilogue tile of `m8n8k4`: each lane stores two
+#: accumulators and reads eight cells its neighbors stored, and every read
+#: came back as one of the lane's own two -- SeisSol's FP64 volume on sm_80
+#: and sm_86 wrong in every column the instruction computed.
+_PER_LANE = Uniformity.LANE
+
+
 def _as_float(writer: Writer, value):
     """A TF32 half as the float it is, to be stored in a float tile; the
     inverse of `_as_tf32`, and as free."""
@@ -673,6 +742,10 @@ ORDER = (Strategy.MATRIX, Strategy.GENERIC)
 #: An order `prepared_order` states is this operation's fragment order, so an
 #: operand with other readers is not offered one.
 ORDERS_EVERY_READER = False
+
+#: `matmul` keeps a chain's sum in the D layout from its first product to
+#: its last (`MatmulOperands.chain`, `compute.dchain`).
+D_CHAINS = True
 
 
 def convergence(strategy, shape, n, ctx):
@@ -889,11 +962,168 @@ def _lanes_of(start, size, threads):
         yield s, lo, hi - lo, start - s * threads
 
 
+def _rows_where(writer, start, lo, hi):
+    """Row `start + l / 4` of lane `l`, the row group of a D register, and
+    which lanes hold a row of `[lo, hi)`: `(row, predicate)`, the predicate
+    None where all eight rows are inside, and None for both where none is."""
+    if start + 8 <= lo or start >= hi:
+        return None
+    row = _index(writer, div=4, add=start)
+    cond = None
+    if start < lo:
+        cond = writer.op('ge', BOOL, row, lo, hint='g')
+    if start + 8 > hi:
+        upper = writer.op('lt', BOOL, row, hi, hint='g')
+        cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
+                                                    hint='g')
+    return row, cond
+
+
+def _columns_where(writer, start, end):
+    """Column `start + 2 (l % 4)` of lane `l`, and which lanes hold one
+    below `end` (`_rows_where`)."""
+    if start >= end:
+        return None
+    col = _index(writer, mod=4, scale=2, add=start)
+    cond = (None if start + 6 < end
+            else writer.op('lt', BOOL, col, end, hint='g'))
+    return col, cond
+
+
+def _both(writer, a, b):
+    if a is None or b is None:
+        return b if a is None else a
+    return writer.op('and', BOOL, a, b, hint='g')
+
+
+def _guarded(writer, cond):
+    return writer.if_(cond) if cond is not None else contextlib.nullcontext()
+
+
+def _quad_lead(writer):
+    """The first lane of each quad, which holds a row of the D layout with
+    the three after it: where a column carried on the fragments
+    (`TAIL_MAX`) is read and written once per row."""
+    return writer.op('eq', BOOL, _index(writer, mod=4), 0, hint='g')
+
+
+def _open_chain(writer, chain, atom, jstops, tail_of, N, wave):
+    """The chain's accumulators, declared where every member can reach them
+    and holding the output's old value (`MatmulOperands.chain`).
+
+    One set per tile of the chain's window -- the union of its members' --
+    and per register of the D layout, each lane reading the cell the layout
+    gives it (`d_lane_cells`): no lane reads a row the window does not hold
+    or a column past the output.  Where a block has too few tiles for its
+    products to issue back to back, the products get accumulators of their
+    own, as `matmul` gives them (`CHAINS_MIN`); the old value goes into the
+    first.  A column carried on the fragments (`TAIL_MAX`) is a lane's
+    partial sum over the quad: the quad's first lane starts it with the old
+    value, the others at zero.
+    """
+    lo, hi = chain.rows
+    cells = d_lane_cells(atom)
+    fp = ScalarType(atom.d)
+    accs, tails, naccs_of = {}, {}, {}
+    for j in jstops:
+        for i in range(0, hi, wave):
+            tiles = list(range(0, min(wave, hi - i), atom.m))
+            naccs = atom.terms if len(tiles) < CHAINS_MIN else 1
+            naccs_of[j, i] = naccs
+            for ii in tiles:
+                for slot, (row0, col0) in cells.items():
+                    for a in range(naccs):
+                        accs[j, i, ii, a, slot] = writer.declare(
+                            fp, hint='c', uniform=_PER_LANE)
+                    rows = _rows_where(writer, i + ii + row0, lo, hi)
+                    cols = _columns_where(writer, j + col0, N)
+                    if rows is None or cols is None:
+                        continue
+                    writer.assign(accs[j, i, ii, 0, slot],
+                                  chain.load(writer, rows[0], cols[0],
+                                             _both(writer, rows[1], cols[1])))
+                for ci in range(tail_of(j)):
+                    for iii in range(atom.m // 8):
+                        tails[j, i, ii, ci, iii] = writer.declare(
+                            fp, hint='t', uniform=_PER_LANE)
+                        rows = _rows_where(writer, i + ii + 8 * iii, lo, hi)
+                        if rows is None:
+                            continue
+                        writer.assign(tails[j, i, ii, ci, iii],
+                                      chain.load(writer, rows[0],
+                                                 j + atom.n + ci,
+                                                 _both(writer, rows[1],
+                                                       _quad_lead(writer))))
+    chain.state.clear()
+    chain.state.update(accs=accs, tails=tails, naccs=naccs_of)
+
+
+def _chain_accumulators(chain, atom, j, i, cregs, wave):
+    """A member's accumulators for block `i` of column tile `j`: the
+    chain's, in the shape `matmul` indexes them -- `[a][p][slot][tile]`, of
+    one multiplication."""
+    state = chain.state
+    naccs = state['naccs'][j, i]
+    return naccs, [[[[state['accs'].get((j, i, ii, a, slot))
+                      for ii in range(0, wave, atom.m)]
+                     for slot in range(cregs)]]
+                   for a in range(naccs)]
+
+
+def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
+    """The chain's sums written where `_open_chain` read the old values.
+
+    A column carried on the fragments is folded over the quad first, in
+    every lane of it and outside any guard -- the exchange reads all four --
+    and written by the quad's first lane."""
+    lo, hi = chain.rows
+    cells = d_lane_cells(atom)
+    fp = ScalarType(atom.d)
+    state = chain.state
+    fold = ctx.target.lexic.reduction('{0}', Operation.ADD, atom.d, 4,
+                                      subblock=1)
+    for j in jstops:
+        for i in range(0, hi, wave):
+            naccs = state['naccs'][j, i]
+            for ii in range(0, min(wave, hi - i), atom.m):
+                for slot, (row0, col0) in cells.items():
+                    rows = _rows_where(writer, i + ii + row0, lo, hi)
+                    cols = _columns_where(writer, j + col0, N)
+                    if rows is None or cols is None:
+                        continue
+                    part = [state['accs'][j, i, ii, a, slot]
+                            for a in range(naccs)]
+                    value = part[0]
+                    if naccs > 1:
+                        # The corrections first, as `matmul` sums them.
+                        corr = part[1]
+                        for more in part[2:]:
+                            corr = writer.op('add', fp, corr, more, hint='c')
+                        value = writer.op('add', fp, part[0], corr, hint='c')
+                    with _guarded(writer, _both(writer, rows[1], cols[1])):
+                        chain.store(writer, value, rows[0], cols[0])
+                for ci in range(tail_of(j)):
+                    for iii in range(atom.m // 8):
+                        rows = _rows_where(writer, i + ii + 8 * iii, lo, hi)
+                        if rows is None:
+                            continue
+                        total = writer.rawexpr(
+                            fold, state['tails'][j, i, ii, ci, iii], type_=fp,
+                            hint='red', pure=True, movable=False,
+                            crosslane=True)
+                        with _guarded(writer, _both(writer, rows[1],
+                                                    _quad_lead(writer))):
+                            chain.store(writer, total, rows[0],
+                                        j + atom.n + ci)
+
+
 def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them a wave at a time.  The
-    # accessors take slots, so `i // threads` is what reaches them.
-    M = ops.lead_elements
+    # accessors take slots, so `i // threads` is what reaches them.  Counted
+    # from the first slot's start, where the accessors count, and so to the
+    # window's end (`MatmulOperands.lead_first`).
+    M = ops.lead_first + ops.lead_elements
     N, K, kx = span.stop, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
     # The warp the fragments are spread over, and how many multiplications
@@ -948,6 +1178,14 @@ def matmul(writer, ops, ctx, span):
 
     # `supports()` is the gate; this is the guard for a direct caller.
     assert threads <= wave and wave % threads == 0
+    # A chain's sum stays in the accumulators from its first product to its
+    # last (`MatmulOperands.chain`): one multiplication per warp, whose
+    # lanes are the D layout's, one row per lane.
+    chain = ops.chain
+    if chain is not None and (mults != 1 or ops.lead_width != 1):
+        raise InternalError(
+            f'a chain of products over {threads} lanes at lead width '
+            f'{ops.lead_width}: the D layout is a warp\'s, one row per lane')
     lane, mine, region = _warp_group(writer, ops, threads, mults)
     # A barrier here meets the warp.  Where the warp holds several
     # multiplications all of them have to arrive, and the count is what says
@@ -1125,9 +1363,12 @@ def matmul(writer, ops, ctx, span):
     # FP64's store and read were both 2-way (`ctile` was 72 of the 124
     # conflicting accesses of `localFluxAll` o6 on sm_90).  So the width is
     # the elements of one pass over the banks, which for FP32 is the wave.
-    Cshm = writer.alloc(atom.d, (tailbase + tailed * ntail * tailcol + room,),
-                        MemSpace.SHARED, hint='ctile',
-                        swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size()))
+    #
+    # A chain has none: its sum stays where the instruction leaves it.
+    Cshm = (None if chain is not None else
+            writer.alloc(atom.d, (tailbase + tailed * ntail * tailcol + room,),
+                         MemSpace.SHARED, hint='ctile',
+                         swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size())))
 
     # Every step of the contraction, per block of rows.
     steps = [(k, kk) for k in range(0, K, wave)
@@ -1181,6 +1422,12 @@ def matmul(writer, ops, ctx, span):
     def scope():
         return contextlib.nullcontext() if ahead else writer.AnonymousScope()
 
+    def tail_of(j):
+        return ntail if tailed and j == jstops[-1] else 0
+
+    if chain is not None and chain.opens:
+        _open_chain(writer, chain, atom, jstops, tail_of, N, wave)
+
     for j in jstops:
         # The last whole tile carries the narrow remainder, if there is one.
         tail = ntail if tailed and j == jstops[-1] else 0
@@ -1213,12 +1460,18 @@ def matmul(writer, ops, ctx, span):
                     # Where the step has too few chains for its HMMAs to
                     # issue back to back, every product gets an accumulator
                     # of its own (`CHAINS_MIN`).  `Cvals` is the first.
-                    naccs = atom.terms if len(tiles) * mults < CHAINS_MIN else 1
-                    accs = [[[[writer.declare(ScalarType(atom.d), hint='c')
-                               for _ in range(wave // atom.m)]
-                              for _ in range(cregs)]
-                             for _ in range(mults)]
-                            for _ in range(naccs)]
+                    if chain is not None:
+                        naccs, accs = _chain_accumulators(chain, atom, j, i,
+                                                          cregs, wave)
+                    else:
+                        naccs = (atom.terms if len(tiles) * mults < CHAINS_MIN
+                                 else 1)
+                        accs = [[[[writer.declare(ScalarType(atom.d), hint='c',
+                                                  uniform=_PER_LANE)
+                                   for _ in range(wave // atom.m)]
+                                  for _ in range(cregs)]
+                                 for _ in range(mults)]
+                                for _ in range(naccs)]
                     Cvals = accs[0]
                     # The remainder's partial sums, `(round, tile, column, row
                     # group) -> value`: a lane's share of rows `g` and `g + 8`,
@@ -1289,10 +1542,10 @@ def matmul(writer, ops, ctx, span):
                                 # value after `cse`.
                                 if bdirect:
                                     Bfrag[0][kkk + jj * kregs] = _bfrag(
-                                        writer, ops, threadrange,
+                                        writer, ops,
                                         j + jj * ntile,
                                         k + trueK + kkk * ktile,
-                                        ktile, ntile, N, atom,
+                                        ktile, ntile, N, K + kx, atom,
                                         threads)
                                     continue
                                 col = _index(writer, mod=ktile, lane=lane)
@@ -1322,9 +1575,10 @@ def matmul(writer, ops, ctx, span):
                             for kf in range(kregs):
                                 for ci in range(tail):
                                     if bdirect:
-                                        btail[p, kf, ci] = ops.B_frag(
-                                            writer, j + atom.n + ci,
-                                            k + trueK + kf * ktile, ktile, 1)
+                                        btail[p, kf, ci] = _bfrag(
+                                            writer, ops, j + atom.n + ci,
+                                            k + trueK + kf * ktile, ktile, 1,
+                                            N, K + kx, atom, threads)
                                         continue
                                     at_ = _index(writer, mod=ktile, lane=lane,
                                                  add=kf * ktile + (atom.n + ci) * atom.k)
@@ -1560,6 +1814,16 @@ def matmul(writer, ops, ctx, span):
                                                                  hint='t'))
                                             Tvals[p, ii, ci, iii] = acc
 
+                    if chain is not None:
+                        # The carried column's partials go into the chain's,
+                        # and the sum stays where it is: the last member
+                        # writes it (`_close_chain`).
+                        for (p, ii, ci, iii), partial in Tvals.items():
+                            writer.accumulate(
+                                chain.state['tails'][j, i, ii, ci, iii],
+                                partial)
+                        continue
+
                     # A tile left out at every step has no remainder partials;
                     # the epilogue reads them per tile that exists, and zero is
                     # what they sum to.
@@ -1590,7 +1854,8 @@ def matmul(writer, ops, ctx, span):
                     # here and written through `assign` rather than being the
                     # result of the load: a value defined inside the guard
                     # would not be visible to the store that follows.
-                    Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c')
+                    Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c',
+                                                    uniform=_PER_LANE)
                             for q in range(mults) for jj in range(ncols)}
 
                     # The first block of the epilogue stores where the steps
@@ -1653,4 +1918,6 @@ def matmul(writer, ops, ctx, span):
                         for jj in range(0, min(ncols, N - j)):
                             C(writer, Cout[q, jj], i // threads + q, j + jj)
 
+    if chain is not None and chain.closes:
+        _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave)
     return True
