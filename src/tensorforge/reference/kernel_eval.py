@@ -9,7 +9,8 @@ An interpreter for the subset of CUDA the generator emits: declarations,
 assignments, `if`/`else`, counted `for`, ternaries, array and pointer
 indexing, short vectors (`Vec`), the `cp.async` transfer and the bulk copy,
 atomic accumulation, the cross-lane reads and the fold over the lanes
-(`tensorforge::reduction`).  `evaluate_wave` runs the lanes of one
+(`tensorforge::reduction`), and the warp's matrix instruction, `mma.sync`,
+with the TF32 split around it.  `evaluate_wave` runs the lanes of one
 multiplication together over one memory, statement by statement
 (`Lockstep`), which is what a cooperatively staged operand, an atomic and a
 `readlane` need; `evaluate` runs one lane on its own.
@@ -46,7 +47,9 @@ _DECL = re.compile(
     # that most needs an oracle would have none.
     r'(?:tensorforge::Vector(?:Relaxed)?T\s*<[^>]*>|float[234]|double[234]|'
     r'u?int(?:8|16|32|64)_t|float|double|int|unsigned|size_t|bool|auto|'
-    r'__float128|char)'
+    # A TF32 half (`nvidia.TF32_HALF`): held here as the float it stands
+    # for, which is what `mma.sync` multiplies (`Interp._mma`).
+    r'__float128|char|tensorforge::tf32)'
     r'(?P<ptr>\s*\*(?:\s*const)?(?:\s*__restrict__)?)?\s+'
     r'(?P<name>\w+)\s*(?P<arr>\[\s*(?P<dim>\d+)\s*\])?\s*'
     r'(?:\{\s*\}|=\s*(?P<init>.+))?$')
@@ -108,6 +111,118 @@ _BULK_COPY = re.compile(
     r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
     r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
 _BULK_WAIT = re.compile(r'^tensorforge::bulk_wait\s*\(\s*(?P<cursor>\w+)\s*\)$')
+
+#: `tensorforge::splitFloatTF32(upper, lower, value)` (`cuda.h`): the two
+#: TF32 halves a 3xTF32 product multiplies, written through references.
+_SPLIT_TF32 = re.compile(
+    r'^tensorforge::splitFloatTF32\s*\(\s*(?P<upper>\w+)\s*,\s*(?P<lower>\w+)'
+    r'\s*,\s*(?P<value>.+)\)$')
+
+#: The name of `mma.sync` as NVIDIA's path issues it (`MMAInstr`): the
+#: shape, and the types of D, A, B and C.
+_MMA_NAME = re.compile(
+    r'^mma\.sync\.aligned\.m(?P<m>\d+)n(?P<n>\d+)k(?P<k>\d+)\.row\.col'
+    r'\.(?P<d>\w+)\.(?P<a>\w+)\.(?P<b>\w+)\.(?P<c>\w+)\s')
+
+
+class _Mma(NamedTuple):
+    """One `mma.sync` statement: the shape, A's type, and the operand
+    expressions of its four register groups, in the template's order."""
+    m: int
+    n: int
+    k: int
+    atype: str
+    d: Tuple[str, ...]
+    a: Tuple[str, ...]
+    b: Tuple[str, ...]
+    c: Tuple[str, ...]
+
+
+def _top_level(text: str, sep: str) -> List[str]:
+    """`text` split at every `sep` outside parentheses and string literals."""
+    out, depth, quoted, start = [], 0, False, 0
+    for i, ch in enumerate(text):
+        if ch == '"':
+            quoted = not quoted
+        elif not quoted and ch == '(':
+            depth += 1
+        elif not quoted and ch == ')':
+            depth -= 1
+        elif not quoted and depth == 0 and ch == sep:
+            out.append(text[start:i])
+            start = i + 1
+    out.append(text[start:])
+    return out
+
+
+def _mma_statement(stmt: str) -> Optional[_Mma]:
+    """`stmt` as an `mma.sync`, or None where it is something else.
+
+    The inline-asm form `MMAInstr.asmcall` writes: a template of adjacent
+    string literals naming the instruction and four groups of `%i`
+    placeholders -- D, A, B, C -- then the outputs and the inputs, each a
+    constraint and an expression.  A read-write operand (`"+f"`) stands for
+    D and C at once, which is how the accumulator is passed.
+    """
+    head = re.match(r'^asm\s*(?:volatile\s*)?\(', stmt)
+    if head is None or 'mma.sync' not in stmt or not stmt.endswith(')'):
+        return None
+    parts = _top_level(stmt[head.end():-1], ':')
+    if len(parts) != 3:
+        raise Abort(f'mma.sync without outputs and inputs: {stmt!r}')
+    template = ''.join(re.findall(r'"([^"]*)"', parts[0]))
+    name = _MMA_NAME.match(template)
+    groups = re.findall(r'\{([^}]*)\}', template)
+    if name is None or len(groups) != 4:
+        raise Abort(f'mma.sync of a form not modeled: {template!r}')
+    operands = []
+    for text in parts[1:]:
+        for operand in _top_level(text, ','):
+            if not operand.strip():
+                continue
+            om = re.match(r'^\s*"(?P<con>[^"]*)"\s*\((?P<expr>.*)\)\s*$',
+                          operand, re.S)
+            if om is None:
+                raise Abort(f'mma.sync operand {operand!r}')
+            operands.append(om.group('expr').strip())
+
+    def group(text):
+        return tuple(operands[int(p)] for p in
+                     re.findall(r'%(\d+)', text))
+    return _Mma(int(name.group('m')), int(name.group('n')),
+                int(name.group('k')), name.group('a'),
+                *(group(g) for g in groups))
+
+
+def _to_float32(value: float) -> float:
+    """`value` rounded to the nearest float."""
+    try:
+        return struct.unpack('<f', struct.pack('<f', value))[0]
+    except OverflowError:
+        return float('inf') if value > 0 else float('-inf')
+
+
+def _tf32(value: float) -> float:
+    """`value` as the TF32 operand of an `mma.sync` reads it: the upper 19
+    bits of the float -- sign, exponent and ten mantissa bits.  An operand
+    is a register, and the instruction ignores what the conversion that
+    filled it did not clear; the lower half of a split is the raw remainder
+    (`splitFloatTF32`), so it loses its last thirteen bits here, as it does
+    on the device."""
+    bits = struct.unpack('<I', struct.pack('<f', _to_float32(value)))[0]
+    return struct.unpack('<f', struct.pack('<I', bits & 0xffffe000))[0]
+
+
+def _round_tf32(value: float) -> float:
+    """`cvt.rna.tf32.f32`: `value` rounded to ten mantissa bits, half away
+    from zero.  The device rounds half to even from sm_90 on
+    (`splitFloatTF32`); either is a decomposition, and what is checked here
+    is that the lower half carries what the upper one dropped."""
+    bits = struct.unpack('<I', struct.pack('<f', _to_float32(value)))[0]
+    if (bits >> 23) & 0xff == 0xff:
+        return value
+    bits = (bits + 0x1000) & 0xffffe000
+    return struct.unpack('<f', struct.pack('<I', bits & 0xffffffff))[0]
 
 
 class _Cursor(NamedTuple):
@@ -721,6 +836,10 @@ def _py(expr: str) -> str:
     # The standard library's functions, which the environment holds by their
     # own names.
     e = re.sub(r'\bstd::(?=\w+\s*\()', '', e)
+    # The reinterpretations between a float and a TF32 register: the oracle
+    # holds a TF32 half as the float it stands for (`Interp._mma`), so both
+    # are the value itself.
+    e = re.sub(r'\b__(?:float_as_uint|uint_as_float)\s*\(', '(', e)
     e = e.replace('&&', ' and ').replace('||', ' or ')
     e = re.sub(r'(?<![=!<>&|])!(?!=)', ' not ', e)
     # `*(SomeVecType*)&p[i]` -> `VLOAD(ADDR(p, i), N)`.  Done before the
@@ -1080,6 +1199,81 @@ class Interp:
         block, me = int(block), self.env['threadIdx'].x
         return self._readlane(name, (me // block) * block + int(lane) % block)
 
+    def _mma(self, mma: _Mma, stmt: str) -> None:
+        """One `mma.sync`, for the warp this lane is in.
+
+        The instruction is the warp's: every lane hands in its fragments
+        and every lane gets its part of `D` back, so it is evaluated once
+        per statement and warp, from the operands every lane holds before
+        any of them has written its result (`Lockstep.wave_cache`).  The
+        warp is the hardware's -- 32 consecutive threads of the block -- so
+        the lanes of several multiplications that share one take part
+        together, and a warp that is not whole at the statement aborts:
+        the instruction is `.aligned`.
+
+        The fragment layouts are PTX's, stated here from the ISA's tables
+        rather than taken from the emitter, which is what makes this a check
+        of it: lane `l` of the warp is `g = l / 4` and `t = l % 4`; register
+        `i` of A holds row `g + 8 (i % (m / 8))`, column `t + 4 (i / (m /
+        8))`; register `i` of B row `t + 4 i`, column `g`; register `i` of C
+        and D row `g + 8 (i / 2)`, column `2 t + i % 2`.  That covers every
+        shape the path issues: `m16n8k4` and `m16n8k8` in TF32, `m8n8k4`,
+        `m16n8k4`, `m16n8k8` and `m16n8k16` in FP64.
+
+        A TF32 operand is read as the instruction reads its register
+        (`_tf32`); the products are summed in double precision, as every
+        other sum of the oracle is.
+        """
+        run = self.lockstep
+        if run is None:
+            raise Abort(f'mma.sync outside a lockstep run: {stmt!r}')
+        warp = self.lane // 32
+        key = ('mma', warp, stmt)
+        result = run.wave_cache.get(key)
+        if result is None:
+            lanes = {it.lane % 32: it for it in run.current
+                     if it.lane // 32 == warp}
+            if len(lanes) != 32:
+                raise Abort(f'mma.sync with {len(lanes)} lanes of the warp '
+                            f'taking part')
+            m, n, k = mma.m, mma.n, mma.k
+            mregs = m // 8
+            if (m % 8 or n != 8 or len(mma.a) != m * k // 32
+                    or len(mma.b) != k * n // 32 or len(mma.c) != m * n // 32
+                    or len(mma.d) != len(mma.c)):
+                raise Abort(f'mma.sync of a shape not modeled: {stmt!r}')
+            read = _tf32 if mma.atype == 'tf32' else (lambda v: v)
+            A = [[0.0] * k for _ in range(m)]
+            B = [[0.0] * n for _ in range(k)]
+            C = [[0.0] * n for _ in range(m)]
+            for l, it in lanes.items():
+                g, t = l // 4, l % 4
+                for i, text in enumerate(mma.a):
+                    A[g + 8 * (i % mregs)][t + 4 * (i // mregs)] = \
+                        read(it.ev(text))
+                for i, text in enumerate(mma.b):
+                    B[t + 4 * i][g] = read(it.ev(text))
+                for i, text in enumerate(mma.c):
+                    C[g + 8 * (i // 2)][2 * t + i % 2] = it.ev(text)
+            result = {}
+            for l in lanes:
+                g, t = l // 4, l % 4
+                out = []
+                for i in range(len(mma.d)):
+                    r, c = g + 8 * (i // 2), 2 * t + i % 2
+                    out.append(C[r][c] + sum(A[r][x] * B[x][c]
+                                             for x in range(k)))
+                result[l] = out
+            run.wave_cache[key] = result
+        for text, value in zip(mma.d, result[self.lane % 32]):
+            am = re.match(r'^(\w+)\s*\[(.*)\]$', text)
+            if am:
+                self.env[am.group(1)][self.ev(am.group(2))] = value
+            elif re.match(r'^\w+$', text):
+                self.env[text] = value
+            else:
+                raise Abort(f'mma.sync writes {text!r}')
+
     def ev(self, expr: str):
         self.budget -= 1
         if self.budget < 0:
@@ -1183,6 +1377,19 @@ class Interp:
                 tracker.bulk = None
 
     def assign(self, stmt: str) -> None:
+        mma = _mma_statement(stmt)
+        if mma is not None:
+            self._mma(mma, stmt)
+            return
+        sp = _SPLIT_TF32.match(stmt)
+        if sp:
+            # The upper half rounded, the lower the remainder as it is: what
+            # the device keeps of it is the instruction's to decide (`_tf32`).
+            value = self.ev(sp.group('value'))
+            upper = _round_tf32(value)
+            self.env[sp.group('upper')] = upper
+            self.env[sp.group('lower')] = value - upper
+            return
         lq = _LAUNCH_QUEUE.match(stmt)
         if lq:
             # The response slots in shared memory, which only the cursor reads.
@@ -1348,11 +1555,34 @@ class Interp:
         raise Abort(f'unsupported statement {stmt!r}')
 
 
+def _parenthesized(text: str) -> bool:
+    """Whether every parenthesis of `text` outside its string literals is
+    closed."""
+    depth, quoted = 0, False
+    for ch in text:
+        if ch == '"':
+            quoted = not quoted
+        elif not quoted:
+            depth += (ch == '(') - (ch == ')')
+    return depth <= 0
+
+
 def parse(src: str) -> List:
     """Line-based parse into nested statement nodes."""
     lines = []
+    #: An inline asm spread over several lines, `mma.sync`'s, as one
+    #: statement: its template and operand lists are one call.
+    held = None
     for raw in src.splitlines():
         t = raw.split('//')[0].strip()
+        if held is not None:
+            held = f'{held} {t}'
+            if not _parenthesized(held):
+                continue
+            t, held = held, None
+        elif re.match(r'^asm\s*(?:volatile\s*)?\(', t) and not _parenthesized(t):
+            held = t
+            continue
         if not t or t.startswith('#'):
             continue
         while t.endswith('{') and len(t) > 1:     # `for (...) {` on one line

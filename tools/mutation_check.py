@@ -3551,6 +3551,20 @@ GROUPS = {
         ('an expression read across taken for a name',
          sub(ORACLE, "        if re.fullmatch(r'\\w+', text):", '        if True:', 1)),
     ]),
+
+    # The host oracle's `mma.sync`, and what it found in NVIDIA's path.
+    'mmaoracle': ('tests/test_mma_oracle.py', [
+        ("the oracle's accumulator columns handed back swapped",
+         sub(ORACLE, '                    r, c = g + 8 * (i // 2), 2 * t + i % 2\n',
+             '                    r, c = g + 8 * (i // 2), 2 * t + 1 - i % 2\n', 1)),
+        ("the oracle's B read along the row group",
+         sub(ORACLE, '                    B[t + 4 * i][g] = read(it.ev(text))\n',
+             '                    B[(t + 4 * i) % k][(g + 1) % n] = read(it.ev(text))\n',
+             1)),
+        ("the oracle's lower TF32 half dropped",
+         sub(ORACLE, "            self.env[sp.group('lower')] = value - upper\n",
+             "            self.env[sp.group('lower')] = 0.0\n", 1)),
+    ]),
 }
 
 
