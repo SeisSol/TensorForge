@@ -2706,6 +2706,7 @@ class MultilinearInstruction(ComputeInstruction):
                 A_zero=A_zero if width == 1 else None,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
                 threads=self._num_threads, lead_width=width,
+                lead_first=self._ns[0][0] % span,
                 a=self._ops[0].symbol.get_fptype(),
                 b=self._ops[1].symbol.get_fptype(),
                 accumulator=self._idest.get_fptype())

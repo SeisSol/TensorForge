@@ -907,8 +907,10 @@ def _lanes_of(start, size, threads):
 def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them a wave at a time.  The
-    # accessors take slots, so `i // threads` is what reaches them.
-    M = ops.lead_elements
+    # accessors take slots, so `i // threads` is what reaches them.  Counted
+    # from the first slot's start, where the accessors count, and so to the
+    # window's end (`MatmulOperands.lead_first`).
+    M = ops.lead_first + ops.lead_elements
     N, K, kx = span.stop, ops.k, ops.kx
     threads, dtype, sparse = ops.threads, ops.accumulator, ops.sparse
     # The warp the fragments are spread over, and how many multiplications

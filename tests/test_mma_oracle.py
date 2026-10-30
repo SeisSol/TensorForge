@@ -21,6 +21,7 @@ cancels in is compared against what it lost.
 from __future__ import annotations
 
 import importlib.util
+import json
 import warnings
 from pathlib import Path
 
@@ -95,6 +96,28 @@ def test_the_matrix_path_computes_on_the_oracle(arch, precision):
         got, _ = kernel.run({'tensor_cores': True})
     for alias, error in _normwise(got, kernel.expected()).items():
         assert error <= TOLERANCE[precision], (alias, error)
+
+
+@pytest.mark.parametrize('window', [(2, 49), (16, 49)])
+def test_a_window_that_starts_inside_a_slot_is_walked_to_its_end(window):
+    """A window from row `lo` to `hi`: the path walks the rows from the
+    start of the window's first slot, and so has to walk to `hi`, not to
+    `hi - lo`.  At `[2, 49)` the walk ended with the tile before row 48's,
+    and row 48 -- the window's last, alone in its tile -- kept the zero its
+    accumulator was declared with (`MatmulOperands.lead_first`)."""
+    description = json.loads(json.dumps(_volume('d')))
+    lo, hi = window
+    for op in description['operations']:
+        if op['result']['name'] == 'Q':
+            op['result']['bbox'][0][0], op['result']['bbox'][1][0] = lo, hi
+            op['args'][0]['bbox'][0][0], op['args'][0]['bbox'][1][0] = lo, hi
+            break
+    kernel = _kernel(description, 'd', 'sm_90')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got, _ = kernel.run({'tensor_cores': True})
+    for alias, error in _normwise(got, kernel.expected()).items():
+        assert error <= TOLERANCE['d'], (alias, error)
 
 
 def test_a_dropped_correction_term_is_seen():

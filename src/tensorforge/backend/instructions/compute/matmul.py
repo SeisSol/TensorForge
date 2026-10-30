@@ -148,6 +148,16 @@ class MatmulOperands:
     #: a path that cannot take more declines.
     lead_width: int = 1
 
+    #: Where the window starts, in elements from the first slot the
+    #: accessors read.  A window that starts inside a slot -- SeisSol's
+    #: `kDivM` products write from row one -- has its first row this far into
+    #: the slot and its last :attr:`lead_elements` after that, so a path that
+    #: walks elements from the slot's start walks ``lead_first +
+    #: lead_elements`` of them.  :attr:`lead_elements` alone stops that many
+    #: rows short of the window's end, which a tile boundary hides until the
+    #: window ends in a tile of its own.
+    lead_first: int = 0
+
     #: ``mult_stride() -> int``: shared memory one multiplication owns, in
     #: elements -- the distance from its copy of a staging tile to its
     #: neighbor's.  Asked only where a warp holds several multiplications and

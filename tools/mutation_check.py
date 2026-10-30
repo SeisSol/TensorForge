@@ -3567,6 +3567,10 @@ GROUPS = {
         ('the accumulators declared the same on every lane again',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '_PER_LANE = Uniformity.LANE', '_PER_LANE = Uniformity.GRID', 1)),
+        ('a window inside its first slot walked for its extent alone',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    M = ops.lead_first + ops.lead_elements\n',
+             '    M = ops.lead_elements\n', 1)),
     ]),
 }
 
