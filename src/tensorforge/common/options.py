@@ -1353,6 +1353,15 @@ declare('mma_d_layout',
             'one multiplication per warp; a product it does not reach keeps '
             'its epilogue.')
 
+declare('mma_presplit',
+        default=False,
+        env='TF_MMA_PRESPLIT',
+        parse=parse_bool,
+        doc='Store a batch-constant operand NVIDIA\'s TF32 path reads in '
+            'fragment order as its two TF32 halves, so that no fragment is '
+            'split after it is loaded.  Kept only where every reader of the '
+            'operand is a matrix product.')
+
 declare('mma_min_depth',
         default=None,
         env='TF_MMA_MIN_DEPTH',

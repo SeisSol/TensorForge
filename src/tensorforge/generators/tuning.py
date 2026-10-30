@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Tuple)
 
-from tensorforge.common.basic_types import Addressing
+from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge import toolchain
 from tensorforge.toolchain import Resources, Toolchain
@@ -244,6 +244,9 @@ def space(descrs, context: Context) -> List[Knob]:
                           lambda c: ((1, 2) if c.get('tensor_cores') else (None,))))
         knobs.append(Knob('mma_min_depth',
                           lambda c: ((None, 8) if c.get('tensor_cores') else (None,))))
+        if context.fp_type is Datatype.F32:
+            knobs.append(Knob('mma_presplit',
+                              lambda c: ((False, True) if c.get('tensor_cores') else (False,))))
     if _stackable(descrs):
         knobs.append(Knob('stack_elements', lambda c: (1, 2)))
     widths = _matrix_widths(descrs, context)

@@ -507,7 +507,27 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     # Over the wave and not over one multiplication: the fragment is the
     # warp's, and a narrower multiplication reads it with its neighbors'
     # lanes (`matmul`, `shift`).
-    return fragment_order(shape, atom, WAVE)
+    order = fragment_order(shape, atom, WAVE)
+    if atom.mode == MMAMode.TF32 and presplit(ctx):
+        # Stored as its two TF32 halves, planar: the three products read the
+        # halves as they lie (`_as_tf32`) instead of splitting every fragment
+        # after it is loaded.  `_offer_order` keeps the parts only where
+        # every reader is a matrix product -- any other reader would take the
+        # upper half for the value.
+        return SplitOrder(order, parts=2)
+    return order
+
+
+class SplitOrder(tuple):
+    """A fragment order (`fragment_order`) and the scalars an element of it
+    takes: two, the TF32 halves `MMAMode.TF32` multiplies, stored planar.
+    `MultilinearInstruction._offer_order` sets both from here, as from AMD's
+    `QuadOrder`."""
+
+    def __new__(cls, order, parts=1):
+        self = super().__new__(cls, order)
+        self.parts = int(parts)
+        return self
 
 
 def widths(threads, accumulator, ctx):
@@ -823,6 +843,11 @@ def prefetch(ctx) -> int:
     """`Options.mma_prefetch` where it is set, `PREFETCH` where it is not."""
     asked = None if ctx is None else ctx.get_user_options().mma_prefetch
     return PREFETCH if asked is None else int(asked)
+
+
+def presplit(ctx) -> bool:
+    """`Options.mma_presplit`: a prepared TF32 operand stored as its halves."""
+    return bool(ctx is not None and ctx.get_user_options().mma_presplit)
 
 
 def min_depth(ctx) -> int:
