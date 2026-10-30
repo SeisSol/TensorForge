@@ -242,6 +242,8 @@ def space(descrs, context: Context) -> List[Knob]:
         knobs.append(Knob('tensor_cores', lambda c: (False, True)))
         knobs.append(Knob('mma_prefetch',
                           lambda c: ((1, 2) if c.get('tensor_cores') else (None,))))
+        knobs.append(Knob('mma_min_depth',
+                          lambda c: ((None, 8) if c.get('tensor_cores') else (None,))))
     if _stackable(descrs):
         knobs.append(Knob('stack_elements', lambda c: (1, 2)))
     widths = _matrix_widths(descrs, context)

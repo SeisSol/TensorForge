@@ -2479,6 +2479,14 @@ GROUPS = {
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
+        ('a narrow multiplication with its own A offered the matrix path again',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    if shape.threads < WAVE and not shape.a_uniform:\n        return frozenset()\n',
+             '', 1)),
+        ('the depth floor read from the module whatever the build asks',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '                         shape.depth, min_depth(ctx))',
+             '                         shape.depth)', 1)),
         ('an operator read over a window staged per element again',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    8.8; in double the viscoelastic flux 40.5 -> 37.2, the rest within 1 %.\n'
@@ -2546,7 +2554,7 @@ GROUPS = {
              '    if (enabled(ctx)\n'
              '            and supports(shape.threads, shape.accumulator, '
              'shape.sparse,\n'
-             '                         shape.depth)\n'
+             '                         shape.depth, min_depth(ctx))\n'
              '            and instrs_for(shape.accumulator, sm_of(ctx))):',
              '    if enabled(ctx):', 1)),
         ('the arch dropped from the offer, so a target with no entry is offered one',

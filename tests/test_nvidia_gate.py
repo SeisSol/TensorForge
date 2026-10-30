@@ -193,6 +193,42 @@ def test_an_operator_read_over_a_window_is_stored_in_fragment_order(
     assert "atile" not in source
 
 
+def _matrix_offered(threads, depth, a_uniform, **options):
+    from tensorforge.backend.instructions.compute.strategy import (
+        ComputeShape, Strategy)
+    from tensorforge.common.context import Options
+    ctx = Context(arch="sm_90", backend="cuda", fp_type=Datatype.F32,
+                  options=Options(tensor_cores=True, **options))
+    shape = ComputeShape(threads=threads, accumulator=Datatype.F32,
+                         sparse=False, explicit_simd=False, depth=depth,
+                         a_uniform=a_uniform)
+    return Strategy.MATRIX in nvidia.strategies(shape, ctx)
+
+
+def test_a_narrow_multiplication_with_its_own_a_stays_on_the_nest():
+    """Below the wave the warp runs one round per multiplication, and with an
+    `A` per element each round reads the fragments its own multiplication
+    staged.  That computed wrong numbers -- SeisSol's viscoelastic derivative
+    at 16 lanes, `dQane(0) x E`, up to 4.6 % off on sm_90 and sm_120 -- so it
+    is declined until the cause is found.  A batch-constant `A`, read once
+    from the first multiplication's copy, agrees to rounding and keeps the
+    path."""
+    assert not _matrix_offered(16, 32, a_uniform=False)
+    assert _matrix_offered(16, 32, a_uniform=True)
+    assert _matrix_offered(32, 32, a_uniform=False)
+
+
+def test_the_depth_floor_is_a_build_option():
+    """`MIN_DEPTH` keeps a contraction of 9 on the nest, and that is not a
+    rule: SeisSol's derivative o6 in double was twice as fast with its star
+    products on DMMA (GH200, 79.3 against 40.9 ns per element) while the
+    volume was 15 to 17 % slower.  So a build can lower it, and the tuner
+    tries it (`Options.mma_min_depth`)."""
+    assert not _matrix_offered(32, 9, a_uniform=True)
+    assert _matrix_offered(32, 9, a_uniform=True, mma_min_depth=8)
+    assert not _matrix_offered(32, 7, a_uniform=True, mma_min_depth=8)
+
+
 def test_the_switch_is_off():
     """Not an opinion about whether it should be -- a place where the
     deployment decision is written down once, so flipping it is a diff."""

@@ -1288,6 +1288,19 @@ declare('mma_prefetch_across',
             '`mmaosm` 7 % slower -- same instructions, L1 hits 95.2 % against '
             '93.1 % -- so it is a question per kernel, not a constant.')
 
+declare('mma_min_depth',
+        default=None,
+        env='TF_MMA_MIN_DEPTH',
+        parse=parse_optional_int,
+        doc='Contraction steps below which a product stays off NVIDIA\'s matrix '
+            'path.  None takes `primitives.nvidia.MIN_DEPTH`, 16.  A search '
+            'parameter and not a constant: the depth-9 star products of '
+            'SeisSol\'s derivative are 44 % padding at k = 16, and yet o6 in '
+            'double took 79.3 ns per element with them on the nest and 40.9 '
+            'with them on DMMA (GH200) -- the nest spilled 2.8 kB, the matrix '
+            'path 0.4 kB -- while the volume in either precision was 15 to 17 % '
+            'slower with them on the matrix path.')
+
 declare('matrix_columns',
         default=0,
         parse=parse_int,

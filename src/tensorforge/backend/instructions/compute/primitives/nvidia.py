@@ -689,7 +689,7 @@ def convergence(strategy, shape, n, ctx):
     return None
 
 
-def supports(threads, dtype, sparse, depth=0) -> bool:
+def supports(threads, dtype, sparse, depth=0, min_depth=MIN_DEPTH) -> bool:
     """Whether `matmul` can emit for this shape, asked *before* it is called.
 
     A question and not an `assert` inside the emitter: with the path on, an
@@ -705,14 +705,14 @@ def supports(threads, dtype, sparse, depth=0) -> bool:
     * ``not sparse``.  `matmul` declines these by returning `False` as well;
       asked here, a sparse operand never reaches a plan that names a matrix
       arrangement it would only decline.
-    * ``depth >= MIN_DEPTH``.  A shallow contraction reaches this path and then
-      spends most of its issues on padding; see `MIN_DEPTH`.  `depth == 0` is
-      "the caller does not know", which is not the same as "shallow" and is
-      admitted.
+    * ``depth >= min_depth``.  A shallow contraction reaches this path and then
+      spends most of its issues on padding; see `MIN_DEPTH`, which a build
+      overrides with `Options.mma_min_depth`.  `depth == 0` is "the caller
+      does not know", which is not the same as "shallow" and is admitted.
     """
     return (threads <= WAVE and WAVE % threads == 0
             and dtype in (Datatype.F32, Datatype.F64)
-            and not sparse and (depth == 0 or depth >= MIN_DEPTH))
+            and not sparse and (depth == 0 or depth >= min_depth))
 
 
 def lead_route(shape):
@@ -752,6 +752,12 @@ def prefetch(ctx) -> int:
     return PREFETCH if asked is None else int(asked)
 
 
+def min_depth(ctx) -> int:
+    """`Options.mma_min_depth` where it is set, `MIN_DEPTH` where it is not."""
+    asked = None if ctx is None else ctx.get_user_options().mma_min_depth
+    return MIN_DEPTH if asked is None else int(asked)
+
+
 def strategies(shape, ctx):
     """What this target can emit for this shape.
 
@@ -771,12 +777,23 @@ def strategies(shape, ctx):
     That is a refusal with a price attached rather than a literal.  It also
     means this lifts the way AMD's will: by an emitter learning a route, not
     by a condition being edited.
+
+    A multiplication narrower than the warp whose `A` is its own -- not the
+    batch's -- is declined as well.  The warp then runs one round per
+    multiplication, each reading the fragments its multiplication staged,
+    and that case computes wrong numbers: SeisSol's viscoelastic derivative
+    at 16 lanes, `dQane(0) x E` (A per element, a contraction over two
+    indices), comes out up to 4.6 % off on sm_90 and sm_120, while every
+    product with a batch-constant `A` agrees to rounding.  Until the cause is
+    found the nest computes it.
     """
     if not takes(lead_route(shape)):
         return frozenset()
+    if shape.threads < WAVE and not shape.a_uniform:
+        return frozenset()
     if (enabled(ctx)
             and supports(shape.threads, shape.accumulator, shape.sparse,
-                         shape.depth)
+                         shape.depth, min_depth(ctx))
             and instrs_for(shape.accumulator, sm_of(ctx))):
         return frozenset({Strategy.MATRIX})
     return frozenset()
