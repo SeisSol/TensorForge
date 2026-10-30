@@ -3575,6 +3575,37 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    rows = min(ktile, depth - kbase)\n', '    rows = ktile\n', 1)),
     ]),
+
+    # Products that add into one output, summed in the D layout.
+    'dchain': ('tests/test_d_chain.py', [
+        ('the target keeps no chains',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             'D_CHAINS = True\n', 'D_CHAINS = False\n', 1)),
+        ("the old value not read into the chain's accumulators",
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '                    writer.assign(accs[j, i, ii, 0, slot],\n',
+             '                    if False: writer.assign(accs[j, i, ii, 0, slot],\n', 1)),
+        ("the chain's window taken from its first member",
+         sub(Path('src/tensorforge/backend/instructions/compute/dchain.py'),
+             '                       rows=_union([m.d_chain_rows() for m in members]),\n',
+             '                       rows=first.d_chain_rows(),\n', 1)),
+        ('a member let in that adds numbers into rows it does not own',
+         sub(Path('src/tensorforge/backend/instructions/compute/dchain.py'),
+             '        if foreign and not member._known_zero_rows(foreign):\n',
+             '        if False:\n', 1)),
+        ('the carried column taken from one lane of the quad',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "    fold = ctx.target.lexic.reduction('{0}', Operation.ADD, atom.d, 4,\n",
+             "    fold = ctx.target.lexic.reduction('{0}', Operation.ADD, atom.d, 1,\n", 1)),
+        ('every lane of a quad starting the carried column with the old value',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "    return writer.op('eq', BOOL, _index(writer, mod=4), 0, hint='g')\n",
+             "    return writer.op('ge', BOOL, _index(writer, mod=4), 0, hint='g')\n", 1)),
+        ('a read of the output between two members not seen',
+         sub(Path('src/tensorforge/backend/instructions/compute/dchain.py'),
+             '            if any(_reads_or_writes(x, (dest,), dest.obj)\n',
+             '            if False and any(_reads_or_writes(x, (dest,), dest.obj)\n', 1)),
+    ]),
 }
 
 

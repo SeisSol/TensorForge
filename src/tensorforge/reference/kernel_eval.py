@@ -1511,6 +1511,20 @@ class Interp:
             init = m.group('init')
             self.env[name] = self.ev(init) if init else 0.0
             return
+        cm = re.match(r'^(\w+)\s*(\[.*\])?\s*\+=(.*)$', stmt)
+        if cm:
+            # `target += value`, an accumulator updated in place
+            # (`IRBuilder.accumulate`).
+            name, at, rhs = cm.groups()
+            val = self.ev(rhs.strip())
+            if at:
+                base, idx = self.env[name], self.ev(at.strip()[1:-1])
+                base[idx] = base[idx] + val
+            elif name in self.env:
+                self.env[name] = self.env[name] + val
+            else:
+                raise Abort(f'{stmt!r}: {name} is not defined')
+            return
         if '=' in stmt and not re.search(r'[=!<>]=', stmt.split('=')[0] + '='):
             lhs, rhs = stmt.split('=', 1)
             lhs, rhs = lhs.strip(), rhs.strip()
