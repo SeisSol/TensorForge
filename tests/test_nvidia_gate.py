@@ -229,6 +229,50 @@ def test_the_depth_floor_is_a_build_option():
     assert not _matrix_offered(32, 7, a_uniform=True, mma_min_depth=8)
 
 
+def _stored_parts(config, kernel, dtype, **options):
+    """The parts each prepared operand of a fixture kernel is stored in, from
+    the kernel's own metadata."""
+    import contextlib
+    import io
+    import json
+    import re
+
+    import seissol_suite as fx
+    from tensorforge.common.context import Options
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    descrs = DescriptionReader(None, {}).read(
+        fx.description("elastic-linearck", config, kernel))[0]
+    ctx = Context(arch="sm_90", backend="cuda", fp_type=dtype,
+                  options=Options(tensor_cores=True, **options))
+    gen = Generator(descrs, ctx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    meta = json.loads(re.search(r"tensorforge-meta: (\{.*\})",
+                                gen.get_kernel()).group(1))
+    return {o["alias"]: o["parts"] for o in meta["operands"] if o["ordered"]}
+
+
+def test_a_presplit_operator_is_stored_as_its_tf32_halves():
+    """With `mma_presplit` the fragment order asks for the two TF32 halves
+    (`SplitOrder`), so the products read them as they lie instead of
+    splitting every fragment after the load.  Measured on GH200 it is a
+    question per kernel: the viscoelastic derivative o6 6.7 % faster, the
+    volume 5.9 % and the local flux 19 % slower (the halves hold registers),
+    so it is an option the tuner tries and not the default.  Double has no
+    halves and keeps one part."""
+    plain = _stored_parts("elastic-linearck-o6-s", "gpu_volume",
+                          Datatype.F32)
+    split = _stored_parts("elastic-linearck-o6-s", "gpu_volume",
+                          Datatype.F32, mma_presplit=True)
+    assert plain and set(plain.values()) == {1}
+    assert split.keys() == plain.keys() and set(split.values()) == {2}
+    double = _stored_parts("elastic-linearck-o6-d", "gpu_volume",
+                           Datatype.F64, mma_presplit=True)
+    assert double and set(double.values()) == {1}
+
+
 def test_the_switch_is_off():
     """Not an opinion about whether it should be -- a place where the
     deployment decision is written down once, so flipping it is a diff."""

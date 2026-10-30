@@ -2479,6 +2479,9 @@ GROUPS = {
     ]),
 
     'gate': ('tests/test_nvidia_gate.py', [
+        ('a presplit order asks for one part',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '        return SplitOrder(order, parts=2)', '        return SplitOrder(order, parts=1)', 1)),
         ('a narrow multiplication with its own A offered the matrix path again',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    if shape.threads < WAVE and not shape.a_uniform:\n        return frozenset()\n',
