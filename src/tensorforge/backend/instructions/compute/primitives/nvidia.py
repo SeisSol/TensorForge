@@ -489,9 +489,10 @@ def widths(threads, accumulator, ctx):
     return ()
 
 
-def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
-           atom, threads):
-    """One `B` fragment read where it lies, with the column range guarded.
+def _bfrag(writer, ops, nbase, kbase, ktile, ntile, N, depth, atom,
+           threads):
+    """One `B` fragment read where it lies, with the column range guarded,
+    and the rows past the operand's depth.
 
     The guard is the whole difference between this and the staged read, and it
     is easy to leave out: staged, the columns past the end of the operand are
@@ -507,15 +508,40 @@ def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
     themselves are independent --- column `c` of the product comes from column
     `c` of `B` --- so the values the guarded-off lanes would hold are never
     read; it is the access that has to not happen.
+
+    The same holds for the rows.  An atom deeper than what is left of the
+    contraction -- sm_90's FP64 steps sixteen at a time, 35 deep in the order-6
+    volume -- reads rows `depth` and on, which the staged read gives zeros
+    (`breg`).  Read where they lie, they are the next column's, or past the
+    operand altogether in its last column: the column carried on the
+    fragments (`TAIL_MAX`, `ntile == 1`, every lane in the one column) read
+    five rows of shared memory nothing had written, or that a transfer was
+    still landing in.  `A`'s padding makes every such product zero, unless
+    what was read was not a number.
+
+    `depth` is where the operand's rows end, in `kbase`'s units.
     """
-    live = min(ntile, N - nbase) * ktile
-    if live >= threads:
+    rows = min(ktile, depth - kbase)
+    if rows <= 0:
+        # No row of the fragment is the operand's: the staged read's zero.
+        return writer.declare(ScalarType(atom.d), hint='bs')
+    # Every lane holds the one column where the fragment is a column wide.
+    live = threads if ntile == 1 else min(ntile, N - nbase) * ktile
+    if live >= threads and rows >= ktile:
         return ops.B_frag(writer, nbase, kbase, ktile, ntile)
+    tid = writer.thread_id('x')
+    cond = None
+    if live < threads:
+        cond = writer.op('lt', BOOL, tid, live, hint='g')
+    if rows < ktile:
+        deep = writer.op('lt', BOOL, _index(writer, mod=ktile), rows, hint='g')
+        cond = deep if cond is None else writer.op('and', BOOL, cond, deep,
+                                                   hint='g')
     # Declared outside the guard: a value defined inside one is not visible to
     # the instruction that follows, and a slot nothing writes reads zero.
     # Lane by lane, as every value the guard assigns it (`_PER_LANE`).
     value = writer.declare(ScalarType(atom.d), hint='bs', uniform=_PER_LANE)
-    with threadrange(0, live):
+    with writer.if_(cond):
         writer.assign(value, ops.B_frag(writer, nbase, kbase, ktile, ntile))
     return value
 
@@ -1307,10 +1333,10 @@ def matmul(writer, ops, ctx, span):
                                 # value after `cse`.
                                 if bdirect:
                                     Bfrag[0][kkk + jj * kregs] = _bfrag(
-                                        writer, ops, threadrange,
+                                        writer, ops,
                                         j + jj * ntile,
                                         k + trueK + kkk * ktile,
-                                        ktile, ntile, N, atom,
+                                        ktile, ntile, N, K + kx, atom,
                                         threads)
                                     continue
                                 col = _index(writer, mod=ktile, lane=lane)
@@ -1340,9 +1366,10 @@ def matmul(writer, ops, ctx, span):
                             for kf in range(kregs):
                                 for ci in range(tail):
                                     if bdirect:
-                                        btail[p, kf, ci] = ops.B_frag(
-                                            writer, j + atom.n + ci,
-                                            k + trueK + kf * ktile, ktile, 1)
+                                        btail[p, kf, ci] = _bfrag(
+                                            writer, ops, j + atom.n + ci,
+                                            k + trueK + kf * ktile, ktile, 1,
+                                            N, K + kx, atom, threads)
                                         continue
                                     at_ = _index(writer, mod=ktile, lane=lane,
                                                  add=kf * ktile + (atom.n + ci) * atom.k)

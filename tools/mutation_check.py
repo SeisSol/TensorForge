@@ -3571,6 +3571,9 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              '    M = ops.lead_first + ops.lead_elements\n',
              '    M = ops.lead_elements\n', 1)),
+        ('a B fragment read where it lies past the rows of the operand',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '    rows = min(ktile, depth - kbase)\n', '    rows = ktile\n', 1)),
     ]),
 }
 

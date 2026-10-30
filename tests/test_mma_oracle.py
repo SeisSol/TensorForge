@@ -58,11 +58,15 @@ def _volume(precision):
 
 
 def _normwise(got, want):
-    """The largest deviation per output, against its largest magnitude."""
+    """The largest deviation per output, against its largest magnitude --
+    infinite where a cell is not a number, which `max` would pass over."""
     out = {}
     for alias in {alias for alias, _ in want}:
         keys = [key for key in want if key[0] == alias]
         scale = max(abs(want[key]) for key in keys) or 1.0
+        if any(got[key] != got[key] for key in keys):
+            out[alias] = float('inf')
+            continue
         out[alias] = max(abs(got[key] - want[key]) for key in keys) / scale
     return out
 
@@ -118,6 +122,31 @@ def test_a_window_that_starts_inside_a_slot_is_walked_to_its_end(window):
         got, _ = kernel.run({'tensor_cores': True})
     for alias, error in _normwise(got, kernel.expected()).items():
         assert error <= TOLERANCE['d'], (alias, error)
+
+
+@pytest.mark.parametrize('precision', ['s', 'd'])
+def test_the_matrix_path_reads_no_shared_memory_it_did_not_write(precision,
+                                                                 monkeypatch):
+    """Shared memory nothing wrote reads as not a number: the deep atoms
+    of sm_90 step past the volume's 35 rows of `B`, and read where it lies,
+    the column carried on the fragments read the rows after the operand's
+    last -- a gap of the arena, or the next operator's transfer still in
+    flight.  `A`'s padding made each such product zero, but for a value
+    that is not a number."""
+    from tensorforge.reference import kernel_eval as ke
+    real = ke.Slot.read
+
+    def read(self, base, idx):
+        if base == 'shr' and (base, int(idx)) not in self.data:
+            return float('nan')
+        return real(self, base, idx)
+    monkeypatch.setattr(ke.Slot, 'read', read)
+    kernel = _kernel(_volume(precision), precision, 'sm_90')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got, _ = kernel.run({'tensor_cores': True})
+    for alias, error in _normwise(got, kernel.expected()).items():
+        assert error <= TOLERANCE[precision], (alias, error)
 
 
 def test_a_dropped_correction_term_is_seen():
