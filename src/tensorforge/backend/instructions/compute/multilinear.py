@@ -1074,7 +1074,7 @@ class MultilinearInstruction(ComputeInstruction):
         """
         from tensorforge.backend.instructions.memory.load import GlbToRegLoader
         from tensorforge.backend.instructions.memory.store import StoreRegToGlb
-        if module is None or not getattr(module, 'D_CHAINS', False):
+        if module is None or not module.D_CHAINS:
             return 'the target keeps no chains'
         if self._context.get_user_options().atomic_accumulation:
             return 'an accumulation may be added atomically'

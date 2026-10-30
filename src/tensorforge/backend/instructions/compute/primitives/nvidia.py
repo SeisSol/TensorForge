@@ -767,6 +767,20 @@ ORDERS_EVERY_READER = False
 #: its last (`MatmulOperands.chain`, `compute.dchain`).
 D_CHAINS = True
 
+#: Where a chain's output enters its sum: `'start'`, read by the first
+#: member into the accumulators, so that every product adds onto it;
+#: `'end'`, read by the last and added to the sum before it is written
+#: back.  One read and one write of the output either way, and the same
+#: numbers: on SeisSol's order-6 volume both come out at 1.5e-6 normwise
+#: against the vector build in single precision and 1.1e-15 in double,
+#: where the products added one by one come out at 7.3e-7 and 5.4e-16 --
+#: the sum of all three stays in the tensor cores' accumulation, which is
+#: not rounded to nearest.  What differs is the read's latency: at the
+#: start the products hide it, at the end nothing does.  Measured on GH200
+#: (batch 262144): 5.01 against 9.01 ns per element in single, 12.15
+#: against 17.31 in double.
+CHAIN_OLD_VALUE = 'start'
+
 
 def convergence(strategy, shape, n, ctx):
     """How far the threads have to run in step for `strategy` over `shape`.
@@ -1034,7 +1048,8 @@ def _quad_lead(writer):
 
 def _open_chain(writer, chain, atom, jstops, tail_of, N, wave):
     """The chain's accumulators, declared where every member can reach them
-    and holding the output's old value (`MatmulOperands.chain`).
+    (`MatmulOperands.chain`), and the output's old value read into them
+    where it enters the sum at the start (`CHAIN_OLD_VALUE`).
 
     One set per tile of the chain's window -- the union of its members' --
     and per register of the D layout, each lane reading the cell the layout
@@ -1049,6 +1064,7 @@ def _open_chain(writer, chain, atom, jstops, tail_of, N, wave):
     lo, hi = chain.rows
     cells = d_lane_cells(atom)
     fp = ScalarType(atom.d)
+    start = CHAIN_OLD_VALUE == 'start'
     accs, tails, naccs_of = {}, {}, {}
     for j in jstops:
         for i in range(0, hi, wave):
@@ -1062,7 +1078,7 @@ def _open_chain(writer, chain, atom, jstops, tail_of, N, wave):
                             fp, hint='c', uniform=_PER_LANE)
                     rows = _rows_where(writer, i + ii + row0, lo, hi)
                     cols = _columns_where(writer, j + col0, N)
-                    if rows is None or cols is None:
+                    if rows is None or cols is None or not start:
                         continue
                     writer.assign(accs[j, i, ii, 0, slot],
                                   chain.load(writer, rows[0], cols[0],
@@ -1072,7 +1088,7 @@ def _open_chain(writer, chain, atom, jstops, tail_of, N, wave):
                         tails[j, i, ii, ci, iii] = writer.declare(
                             fp, hint='t', uniform=_PER_LANE)
                         rows = _rows_where(writer, i + ii + 8 * iii, lo, hi)
-                        if rows is None:
+                        if rows is None or not start:
                             continue
                         writer.assign(tails[j, i, ii, ci, iii],
                                       chain.load(writer, rows[0],
@@ -1096,7 +1112,9 @@ def _chain_accumulators(chain, atom, j, i, cregs, wave):
 
 
 def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
-    """The chain's sums written where `_open_chain` read the old values.
+    """The chain's sums written where `_open_chain` read the old values --
+    or, where the old value enters at the end (`CHAIN_OLD_VALUE`), read
+    there, added and written back.
 
     A column carried on the fragments is folded over the quad first, in
     every lane of it and outside any guard -- the exchange reads all four --
@@ -1105,6 +1123,13 @@ def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
     cells = d_lane_cells(atom)
     fp = ScalarType(atom.d)
     state = chain.state
+    end = CHAIN_OLD_VALUE != 'start'
+
+    def plus_old(value, row, col, cond):
+        if not end:
+            return value
+        return writer.op('add', fp, chain.load(writer, row, col, cond), value,
+                         hint='c')
     fold = ctx.target.lexic.reduction('{0}', Operation.ADD, atom.d, 4,
                                       subblock=1)
     for j in jstops:
@@ -1125,7 +1150,9 @@ def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
                         for more in part[2:]:
                             corr = writer.op('add', fp, corr, more, hint='c')
                         value = writer.op('add', fp, part[0], corr, hint='c')
-                    with _guarded(writer, _both(writer, rows[1], cols[1])):
+                    cond = _both(writer, rows[1], cols[1])
+                    value = plus_old(value, rows[0], cols[0], cond)
+                    with _guarded(writer, cond):
                         chain.store(writer, value, rows[0], cols[0])
                 for ci in range(tail_of(j)):
                     for iii in range(atom.m // 8):
@@ -1136,8 +1163,9 @@ def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
                             fold, state['tails'][j, i, ii, ci, iii], type_=fp,
                             hint='red', pure=True, movable=False,
                             crosslane=True)
-                        with _guarded(writer, _both(writer, rows[1],
-                                                    _quad_lead(writer))):
+                        cond = _both(writer, rows[1], _quad_lead(writer))
+                        total = plus_old(total, rows[0], j + atom.n + ci, cond)
+                        with _guarded(writer, cond):
                             chain.store(writer, total, rows[0],
                                         j + atom.n + ci)
 
