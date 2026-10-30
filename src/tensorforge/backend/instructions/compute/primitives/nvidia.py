@@ -513,7 +513,8 @@ def _bfrag(writer, ops, threadrange, nbase, kbase, ktile, ntile, N,
         return ops.B_frag(writer, nbase, kbase, ktile, ntile)
     # Declared outside the guard: a value defined inside one is not visible to
     # the instruction that follows, and a slot nothing writes reads zero.
-    value = writer.declare(ScalarType(atom.d), hint='bs')
+    # Lane by lane, as every value the guard assigns it (`_PER_LANE`).
+    value = writer.declare(ScalarType(atom.d), hint='bs', uniform=_PER_LANE)
     with threadrange(0, live):
         writer.assign(value, ops.B_frag(writer, nbase, kbase, ktile, ntile))
     return value
@@ -625,6 +626,20 @@ CHAINS_MIN = 2
 #: one tile, one 8-byte access each -- which the XOR-8 swizzle cannot serve
 #: conflict-free, since rows two apart then share their banks.
 BSPLIT_STAGED = False
+
+
+#: The uniformity of a register `matmul` declares and then writes lane by
+#: lane -- an accumulator `mma.sync` writes through its `"+f"` operand, a
+#: register an epilogue read assigns under a lane guard.  A declaration is
+#: taken to be the same everywhere unless it says otherwise
+#: (`IRBuilder.declare`), and the zero it starts as is; what is written into
+#: it afterwards is not, and a pass that believes the declaration takes a
+#: load of another lane's store of it for one of its own.  `pir.forward` did
+#: exactly that with the epilogue tile of `m8n8k4`: each lane stores two
+#: accumulators and reads eight cells its neighbors stored, and every read
+#: came back as one of the lane's own two -- SeisSol's FP64 volume on sm_80
+#: and sm_86 wrong in every column the instruction computed.
+_PER_LANE = Uniformity.LANE
 
 
 def _as_float(writer: Writer, value):
@@ -1214,7 +1229,8 @@ def matmul(writer, ops, ctx, span):
                     # issue back to back, every product gets an accumulator
                     # of its own (`CHAINS_MIN`).  `Cvals` is the first.
                     naccs = atom.terms if len(tiles) * mults < CHAINS_MIN else 1
-                    accs = [[[[writer.declare(ScalarType(atom.d), hint='c')
+                    accs = [[[[writer.declare(ScalarType(atom.d), hint='c',
+                                              uniform=_PER_LANE)
                                for _ in range(wave // atom.m)]
                               for _ in range(cregs)]
                              for _ in range(mults)]
@@ -1590,7 +1606,8 @@ def matmul(writer, ops, ctx, span):
                     # here and written through `assign` rather than being the
                     # result of the load: a value defined inside the guard
                     # would not be visible to the store that follows.
-                    Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c')
+                    Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c',
+                                                    uniform=_PER_LANE)
                             for q in range(mults) for jj in range(ncols)}
 
                     # The first block of the epilogue stores where the steps

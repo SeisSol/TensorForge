@@ -3564,6 +3564,9 @@ GROUPS = {
         ("the oracle's lower TF32 half dropped",
          sub(ORACLE, "            self.env[sp.group('lower')] = value - upper\n",
              "            self.env[sp.group('lower')] = 0.0\n", 1)),
+        ('the accumulators declared the same on every lane again',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '_PER_LANE = Uniformity.LANE', '_PER_LANE = Uniformity.GRID', 1)),
     ]),
 }
 

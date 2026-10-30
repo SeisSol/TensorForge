@@ -83,15 +83,8 @@ def _source(description, precision, arch, **options):
     return gen.get_kernel()
 
 
-#: `m8n8k4` in FP64: `pir.forward` takes the epilogue tile's reads of the
-#: neighbors' accumulators for reads of the lane's own.
-_M8N8K4 = pytest.mark.xfail(strict=True, reason='forward takes neighbor '
-                            'reads of the m8n8k4 epilogue for own ones')
-
-
-@pytest.mark.parametrize('arch,precision', [
-    ('sm_90', 's'), ('sm_90', 'd'), ('sm_86', 's'),
-    pytest.param('sm_86', 'd', marks=_M8N8K4)])
+@pytest.mark.parametrize('arch', ['sm_86', 'sm_90'])
+@pytest.mark.parametrize('precision', ['s', 'd'])
 def test_the_matrix_path_computes_on_the_oracle(arch, precision):
     description = _volume(precision)
     assert 'mma.sync' in _source(description, precision, arch,
