@@ -1447,20 +1447,21 @@ def _number(text: str):
 
 
 def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
-              mults: int = 1, mult: int = 0) -> Dict[str, object]:
+              mults: int = 1, mult: int = 0, block: int = 0,
+              grid: int = 1) -> Dict[str, object]:
     """The names a kernel body starts with, for one lane.
 
     `blockDim` follows the launcher.  `blockDim.x` appears in no generated
     kernel today, but `blockDim.y` is the stride of the batch loop in most of
     them, and a fixed 1 there is a guess that happens to agree only while
     `numElements` is 1.  `mult` is the multiplication of the block the lane
-    belongs to, `threadIdx.y`.
+    belongs to, `threadIdx.y`; `block` the block of a grid of `grid`.
     """
     env = {
         'threadIdx': type('T', (), {'x': tid, 'y': mult, 'z': 0})(),
-        'blockIdx': type('B', (), {'x': 0, 'y': 0, 'z': 0})(),
+        'blockIdx': type('B', (), {'x': block, 'y': 0, 'z': 0})(),
         'blockDim': type('D', (), {'x': lanes, 'y': mults, 'z': 1})(),
-        'gridDim': type('G', (), {'x': 1, 'y': 1, 'z': 1})(),
+        'gridDim': type('G', (), {'x': grid, 'y': 1, 'z': 1})(),
     }
     # An operand declared a pointer to pointers is a table of them, one per
     # element.
@@ -1681,7 +1682,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   mults: int = 1,
                   races: Optional[List[Race]] = None,
                   elements: int = 1, block: bool = False,
-                  launches: Sequence[int] = ()) -> Dict:
+                  launches: Sequence[int] = (), grid: int = 1) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
     The difference from calling `evaluate` per lane is that the lanes share
@@ -1701,6 +1702,11 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     `launches` are the CTA ids a launch-control queue hands the block after
     its own, in order (`_LaunchCursor`).
 
+    `grid` runs every block of a grid that many blocks wide, one after the
+    other on the one memory: a block's traversal of the batch is then its
+    share of it, as the launch hands it out.  Blocks take no part in each
+    other's work, so in turn is as good an order as any.
+
     The lanes run are those of the block's first multiplication, unless
     `block` asks for all `mults` of them.  What the block does together
     before its batch loop -- copying an operand all elements read into
@@ -1715,26 +1721,27 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
         _fill(mem, preset)
     if races is not None:
         mem.tracker = Races()
-    groups = []
-    for mult in range(mults if block else 1):
-        group = []
-        for tid in range(lanes):
-            env = _base_env(src, mem, tid, lanes=lanes, mults=mults,
-                            mult=mult)
-            for name in re.findall(r'\b(numElements\d+)\b', src):
-                env[name] = elements
-            # A mask the preset gives is one the kernel is handed; without
-            # one, the pointer is null and every element counts.
-            for name in preset or ():
-                if re.fullmatch(r'flags\d+', name):
-                    env[name] = Ptr(mem, name)
-            interp = Interp(mem, env)
-            interp.lane = tid + mult * lanes
-            interp.launches = tuple(launches)
-            group.append(interp)
-        groups.append(group)
-    interps = [it for group in groups for it in group]
-    Lockstep(interps, groups).run(parse(body))
+    for cta in range(grid):
+        groups = []
+        for mult in range(mults if block else 1):
+            group = []
+            for tid in range(lanes):
+                env = _base_env(src, mem, tid, lanes=lanes, mults=mults,
+                                mult=mult, block=cta, grid=grid)
+                for name in re.findall(r'\b(numElements\d+)\b', src):
+                    env[name] = elements
+                # A mask the preset gives is one the kernel is handed; without
+                # one, the pointer is null and every element counts.
+                for name in preset or ():
+                    if re.fullmatch(r'flags\d+', name):
+                        env[name] = Ptr(mem, name)
+                interp = Interp(mem, env)
+                interp.lane = tid + mult * lanes
+                interp.launches = tuple(launches)
+                group.append(interp)
+            groups.append(group)
+        interps = [it for group in groups for it in group]
+        Lockstep(interps, groups).run(parse(body))
     if races is not None:
         races.extend(mem.tracker.found)
         mem.tracker = None

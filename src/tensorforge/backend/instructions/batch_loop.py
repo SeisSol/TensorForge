@@ -72,6 +72,10 @@ class BatchLoop(AbstractInstruction):
         # The element index as a value, while the body is being built.
         self._induction = None
         self._first_lookahead = None
+        # The end and the stride of a traversal over parts of the batch
+        # (`Generator._parted_traversal`), as values, while the body is built;
+        # None for the grid stride over the whole batch.
+        self._parted = None
         # `LAUNCHCTRL` only: how many cancel requests are kept in flight.  One
         # is enough to hide the queue's own latency behind the body, because
         # the request for the next element is posted before the current one is
@@ -422,6 +426,8 @@ class BatchLoop(AbstractInstruction):
         """
         if not hasattr(writer, 'extern_value'):
             return self._stacks()
+        if self._parted is not None:
+            return self._parted[0]
         from tensorforge.backend.pir.core import SIZE, Uniformity
         return writer.extern_value(self._stacks(), SIZE,
                                    uniform=Uniformity.GRID)
@@ -475,6 +481,24 @@ class BatchLoop(AbstractInstruction):
                f'{read.format(self._batch(0))};')
         return 'allowed'
 
+    def _parted_bounds(self, writer):
+        """The start and the stride the persistent loop takes: the section's
+        where it cut the batch into parts (`Generator._parted_traversal`) --
+        whose end `_count` answers with, until the loop is built -- and the
+        grid stride's from the launch geometry otherwise.
+
+        Read off the section's bindings ahead of the loop, which are the
+        values a part's geometry is computed into once; inside the loop the
+        loop's own bindings answer, and they do not hold these.
+        """
+        bound = BatchLoop.indices_in(writer) or {}
+        name = GeneralLexicon.BATCH_ID_NAME
+        stride = bound.get(f'{name}_stride')
+        if stride is None:
+            return self._start, self._stride
+        self._parted = (bound[f'{name}_end'], stride)
+        return bound[f'{name}_start'], stride
+
     def _lookahead_bindings(self, writer, bound: dict = None) -> None:
         """Bind batchid1..N as clamped element indices, for prefetching.
 
@@ -519,8 +543,8 @@ class BatchLoop(AbstractInstruction):
             # for an element past the end, and the answer that costs nothing is
             # the one they already hold -- a valid address they prefetch and
             # never read.
-            ahead = writer.op('add', SIZE, prev, self._stride,
-                              hint=f'ahead{n}')
+            step = self._stride if self._parted is None else self._parted[1]
+            ahead = writer.op('add', SIZE, prev, step, hint=f'ahead{n}')
             inside = writer.op('lt', BOOL, ahead, self._count(writer),
                                hint=f'inbatch{n}')
             prev = writer.op('select', SIZE, inside, ahead, prev,
@@ -809,8 +833,9 @@ class BatchLoop(AbstractInstruction):
                 # header would widen the variable and leave everything computed
                 # from it at `int32_t`.
                 peel = self._peel_index(writer)
-                with writer.for_(self._start, self._count(writer),
-                                 self._stride, hint=self._batch(0),
+                start, stride = self._parted_bounds(writer)
+                with writer.for_(start, self._count(writer),
+                                 stride, hint=self._batch(0),
                                  index_type=SIZE, peel_index=peel,
                                  uniform=Uniformity.MULT,
                                  flag_word=self._flag_word()) as loop:
@@ -835,6 +860,7 @@ class BatchLoop(AbstractInstruction):
                                 self._emit_body(writer)
                     finally:
                         self._induction = None
+                        self._parted = None
                 return
             self._refuse_stack('a traversal spelled as text')
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
