@@ -278,8 +278,8 @@ PREFERENCES = {
         # 65536); wrap off alone 15 %, move off alone 10 %;
         # `neighboringFlux` at order 6 in double 3.8x, its spill 25 to 5 kB.
         # Slower only `localFluxAll` at order 4 in single, by 4 %.  The
-        # explicit vector is not measured and keeps both
-        # (`_explicit_simd`).
+        # explicit vector and AdaptiveCpp are not measured and keep both
+        # (`_explicit_simd`, `ONEAPI_ONLY`).
         move_loads=False,
         wrap_loads=False,
         # Sixteen lanes a multiplication, a sub-group of 16: SIMD16, where a
@@ -291,13 +291,20 @@ PREFERENCES = {
         # sixteen, `neighboringFlux` at order 6 in single, by 13 %: 11.5 kB of
         # spill at 16 lanes and none at 32.  `localFluxAll` at order 4 in
         # single spills 12.5 kB at 16 and none at 32 and still runs 4 %
-        # faster.  The explicit vector is not measured and keeps the
-        # deduction (`_explicit_simd`).
+        # faster.  The explicit vector and AdaptiveCpp are not measured and
+        # keep the deduction (`_explicit_simd`, `ONEAPI_ONLY`).
         lanes_per_mult=16,
         split_predicated_load=True,
         tune_preload_globals=True,
         lanes_down_to_wave=True),
 }
+
+
+#: The preferences measured under DPC++'s SPMD lowering (`oneapi`) alone, on
+#: the Max 1550: the moves and wraps that spill there, and the sixteen lanes.
+#: Any other lowering of the device -- AdaptiveCpp's, the explicit vector --
+#: keeps the plain defaults (`Target.prefs`).
+ONEAPI_ONLY = ('move_loads', 'wrap_loads', 'lanes_per_mult')
 
 
 def _explicit_simd(prefs: Preferences) -> Preferences:
@@ -347,14 +354,16 @@ class Target:
     @property
     def prefs(self) -> Preferences:
         """This target's row of `PREFERENCES`, with what the lowering cannot
-        express removed (`_explicit_simd`).  The lane count only where it was
-        measured, DPC++'s SPMD lowering (`oneapi`): AdaptiveCpp's of the same
-        device keeps the deduction."""
+        express removed (`_explicit_simd`).  What was measured under DPC++'s
+        SPMD lowering alone (`ONEAPI_ONLY`) holds for `oneapi` alone:
+        AdaptiveCpp's lowering of the same device keeps the defaults."""
         prefs = PREFERENCES.get(self.hw.vendor, Preferences())
         if self.explicit_simd:
             return _explicit_simd(prefs)
-        if prefs.lanes_per_mult and self.backend != 'oneapi':
-            return replace(prefs, lanes_per_mult=0)
+        if self.backend != 'oneapi':
+            plain = Preferences()
+            return replace(prefs, **{name: getattr(plain, name)
+                                     for name in ONEAPI_ONLY})
         return prefs
 
     @property

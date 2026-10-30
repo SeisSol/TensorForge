@@ -363,8 +363,10 @@ declare('enable_move_loads',
             '*priced*, not because it is in doubt. A pass with '
             'no way to be turned off is a pass whose contribution nobody has '
             'measured, and the same argument that put `preload_globals` behind '
-            'a question applies to it.  Off under Intel\'s SPMD lowering, '
-            'where what it moves spills (`Preferences.move_loads`).')
+            'a question applies to it.  Off under DPC++\'s SPMD lowering for '
+            'Intel (`oneapi`), where what it moves spills '
+            '(`Preferences.move_loads`); AdaptiveCpp\'s lowering of the same '
+            'device is not measured and keeps it (`target.ONEAPI_ONLY`).')
 
 declare('enable_wrap_loads',
         rule=lambda target: target.prefs.wrap_loads,
@@ -376,9 +378,11 @@ declare('enable_wrap_loads',
             'buffer copy, register and shared destinations alike.  The same '
             'in any loop over constant bounds -- a merged run, a rolled '
             'reduction -- for its next trip; see backend/pir/wrap.py.  Off '
-            'under Intel\'s SPMD lowering, where what it moves spills and a '
-            'grid that covers the batch in one round has no next element '
-            '(`Preferences.wrap_loads`).')
+            'under DPC++\'s SPMD lowering for Intel (`oneapi`), where what it '
+            'moves spills and a grid that covers the batch in one round has '
+            'no next element (`Preferences.wrap_loads`); AdaptiveCpp\'s '
+            'lowering of the same device is not measured and keeps it '
+            '(`target.ONEAPI_ONLY`).')
 
 declare('move_distance',
         default=1,

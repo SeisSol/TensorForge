@@ -164,13 +164,15 @@ def test_a_grid_that_covers_the_batch_in_one_round_takes_no_parts():
 @pytest.mark.parametrize("arch,backend,expected", [
     ("pvc", "oneapi", False),
     ("pvc", "esimd", True),
+    ("pvc", "acpp", True),
     ("sm_120", "cuda", True),
     ("gfx942", "hip", True),
 ])
 def test_moving_and_wrapping_are_off_under_intels_spmd_lowering(
         arch, backend, expected):
-    """What they move spills under SPMD on PVC, and the grid there covers
-    the batch in one round; the explicit vector is not measured and keeps
+    """What they move spills under DPC++'s SPMD lowering on PVC, and the
+    grid there covers the batch in one round; the explicit vector and
+    AdaptiveCpp's lowering of the same device are not measured and keep
     both."""
     resolved = Options().resolve(Context(arch=arch, backend=backend,
                                          fp_type=DT).target)
