@@ -68,9 +68,11 @@ def _oneapi_kernel(threads=None):
     return gen.get_kernel()
 
 
-@pytest.mark.parametrize('threads,size', [(None, 32), (16, 16)])
+@pytest.mark.parametrize('threads,size', [(None, 16), (16, 16), (32, 32)])
 def test_the_oneapi_kernel_requires_its_multiplications_sub_group(threads,
                                                                   size):
+    # Deduced, a multiplication takes the 16 lanes Intel's SPMD lowering
+    # defaults to (`Preferences.lanes_per_mult`); given 32, a sub-group of 32.
     src = _oneapi_kernel(threads)
     assert SUB_GROUP.findall(src) == [str(size)]
     # the sub-group is the multiplication, so one index serves it

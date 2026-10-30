@@ -117,6 +117,8 @@ class Preferences:
     #: `enable_move_loads` and `enable_wrap_loads`,
     move_loads: bool = True
     wrap_loads: bool = True
+    #: `lanes_per_mult`, 0 for the deduced count,
+    lanes_per_mult: int = 0
     #: and the rest under their own names.
     preload_globals: bool = False
     preload_shards: bool = False
@@ -280,6 +282,18 @@ PREFERENCES = {
         # (`_explicit_simd`).
         move_loads=False,
         wrap_loads=False,
+        # Sixteen lanes a multiplication, a sub-group of 16: SIMD16, where a
+        # lane has twice the register file one of 32 has.  Over the sixteen
+        # SeisSol elastic kernels above, 0.76x the time of 32 lanes in
+        # geometric mean at a batch of 262144 (0.68x at 65536), IGC's spill
+        # 142 kB to 72 kB and eight of them none at all; `volume` at order 6
+        # in double 0.60x, `neighboringFlux` 0.62x.  Slower at 16 one of the
+        # sixteen, `neighboringFlux` at order 6 in single, by 13 %: 11.5 kB of
+        # spill at 16 lanes and none at 32.  `localFluxAll` at order 4 in
+        # single spills 12.5 kB at 16 and none at 32 and still runs 4 %
+        # faster.  The explicit vector is not measured and keeps the
+        # deduction (`_explicit_simd`).
+        lanes_per_mult=16,
         split_predicated_load=True,
         tune_preload_globals=True,
         lanes_down_to_wave=True),
@@ -305,7 +319,7 @@ def _explicit_simd(prefs: Preferences) -> Preferences:
                                      broadcast_without_staging=False),
                    preload_globals=True, tune_preload_globals=False,
                    lanes_down_to_wave=False,
-                   move_loads=True, wrap_loads=True)
+                   move_loads=True, wrap_loads=True, lanes_per_mult=0)
 
 
 class Target:
@@ -333,9 +347,15 @@ class Target:
     @property
     def prefs(self) -> Preferences:
         """This target's row of `PREFERENCES`, with what the lowering cannot
-        express removed (`_explicit_simd`)."""
+        express removed (`_explicit_simd`).  The lane count only where it was
+        measured, DPC++'s SPMD lowering (`oneapi`): AdaptiveCpp's of the same
+        device keeps the deduction."""
         prefs = PREFERENCES.get(self.hw.vendor, Preferences())
-        return _explicit_simd(prefs) if self.explicit_simd else prefs
+        if self.explicit_simd:
+            return _explicit_simd(prefs)
+        if prefs.lanes_per_mult and self.backend != 'oneapi':
+            return replace(prefs, lanes_per_mult=0)
+        return prefs
 
     @property
     def sycl(self) -> bool:

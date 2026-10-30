@@ -26,7 +26,7 @@ from types import SimpleNamespace
 import pytest
 
 from tensorforge.common.basic_types import Addressing, Datatype
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators import lanes
@@ -520,3 +520,48 @@ def test_an_amd_multiplication_wider_than_the_wave_is_refused(monkeypatch):
     with pytest.raises(GenerationError):
         Generator(_gemm(56, 9, 56), _ctx("gfx1150", "hip")).generate()
     Generator(_gemm(56, 9, 56), _ctx("gfx942", "hip")).generate()
+
+
+@pytest.mark.parametrize("arch,backend,lanes_", [
+    ("pvc", "oneapi", 16), ("pvc", "esimd", 32), ("pvc", "acpp", 32),
+    ("sm_86", "cuda", 32), ("gfx942", "hip", 32)])
+def test_intels_spmd_lowering_spreads_a_multiplication_over_sixteen_lanes(
+        arch, backend, lanes_):
+    """A sub-group of 16 gives a lane twice the registers one of 32 has: on
+    a Max 1550 the SeisSol elastic kernels spilled half as much and ran in
+    0.76x the time (`Preferences.lanes_per_mult`).  The explicit vector,
+    AdaptiveCpp's lowering of the same device and the other vendors keep the
+    deduction, 32 for 56 rows."""
+    gen = Generator(_gemm(56, 9, 56), _ctx(arch, backend))
+    gen.generate()
+    assert gen._num_threads == lanes_
+
+
+def _lanes_of(rows, arch, backend, **options):
+    gen = Generator(_gemm(rows, 9, rows), Context(
+        arch=arch, backend=backend, fp_type=Datatype.F32,
+        options=Options(**options)))
+    gen.generate()
+    return gen._num_threads
+
+
+def test_the_default_count_caps_the_lanes_and_adds_none():
+    """Eight rows deduce eight lanes, and the target's sixteen does not widen
+    them.  Asked for, sixteen is the same configuration there -- the same
+    identity, so the same kernel -- while where it is not the default it
+    widens them as it always did."""
+    assert _lanes_of(8, "pvc", "oneapi") == 8
+    assert _lanes_of(8, "pvc", "oneapi", lanes_per_mult=16) == 8
+    assert _lanes_of(8, "sm_86", "cuda", lanes_per_mult=16) == 16
+    assert _lanes_of(56, "pvc", "oneapi", lanes_per_mult=8) == 8
+
+
+def test_a_default_count_leaves_the_tuner_free_and_an_asked_one_pins_it():
+    """Only a count the caller asked for is part of the configuration's
+    identity, and only that one is pinned for `autotune`."""
+    from tensorforge.common.target import Target
+    resolved = Options().resolve(Target("pvc", "oneapi"))
+    assert resolved.lanes_per_mult == 16
+    assert "lanes_per_mult" not in resolved.delta()
+    asked = Options(lanes_per_mult=8).resolve(Target("pvc", "oneapi"))
+    assert asked.delta()["lanes_per_mult"] == 8

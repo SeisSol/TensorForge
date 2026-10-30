@@ -788,9 +788,14 @@ def test_a_narrowing_accumulation_chain_is_stored_once(backend, arch):
     every term and read back for the next one, it would take three global
     round trips per element.
     """
-    src = _generate("accumulate_narrowing_chain", backend, arch).get_kernel()
-    writes, reads = _accesses(src, "glb_m0")
-    assert writes == 1, f"stored {writes} times"
+    gen = _generate("accumulate_narrowing_chain", backend, arch)
+    writes, reads = _accesses(gen.get_kernel(), "glb_m0")
+    # A store per register block the 20 rows span, each block's rows once:
+    # one block at 32 lanes, two at the 16 Intel's SPMD lowering takes
+    # (`Preferences.lanes_per_mult`) -- rows 0-15 from the chain's image,
+    # 16-19 from the assignment's, which no term reaches.
+    blocks = -(-20 // gen._num_threads)
+    assert writes == blocks, f"stored {writes} times over {blocks} blocks"
     assert not reads, "the output is read back after it was stored"
 
 

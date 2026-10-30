@@ -1421,15 +1421,20 @@ declare('preload_register_share',
             'and 111 AGPR on gfx942.')
 
 declare('lanes_per_mult',
-        default=0,
+        rule=lambda target: target.prefs.lanes_per_mult,
         env='TF_LANES',
+        parse=parse_int,
         doc='Lanes one multiplication is spread over, instead of the deduced '
             'count.  0 keeps the deduction.  Only narrower counts are taken, '
             'and only powers of two, so that a warp still holds whole '
             'multiplications; the rows a lane covers grow to match, with the '
             'last ones padded.  A search parameter and not a default: on sm_120 '
             'eight lanes made `local_flux` 10 % faster and `chain_three` four '
-            'times slower, because it spilled -- see `lanes.narrower`.')
+            'times slower, because it spilled -- see `lanes.narrower`.  '
+            'Except under Intel\'s SPMD lowering, where 16 is the default: a '
+            'sub-group of 16 gives a lane twice the registers one of 32 does, '
+            'and the SeisSol kernels spilled half as much and ran 0.76x '
+            '(`Preferences.lanes_per_mult`).')
 
 declare('wave_uniform_rows',
         default=True,

@@ -761,7 +761,9 @@ class Generator:
     fixed = {}
     if self._lanes is not None:
       fixed['lanes'] = self._lanes
-    elif opts.lanes_per_mult:
+    elif opts.lanes_per_mult and 'lanes_per_mult' in opts.delta():
+      # A count the target's default gives (`Preferences.lanes_per_mult`) is
+      # a starting point, and the search stays free to leave it.
       asked = lane_config.requested(given, self._context)
       if asked is not None:
         fixed['lanes'] = asked

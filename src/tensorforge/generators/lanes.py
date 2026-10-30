@@ -338,7 +338,9 @@ def requested(descr_list: List[OperationDescription],
     `None` where it is unset, or where the count is not one of `narrower`'s:
     a wider count than the deduction, or one that is not a power of two, is
     not taken rather than forced, so that one setting can be passed to a whole
-    corpus and change only the sections it applies to.
+    corpus and change only the sections it applies to.  The target's default
+    count is never wider than the deduction: it caps the lanes and does not
+    add any.
     """
     want = context.get_user_options().lanes_per_mult
     if not want:
@@ -346,6 +348,11 @@ def requested(descr_list: List[OperationDescription],
     base = deduce(descr_list, context)
     if want == base.num_threads:
         return base
+    if (want > base.num_threads
+            and 'lanes_per_mult' not in context.get_user_options().delta()):
+        # A count the target gives by default (`Preferences.lanes_per_mult`)
+        # is a ceiling: a section that deduces fewer lanes keeps them.
+        return None
     hit = next((c for c in narrower(descr_list, context, floor=1)
                 if c.num_threads == want), None)
     if hit is not None:
