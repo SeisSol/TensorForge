@@ -1167,7 +1167,7 @@ declare('merge_variants',
             '`0` none.  On sm_120 `local_flux` (its four faces merged) computes '
             'the same checksum as the expanded list and runs 5 % faster at 32 '
             'lanes, 12 % at 16 and 24 % at 8, from a quarter to a half of the '
-            'code; on GB200 22 to 35 % (preferences.yml).  With `k_roll` as well '
+            'code; on GB200 22 to 35 % (package 4).  With `k_roll` as well '
             'it gained less, the merged rolled body taking more registers.')
 
 declare('merge_icache_fraction',

@@ -5,7 +5,7 @@
 
 A preference is a measurement standing in for a ranking: which device, which
 kernels, what to build them with, and on whose evidence.  Held here: the
-device names a context answers to, the matching, the shipped GB200 entries,
+device names a context answers to, the matching, what a preference builds,
 and that `prefer` builds a preference and nothing else.
 """
 
@@ -94,19 +94,36 @@ def test_the_callers_file_comes_before_the_shipped_one(tmp_path):
     assert pref.source == path
 
 
-def test_the_shipped_gb200_entry_reaches_local_flux():
+#: What GB200's package 4 measured for `local_flux` (2026-09), shipped until
+#: the generator outgrew it.
+PKG4 = """
+- device: sm_100
+  match: {dtype: f32, rows: [41, 64], columns: [1, 16]}
+  prefer: {lanes: 8, width: 1, merge_variants: true, k_roll: auto}
+  evidence: "GB200 pkg4 local_flux b56: 8 lanes merged, k_roll 28, -26 % vs default"
+"""
+
+
+def test_every_shipped_entry_says_where_it_comes_from():
+    for pref in preferences._load_file(preferences.SHIPPED):
+        assert pref.evidence, pref
+
+
+def test_a_preference_reaches_the_kernels_it_matches(tmp_path):
     descrs = _case().descr_list()
-    ctx = _ctx()
+    path = _write(tmp_path, PKG4)
+    ctx = _ctx(preferences=path)
     pref = preferences.lookup(descrs, ctx)
-    assert pref is not None and pref.source == preferences.SHIPPED
+    assert pref is not None and pref.source == path
     cand = tuning.preferred(pref, descrs, ctx)
     assert (cand.lanes.num_threads, cand.lanes.lead_width) == (8, 1)
     # `auto`: the largest divisor of the 56-step reduction up to 32
     assert cand.get('k_roll') == 28 and cand.get('merge_variants') is True
     assert cand.get('prepare_operands') is None, 'the host would have to pack'
+    assert preferences.lookup(descrs, _ctx('sm_90', preferences=path)) is None
 
 
-def test_prefer_builds_the_preference_and_nothing_else(monkeypatch):
+def test_prefer_builds_the_preference_and_nothing_else(monkeypatch, tmp_path):
     built = []
     real = tuning.build
 
@@ -115,7 +132,8 @@ def test_prefer_builds_the_preference_and_nothing_else(monkeypatch):
         return real(factory, context, candidate, generate)
     monkeypatch.setattr(tuning, 'build', counting)
     mod = _case()
-    gen = Generator(mod.descr_list(), _ctx(autotune='prefer'))
+    gen = Generator(mod.descr_list(),
+                    _ctx(autotune='prefer', preferences=_write(tmp_path, PKG4)))
     gen.generate()
     assert len(built) == 1
     assert gen.tuned.lanes.num_threads == 8
