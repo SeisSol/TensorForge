@@ -2092,6 +2092,16 @@ class MultilinearInstruction(ComputeInstruction):
             for user in (self,) + tuple(
                 u for u in sym.get_user_list()
                 if isinstance(u, MultilinearInstruction) and u is not self))
+        # And by default not at all where one rolls (`Options.pack_rolled`).
+        # Folded away, a packed read is free -- its numbers are immediates and
+        # its lane range a constant.  In a real loop every one of them is
+        # paid a trip: the column's numbers read from a table, the range
+        # compared, the read held off the lanes outside it, and the operand
+        # out of the interleave, which would have read a lane's rows as one
+        # vector.  SeisSol elastic at order 8 on sm_120, dense against
+        # packed: localFluxAll and derivative -12 to -13 %.
+        if rolled and not self._context.get_user_options().pack_rolled:
+            return
         # With `pack_tables` the per-column numbers are read at run time
         # instead, so a rolled reader no longer holds every reader to the
         # forms that need none (`Symbol._tabled_packed_index`).  The value

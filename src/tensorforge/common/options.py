@@ -988,6 +988,21 @@ declare('pack_operands',
             'takes the operand and `auto`/`fit` leave the measured win in '
             'place, packing only what it declines.')
 
+declare('pack_rolled',
+        default=False,
+        parse=parse_bool,
+        doc='Pack an operand (`pack_operands`) that a rolled reduction reads '
+            '-- `k_roll`, or one `k_unroll_max` rolls.  Off by default: a read '
+            'of a packed operand costs nothing where its column is a constant, '
+            'and a trip of its own in a real loop -- the column\'s numbers from '
+            'a table (`pack_tables`), the lane range compared, the read held '
+            'off the lanes outside it, and the operand kept out of the SIMT '
+            'interleave, which reads a lane\'s rows as one vector.  SeisSol '
+            'elastic at order 8, single precision, sm_120: dense against '
+            'packed, localFluxAll and derivative -12 to -13 %; GH200 at orders '
+            '7 and 8 likewise.  What packing saves is storage, which is what to '
+            'turn this on for where an operand no longer fits.')
+
 declare('pack_tables',
         default='auto',
         parse=parse_str,

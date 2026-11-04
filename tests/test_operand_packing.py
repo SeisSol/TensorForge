@@ -417,6 +417,7 @@ def test_a_rolled_reduction_takes_a_uniform_form_without_a_table():
                         Context(arch="sm_120", backend="cuda",
                                 fp_type=Datatype.F32,
                                 options=Options(pack_operands=kind, k_roll=4,
+                                                pack_rolled=True,
                                                 pack_tables="off")))
         gen.generate()
         return gen, a.tensor
@@ -429,6 +430,25 @@ def test_a_rolled_reduction_takes_a_uniform_form_without_a_table():
 
     _, t = built(odd, "runs")
     assert t.packing is None
+
+
+@pytest.mark.parametrize("kind", ("fit",) + KINDS)
+def test_an_operand_a_rolled_reduction_reads_stays_dense(kind):
+    """`pack_rolled` off, the default: a packed read is free where its column
+    is a constant and a trip of its own where the loop hands the column over
+    -- a table read, a range compared, a read held off lanes, and no vector
+    from the interleave.  So an operand a rolled reduction reads is not
+    offered a form at all, whatever `pack_operands` names."""
+    gen, t = _generated(_band(), kind, k_roll=4)
+    assert t.packing is None
+    assert t.packing_table is None
+    assert "_pack[" not in gen.get_kernel()
+
+
+def test_an_unrolled_reader_still_packs():
+    """The same operand, read by an unrolled reduction, takes its form."""
+    _, t = _generated(_band(), "runs")
+    assert t.packing is not None
 
 
 def test_a_table_makes_the_other_forms_reachable_from_a_rolled_reduction():
@@ -458,6 +478,7 @@ def test_a_table_makes_the_other_forms_reachable_from_a_rolled_reduction():
                         Context(arch="sm_120", backend="cuda",
                                 fp_type=Datatype.F32,
                                 options=Options(pack_operands=kind, k_roll=4,
+                                                pack_rolled=True,
                                                 pack_tables=tables)))
         gen.generate()
         return gen, a.tensor
@@ -518,7 +539,8 @@ def test_a_table_leaves_room_for_the_views_lower_corner():
     gen = Generator([GemmDescr(False, False, a, b, c, alpha=1.0, beta=0.0)],
                     Context(arch="sm_120", backend="cuda",
                             fp_type=Datatype.F32,
-                            options=Options(pack_operands="runs", k_roll=4)))
+                            options=Options(pack_operands="runs", k_roll=4,
+                                            pack_rolled=True)))
     gen.generate()
     t = a.tensor
     assert t.packing is not None and t.packing_table is not None
@@ -568,6 +590,7 @@ def test_a_table_too_big_for_the_arguments_goes_into_the_file():
                         Context(arch="sm_86", backend="cuda",
                                 fp_type=Datatype.F32,
                                 options=Options(pack_operands="runs", k_roll=4,
+                                                pack_rolled=True,
                                                 pack_tables=home)))
         gen.generate()
         return gen, a.tensor
@@ -653,6 +676,7 @@ def test_fit_falls_through_to_a_looser_form_where_a_tighter_is_refused():
                     Context(arch="sm_120", backend="cuda",
                             fp_type=Datatype.F32,
                             options=Options(pack_operands="fit", k_roll=4,
+                                            pack_rolled=True,
                                             pack_tables="off")))
     gen.generate()
     # `runs` is refused here and `rows` is not, so `rows` is what it takes
