@@ -530,9 +530,10 @@ class MultilinearInstruction(ComputeInstruction):
         # in its own window, shifted, and is left alone rather than
         # translated back.
         if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
-                or obj.addressing is not Addressing.NONE or not obj.has_values()):
+                or obj.addressing is not Addressing.NONE
+                or self._zero_pattern(obj) is None):
             return False
-        data = obj.get_values()
+        data = self._zero_pattern(obj)
         axes = []
         for j, x in enumerate(idx):
             if isinstance(x, Immediate):
@@ -964,6 +965,39 @@ class MultilinearInstruction(ComputeInstruction):
         return (symbol.stype in (SymbolType.Global, SymbolType.Data)
                 or bool(getattr(symbol, 'verbatim', False)))
 
+    @staticmethod
+    def _zero_pattern(obj):
+        """The numbers a known zero is read from, or None.
+
+        A tensor's own -- or, for a merged run's stand-in (`is_variant`), one
+        wherever any of its members has a number and zero where none has:
+        the union of their patterns.  One body runs for every member, so it
+        may leave out only what is zero in all of them; and that much it may,
+        statically, with no table.  Left at "no numbers", a stand-in was
+        multiplied over its whole box -- for SeisSol's `localFluxAll` at order
+        8, twice the terms of the union.
+
+        Only for the question of what is zero.  What a cell *is* differs from
+        member to member, so a reader that wants the numbers themselves -- a
+        gather's weights -- still finds none.
+        """
+        if obj.has_values():
+            return obj.get_values()
+        if not getattr(obj, 'is_variant', False):
+            return None
+        union = getattr(obj, '_union_pattern', None)
+        if union is not None:
+            return union
+        members = tuple(getattr(obj, 'variant_members', ()))
+        if not members or any(not m.has_values() for m in members):
+            return None
+        values = [np.asarray(m.get_values()) for m in members]
+        if any(v.shape != values[0].shape for v in values):
+            return None
+        union = np.any(np.stack([v != 0 for v in values]), axis=0).astype(float)
+        obj._union_pattern = union
+        return union
+
     def _zero_block(self, e_lo, e_hi, k_lo, k_hi, span) -> bool:
         """`_known_zero` for a matrix path: is `A` zero over a block?
 
@@ -979,7 +1013,8 @@ class MultilinearInstruction(ComputeInstruction):
         symbol = self._ops[0].symbol
         obj = getattr(symbol, 'obj', None)
         if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
-                or obj.addressing is not Addressing.NONE or not obj.has_values()
+                or obj.addressing is not Addressing.NONE
+                or self._zero_pattern(obj) is None
                 or len(self._ks) != 1
                 or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']):
             return False
@@ -994,7 +1029,7 @@ class MultilinearInstruction(ComputeInstruction):
               for k in range(k_lo, k_hi) if k < klast - kfirst]
         if not rows or not ks:
             return True
-        data = obj.get_values()
+        data = self._zero_pattern(obj)
         if (min(rows) < 0 or max(rows) >= data.shape[lead]
                 or min(ks) < 0 or max(ks) >= data.shape[red]):
             return False
@@ -1142,7 +1177,8 @@ class MultilinearInstruction(ComputeInstruction):
         symbol = self._ops[0].symbol
         obj = getattr(symbol, 'obj', None)
         if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
-                or obj.addressing is not Addressing.NONE or not obj.has_values()
+                or obj.addressing is not Addressing.NONE
+                or self._zero_pattern(obj) is None
                 or len(self._ks) != 1
                 or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']):
             return False
@@ -1150,7 +1186,7 @@ class MultilinearInstruction(ComputeInstruction):
         lead, red = nks.index('n0'), nks.index('k0')
         rows = [r + self._eff_offset(0, lead) for r in rows]
         ks = [k + self._eff_offset(0, red) for k in range(*self._ks[0])]
-        data = obj.get_values()
+        data = self._zero_pattern(obj)
         if (min(rows) < 0 or max(rows) >= data.shape[lead]
                 or min(ks) < 0 or max(ks) >= data.shape[red]):
             return False
@@ -1496,13 +1532,14 @@ class MultilinearInstruction(ComputeInstruction):
         symbol = self._ops[0].symbol
         obj = getattr(symbol, 'obj', None)
         if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
-                or obj.addressing is not Addressing.NONE or not obj.has_values()
+                or obj.addressing is not Addressing.NONE
+                or self._zero_pattern(obj) is None
                 or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']
                 or not self._ns or 0 not in self._lead_dims):
             return None
         nks = self._opdim_to_nks[0]
         lead, red = nks.index('n0'), nks.index('k0')
-        data = obj.get_values()
+        data = self._zero_pattern(obj)
         if lead != 0:
             data = data.T
         klo, khi = loop.start, loop.end
