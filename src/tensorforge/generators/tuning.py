@@ -1003,9 +1003,12 @@ class CompiledScore:
             run = subprocess.run(cmd + list(self.flags), capture_output=True,
                                  text=True, timeout=self.timeout)
             spilled = entry.reported_spill(product)
+            code = entry.code_bytes(product)
         report = toolchain.resources(entry.backend, run.stdout + run.stderr)
         if report is None or run.returncode:
             return None
+        if code is not None:
+            report = replace(report, code_bytes=code)
         if spilled is not None:
             # The object's own figure, and it decides: the console heuristic
             # reads a recompilation as "spilled, amount unknown", and IGC
@@ -1434,6 +1437,36 @@ SPILL_GROWTH = 1.5
 #: unmerged that spill nothing (A100).
 SPILL_WEIGHT = 64
 
+#: What an instruction from code past the instruction cache costs on top of
+#: one from inside it: this share of what the part's microbenchmark measured
+#: beyond the one it costs anyway (`hw_descr.icache_miss_factor` less 1).  It
+#: is charged on as many of the executed instructions as the code has past the
+#: cache (`analysis.icache.past_share`), with the code as large as the
+#: compiler wrote it: the emitter's estimate puts the build below at 176 kB,
+#: ptxas wrote 258.
+#:
+#: A share and not the whole, because the probe's FFMA chains issue every
+#: clock, while a kernel also waits on other things, and part of a fetch hides
+#: behind them.  Any value from 0.44 to 0.50 picks the same over the measured
+#: kernels.  What it moves:
+#:
+#: - Order-8 `localFluxAll` in single precision on GH200 and GB200 is merged
+#:   again.  Written out at 32 lanes, its faces count 28 % fewer instructions
+#:   than merged, but they are 258 and 243 kB of code and run 26 % slower on
+#:   both.  The same build is 3 and 10 % faster on A100 and sm_120, whose
+#:   factors leave it alone.
+#: - Order-6 `localFluxAll` moves from sixteen lanes unmerged (204 to 216 kB)
+#:   to sixteen merged, which is 3 to 4 % slower on those two.  The unmerged
+#:   build runs at 1.07 to 1.11 times the default's time per instruction, not
+#:   the 1.3 to 1.4 charged.
+#:
+#: Below 0.44 GB200 loses the order-8 move.  From 0.51 GH200 merges order-6
+#: `localFluxAll` in double precision (7 % slower), and from 0.62 it takes 64
+#: lanes for order-8 `volume` (24 % slower).  On the generator before merged
+#: runs left out the union, the merged sixteen lanes counted 21 % higher, and
+#: the order-6 move went to 32 lanes unmerged instead, 25 % slower on GH200.
+ICACHE_SHARE = 0.47
+
 
 def executed_instructions(result: Build) -> Optional[float]:
     """Warp instructions one element of the batch executes, by the emitter's
@@ -1510,34 +1543,35 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                generate) -> Candidate:
     """The configuration `autotune=lanes` builds: the fewest instructions an
     element executes, among the candidates that spill no more than the
-    default allows, with the spilling priced in.
+    default allows, with the spilling (`SPILL_WEIGHT`) and the code past the
+    instruction cache (`ICACHE_SHARE`) priced in.
 
     Every candidate is generated -- the emitter's count needs nothing else --
     and the compiler is asked about as few as the bound admits: the default
     first, which sets the guard (`SPILL_GROWTH`), then the rest in order of
     their count, until a count alone is past the best cost found, which
-    spilling can only raise.  Over SeisSol's elastic kernels at orders 6 and
-    8 that compiles three to five of five to eight candidates.
+    spilling and code can only raise.  Over SeisSol's elastic kernels at
+    orders 6 and 8 that compiles three to five of five to eight candidates.
 
-    Measured over the same kernels on four GPUs -- 48 of them, the lane counts
-    from eight to 128 with merging on and off, builds of one source pooled --
-    as the loss against the fastest candidate (mean / worst):
+    Measured over the same kernels on four GPUs -- 48 of them, eight to 64
+    lanes with merging on and off, builds of one source pooled -- as the loss
+    against the fastest candidate (mean / worst):
 
-        GPU            the default   this rule
-        A100 sm_80     38.0 / 401 %  5.6 / 41 %
-        GH200 sm_90    41.3 / 480    6.4 / 28
-        GB200 sm_100   12.7 /  48    7.4 / 20
-        sm_120 laptop  17.1 /  44    7.3 / 16
+        GPU            the default    spilling only      this rule
+        A100 sm_80     13.4 / 41 %     6.0 / 41 %        6.0 / 41 %
+        GH200 sm_90    15.9 / 77       7.3 / 29          5.9 / 29
+        GB200 sm_100   15.0 / 52       7.6 / 29          4.7 / 14
+        sm_120 laptop  14.8 / 38       5.8 / 15          5.8 / 15
 
-    and `autotune=compiled`, the coordinate walk over the whole simple space
-    at up to 24 builds, at 6.8 / 41 % on A100.  The loss that is left is the
-    time derivative at sixteen lanes, which spills twice what 32 do and is
-    29 % faster for it on A100 and GH200 in double precision and 59 % slower
-    on GH200 in single: nothing a build says about itself separates those.
+    The loss that is left is mostly the time derivative at sixteen lanes,
+    which spills about twice what 32 do and is 22 to 29 % faster for it on
+    A100 and GH200 in double precision and 43 % slower on GH200 in single:
+    nothing a build says about itself separates those.  Then 64 lanes for
+    order-8 `neighboringFlux` in double precision (16 to 27 %), which count
+    17 % more instructions than 32, with 32 spilling 28 bytes or nothing.
 
     The default unless the winner's cost is `DEVIATION_MARGIN` below the
-    default's -- which over the measured kernels moves no pick: every move
-    taken was worth more than ten percent.  Measured on NVIDIA only.
+    default's.  Measured on NVIDIA only.
     """
     hw = context.target.hw
     wave = max(1, getattr(hw, 'vec_unit_length', 32))
@@ -1561,13 +1595,18 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         report = None
     if report is None:
         return origin
+    from tensorforge.analysis.icache import past_share
     limit = SPILL_GROWTH * report.spill_bytes
+    miss = getattr(hw, 'icache_miss_factor', None)
+    refetch = ICACHE_SHARE * max(0.0, miss - 1.0) if miss else 0.0
 
-    def cost(cand: Candidate, spill: int) -> float:
+    def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
-        return counts[cand] + SPILL_WEIGHT * spill / elem * lanes / wave
+        past = past_share(seen.code_bytes, hw)
+        return (counts[cand] * (1.0 + refetch * past)
+                + SPILL_WEIGHT * seen.spill_bytes / elem * lanes / wave)
 
-    best, least = origin, cost(origin, report.spill_bytes)
+    best, least = origin, cost(origin, report)
     default = least
     for cand in sorted((c for c in counts if c != origin), key=counts.get):
         if counts[cand] >= least:
@@ -1578,7 +1617,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             seen = None
         if seen is None or seen.spill_bytes > limit:
             continue
-        price = cost(cand, seen.spill_bytes)
+        price = cost(cand, seen)
         if price < least:
             best, least = cand, price
     return best if least < (1.0 - DEVIATION_MARGIN) * default else origin

@@ -74,17 +74,19 @@ def _key(cand):
 
 
 class TableScorer:
-    """Reports the spilling `spills` names for a candidate's (lanes, merge),
-    and counts the questions."""
+    """Reports the spilling `spills` and the code `code` names for a
+    candidate's (lanes, merge), and counts the questions."""
 
-    def __init__(self, spills):
+    def __init__(self, spills, code=None):
         self.spills = spills
+        self.code = code or {}
         self.asked = []
 
     def resources(self, result):
         key = _key(result.candidate)
         self.asked.append(key)
-        return Resources(registers=255, spill_bytes=self.spills.get(key, 0))
+        return Resources(registers=255, spill_bytes=self.spills.get(key, 0),
+                         code_bytes=self.code.get(key))
 
 
 def _counting(table):
@@ -186,6 +188,29 @@ def test_a_move_within_the_margin_keeps_the_default(monkeypatch):
     pick = tuning.lanes_rule(descr_factory, ctx, TableScorer({}), origin,
                              first, generate=Generator.trial)
     assert pick == origin
+
+
+@pytest.mark.parametrize('arch,taken', [('sm_90', False), ('sm_120', True)])
+def test_code_past_the_cache_costs_what_the_part_measured(monkeypatch, arch,
+                                                          taken):
+    """32 lanes unmerged count 30 % fewer instructions and are 256 kB of
+    code, half of it past the cache: on GH200, whose probe ran three times
+    slower past it, that is no move; on sm_120, at 2.05, it is.  Order-8
+    `localFluxAll` in single precision written out is 26 % slower than merged
+    on GH200 and 10 % faster on sm_120."""
+    ctx = _context(arch)
+    descr_factory = _local_flux()
+    origin, first = _origin(descr_factory, ctx)
+    counts = {(32, None): 1000, (32, True): 1000, (32, False): 700,
+              (16, True): 1200, (16, False): 1200, (8, True): 1300,
+              (8, False): 1300, (64, True): 1500, (64, False): 1500}
+    monkeypatch.setattr(tuning, 'executed_instructions', _counting(counts))
+    scorer = TableScorer({}, code={(32, None): 60 * 1024,
+                                   (32, False): 256 * 1024})
+    pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
+                             generate=Generator.trial)
+    assert (_key(pick) == (32, False)) == taken
+    assert pick == origin or taken
 
 
 def test_the_emitters_count_follows_the_trips():

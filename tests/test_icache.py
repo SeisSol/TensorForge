@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from tensorforge.analysis.icache import (ICacheBudgetWarning, code_bytes,
-                                         icache_excess)
+                                         icache_excess, past_share)
 from tensorforge.backend.pir.emit import _code_copies
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
@@ -111,6 +111,15 @@ class TestWeighed:
     def test_a_target_without_a_stated_cache_judges_nothing(self):
         assert icache_excess(10 ** 9, self.hw(None)) == 0
 
+    def test_the_share_past_the_cache_is_of_the_whole_body(self):
+        """256 kB against 128: half of what an element runs through has to
+        come back for the next one."""
+        hw = self.hw(128 * 1024)
+        assert past_share(256 * 1024, hw) == 0.5
+        assert past_share(100 * 1024, hw) == 0.0
+        assert past_share(None, hw) == 0.0
+        assert past_share(256 * 1024, self.hw(None)) == 0.0
+
     def test_the_scorer_counts_whole_kilobytes_past_it(self, monkeypatch):
         """Of the size the build it is handed laid down: `local_flux`
         against a cache made too small for it."""
@@ -152,6 +161,18 @@ class TestTargets:
         hw = Context(arch=arch, backend=backend,
                      fp_type=Datatype.F32).target.hw
         assert hw.icache_size == size
+
+    @pytest.mark.parametrize('arch,factor', [
+        ('sm_80', 1.28), ('sm_90', 3.0), ('sm_100', 2.6), ('sm_120', 2.05),
+        ('sm_110', 3.0), ('sm_86', None)])
+    def test_the_miss_factor_is_stated_where_it_was_measured(self, arch,
+                                                              factor):
+        """By microbenchmark on four parts, taken over by the parts based
+        on one (sm_110 on sm_90), and absent elsewhere."""
+        from tensorforge.common.basic_types import Datatype
+        hw = Context(arch=arch, backend='cuda',
+                     fp_type=Datatype.F32).target.hw
+        assert hw.icache_miss_factor == factor
 
     def test_intel_states_none_yet(self):
         from tensorforge.common.basic_types import Datatype
