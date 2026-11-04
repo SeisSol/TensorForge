@@ -1251,6 +1251,19 @@ declare('ell_gather',
             'to 10 % slower at order 8 on gfx1150; Intel is unmeasured.  '
             'Needs `skip_known_zeros`.')
 
+declare('k_segments',
+        default=4,
+        parse=parse_int,
+        doc='At most how many loops a rolled reduction is cut into where the '
+            'lane slots of its batch-constant operand start and stop having '
+            'numbers.  Unrolled, a reduction leaves out every slot and step the '
+            'operand is zero at (`skip_known_zeros`); rolled, every slot runs '
+            'every step -- in the rolled products of SeisSol\'s order-8 '
+            'derivative a third of the slot-steps at 32 lanes and over two '
+            'fifths at 8 lie outside the steps where their slot has a number.  '
+            'Cut, each segment leaves out the slots that are zero on all of '
+            'it.  1 keeps one loop.')
+
 declare('skip_known_zeros',
         default=True,
         parse=parse_bool,

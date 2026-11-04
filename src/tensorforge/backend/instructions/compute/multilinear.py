@@ -97,6 +97,12 @@ def _contiguous_first_axis(sym) -> bool:
         return False
 
 
+#: What a segment of a rolled reduction has to save to be cut out of it, as
+#: a share of the work of the uncut loop (`MultilinearInstruction._k_segments`):
+#: the price of its code and of setting up a loop.
+K_SEGMENT_GAIN = 0.03
+
+
 def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max, vector=1):
     """The unroll count of a rolled reduction, or 0 to unroll it whole.
 
@@ -197,6 +203,10 @@ class MultilinearInstruction(ComputeInstruction):
         #: of (`dchain.DChain`), set by `dchain.link`; None for a product on
         #: its own.
         self._dchain = None
+        #: The steps of the rolled reduction the body being written covers,
+        #: `(lo, hi)` in the loop's coordinates, while `_nonleading_dim`
+        #: writes one segment of it (`_k_segments`); None otherwise.
+        self._k_span = None
 
         assert num_threads % blockcount == 0
 
@@ -542,6 +552,14 @@ class MultilinearInstruction(ComputeInstruction):
                     lo, hi = self._ns[target]
                     shift = self._eff_offset(i, j)
                     cells = [r for r in cells if lo + shift <= r < hi + shift]
+            elif (self._k_span is not None
+                  and self._target[i][j] == -len(self._ks)):
+                # The rolled reduction's counter, in a segment of it: every
+                # step the segment runs, so the product goes only where the
+                # operand is zero on all of them (`_k_segments`).
+                lo, hi = self._k_span
+                shift = self._eff_offset(i, j)
+                cells = [k + shift for k in range(lo, hi)]
             else:
                 return False
             if any(not 0 <= r < data.shape[j] for r in cells):
@@ -1421,7 +1439,151 @@ class MultilinearInstruction(ComputeInstruction):
                                          total, term)
             self._vdest.store(writer, self._context, total, ns, False)
 
-        write_loops(self._context, writer, loopstack, nonlead_writer)
+        segments = self._k_segments(loopstack, loopmap)
+        if segments is None:
+            write_loops(self._context, writer, loopstack, nonlead_writer)
+            return
+        at = loopmap[f'k{len(self._ks) - 1}']
+        for lo, hi, roll in segments:
+            loop = loopstack[at]
+            rolled = roll > 0
+            stack = list(loopstack)
+            stack[at] = Loop(loop.var, lo, hi, loop.step, unroll=not rolled,
+                             pragma=roll if rolled else True)
+            self._k_span = (lo, hi) if rolled else None
+            try:
+                write_loops(self._context, writer, stack, nonlead_writer)
+            finally:
+                self._k_span = None
+
+    def _k_segments(self, loopstack, loopmap):
+        """The rolled reduction cut where lane slots of `A` start and stop
+        having numbers, or None to write it as one loop.
+
+        `[(lo, hi, roll)]`, in the loop's coordinates, `roll` 0 for a segment
+        written out.  An unrolled reduction leaves out every slot and step
+        `A` is zero at (`_known_zero`); a rolled one runs every slot on every
+        step, and SeisSol's operators are far from that: in the rolled
+        products of the order-8 derivative a third of the slot-steps at 32
+        lanes, and over two fifths at 8, lie outside the steps where their
+        slot has a number.  So the steps are cut where a slot starts and
+        stops, and every segment is written with its range at hand: a slot
+        `A` is zero on all of it is left out the same way (`_k_span`).
+
+        The cuts are rounded to whole vectors of the second operand's reads,
+        so that a segment's trips start aligned like the loop's did
+        (`_roll_count`); a slot's range only grows by that, so nothing that
+        has a number is left out -- `_known_zero` decides that alone, from
+        the cells, whatever the cuts were.  Which cuts to make is a choice
+        over the candidates: the work left -- slots times steps -- against
+        a price per segment, which is code and a loop set up, as the share
+        of the uncut work `K_SEGMENT_GAIN` a segment has to save; and no more
+        than `Options.k_segments` of them.  Each segment stays a loop, by a
+        count of its own no larger than the loop's; only one of a couple of
+        vectors is written out.
+        """
+        opts = self._context.get_user_options()
+        limit = opts.k_segments
+        at = loopmap.get(f'k{len(self._ks) - 1}')
+        if (limit <= 1 or at is None or not opts.skip_known_zeros
+                or len(self._ks) != 1 or self._k_width != 1
+                or not self._ops):
+            return None
+        loop = loopstack[at]
+        if loop.unroll or loop.step != 1 or not isinstance(loop.pragma, int) \
+                or isinstance(loop.pragma, bool):
+            return None
+        symbol = self._ops[0].symbol
+        obj = getattr(symbol, 'obj', None)
+        if (not self._indexed_as_tensor(symbol) or not isinstance(obj, Tensor)
+                or obj.addressing is not Addressing.NONE or not obj.has_values()
+                or sorted(self._opdim_to_nks[0]) != ['k0', 'n0']
+                or not self._ns or 0 not in self._lead_dims):
+            return None
+        nks = self._opdim_to_nks[0]
+        lead, red = nks.index('n0'), nks.index('k0')
+        data = obj.get_values()
+        if lead != 0:
+            data = data.T
+        klo, khi = loop.start, loop.end
+        lo, hi = self._ns[0]
+        span = max(1, self._num_threads * self._lead_width)
+        base = (lo // span) * span
+        nshift, kshift = self._eff_offset(0, lead), self._eff_offset(0, red)
+        if (base + nshift < 0 or klo + kshift < 0
+                or hi + nshift > data.shape[0] or khi + kshift > data.shape[1]):
+            return None
+        # Each slot's steps with a number, as a hull.
+        ranges = []
+        for s0 in range(base, hi, span):
+            rows = [r + nshift for r in range(max(s0, lo), min(s0 + span, hi))]
+            if not rows:
+                continue
+            live = np.nonzero(np.any(
+                data[np.ix_(rows, list(range(klo + kshift, khi + kshift)))]
+                != 0, axis=0))[0]
+            ranges.append((klo + int(live[0]), klo + int(live[-1]) + 1)
+                          if len(live) else None)
+        live = [r for r in ranges if r is not None]
+        if not live:
+            return None
+        vector = self._roll_vector()
+
+        def down(k):
+            return klo + (k - klo) // vector * vector
+
+        def up(k):
+            return min(khi, klo + -(-(k - klo) // vector) * vector)
+
+        cuts = sorted({klo, khi} | {down(a) for a, _ in live}
+                      | {up(b) for _, b in live})
+
+        def work(a, b):
+            return (b - a) * sum(1 for lo_, hi_ in live
+                                 if lo_ < b and hi_ > a)
+
+        whole = work(klo, khi)
+        price = K_SEGMENT_GAIN * whole
+        # Fewest-cost partitions of the cuts into at most `limit` segments.
+        n = len(cuts)
+        best = {(0, 0): (0.0, None)}
+        for used in range(limit):
+            for i in range(n):
+                if (i, used) not in best:
+                    continue
+                cost, _ = best[(i, used)]
+                for j in range(i + 1, n):
+                    c = cost + work(cuts[i], cuts[j]) + price
+                    key = (j, used + 1)
+                    if key not in best or c < best[key][0]:
+                        best[key] = (c, i)
+        ends = [(best[(n - 1, u)][0], u) for u in range(1, limit + 1)
+                if (n - 1, u) in best]
+        cost, used = min(ends)
+        if used <= 1 or cost >= whole + price:
+            return None
+        bounds, j = [], n - 1
+        while used:
+            i = best[(j, used)][1]
+            bounds.append((cuts[i], cuts[j]))
+            j, used = i, used - 1
+        bounds.reverse()
+        roll = loop.pragma
+        out = []
+        for a, b in bounds:
+            # Still a loop, by a count of its own no larger than the loop's:
+            # written out, the segments together would be the reduction the
+            # cap rolled.  Only a segment of a couple of vectors is written
+            # out, where a loop would be all set-up.
+            steps = b - a
+            counts = list(range(vector, min(roll, steps) + 1, vector))
+            whole = [d for d in counts if steps % d == 0]
+            count = (0 if steps <= 2 * vector or not counts
+                     else max(whole) if whole else max(counts))
+            if count and not self._rollable(len(self._ks) - 1, a, b, 1, count):
+                count = 0
+            out.append((a, b, count))
+        return out
 
     def _k_group(self, varlist, loopmap):
         """The reduction values this body covers, and which slot they fill.

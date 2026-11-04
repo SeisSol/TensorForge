@@ -120,3 +120,46 @@ def test_a_reduction_the_cap_covers_stays_unrolled(monkeypatch):
 
 def test_a_zero_cap_unrolls_every_reduction(monkeypatch):
     assert _rolled(_kernel(monkeypatch, 56, 9, 120, k_unroll_max=0)) == []
+
+
+def _triangle(monkeypatch, rows, k, **options):
+    """`C = A B` with an `A` whose row `r` has numbers in the first
+    `r + 1` steps only -- a triangle, which a lane slot reaches a step range
+    of: the slot of the first 32 rows needs steps 0..31, the next one from
+    step 32 on as well."""
+    import numpy as np
+    monkeypatch.delenv("TF_OPTIONS", raising=False)
+    if options:
+        monkeypatch.setenv("TF_OPTIONS",
+                           ",".join(f"{a}={b}" for a, b in options.items()))
+    values = np.zeros((rows, k))
+    for r in range(rows):
+        values[r, r:] = 1.0 + r
+    a = SubTensor(Tensor([rows, k], Addressing.NONE,
+                         BoundingBox([0, 0], [rows, k]), alias="A",
+                         datatype=Datatype.F32, data=values))
+    gen = Generator([GemmDescr(False, False, a=a, b=_t([k, 9], "B"),
+                               c=_t([rows, 9], "C"))],
+                    Context(arch="sm_86", backend="cuda", fp_type=Datatype.F32))
+    gen.generate()
+    return gen.get_kernel()
+
+
+def test_a_rolled_reduction_is_cut_where_a_slot_starts(monkeypatch):
+    """96 steps over 64 rows at 32 lanes: the second slot has numbers from
+    step 32 on, so the loop is cut there, and the segment before the cut
+    accumulates into the first slot alone -- rolled whole, every slot would
+    run every step."""
+    src = _triangle(monkeypatch, 64, 96, k_unroll_max=16)
+    heads = list(re.finditer(r"#pragma unroll \d+\s*\n\s*for \(int32_t \w+ = "
+                             r"(\d+); \w+ < (\d+);", src))
+    assert [m.groups() for m in heads] == [("0", "32"), ("32", "96")]
+    first = set(re.findall(r"(ir\d+)\[(\d+)\] = ",
+                           src[heads[0].end():heads[1].start()]))
+    # one slot of nine columns, two slots' registers apart
+    assert len(first) == 9 and all(int(i) % 2 == 0 for _, i in first)
+
+
+def test_one_segment_keeps_one_loop(monkeypatch):
+    src = _triangle(monkeypatch, 64, 96, k_unroll_max=16, k_segments=1)
+    assert len(_rolled(src)) == 1
