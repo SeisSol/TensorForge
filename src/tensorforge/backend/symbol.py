@@ -1510,7 +1510,8 @@ class Symbol:
     swz = getattr(getattr(buf, 'type', None), 'swizzle', None)
     return swz is not None and not swz.admits(width)
 
-  def _interleaved_load(self, writer, context: Context, index, nontemp):
+  def _interleaved_load(self, writer, context: Context, index, nontemp,
+                        first: int = 0):
     """One row of an operand stored in the SIMT interleave, or `None`.
 
     `Tensor.simt_interleave` says where lane `l`'s rows sit: slot `s` of
@@ -1525,6 +1526,12 @@ class Symbol:
     rows, any number of columns.  A ragged last slot, and the lanes past a
     full-lane tail's `valid`, read the order's padding, which is zero and
     stored: the vector never leaves the buffer.
+
+    A window's head (`first`, the lanes before the window's first row) reads
+    rows of the same column that are not the window's.  The vector is read
+    whole for them too -- its other slots are the lane's own rows, and the
+    other reads of the group share it -- and the slot taken out of it is set
+    to zero on those lanes, which is what the padding gives a tail.
 
     `None` for an index this cannot address -- a runtime slot, a shift or a
     box start inside a slot, a lead index of another width or distribution --
@@ -1573,7 +1580,13 @@ class Symbol:
                       align=group * self.get_fptype().size(),
                       layout=layout_of(index, self.num_threads),
                       nontemporal=nontemp)
-    return writer.extract(vec, slot % group, hint='p')
+    value = writer.extract(vec, slot % group, hint='p')
+    if not first:
+      return value
+    at = writer.lane_index(threads, li._stride, hint='lead')
+    inside = writer.op('ge', BOOL, at, first, hint='g')
+    return writer.op('select', ScalarType(self.get_fptype()), inside, value,
+                     0.0, hint='p')
 
   def _slot_major_index(self, writer, context: Context, index):
     """A read of a slot-major operand (`Tensor.slot_major`), as the index of
@@ -3586,23 +3599,20 @@ class Symbol:
         in_order = (self.stype in (SymbolType.Global, SymbolType.Batch)
                     or (self.stype is SymbolType.SharedMem
                         and getattr(self, 'verbatim', False)))
-        if (getattr(self.obj, 'simt_interleave', None) is not None
-                and in_order and first):
-          # The other half: a window's head reads the lanes *before* it, and
-          # those are another row of the same column rather than padding, so
-          # no stored zero stands in for them.  Refused rather than read at
-          # the logical address, which is the failure above.
-          raise InternalError(
-              f'{self.name}: a window head of {first} lanes over an operand '
-              f'stored in the SIMT interleave; the lanes before the window '
-              f'hold another row, not the padding a tail reads')
+        # The other half: a window's head reads the lanes *before* it, and
+        # those are another row of the same column rather than padding, so no
+        # stored zero stands in for them.  Read at the logical address it
+        # would be the failure above; read through the interleave, the lanes
+        # take their rows like any other and the head's are set to zero
+        # behind the read (`_interleaved_load`), which keeps the one vector
+        # the other slots of the lane share.
         if (bc_lane is None and w == 1 and not part and parts == 1
                 and shift is None
                 and getattr(self.obj, 'simt_interleave', None) is not None
                 and in_order):
           interleaved = self._interleaved_load(
               writer, context, read_index,
-              nontemp and self.stype is not SymbolType.SharedMem)
+              nontemp and self.stype is not SymbolType.SharedMem, first)
           if interleaved is not None:
             return interleaved
         if (bc_lane is None

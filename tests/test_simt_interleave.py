@@ -199,3 +199,34 @@ def test_a_merged_run_stores_every_member_alike(monkeypatch):
                        src)
     assert reads and set(reads) == {"tensorforge::VectorT<float, 4>"}
     assert not re.search(r"= glb_(?:m0|v0)\[", src)
+
+
+def test_a_window_head_over_the_interleave_reads_zero_on_its_lanes(monkeypatch):
+    """SeisSol's volume at order 6, dense and rolled: a product whose rows
+    start at row 1 reads its operator with a window head of one lane, and
+    the operator stored in the interleave.  The lanes before the window
+    would read the column's other rows, which no stored zero stands in for;
+    they take the lane's vector like the rest and set the slot to zero
+    behind it.  It was refused, which held `pack_operands=off` away from
+    every rolled volume kernel."""
+    import warnings
+
+    import seissol_suite as suite
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.frontend.yateto import DescriptionReader
+
+    monkeypatch.setenv("TF_OPTIONS", "pack_operands=off,k_roll=8")
+    system = 'elastic-linearck'
+    descrs = DescriptionReader(None, {}).read(suite.description(
+        system, f'{system}-o6-s', 'gpu_volume'))[0]
+    gen = Generator(descrs, Context(arch="sm_120", backend="cuda",
+                                    fp_type=Datatype.F32))
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen.generate()
+    src = gen.get_kernel()
+    heads = re.findall(r"bool (v\d+_g) = v\d+_lead >= 1;", src)
+    assert heads
+    selects = [m for g in heads for m in re.findall(
+        rf"= {g} \? \((v\d+_data)\[\d\]\) : 0\.0f;", src)]
+    assert selects
