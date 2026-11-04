@@ -1313,6 +1313,8 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
                       f'({pref.evidence}) does not build here; ranking instead')
     if mode == 'prefer':
         return None
+    if mode == 'lanes':
+        return _lanes_mode(descr_factory, context, cache, fixed, generate)
     # The scorer first: the space depends on which one ranks it.
     if mode == 'compiled':
         scorer = CompiledScore()
@@ -1324,7 +1326,7 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
         scorer = static_score
     else:
         raise ValueError(f'autotune: unknown mode {mode!r}; off, prefer, '
-                         f'static or compiled')
+                         f'static, compiled or lanes')
     knobs = simple_space(descrs, context, mode=mode)
     origin = start(descrs, context)
     for name, value in (fixed or {}).items():
@@ -1408,3 +1410,209 @@ def _worth_it(descr_factory, context: Context, best: Candidate,
     if least is None or was is None:
         return best
     return best if least < (1.0 - DEVIATION_MARGIN) * was else origin
+
+
+# --------------------------------------------------------------------------- #
+# The lanes rule: the lane count and merging, with one compiler question each
+# --------------------------------------------------------------------------- #
+
+#: How much more a candidate may spill than the default build and still be
+#: taken: never where the default spills nothing.  Over SeisSol's elastic
+#: kernels at orders 6 and 8 on four GPUs (`autotune=lanes`), 1.0, 1.5 and 2
+#: pick the same; what the guard keeps out is a narrower count that spills
+#: where the default does not, which is where the cost below cannot be trusted
+#: -- the same 212 B of spilling cost order-8 `volume` 47 % on A100 at sixteen
+#: lanes, and 112 B of it gained 13 % on sm_120.
+SPILL_GROWTH = 1.5
+
+#: What a spilled value is worth against one executed instruction, per byte of
+#: spill traffic ptxas reports and element of the data type, per warp.  A
+#: weight rather than a model: any value from 48 to 512 picks the same over
+#: the measured kernels, and 0 does not -- without it the guard alone lets
+#: order-8 `localFluxAll` in double precision take sixteen lanes unmerged,
+#: which spills within the default's 4.8 KB and runs 131 % behind the 64 lanes
+#: unmerged that spill nothing (A100).
+SPILL_WEIGHT = 64
+
+
+def executed_instructions(result: Build) -> Optional[float]:
+    """Warp instructions one element of the batch executes, by the emitter's
+    own count (`pipeline.instructions_per_element`, summed): loops counted
+    with their trips, which is the difference from the instructions a
+    disassembly lists.  A merged run states its body once and runs it once
+    per member; a reduction rolled by 28 states one trip.  Counted that way,
+    the static listing puts 128 lanes ahead for order-8 `volume`, where they
+    run 42 % (A100) to 145 % (sm_120) behind, and cannot say what merging
+    does at all.  None where the build counted no mix."""
+    from tensorforge.analysis import pipeline
+    gen = result.generator
+    mix = gen.metrics.issue_mix
+    if not mix:
+        return None
+    per = pipeline.instructions_per_element(mix, result.context.target.hw,
+                                            gen.lanes.num_threads)
+    return sum(per.values()) / _stack_of(gen)
+
+
+def lane_candidates(descrs, context: Context, origin: Candidate,
+                    fixed: Optional[Mapping[str, Any]] = None
+                    ) -> List[Candidate]:
+    """Every lane count the rule weighs, times merging where something
+    repeats.
+
+    The powers of two from the deduced count down to `lanes.MIN_LANES` (the
+    vector unit under SPMD, `Preferences.lanes_down_to_wave`), and the wider
+    ones up to the next power of two at or above the extent (`_wider`):
+    wider is what order-8 `localFluxAll` in double precision wants, 64 lanes
+    unmerged at -80 % on A100 and -83 % on GH200, and it loses everywhere in
+    single precision, which the count below sees by itself.  Merging both
+    ways where `_mergeable`, since which way wins depends on the count -- off
+    at 16 and 32 lanes on A100, GH200 and sm_120, on at eight.  What `fixed`
+    names stays as the origin has it.
+    """
+    flat = _flat(descrs)
+    hw = context.target.hw
+    base = lane_config.deduce(flat, context)
+    rows = base.num_active_threads or base.num_threads
+    fixed = fixed or {}
+    if 'lanes' in fixed:
+        geometries = [origin.lanes]
+    else:
+        floor = lane_config.MIN_LANES
+        if context.target.prefs.lanes_down_to_wave:
+            floor = max(floor, getattr(hw, 'vec_unit_length', 1))
+        geometries = []
+        t = base.num_threads
+        while t >= floor:
+            geometries.append(LaneConfig(t, base.num_active_threads,
+                                         base.lead_width))
+            if t & (t - 1):
+                break
+            t //= 2
+        geometries += _wider(base, rows, hw)
+    merging = [None]
+    if 'merge_variants' not in fixed and _mergeable(descrs, context):
+        merging = [False, True]
+    out = []
+    for geometry in geometries:
+        for merge in merging:
+            cand = origin.set('lanes', geometry)
+            if merge is not None:
+                cand = cand.set('merge_variants', merge)
+            if cand not in out:
+                out.append(cand)
+    return out
+
+
+def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
+               origin: Candidate, first: Build,
+               fixed: Optional[Mapping[str, Any]] = None, *,
+               generate) -> Candidate:
+    """The configuration `autotune=lanes` builds: the fewest instructions an
+    element executes, among the candidates that spill no more than the
+    default allows, with the spilling priced in.
+
+    Every candidate is generated -- the emitter's count needs nothing else --
+    and the compiler is asked about as few as the bound admits: the default
+    first, which sets the guard (`SPILL_GROWTH`), then the rest in order of
+    their count, until a count alone is past the best cost found, which
+    spilling can only raise.  Over SeisSol's elastic kernels at orders 6 and
+    8 that compiles three to five of five to eight candidates.
+
+    Measured over the same kernels on four GPUs -- 48 of them, the lane counts
+    from eight to 128 with merging on and off, builds of one source pooled --
+    as the loss against the fastest candidate (mean / worst):
+
+        GPU            the default   this rule
+        A100 sm_80     38.0 / 401 %  5.6 / 41 %
+        GH200 sm_90    41.3 / 480    6.4 / 28
+        GB200 sm_100   12.7 /  48    7.4 / 20
+        sm_120 laptop  17.1 /  44    7.3 / 16
+
+    and `autotune=compiled`, the coordinate walk over the whole simple space
+    at up to 24 builds, at 6.8 / 41 % on A100.  The loss that is left is the
+    time derivative at sixteen lanes, which spills twice what 32 do and is
+    29 % faster for it on A100 and GH200 in double precision and 59 % slower
+    on GH200 in single: nothing a build says about itself separates those.
+
+    The default unless the winner's cost is `DEVIATION_MARGIN` below the
+    default's -- which over the measured kernels moves no pick: every move
+    taken was worth more than ten percent.  Measured on NVIDIA only.
+    """
+    hw = context.target.hw
+    wave = max(1, getattr(hw, 'vec_unit_length', 32))
+    elem = context.fp_type.size()
+    builds: Dict[Candidate, Build] = {origin: first}
+    counts: Dict[Candidate, float] = {}
+    for cand in [origin] + lane_candidates(descr_factory(), context, origin,
+                                           fixed):
+        result = builds.get(cand) or build(descr_factory, context, cand,
+                                           generate)
+        builds[cand] = result
+        if result.ok:
+            count = executed_instructions(result)
+            if count is not None:
+                counts[cand] = count
+    if origin not in counts:
+        return origin
+    try:
+        report = scorer.resources(first)
+    except Exception:                         # noqa: BLE001
+        report = None
+    if report is None:
+        return origin
+    limit = SPILL_GROWTH * report.spill_bytes
+
+    def cost(cand: Candidate, spill: int) -> float:
+        lanes = builds[cand].generator.lanes.num_threads
+        return counts[cand] + SPILL_WEIGHT * spill / elem * lanes / wave
+
+    best, least = origin, cost(origin, report.spill_bytes)
+    default = least
+    for cand in sorted((c for c in counts if c != origin), key=counts.get):
+        if counts[cand] >= least:
+            break
+        try:
+            seen = scorer.resources(builds[cand])
+        except Exception:                     # noqa: BLE001
+            seen = None
+        if seen is None or seen.spill_bytes > limit:
+            continue
+        price = cost(cand, seen.spill_bytes)
+        if price < least:
+            best, least = cand, price
+    return best if least < (1.0 - DEVIATION_MARGIN) * default else origin
+
+
+def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
+                fixed: Optional[Mapping[str, Any]], generate
+                ) -> Optional[Candidate]:
+    """`autotune=lanes`: `lanes_rule` where a compiler can be asked, the
+    default where none can or the target is not NVIDIA, the one the rule was
+    measured on.  Remembered by the default build's source, as the walk's
+    picks are (`Options.autotune_cache`)."""
+    hw = context.target.hw
+    if str(hw.vendor).lower() != 'nvidia':
+        warnings.warn(f'autotune=lanes: measured on NVIDIA only; the default '
+                      f'stands on {hw.model}')
+        return None
+    scorer = CompiledScore()
+    if not scorer.available(context):
+        warnings.warn('autotune=lanes: no compiler for this target '
+                      '(Toolchain, TF_NVCC); the default stands')
+        return None
+    descrs = descr_factory()
+    origin = start(descrs, context)
+    for name, value in (fixed or {}).items():
+        origin = origin.set(name, value)
+    first = build(descr_factory, context, origin, generate)
+    if not first.ok:
+        return None
+    _load(cache)
+    key = _key(first, 'lanes')
+    if key in _PICKS:
+        return Candidate.from_dict(_PICKS[key])
+    pick = lanes_rule(descr_factory, context, scorer, origin, first, fixed,
+                      generate=generate)
+    _store(cache, key, pick)
+    return pick
