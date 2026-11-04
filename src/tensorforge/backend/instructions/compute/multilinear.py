@@ -97,20 +97,37 @@ def _contiguous_first_axis(sym) -> bool:
         return False
 
 
-def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max):
+def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max, vector=1):
     """The unroll count of a rolled reduction, or 0 to unroll it whole.
 
     `k_roll` where it is asked for.  Otherwise a reduction longer than
-    `k_unroll_max` steps (`Options.k_unroll_max`) is rolled by the largest
-    divisor of its step count that is no larger, so that the rolled loop runs
-    whole groups -- and by the cap itself where the count is prime.  Whether
-    it can be rolled at all is `_rollable`'s question, not this one's.
+    `k_unroll_max` steps (`Options.k_unroll_max`) is rolled -- by a count
+    whose trip covers whole vectors of `vector` elements, where the cap
+    admits one: then every trip starts its reduction index on a vector
+    boundary, and an operand whose reduction axis is contiguous is read a
+    vector at a time in a rolled loop as in an unrolled one.  A count that is
+    no such multiple starts every other trip off the boundary, and the
+    compiler, which cannot prove the alignment of any of them, reads it an
+    element at a time: SeisSol's order-7 reduction of 84 steps went to 42.
+    Among the counts that are, the largest that divides the step count, so
+    that the loop runs whole trips; where none does, the largest, and the
+    compiler's remainder loop takes the tail.
+
+    Without such a count -- a cap below the vector -- the largest divisor of
+    the step count that is no larger than the cap, and the cap itself where
+    the count is prime.  Whether the reduction can be rolled at all is
+    `_rollable`'s question, not this one's.
     """
     if k_roll:
         return k_roll
     steps = (dimmax - dimmin) // step if step > 0 else 0
     if not k_unroll_max or steps <= k_unroll_max:
         return 0
+    unit = vector // math.gcd(vector, step) if step > 0 else 1
+    if unit > 1 and k_unroll_max >= unit:
+        counts = range(unit, k_unroll_max + 1, unit)
+        whole = [d for d in counts if steps % d == 0]
+        return max(whole) if whole else max(counts)
     best = max(d for d in range(1, k_unroll_max + 1) if steps % d == 0)
     return best if best > 1 else k_unroll_max
 
@@ -697,7 +714,8 @@ class MultilinearInstruction(ComputeInstruction):
         step = self._k_width if self._k_width > 1 else 1
         rolled = self._rollable(
             len(self._ks) - 1, klo, khi, step,
-            _roll_count(klo, khi, step, options.k_roll, options.k_unroll_max))
+            _roll_count(klo, khi, step, options.k_roll, options.k_unroll_max,
+                        self._roll_vector()))
         slots, dense, sparse = {}, 0, 0
         for s in range(lo // block, (hi - 1) // block + 1):
             live = [r for r in range(s * block, (s + 1) * block)
@@ -1250,7 +1268,8 @@ class MultilinearInstruction(ComputeInstruction):
                     # real `for` it would be a runtime comparison per step,
                     # which costs more than the loads it saves.
                     step *= self._k_width
-                roll = _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max)
+                roll = _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max,
+                                   self._roll_vector())
                 rolled = (i == len(self._ks) - 1
                           and self._rollable(i, dimmin, dimmax, step, roll))
                 loopstack += [Loop(f'k{i}', dimmin, dimmax, step,
@@ -1458,6 +1477,12 @@ class MultilinearInstruction(ComputeInstruction):
             if (box.lower()[i], box.upper()[i]) != (dimmin, dimmax):
                 return False
         return True
+
+    def _roll_vector(self) -> int:
+        """Elements of one 16-byte access, the widest a lane reads from shared
+        or global memory in one instruction on every target here -- what a
+        rolled reduction's trip is aligned to (`_roll_count`)."""
+        return max(1, 16 // self._context.fp_type.size())
 
     def _rollable(self, i, dimmin, dimmax, step, k_roll):
         """May reduction loop `i` be a real loop instead of an unrolled one?
@@ -1968,7 +1993,7 @@ class MultilinearInstruction(ComputeInstruction):
         dimmin, dimmax = self._ks[i]
         step = self._k_width if self._k_width > 1 else 1
         roll = _roll_count(dimmin, dimmax, step, opts.k_roll,
-                           opts.k_unroll_max)
+                           opts.k_unroll_max, self._roll_vector())
         return self._rollable(i, dimmin, dimmax, step, roll)
 
     def _offer_packing(self, level: int = 0):

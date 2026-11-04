@@ -93,6 +93,27 @@ def test_a_reduction_past_the_cap_is_rolled_unasked(monkeypatch):
     assert [(count, extent) for count, extent, _ in loops] == [("60", "120")]
 
 
+def test_a_rolled_trip_covers_whole_vectors(monkeypatch):
+    """84 steps: the largest divisor under the cap is 42, which starts every
+    other trip two floats off a 16-byte boundary, so no trip's operand reads
+    could be vector reads.  28 divides the count and is a multiple of four."""
+    loops = _rolled(_kernel(monkeypatch, 56, 9, 84))
+    assert [(count, extent) for count, extent, _ in loops] == [("28", "84")]
+
+
+def test_a_count_no_vector_divides_takes_a_tail(monkeypatch):
+    """67 steps, prime: the largest multiple of four under the cap, and the
+    compiler's remainder loop for the last three."""
+    loops = _rolled(_kernel(monkeypatch, 56, 9, 67))
+    assert [(count, extent) for count, extent, _ in loops] == [("64", "67")]
+
+
+def test_a_cap_below_the_vector_keeps_the_divisor_rule(monkeypatch):
+    """A cap of two admits no trip of four elements: the largest divisor."""
+    loops = _rolled(_kernel(monkeypatch, 56, 9, 84, k_unroll_max=3))
+    assert [(count, extent) for count, extent, _ in loops] == [("3", "84")]
+
+
 def test_a_reduction_the_cap_covers_stays_unrolled(monkeypatch):
     assert _rolled(_kernel(monkeypatch, 56, 9, 64)) == []
 
