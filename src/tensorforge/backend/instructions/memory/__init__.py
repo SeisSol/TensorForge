@@ -5,7 +5,7 @@ from ..abstract_instruction import AbstractInstruction, _explicit_simd
 from abc import abstractmethod
 from contextlib import nullcontext
 from tensorforge.backend.writer import Writer
-from typing import Union
+from typing import Optional, Union
 from tensorforge.common.context import Context
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.backend.pir.core import Qual, MemSpace
@@ -64,12 +64,14 @@ class AbstractShrMemWrite(MemoryInstruction):
     """A window into this transfer's buffer, as a value.  Placed by the
     allocator (`pir.allocate`), which is where the buffer's offset is
     decided."""
+    granule = self._permute_granule(writer)
     return writer.alloc(self._dest.get_fptype(), (self.stage_size(),),
                         MemSpace.SHARED, hint=name, extern=name,
                         arena=self._arena(),
                         quals=(Qual.RESTRICT,),
-                        swizzle=self._swizzle(writer), identity=self._dest,
-                        place_align=self._place_align)
+                        swizzle=self._swizzle(granule), identity=self._dest,
+                        place_align=self._place_align,
+                        permutable=granule)
 
   def _arena(self) -> str:
     return (GeneralLexicon.TOTAL_SHR_MEM if self._global_offset
@@ -102,22 +104,24 @@ class AbstractShrMemWrite(MemoryInstruction):
     """
     return 1
 
-  def _swizzle(self, writer=None):
-    """A row permutation for this window, when one is both legal and useful.
+  def _permute_granule(self, writer=None) -> Optional[int]:
+    """The granule a permutation of this window would have to keep whole,
+    where one may be applied at all; None where it may not.
 
-    A tile written a row at a time and read a column at a time costs a bank
-    cycle per lane: `s0[(threadIdx.x % 32) * 32]` puts every lane in bank 0
-    with a different address, which `tools/bank_conflicts.py` reports as
-    32-way.  Permuting the columns per row costs nothing and clears it, and
-    leaves a row-wise access exactly as good -- it reaches the same banks in a
-    different order.
+    Why one is worth having: a tile written a row at a time and read a
+    column at a time costs a bank cycle per lane -- `s0[(threadIdx.x % 32) *
+    32]` puts every lane in bank 0 with a different address, which
+    `tools/bank_conflicts.py` reports as 32-way.  Permuting the columns per
+    row clears it, and leaves a row-wise access exactly as good: it reaches
+    the same banks in a different order.  Whether a window is read that way
+    is a fact about its readers, which come later; `_swizzle` says who
+    decides.
 
-    Only for a power-of-two row width, which is what makes `k ^ (n % width)`
-    stay inside the row.  Everything else keeps the plain layout: a tile 13
-    wide has no conflict worth this, and a permutation that carried across
-    rows would be a different element, not a slower one.
+    The granule is the writer's own hop (`transfer_granule`) and nothing
+    wider.  What the readers take at once is read off the body by
+    `pir.banks.propose`, which sizes the granule it proposes to the widest
+    access it finds.
     """
-    from tensorforge.backend.pir.core import XorSwizzle
     view = self._dest.data_view
     if view is None or len(view.shape) < 2:
       return None
@@ -144,7 +148,7 @@ class AbstractShrMemWrite(MemoryInstruction):
     #
     # It is the text that is the problem, not the bulk.  A structured
     # `copy_async` permutes its destination like any other access
-    # (`PirBuilder.copy_async`), and the width it moves is granted above, so a
+    # (`PirBuilder.copy_async`), and the width it moves is granted, so a
     # window filled by one is as permutable as a window filled element by
     # element.
     #
@@ -161,6 +165,54 @@ class AbstractShrMemWrite(MemoryInstruction):
     if writer is not None and hasattr(self, '_structured_copy'):
       if not self._structured_copy(writer):
         return None
+    return max(1, self.transfer_granule())
+
+  def _swizzle(self, granule: Optional[int]):
+    """The permutation this window is built with, given the granule it would
+    have to keep (`_permute_granule`; None where it may take none).
+
+    Under `Options.swizzle` `decide`, the default, that is what
+    `pir.banks.propose` chose from the body built without one
+    (`Context.swizzle_decisions`) -- and nothing where it chose nothing,
+    which includes the first build of every body.  The readers are known by
+    then: a window every lane reads at the same address, as the second
+    operand of a product is, gains nothing from a permutation and pays its
+    arithmetic wherever the index is not a constant.
+
+    A decision the window cannot take any more is dropped rather than bent:
+    a granule narrower than the writer's hop, or blocks that do not tile the
+    window.  `volume` is the rule from before the decision
+    (`_volume_swizzle`), and `off` permutes nothing.
+    """
+    if granule is None:
+      return None
+    mode = self._context.get_user_options().swizzle
+    if mode == 'off':
+      return None
+    if mode == 'volume':
+      return self._volume_swizzle(granule)
+    if mode != 'decide':
+      raise ValueError(f'Options.swizzle: {mode!r} is none of decide, '
+                       f'volume, off')
+    decided = self._context.swizzle_decisions.get(self._dest)
+    if decided is None:
+      return None
+    # The blocks have to tile the window as allocated, which is what the
+    # proposal was sized against: the permutation maps each block onto
+    # itself, so a partial last block would send indices past the end.
+    if (decided.granule < granule
+        or self.stage_size() % (decided.width * decided.granule)):
+      return None
+    return decided
+
+  def _volume_swizzle(self, need: int):
+    """The permutation `Options.swizzle` `volume` gives a window that may take
+    one with granule `need`: as wide as the window's volume admits, whoever
+    reads it."""
+    from tensorforge.backend.pir.core import XorSwizzle
+    volume = 1
+    for n in self._dest.data_view.shape:
+      volume *= n
 
     # The width has to divide the *volume*, not merely be the row width.  The
     # permutation maps each block of `width` elements onto itself, so a buffer
@@ -179,10 +231,7 @@ class AbstractShrMemWrite(MemoryInstruction):
     # spreads a column read over every bank, so permuting it would move
     # elements the plain layout had placed well: strides 9 and 13 are 1-way
     # untouched and 2- or 3-way under any width.
-    volume = 1
-    for n in view.shape:
-      volume *= n
-
+    #
     # The granule is what an access may take in one go, from either side: a
     # reader's `k_width`, and this transfer's own hop (`transfer_granule`).
     # It has to be decided here because the permutation is decided here, and
@@ -203,7 +252,6 @@ class AbstractShrMemWrite(MemoryInstruction):
     # failure of it: the alternative is a narrower granule, which does not make
     # the wide read slower, it makes it a scalar read again.  The permutation
     # is worth a few bank cycles; the access it would forbid is worth a load.
-    need = max(1, self.transfer_granule())
     granule = 1
     want = max(need, getattr(self._context.get_user_options(), 'k_width', 1) or 1)
     while granule * 2 <= want and volume % (granule * 2) == 0:

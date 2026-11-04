@@ -10,6 +10,7 @@ import warnings
 from contextlib import contextmanager
 
 from tensorforge.backend import pir
+from tensorforge.backend.pir import banks
 from tensorforge.backend.pir.transfers import pipelines
 from tensorforge.backend.pir.core import (Access, Effect, MemSpace,
                                           Uniformity)
@@ -100,6 +101,50 @@ def _check_register_budget(body, simd: bool, context, where: str) -> None:
 #: more than a few registers came out above it under the slot-level
 #: `pir.pressure`, and none that fitted did.
 FIT_FRACTION = 0.85
+
+
+def _deciding_swizzles(context, attempt, lanes: Optional[int] = None):
+  """`attempt`, and once more where a staged window of the body it built
+  wants a permutation (`Options.swizzle` `decide`).
+
+  The first build permutes no window that has not been decided already
+  (`AbstractShrMemWrite._swizzle`), so what `pir.banks.propose` reads are the
+  addresses the plain layout gives.  Where it proposes a permutation for a
+  window, the decision goes into `Context.swizzle_decisions` and the body is
+  built again: the permutation is baked into every index a build emits, so
+  the only place to apply it is a build.  Where it proposes none -- every
+  window that is read at the same address in every lane, which is most of
+  them -- the first build stands, and the decision cost one reading of the
+  body.
+
+  `lanes` is how many lanes one multiplication spans, which is what the
+  accesses are read over (`banks.propose`); the whole bank width where it is
+  not given.
+  """
+  def run():
+    builder, body = attempt()
+    options = context.get_user_options()
+    if options.swizzle != 'decide':
+      return builder, body
+    proposals = banks.propose(body, lanes=lanes or banks.LANES,
+                              banks=context.target.hw.shmem_banks,
+                              tables=context.module_tables)
+    decided = context.swizzle_decisions
+    fresh = {window: p.swizzle for window, p in proposals.items()
+             if p.swizzle is not None and decided.get(window) != p.swizzle}
+    if options.ir_debug:
+      for window, p in proposals.items():
+        name = getattr(window, 'name', window)
+        if p.unread:
+          print(f'swizzle: {name}: plain, unread: {p.unread}')
+        else:
+          print(f'swizzle: {name}: {p.swizzle or "plain"} '
+                f'(plain {p.plain:g}, permuted {p.permuted:g})')
+    if not fresh:
+      return builder, body
+    decided.update(fresh)
+    return attempt()
+  return run
 
 
 def _fused_if_over_budget(context, attempt, finish):
@@ -374,7 +419,7 @@ class AbstractInstruction(ABC):
   @classmethod
   def optimized_body(cls, context, names, fill, arena=None, place=None,
                      barriers=None, metrics=None, shards=None, trips=None,
-                     carry=None):
+                     carry=None, lanes=None):
     """`fill(builder)` as one body, through the pipeline, ready to emit.
 
     The half of `build_shared_body` that needs no writer: `names` is the
@@ -400,7 +445,9 @@ class AbstractInstruction(ABC):
     registers (`Options.carry_trips`), and what `atomics` takes, where an
     accumulation is added atomically (`Options.atomic_accumulation`), and
     `forward`, where a load reads what its own lane stored from where the
-    store took it (`Options.forward_memory`).
+    store took it (`Options.forward_memory`).  `lanes` is how many lanes one
+    multiplication spans, which the permutation of its windows is decided
+    over (`_deciding_swizzles`).
     """
     def attempt():
       builder = cls._body_builder(context, names, arena)
@@ -411,7 +458,7 @@ class AbstractInstruction(ABC):
         cls._shared_body.pop()
       return builder, builder.finish()
     _, body = _fused_if_over_budget(
-        context, attempt,
+        context, _deciding_swizzles(context, attempt, lanes),
         lambda builder, body: cls._optimize_shared_body(context, builder, body,
                                                         place, barriers,
                                                         metrics, shards,
@@ -572,7 +619,7 @@ class AbstractInstruction(ABC):
       build(builder)
       return builder, builder.finish()
     _, body = _fused_if_over_budget(
-        self._context, attempt,
+        self._context, _deciding_swizzles(self._context, attempt),
         lambda _builder, body: pir.optimize(body, explicit_simd=simd,
                                             debug=debug,
                                             where=type(self).__name__))

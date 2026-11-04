@@ -1573,6 +1573,21 @@ declare('k_width',
             'removes loads of the broadcast operand rather than instructions on '
             'the vectorized one, and it works with or without a lead width at all.')
 
+declare('swizzle',
+        default='decide',
+        parse=parse_str,
+        env='TF_SWIZZLE',
+        doc='How a staged shared-memory window is permuted against bank '
+            'conflicts.  `decide`, the default, builds the body with every '
+            'window plain, reads the accesses it makes lane by lane, and '
+            'builds it again with a permutation where one lowers the bank '
+            'cycles by more than its own arithmetic costs (`pir.banks.propose`) '
+            '-- which a window read the same in every lane, as the second '
+            'operand of a product is, never does.  `volume` permutes every '
+            'window whose volume admits it, as before the decision existed; '
+            '`off` never permutes.  Tiles of the matrix paths keep the '
+            'permutations they choose themselves.')
+
 declare('stage_row_bytes',
         default=0,
         env='TF_STAGE_ROW_BYTES',

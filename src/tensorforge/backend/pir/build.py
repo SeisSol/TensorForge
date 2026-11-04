@@ -979,7 +979,8 @@ class IRBuilder:
               identity: Any = None, stages: int = 1,
               stage: Optional[Operand] = None,
               place_align: Optional[int] = None,
-              lifetime: Optional[str] = None) -> Value:
+              lifetime: Optional[str] = None,
+              permutable: Optional[int] = None) -> Value:
         """Request a buffer *symbolically*.
 
         No offset and no address: for registers the compiler assigns those,
@@ -998,7 +999,10 @@ class IRBuilder:
         `identity` is the buffer a window is one of the windows of, which is
         what tells two windows of one rotating buffer apart from two buffers.
         `lifetime` `'body'` keeps the buffer occupied everywhere in the body,
-        whatever its accesses say (`bulk_channel`).
+        whatever its accesses say (`bulk_channel`).  `permutable` is the
+        granule a permutation of this window would have to keep whole, where
+        one may be applied at all -- what `banks.propose` decides from, once
+        the body exists.
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
@@ -1053,6 +1057,8 @@ class IRBuilder:
             # a write asks it of the buffer, not of the window
             # (`barriers.place_barriers`).
             attrs = attrs + (('identity', identity),)
+        if permutable is not None:
+            attrs = attrs + (('permutable', permutable),)
         args = (stage,) if stage is not None and stages > 1 else ()
         self._emit_op(Op.ALLOC, (v,), args, pure=False, movable=False,
                       attrs=attrs)

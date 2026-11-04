@@ -1889,7 +1889,8 @@ class Generator:
         lambda body: self._emit_section(body, index, section),
         arena=obj.name, place=place, barriers=self._barriers(section),
         metrics=self._metrics, shards=self._shard_spec(section),
-        trips=self._trip_spec(), carry=self._carry_spec(section))
+        trips=self._trip_spec(), carry=self._carry_spec(section),
+        lanes=self._num_threads)
     return body, place.layout
 
   def _trip_spec(self) -> Optional[dict]:

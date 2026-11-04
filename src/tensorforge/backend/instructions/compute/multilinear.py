@@ -1230,6 +1230,8 @@ class MultilinearInstruction(ComputeInstruction):
         diagonal = self._identity_reduction()
         ell = self._ell_plan() if diagonal is None else None
         self._module_tables = dict(ell.tables) if ell is not None else {}
+        self._context.module_tables.update(
+            {name: values for name, (_, values) in self._module_tables.items()})
         for i, (dimmin, dimmax) in enumerate(self._ks):
             loopmap[f'k{i}'] = len(loopstack)
             if diagonal is not None or ell is not None:

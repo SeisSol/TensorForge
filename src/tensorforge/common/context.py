@@ -29,6 +29,19 @@ class Context:
     #: name the first while generation reads the second.
     self._asked_options: Options = Options() if options is None else options
     self._options: ResolvedOptions = self._asked_options.resolve(self.target)
+    #: The permutation each staged window is built with, by the window's
+    #: symbol, where `pir.banks.propose` chose one from a body built without
+    #: (`Options.swizzle` `decide`; `AbstractShrMemWrite._swizzle`).  Kept
+    #: here because the decision outlives the build it was read from: the body
+    #: is built again with it, and every later build of the same section --
+    #: for the fused broadcast, for the multiplication's stride -- has to
+    #: reach the same window the same way.
+    self.swizzle_decisions: dict = {}
+    #: The numbers of the generated file's tables by name, as instructions
+    #: build bodies that read them (`MultilinearInstruction.module_tables`):
+    #: the swizzle decision reads an address taken from one.  A name is a
+    #: hash of the numbers, so one map serves every kernel of a context.
+    self.module_tables: dict = {}
 
   def set_fp_type(self, fp_type: Datatype):
     self.fp_type = fp_type
