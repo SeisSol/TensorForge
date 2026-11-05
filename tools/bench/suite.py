@@ -280,10 +280,11 @@ CONFIGS: Dict[str, Config] = {
     # The lane count and merging `autotune=lanes` chooses per kernel
     # (`tuning.lanes_rule`): the fewest instructions an element executes,
     # with the compiler's spilling and the code past the instruction cache
-    # priced in.  It needs the target's compiler at generation and is NVIDIA's
-    # only; elsewhere the rule declines with a warning and the row times
-    # `baseline`'s code again.  Its build compiles several candidates a
-    # kernel, so the row's build time is the rule's as well.
+    # priced in -- on AMD the pipe bound instead.  It needs the target's
+    # compiler at generation and was measured on NVIDIA, MI300A, MI210 and,
+    # under DPC++, the Max 1550; elsewhere the rule declines with a warning
+    # and the row times `baseline`'s code again.  Its build compiles several
+    # candidates a kernel, so the row's build time is the rule's as well.
     'lanes': Config('lanes', Options(autotune='lanes')),
     # The launches the generators before TensorForge made of a kernel, built
     # by TensorForge and by them, as a ladder of single steps.  `chains` cuts

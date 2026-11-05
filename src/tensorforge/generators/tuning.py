@@ -539,9 +539,18 @@ def simple_space(descrs, context: Context,
 
 
 def start(descrs, context: Context) -> Candidate:
-    """The configuration the generator would pick unasked: the deduced lanes
-    and every option at the base context's value."""
-    base = lane_config.deduce(_flat(descrs), context)
+    """The configuration the generator would pick unasked: the lanes it
+    builds with -- the target's count where it has one
+    (`Preferences.lanes_per_mult`, sixteen under DPC++ on Intel), the
+    deduced ones otherwise -- and every option at the base context's value.
+
+    The deduction alone is not the default everywhere: on the Max 1550 it is
+    64 lanes for order-6 `volume`, which the generator builds at sixteen, and
+    a walk that starts there measures its margin against a build nobody
+    gets."""
+    flat = _flat(descrs)
+    base = (lane_config.requested(flat, context)
+            or lane_config.deduce(flat, context))
     return Candidate(lanes=base)
 
 
@@ -1487,6 +1496,82 @@ def executed_instructions(result: Build) -> Optional[float]:
     return sum(per.values()) / _stack_of(gen)
 
 
+def pipe_bound(result: Build, spill_bytes: float = 0.0) -> Optional[float]:
+    """Clocks one element of the batch keeps the busiest pipe of a CU busy
+    (`pipeline.of`), with what the compiler spilled written into the same
+    tables and stretched where the build holds too few waves to feed the
+    pipes (`_least_cycles`).  None where the build counted no mix.
+
+    What the rule ranks by on AMD, where a count of instructions does not say
+    what they cost: an FP32 statement is 3.7 instructions on CDNA and 1.1 on
+    RDNA (`pipeline.INSTRUCTIONS_PER_STATEMENT`), and the matrix and FP64 units
+    run at rates of their own.  The bound weighs each category at its rate."""
+    gen = result.generator
+    if not gen.metrics.issue_mix:
+        return None
+    lanes, wave, resident = _geometry(result)
+    return _least_cycles(gen, lanes, wave, spill_bytes=spill_bytes,
+                         resident=resident, hw=result.context.target.hw)
+
+
+#: What the lanes rule ranks by, per vendor: the instructions an element
+#: executes (`executed_instructions`) or the pipe bound (`pipe_bound`).
+#: Measured as the loss against the fastest candidate (mean / worst) over
+#: SeisSol's elastic kernels -- eight to 64 lanes, merged and not, builds of
+#: one source pooled; on AMD orders 6 and 8 in double, order 6 in single (12
+#: kernels), on the Max 1550 orders 6 and 8 (16), sixteen to 64 lanes:
+#:
+#:     ranked by                     MI300A     MI210      Max 1550
+#:     the default build             6.9 / 35   23.7 / 48   1.3 / 11 %
+#:     instructions + spilling       8.4 / 58   96.6 / 232  0.7 / 11
+#:     the pipe bound                2.2 /  9   61.4 / 227  3.6 / 32
+#:     the bound, waves stretched    2.2 /  9    7.7 / 30
+#:
+#: On the NVIDIA grids of `lanes_rule` the bound loses 14 to 20 % on average
+#: where the count loses 6 to 7: the bound takes the narrowest count wherever
+#: the issue port binds.  On MI300A the count takes eight lanes for order-6
+#: `volume` in single precision, 58 % slower than the sixteen the bound takes.
+#: On the Max 1550 the sixteen lanes of `Preferences.lanes_per_mult` are
+#: already within 1.3 %; the count moves one kernel, order-6
+#: `neighboringFlux` in single precision, to 32 lanes (8 % faster: IGC
+#: spills 11.8 kB at sixteen and nothing at 32).  The stretch is
+#: `LATENCY_WAVES_PER_SIMD`'s.
+RANKED_BY = {'nvidia': 'instructions', 'amd': 'bound',
+             'intel': 'instructions'}
+
+#: Waves a SIMD has to hold before an AMD part runs at the pipe bound, as the
+#: lanes rule measured it: the bound of a build at fewer waves (the
+#: compiler's occupancy, `Resources.register_blocks` on AMD) is stretched by
+#: the shortfall.  One on MI300A, where any stretch costs (2 waves: 10.6 %
+#: mean loss, 84 % worst), eight on MI210, which runs SeisSol's kernels as
+#: if latency bound: stretched from three waves on, the rule's mean loss is
+#: 10.8 % (7.7 % from six), against 61 % unstretched -- sixteen lanes of
+#: order-6 `derivative` in single precision count 22 % fewer clocks than 32,
+#: both at one wave, and run twice as long, while 64 lanes at two waves run a
+#: third faster.  The code is the same (ROCm 7.2 emits the same instructions
+#: for both, to within gfx942's DPP-hazard `s_nop`s); the memory below it is
+#: not -- 8 MB of L2 against 256 MB of Infinity Cache -- which is probably
+#: the difference.  An AMD part without an entry was never measured, and its
+#: default stands.
+LATENCY_WAVES_PER_SIMD = {'gfx942': 1, 'gfx90a': 8}
+
+
+def _ranked_by(context: Context) -> Optional[str]:
+    """`RANKED_BY` for the target, or None where it was never measured: on
+    AMD the parts of `LATENCY_WAVES_PER_SIMD`; on Intel DPC++'s SPMD lowering
+    (`oneapi`), where the lanes are the sub-group -- under the explicit
+    vector they are the vector's width, which `CompiledScore` ranks apart,
+    and AdaptiveCpp keeps the deduction (`ONEAPI_ONLY`)."""
+    target = context.target
+    vendor = str(target.hw.vendor).lower()
+    if vendor == 'intel' and (target.explicit_simd
+                              or target.backend != 'oneapi'):
+        return None
+    if vendor == 'amd' and target.hw.model not in LATENCY_WAVES_PER_SIMD:
+        return None
+    return RANKED_BY.get(vendor)
+
+
 def lane_candidates(descrs, context: Context, origin: Candidate,
                     fixed: Optional[Mapping[str, Any]] = None
                     ) -> List[Candidate]:
@@ -1571,11 +1656,23 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     17 % more instructions than 32, with 32 spilling 28 bytes or nothing.
 
     The default unless the winner's cost is `DEVIATION_MARGIN` below the
-    default's.  Measured on NVIDIA only.
+    default's.
+
+    On AMD the same walk ranks by the pipe bound instead (`RANKED_BY`,
+    `pipe_bound`), with the spilling written into it rather than priced
+    beside it, and stretched where the compiler's occupancy falls short of
+    the waves the part needs (`LATENCY_WAVES_PER_SIMD`); the guard, the
+    margin and the order of the compiler's questions are the same, since the
+    bound without either is as much a floor of the cost as the count is of
+    the count's.  On Intel, under DPC++, the count as on NVIDIA, starting
+    from the sixteen lanes the target builds (`start`).
     """
     hw = context.target.hw
     wave = max(1, getattr(hw, 'vec_unit_length', 32))
     elem = context.fp_type.size()
+    by_bound = _ranked_by(context) == 'bound'
+    latency = LATENCY_WAVES_PER_SIMD.get(hw.model, 1)
+    figure = pipe_bound if by_bound else executed_instructions
     builds: Dict[Candidate, Build] = {origin: first}
     counts: Dict[Candidate, float] = {}
     for cand in [origin] + lane_candidates(descr_factory(), context, origin,
@@ -1584,7 +1681,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                                            generate)
         builds[cand] = result
         if result.ok:
-            count = executed_instructions(result)
+            count = figure(result)
             if count is not None:
                 counts[cand] = count
     if origin not in counts:
@@ -1603,6 +1700,12 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
         past = past_share(seen.code_bytes, hw)
+        if by_bound:
+            spilled = (pipe_bound(builds[cand], seen.spill_bytes)
+                       if seen.spill_bytes else counts[cand])
+            waves = max(1, seen.register_blocks or 1)
+            return (spilled * max(1.0, latency / waves)
+                    * (1.0 + refetch * past))
         return (counts[cand] * (1.0 + refetch * past)
                 + SPILL_WEIGHT * seen.spill_bytes / elem * lanes / wave)
 
@@ -1627,18 +1730,19 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
                 fixed: Optional[Mapping[str, Any]], generate
                 ) -> Optional[Candidate]:
     """`autotune=lanes`: `lanes_rule` where a compiler can be asked, the
-    default where none can or the target is not NVIDIA, the one the rule was
-    measured on.  Remembered by the default build's source, as the walk's
-    picks are (`Options.autotune_cache`)."""
+    default where none can or the vendor was never measured (`RANKED_BY`).
+    Remembered by the default build's source, as the walk's picks are
+    (`Options.autotune_cache`)."""
     hw = context.target.hw
-    if str(hw.vendor).lower() != 'nvidia':
-        warnings.warn(f'autotune=lanes: measured on NVIDIA only; the default '
-                      f'stands on {hw.model}')
+    if _ranked_by(context) is None:
+        warnings.warn(f'autotune=lanes: not measured for {hw.model} under '
+                      f'{context.target.backend}; the default stands')
         return None
     scorer = CompiledScore()
     if not scorer.available(context):
         warnings.warn('autotune=lanes: no compiler for this target '
-                      '(Toolchain, TF_NVCC); the default stands')
+                      '(Toolchain, TF_NVCC, TF_HIPCC, TF_ICPX); the default '
+                      'stands')
         return None
     descrs = descr_factory()
     origin = start(descrs, context)

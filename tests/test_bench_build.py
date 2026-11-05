@@ -117,3 +117,29 @@ def test_a_workload_that_does_not_generate_has_no_cost(monkeypatch):
     record, = bench_build.build(unit).workloads
     assert record.error.startswith('ZeroDivisionError')
     assert record.code_bytes is None and record.compile_s is None
+
+
+def test_the_targets_own_lane_count_is_not_pinned(monkeypatch):
+    """Under DPC++ the target builds sixteen lanes unasked
+    (`Preferences.lanes_per_mult`).  The harness leaves that to the
+    generator, so that a tuner may still leave it; a count the configuration
+    asks for is passed, and pinned."""
+    seen = []
+
+    class Recorder:
+        def __init__(self, descrs, ctx, attrs=None, lanes=None):
+            seen.append(lanes)
+            raise RuntimeError('recorded')
+
+    monkeypatch.setattr(bench_build, 'Generator', Recorder)
+    from tensorforge.common.context import Options
+    for config, pinned in ((Config('default'), None),
+                           (Config('l32', Options(lanes_per_mult=32)), 32)):
+        unit = BuildUnit(suite='t', target=TargetSpec('oneapi', 'pvc'),
+                         datatype=Datatype.F32, config=config,
+                         workloads=(Workload('lf', _case('local_flux'),
+                                             Datatype.F32),),
+                         batches=(4,))
+        bench_build.generate(unit.workloads[0], unit)
+        got = seen[-1]
+        assert (got.num_threads if got is not None else None) == pinned
