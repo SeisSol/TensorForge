@@ -156,13 +156,13 @@ def check_units(built: List, device: Device, args) -> Dict[Tuple[str, str],
     configuration, against the reference configuration's: `baseline` where
     it was built, else the first.
 
-    A configuration that cuts a kernel into launches computes the same thing
-    in another order: the same outputs, up to rounding, from the same inputs
-    (`driver_bench`).  One that does not has a number that is not the
-    kernel's, and timing it would measure a defect.  So the verdict is kept
-    per unit and workload, and a failed one keeps the workload out of the
-    timing.  A kernel that is not an export has no description to know its
-    outputs by, and is left alone.
+    A configuration that cuts a kernel into launches, or builds it with
+    another generator, computes the same thing in another order: the same
+    outputs, up to rounding, from the same inputs (`driver_bench`).  One
+    that does not has a number that is not the kernel's, and timing it would
+    measure a defect.  So the verdict is kept per unit and workload, and a
+    failed one keeps the workload out of the timing.  A kernel that is not
+    an export has no description to know its outputs by, and is left alone.
     """
     found: Dict[Tuple[str, str], Dict[str, Tuple]] = {}
     for unit, unit_build in built:
@@ -234,9 +234,10 @@ def measure(unit_build: bench_build.UnitBuild, device: Device,
             'device': device.name,
             'datatype': unit_build.unit.datatype.name,
             'config': unit_build.unit.config.label,
-            # How the configuration launches the kernel: a row of a kernel
-            # cut into launches is the whole sequence's.
+            # How the configuration launches the kernel, and with what: a
+            # row of a kernel cut into launches is the whole sequence's.
             'partition': unit_build.unit.config.partition,
+            'generator': unit_build.unit.config.generator,
             'launches': record.launches,
             'lanes': record.lanes,
             'static': record.static,
@@ -398,6 +399,15 @@ def report(rows: List[Dict], verbose: bool) -> None:
                     print(f'         {name}')
 
 
+def _generators(spec: suite_mod.Suite) -> Dict[str, str]:
+    """The versions of the generators other than TensorForge the suite's
+    configurations build with."""
+    if all(c.generator == 'tensorforge' for c in spec.configs):
+        return {}
+    import forge
+    return forge.versions()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('suite', type=Path)
@@ -488,6 +498,7 @@ def main() -> int:
                     'datatype': unit.datatype.name,
                     'config': unit.config.label,
                     'partition': unit.config.partition,
+                    'generator': unit.config.generator,
                     'launches': record.launches,
                     'kernels': record.kernels,
                     'capture': captured.tag if captured else None,
@@ -533,6 +544,7 @@ def main() -> int:
                 'iters': args.iters, 'warmup': args.warmup,
                 'repeat': args.repeat,
                 'checked': bool(check and not args.build_only),
+                'generators': _generators(spec),
                 'devices': [asdict(d) for d in devices],
             },
             'manifest': manifest,

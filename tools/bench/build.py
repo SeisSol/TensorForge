@@ -326,7 +326,7 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
     try:
         ctx = Context(arch=unit.target.arch, backend=unit.target.backend,
                       fp_type=unit.datatype, options=options)
-        if config.partition == 'whole':
+        if config.generator == 'tensorforge' and config.partition == 'whole':
             gens = [_tensorforge(workload.descrs(), workload, unit, ctx)]
             headers = list(ctx.target.headers()) + list(
                 gens[0].get_helper_headers())
@@ -335,7 +335,7 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
                 gens[0], unit.target.backend, workload.name, includes,
                 regions)
             record.symbol = f'kernel_{gens[0].get_base_name()}'
-        else:
+        elif config.generator == 'tensorforge':
             gens = [_tensorforge(_read(piece), workload, unit, ctx)
                     for _, piece in pieces(workload, config)]
             headers = list(ctx.target.headers())
@@ -345,6 +345,19 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
             includes = '\n'.join(f'#include "{h}"' for h in headers)
             src, record.symbol = driver_bench.emit_sequence_tu(
                 gens, unit.target.backend, workload.name, includes, regions)
+        elif config.generator in suite.GENERATORS:
+            import forge
+            built = forge.build(pieces(workload, config), workload, unit,
+                                regions)
+            record.generate_s = time.perf_counter() - started
+            record.symbol = built.symbol
+            record.launches = len(built.kernels)
+            record.kernels = list(built.kernels)
+            record.cost = workload_cost(workload, config, 1, unit.datatype)
+            return built.source, record
+        else:
+            raise ValueError(f'no generator {config.generator!r}; there are '
+                             f'{list(suite.GENERATORS)}')
     except Exception as exc:                      # noqa: BLE001
         record.error = f'{type(exc).__name__}: {exc}'
         return None, record

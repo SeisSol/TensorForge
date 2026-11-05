@@ -24,6 +24,7 @@ the thing timed.
 | `suite.py` | what to measure: workloads, batches, configurations |
 | `suites/` | suite definitions |
 | `build.py` | one binary per configuration, with measurement flags |
+| `forge.py` | the generators before TensorForge, gemmforge and chainforge, on the same exports |
 | `run.py` | the vendor-neutral timing run |
 | `profile.py` | the vendor profilers, over the same binary |
 | `roofline.py` | measured machine ceilings, and the kernels under them |
@@ -176,6 +177,46 @@ configuration further from `baseline` than rounding (`run.CHECK_TOLERANCE`)
 computes something else, and is kept out of the timing with the difference as
 its error.
 
+## Against the generators before TensorForge: `forge.py`
+
+SeisSol generated its GPU kernels with gemmforge and chainforge before
+TensorForge (`--device_codegen gemmforge-chainforge`): yateto groups runs of
+GEMMs into chains, which chainforge builds as one kernel each, and hands every
+other GEMM and every copy-scale-add to gemmforge. `forge.py` builds the
+launches of `chains` and `ops` (above) with the two instead
+(`Config.generator`), which makes the comparison a ladder of configurations,
+each one step from the next (`suite.CONFIGS`):
+
+| configuration | launches (`Config.partition`) | built by (`Config.generator`) |
+|---|---|---|
+| `baseline` | one (`whole`) | TensorForge |
+| `chains` | as gemmforge-chainforge cuts the kernel (`chains`) | TensorForge |
+| `gemmforge-chainforge` | the same | gemmforge and chainforge |
+| `ops` | one per operation (`ops`) | TensorForge |
+| `gemmforge` | the same | gemmforge |
+
+`baseline` over `gemmforge-chainforge` is what SeisSol gained; `chains` parts
+it into what fusing the whole kernel is worth (against `baseline`) and what
+the code is worth (against `gemmforge-chainforge`), at the launches the old
+generators made. Where a kernel is one chain, it is one launch in both, and
+the comparison is of the code alone.
+
+What the two generators are handed -- every matrix's box and region, the
+alignment a GEMM's rows are rounded to, the factors -- is yateto's
+(`forge.lower`), checked against the same recording as the cut
+(`tests/test_bench_forge.py`): the same matrices and factors, and the same
+code but for the routines' names. The op list itself is the one yateto hands
+both: SeisSol picks the same cost estimator for TensorForge and for
+gemmforge-chainforge, and the exports are laid out dense, which is all
+gemmforge takes. Products of several simulations are of a rank the two do not
+take, and only the elastic system's kernels were checked.
+
+The generators are optional: `pip install -r
+tools/bench/requirements-forge.txt` installs the commits the lowering was
+checked with, and without them the two configurations build nothing and say
+why. The check before the timing compares them with `baseline` like any other
+configuration: their buffers are filled as TensorForge's are.
+
 ## Symbols and build units
 
 The emitted symbol is `kernel_kernel_<digest>`, a digest of the generated source
@@ -185,8 +226,8 @@ symbol, and two workloads that generate the same kernel under one configuration
 always do.
 
 The build unit is one binary per `(target, datatype, options, lane ceiling,
-partition)`, holding every workload in the suite. Inside a binary the
-configuration is fixed; across binaries the configuration is the binary's
+partition, generator)`, holding every workload in the suite. Inside a binary
+the configuration is fixed; across binaries the configuration is the binary's
 identity and goes in the manifest. The batch is a runtime argument and forces
 no rebuild.
 

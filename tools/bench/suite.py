@@ -26,10 +26,10 @@ never share one, and two workloads that generate the same kernel under one
 configuration always do (`build.build` reports the second as the first).
 
 The unit is one binary per `(target, datatype, options, lane ceiling,
-partition)`, holding every workload in the suite.  Within a binary the
-configuration is fixed; across binaries the configuration is the binary's
-identity and is recorded in the manifest.  The batch is a runtime argument
-and needs no rebuild.
+partition, generator)`, holding every workload in the suite.  Within a
+binary the configuration is fixed; across binaries the configuration is the
+binary's identity and is recorded in the manifest.  The batch is a runtime
+argument and needs no rebuild.
 """
 
 from __future__ import annotations
@@ -92,10 +92,10 @@ class Workload:
     #: shared by every order, precision and equation (`capture.py`).
     capture: Optional[Capture] = None
     #: The exported description the descriptors are read from, where there
-    #: is one: a configuration cuts the export into launches
-    #: (`Config.partition`), not TensorForge's reading of it.  Not part of
-    #: the identity -- the name and the capture are -- and a dictionary has
-    #: no hash.
+    #: is one.  What a configuration cuts into launches (`Config.partition`)
+    #: and what another generator builds from: both read the export, not
+    #: TensorForge's reading of it.  Not part of the identity -- the name and
+    #: the capture are -- and a dictionary has no hash.
     description: Optional[Dict] = field(default=None, compare=False,
                                         repr=False)
 
@@ -122,6 +122,14 @@ class Config:
     #: (`Workload.description`) and is timed as the sequence of its launches,
     #: one after the other on one stream, the way SeisSol issues them.
     partition: str = 'whole'
+    #: What builds the launches (`GENERATORS`): `tensorforge`, or
+    #: `gemmforge-chainforge`, the generators SeisSol used before it, spelled
+    #: as its `--device_codegen` spells them (`forge.py`).
+    generator: str = 'tensorforge'
+
+
+#: What builds a configuration's launches.
+GENERATORS = ('tensorforge', 'gemmforge-chainforge')
 
 
 @dataclass(frozen=True)
@@ -269,14 +277,21 @@ CONFIGS: Dict[str, Config] = {
     # ranking chooses its matrix path whatever the option says.  Where it
     # changes nothing, the row times `baseline`'s code again.
     'tensor-cores': Config('tensor-cores', Options(tensor_cores=True)),
-    # A kernel cut into launches, each built by TensorForge.  `chains` cuts
-    # it where gemmforge-chainforge, the generators SeisSol used before
-    # TensorForge, cut it and changes nothing else, so against `baseline` it
-    # is what fusing the whole kernel is worth; `ops` is one launch per
-    # operation, what yateto makes of the kernel where chainforge cannot be
-    # imported.  Only an exported kernel can be cut (`split_description`).
+    # The launches the generators before TensorForge made of a kernel, built
+    # by TensorForge and by them, as a ladder of single steps.  `chains` cuts
+    # the kernel where gemmforge-chainforge does and changes nothing else, so
+    # against `baseline` it is what fusing the whole kernel is worth;
+    # `gemmforge-chainforge` builds the same launches with those generators,
+    # so against `chains` it is what the code is worth.  `ops` and
+    # `gemmforge` are the same pair at one launch per operation: what yateto
+    # makes of the kernel where chainforge cannot be imported.  Only an
+    # exported kernel can be cut (`split_description`).
     'chains': Config('chains', partition='chains'),
+    'gemmforge-chainforge': Config('gemmforge-chainforge', partition='chains',
+                                   generator='gemmforge-chainforge'),
     'ops': Config('ops', partition='ops'),
+    'gemmforge': Config('gemmforge', partition='ops',
+                        generator='gemmforge-chainforge'),
     # A second `baseline` under another name, and the only row here that is
     # not a question about the generator.  It builds the same kernel on
     # every target, so the gap between the two is the machine moving under
