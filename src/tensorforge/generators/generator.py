@@ -570,6 +570,9 @@ class Generator:
     #: before `rows`; what a level buys on top is the bitset, which is the
     #: one form that costs something.
     self._pack_level = 0
+    #: The loosest level the section's next attempt may choose
+    #: (`_choose_pack_level`): where the last one stopped once it did not fit.
+    self._pack_floor = 0
     self._preloaded = set()
     self._preload_left = set()
     #: The launch every section runs under, once the sections are built.
@@ -1019,10 +1022,13 @@ class Generator:
     for codesection, lastbarrier in zip(descrlist, barrier):
       self._preload_drop = 0
       self._pack_level = 0
+      self._pack_floor = 0
       # Two attempts, with the operators preloaded and without -- or, under
-      # `preload_partial`, one more per operator dropped.  Each failed attempt
-      # either drops one or gives up preloading, and an attempt without it
-      # ends the loop, so it ends.
+      # `pack_operands='fit'`, one more per tighter packing, and under
+      # `preload_partial` one more per operator dropped.  Each failed attempt
+      # tightens the packing, drops an operator or gives up preloading, each
+      # only ever in one direction, and an attempt without preloading ends the
+      # loop, so it ends.
       while True:
         scopecnt = self._scopes.get_num_scopes()
         self._scopes.add_scope()
@@ -2715,11 +2721,19 @@ class Generator:
     there is room for is the block's.  The tightest form where none fits, so
     that a block that cannot stage everything at least stages as much as it
     can -- `preload_partial` then takes the first fit of *that*.
+
+    Never looser than a retry has tightened to (`_pack_floor`).  Every
+    attempt asks again, and the estimate it asks is the one that admitted the
+    attempt that did not fit; from level zero it would hand back that level
+    and undo the step.  Where the images fit by the estimate but leave no room
+    for one multiplication -- SeisSol's order-8 single-precision volume kernel
+    on gfx942 -- that was an endless loop, every round leaving its symbols
+    behind: 16 GB after ten minutes.
     """
     if self._context.get_user_options().pack_operands != 'fit':
       return
     size = self._context.fp_type.size()
-    for level in range(FIT_LEVELS + 1):
+    for level in range(self._pack_floor, FIT_LEVELS + 1):
       total = sum(self._pack_estimate(symbol.obj, level)
                   for symbol in candidates)
       if total * size < cap:
@@ -2742,6 +2756,7 @@ class Generator:
     if not self._section.preload or self._pack_level >= FIT_LEVELS:
       return False
     self._pack_level += 1
+    self._pack_floor = self._pack_level
     return True
 
   def _preload_selection(self, candidates, cap):
