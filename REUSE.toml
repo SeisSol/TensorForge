@@ -12,10 +12,11 @@ path = ["AUTHORS", "requirements.txt"]
 SPDX-FileCopyrightText = "2023 SeisSol Group"
 SPDX-License-Identifier = "MIT"
 
-# A recorded kernel description is data written by `dump_descriptors.py`, so
-# it carries no header of its own; there is nowhere in JSON to put one.  A
+# A recorded kernel description is data written by `dump_descriptors.py`, and
+# what yateto handed gemmforge and chainforge is a recording too (`forge/`),
+# so neither carries a header of its own; there is nowhere in JSON to put one.  A
 # clustering is a table in SeisSol's own format, which has no comment line.
 [[annotations]]
-path = ["tests/fixtures/kernels/**", "tests/fixtures/seissol/**", "tools/bench/data/**", "tools/bench/clusterings/**"]
+path = ["tests/fixtures/kernels/**", "tests/fixtures/seissol/**", "tests/fixtures/forge/**", "tools/bench/data/**", "tools/bench/clusterings/**"]
 SPDX-FileCopyrightText = "2026 SeisSol Group"
 SPDX-License-Identifier = "MIT"

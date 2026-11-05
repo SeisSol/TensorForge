@@ -43,7 +43,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -54,7 +54,6 @@ for extra in (str(HERE), str(ROOT / 'src'), str(ROOT / 'tests')):
 import build as bench_build                                     # noqa: E402
 import suite as suite_mod                                       # noqa: E402
 from tensorforge import interop                                 # noqa: E402
-from tensorforge.analysis.cost import list_cost                 # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -106,6 +105,20 @@ def run_binary(exe: Path, workload: str, batch: int, iters: int, warmup: int,
     process so a counter collection stays small -- drives the same binary the
     same way.
     """
+    return _invoke(exe, ['time', workload, str(batch), str(iters),
+                         str(warmup)], device, timeout)
+
+
+def check_binary(exe: Path, workload: str, batch: int, device: Device,
+                 timeout: float) -> Dict:
+    """One launch of one workload at `batch`, its outputs read back: the
+    checksum and its magnitude (`driver_bench`)."""
+    return _invoke(exe, ['check', workload, str(batch), '1', '0'], device,
+                   timeout)
+
+
+def _invoke(exe: Path, args: List[str], device: Device,
+            timeout: float) -> Dict:
     env = os.environ.copy()
     if device.vendor == 'nvidia':
         env['CUDA_VISIBLE_DEVICES'] = str(device.index)
@@ -114,7 +127,7 @@ def run_binary(exe: Path, workload: str, batch: int, iters: int, warmup: int,
     # The index is consumed by the environment above, so the binary always
     # opens device 0 of what it can see.  Passing both would select the second
     # device of a one-device view.
-    cmd = [str(exe), 'time', workload, str(batch), str(iters), str(warmup), '0']
+    cmd = [str(exe), *args, '0']
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=timeout, check=False, env=env)
@@ -130,8 +143,78 @@ def run_binary(exe: Path, workload: str, batch: int, iters: int, warmup: int,
     return {'error': 'the driver printed no measurement'}
 
 
+#: How far apart two builds' checksums may lie, as a share of their
+#: magnitude, and still be one computation: what reassociating the sums of a
+#: chain of small products moves, with room to spare -- and orders of
+#: magnitude below what a wrong row, column or factor moves.
+CHECK_TOLERANCE = {'F64': 1e-10, 'F32': 1e-4}
+
+
+def check_units(built: List, device: Device, args) -> Dict[Tuple[str, str],
+                                                              Dict]:
+    """Every exported workload's outputs after one launch, in every
+    configuration, against the reference configuration's: `baseline` where
+    it was built, else the first.
+
+    A configuration that cuts a kernel into launches computes the same thing
+    in another order: the same outputs, up to rounding, from the same inputs
+    (`driver_bench`).  One that does not has a number that is not the
+    kernel's, and timing it would measure a defect.  So the verdict is kept
+    per unit and workload, and a failed one keeps the workload out of the
+    timing.  A kernel that is not an export has no description to know its
+    outputs by, and is left alone.
+    """
+    found: Dict[Tuple[str, str], Dict[str, Tuple]] = {}
+    for unit, unit_build in built:
+        if unit_build.exe is None:
+            continue
+        exported = {w.name for w in unit.workloads
+                    if w.description is not None}
+        for record in unit_build.usable:
+            if record.name not in exported:
+                continue
+            result = check_binary(unit_build.exe, record.name,
+                                  args.check_batch, device, args.timeout)
+            found.setdefault((unit.datatype.name, record.name), {})[
+                unit.config.label] = (unit.label, result)
+    verdicts: Dict[Tuple[str, str], Dict] = {}
+    for (datatype, name), by_config in found.items():
+        reference = ('baseline' if 'baseline' in by_config
+                     else sorted(by_config)[0])
+        _, ref = by_config[reference]
+        tolerance = CHECK_TOLERANCE.get(datatype, 1e-4)
+        for label, (unit_label, got) in by_config.items():
+            verdict = {'reference': reference,
+                       'checksum': got.get('checksum'),
+                       'magnitude': got.get('magnitude')}
+            if got.get('error'):
+                verdict.update(failed=True,
+                               check=f'check failed: {got["error"]}')
+            elif label == reference:
+                verdict.update(failed=False, check='reference')
+            elif ref.get('error') or ref.get('checksum') is None:
+                verdict.update(failed=False,
+                               check=f'{reference} has no checksum to '
+                                     'compare with')
+            else:
+                scale = max(abs(ref.get('magnitude') or 0.0),
+                            abs(got.get('magnitude') or 0.0))
+                off = abs(got['checksum'] - ref['checksum'])
+                share = off / scale if scale else (0.0 if not off
+                                                  else float('inf'))
+                verdict.update(
+                    failed=share > tolerance, share=share,
+                    check=(f'agrees with {reference}' if share <= tolerance
+                           else f'differs from {reference} by {share:.1e} '
+                                f'of the magnitude'))
+            verdicts[(unit_label, name)] = verdict
+    return verdicts
+
+
 def measure(unit_build: bench_build.UnitBuild, device: Device,
-            workloads: List[suite_mod.Workload], args) -> List[Dict]:
+            workloads: List[suite_mod.Workload], args,
+            verdicts: Optional[Dict[Tuple[str, str], Dict]] = None
+            ) -> List[Dict]:
     """Every surviving workload at every batch, joined with its cost.
 
     The rows come back *without* their timings: `time_rows` fills those in,
@@ -151,6 +234,10 @@ def measure(unit_build: bench_build.UnitBuild, device: Device,
             'device': device.name,
             'datatype': unit_build.unit.datatype.name,
             'config': unit_build.unit.config.label,
+            # How the configuration launches the kernel: a row of a kernel
+            # cut into launches is the whole sequence's.
+            'partition': unit_build.unit.config.partition,
+            'launches': record.launches,
             'lanes': record.lanes,
             'static': record.static,
             **record.cost_fields(),
@@ -161,14 +248,22 @@ def measure(unit_build: bench_build.UnitBuild, device: Device,
         captured = by_name[record.name].capture
         if captured is not None:
             base.update(captured.fields())
+        verdict = (verdicts or {}).get((unit_build.unit.label, record.name))
+        if verdict is not None:
+            base.update(check=verdict['check'],
+                        checksum=verdict.get('checksum'))
+            if verdict['failed']:
+                rows.append({**base, 'error': verdict['check']})
+                continue
         if not record.ok:
             # A refusal always carries a reason: `report` takes a row without
             # an error for a measurement, and a measurement has a batch.
             rows.append({**base, 'error': record.error or 'not built'})
             continue
         for batch in unit_build.unit.batches:
-            cost = list_cost(by_name[record.name].descrs(), batch=batch,
-                             datatype=unit_build.unit.datatype)
+            cost = bench_build.workload_cost(
+                by_name[record.name], unit_build.unit.config, batch,
+                unit_build.unit.datatype)
             row = {**base, 'batch': batch,
                    'flops': cost.flops, 'bytes': cost.bytes,
                    # What the operation needs once the structural zeros are
@@ -330,6 +425,14 @@ def main() -> int:
     ap.add_argument('--out', type=Path, default=None,
                     help='write results and manifest here as JSON')
     ap.add_argument('--build-only', action='store_true')
+    ap.add_argument('--check', action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help='run every exported workload once first and keep '
+                         'out of the timing a configuration whose outputs '
+                         'differ from the reference configuration\'s '
+                         '(default: what the suite says, CHECK)')
+    ap.add_argument('--check-batch', type=int, default=256,
+                    help='the batch the check runs at')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
 
@@ -368,18 +471,25 @@ def main() -> int:
     rows: List[Dict] = []
     manifest: List[Dict] = []
     captures = {w.name: w.capture for w in spec.workloads}
+    check = spec.check if args.check is None else args.check
     for device in devices:
+        built_units = []
+        entries: Dict[Tuple[str, str], Dict] = {}
         for unit in suite_mod.expand(spec, [device.spec]):
             built = bench_build.build(unit, jobs=args.jobs)
+            built_units.append((unit, built))
             if built.error:
                 print(f'{unit.label}: {built.error}', file=sys.stderr)
             for record in built.workloads:
                 captured = captures.get(record.name)
-                manifest.append({
+                entries[(unit.label, record.name)] = {
                     'unit': unit.label, 'workload': record.name,
                     'backend': unit.target.backend, 'arch': unit.target.arch,
                     'datatype': unit.datatype.name,
                     'config': unit.config.label,
+                    'partition': unit.config.partition,
+                    'launches': record.launches,
+                    'kernels': record.kernels,
                     'capture': captured.tag if captured else None,
                     'symbol': record.symbol, 'origin': record.origin,
                     'lanes': record.lanes, 'static': record.static,
@@ -392,11 +502,21 @@ def main() -> int:
                     'bytes_per_element': (record.cost.bytes
                                           if record.cost else None),
                     **record.cost_fields(),
-                })
-            if built.exe is None or args.build_only:
+                }
+        verdicts = (check_units(built_units, device, args)
+                    if check and not args.build_only else {})
+        for key, verdict in verdicts.items():
+            entries[key].update(check=verdict['check'],
+                                checksum=verdict.get('checksum'),
+                                magnitude=verdict.get('magnitude'))
+        manifest.extend(entries.values())
+        if args.build_only:
+            continue
+        for unit, built in built_units:
+            if built.exe is None:
                 continue
-            rows.extend(measure(built, device,
-                                list(unit.workloads), args))
+            rows.extend(measure(built, device, list(unit.workloads), args,
+                                verdicts))
 
     if not args.build_only:
         time_rows(rows, args)
@@ -412,6 +532,7 @@ def main() -> int:
                 'elapsed_s': time.time() - started,
                 'iters': args.iters, 'warmup': args.warmup,
                 'repeat': args.repeat,
+                'checked': bool(check and not args.build_only),
                 'devices': [asdict(d) for d in devices],
             },
             'manifest': manifest,

@@ -47,18 +47,38 @@ zero, so a caller can tell "no device clock here" from "took no time".
 
 Filled on the host with a deterministic pattern in [0.5, 1.5) and copied once,
 outside the timed region. The values do not matter for correctness -- nothing
-is compared -- but they matter for speed: zeros and denormals are not
-representative on any of these machines, and a buffer left uninitialized can
-contain both.
+is compared against a reference -- but they matter for speed: zeros and
+denormals are not representative on any of these machines, and a buffer left
+uninitialized can contain both.
+
+A batch-constant operand whose numbers the description gives holds those
+numbers instead (`host_values`).  SeisSol's operators are those numbers, so
+they are as representative as anything, and a generator that builds them into
+its code computes with them whatever the buffer holds: only with them in the
+buffer too does a kernel that reads it compute the same thing, which is what
+`check` compares two builds by.
+
+## A sequence of launches
+
+A kernel cut into launches (`emit_sequence_tu`) is one workload whose
+`launch` issues its launches one after the other on one stream, the
+temporaries passed between them in global memory: the wall clock is then the
+sequence's with every launch's overhead in it, and the device clock spans the
+first launch to the last.  `tfb_launches_<tag>` says how many there are.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from tensorforge.common.basic_types import FlagMode
+import numpy as np
 
+from tensorforge.common.basic_types import Datatype, FlagMode
+
+from . import layout
 from .driver_emit import collect_operands, launcher_call_expr
 
 #: Bytes per element, keyed by the C++ spelling `driver_emit` produces.
@@ -135,17 +155,99 @@ def _fill(ctype: str, host: str, count: str) -> str:
             f"0.5 + (double)((i * 2654435761u) & 1023u) / 1024.0); }}")
 
 
-def emit_workload_tu(generator, backend: str, name: str,
-                     includes_src: str) -> str:
-    """One translation unit: the kernel, its launcher, and three entry points.
+@dataclass(frozen=True)
+class Region:
+    """Where the checksum reads an output: the box of cells the kernel
+    writes, in the storage the export lays the tensor out in -- column-major
+    over `sizes`, from `starts`.
 
-    The entry points are uniform (`setup`, `launch`, `teardown`) so the driver
-    can hold a table of function pointers and never see a launcher signature.
-    That is what lets one binary carry every workload of a configuration: the
-    driver TU is identical for all of them and does not have to be regenerated
-    when a workload's operands change.
-    """
-    ops = collect_operands(generator)
+    The box and not the buffer, because generators agree on the box and not
+    on the rest: gemmforge writes the rows an aligned count pads the box to,
+    and zeroes a whole destination before a copy, where TensorForge leaves
+    what it does not compute alone -- and a checksum over the buffer would
+    compare those, which nobody reads, instead of the numbers."""
+    alias: str
+    starts: Tuple[int, ...]
+    sizes: Tuple[int, ...]
+    lo: Tuple[int, ...]
+    hi: Tuple[int, ...]
+
+
+@dataclass
+class Buffer:
+    """A device buffer the entry points own: one tensor for the whole batch,
+    or one block for a batch-constant one, and how it is filled, passed and
+    summed.
+
+    `stem` names it in the source -- `d_<stem>`, and `d_p_<stem>` for the
+    pointer table of a `pointer_based` one.  `written` makes the table's
+    pointees mutable, which a launch writing through it needs.  `host` is
+    what a batch-constant operand holds, in its storage order, where the
+    description gave the numbers: SeisSol's operators are those numbers, and
+    a kernel that takes them from the description and one that reads the
+    buffer then agree.  `summed` puts it into the checksum, over `region`
+    where there is one and over the whole buffer where not."""
+    stem: str
+    alias: str
+    ctype: str
+    per: int
+    addressing: str
+    written: bool = False
+    host: Optional[Sequence[float]] = None
+    summed: bool = False
+    region: Optional[Region] = None
+
+
+_DATATYPE_OF = {"float": Datatype.F32, "double": Datatype.F64}
+
+
+def host_values(op) -> Optional[List[float]]:
+    """What a batch-constant operand's buffer holds, from the description's
+    numbers, in the storage the generator chose for it -- compressed by its
+    `pack_index`, split into the parts `storage_parts` says -- the way the
+    correctness harness prepares it (`runner.run_case`).  `None` where the
+    description gives no numbers or the storage is one the harness cannot
+    write, which leaves the buffer to the pattern."""
+    if op.values is None or op.addressing != "none":
+        return None
+    dt = _DATATYPE_OF.get(op.ctype)
+    if dt is None or op.storage_parts not in (1, 2):
+        return None
+    flat = np.asarray(op.values, dtype=layout.np_dtype(dt))
+    if op.pack_index is not None:
+        flat = layout.pack(flat[None, :], np.asarray(op.pack_index), dt)
+    if op.storage_parts == 2:
+        try:
+            flat = layout.split_tf32(
+                flat, dt, planar=(op.storage_volume // 2
+                                  if op.storage_planar else 0))
+        except ValueError:
+            return None
+    per = op.storage_volume or op.volume
+    if flat.size != per:
+        return None
+    return [float(v) for v in flat]
+
+
+def operand_buffer(op, stem: str, written: bool,
+                   regions: Optional[Dict[str, Region]]) -> Buffer:
+    """The buffer of one launcher operand of TensorForge's.
+
+    `storage_volume` and not `volume`: the batch stride the kernel uses is
+    `Tensor.storage_volume()` (ptr_manip.py), which is the compressed count
+    for a sparse tensor.  Allocating the dense volume would be harmless;
+    allocating less than the stride would not, and the two names being one
+    letter apart is reason enough to say which is meant."""
+    alias = op.alias or op.kernel_name
+    return Buffer(
+        stem=stem, alias=alias, ctype=op.ctype,
+        per=op.storage_volume or op.volume, addressing=op.addressing,
+        written=written, host=host_values(op),
+        summed=(alias in regions) if regions is not None else op.is_sink,
+        region=(regions or {}).get(alias))
+
+
+def _check_addressing(ops) -> None:
     for op in ops:
         if op.is_scalar:
             continue
@@ -154,40 +256,33 @@ def emit_workload_tu(generator, backend: str, name: str,
                 f"operand {op.kernel_name} uses {op.addressing!r} addressing; "
                 f"the measurement driver handles 'strided', 'none', "
                 f"'pointer_based' and 'scalar'")
+        if op.residence == "argument":
+            raise NotImplementedError(
+                f"operand {op.kernel_name} is passed by value; the "
+                f"measurement driver keeps every operand on the device")
 
-    tag = slug(name)
-    lang = "sycl" if backend in ("oneapi", "acpp", "esimd", "sycl") else backend
 
-    decls, allocs, fills, frees, sums = [], [], [], [], []
-    for op in ops:
-        if op.is_scalar:
-            continue
-        elem = _ELEM_BYTES[op.ctype]
-        # `storage_volume` and not `volume`: the batch stride the kernel uses
-        # is `Tensor.storage_volume()` (ptr_manip.py), which is the compressed
-        # count for a sparse tensor. Allocating the dense volume would be
-        # harmless; allocating less than the stride would not, and the two
-        # names being one letter apart is reason enough to say which is meant.
-        per = op.storage_volume or op.volume
-        span = (f"(size_t){per}u * {elem}" if op.addressing == "none"
-                else f"(size_t){per}u * batch * {elem}")
-        decls.append(f"static {op.ctype}* d_{op.kernel_name} = nullptr;")
-        allocs.append(f"    DEV_MALLOC(d_{op.kernel_name}, {span});")
-        if op.is_sink:
-            # Weighted, so that a kernel writing the right values in the wrong
-            # places is not the same number as one writing them in the right
-            # ones -- which a plain sum would make it.
-            sums.append(
-                f"  {{ const size_t n = ({span}) / {elem};\n"
-                f"    void* h = std::malloc({span});\n"
-                f"    if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
-                f"std::exit(2); }}\n"
-                f"    DEV_MEMCPY_D2H(h, d_{op.kernel_name}, {span});\n"
-                f"    const {op.ctype}* p = (const {op.ctype}*)h;\n"
-                f"    for (size_t i = 0; i < n; ++i)\n"
-                f"      acc += (double)p[i] * (double)((i % 1021u) + 1u);\n"
-                f"    std::free(h); }}")
-        if op.addressing == "pointer_based":
+def _literal(value: float, ctype: str) -> str:
+    text = repr(float(value))
+    return text + "f" if ctype == "float" else text
+
+
+def _span(b: Buffer) -> str:
+    elem = _ELEM_BYTES[b.ctype]
+    return (f"(size_t){b.per}u * {elem}" if b.addressing == "none"
+            else f"(size_t){b.per}u * batch * {elem}")
+
+
+def buffer_code(buffers: Sequence[Buffer]) -> Tuple[List[str], List[str],
+                                                     List[str], List[str]]:
+    """Declarations, allocations, fills and frees for `buffers`."""
+    decls, allocs, fills, frees = [], [], [], []
+    for b in buffers:
+        elem = _ELEM_BYTES[b.ctype]
+        span = _span(b)
+        decls.append(f"static {b.ctype}* d_{b.stem} = nullptr;")
+        allocs.append(f"    DEV_MALLOC(d_{b.stem}, {span});")
+        if b.addressing == "pointer_based":
             # The pointers are *contiguous and in order*: element i lives at
             # `slab + i * per`, exactly where a STRIDED operand would put it.
             #
@@ -205,91 +300,295 @@ def emit_workload_tu(generator, backend: str, name: str,
             # `i * per` and not `i`: `d_X` is a `ctype*`, so `+ i` advances by
             # one scalar where the kernel indexes by one batch element.
             ptr_bytes = "batch * sizeof(void*)"
-            # `const` unless the kernel writes through it.  `float**` does not
+            # `const` unless a launch writes through it.  `float**` does not
             # convert to `const float**` -- the language forbids it, because
             # through the second one could store a `const float*` into the
-            # first's pointee -- so the table has to be declared with the
-            # constness the launcher's parameter already has.
-            ptr_elem = op.ctype if op.is_sink else f"const {op.ctype}"
-            decls.append(f"static {ptr_elem}** d_p_{op.kernel_name} = nullptr;")
-            allocs.append(f"    DEV_MALLOC(d_p_{op.kernel_name}, {ptr_bytes});")
+            # first's pointee -- so the table has the constness the writing
+            # launcher's parameter has, and a launch that only reads a table
+            # another one writes through is handed it cast.
+            ptr_elem = b.ctype if b.written else f"const {b.ctype}"
+            decls.append(f"static {ptr_elem}** d_p_{b.stem} = nullptr;")
+            allocs.append(f"    DEV_MALLOC(d_p_{b.stem}, {ptr_bytes});")
             fills.append(
                 f"    {{ void** h = (void**)std::malloc({ptr_bytes});\n"
                 f"      if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
                 f"std::exit(2); }}\n"
                 f"      for (size_t i = 0; i < batch; ++i)\n"
-                f"        h[i] = d_{op.kernel_name} + i * (size_t){per}u;\n"
-                f"      DEV_MEMCPY_H2D(d_p_{op.kernel_name}, h, {ptr_bytes});\n"
+                f"        h[i] = d_{b.stem} + i * (size_t){b.per}u;\n"
+                f"      DEV_MEMCPY_H2D(d_p_{b.stem}, h, {ptr_bytes});\n"
                 f"      std::free(h); }}")
-            frees.append(f"    DEV_FREE(d_p_{op.kernel_name});"
-                         f" d_p_{op.kernel_name} = nullptr;")
-        fills.append(
-            f"    {{ void* h = std::malloc({span});\n"
-            f"      if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
-            f"std::exit(2); }}\n"
-            + _fill(op.ctype, "h", f"({span}) / {elem}") + "\n"
-            f"      DEV_MEMCPY_H2D(d_{op.kernel_name}, h, {span});\n"
-            f"      std::free(h); }}")
-        frees.append(f"    DEV_FREE(d_{op.kernel_name});"
-                     f" d_{op.kernel_name} = nullptr;")
+            frees.append(f"    DEV_FREE(d_p_{b.stem}); d_p_{b.stem} = nullptr;")
+        if b.host is not None:
+            values = ", ".join(_literal(v, b.ctype) for v in b.host)
+            decls.append(f"static const {b.ctype} h_{b.stem}[] = {{{values}}};")
+            fills.append(f"    DEV_MEMCPY_H2D(d_{b.stem}, h_{b.stem}, {span});")
+        else:
+            fills.append(
+                f"    {{ void* h = std::malloc({span});\n"
+                f"      if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
+                f"std::exit(2); }}\n"
+                + _fill(b.ctype, "h", f"({span}) / {elem}") + "\n"
+                f"      DEV_MEMCPY_H2D(d_{b.stem}, h, {span});\n"
+                f"      std::free(h); }}")
+        frees.append(f"    DEV_FREE(d_{b.stem}); d_{b.stem} = nullptr;")
+    return decls, allocs, fills, frees
 
+
+def flags_code() -> Tuple[List[str], List[str], List[str], List[str]]:
+    """The batch flags of a kernel whose flag mode requires them: every
+    element on."""
+    return (["static unsigned* d_flags = nullptr;"],
+            ["    DEV_MALLOC(d_flags, batch * sizeof(unsigned));"],
+            ["    { unsigned* h = (unsigned*)std::malloc("
+             "batch * sizeof(unsigned));\n"
+             "      if (!h) { std::fprintf(stderr, \"host alloc\\n\"); "
+             "std::exit(2); }\n"
+             "      for (size_t i = 0; i < batch; ++i) h[i] = 1u;\n"
+             "      DEV_MEMCPY_H2D(d_flags, h, batch * sizeof(unsigned));\n"
+             "      std::free(h); }"],
+            ["    DEV_FREE(d_flags); d_flags = nullptr;"])
+
+
+def _region_sum(b: Buffer, span: str) -> str:
+    """The checksum over `b.region`: every element's box, each cell weighted
+    by its place in the buffer, as the whole buffer's cells are."""
+    r = b.region
+    strides = [1]
+    for size in r.sizes[:-1]:
+        strides.append(strides[-1] * size)
+    count = "batch" if b.addressing != "none" else "1"
+    lines = [f"  {{ void* h = std::malloc({span});",
+             "    if (!h) { std::fprintf(stderr, \"host alloc\\n\"); "
+             "std::exit(2); }",
+             f"    DEV_MEMCPY_D2H(h, d_{b.stem}, {span});",
+             f"    const {b.ctype}* p = (const {b.ctype}*)h;",
+             f"    for (size_t e = 0; e < {count}; ++e)"]
+    indent = "    "
+    for d in reversed(range(len(r.lo))):
+        indent += "  "
+        lines.append(f"{indent}for (size_t x{d} = {r.lo[d]}u; "
+                     f"x{d} < {r.hi[d]}u; ++x{d})")
+    offset = " + ".join(f"(x{d} - {r.starts[d]}u) * {strides[d]}u"
+                        for d in range(len(r.lo))) or "0"
+    indent += "  "
+    lines.append(f"{indent}{{ const size_t i = e * (size_t){b.per}u + "
+                 f"{offset};")
+    lines.append(f"{indent}  const double w = (double)((i % 1021u) + 1u);")
+    lines.append(f"{indent}  acc += (double)p[i] * w; "
+                 f"mag += std::fabs((double)p[i]) * w; }}")
+    lines.append("    std::free(h); }")
+    return "\n".join(lines)
+
+
+def checksum_code(buffers: Sequence[Buffer]) -> List[str]:
+    """The checksum's statements over every summed buffer.  Where the
+    outputs are named (`Region`), in the order of their names, so that two
+    translation units holding the same outputs under other stems add them
+    up in one order."""
+    out = []
+    summed = [b for b in buffers if b.summed]
+    if any(b.region is not None for b in buffers):
+        summed.sort(key=lambda b: b.alias)
+    for b in summed:
+        elem = _ELEM_BYTES[b.ctype]
+        span = _span(b)
+        if b.region is not None:
+            out.append(_region_sum(b, span))
+            continue
+        # Weighted, so that a kernel writing the right values in the wrong
+        # places is not the same number as one writing them in the right
+        # ones -- which a plain sum would make it.
+        out.append(
+            f"  {{ const size_t n = ({span}) / {elem};\n"
+            f"    void* h = std::malloc({span});\n"
+            f"    if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
+            f"std::exit(2); }}\n"
+            f"    DEV_MEMCPY_D2H(h, d_{b.stem}, {span});\n"
+            f"    const {b.ctype}* p = (const {b.ctype}*)h;\n"
+            f"    for (size_t i = 0; i < n; ++i) {{\n"
+            f"      const double w = (double)((i % 1021u) + 1u);\n"
+            f"      acc += (double)p[i] * w; "
+            f"mag += std::fabs((double)p[i]) * w; }}\n"
+            f"    std::free(h); }}")
+    return out
+
+
+def entry_points(tag: str, decls: Sequence[str], allocs: Sequence[str],
+                 fills: Sequence[str], frees: Sequence[str],
+                 launch: Sequence[str], sums: Sequence[str], symbol: str,
+                 launches: int, code: str = "") -> str:
+    """The entry points every workload's translation unit defines, with the
+    buffers in `namespace tfb_<tag>`, and beside them `code` -- what a
+    sequence of launches puts there of its own."""
+    nl = "\n"
+    return (
+        f"\nnamespace tfb_{tag} {{\n{nl.join(decls)}\n{code}\n}}\n"
+        f"\nextern \"C\" void tfb_setup_{tag}(size_t batch) {{\n"
+        f"  using namespace tfb_{tag};\n{nl.join(allocs)}\n{nl.join(fills)}\n}}\n"
+        f"\nextern \"C\" void tfb_launch_{tag}(void* stream, size_t batch) {{\n"
+        f"  using namespace tfb_{tag};\n{nl.join(launch)}\n}}\n"
+        f"\nextern \"C\" void tfb_teardown_{tag}() {{\n"
+        f"  using namespace tfb_{tag};\n{nl.join(frees)}\n}}\n"
+        f"\nextern \"C\" double tfb_checksum_{tag}(size_t batch, "
+        f"double* magnitude) {{\n"
+        f"  using namespace tfb_{tag};\n  double acc = 0.0, mag = 0.0;\n"
+        f"{nl.join(sums) if sums else '  (void)batch;'}\n"
+        f"  if (magnitude) *magnitude = mag;\n  return acc;\n}}\n"
+        f"\nextern \"C\" const char* tfb_symbol_{tag}() {{\n"
+        f"  return \"{symbol}\";\n}}\n"
+        f"\nextern \"C\" unsigned tfb_launches_{tag}() {{\n"
+        f"  return {launches}u;\n}}\n")
+
+
+def tu_head(backend: str, includes_src: str) -> str:
+    """What every workload's translation unit starts with."""
+    lang = "sycl" if backend in ("oneapi", "acpp", "esimd", "sycl") else backend
+    return ("// generated by tests/harness/driver_bench.py -- do not edit\n"
+            "#include <cmath>\n#include <cstdio>\n#include <cstdlib>\n"
+            + _TU_PREAMBLE[lang]
+            + _macros(lang)
+            + "\n" + includes_src + "\n")
+
+
+def emit_workload_tu(generator, backend: str, name: str,
+                     includes_src: str,
+                     regions: Optional[Dict[str, Region]] = None) -> str:
+    """One translation unit: the kernel, its launcher, and the entry points.
+
+    The entry points are uniform (`setup`, `launch`, `teardown`, ...) so the
+    driver can hold a table of function pointers and never see a launcher
+    signature.  That is what lets one binary carry every workload of a
+    configuration: the driver TU is identical for all of them and does not
+    have to be regenerated when a workload's operands change.
+
+    `regions` names the kernel's outputs and the boxes they are written over
+    (`Region`); the checksum then reads those and nothing else.  Without, it
+    reads every buffer the kernel writes, whole.
+    """
+    ops = collect_operands(generator)
+    _check_addressing(ops)
+    tag = slug(name)
+    buffers = [operand_buffer(op, op.kernel_name, op.is_sink, regions)
+               for op in ops if not op.is_scalar]
+    decls, allocs, fills, frees = buffer_code(buffers)
     if generator.flag_mode() is FlagMode.REQUIRED:
-        decls.append("static unsigned* d_flags = nullptr;")
-        allocs.append("    DEV_MALLOC(d_flags, batch * sizeof(unsigned));")
-        fills.append(
-            "    { unsigned* h = (unsigned*)std::malloc(batch * sizeof(unsigned));\n"
-            "      if (!h) { std::fprintf(stderr, \"host alloc\\n\"); std::exit(2); }\n"
-            "      for (size_t i = 0; i < batch; ++i) h[i] = 1u;\n"
-            "      DEV_MEMCPY_H2D(d_flags, h, batch * sizeof(unsigned));\n"
-            "      std::free(h); }")
-        frees.append("    DEV_FREE(d_flags); d_flags = nullptr;")
+        for part, extra in zip((decls, allocs, fills, frees), flags_code()):
+            part.extend(extra)
 
     call = launcher_call_expr(generator, ops, batch="batch",
                               stream="DEV_STREAM_PTR(stream)", flags="d_flags")
+    body = entry_points(tag, decls, allocs, fills, frees, [f"  {call};"],
+                        checksum_code(buffers),
+                        f"kernel_{generator.get_base_name()}", 1)
+    return (tu_head(backend, includes_src)
+            + generator.get_header() + "\n"
+            + generator.get_kernel() + "\n"
+            + generator.get_launcher() + "\n"
+            + body)
 
-    body = f'''
-namespace tfb_{tag} {{
-{chr(10).join(decls)}
-}}
 
-extern "C" void tfb_setup_{tag}(size_t batch) {{
-  using namespace tfb_{tag};
-{chr(10).join(allocs)}
-{chr(10).join(fills)}
-}}
+#: What TensorForge's header and launcher open with: the launch types, under
+#: a guard.  A sequence defines them once, at namespace scope, ahead of the
+#: namespace its kernels go into -- defined inside it, they would make
+#: `tfb_<tag>::tensorforge` the namespace every `tensorforge::` in the kernels
+#: finds first, and the runtime's would be out of reach.
+_LAUNCH_TYPES = re.compile(r"#ifndef TENSORFORGE_LAUNCH_TYPES\n.*?\n#endif\n",
+                           re.S)
 
-extern "C" void tfb_launch_{tag}(void* stream, size_t batch) {{
-  using namespace tfb_{tag};
-  {call};
-}}
 
-extern "C" void tfb_teardown_{tag}() {{
-  using namespace tfb_{tag};
-{chr(10).join(frees)}
-}}
+def emit_sequence_tu(generators: Sequence, backend: str, name: str,
+                     includes_src: str,
+                     regions: Optional[Dict[str, Region]] = None
+                     ) -> Tuple[str, str]:
+    """One translation unit for a kernel cut into launches: the kernel and
+    launcher of every launch, and the entry points of `emit_workload_tu`,
+    whose `launch` issues the launches one after the other on one stream.
 
-extern "C" double tfb_checksum_{tag}(size_t batch) {{
-  using namespace tfb_{tag};
-  double acc = 0.0;
-{chr(10).join(sums) if sums else "  (void)batch;"}
-  return acc;
-}}
+    A tensor is one buffer for every launch that names it, by its name in
+    the description: a temporary passed from one launch to the next is
+    written by the first and read by the second, as SeisSol's scratch memory
+    is.  Where two launches store a batch-constant operand differently -- a
+    generator may prepare one for the instruction that reads it -- each gets
+    its own; a tensor of the batch stored two ways is refused, since no one
+    buffer could be both.
 
-extern "C" const char* tfb_symbol_{tag}() {{
-  return "kernel_{generator.get_base_name()}";
-}}
-'''
+    The kernels go into `namespace tfb_<tag>`.  Two launches of a sequence
+    can be the same kernel -- the same product of two operators on two inputs
+    -- which is then defined once; two sequences can share one too, and the
+    namespaces keep them apart in one binary.
 
-    return (
-        "// generated by tests/harness/driver_bench.py -- do not edit\n"
-        "#include <cstdio>\n#include <cstdlib>\n"
-        + _TU_PREAMBLE[lang]
-        + _macros(lang)
-        + "\n" + includes_src + "\n"
-        + generator.get_header() + "\n"
-        + generator.get_kernel() + "\n"
-        + generator.get_launcher() + "\n"
-        + body)
+    Returns the source and the symbol it names the sequence by, a digest of
+    its kernels and of the order they are launched in.
+    """
+    tag = slug(name)
+    shapes: Dict[str, Tuple] = {}
+    uses: Dict[str, List] = {}
+    pieces = []
+    for n, gen in enumerate(generators):
+        ops = collect_operands(gen)
+        _check_addressing(ops)
+        keys = {}
+        for op in ops:
+            if op.is_scalar:
+                continue
+            alias = op.alias or op.kernel_name
+            shape = (op.addressing, op.ctype, op.storage_volume or op.volume,
+                     op.storage_parts, op.pack_index)
+            key = alias
+            if shapes.setdefault(alias, shape) != shape:
+                if op.addressing != "none":
+                    raise ValueError(
+                        f"{name}: the launches store {alias} two ways, "
+                        f"{shapes[alias][:3]} and {shape[:3]}")
+                key = f"{alias}#{n}"
+            keys[op.kernel_name] = key
+            uses.setdefault(key, []).append(op)
+        pieces.append((gen, ops, keys))
+    buffers: Dict[str, Buffer] = {}
+    for i, (key, ops) in enumerate(uses.items()):
+        buffers[key] = operand_buffer(ops[0], f"b{i}",
+                                      any(op.is_sink for op in ops), regions)
+        if regions is None:
+            buffers[key].summed = buffers[key].written
+
+    launches: List[str] = []
+    kernels: Dict[str, object] = {}
+    needs_flags = False
+    for gen, ops, keys in pieces:
+        needs_flags |= gen.flag_mode() is FlagMode.REQUIRED
+
+        def argument(op, keys=keys):
+            b = buffers[keys[op.kernel_name]]
+            if op.addressing != "pointer_based":
+                return f"d_{b.stem}"
+            if b.written and not op.is_sink:
+                return f"const_cast<const {b.ctype}**>(d_p_{b.stem})"
+            return f"d_p_{b.stem}"
+
+        call = launcher_call_expr(gen, ops, batch="batch",
+                                  stream="DEV_STREAM_PTR(stream)",
+                                  flags="d_flags", buffer=argument)
+        launches.append(f"  {call};")
+        kernels.setdefault(gen.get_base_name(), gen)
+
+    first = next(iter(kernels.values()))
+    found = _LAUNCH_TYPES.search(first.get_header())
+    if found is None:
+        raise ValueError("the generator's header does not open with the "
+                         "launch types a sequence defines ahead of its "
+                         "kernels")
+    code = "\n".join(gen.get_header() + "\n" + gen.get_kernel() + "\n"
+                     + gen.get_launcher() for gen in kernels.values())
+    decls, allocs, fills, frees = buffer_code(list(buffers.values()))
+    if needs_flags:
+        for part, extra in zip((decls, allocs, fills, frees), flags_code()):
+            part.extend(extra)
+    symbol = "sequence_" + hashlib.sha256(
+        "\n".join([code] + launches).encode()).hexdigest()[:16]
+    body = entry_points(tag, decls, allocs, fills, frees, launches,
+                        checksum_code(list(buffers.values())), symbol,
+                        len(launches), code)
+    return tu_head(backend, includes_src) + found.group(0) + body, symbol
 
 
 # ----------------------------------------------------------------------
@@ -311,6 +610,7 @@ _DRIVER_PREAMBLE_CUDA = r"""
 #define DEV_EVENT_RECORD(e,s)  (void)cudaEventRecord((e),(s))
 #define DEV_EVENT_SYNC(e)      (void)cudaEventSynchronize((e))
 #define DEV_EVENT_MS(o,a,b)    (void)cudaEventElapsedTime(&(o),(a),(b))
+#define DEV_EVENTS_LAST_ONLY   0
 """
 
 _DRIVER_PREAMBLE_HIP = r"""
@@ -328,6 +628,7 @@ _DRIVER_PREAMBLE_HIP = r"""
 #define DEV_EVENT_RECORD(e,s)  (void)hipEventRecord((e),(s))
 #define DEV_EVENT_SYNC(e)      (void)hipEventSynchronize((e))
 #define DEV_EVENT_MS(o,a,b)    (void)hipEventElapsedTime(&(o),(a),(b))
+#define DEV_EVENTS_LAST_ONLY   0
 """
 
 # The queue is in-order and owned here; the workload TUs allocate through it.
@@ -337,7 +638,9 @@ _DRIVER_PREAMBLE_HIP = r"""
 # on, that event carries the device's start and end.  Recorded after the
 # launch it is the kernel; the "before" record is the previous command and is
 # not used.  A launcher that submitted more than one command would be timed
-# by its last.  Without the extension, absence is reported as absence.
+# by its last, and so would a workload of several launches -- for which the
+# driver therefore reports no device clock (`DEV_EVENTS_LAST_ONLY`).  Without
+# the extension, absence is reported as absence.
 _DRIVER_PREAMBLE_SYCL = r"""
 #include <sycl/sycl.hpp>
 sycl::queue* tfb_queue = nullptr;
@@ -361,6 +664,7 @@ sycl::queue* tfb_queue = nullptr;
 #define DEV_EVENT_MS(o,a,b)    ((o) = (float)(1e-6 * (double)( \
     (b).get_profiling_info<sycl::info::event_profiling::command_end>() - \
     (b).get_profiling_info<sycl::info::event_profiling::command_start>())))
+#define DEV_EVENTS_LAST_ONLY   1
 #else
 #define DEV_HAS_EVENTS         0
 #endif
@@ -381,7 +685,8 @@ struct TfbWorkload {
   void (*launch)(void*, size_t);
   void (*teardown)();
   const char* (*symbol)();
-  double (*checksum)(size_t);
+  double (*checksum)(size_t, double*);
+  unsigned (*launches)();
 };
 
 %(decls)s
@@ -433,6 +738,9 @@ static void run_one(const TfbWorkload& w, bool timing, size_t batch,
 
   std::vector<double> ev;
 #if DEV_HAS_EVENTS
+  /* An event that stands for the last command of the queue times the last
+     of several launches, which is no time of the workload's. */
+  if (!(DEV_EVENTS_LAST_ONLY && w.launches() > 1)) {
   DEV_EVENT_T a, b;
   DEV_EVENT_CREATE(a);
   DEV_EVENT_CREATE(b);
@@ -447,11 +755,14 @@ static void run_one(const TfbWorkload& w, bool timing, size_t batch,
   }
   DEV_EVENT_DESTROY(a);
   DEV_EVENT_DESTROY(b);
+  }
 #endif
 
   std::printf("{\"workload\": \"%%s\", \"symbol\": \"%%s\", \"batch\": %%zu, "
-              "\"iters\": %%zu, \"warmup\": %%zu, \"wall_ns\": %%.3f",
-              w.name, w.symbol(), batch, iters, warmup, wall_ns);
+              "\"iters\": %%zu, \"warmup\": %%zu, \"launches\": %%u, "
+              "\"wall_ns\": %%.3f",
+              w.name, w.symbol(), batch, iters, warmup, w.launches(),
+              wall_ns);
   if (ev.empty()) {
     std::printf(", \"event_ns\": null");
   } else {
@@ -474,8 +785,10 @@ int main(int argc, char** argv) {
 
   if (mode == "list") {
     for (size_t i = 0; i < tfb_count; ++i)
-      std::printf("{\"workload\": \"%%s\", \"symbol\": \"%%s\"}\n",
-                  tfb_table[i].name, tfb_table[i].symbol());
+      std::printf("{\"workload\": \"%%s\", \"symbol\": \"%%s\", "
+                  "\"launches\": %%u}\n",
+                  tfb_table[i].name, tfb_table[i].symbol(),
+                  tfb_table[i].launches());
     return 0;
   }
   if (mode != "time" && mode != "profile" && mode != "check") usage();
@@ -499,14 +812,19 @@ int main(int argc, char** argv) {
       /* One launch, then the sinks read back and reduced.  Not a reference
          comparison -- the driver has no oracle -- but enough to tell two
          builds of one workload apart, which is what an experiment on a
-         patched kernel needs and what the timing modes cannot give. */
+         patched kernel needs and what the timing modes cannot give.  The
+         magnitude is the same sum over the values' absolute values: what a
+         difference between two checksums is to be read against, since the
+         signed sum can cancel to anything. */
       const TfbWorkload& w = tfb_table[i];
       w.setup(batch);
       w.launch(DEV_STREAM_PTR(stream), batch);
       DEV_STREAM_SYNC(stream);
+      double magnitude = 0.0;
+      const double checksum = w.checksum(batch, &magnitude);
       std::printf("{\"workload\": \"%%s\", \"batch\": %%zu, "
-                  "\"checksum\": %%.17g}\n",
-                  w.name, batch, w.checksum(batch));
+                  "\"checksum\": %%.17g, \"magnitude\": %%.17g}\n",
+                  w.name, batch, checksum, magnitude);
       w.teardown();
       ran = true;
       continue;
@@ -547,11 +865,12 @@ def emit_driver(names: Sequence[str], backend: str) -> str:
             f'extern "C" void tfb_launch_{tag}(void*, size_t);\n'
             f'extern "C" void tfb_teardown_{tag}();\n'
             f'extern "C" const char* tfb_symbol_{tag}();\n'
-            f'extern "C" double tfb_checksum_{tag}(size_t);')
+            f'extern "C" double tfb_checksum_{tag}(size_t, double*);\n'
+            f'extern "C" unsigned tfb_launches_{tag}();')
         escaped = name.replace('\\', '\\\\').replace('"', '\\"')
         table.append(f'  {{"{escaped}", tfb_setup_{tag}, tfb_launch_{tag}, '
                      f'tfb_teardown_{tag}, tfb_symbol_{tag}, '
-                     f'tfb_checksum_{tag}}},')
+                     f'tfb_checksum_{tag}, tfb_launches_{tag}}},')
 
     return preamble + (_DRIVER_BODY % {
         "decls": "\n".join(decls),

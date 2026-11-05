@@ -1,0 +1,815 @@
+{
+ "source": "SeisSol 8399348 with yateto dbd2296, gemmforge 3377c1f and chainforge 2d47e50, --device_codegen gemmforge-chainforge for cuda sm_86; the matrices and factors yateto handed the generators, as they print them",
+ "export": "elastic-3-d-s1.json",
+ "target": [
+  "cuda",
+  "sm_86"
+ ],
+ "chains": {
+  "gpu_derivative": [
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "chain",
+    "gemms": [
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [1, 0, 8, 9]};",
+      "b": "B = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp0 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "C = {rows: 8, cols: 7, addr: none, bbox: [0, 0, 8, 7]};",
+      "b": "tmp0 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};",
+      "c": "D = {rows: 8, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "E = {rows: 16, cols: 9, addr: pointer_based, bbox: [1, 0, 16, 9]};",
+      "b": "F = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp1 = {rows: 15, cols: 9, addr: strided, bbox: [0, 0, 15, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "G = {rows: 8, cols: 8, addr: none, bbox: [0, 0, 8, 8]};",
+      "b": "tmp1 = {rows: 15, cols: 9, addr: strided, bbox: [0, 0, 15, 9]};",
+      "c": "D = {rows: 8, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "E = {rows: 16, cols: 9, addr: pointer_based, bbox: [1, 0, 16, 9]};",
+      "b": "H = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp2 = {rows: 15, cols: 9, addr: strided, bbox: [0, 0, 15, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "I = {rows: 8, cols: 9, addr: none, bbox: [0, 0, 8, 9]};",
+      "b": "tmp2 = {rows: 15, cols: 9, addr: strided, bbox: [0, 0, 15, 9]};",
+      "c": "D = {rows: 8, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};"
+     }
+    ]
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "chain",
+    "gemms": [
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 8, cols: 9, addr: pointer_based, bbox: [1, 0, 8, 9]};",
+      "b": "B = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp0 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "C = {rows: 8, cols: 7, addr: none, bbox: [0, 0, 8, 1]};",
+      "b": "tmp0 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};",
+      "c": "D = {rows: 8, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 8, cols: 9, addr: pointer_based, bbox: [1, 0, 8, 9]};",
+      "b": "E = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp1 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "F = {rows: 8, cols: 8, addr: none, bbox: [0, 0, 8, 2]};",
+      "b": "tmp1 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};",
+      "c": "D = {rows: 8, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 8, cols: 9, addr: pointer_based, bbox: [1, 0, 8, 9]};",
+      "b": "G = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp2 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "H = {rows: 8, cols: 9, addr: none, bbox: [0, 0, 8, 3]};",
+      "b": "tmp2 = {rows: 7, cols: 9, addr: strided, bbox: [0, 0, 7, 9]};",
+      "c": "D = {rows: 8, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};"
+     }
+    ]
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n"
+   }
+  ],
+  "gpu_volume": [
+   {
+    "kind": "chain",
+    "gemms": [
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};",
+      "b": "B = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp0 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "C = {rows: 8, cols: 4, addr: none, bbox: [1, 0, 8, 4]};",
+      "b": "tmp0 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "D = {rows: 16, cols: 9, addr: pointer_based, bbox: [1, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};",
+      "b": "E = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp1 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "F = {rows: 16, cols: 4, addr: none, bbox: [1, 0, 16, 4]};",
+      "b": "tmp1 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "G = {rows: 16, cols: 9, addr: pointer_based, bbox: [1, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 8, 9]};",
+      "b": "H = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp2 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "I = {rows: 16, cols: 4, addr: none, bbox: [1, 0, 16, 4]};",
+      "b": "tmp2 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "G = {rows: 16, cols: 9, addr: pointer_based, bbox: [1, 0, 16, 9]};"
+     }
+    ]
+   }
+  ],
+  "gpu_localFluxAll": [
+   {
+    "kind": "chain",
+    "gemms": [
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};",
+      "b": "B = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp0 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "C = {rows: 8, cols: 10, addr: none, bbox: [0, 0, 8, 10]};",
+      "b": "tmp0 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};",
+      "c": "tmp1 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "D = {rows: 16, cols: 6, addr: none, bbox: [0, 0, 16, 6]};",
+      "b": "tmp1 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "E = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};",
+      "b": "F = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp2 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "G = {rows: 8, cols: 10, addr: none, bbox: [0, 0, 8, 10]};",
+      "b": "tmp2 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};",
+      "c": "tmp3 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "H = {rows: 16, cols: 6, addr: none, bbox: [0, 0, 16, 6]};",
+      "b": "tmp3 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "E = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};",
+      "b": "I = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp4 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "J = {rows: 8, cols: 10, addr: none, bbox: [0, 0, 8, 10]};",
+      "b": "tmp4 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};",
+      "c": "tmp5 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "K = {rows: 16, cols: 6, addr: none, bbox: [0, 0, 16, 6]};",
+      "b": "tmp5 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "E = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};",
+      "b": "L = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp6 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "M = {rows: 8, cols: 10, addr: none, bbox: [0, 0, 8, 10]};",
+      "b": "tmp6 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};",
+      "c": "tmp7 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "N = {rows: 16, cols: 6, addr: none, bbox: [0, 0, 16, 6]};",
+      "b": "tmp7 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "E = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};"
+     }
+    ]
+   }
+  ],
+  "gpu_neighboringFlux[0]": [
+   {
+    "kind": "chain",
+    "gemms": [
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "A = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};",
+      "b": "B = {rows: 9, cols: 9, addr: pointer_based, bbox: [0, 0, 9, 9]};",
+      "c": "tmp0 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "0.0",
+      "prefer_align": "True",
+      "a": "C = {rows: 8, cols: 10, addr: none, bbox: [0, 0, 8, 10]};",
+      "b": "tmp0 = {rows: 16, cols: 9, addr: strided, bbox: [0, 0, 16, 9]};",
+      "c": "tmp1 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};"
+     },
+     {
+      "alpha": "1.0",
+      "beta": "1.0",
+      "prefer_align": "True",
+      "a": "D = {rows: 16, cols: 6, addr: none, bbox: [0, 0, 16, 6]};",
+      "b": "tmp1 = {rows: 8, cols: 9, addr: strided, bbox: [0, 0, 8, 9]};",
+      "c": "E = {rows: 16, cols: 9, addr: pointer_based, bbox: [0, 0, 16, 9]};"
+     }
+    ]
+   }
+  ],
+  "gpu_derivativeTaylorExpansion": [
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n"
+   }
+  ]
+ },
+ "ops": {
+  "gpu_derivative": [
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 8\naddressing = none\nbounding box = [0, 0, 8, 7]\nnum. actual rows = 8\nnum. actual cols = 7\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [1, 0, 8, 9]\nnum. actual rows = 7\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = none\nbounding box = [0, 0, 8, 8]\nnum. actual rows = 8\nnum. actual cols = 8\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [1, 0, 9, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 10\naddressing = none\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [1, 0, 10, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 8\naddressing = none\nbounding box = [0, 0, 8, 1]\nnum. actual rows = 8\nnum. actual cols = 1\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [1, 0, 2, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = none\nbounding box = [0, 0, 8, 2]\nnum. actual rows = 8\nnum. actual cols = 2\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [1, 0, 3, 9]\nnum. actual rows = 2\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 10\naddressing = none\nbounding box = [0, 0, 8, 3]\nnum. actual rows = 8\nnum. actual cols = 3\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [1, 0, 4, 9]\nnum. actual rows = 3\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n"
+   }
+  ],
+  "gpu_volume": [
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 4\naddressing = none\nbounding box = [0, 0, 8, 4]\nnum. actual rows = 8\nnum. actual cols = 4\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 16\nnum. columns = 4\naddressing = none\nbounding box = [0, 0, 16, 4]\nnum. actual rows = 16\nnum. actual cols = 4\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 16\nnum. columns = 4\naddressing = none\nbounding box = [0, 0, 16, 4]\nnum. actual rows = 16\nnum. actual cols = 4\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   }
+  ],
+  "gpu_localFluxAll": [
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 10\naddressing = none\nbounding box = [0, 0, 8, 10]\nnum. actual rows = 8\nnum. actual cols = 10\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 16\nnum. columns = 6\naddressing = none\nbounding box = [0, 0, 16, 6]\nnum. actual rows = 16\nnum. actual cols = 6\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 6, 9]\nnum. actual rows = 6\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 10\naddressing = none\nbounding box = [0, 0, 8, 10]\nnum. actual rows = 8\nnum. actual cols = 10\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 16\nnum. columns = 6\naddressing = none\nbounding box = [0, 0, 16, 6]\nnum. actual rows = 16\nnum. actual cols = 6\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 6, 9]\nnum. actual rows = 6\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 10\naddressing = none\nbounding box = [0, 0, 8, 10]\nnum. actual rows = 8\nnum. actual cols = 10\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 16\nnum. columns = 6\naddressing = none\nbounding box = [0, 0, 16, 6]\nnum. actual rows = 16\nnum. actual cols = 6\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 6, 9]\nnum. actual rows = 6\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 10\naddressing = none\nbounding box = [0, 0, 8, 10]\nnum. actual rows = 8\nnum. actual cols = 10\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 16\nnum. columns = 6\naddressing = none\nbounding box = [0, 0, 16, 6]\nnum. actual rows = 16\nnum. actual cols = 6\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 6, 9]\nnum. actual rows = 6\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   }
+  ],
+  "gpu_neighboringFlux[0]": [
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n",
+    "b": "num. rows = 9\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 9, 9]\nnum. actual rows = 9\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "0.0",
+    "a": "num. rows = 8\nnum. columns = 10\naddressing = none\nbounding box = [0, 0, 8, 10]\nnum. actual rows = 8\nnum. actual cols = 10\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "c": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 8, 9]\nnum. actual rows = 8\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "gemm",
+    "trans": [
+     false,
+     false
+    ],
+    "alpha": "1.0",
+    "beta": "1.0",
+    "a": "num. rows = 16\nnum. columns = 6\naddressing = none\nbounding box = [0, 0, 16, 6]\nnum. actual rows = 16\nnum. actual cols = 6\n",
+    "b": "num. rows = 8\nnum. columns = 9\naddressing = strided\nbounding box = [0, 0, 6, 9]\nnum. actual rows = 6\nnum. actual cols = 9\n",
+    "c": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 16, 9]\nnum. actual rows = 16\nnum. actual cols = 9\n"
+   }
+  ],
+  "gpu_derivativeTaylorExpansion": [
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "0.0",
+    "a": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 10, 9]\nnum. actual rows = 10\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 4, 9]\nnum. actual rows = 4\nnum. actual cols = 9\n"
+   },
+   {
+    "kind": "csa",
+    "alpha": "<scalar>",
+    "beta": "1.0",
+    "a": "num. rows = 8\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n",
+    "b": "num. rows = 16\nnum. columns = 9\naddressing = pointer_based\nbounding box = [0, 0, 1, 9]\nnum. actual rows = 1\nnum. actual cols = 9\n"
+   }
+  ]
+ }
+}

@@ -21,7 +21,7 @@ backend-selection block at the top picks between them.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Callable, List, Optional
 
 from tensorforge.backend.symbol import SymbolType
 from tensorforge.common.basic_types import DataFlowDirection, FlagMode
@@ -188,7 +188,9 @@ def _cell_values(t):
 def launcher_call_expr(generator, ops: List[DriverOperand], *,
                        batch: str = "batch",
                        stream: str = "DEV_STREAM_PTR(stream)",
-                       flags: str = "d_flags") -> str:
+                       flags: str = "d_flags",
+                       buffer: Optional[Callable[[DriverOperand], str]] = None
+                       ) -> str:
     """The launcher call, as one C++ expression.
 
     Separated from ``emit`` because it is the second half of what
@@ -201,6 +203,11 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
     ``flags`` is only read when the kernel's flag mode is ``REQUIRED``; the
     caller owns the buffer of that name, since whether it needs allocating is
     the caller's business and not this expression's.
+
+    ``buffer`` spells the argument of a batched operand where the caller's
+    buffers are not ``d_<kernel name>`` -- a sequence of launches shares one
+    buffer per tensor between them -- and its ``extraOffset`` still follows
+    from here.
     """
     call_args = []
     for op in ops:
@@ -215,7 +222,9 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
 
             call_args.append(f"static_cast<{op.ctype}>({op.scalar_value!r}{suffix})")
         else:
-            if op.addressing == "pointer_based":
+            if buffer is not None:
+                call_args.append(buffer(op))
+            elif op.addressing == "pointer_based":
                 call_args.append(f"d_p_{op.kernel_name}")
             elif op.residence == "argument":
                 # by value: the launcher copies it out of host memory

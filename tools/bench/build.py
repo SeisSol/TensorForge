@@ -61,14 +61,17 @@ for extra in (ROOT / 'src', ROOT / 'tests', ROOT / 'tools'):
 
 from harness import driver_bench                                # noqa: E402
 from tensorforge import toolchain                               # noqa: E402
-from tensorforge.analysis.cost import list_cost                 # noqa: E402
+from tensorforge.analysis.cost import (Cost, list_cost,         # noqa: E402
+                                       sequence_cost)
 from tensorforge.analysis.icache import code_bytes              # noqa: E402
 from tensorforge.analysis.pipeline import executed_flops        # noqa: E402
 from tensorforge.common.context import Context, Options         # noqa: E402
 from tensorforge.generators import lanes                        # noqa: E402
+from tensorforge.frontend.yateto import DescriptionReader       # noqa: E402
 from tensorforge.generators.generator import Generator          # noqa: E402
 
-from suite import BuildUnit, Workload                           # noqa: E402
+import suite                                                    # noqa: E402
+from suite import BuildUnit, Config, Workload                   # noqa: E402
 
 INCLUDE = ROOT / 'src' / 'tensorforge' / 'include'
 
@@ -164,6 +167,11 @@ class WorkloadBuild:
     object_bytes: Optional[int] = None
     code_bytes: Optional[int] = None
     icache_bytes: Optional[int] = None
+    #: How many launches the workload is, and the kernel each one runs, in
+    #: order: one and the workload's own kernel unless the configuration cuts
+    #: it (`Config.partition`).
+    launches: int = 1
+    kernels: List[str] = field(default_factory=list)
     error: str = ''
 
     def cost_fields(self) -> Dict[str, Optional[float]]:
@@ -194,6 +202,114 @@ class UnitBuild:
 # Generation
 # ----------------------------------------------------------------------
 
+def regions_of(description: Optional[Dict]
+               ) -> Optional[Dict[str, driver_bench.Region]]:
+    """The outputs of an exported kernel and the box each is written over
+    (`driver_bench.Region`), which the checksum reads: every tensor an
+    operation writes that is no temporary, over the hull of the boxes
+    written, in the storage the export lays it out in.  An output stored
+    other than as a box, or written through a window, is left out -- a
+    checksum that reads less is still one that two builds have to agree on.
+    `None` without a description: the checksum then reads every buffer a
+    kernel writes, whole."""
+    if description is None:
+        return None
+    tensors = {t['name']: t for t in description['tensors']}
+    boxes: Dict[str, List] = {}
+    windowed = set()
+    for op in description['operations']:
+        result = op['result']
+        tensor = tensors[result['name']]
+        if (tensor.get('flags', {}).get('temporary')
+                or tensor['storage'].get('type') != 'bbox'
+                or not result.get('bbox')):
+            continue
+        if (result.get('sliced') or result.get('offset_from')
+                or any(result.get('offset') or ())):
+            windowed.add(result['name'])
+        boxes.setdefault(result['name'], []).append(result['bbox'])
+    out: Dict[str, driver_bench.Region] = {}
+    for name, found in boxes.items():
+        if name in windowed:
+            continue
+        storage = tensors[name]['storage']
+        starts = tuple(storage.get('start') or [0] * len(storage['shape']))
+        sizes = tuple(storage.get('sizes') or storage['shape'])
+        rank = len(found[0][0])
+        lo = tuple(min(b[0][d] for b in found) for d in range(rank))
+        hi = tuple(max(b[1][d] for b in found) for d in range(rank))
+        if rank != len(starts) or any(
+                lo[d] < starts[d] or hi[d] > starts[d] + sizes[d]
+                for d in range(rank)):
+            continue
+        out[name] = driver_bench.Region(name, starts, sizes, lo, hi)
+    return out
+
+
+def pieces(workload: Workload, config: Config
+           ) -> List[Tuple[suite.Launch, Dict]]:
+    """The launches `config` cuts `workload` into, each with the description
+    it is built from (`suite.split_description`)."""
+    if config.partition not in suite.PARTITIONS:
+        raise ValueError(f'no partition {config.partition!r}; there are '
+                         f'{sorted(suite.PARTITIONS)}')
+    if workload.description is None:
+        raise ValueError(f'only an exported kernel can be cut into launches '
+                         f'({config.partition!r}); {workload.name} has no '
+                         f'description')
+    launches = suite.PARTITIONS[config.partition](workload.description)
+    return list(zip(launches, suite.split_description(workload.description,
+                                                      launches)))
+
+
+def _read(description: Dict) -> List:
+    return DescriptionReader(arch=None).read(description)[0]
+
+
+def workload_cost(workload: Workload, config: Config, batch: int,
+                  datatype) -> Cost:
+    """What the operation costs as `config` launches it: the kernel's own
+    arithmetic, and the traffic of every launch added up where it is cut
+    into several (`analysis.cost.sequence_cost`) -- a temporary passed
+    between two launches written by one and read by the other, the
+    operators fetched once per launch."""
+    if config.partition == 'whole' or workload.description is None:
+        return list_cost(workload.descrs(), batch=batch, datatype=datatype)
+    return sequence_cost([list_cost(_read(piece), batch=batch,
+                                    datatype=datatype)
+                          for _, piece in pieces(workload, config)])
+
+
+def _tensorforge(descrs: List, workload: Workload, unit: BuildUnit,
+                 ctx: Context) -> Generator:
+    """One kernel built by TensorForge, at the lanes the configuration asks
+    for, generated."""
+    # `Options.lanes_per_mult` first: the generator takes an explicit
+    # `lanes` over the option (`Generator` builds with `self._lanes or
+    # lanes.requested(...)`), so passing only the deduction here would
+    # build every lane-count configuration at the deduced count.
+    #
+    # And only what the configuration asked for is passed: a geometry
+    # given here is one the tuner holds fixed, so handing it the deduction
+    # -- which is the generator's own answer, not the caller's -- takes
+    # the lane count out of the space for every build this harness does.
+    #
+    # A stated ceiling counts as asked; the default one does not.  Every
+    # `Config` carries `lane_ceiling`, and it is `DEFAULT_LANE_CEILING`
+    # unless the configuration says otherwise -- so testing it for
+    # truthiness would pin every build, which is the whole of what this
+    # is here to stop.
+    ceiling = unit.config.lane_ceiling
+    stated = unit.config.wave_wide or ceiling != lanes.DEFAULT_LANE_CEILING
+    asked = (lanes.requested(descrs, ctx)
+             or (lanes.deduce(descrs, ctx, ceiling=ceiling)
+                 if stated else None))
+    gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=asked)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen
+
+
 def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
                                                            WorkloadBuild]:
     """`(translation unit source, record)` for one workload in one unit.
@@ -203,55 +319,52 @@ def generate(workload: Workload, unit: BuildUnit) -> Tuple[Optional[str],
     which is the slow part anyway.
     """
     record = WorkloadBuild(name=workload.name, origin=workload.origin)
-    options = unit.config.options or Options()
+    config = unit.config
+    options = config.options or Options()
+    regions = regions_of(workload.description)
     started = time.perf_counter()
     try:
-        descrs = workload.descrs()
         ctx = Context(arch=unit.target.arch, backend=unit.target.backend,
                       fp_type=unit.datatype, options=options)
-        # `Options.lanes_per_mult` first: the generator takes an explicit
-        # `lanes` over the option (`Generator` builds with `self._lanes or
-        # lanes.requested(...)`), so passing only the deduction here would
-        # build every lane-count configuration at the deduced count.
-        #
-        # And only what the configuration asked for is passed: a geometry
-        # given here is one the tuner holds fixed, so handing it the deduction
-        # -- which is the generator's own answer, not the caller's -- takes
-        # the lane count out of the space for every build this harness does.
-        #
-        # A stated ceiling counts as asked; the default one does not.  Every
-        # `Config` carries `lane_ceiling`, and it is `DEFAULT_LANE_CEILING`
-        # unless the configuration says otherwise -- so testing it for
-        # truthiness would pin every build, which is the whole of what this
-        # is here to stop.
-        ceiling = unit.config.lane_ceiling
-        stated = unit.config.wave_wide or ceiling != lanes.DEFAULT_LANE_CEILING
-        asked = (lanes.requested(descrs, ctx)
-                 or (lanes.deduce(descrs, ctx, ceiling=ceiling)
-                     if stated else None))
-        gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=asked)
-        with contextlib.redirect_stdout(io.StringIO()):
-            gen.generate()
-        headers = list(ctx.target.headers()) + list(
-            gen.get_helper_headers())
-        includes = '\n'.join(f'#include "{h}"' for h in headers)
-        src = driver_bench.emit_workload_tu(
-            gen, unit.target.backend, workload.name, includes)
+        if config.partition == 'whole':
+            gens = [_tensorforge(workload.descrs(), workload, unit, ctx)]
+            headers = list(ctx.target.headers()) + list(
+                gens[0].get_helper_headers())
+            includes = '\n'.join(f'#include "{h}"' for h in headers)
+            src = driver_bench.emit_workload_tu(
+                gens[0], unit.target.backend, workload.name, includes,
+                regions)
+            record.symbol = f'kernel_{gens[0].get_base_name()}'
+        else:
+            gens = [_tensorforge(_read(piece), workload, unit, ctx)
+                    for _, piece in pieces(workload, config)]
+            headers = list(ctx.target.headers())
+            for gen in gens:
+                headers += [h for h in gen.get_helper_headers()
+                            if h not in headers]
+            includes = '\n'.join(f'#include "{h}"' for h in headers)
+            src, record.symbol = driver_bench.emit_sequence_tu(
+                gens, unit.target.backend, workload.name, includes, regions)
     except Exception as exc:                      # noqa: BLE001
         record.error = f'{type(exc).__name__}: {exc}'
         return None, record
 
     record.generate_s = time.perf_counter() - started
-    record.symbol = f'kernel_{gen.get_base_name()}'
+    record.launches = len(gens)
+    record.kernels = [f'kernel_{gen.get_base_name()}' for gen in gens]
     # What it was built at, which with nothing asked for is what the generator
-    # deduced or the tuner picked.
-    record.lanes = gen.lanes.num_threads
+    # deduced or the tuner picked -- the widest launch's, for several.
+    record.lanes = max(gen.lanes.num_threads for gen in gens)
     hw = ctx.target.hw
-    record.code_bytes = code_bytes(gen.metrics.code_units, hw)
+    # The instruction cache holds one kernel at a time; a sequence's code is
+    # its largest kernel's as far as the cache is concerned.
+    record.code_bytes = max(code_bytes(gen.metrics.code_units, hw)
+                            for gen in gens)
     record.icache_bytes = getattr(hw, 'icache_size', None)
-    record.cost = list_cost(workload.descrs(), batch=1,
-                            datatype=unit.datatype)
-    record.executed_flops = executed_flops(gen)
+    record.cost = workload_cost(workload, config, 1, unit.datatype)
+    counted = [executed_flops(gen) for gen in gens]
+    record.executed_flops = (sum(counted) if all(c is not None
+                                                for c in counted) else None)
     return src, record
 
 

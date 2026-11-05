@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import prod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -513,3 +513,33 @@ def list_cost(descr_list: List, batch: int = 1,
     for descr in descr_list:
         total = total.merged(descr_cost(descr, batch=batch, datatype=datatype))
     return total
+
+
+def sequence_cost(costs: Sequence[Cost]) -> Cost:
+    """Separate launches, one after the other: the arithmetic and the
+    traffic both added up.
+
+    Where `list_cost` unites the traffic of the descriptors of one kernel,
+    a launch fetches its own operands from memory however recently the one
+    before it did, and a temporary passed between two launches is written
+    by one and read by the other.  So nothing is united here, and the
+    per-tensor entries are the launches' own, one after the other.
+    """
+    if not costs:
+        raise ValueError('a sequence of no launches costs nothing to speak of')
+    batch = costs[0].batch
+    if any(c.batch != batch for c in costs):
+        raise ValueError('the launches of one sequence run at one batch')
+    return Cost(
+        mults=sum(c.mults for c in costs),
+        adds=sum(c.adds for c in costs),
+        nonzero_mults=sum(c.nonzero_mults for c in costs),
+        nonzero_adds=sum(c.nonzero_adds for c in costs),
+        nonzero_exact=all(c.nonzero_exact for c in costs),
+        transcendental=sum(c.transcendental for c in costs),
+        nonarith=sum(c.nonarith for c in costs),
+        read_bytes=sum(c.read_bytes for c in costs),
+        write_bytes=sum(c.write_bytes for c in costs),
+        batch=batch,
+        tensors=[t for c in costs for t in c.tensors],
+        unmodeled=[u for c in costs for u in c.unmodeled])

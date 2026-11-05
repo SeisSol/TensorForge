@@ -108,7 +108,8 @@ every job script without touching a machine; an entry that still has a
 ## Suites
 
 A suite is a Python module, the same shape a test case is. It defines `NAME`
-and `workloads()`, and may set `BATCHES`, `CONFIGS`, `TARGETS`, `DATATYPES`.
+and `workloads()`, and may set `BATCHES`, `CONFIGS`, `TARGETS`, `DATATYPES`
+and `CHECK`.
 
 ```bash
 TF_BENCH_DUMP=descriptors.json python3 tools/bench/run.py suites/seissol.py
@@ -138,6 +139,43 @@ the whole under the name of its own single piece (`gpu_volume~0-of-1`), so that
 no other reader sees a second measurement of the kernel -- and the two are
 what fusion is worth as a number.
 
+## A kernel cut into launches
+
+A configuration can also cut an exported kernel into launches and time them
+as one workload (`Config.partition`): `chains` cuts it where
+gemmforge-chainforge, the generators SeisSol used before TensorForge, cut it,
+and `ops` into one launch per operation, as yateto launches a kernel through
+gemmforge alone. Against `baseline`, the whole kernel in one launch, `chains`
+is what fusing the kernel is worth at the launches SeisSol made of it. The cut
+is yateto's `FindFusedGemms` on the export (`suite.chain_partition`): runs of
+GEMMs as one chain each, every other operation a launch of its own, checked
+against a recording of yateto cutting SeisSol's elastic kernels
+(`tests/fixtures/forge`, `tests/test_bench_partition.py`). A kernel that is
+one chain -- `volume`, `localFluxAll`, the neighbour flux -- is one launch
+either way; `derivative` is two copies and then a chain and a copy per time
+derivative, `derivativeTaylorExpansion` one copy per derivative.
+
+A configuration that cuts a kernel is timed as the sequence of its launches:
+one workload whose `launch` issues them one after the other on one stream,
+every tensor one buffer whichever launch names it, a temporary passed between
+two of them in global memory as SeisSol's scratch memory holds it
+(`driver_bench.emit_sequence_tu`). The wall clock then carries every launch's
+overhead, as SeisSol pays it, and the device clock spans the first launch to
+the last -- not on SYCL, where the event the driver times by stands for the
+last command only, and a sequence has no device clock. Its cost is the
+launches' added up (`analysis.cost.sequence_cost`): a temporary between two
+launches is written by one and read by the other, an input read again by
+every launch that reads it.
+
+Before anything is timed, every configuration's outputs after one launch are
+checked against `baseline`'s (`CHECK`, `run.py --check`): the same inputs --
+the pattern, and the description's numbers in every batch-constant operator --
+and a checksum over the box each output is written over, weighted by place,
+beside the same sum of absolute values to read a difference against. A
+configuration further from `baseline` than rounding (`run.CHECK_TOLERANCE`)
+computes something else, and is kept out of the timing with the difference as
+its error.
+
 ## Symbols and build units
 
 The emitted symbol is `kernel_kernel_<digest>`, a digest of the generated source
@@ -146,10 +184,11 @@ with the name taken out. The source records the options it was built with
 symbol, and two workloads that generate the same kernel under one configuration
 always do.
 
-The build unit is one binary per `(target, datatype, options, lane ceiling)`,
-holding every workload in the suite. Inside a binary the configuration is
-fixed; across binaries the configuration is the binary's identity and goes in
-the manifest. The batch is a runtime argument and forces no rebuild.
+The build unit is one binary per `(target, datatype, options, lane ceiling,
+partition)`, holding every workload in the suite. Inside a binary the
+configuration is fixed; across binaries the configuration is the binary's
+identity and goes in the manifest. The batch is a runtime argument and forces
+no rebuild.
 
 Unique per kernel is not unique per workload: two workloads can generate the
 same kernel — a pointwise operation that does not change with the order, for

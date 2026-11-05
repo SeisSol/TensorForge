@@ -25,11 +25,11 @@ names one kernel under one configuration: two configurations of a workload
 never share one, and two workloads that generate the same kernel under one
 configuration always do (`build.build` reports the second as the first).
 
-The unit is one binary per `(target, datatype, options, lane ceiling)`,
-holding every workload in the suite.  Within a binary the configuration is
-fixed; across binaries the configuration is the binary's identity and is
-recorded in the manifest.  The batch is a runtime argument and needs no
-rebuild.
+The unit is one binary per `(target, datatype, options, lane ceiling,
+partition)`, holding every workload in the suite.  Within a binary the
+configuration is fixed; across binaries the configuration is the binary's
+identity and is recorded in the manifest.  The batch is a runtime argument
+and needs no rebuild.
 """
 
 from __future__ import annotations
@@ -41,7 +41,8 @@ import io
 import json
 import os
 import sys
-from dataclasses import dataclass, replace
+from collections import defaultdict
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -90,6 +91,13 @@ class Workload:
     #: the capture says.  Part of what the kernel *is*: the name alone is
     #: shared by every order, precision and equation (`capture.py`).
     capture: Optional[Capture] = None
+    #: The exported description the descriptors are read from, where there
+    #: is one: a configuration cuts the export into launches
+    #: (`Config.partition`), not TensorForge's reading of it.  Not part of
+    #: the identity -- the name and the capture are -- and a dictionary has
+    #: no hash.
+    description: Optional[Dict] = field(default=None, compare=False,
+                                        repr=False)
 
     def __post_init__(self):
         if not callable(self.descrs):
@@ -108,6 +116,12 @@ class Config:
     #: True where `lane_ceiling` is meant as "the wave width", which `None`
     #: also spells; the two are told apart so a manifest can say which.
     wave_wide: bool = False
+    #: How a kernel is cut into launches (`PARTITIONS`): `whole`, one;
+    #: `chains`, the launches gemmforge-chainforge makes of it; `ops`, one per
+    #: operation.  Anything but `whole` needs an exported kernel
+    #: (`Workload.description`) and is timed as the sequence of its launches,
+    #: one after the other on one stream, the way SeisSol issues them.
+    partition: str = 'whole'
 
 
 @dataclass(frozen=True)
@@ -126,6 +140,10 @@ class Suite:
     targets: Optional[Tuple[TargetSpec, ...]]   # None: detect at run time
     datatypes: Tuple[Datatype, ...]
     description: str = ''
+    #: Whether a run checks every exported workload's outputs against the
+    #: reference configuration's before timing it (`run.check_units`): for a
+    #: suite whose configurations compute one thing in several ways.
+    check: bool = False
 
 
 @dataclass(frozen=True)
@@ -251,6 +269,14 @@ CONFIGS: Dict[str, Config] = {
     # ranking chooses its matrix path whatever the option says.  Where it
     # changes nothing, the row times `baseline`'s code again.
     'tensor-cores': Config('tensor-cores', Options(tensor_cores=True)),
+    # A kernel cut into launches, each built by TensorForge.  `chains` cuts
+    # it where gemmforge-chainforge, the generators SeisSol used before
+    # TensorForge, cut it and changes nothing else, so against `baseline` it
+    # is what fusing the whole kernel is worth; `ops` is one launch per
+    # operation, what yateto makes of the kernel where chainforge cannot be
+    # imported.  Only an exported kernel can be cut (`split_description`).
+    'chains': Config('chains', partition='chains'),
+    'ops': Config('ops', partition='ops'),
     # A second `baseline` under another name, and the only row here that is
     # not a question about the generator.  It builds the same kernel on
     # every target, so the gap between the two is the machine moving under
@@ -362,27 +388,190 @@ def _names_in(node) -> List[str]:
     return found
 
 
-def split_description(description: Dict) -> List[Dict]:
-    """An exported kernel as one description per operation, in order: the
-    chain a generator launches that does not fuse, one kernel per product.
+# -- launches --------------------------------------------------------------- #
 
-    Every temporary becomes a global array, written by one launch and read
-    by the next, in the layout SeisSol's scratch allocator gives it --
-    strided per element (`n*N+o&`) -- with only the flag that let it live in
-    registers or shared memory taken away.  Nothing else changes: the
-    operations, their operands and the constants are the kernel's own, so
-    the pieces together compute what it computes, through memory.
+@dataclass(frozen=True)
+class Launch:
+    """The operations of an exported kernel one launch computes, by their
+    place in it, and what a generator before TensorForge makes of them
+    (`kind`): `chain`, GEMMs chainforge runs as one kernel; `gemm` and
+    `csa`, gemmforge's GEMM and copy-scale-add; `other`, an operation
+    neither of them takes; `kernel`, a whole kernel."""
+    kind: str
+    operations: Tuple[int, ...]
+
+
+def _window(ref: Dict) -> bool:
+    """Whether an operand reference is a window into a larger tensor."""
+    return bool(ref.get('sliced') or ref.get('offset_from')
+                or any(ref.get('offset') or ()))
+
+
+def is_gemm(op: Dict) -> bool:
+    """A product gemmforge and chainforge take: two matrices, one index
+    contracted, nothing transposed, no window, no condition --
+    `C[mn] = A[mk] B[kn]`.  The products of SeisSol's elastic kernels are
+    all of this shape; a transposed one, which yateto can hand them as
+    well, is left to `other` rather than guessed at."""
+    return (op.get('type') == 'multilinear' and len(op['args']) == 2
+            and len(op['result']['indices']) == 2
+            and all(len(a['indices']) == 2 for a in op['args'])
+            and op.get('permute') == [[0, 1], [0, 1]]
+            and op.get('target') == [[0, -1], [-1, 1]]
+            and not op.get('condition')
+            and not any(_window(r) for r in [op['result'], *op['args']]))
+
+
+def is_csa(op: Dict) -> bool:
+    """A copy-scale-add gemmforge takes: one matrix, read the way the
+    result is laid out, scaled and stored or added."""
+    return (op.get('type') == 'multilinear' and len(op['args']) == 1
+            and len(op['result']['indices']) == 2
+            and op['args'][0]['indices'] == op['result']['indices']
+            and not op.get('condition')
+            and not any(_window(r) for r in [op['result'], *op['args']]))
+
+
+def _kind(op: Dict) -> str:
+    return 'gemm' if is_gemm(op) else 'csa' if is_csa(op) else 'other'
+
+
+def whole_partition(description: Dict) -> List[Launch]:
+    """The kernel as one launch."""
+    return [Launch('kernel', tuple(range(len(description['operations']))))]
+
+
+def ops_partition(description: Dict) -> List[Launch]:
+    """One launch per operation: what yateto launches through gemmforge
+    where chainforge cannot be imported."""
+    return [Launch(_kind(op), (i,))
+            for i, op in enumerate(description['operations'])]
+
+
+def chain_partition(description: Dict) -> List[Launch]:
+    """The launches gemmforge-chainforge makes of a kernel: runs of GEMMs as
+    chainforge chains, everything else one launch each.
+
+    yateto's `FindFusedGemms` (`controlflow/fused_gemm_automata`), on the
+    export.  A chain is what chainforge runs as one kernel, which keeps the
+    chain's temporaries in its own memory and takes the factors of its last
+    GEMM alone at run time.  So a GEMM starts a chain unless it reads a
+    temporary or accumulates into one; it joins the chain unless the GEMM
+    before it is scaled by a factor known only at run time, it accumulates
+    into a temporary, or it reads a temporary the chain did not write.  A
+    chain whose temporaries are read after it loses GEMMs from its end until
+    none are, and those run on their own; a GEMM that cannot be in a chain
+    is gemmforge's.  Checked against what yateto hands the two generators
+    for SeisSol's elastic kernels at orders 3, 4 and 6, in both precisions,
+    for sm_86 and gfx90a: the same launches with the same matrices.
+    """
+    tensors = {t['name']: t for t in description['tensors']}
+    ops = description['operations']
+
+    def temporary(name: str) -> bool:
+        return bool(tensors[name].get('flags', {}).get('temporary'))
+
+    def by_argument(op: Dict) -> bool:
+        alpha = (op.get('linear') or {}).get('alpha')
+        return alpha is not None and tensors[alpha['name']]['values'] is None
+
+    def temporaries_read(op: Dict) -> set:
+        return {a['name'] for a in op['args'] if temporary(a['name'])}
+
+    def accumulates_into_temporary(op: Dict) -> bool:
+        return (bool((op.get('linear') or {}).get('add'))
+                and temporary(op['result']['name']))
+
+    # Per operation, every tensor the ones after it touch.
+    touched_after: List[set] = [set() for _ in ops]
+    seen: set = set()
+    for i in reversed(range(len(ops))):
+        touched_after[i] = set(seen)
+        seen |= set(_names_in(ops[i]))
+
+    launches: List[Launch] = []
+    chain: List[int] = []
+
+    def close() -> None:
+        alone: List[int] = []
+        while chain:
+            written = {ops[i]['result']['name'] for i in chain
+                       if temporary(ops[i]['result']['name'])}
+            if not written & touched_after[chain[-1]]:
+                break
+            alone.insert(0, chain.pop())
+        if chain:
+            launches.append(Launch('chain', tuple(chain)))
+        launches.extend(Launch('gemm', (i,)) for i in alone)
+        chain.clear()
+
+    for i, op in enumerate(ops):
+        if not is_gemm(op):
+            close()
+            launches.append(Launch(_kind(op), (i,)))
+            continue
+        if chain:
+            written = {ops[j]['result']['name'] for j in chain}
+            if (by_argument(ops[chain[-1]]) or accumulates_into_temporary(op)
+                    or not temporaries_read(op) <= written):
+                close()
+        if not chain and (temporaries_read(op)
+                          or accumulates_into_temporary(op)):
+            launches.append(Launch('gemm', (i,)))
+            continue
+        chain.append(i)
+    close()
+    return launches
+
+
+#: How a configuration cuts a kernel into launches (`Config.partition`).
+PARTITIONS: Dict[str, Callable[[Dict], List[Launch]]] = {
+    'whole': whole_partition,
+    'chains': chain_partition,
+    'ops': ops_partition,
+}
+
+
+def split_description(description: Dict,
+                      launches: Optional[Sequence[Launch]] = None
+                      ) -> List[Dict]:
+    """An exported kernel as one description per launch, in order -- by
+    default one launch per operation, the chain a generator launches that
+    does not fuse.
+
+    A temporary that more than one launch touches becomes a global array,
+    written by one launch and read by a later one, in the layout SeisSol's
+    scratch allocator gives it -- strided per element (`n*N+o&`) -- with
+    only the flag that let it live in registers or shared memory taken
+    away; one that a single launch touches stays where that launch keeps
+    it.  Nothing else changes: the operations, their operands and the
+    constants are the kernel's own, so the pieces together compute what it
+    computes, through memory.
     """
     tensors = description['tensors']
+    operations = description['operations']
+    if launches is None:
+        launches = ops_partition(description)
+    order = [i for launch in launches for i in launch.operations]
+    if order != list(range(len(operations))):
+        raise ValueError('the launches have to take every operation once and '
+                         'in order')
+    touched: Dict[str, set] = defaultdict(set)
+    for n, launch in enumerate(launches):
+        for i in launch.operations:
+            for name in _names_in(operations[i]):
+                touched[name].add(n)
     pieces = []
-    for op in description['operations']:
-        used = set(_names_in(op))
+    for n, launch in enumerate(launches):
+        ops = [operations[i] for i in launch.operations]
+        used = set(_names_in(ops))
         kept = []
         for tensor in tensors:
             if tensor['name'] not in used:
                 continue
             tensor = json.loads(json.dumps(tensor))
-            if tensor.get('flags', {}).get('temporary'):
+            if (tensor.get('flags', {}).get('temporary')
+                    and touched[tensor['name']] != {n}):
                 tensor['flags']['temporary'] = False
             kept.append(tensor)
         missing = used - {t['name'] for t in kept}
@@ -391,7 +580,7 @@ def split_description(description: Dict) -> List[Dict]:
                              'which the description does not declare')
         pieces.append({**{k: v for k, v in description.items()
                           if k not in ('tensors', 'operations')},
-                       'tensors': kept, 'operations': [op]})
+                       'tensors': kept, 'operations': ops})
     return pieces
 
 
@@ -439,13 +628,14 @@ def from_dump(path: Path, pattern: str = '*',
                     out.append(Workload(
                         name=Piece(symbol, index, len(pieces)).name,
                         descrs=factory, datatype=datatype,
-                        origin=f'split:{Path(path).name}', capture=capture))
+                        origin=f'split:{Path(path).name}', capture=capture,
+                        description=piece))
                 continue
             def factory(description=description):
                 return DescriptionReader(arch=None).read(description)[0]
             out.append(Workload(name=symbol, descrs=factory, datatype=datatype,
                                 origin=f'dump:{Path(path).name}',
-                                capture=capture))
+                                capture=capture, description=description))
         return out
     if split:
         raise ValueError(f'{path}: only an export (`descriptions`) can be '
@@ -508,7 +698,7 @@ def load(path: Path) -> Suite:
 
     Required: `NAME`, `workloads()`.  Optional: `DESCRIPTION`, `BATCHES`,
     `CONFIGS` (labels into the table above, or `Config` objects), `TARGETS`,
-    `DATATYPES`.
+    `DATATYPES`, `CHECK`.
     """
     path = Path(path)
     spec = importlib.util.spec_from_file_location(f'tfsuite_{path.stem}', path)
@@ -550,7 +740,8 @@ def load(path: Path) -> Suite:
         datatypes=tuple(getattr(mod, 'DATATYPES',
                                 sorted({w.datatype for w in workloads},
                                        key=lambda d: d.name))),
-        description=getattr(mod, 'DESCRIPTION', ''))
+        description=getattr(mod, 'DESCRIPTION', ''),
+        check=bool(getattr(mod, 'CHECK', False)))
 
 
 def expand(suite: Suite, targets: Sequence[TargetSpec]) -> List[BuildUnit]:

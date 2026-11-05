@@ -771,6 +771,11 @@ def profile_unit(unit_build: bench_build.UnitBuild,
     # has the toolchain.
     exe = unit_build.exe or Path('<unbuilt>')
     for record in unit_build.workloads:
+        if record.launches > 1:
+            # The adapters select one kernel by its symbol and skip a number
+            # of its launches; a workload of several launches is several
+            # kernels, and its symbol names none of them.
+            continue
         if args.dry_run:
             if record.symbol is None:
                 continue
