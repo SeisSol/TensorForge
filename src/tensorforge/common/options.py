@@ -639,6 +639,33 @@ declare('split_predicated_load',
             'a value, there is no other lane to read from, and an address '
             'clamped by a mask is not an address.')
 
+declare('convert_lane_guards',
+        rule=lambda target: target.prefs.convert_lane_guards,
+        parse=parse_bool,
+        doc='Lower a guard over a lane-varying condition the way the '
+            'explicit-vector lowering always does (the PIR pass `if_convert`): '
+            'arithmetic runs on every lane, reads become selects, and only a '
+            'statement with a side effect keeps a branch of its own.\n'
+            'For a miscompilation and not for the program, like '
+            '`split_predicated_load`, and the same one met another way.  '
+            'SeisSol\'s time derivative computes its last derivative on one '
+            'lane, which reads by broadcast what the lanes above it computed, '
+            'and assigns and stores the result under `if (lane < 1)`.  With '
+            'its optimizer on, the Intel device compiler loses part of what '
+            'those lanes contribute: on the Max 1550, 8 to 16 values an '
+            'element of the last derivative and of the integral that adds it '
+            'up, at orders 4 and 6 in both precisions, ahead of time and '
+            'through the JIT alike, with every predicated load already split.  '
+            '`-cl-opt-disable` computes it, and so does this, both ways; '
+            'spelling the broadcast `select_from_group`, or turning off IGC\'s '
+            'code sinking, does not.\n'
+            'What it costs, over the twenty elastic kernels at orders 4 and 6 '
+            'in both precisions: 0.3 % more time in geometric mean, from 13 % '
+            'less (the order-4 derivative in double, which was wrong before) '
+            'to 28 % more (`volume` at order 4 in double).\n'
+            'Intel only.  Elsewhere a guard around a block of arithmetic is '
+            'one branch, and this makes it one per statement that writes.')
+
 declare('inline_pir_values',
         default=True,
         parse=parse_bool,

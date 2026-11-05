@@ -550,6 +550,7 @@ class AbstractInstruction(ABC):
       # (`BatchLoop._gen_grouped_ir`).
       rows = pir.GroupRows(builder.scratch, context.target.lexic.pick)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
+                        convert_guards=options.convert_lane_guards,
                         debug=options.ir_debug, move=move, wrap=wrap,
                         place=place, barriers=barriers, prefetch=prefetch,
                         shards=held, rows=rows, carry=carried,
@@ -612,6 +613,7 @@ class AbstractInstruction(ABC):
 
     simd = _explicit_simd(self._context)
     debug = self._context.get_user_options().ir_debug
+    convert = self._context.get_user_options().convert_lane_guards
     def attempt():
       builder = pir.IRBuilder(fptype=self._context.fp_type,
                               context=self._context,
@@ -621,6 +623,7 @@ class AbstractInstruction(ABC):
     _, body = _fused_if_over_budget(
         self._context, _deciding_swizzles(self._context, attempt),
         lambda _builder, body: pir.optimize(body, explicit_simd=simd,
+                                            convert_guards=convert,
                                             debug=debug,
                                             where=type(self).__name__))
 

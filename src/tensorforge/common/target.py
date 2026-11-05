@@ -125,6 +125,7 @@ class Preferences:
     stage_members: bool = False
     split_member_copies: bool = False
     split_predicated_load: bool = False
+    convert_lane_guards: bool = False
     inline_constants: int = 64
     argument_constants: bool = False
     ell_gather: int = 3
@@ -294,7 +295,11 @@ PREFERENCES = {
         # faster.  The explicit vector and AdaptiveCpp are not measured and
         # keep the deduction (`_explicit_simd`, `ONEAPI_ONLY`).
         lanes_per_mult=16,
+        # Both for IGC's optimizer and not for the hardware: a lane guard it
+        # carries backwards into the lanes a broadcast reads
+        # (`Options.split_predicated_load`, `Options.convert_lane_guards`).
         split_predicated_load=True,
+        convert_lane_guards=True,
         tune_preload_globals=True,
         lanes_down_to_wave=True),
 }

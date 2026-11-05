@@ -53,7 +53,7 @@ class BodyContext(PassContext):
     """One body, and what is known about it."""
 
     def __init__(self, body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
-                 where: str = ''):
+                 convert_guards: bool = False, where: str = ''):
         super().__init__()
         self.body = body
         #: What built the body, for the findings reported about it.
@@ -61,6 +61,9 @@ class BodyContext(PassContext):
         #: Whether the lane is in the type, where a guard over a lane-varying
         #: condition is a mask with no branch to lower it to.
         self.explicit_simd = explicit_simd
+        #: Whether such a guard is converted under SPMD too, where it could be
+        #: a branch (`Options.convert_lane_guards`).
+        self.convert_guards = convert_guards
         #: What `schedule_async` could not determine statically.
         self.diagnostics: List[str] = []
         self._reported: frozenset = frozenset()
@@ -666,7 +669,8 @@ def standard_pipeline(debug: str = '',
         pm.add(prefetch)
     pm.add(Rewrite('if_convert',
                    lambda body: if_convert(body, sink_into_loops=True),
-                   preserves=('flat',), when=lambda pc: pc.explicit_simd))
+                   preserves=('flat',),
+                   when=lambda pc: pc.explicit_simd or pc.convert_guards))
     for name, fn in (('converge', converge_crosslane), ('fold', fold),
                      ('cse', cse)):
         pm.add(Rewrite(name, fn, preserves=('flat',)))
@@ -727,6 +731,7 @@ def standard_pipeline(debug: str = '',
 
 
 def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
+             convert_guards: bool = False,
              debug: str = '', diagnostics: Optional[List[str]] = None,
              move: Optional[MoveLoads] = None,
              wrap: Optional[WrapLoads] = None,
@@ -754,9 +759,12 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     the value -- ``early_forward`` a load of memory, ahead of the atomics
     and of the cover's count; ``own`` keeps a buffer every lane reads only
     what it wrote itself in registers;
+    ``convert_guards`` lowers a lane guard to selects under SPMD as well
+    (`Options.convert_lane_guards`);
     ``where`` names what built the body in the findings `debug` reports.
     """
-    pc = BodyContext(body, explicit_simd=explicit_simd, where=where)
+    pc = BodyContext(body, explicit_simd=explicit_simd,
+                     convert_guards=convert_guards, where=where)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
                       shards, rows, carry, atomics, forward,
                       early_forward, own).run(pc)
