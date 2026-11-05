@@ -2842,8 +2842,20 @@ class MultilinearInstruction(ComputeInstruction):
                 # outer product
                 kx = 0
             else:
-                # TODO: remove
-                kx = self._ks[0][0]
+                # Where the contraction's first step lies within the block `B`
+                # is read from.  `unwindK` reads `B` a block of lanes at a
+                # time, from the block holding that step (slot `ks00 // span`)
+                # on, and every path counts its positions from that block's
+                # start, the lead operand's steps `kx` later (`_load_a`,
+                # `matmul32`).  That is the step itself only while it lies in
+                # the first block; past it, the blocks before it were counted
+                # a second time.  At one lane a multiplication every window
+                # from depth 1 starts past the first block: SeisSol's time
+                # derivative split into its products paired `kDivMT(k)[:, 1]`
+                # with `dQ(k)[2, :]` on AMD, where `dQ` is a register image the
+                # DPP chain reads -- about 10 % off (`test_regressions`,
+                # `tc_window_past_block`).
+                kx = self._ks[0][0] % span
 
             def unwindK(k, full):
                 ks00 = self._ks[0][0] if len(self._ks) > 0 else 0
