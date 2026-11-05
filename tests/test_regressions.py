@@ -1157,3 +1157,100 @@ def test_a_term_of_scalars_alone_is_their_product(backend, arch):
         if got is None or abs(got - want) > 1e-6 * max(1.0, abs(want)):
             wrong.append((r, got, want))
     assert not wrong, f"{len(wrong)} entries of O are wrong, first {wrong[:3]}"
+
+
+# ----------------------------------------------------------------------
+# A contraction window past the first block of lanes
+# ----------------------------------------------------------------------
+
+def _one_lane_window(backend, arch):
+    """`C = A[0:1, 1:3] B[1:3, :]`: one row, so one lane a multiplication,
+    and a contraction window from depth 1 -- the last product of SeisSol's
+    time derivative taken on its own (`kDivMT(k) x dQ(k)` at the highest `k`,
+    `tools/bench/suites/seissolsplit.py`).  At one lane every row is a block,
+    so the window starts past the first one.
+
+    Built here rather than kept as a case: under ESIMD its staging copy into
+    shared memory is spelled as a cast of an SLM offset (`test_esimd_slm`),
+    a defect of its own that the case corpus would carry as a standing red.
+    """
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+    rows, cols, lo, hi = 1, 9, 1, 3
+    a = Tensor([rows, 4], Addressing.NONE, BoundingBox([0, lo], [rows, hi]),
+               alias="A", datatype=Datatype.F32)
+    b = Tensor([4, cols], Addressing.STRIDED, BoundingBox([lo, 0], [hi, cols]),
+               alias="B", datatype=Datatype.F32)
+    c = Tensor([rows, cols], Addressing.STRIDED,
+               BoundingBox([0, 0], [rows, cols]), alias="C",
+               datatype=Datatype.F32)
+    gen = Generator([GemmDescr(False, False, SubTensor(a), SubTensor(b),
+                               SubTensor(c), alpha=1.0, beta=0.0)],
+                    Context(arch=arch, backend=backend, fp_type=Datatype.F32))
+    gen.generate()
+    return gen, rows, cols, lo, hi
+
+
+@pytest.mark.parametrize("backend,arch", [("hip", "gfx90a"), ("hip", "gfx942"),
+                                          ("hip", "gfx1150"), ("cuda", "sm_86")])
+def test_a_window_past_the_first_block_pairs_each_step_with_its_row(backend,
+                                                                     arch):
+    """The one-lane product (`_one_lane_window`), on the host against the
+    product of its inputs.
+
+    On AMD the DPP chain read `B`'s register image from the block holding the
+    first step and counted that block a second time through `kx`, pairing
+    `A[0, k]` with `B[k + 1, :]` -- the derivative split into its products
+    was 0.9 to 15 % off on MI210 at every order.  The whole block runs
+    (`block=True`): `A` is copied into shared memory by every thread its
+    share.
+    """
+    gen, rows, cols, lo, hi = _one_lane_window(backend, arch)
+    assert gen.lanes.num_threads == 1
+    names = _kernel_names(gen.get_kernel())
+    lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
+    mem = kernel_eval.evaluate_wave(gen.get_kernel(), lanes, seed=5,
+                                    globals_only=True, mults=mults,
+                                    block=True)
+    before = kernel_eval.Slot(5)
+    depth = hi - lo
+    wrong = []
+    for j in range(cols):
+        for i in range(rows):
+            want = sum(before.read(names["A"], i + k * rows)
+                       * before.read(names["B"], k + j * depth)
+                       for k in range(depth))
+            got = mem.get((names["C"], i + j * rows))
+            if got is None or abs(got - want) > 1e-6 * max(1.0, abs(want)):
+                wrong.append((i, j, got, want))
+    assert not wrong, f"{len(wrong)} entries of C are wrong, first {wrong[:3]}"
+
+
+@pytest.mark.parametrize("shape", ["one lane", "tc_window_past_block"])
+@pytest.mark.parametrize("arch", ["gfx90a", "gfx942", "gfx1150"])
+def test_the_matrix_paths_count_from_the_block_holding_the_first_step(
+        monkeypatch, shape, arch):
+    """`MatmulOperands.kx` is where the window's first step lies in the block
+    `B` is read from, not the step: every path reads `B` a block at a time
+    from that block (`unwindK`) and the lead operand `kx` steps later.  The
+    two agree while the window starts in the first block; these start in the
+    second -- one lane from depth 1, eight lanes from depth 9 -- which the
+    host cannot run through the DPP and MFMA intrinsics.  The GPU runs of
+    `tc_window_past_block` can (`test_kernels`)."""
+    from tensorforge.backend.instructions.compute.primitives import amd
+    seen = []
+    real = amd.matmul
+
+    def spy(writer, ops, ctx, span):
+        seen.append((ops.kx, ops.threads * ops.lead_width))
+        return real(writer, ops, ctx, span)
+    monkeypatch.setattr(amd, "matmul", spy)
+    if shape == "one lane":
+        lo = _one_lane_window("hip", arch)[3]
+    else:
+        lo = _load(shape).LO
+        _generate(shape, "hip", arch)
+    assert seen, "no matrix path was asked"
+    assert all(kx == lo % span for kx, span in seen), seen
