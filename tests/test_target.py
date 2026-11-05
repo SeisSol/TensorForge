@@ -298,6 +298,9 @@ def test_the_explicit_vector_changes_what_it_cannot_express():
     ('gfx942', 'hip', 'inline_constants', 64),
     ('sm_86', 'cuda', 'argument_constants', True),
     ('pvc', 'oneapi', 'split_predicated_load', True),
+    ('pvc', 'oneapi', 'convert_lane_guards', True),
+    ('sm_86', 'cuda', 'convert_lane_guards', False),
+    ('gfx942', 'hip', 'convert_lane_guards', False),
 ])
 def test_an_option_nobody_set_takes_the_preference(arch, backend, option,
                                                    expected):
