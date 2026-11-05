@@ -173,6 +173,11 @@ def _stated(uniform, joined: Uniformity, what: str) -> Uniformity:
 #: `v{id}_{hint}`, so this over-matches on purpose and the lookup decides.
 _IDENT = re.compile(r'\bv\d+\w*\b')
 
+#: What an operation computes with, as opposed to where it finds it: the
+#: loads `begin_operation` keeps to the operation that wrote them.
+_NUMBERS = frozenset({Datatype.F16, Datatype.BF16, Datatype.F32, Datatype.F64,
+                      Datatype.F128})
+
 
 def _names_in(code: str, name: str) -> bool:
     """Whether `name` appears in `code` as an identifier, not as a substring.
@@ -259,6 +264,24 @@ class IRBuilder:
         self._prologue: List[Stmt] = []
         #: window name -> the cursor of its bulk copies in this body
         self._bulk_cursors: Dict[str, str] = {}
+        #: The operation of a shared body being built, where its operands are
+        #: to be taken over only within it (`begin_operation`); None otherwise.
+        self._operation: Optional[int] = None
+
+    def begin_operation(self) -> None:
+        """An operation joins this body: from here on, until the next one
+        does, what it loads from memory is its own.
+
+        Only while the context asks for it (`reread_per_operation`, set by a
+        build that did not fit its registers).  A load of a number from
+        memory then carries the operation it was written for, which is part
+        of what `load_cse` keys it on -- so a later operation reading the
+        same location reads it again instead of keeping the first one's
+        value live through everything in between.  Addresses, indices and
+        pointers are exempt: they are what every operation of the body
+        shares, and cheap to hold."""
+        if getattr(self.context, 'reread_per_operation', False):
+            self._operation = (self._operation or 0) + 1
 
     # -- values ------------------------------------------------------------ #
 
@@ -1293,6 +1316,11 @@ class IRBuilder:
             # Lanes before a window's start (`LeadIndex.first`), the other
             # end of the same statement.
             attrs += [('head', head)]
+        if (self._operation is not None
+                and space not in (MemSpace.REGISTER, MemSpace.NONE)
+                and getattr(type_, 'base', None) in _NUMBERS):
+            # Taken over within this operation only (`begin_operation`).
+            attrs += [('operation', self._operation)]
         attrs = tuple(attrs)
 
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),

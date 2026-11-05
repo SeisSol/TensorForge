@@ -928,6 +928,25 @@ declare('amd_moved_broadcast',
             'an element fused in double precision and 28.1 with the moves (one '
             'per product and row), 26.3 against 21.3 in single.')
 
+declare('reread_over_budget',
+        default=True,
+        parse=parse_bool,
+        doc='Where a body does not fit the register file, build it once more '
+            'with every operand loaded from memory taken over only within the '
+            'operation that loaded it, and keep that build where it needs '
+            'fewer registers.  `pir.load_cse` otherwise hands a value read '
+            'once to every later read of the same location, which is free '
+            'where the registers are there and a spill where they are not: '
+            'SeisSol\'s elastic time derivative read its three star matrices '
+            'once and held them through every step, 2 KB a lane, and from '
+            'order 4 in double precision spilled 1.8 to 2.3 KB on sm_90 '
+            'where it had not before the barriers moved behind the passes '
+            '(668337a8).  The register file is the target\'s '
+            '(`max_reg_per_thread`), against all live values where wave-'
+            'uniform ones share it (NVIDIA, Intel), and against the lane-'
+            'varying ones and the scalar file apart where they do not '
+            '(AMD, `max_scalar_reg_per_wave`).')
+
 declare('stage_group',
         default=8,
         doc='Multiplications a block holds under `stage_members`, and so how '

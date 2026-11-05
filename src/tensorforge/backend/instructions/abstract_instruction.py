@@ -147,7 +147,74 @@ def _deciding_swizzles(context, attempt, lanes: Optional[int] = None):
   return run
 
 
-def _fused_if_over_budget(context, attempt, finish):
+def _register_excess(context, body, lanes: Optional[int] = None
+                     ) -> Optional[int]:
+  """Bytes a lane holds live at `body`'s peak beyond what its registers may
+  take (`FIT_FRACTION` of the target's file), 0 where it fits, and None where
+  the question has no answer here: no budget stated, or an explicit vector,
+  where `pir.pressure` still counts arrays whole.
+
+  One file or two, as the target has them.  A value a whole wave agrees on
+  takes a scalar register on AMD (`max_scalar_reg_per_wave`), so the lane-
+  varying peak and the uniform one are held to their files apart there.
+  Elsewhere it takes a vector register like any other -- NVIDIA's uniform
+  datapath carries integers and addresses only -- and the two together are
+  held to the one file: the star matrices SeisSol's time derivative held
+  through every step were 2 KB of wave-uniform values on sm_90, against 1020 B
+  of registers, and the lane-varying peak alone said 139 registers.
+  `lanes` is how many lanes a multiplication spans (`body_pressure`).
+  """
+  hw = context.target.hw
+  budget = getattr(hw, 'max_reg_per_thread', None)
+  if _explicit_simd(context) or budget is None:
+    return None
+  total, split = body_pressure(context, body, False, lanes)
+  scalar = getattr(hw, 'max_scalar_reg_per_wave', None)
+  if scalar is None or len(split) < 2:
+    return max(0, total - int(FIT_FRACTION * budget))
+  lane, uniform = split[0], split[1]
+  return (max(0, lane - int(FIT_FRACTION * budget))
+          + max(0, uniform - int(FIT_FRACTION * scalar)))
+
+
+def _reread_if_over_budget(context, attempt, finish, builder, body,
+                           lanes: Optional[int] = None):
+  """`body`, or a build of it whose operations each read their operands
+  from memory again, where that one is over its registers by less.
+
+  `pir.load_cse` hands a value loaded once to every later read of the same
+  location, across operations as well -- which is free where the registers
+  are there, and a spill where they are not.  So the question is asked of the
+  finished body: where it does not fit (`_register_excess`), it is built once
+  more with the loads of numbers from memory keyed to the operation that wrote
+  them (`IRBuilder.begin_operation`), and the build that is over by less is
+  kept.  An operation still shares a load within itself; what goes is only
+  the hand-over from one operation to the next, where the value lives through
+  everything the operations in between hold.
+
+  The flag stays set where the second build is kept, so that a build after
+  it (`_fused_if_over_budget`'s) is built the same way; the caller clears it.
+  """
+  if not context.get_user_options().reread_over_budget:
+    return builder, body
+  excess = _register_excess(context, body, lanes)
+  if not excess:
+    return builder, body
+  materialized = getattr(context, 'materialized_broadcast', False)
+  context.reread_per_operation = True
+  context.materialized_broadcast = False
+  again, rebuilt = attempt()
+  rebuilt = finish(again, rebuilt)
+  if _register_excess(context, rebuilt, lanes) < excess:
+    return again, rebuilt
+  context.reread_per_operation = False
+  context.materialized_broadcast = materialized
+  return builder, body
+
+
+def _fused_if_over_budget(context, attempt, finish,
+                          lanes: Optional[int] = None,
+                          operations: bool = False):
   """`attempt()`, finished, and once more with fused broadcasts if the first
   one does not fit.
 
@@ -168,36 +235,47 @@ def _fused_if_over_budget(context, attempt, finish):
   Not under an explicit vector, where `pir.pressure` still counts arrays whole
   and so would push every body back; and nothing happens where the target
   states no budget or no broadcast was materialized.
+
+  Where the body is a section's, whose operations join it one by one
+  (`operations`), a build that reads their operands again comes first
+  (`_reread_if_over_budget`); `lanes` is how many lanes a multiplication
+  spans.
   """
   context.materialized_broadcast = False
-  builder, body = attempt()
-  body = finish(builder, body)
-  if not getattr(context, 'materialized_broadcast', False):
-    return builder, body
-  simd = _explicit_simd(context)
-  budget = getattr(context.target.hw, 'max_reg_per_thread', None)
-  if simd or budget is None:
-    return builder, body
-  used = pir.pressure(body, in_bytes=True, explicit_simd=simd)
-  if used <= FIT_FRACTION * budget:
-    return builder, body
-  # On CDNA a move is read by its products right behind it and holds no more
-  # than the fused form does (`amd.moved_on_cdna`), so a body over the budget
-  # is over it either way, and the fused form is taken only where it holds
-  # less.  Elsewhere the moved values are what went over: taken back as before.
-  compare = getattr(context.get_user_options(), 'amd_moved_broadcast', False)
-  moved = (builder, body)
-  context.force_fused_broadcast = True
+  reread = getattr(context, 'reread_per_operation', False)
   try:
     builder, body = attempt()
     body = finish(builder, body)
+    if operations:
+      builder, body = _reread_if_over_budget(context, attempt, finish,
+                                             builder, body, lanes)
+    if not getattr(context, 'materialized_broadcast', False):
+      return builder, body
+    simd = _explicit_simd(context)
+    budget = getattr(context.target.hw, 'max_reg_per_thread', None)
+    if simd or budget is None:
+      return builder, body
+    used = pir.pressure(body, in_bytes=True, explicit_simd=simd)
+    if used <= FIT_FRACTION * budget:
+      return builder, body
+    # On CDNA a move is read by its products right behind it and holds no
+    # more than the fused form does (`amd.moved_on_cdna`), so a body over the
+    # budget is over it either way, and the fused form is taken only where it
+    # holds less.  Elsewhere the moved values are what went over: taken back
+    # as before.
+    compare = getattr(context.get_user_options(), 'amd_moved_broadcast', False)
+    moved = (builder, body)
+    context.force_fused_broadcast = True
+    builder, body = attempt()
+    body = finish(builder, body)
+    if compare and pir.pressure(body, in_bytes=True,
+                                explicit_simd=simd) >= used:
+      return moved
+    return builder, body
   finally:
     context.force_fused_broadcast = False
     context.materialized_broadcast = False
-  if compare and pir.pressure(body, in_bytes=True,
-                              explicit_simd=simd) >= used:
-    return moved
-  return builder, body
+    context.reread_per_operation = reread
 
 
 class RegisterBudgetWarning(UserWarning):
@@ -472,7 +550,8 @@ class AbstractInstruction(ABC):
         lambda builder, body: cls._optimize_shared_body(context, builder, body,
                                                         place, barriers,
                                                         metrics, shards,
-                                                        trips, carry))
+                                                        trips, carry),
+        lanes=lanes, operations=True)
     return body
 
   @staticmethod
@@ -618,6 +697,9 @@ class AbstractInstruction(ABC):
         buf = sym.pir_buffer(builder)
         if buf is not None:
           builder.mark('defines', buf)
+      # Where the body is built again for its registers, what this
+      # instruction loads is its own (`_reread_if_over_budget`).
+      builder.begin_operation()
       build(builder)
       return
 
