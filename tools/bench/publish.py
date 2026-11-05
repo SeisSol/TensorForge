@@ -41,6 +41,9 @@ number in the text can be checked against the one in the figure.
 | `figures/machines-roofline-*` | runs, ceilings | where does each kernel sit under each machine's own roof? |
 | `figures/configs-*` | runs | does a configuration -- or another generator -- help? |
 | `figures/fusion-*` | split runs | what is fusing a kernel's chain worth? |
+| `figures/legacy-*` | legacy runs | what does TensorForge gain on gemmforge and chainforge, and from what? |
+| `figures/legacy-roofline-*` | legacy runs, ceilings | where does a kernel move under the roof, from their launches to one? |
+| `tables/legacy-*` | legacy runs | how many launches do they make of a kernel, and what do those move? |
 | `figures/lanes-*` | runs | how much of what a kernel issues is needed? |
 | `figures/resources-*` | runs | registers, spills and code, against the order |
 | `figures/precision-*` | runs, ceilings | what does double cost against single? |
@@ -106,7 +109,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import texout                                                    # noqa: E402
-from capture import DATATYPE, Capture, Piece                     # noqa: E402
+from capture import DATATYPE, Capture, Legacy, Piece             # noqa: E402
 from compare import Ceiling, Field, Point, collect               # noqa: E402
 from seissolrun import (Clustering, Run, collect_runs,
                         measured_speedups, read_clustering)      # noqa: E402
@@ -1936,14 +1939,18 @@ def figure_configs(fieldset: Field, kernels: Sequence[str]
     machine, in one precision, right of one where the candidate is faster.
     A row per kernel and order, so that the names are read across rather
     than tilted, and a logarithmic axis, so that twice as fast and twice as
-    slow are as far from one."""
-    configs = fieldset.configs
+    slow are as far from one.
+
+    The configurations are those the kernels were measured in: a run of
+    the pieces of a kernel, or of the legacy comparison, has configurations
+    of its own, which this figure has no point of."""
     ref = fieldset.reference
+    full = [p for p in _full(fieldset, kernels)
+            if p.capture.simulations == 1]
+    configs = sorted({p.config for p in full})
     if len(configs) < 2 or ref is None:
         return []
     others = [c for c in configs if c != ref]
-    full = [p for p in _full(fieldset, kernels)
-            if p.capture.simulations == 1]
     out = []
     for arch, dt, eq in sorted({(p.arch, p.datatype, p.capture.equation)
                                 for p in full}):
@@ -2164,6 +2171,305 @@ def figure_fusion(fieldset: Field, kernels: Sequence[str], clock: str
         out.append(Output(f'fusion-{arch}-{eq}-{dt.lower()}', 'figure', tex,
                           entries, caption))
     return out, skipped
+
+
+# ----------------------------------------------------------------------
+# Against the generators before TensorForge
+# ----------------------------------------------------------------------
+
+#: The configuration the legacy comparison reads as the old generators', and
+#: the ladder between them and TensorForge (`suites/seissolforge.py`).
+LEGACY_CONFIG = 'gemmforge-chainforge'
+
+
+def _legacy(fieldset: Field, kernels: Sequence[str]
+            ) -> Dict[Tuple[str, str, str],
+                      Dict[Tuple[str, int, str], Dict[str, Dict[int, Dict]]]]:
+    """The legacy comparison's rows: per machine, precision and equation,
+    per kernel, order and run, per configuration and batch.  A run and not
+    the whole campaign: two configurations are compared within one run, on
+    one clock."""
+    found: Dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    for p in fieldset.points:
+        legacy = Legacy.of(p.workload)
+        if (legacy is None or legacy.kernel not in kernels
+                or p.capture is None or p.capture.simulations != 1):
+            continue
+        found[(p.arch, p.datatype, p.capture.equation)][
+            (legacy.kernel, p.capture.order, p.run)][p.config][p.batch] = \
+            p.row
+    return found
+
+
+def _legacy_entry(kernel: str, order: int, run: str,
+                  by_config: Dict[str, Dict[int, Dict]], clock: str
+                  ) -> Optional[Dict]:
+    """The comparison of one kernel at one order: what TensorForge gains on
+    the old generators, and the two steps of it -- fusing the whole kernel
+    and the code -- at the largest launch both were measured at, and the
+    whole of it at the smallest, where a sequence's launches weigh most."""
+    base, old = by_config.get('baseline', {}), by_config.get(LEGACY_CONFIG, {})
+    common = sorted(b for b in set(base) & set(old)
+                    if _nanos(base[b], clock) and _nanos(old[b], clock))
+    if not common:
+        return None
+    big, small = common[-1], common[0]
+
+    def ratio(slow: str, fast: str, batch: int) -> Optional[float]:
+        a = by_config.get(slow, {}).get(batch)
+        b = by_config.get(fast, {}).get(batch)
+        ta = _per_element(a, batch, clock) if a else None
+        tb = _per_element(b, batch, clock) if b else None
+        return ta / tb if ta and tb else None
+
+    def launches(config: str) -> Optional[int]:
+        row = by_config.get(config, {}).get(big)
+        return row.get('launches') if row else None
+
+    def moved(config: str) -> Optional[float]:
+        row = by_config.get(config, {}).get(big)
+        return row['bytes'] / big if row and row.get('bytes') else None
+
+    fused = moved('baseline')
+    return {
+        'kernel': kernel, 'order': order, 'run': run, 'clock': clock,
+        'batch_large': big, 'batch_small': small,
+        'total_large': ratio(LEGACY_CONFIG, 'baseline', big),
+        'total_small': (ratio(LEGACY_CONFIG, 'baseline', small)
+                        if small != big else None),
+        'fusion': ratio('chains', 'baseline', big),
+        'code': ratio(LEGACY_CONFIG, 'chains', big),
+        'fusion_ops': ratio('ops', 'baseline', big),
+        'code_ops': ratio('gemmforge', 'ops', big),
+        'launches_chains': launches(LEGACY_CONFIG),
+        'launches_ops': launches('gemmforge'),
+        'bytes_fused': fused,
+        'bytes_chains': moved(LEGACY_CONFIG),
+        'bytes_ops': moved('gemmforge'),
+    }
+
+
+def figure_legacy(fieldset: Field, kernels: Sequence[str], clock: str
+                  ) -> Tuple[List[Output], List[str]]:
+    """TensorForge against gemmforge and chainforge, per kernel and order:
+    what SeisSol gained -- the old generators' time per element over
+    TensorForge's -- and the two steps it parts into, from one run
+    (`suites/seissolforge.py`).  Fusing the whole kernel is TensorForge at
+    the old generators' launches over TensorForge in one; the code is the
+    old generators over TensorForge at the same launches.  The two multiply
+    to the whole, at the largest launch; at the smallest the whole is drawn
+    again, where the sequence's launches weigh most."""
+    found = _legacy(fieldset, kernels)
+    if not found:
+        return [], ['legacy: no kernel measured against gemmforge and '
+                    'chainforge (suites/seissolforge.py)']
+    out, skipped = [], []
+    for (arch, dt, eq), by_kernel in sorted(found.items()):
+        entries = [e for (k, o, run), by_config in by_kernel.items()
+                   for e in [_legacy_entry(k, o, run, by_config, clock)]
+                   if e is not None]
+        tag = f'{arch}-{eq}-{dt.lower()}'
+        if not entries:
+            skipped.append(f'legacy-{tag}: neither TensorForge and the old '
+                           'generators measured at one batch')
+            continue
+        entries.sort(key=lambda e: (kernels.index(e['kernel']), e['order'],
+                                    e['run']))
+        groups = [(e['kernel'], e['order']) for e in entries]
+        series = [('total_large', 'tf s1, only marks', 'all of it'),
+                  ('total_small', 'tf s2, only marks',
+                   'all of it, smallest launch'),
+                  ('fusion', 'tf s3, only marks', 'fusing the kernel'),
+                  ('code', 'tf s4, only marks', 'the code')]
+        values = [e[key] for e in entries for key, _, _ in series
+                  if e.get(key)]
+        if not values:
+            skipped.append(f'legacy-{tag}: no time per element to divide')
+            continue
+        ax = _dot_axis(groups, values,
+                       'speed-up of TensorForge over gemmforge-chainforge')
+        ax.plots = [texout.Plot(style,
+                                [(e.get(key), y)
+                                 for y, e in enumerate(entries)], legend)
+                    for key, style, legend in series]
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {arch}, {_dt_name(dt)}, '
+            f'{eq}; time per element on the {clock} clock, one run; '
+            'all of it = gemmforge-chainforge over baseline, fusing = chains '
+            'over baseline, the code = gemmforge-chainforge over chains; '
+            'one launch per operation (ops, gemmforge) in the CSV'))
+        caption = (f'TensorForge against the generators SeisSol used before '
+                   f'it, gemmforge and chainforge, on '
+                   f'{texout.escape(fieldset.device_of(arch))}, '
+                   f'{_dt_name(dt)}, {eq}: their time per element over '
+                   'TensorForge\'s at the largest launch measured and at the '
+                   'smallest, and the two steps the largest parts into -- '
+                   'fusing the whole kernel, TensorForge at the launches '
+                   'the old generators make of it against TensorForge in one '
+                   'launch, and the code, the old generators against '
+                   'TensorForge at those launches.  Right of one, TensorForge '
+                   f'is faster.  {_clock_sentence(clock)}')
+        out.append(Output(f'legacy-{tag}', 'figure', tex, entries, caption))
+    return out, skipped
+
+
+def figure_legacy_roofline(fieldset: Field, kernels: Sequence[str],
+                           styles: Styles) -> Tuple[List[Output], List[str]]:
+    """Each kernel at each order under one machine's roof twice: as the old
+    generators launch it, hollow, and as TensorForge does, filled, an arrow
+    from the one to the other.
+
+    On one flop count for both, the one the operation needs -- or the dense
+    one where that is asked for: the count a kernel issues is TensorForge's
+    to know and not the old generators'.  So the arrow's rise is the
+    speed-up and its run what the launches between them move through
+    memory, which fusing them saves."""
+    basis = 'dense' if flop_basis() == 'dense' else 'nonzero'
+    found = _legacy(fieldset, kernels)
+    if not found:
+        return [], []
+    out, skipped = [], []
+    for (arch, dt, eq), by_kernel in sorted(found.items()):
+        tag = f'{arch}-{eq}-{dt.lower()}'
+        ceiling = fieldset.ceiling(arch, dt)
+        if ceiling is None or not ceiling.ridge:
+            skipped.append(f'legacy-roofline-{tag}: no {dt} ceiling for '
+                           f'{arch}')
+            continue
+        pairs = []
+        for (kernel, order, run), by_config in sorted(by_kernel.items()):
+            base = by_config.get('baseline', {})
+            old = by_config.get(LEGACY_CONFIG, {})
+            common = sorted(set(base) & set(old))
+            if not common:
+                continue
+            batch = common[-1]
+
+            def place(row: Dict) -> Optional[Tuple[float, float]]:
+                nanos = _nanos(row, 'event')
+                flops = flops_of(row, basis)
+                if not (nanos and flops and row.get('bytes')):
+                    return None
+                return flops / row['bytes'], flops / nanos
+
+            new, was = place(base[batch]), place(old[batch])
+            if new and was:
+                pairs.append((kernel, order, batch, was, new))
+        if not pairs:
+            continue
+        xs = [p[i][0] for p in pairs for i in (3, 4)]
+        ys = [p[i][1] for p in pairs for i in (3, 4)]
+        x0 = min(min(xs) / 2, ceiling.ridge / 8)
+        x1 = max(max(xs) * 2, ceiling.ridge * 4)
+        ax = texout.Axis(options=[
+            'tf', 'tf legend above', 'xmode=log', 'ymode=log',
+            f'xmin={x0:.4g}, xmax={x1:.4g}',
+            f'ymin={min(ys) / 3:.4g}, '
+            f'ymax={ceiling.flops_per_s / 1e9 * 2.2:.4g}',
+            f'xlabel={{flop/byte ({FLOP_LABEL[basis]})}}',
+            f'ylabel={{GFLOP/s ({FLOP_LABEL[basis]})}}'])
+        _roof_lines(ax, ceiling, x0, x1)
+        rows = []
+        for k in kernels:
+            mine = [p for p in pairs if p[0] == k]
+            if not mine:
+                continue
+            ax.plots.append(texout.Plot(
+                styles(k) + ', only marks',
+                [(new[0], new[1]) for _, _, _, _, new in mine],
+                texout.escape(short(k)),
+                labels=[str(o) for _, o, _, _, _ in mine]))
+            ax.plots.append(texout.Plot(
+                styles(k) + ', only marks, mark options={solid, '
+                'fill=white}, forget plot',
+                [(was[0], was[1]) for _, _, _, was, _ in mine]))
+            for _, o, batch, was, new in mine:
+                ax.raw.append(
+                    f'\\draw[tf rule, -stealth] (axis cs:{was[0]:.6g},'
+                    f'{was[1]:.6g}) -- (axis cs:{new[0]:.6g},{new[1]:.6g});\n')
+                rows.append({'kernel': k, 'order': o, 'batch': batch,
+                             'flops': basis,
+                             'intensity_legacy': was[0],
+                             'gflops_legacy': was[1],
+                             'intensity': new[0], 'gflops': new[1],
+                             'speedup': new[1] / was[1],
+                             'bytes_ratio': new[0] / was[0]})
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {arch}, {_dt_name(dt)}, '
+            f'{eq}; device clock, the largest launch both were measured at; '
+            f'flops {FLOP_LABEL[basis]}, for both'))
+        caption = (f'The {eq} kernels under the roof of '
+                   f'{texout.escape(fieldset.device_of(arch))}, '
+                   f'{_dt_name(dt)}, as gemmforge and chainforge launch them '
+                   '(hollow) and as TensorForge does (filled), at the largest '
+                   'launch measured, labelled with the order.  Both on the '
+                   f'flops {FLOP_LABEL[basis]}: the arrow rises by the '
+                   'speed-up and runs right by what the launches between '
+                   'the old generators\' kernels move through memory.')
+        out.append(Output(f'legacy-roofline-{tag}', 'figure', tex, rows,
+                          caption))
+    return out, skipped
+
+
+def table_legacy(fieldset: Field, kernels: Sequence[str]
+                 ) -> List[Output]:
+    """What the old generators make of each kernel, per equation and
+    precision: how many launches, and the compulsory bytes they move
+    against the fused kernel's -- with chainforge and without.  Of the
+    operation and the cut alone, so the same on every machine: read off
+    whichever measured it."""
+    found = _legacy(fieldset, kernels)
+    by_panel: Dict[Tuple[str, str], Dict[Tuple[str, int], Dict]] = \
+        defaultdict(dict)
+    for (arch, dt, eq), by_kernel in sorted(found.items()):
+        for (k, o, run), by_config in sorted(by_kernel.items()):
+            entry = _legacy_entry(k, o, run, by_config, 'wall')
+            if entry is not None and entry['bytes_fused']:
+                by_panel[(eq, dt)].setdefault((k, o), entry)
+    out = []
+    for (eq, dt), entries in sorted(by_panel.items()):
+        body, rows_csv = [], []
+        last = None
+        for (k, o), e in sorted(entries.items(),
+                                key=lambda t: (kernels.index(t[0][0]),
+                                               t[0][1])):
+            name = r'\texttt{' + texout.escape(short(k)) + '}'
+            body.append([name if k != last else '', str(o),
+                         str(e['launches_chains'] or '--'),
+                         str(e['launches_ops'] or '--'),
+                         texout.num(e['bytes_chains'] / e['bytes_fused'])
+                         if e['bytes_chains'] else '--',
+                         texout.num(e['bytes_ops'] / e['bytes_fused'])
+                         if e['bytes_ops'] else '--'])
+            last = k
+            rows_csv.append({'kernel': k, 'order': o, 'equation': eq,
+                             'datatype': dt,
+                             'launches_chains': e['launches_chains'],
+                             'launches_ops': e['launches_ops'],
+                             'bytes_fused': e['bytes_fused'],
+                             'bytes_chains': e['bytes_chains'],
+                             'bytes_ops': e['bytes_ops']})
+        tex = texout.table(
+            'l r r r r r',
+            [['', '', r'\multicolumn{2}{c}{Launches}',
+              r'\multicolumn{2}{c}{Bytes / fused}'],
+             r'\cmidrule(lr){3-4}\cmidrule(l){5-6}',
+             ['Kernel', '$O$', 'CF+GF', 'GF', 'CF+GF', 'GF']],
+            body,
+            comment=('generated by tools/bench/publish.py from the legacy '
+                     'comparison (suites/seissolforge.py): launches per '
+                     'kernel, and compulsory bytes per element against the '
+                     'fused kernel\'s (analysis.cost, launches added up)'))
+        caption = (f'What gemmforge and chainforge (CF+GF) and gemmforge '
+                   f'alone (GF) make of the {eq} kernels, {_dt_name(dt)}: '
+                   'how many launches, and the bytes those move through '
+                   'memory, compulsorily, against the kernel fused into '
+                   'one -- every temporary passed between two launches '
+                   'written and read again, every input read by each launch '
+                   'that reads it.')
+        out.append(Output(f'legacy-{eq}-{dt.lower()}', 'table', tex,
+                          rows_csv, caption))
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -3244,7 +3550,8 @@ def table_buildcost(manifests: Sequence[Dict], fieldset: Optional[Field]
     the heading.
 
     Over the kernels a production build makes: a piece of the split suite
-    is none of them, and a kernel two runs of a campaign built -- the
+    is none of them, nor is a kernel the legacy comparison builds, and a
+    kernel two runs of a campaign built -- the
     timing run's few and the build of the whole configuration
     (`evaluate.py`) -- is one kernel, counted once, with the compile time
     where one of them has it."""
@@ -3252,7 +3559,8 @@ def table_buildcost(manifests: Sequence[Dict], fieldset: Optional[Field]
     for entry in manifests:
         workload = entry.get('workload') or ''
         if (entry.get('error') or entry.get('generate_s') is None
-                or Piece.of(workload) is not None):
+                or Piece.of(workload) is not None
+                or Legacy.of(workload) is not None):
             continue
         capture = Capture.from_tag(entry.get('capture') or '')
         if capture is None:
@@ -3842,6 +4150,9 @@ def build(fieldset: Optional[Field], described: Sequence,
         add(figure_configs(fieldset, kernels),
             'configs: one configuration only')
         add(figure_fusion(fieldset, kernels, clock))
+        add(figure_legacy(fieldset, kernels, clock))
+        add(figure_legacy_roofline(fieldset, kernels, styles))
+        add(table_legacy(fieldset, kernels))
         add(figure_lanes(fieldset, kernels, styles),
             'lanes: no executed flops, or one order only')
         add(figure_resources(fieldset, kernels, styles),

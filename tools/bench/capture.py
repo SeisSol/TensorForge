@@ -157,3 +157,29 @@ class Piece:
         if not m:
             return None
         return cls(m['kernel'], int(m['index']), int(m['count']))
+
+
+#: A kernel as the comparison with the generators before TensorForge
+#: measures it (`suites/seissolforge.py`): `gpu_volume~legacy`.
+_LEGACY = re.compile(r'^(?P<kernel>.+)~legacy$')
+
+
+@dataclass(frozen=True)
+class Legacy:
+    """Which kernel a workload of the legacy comparison is.
+
+    Every configuration of that run times the whole kernel -- whole, cut
+    where gemmforge-chainforge cuts it, or one launch per operation, built
+    by TensorForge or by those generators -- under the name of the kernel
+    with a suffix, so that a reader of the timing runs never sees a second
+    measurement of the kernel in another run, which is another clock."""
+    kernel: str
+
+    @property
+    def name(self) -> str:
+        return f'{self.kernel}~legacy'
+
+    @classmethod
+    def of(cls, workload: str) -> Optional['Legacy']:
+        m = _LEGACY.match(workload)
+        return cls(m['kernel']) if m else None

@@ -41,6 +41,10 @@ def _plan(monkeypatch, tmp_path, *argv):
         plan[name] = command
         return evaluate.Step(name, command, 'ok')
 
+    # The comparison with gemmforge and chainforge is planned as though both
+    # were installed: whether they are is a fact about this machine.
+    import forge
+    monkeypatch.setattr(forge, 'missing', lambda: None)
     monkeypatch.setattr(evaluate, 'run_step', record)
     monkeypatch.setattr(evaluate, 'run_with_env',
                         lambda name, command, env, *rest: record(name,
@@ -68,9 +72,14 @@ def test_one_command_plans_everything_the_publication_reads(monkeypatch,
     # Whole and in pieces for one simulation only.
     assert 'seissolsplit.py' in plan['split elastic-4-d-s1'][2]
     assert 'split elastic-4-d-s8' not in plan
+    # Against the old generators for one simulation too, the elastic system
+    # being what they are measured on.
+    assert plan['forge elastic-4-d-s1'][2].endswith('seissolforge.py')
+    assert _flag(plan['forge elastic-4-d-s1'], '--arch') == 'sm_90'
     manifest = json.loads((tmp_path / 'eval' / 'evaluation.json').read_text())
-    skipped, = [s for s in manifest['steps'] if s['status'] == 'skipped']
-    assert skipped['step'] == 'split elastic-4-d-s8'
+    skipped = [s for s in manifest['steps'] if s['status'] == 'skipped']
+    assert {s['step'] for s in skipped} == {'split elastic-4-d-s8',
+                                            'forge elastic-4-d-s8'}
     # The whole configuration built, nothing run.
     build = plan['buildcost elastic-4-d-s1']
     assert build[2].endswith('seissol.py') and '--build-only' in build
@@ -106,6 +115,25 @@ def test_asked_for_is_what_is_run(monkeypatch, tmp_path):
         'baseline', '4096')
     assert not [n for n in plan if n.startswith(('split', 'buildcost',
                                                  'publish'))]
+
+
+def test_the_old_generators_run_where_they_emit_and_on_what_they_take(
+        monkeypatch):
+    import forge
+    from capture import Capture
+    monkeypatch.setattr(forge, 'missing', lambda: None)
+    elastic = Capture('elastic', 4, 'd')
+    assert evaluate.forge_skipped(elastic, 'cuda', 'sm_90') is None
+    assert evaluate.forge_skipped(elastic, None, 'gfx942') is None
+    assert 'CUDA and HIP' in evaluate.forge_skipped(elastic, 'oneapi', 'pvc')
+    assert 'CUDA and HIP' in evaluate.forge_skipped(elastic, None, 'pvc')
+    assert 'elastic' in evaluate.forge_skipped(
+        Capture('viscoelastic', 4, 'd', mechanisms=3), 'cuda', 'sm_90')
+    assert 'one simulation' in evaluate.forge_skipped(
+        Capture('elastic', 4, 'd', simulations=8), 'cuda', 'sm_90')
+    monkeypatch.setattr(forge, 'missing', lambda: 'chainforge not importable')
+    assert evaluate.forge_skipped(elastic, 'cuda', 'sm_90') == \
+        'chainforge not importable'
 
 
 def test_publish_takes_the_seissol_runs_and_clusterings(monkeypatch,

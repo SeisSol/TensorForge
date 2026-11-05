@@ -2,7 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 """The generators SeisSol used before TensorForge, building the launches
-gemmforge-chainforge makes of a kernel (`forge.py`).
+gemmforge-chainforge makes of a kernel (`forge.py`), and the suite that
+measures them against TensorForge (`suites/seissolforge.py`).
 
 The comparison with gemmforge and chainforge is only a comparison if they
 are handed what yateto handed them.  So every matrix and factor is checked
@@ -25,11 +26,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCH = ROOT / 'tools' / 'bench'
-if str(BENCH) not in sys.path:
-    sys.path.insert(0, str(BENCH))
+for extra in (str(BENCH), str(BENCH / 'suites')):
+    if extra not in sys.path:
+        sys.path.insert(0, extra)
 
 import build as bench_build  # noqa: E402
 import suite  # noqa: E402
+from capture import Legacy  # noqa: E402
 from tensorforge.common.basic_types import Datatype  # noqa: E402
 
 DATA = BENCH / 'data'
@@ -142,3 +145,23 @@ def test_without_them_the_configurations_say_why(monkeypatch):
     src, record = _generate('gemmforge',
                             _workload('elastic-4-d-s1.json', 'gpu_volume'))
     assert src is None and 'requirements-forge.txt' in record.error
+
+
+# ----------------------------------------------------------------------
+# The comparison as a suite
+# ----------------------------------------------------------------------
+
+def test_the_legacy_suite_names_its_kernels_apart(monkeypatch):
+    monkeypatch.setenv('TF_BENCH_DUMP', str(DATA / 'elastic-4-d-s1.json'))
+    spec = suite.load(BENCH / 'suites' / 'seissolforge.py')
+    assert spec.check
+    assert [c.label for c in spec.configs] == [
+        'baseline', 'chains', 'gemmforge-chainforge', 'ops', 'gemmforge']
+    import seissolbench
+    names = [w.name for w in spec.workloads]
+    assert all(Legacy.of(n) for n in names)
+    assert not set(names) & set(seissolbench.KERNELS)
+    assert all(w.description is not None for w in spec.workloads)
+    monkeypatch.setenv('TF_BENCH_DUMP', str(DATA / 'elastic-4-d-s8.json'))
+    with pytest.raises(SystemExit, match='one simulation'):
+        suite.load(BENCH / 'suites' / 'seissolforge.py')

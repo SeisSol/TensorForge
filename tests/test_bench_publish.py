@@ -419,7 +419,7 @@ def test_the_kernel_table_has_a_formula_for_every_default_kernel():
 # ----------------------------------------------------------------------
 
 import seissolrun  # noqa: E402
-from capture import Capture, Piece  # noqa: E402
+from capture import Capture, Legacy, Piece  # noqa: E402
 
 HEADER = ('"profilingId","localId","layerType","size","dynamicRuptureSize",'
           '"rank","localRank","timestep","updateFactor","runId"\n')
@@ -578,6 +578,112 @@ def test_pieces_without_their_whole_kernel_in_the_run_say_so(tmp_path):
         _tree(tmp_path, [_point('gpu_volume', 'A', 4, 0.5, batch=256)]),
         ['gpu_volume'], 'wall')
     assert made == [] and 'same run' in why[0]
+
+
+# ----------------------------------------------------------------------
+# Against the generators before TensorForge
+# ----------------------------------------------------------------------
+
+#: A time per launch of each configuration of the legacy comparison at a
+#: batch of 256: TensorForge whole, at the old generators' launches and one
+#: per operation, and the old generators at both.
+LEGACY_NS = {'baseline': 1000.0, 'chains': 1500.0,
+             'gemmforge-chainforge': 3000.0, 'ops': 2000.0,
+             'gemmforge': 5000.0}
+
+
+def _legacy_rows(arch='A', order=4, kernel='gpu_volume',
+                 batches=(256, 65536), times=LEGACY_NS):
+    """The legacy suite's rows of one kernel, from one binary per
+    configuration, the old generators' moving twice the bytes."""
+    rows = []
+    for config, ns in times.items():
+        for batch in batches:
+            rows.append(dict(
+                _point(Legacy(kernel).name, arch, order, 0.5, batch=batch,
+                       config=config, nonzero_flops=6e8,
+                       launches={'gemmforge-chainforge': 8,
+                                 'gemmforge': 23}.get(config, 1)),
+                wall_ns=ns * batch / 256, event_ns=ns * batch / 256,
+                bytes=(2e9 if config != 'baseline' else 1e9) * batch / 256,
+                unit=f'seissolforge-cuda-{arch}-f64-{config}'))
+    return rows
+
+
+def _legacy_run(tmp_path, rows, arch='A'):
+    """The legacy suite's run, beside the main one as `evaluate.py` lays
+    them out."""
+    d = tmp_path / arch / 'forge' / 'elastic-4-d-s1'
+    d.mkdir(parents=True)
+    (d / 'bench.json').write_text(json.dumps(
+        {'run': {'suite': 'seissolforge'}, 'results': rows}))
+
+
+def test_the_old_generators_part_into_fusion_and_code(tmp_path):
+    """What SeisSol gained, and the two steps it parts into, which multiply
+    to it: against its own run's `baseline`, not the main run's."""
+    _legacy_run(tmp_path / 'runs', _legacy_rows())
+    field = _tree(tmp_path / 'runs', [_point('gpu_volume', 'A', 4, 0.9)])
+    (out,), skipped = publish.figure_legacy(field, ['gpu_volume'], 'wall')
+    assert not skipped
+    entry, = out.rows
+    assert (entry['batch_large'], entry['batch_small']) == (65536, 256)
+    assert entry['total_large'] == pytest.approx(3.0)
+    assert entry['total_small'] == pytest.approx(3.0)
+    assert entry['fusion'] == pytest.approx(1.5)
+    assert entry['code'] == pytest.approx(2.0)
+    assert entry['fusion'] * entry['code'] == pytest.approx(
+        entry['total_large'])
+    assert (entry['fusion_ops'], entry['code_ops']) == (
+        pytest.approx(2.0), pytest.approx(2.5))
+    assert (entry['launches_chains'], entry['launches_ops']) == (8, 23)
+    assert entry['bytes_chains'] / entry['bytes_fused'] == pytest.approx(2)
+    assert out.name == 'legacy-A-elastic-f64'
+
+
+def test_without_the_old_generators_say_where_to_get_them(tmp_path):
+    made, why = publish.figure_legacy(
+        _tree(tmp_path, [_point('gpu_volume', 'A', 4, 0.5)]),
+        ['gpu_volume'], 'wall')
+    assert made == [] and 'seissolforge' in why[0]
+
+
+def test_the_old_generators_stay_out_of_every_other_figure(tmp_path):
+    """The legacy runs have configurations of their own and their kernels a
+    name of their own: the configurations figure draws the main run's, and
+    what making the kernels cost leaves theirs out."""
+    _legacy_run(tmp_path / 'runs', _legacy_rows())
+    main = [_point('gpu_volume', 'A', 4, e, config=c)
+            for c, e in (('baseline', 0.5), ('tensor-cores', 0.6))]
+    field = _tree(tmp_path / 'runs', main)
+    out, = publish.figure_configs(field, ['gpu_volume'])
+    assert {r['config'] for r in out.rows} == {'tensor-cores'}
+    assert out.tex.count('\\addplot') == 1
+    manifests = [{'workload': w, 'arch': 'A', 'datatype': 'F64',
+                  'config': 'baseline', 'capture': 'elastic-4-d-s1',
+                  'error': '', 'generate_s': 1.0}
+                 for w in ('gpu_volume', Legacy('gpu_volume').name)]
+    table, = publish.table_buildcost(manifests, field)
+    assert table.rows[0]['kernels'] == 1
+
+
+def test_the_arrow_rises_by_the_speedup_and_runs_by_the_bytes(tmp_path):
+    """On the flops the operation needs for both, since the count a kernel
+    issues is TensorForge's to know: the arrow's rise is the speed-up and
+    its run what the launches between the old kernels move."""
+    _legacy_run(tmp_path / 'runs', _legacy_rows())
+    field = _tree(tmp_path / 'runs', [_point('gpu_volume', 'A', 4, 0.9)])
+    (out,), skipped = publish.figure_legacy_roofline(
+        field, ['gpu_volume'], publish.Styles())
+    assert not skipped
+    row, = out.rows
+    assert row['flops'] == 'nonzero'
+    assert row['speedup'] == pytest.approx(3.0)
+    assert row['bytes_ratio'] == pytest.approx(2.0)
+    assert '-stealth' in out.tex
+    table, = publish.table_legacy(field, ['gpu_volume'])
+    assert table.name == 'legacy-elastic-f64'
+    assert table.rows[0]['launches_chains'] == 8
 
 
 def test_the_cascade_puts_the_most_efficient_machine_first(tmp_path):
@@ -977,6 +1083,8 @@ def test_the_preview_compiles(tmp_path):
                          batch=b), bytes=1.5e9)
              for i, n in ((0, 1), (0, 2), (1, 2)) for o in (3, 4)
              for b in batches]
+    _legacy_run(tmp_path / 'runs', [r for o in (3, 4) for r in
+                                    _legacy_rows(order=o)])
     manifest = [{'workload': k, 'arch': a, 'datatype': 'F64',
                  'config': 'baseline', 'capture': f'elastic-{o}-d-s1',
                  'error': '', 'generate_s': 2.0, 'compile_s': 9.0,
@@ -1008,7 +1116,10 @@ def test_the_preview_compiles(tmp_path):
     kinds = {o.name.split('-')[0] for o in outputs}
     assert {'bound', 'lts', 'timesplit', 'throughput', 'cascade',
             'machines', 'fusion', 'lanes', 'resources', 'precision',
-            'simulations', 'traffic', 'buildcost'} <= kinds, sorted(kinds)
+            'simulations', 'traffic', 'buildcost', 'legacy'} <= kinds, \
+        sorted(kinds)
+    assert {'legacy-A-elastic-f64', 'legacy-roofline-A-elastic-f64',
+            'legacy-elastic-f64'} <= {o.name for o in outputs}
     out = tmp_path / 'pub'
     publish.write(outputs, out, 'test', {'skipped': skipped})
     ok, why = texout.compile_tex(out / 'preview.tex')

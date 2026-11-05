@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 #
 # The generators SeisSol used on GPUs before TensorForge, for the comparison
-# with them (`forge.py`).  Pinned to the commits the lowering was checked
-# against yateto with (`tests/fixtures/forge`).
+# with them (`forge.py`, `suites/seissolforge.py`).  Pinned to the commits
+# the lowering was checked against yateto with (`tests/fixtures/forge`).
 gemmforge @ git+https://github.com/SeisSol/gemmforge.git@3377c1f323ecced31cff18986db8e88ee554f2fc
 chainforge @ git+https://github.com/SeisSol/chainforge.git@2d47e506773e1722f4ecb5b013766388f9b88afd

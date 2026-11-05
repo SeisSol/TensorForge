@@ -32,6 +32,8 @@ machines:
     prepare:                  # once, on the login node: it has the internet
       - python3 -m venv $TF_ROOT/venv
       - $TF_ROOT/venv/bin/pip install -r $TF_CODE/requirements.txt
+      # the generators before TensorForge, for the comparison with them
+      - $TF_ROOT/venv/bin/pip install -r $TF_CODE/tools/bench/requirements-forge.txt
     args: [--backend, cuda]
 
   # A Slurm cluster with AMD GPUs whose GPUs are only visible under srun.
@@ -49,6 +51,7 @@ machines:
     prepare:
       - python3 -m venv $TF_ROOT/venv
       - $TF_ROOT/venv/bin/pip install -r $TF_CODE/requirements.txt
+      - $TF_ROOT/venv/bin/pip install -r $TF_CODE/tools/bench/requirements-forge.txt
     launch: srun --ntasks=1 --gpus=1
     args: [--backend, hip, --profile]
 

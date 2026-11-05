@@ -60,6 +60,7 @@ What one machine gives the publication, and what it costs, per export:
 | `seissolbench`, the ramp-up sweep (one simulation) or the suite's batches | `runs/` | everything per kernel; the launch cost and the time step |
 | the same run in `tensor-cores` too, where it changes the build (NVIDIA, ESIMD) | `runs/` | the matrix units, against `baseline` on one clock |
 | `seissolsplit`, two batches (one simulation) | `split/` | what fusion is worth |
+| `seissolforge`, six batches (elastic, one simulation; CUDA and HIP) | `forge/` | what TensorForge gains on gemmforge and chainforge, and from what |
 | `seissol.py --build-only`, every kernel | `build/` | what making a configuration costs |
 | `profile.py` (`--profile`) | `profiles/` | DRAM traffic against the compulsory bytes |
 
@@ -67,9 +68,9 @@ The sweep is fifteen batches where the suite has four, and a run starts a
 process per measurement, so over the sixteen exports the timing runs start 3210
 processes where the suite's batches alone start 1032 -- twice that with
 `tensor-cores` -- and the split runs 5052 more, one per piece, batch and pass.
-`--no-split`, `--no-buildcost`, `--no-publish`, `--batches` and `--configs`
-take parts out. Across machines, `campaign.py` runs this on each of them
-(below).
+`--no-split`, `--no-forge`, `--no-buildcost`, `--no-publish`, `--batches`
+and `--configs` take parts out. Across machines, `campaign.py` runs this on
+each of them (below).
 
 The driver itself is emitted by `tests/harness/driver_bench.py`, next to the
 correctness driver and sharing its operand collection and its launcher call —
@@ -199,7 +200,9 @@ each one step from the next (`suite.CONFIGS`):
 it into what fusing the whole kernel is worth (against `baseline`) and what
 the code is worth (against `gemmforge-chainforge`), at the launches the old
 generators made. Where a kernel is one chain, it is one launch in both, and
-the comparison is of the code alone.
+the comparison is of the code alone. `suites/seissolforge.py` measures the
+kernels of a time step in all five, in one run, and checks them before it
+times them (`CHECK`).
 
 What the two generators are handed -- every matrix's box and region, the
 alignment a GEMM's rows are rounded to, the factors -- is yateto's
@@ -209,13 +212,20 @@ code but for the routines' names. The op list itself is the one yateto hands
 both: SeisSol picks the same cost estimator for TensorForge and for
 gemmforge-chainforge, and the exports are laid out dense, which is all
 gemmforge takes. Products of several simulations are of a rank the two do not
-take, and only the elastic system's kernels were checked.
+take, and only the elastic system's kernels were checked: the suite takes an
+elastic export of one simulation and refuses any other.
 
 The generators are optional: `pip install -r
 tools/bench/requirements-forge.txt` installs the commits the lowering was
 checked with, and without them the two configurations build nothing and say
 why. The check before the timing compares them with `baseline` like any other
-configuration: their buffers are filled as TensorForge's are.
+configuration: their buffers are filled as TensorForge's are. Like the split
+suite's, the workloads carry the kernel's name with a suffix,
+`gpu_volume~legacy` (`capture.Legacy`), so that no other reader sees a second
+measurement of a kernel. `publish.py` draws what the comparison is worth
+(`figures/legacy-*`), where the kernels move under the roof
+(`figures/legacy-roofline-*`), and what the old generators make of each kernel
+(`tables/legacy-*`).
 
 ## Symbols and build units
 
@@ -473,6 +483,9 @@ a suggested caption, after a page listing what was not made and why.
 | `figures/machines-roofline-*` | where does each kernel sit under each machine's own roof? |
 | `figures/configs-*` | does a configuration -- the matrix units, another generator -- help? |
 | `figures/fusion-*` | what is fusing a kernel's chain worth? |
+| `figures/legacy-*` | what does TensorForge gain on gemmforge and chainforge -- and how much of it is fusion, how much the code? |
+| `figures/legacy-roofline-*` | where does a kernel move under the roof, from the old generators' launches to one? |
+| `tables/legacy-*` | how many launches do the old generators make of a kernel, and what do they move? |
 | `figures/lanes-*` | how much of the arithmetic a kernel issues is needed? |
 | `figures/resources-*` | registers, spills and code against the instruction cache, per order |
 | `figures/precision-*` | what does double cost against single, beside what bytes and FMA rates say? |

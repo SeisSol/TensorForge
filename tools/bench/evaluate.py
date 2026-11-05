@@ -35,6 +35,10 @@ What it does, skipping anything the machine cannot do and saying so:
 4. **split** (`--split`, on by default): each kernel of a one-simulation
    export whole and as one launch per operation (`suites/seissolsplit.py`),
    into `<out>/split/<export>` -- what fusion is worth.
+   **forge** (`--forge`, on by default): each kernel of an elastic
+   one-simulation export against gemmforge and chainforge, the generators
+   SeisSol used before (`suites/seissolforge.py`), into
+   `<out>/forge/<export>` -- on CUDA and HIP, where the two can be imported.
 5. **buildcost** (`--buildcost`, on by default): every kernel of the export
    built once, nothing run (`suites/seissol.py`), into `<out>/build/<export>`
    -- what generating and compiling a configuration costs, not only the few
@@ -207,6 +211,30 @@ def matrix_paths(backend: Optional[str], arch: Optional[str]) -> bool:
     return any(gpu.vendor in ('nvidia', 'intel') for gpu in detect_all())
 
 
+def forge_skipped(captured: Optional[Capture], backend: Optional[str],
+                  arch: Optional[str]) -> Optional[str]:
+    """Why the comparison with gemmforge and chainforge does not run for an
+    export on this machine, or `None`."""
+    if (captured is None or captured.equation != 'elastic'
+            or captured.simulations != 1):
+        return ('the old generators are measured on the elastic system with '
+                'one simulation')
+    import forge
+    if backend is not None and backend not in forge.BACKENDS:
+        return f'gemmforge-chainforge emits CUDA and HIP, not {backend}'
+    if backend is None and arch is not None:
+        if not (arch.startswith('sm_') or arch.startswith('gfx')):
+            return f'gemmforge-chainforge emits CUDA and HIP, not for {arch}'
+    elif backend is None:
+        try:
+            from harness.gpu_detect import detect_all
+        except ImportError:
+            return 'no device detected'
+        if not any(gpu.vendor in ('nvidia', 'amd') for gpu in detect_all()):
+            return 'no NVIDIA or AMD device, which is what the two emit for'
+    return forge.missing()
+
+
 def bench_command(suite: Path, out: Path, args, *extra: str) -> List[str]:
     """`run.py` over `suite` into `out`, on the target asked for."""
     command = [sys.executable, str(HERE / 'run.py'), str(suite),
@@ -245,6 +273,10 @@ def main() -> int:
                     default=True,
                     help='time each kernel whole and in pieces too, for '
                          'what fusion is worth')
+    ap.add_argument('--forge', action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help='time the kernels against gemmforge and chainforge '
+                         'too, where they can be imported')
     ap.add_argument('--buildcost', action=argparse.BooleanOptionalAction,
                     default=True,
                     help='build every kernel of each export once, for what '
@@ -340,6 +372,18 @@ def main() -> int:
                               note='several simulations: the fusion figure '
                                    'reads one'))
 
+        if args.forge:
+            why = forge_skipped(captured, args.backend, args.arch)
+            if why:
+                steps.append(Step(f'forge {tag}', [], 'skipped', note=why))
+            else:
+                steps.append(run_with_env(
+                    f'forge {tag}',
+                    bench_command(HERE / 'suites' / 'seissolforge.py',
+                                  out / 'forge' / tag, args),
+                    env_dump, out / 'logs' / f'forge-{tag}.log',
+                    args.timeout))
+
         if args.buildcost:
             steps.append(run_with_env(
                 f'buildcost {tag}',
@@ -413,7 +457,8 @@ def main() -> int:
             'configs': configs,
             'batches': args.batches or {'one simulation': sweep,
                                         'several': 'the suite\'s'},
-            'split': bool(args.split), 'buildcost': bool(args.buildcost),
+            'split': bool(args.split), 'forge': bool(args.forge),
+            'buildcost': bool(args.buildcost),
             'profiled': bool(args.profile),
             'published': bool(args.publish),
         },
