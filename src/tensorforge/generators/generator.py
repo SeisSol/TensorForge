@@ -504,6 +504,11 @@ class Generator:
     self._merge_decided: bool = merge_within is not None
 
     options = context.get_user_options()
+    if options.reassociate_products:
+      # Ahead of the merge, which groups the products into runs: the
+      # rewritten pairs are what it should group (`reassociate`).
+      from .reassociate import reassociate
+      self._descr_list = reassociate(self._descr_list)
     if options.merge_variants is True or merge_within is not None:
       # Before the operands are named, which is the first thing that reads the
       # list -- a stand-in arriving after it has no name and then no symbol,

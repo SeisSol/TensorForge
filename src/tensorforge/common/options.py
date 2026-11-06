@@ -904,6 +904,17 @@ declare('forward_memory',
             '(`pir.forward`); an element\'s mask is taken to hold where the '
             'body keeps its contract (`elementmask`).')
 
+declare('reassociate_products',
+        default=False,
+        parse=parse_bool,
+        doc='Write ``T = X S; Q (+)= A T`` as ``U = A X; Q (+)= U S`` where '
+            'both are plain matrix products, T is a temporary nothing else '
+            'reads and the operator A has no more rows in its box than X: '
+            'yateto puts the per-element product first, and in the other '
+            'order it runs over the operator\'s rows -- 24 behind a face '
+            'matrix instead of 56 -- and the operator products of a step all '
+            'read the same X (`generators.reassociate`).')
+
 declare('amd_moved_broadcast',
         default=False,
         parse=parse_bool,
