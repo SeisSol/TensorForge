@@ -1632,6 +1632,40 @@ ISSUE_PER_WAVE = ('gfx9',)
 #: why the whole wave is asked about only where nothing narrower is clean.
 CLEAN_WAVE = True
 
+#: Where `Options.pin_loads` is `'auto'`, the rule has ptxas decide it rather
+#: than the estimate (`abstract_instruction.PTXAS_NEED`): a candidate that
+#: spills at least this many bytes a lane is built again pinned, and the
+#: pinned build stands in for it where it spills at most `PIN_KEEP` of that.
+#: A small spill is a cold value ptxas parks, and a pin there costs the
+#: latency the free schedule hid: order-6 `derivative` in single precision
+#: spills 72 B on GB200, 4 B pinned, and runs 90 % slower pinned.  The
+#: viscoelastic time derivatives at orders 4 to 6 spill 0.8 to 6.7 kB and run
+#: 20 to 74 % faster pinned.  Over 36 SeisSol kernels on GB200 (elastic and
+#: viscoelastic, orders 4 to 6, both precisions), as the loss against the
+#: faster of the two builds (mean / worst): never pinned 26.0 / 278 %, pinned
+#: by the estimate 1.5 / 24 % (it misses order-4 `derivative` in single
+#: precision, 808 B spilled, and pins order-6 `volume` in double for 12), and
+#: by this rule 0.1 / 3 %.  On sm_120 the rule picks the faster build of all
+#: 13 kernels measured there.
+PIN_SPILL = 128
+
+#: The share of the spilling a pinned build may keep and still be taken.
+#: Viscoelastic order-6 `volumeExt` in single precision spills 104 B on
+#: sm_120 and 84 B pinned, and runs 24 % slower pinned; where the pin pays,
+#: it removed 80 to 100 % of the spilling.
+PIN_KEEP = 0.5
+
+
+def _pins_by_compiler(context: Context) -> bool:
+    """Whether the compiler decides `Options.pin_loads` here: `'auto'`, on
+    NVIDIA under CUDA, where the fence is (`abstract_instruction._pin_every`).
+    """
+    target = context.target
+    return (getattr(context.get_user_options(), 'pin_loads', 0) == 'auto'
+            and str(target.hw.vendor).lower() == 'nvidia'
+            and target.backend == 'cuda'
+            and not getattr(target, 'explicit_simd', False))
+
 
 def _ranked_by(context: Context) -> Optional[str]:
     """`RANKED_BY` for the target, or None where it was never measured: on
@@ -1747,6 +1781,12 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     the instructions an element executes, over the waves the compiler gives
     a build, are a floor of its cost too (`ISSUE_PER_WAVE`).  On Intel, under DPC++, the count as on NVIDIA, starting
     from the sixteen lanes the target builds (`start`).
+
+    Where `Options.pin_loads` is `'auto'` on NVIDIA, the compiler decides the
+    pin too: a whole-warp candidate it spills `PIN_SPILL` bytes or more for
+    is built again pinned, and that build stands in for it -- the default's
+    included, guard and margin then the pinned one's -- where it spills at
+    most `PIN_KEEP` of that.  The origin comes unpinned (`_lanes_mode`).
     """
     hw = context.target.hw
     wave = max(1, getattr(hw, 'vec_unit_length', 32))
@@ -1774,6 +1814,34 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         report = None
     if report is None:
         return origin
+    pins = _pins_by_compiler(context)
+
+    def pinned(cand: Candidate, seen: Optional[Resources]
+               ) -> Tuple[Candidate, Optional[Resources]]:
+        """`cand` and what the compiler says of it, or its pinned build and
+        what the compiler says of that, where the pin pays (`PIN_SPILL`)."""
+        if (not pins or seen is None or seen.spill_bytes < PIN_SPILL
+                or cand.get('pin_loads')
+                or builds[cand].generator.lanes.num_threads % wave):
+            return cand, seen
+        from tensorforge.backend.instructions.abstract_instruction import (
+            PIN_EVERY)
+        alt = cand.set('pin_loads', PIN_EVERY)
+        result = build(descr_factory, context, alt, generate)
+        if not result.ok:
+            return cand, seen
+        try:
+            other = scorer.resources(result)
+        except Exception:                     # noqa: BLE001
+            other = None
+        if other is None or other.spill_bytes > PIN_KEEP * seen.spill_bytes:
+            return cand, seen
+        builds[alt] = result
+        count = figure(result)
+        counts[alt] = counts[cand] if count is None else count
+        return alt, other
+
+    base, report = pinned(origin, report)
     from tensorforge.analysis.icache import past_share
     limit = SPILL_GROWTH * report.spill_bytes
     miss = getattr(hw, 'icache_miss_factor', None)
@@ -1795,7 +1863,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         return (counts[cand] * (1.0 + refetch * past)
                 + SPILL_WEIGHT * seen.spill_bytes / elem * lanes / wave)
 
-    best, least = origin, cost(origin, report)
+    best, least = base, cost(base, report)
     default = least
     # Where the default spills on AMD, a build that spills nothing wins over
     # every build that does (`CLEAN_FIRST`): until one is found the compiler
@@ -1803,7 +1871,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     # bound alone is still below the best clean one's cost.
     clean_first = CLEAN_FIRST and by_bound and report.spill_bytes > 0
     clean: Optional[Tuple[Candidate, float]] = None
-    for cand in sorted((c for c in counts if c != origin), key=counts.get):
+    for cand in sorted((c for c in counts if c not in (origin, base)),
+                       key=counts.get):
         if clean is not None:
             if counts[cand] >= clean[1]:
                 break
@@ -1813,6 +1882,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             seen = scorer.resources(builds[cand])
         except Exception:                     # noqa: BLE001
             seen = None
+        cand, seen = pinned(cand, seen)
         if seen is None or seen.spill_bytes > limit:
             continue
         price = cost(cand, seen)
@@ -1842,7 +1912,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 clean = (cand, price)
     if clean is not None:
         return clean[0]
-    return best if least < (1.0 - DEVIATION_MARGIN) * default else origin
+    return best if least < (1.0 - DEVIATION_MARGIN) * default else base
 
 
 def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
@@ -1867,6 +1937,10 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
     origin = start(descrs, context)
     for name, value in (fixed or {}).items():
         origin = origin.set(name, value)
+    if _pins_by_compiler(context):
+        # Unpinned to begin with, and every candidate with it: the compiler
+        # says where a pin pays (`PIN_SPILL`), not the estimate.
+        origin = origin.set('pin_loads', 0)
     first = build(descr_factory, context, origin, generate)
     if not first.ok:
         return None

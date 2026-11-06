@@ -500,3 +500,103 @@ def test_an_amd_part_nobody_measured_keeps_its_default(monkeypatch):
     with pytest.warns(UserWarning, match='not measured'):
         assert tuning.autotune(_local_flux(), _amd('gfx1150', autotune='lanes'),
                                mode='lanes', generate=Generator.trial) is None
+
+
+class PinScorer:
+    """Reports the spilling `spills` names for a candidate's (lanes, pin),
+    and counts the questions."""
+
+    def __init__(self, spills):
+        self.spills = spills
+        self.asked = []
+
+    def resources(self, result):
+        cand = result.candidate
+        key = (cand.lanes.num_threads, cand.get('pin_loads', 0))
+        self.asked.append(key)
+        return Resources(registers=255, spill_bytes=self.spills.get(key, 0))
+
+
+def _default_ahead(result):
+    """A count that keeps the default ahead of every other candidate, so far
+    that the compiler is asked about the default alone: 32 lanes, unmerged
+    and merged counting the same as the default's own deduction would
+    otherwise be asked about too."""
+    cand = result.candidate
+    table = {8: 9000, 16: 8000, 32: 1000, 64: 7000}
+    return (table[cand.lanes.num_threads]
+            + (8000 if cand.get('merge_variants') is not None else 0))
+
+
+def _pin_tuned(monkeypatch, spills, fixed=None, **opts):
+    """`autotune=lanes` with `PinScorer(spills)` for the compiler and the
+    default ahead (`_default_ahead`)."""
+    scorer = PinScorer(spills)
+    monkeypatch.setattr(tuning.CompiledScore, 'available',
+                        lambda self, context: True)
+    monkeypatch.setattr(tuning.CompiledScore, 'resources',
+                        lambda self, result: scorer.resources(result))
+    monkeypatch.setattr(tuning, 'executed_instructions', _default_ahead)
+    pick = tuning.autotune(_local_flux(), _context(autotune='lanes', **opts),
+                           mode='lanes', fixed=fixed, generate=Generator.trial)
+    return pick, scorer
+
+
+def test_under_the_lanes_rule_ptxas_decides_the_pin(monkeypatch):
+    """`pin_loads='auto'`: the default built unpinned, and pinned too where
+    ptxas spills `PIN_SPILL` bytes or more -- viscoelastic order-6
+    `derivative` in single precision on GB200, 3840 B and 80 B pinned, and
+    71 % faster pinned."""
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 3840, (32, 32): 80},
+                              pin_loads='auto')
+    assert pick.lanes.num_threads == 32 and pick.get('pin_loads') == 32
+    assert scorer.asked == [(32, 0), (32, 32)]
+
+
+def test_a_small_spill_is_left_unpinned(monkeypatch):
+    """Elastic order-6 `derivative` in single precision on GB200: 72 B, 4 B
+    pinned and 90 % slower for it.  Pinned is not even built."""
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 72, (32, 32): 4},
+                              pin_loads='auto')
+    assert pick.get('pin_loads') == 0 and scorer.asked == [(32, 0)]
+
+
+def test_a_pin_that_keeps_the_spilling_is_not_taken(monkeypatch):
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 400, (32, 32): 300},
+                              pin_loads='auto')
+    assert pick.get('pin_loads') == 0
+    assert scorer.asked == [(32, 0), (32, 32)]
+
+
+def test_the_pin_is_the_compilers_only_under_auto_and_whole_warps(
+        monkeypatch):
+    """Off unless asked; and sixteen lanes share a warp with another
+    multiplication, whose loop can end a trip earlier."""
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 3840})
+    assert pick.get('pin_loads') is None
+    assert scorer.asked[0] == (32, 0)
+    assert all(pin == 0 for _, pin in scorer.asked)
+    sixteen = lane_config.LaneConfig(16, 40, 1)
+    pick, scorer = _pin_tuned(monkeypatch, {(16, 0): 3840},
+                              fixed={'lanes': sixteen}, pin_loads='auto')
+    assert pick.get('pin_loads') == 0
+    assert all(pin == 0 for _, pin in scorer.asked)
+
+
+def test_the_generator_builds_the_pinned_pick(monkeypatch):
+    """Through `Options.autotune`: fenced, where the estimate alone
+    (`PTXAS_NEED`) leaves this small body as it is."""
+    scorer = PinScorer({(32, 0): 3840, (32, 32): 80})
+    monkeypatch.setattr(tuning.CompiledScore, 'available',
+                        lambda self, context: True)
+    monkeypatch.setattr(tuning.CompiledScore, 'resources',
+                        lambda self, result: scorer.resources(result))
+    monkeypatch.setattr(tuning, 'executed_instructions', _default_ahead)
+    gen = Generator(_local_flux()(), _context(autotune='lanes',
+                                              pin_loads='auto'))
+    gen.generate()
+    assert gen.tuned.get('pin_loads') == 32
+    plain = Generator(_local_flux()(), _context(pin_loads='auto'))
+    plain.generate()
+    assert (gen.get_kernel().count('__syncwarp();')
+            > plain.get_kernel().count('__syncwarp();'))
