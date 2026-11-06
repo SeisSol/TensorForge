@@ -85,3 +85,25 @@ def test_without_the_option_nothing_is_rewritten():
         return re.sub(r'kernel_kernel_[0-9a-f]+', 'K', src)
     assert build(reassociate_products=False) == build()
     assert build(reassociate_products=True) != build()
+
+
+def test_a_temporary_written_narrower_than_it_is_read_is_left_alone():
+    """`temp_partial_write`: ``tmp[:, 0:6] = B C; D = A tmp`` reads twelve
+    columns of a temporary its one writer fills six of -- the rest zero.
+    ``(A B) C`` would put products there; on gfx1150 that was 37.7 off."""
+    import importlib.util
+    import pathlib
+    path = (pathlib.Path(__file__).parent / 'cases' / 'slicing'
+            / 'temp_partial_write.py')
+    spec = importlib.util.spec_from_file_location('temp_partial_write', path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    from tensorforge.generators.descriptions import MultilinearDescr
+
+    def flat(descrs):
+        return [op for d in descrs for op in d.operations()]
+
+    descrs = flat(case.descr_list())
+    out = reassociate(descrs)
+    assert all(a is b for a, b in zip(out, descrs)) and len(out) == len(descrs)
+    assert all(isinstance(d, MultilinearDescr) for d in out)

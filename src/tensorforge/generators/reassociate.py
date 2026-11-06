@@ -71,6 +71,15 @@ def _writes(d, tensor) -> bool:
     return w is not None and getattr(w, 'tensor', w) is tensor
 
 
+def _same_view(a: SubTensor, b: SubTensor) -> bool:
+    """Whether two views of one tensor cover the same box at the same
+    offset."""
+    return (list(a.bbox.lower()) == list(b.bbox.lower())
+            and list(a.bbox.upper()) == list(b.bbox.upper())
+            and list(getattr(a, 'offset', None) or [])
+            == list(getattr(b, 'offset', None) or []))
+
+
 def _rows(view: SubTensor):
     box = view.bbox
     return box.lower()[0], box.upper()[0]
@@ -90,6 +99,12 @@ def _pair(descrs: Sequence, i: int) -> Optional[int]:
     second = descrs[j]
     if (not _is_matmul(second) or second.ops[1].tensor is not t
             or second.ops[0].tensor is t or second.dest.tensor is t):
+        return None
+    # What the second reads of T is what the first wrote, no more and no
+    # less: a temporary written narrower than it is read back holds zeros
+    # (or another writer's numbers) in the rest, which ``(A X) S`` would
+    # replace by products.  `temp_partial_write` writes six of twelve columns.
+    if not _same_view(first.dest, second.ops[1]):
         return None
     x, s = first.ops
     a = second.ops[0]
