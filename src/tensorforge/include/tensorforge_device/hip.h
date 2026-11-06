@@ -1081,6 +1081,12 @@ __device__ __forceinline__ void transpose16x4(T &w1, T &w2, T &w3, T &w4, T v1,
 #define CMRSTR(cnt, c, a, b)                                                   \
   "v_cndmask_b32_dpp " c ", " a ", " b CMVCC                                   \
   " row_ror:" STR(cnt) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI
+// The same selection in the VOP3 form, which takes DPP from gfx11 on and names
+// its mask: an SGPR of its own rather than VCC.
+#define CM4STR3(p1, p2, p3, p4, c, a, b, m)                                    \
+  "v_cndmask_b32_e64_dpp " c ", " a ", " b ", " m                              \
+  " quad_perm:[" STR(p1) "," STR(p2) "," STR(p3) "," STR(                      \
+      p4) "] row_mask:0xf bank_mask:0xf bound_ctrl:1 fi:1"
 
 /// One region of a register, selected by lane rather than by mask.
 ///
@@ -1192,8 +1198,18 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
 /// first DPP read -- the `s_mov_b64` -- while the four blocks, not
 /// `volatile`, were free to be reordered, so that the third could follow the
 /// first and read `u3` right behind the write.  Here the four are one block
-/// behind one wait.  gfx9 only, where `v_cndmask_b32_dpp` takes VCC as an
-/// operand; elsewhere the builtin form above.
+/// behind one wait.
+///
+/// On gfx11 and gfx12 the selection takes DPP in its VOP3 form too, which
+/// names its mask (`CM4STR3`): the four masks are four SGPRs the compiler
+/// fills -- once, ahead of a loop -- and the block writes none, so nothing
+/// waits on the SALU inside it.  RDNA's DPP reads no stale source, and gfx11
+/// needs no wait at all.  gfx12 does where an SGPR the SALU just wrote is read
+/// as a VALU mask (clang puts `s_wait_alu 0xfffe` between the two in the
+/// builtin form), and the hazard recognizer does not look into the block, so
+/// the block opens with that wait there.  Wave32 masks: HIP builds no wave64
+/// on gfx10 and later (`WaveSize`).  gfx10 has no VOP3 DPP and keeps the
+/// builtin form above, as does every other target.
 template <typename T>
 __device__ __forceinline__ void transpose4x4b32Fused(T &w1, T &w2, T &w3, T &w4,
                                                      T v1, T v2, T v3, T v4) {
@@ -1229,6 +1245,32 @@ __device__ __forceinline__ void transpose4x4b32Fused(T &w1, T &w2, T &w3, T &w4,
       : [m1a] "s" (mask1a), [m1b] "s" (mask1b), [m2a] "s" (mask2a), [m2b] "s" (mask2b),
         [v1] "v" (v1), [v2] "v" (v2), [v3] "v" (v3), [v4] "v" (v4)
       : "vcc");
+  // clang-format on
+#elif defined(__GFX11__) || defined(__GFX12__)
+  static_assert(sizeof(T) == 4, "a 32-bit lane exchange");
+  static_assert(WaveSize == 32, "wave32 masks");
+  const uint32_t mask1a = 0x55555555U;
+  const uint32_t mask1b = 0xaaaaaaaaU;
+  const uint32_t mask2a = 0x33333333U;
+  const uint32_t mask2b = 0xccccccccU;
+  T u1, u2, u3, u4;
+  // clang-format off
+  asm(
+#ifdef __GFX12__
+      "s_wait_alu 0xfffe \n\t"
+#endif
+      CM4STR3(0, 0, 2, 2, "%[u1]", "%[v2]", "%[v1]", "%[m1a]") "\n\t"
+      CM4STR3(0, 0, 2, 2, "%[u3]", "%[v4]", "%[v3]", "%[m1a]") "\n\t"
+      CM4STR3(1, 1, 3, 3, "%[u2]", "%[v1]", "%[v2]", "%[m1b]") "\n\t"
+      CM4STR3(1, 1, 3, 3, "%[u4]", "%[v3]", "%[v4]", "%[m1b]") "\n\t"
+      CM4STR3(0, 1, 0, 1, "%[w1]", "%[u3]", "%[u1]", "%[m2a]") "\n\t"
+      CM4STR3(0, 1, 0, 1, "%[w2]", "%[u4]", "%[u2]", "%[m2a]") "\n\t"
+      CM4STR3(2, 3, 2, 3, "%[w3]", "%[u1]", "%[u3]", "%[m2b]") "\n\t"
+      CM4STR3(2, 3, 2, 3, "%[w4]", "%[u2]", "%[u4]", "%[m2b]")
+      : [u1] "=&v" (u1), [u2] "=&v" (u2), [u3] "=&v" (u3), [u4] "=&v" (u4),
+        [w1] "=&v" (w1), [w2] "=&v" (w2), [w3] "=&v" (w3), [w4] "=&v" (w4)
+      : [m1a] "s" (mask1a), [m1b] "s" (mask1b), [m2a] "s" (mask2a), [m2b] "s" (mask2b),
+        [v1] "v" (v1), [v2] "v" (v2), [v3] "v" (v3), [v4] "v" (v4));
   // clang-format on
 #else
   transpose4x4b32(w1, w2, w3, w4, v1, v2, v3, v4);
