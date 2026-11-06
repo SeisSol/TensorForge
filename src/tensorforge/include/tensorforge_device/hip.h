@@ -1169,6 +1169,60 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
   w4 = __lane_id() % 4 >= 2 ? u4 : uu2;
 }
 
+/// `transpose4x4b32` with the shuffle and the selection fused: eight
+/// `v_cndmask_b32_dpp` with the lane mask in VCC, against eight DPP moves and
+/// eight selects (`Options.amd_fused_transpose`).
+///
+/// The assembly kept in the comment above, which gave a wrong value now and
+/// then.  The likely reason is the gfx9 hazard the fused FMAs have
+/// (`DPPWAIT`): a DPP instruction reads its first source two wait states
+/// after a VALU write of it at the earliest, the hazard recognizer does not
+/// look into assembly, and each block had one instruction in front of its
+/// first DPP read -- the `s_mov_b64` -- while the four blocks, not
+/// `volatile`, were free to be reordered, so that the third could follow the
+/// first and read `u3` right behind the write.  Here the four are one block
+/// behind one wait.  gfx9 only, where `v_cndmask_b32_dpp` takes VCC as an
+/// operand; elsewhere the builtin form above.
+template <typename T>
+__device__ __forceinline__ void transpose4x4b32Fused(T &w1, T &w2, T &w3, T &w4,
+                                                     T v1, T v2, T v3, T v4) {
+#ifdef __GFX9__
+  static_assert(sizeof(T) == 4, "a 32-bit lane exchange");
+  const uint64_t mask1a = 0x5555555555555555ULL;
+  const uint64_t mask1b = 0xaaaaaaaaaaaaaaaaULL;
+  const uint64_t mask2a = 0x3333333333333333ULL;
+  const uint64_t mask2b = 0xccccccccccccccccULL;
+  T u1, u2, u3, u4;
+  // One block, one wait: the wait covers a VALU write of `v1`..`v4` in
+  // front of it, and inside the block every DPP read stands two
+  // instructions or more behind the write of its register -- `u4`, the
+  // closest, behind the `s_mov_b64` and `w1`.  VCC is the only mask a
+  // `v_cndmask_b32_dpp` takes on gfx9, so each of the four masks is a move.
+  // clang-format off
+  asm(DPPWAIT
+      "s_mov_b64 vcc, %[m1a] \n\t"
+      CM4STR(0, 0, 2, 2, "%[u1]", "%[v2]", "%[v1]") "\n\t"
+      CM4STR(0, 0, 2, 2, "%[u3]", "%[v4]", "%[v3]") "\n\t"
+      "s_mov_b64 vcc, %[m1b] \n\t"
+      CM4STR(1, 1, 3, 3, "%[u2]", "%[v1]", "%[v2]") "\n\t"
+      CM4STR(1, 1, 3, 3, "%[u4]", "%[v3]", "%[v4]") "\n\t"
+      "s_mov_b64 vcc, %[m2a] \n\t"
+      CM4STR(0, 1, 0, 1, "%[w1]", "%[u3]", "%[u1]") "\n\t"
+      CM4STR(0, 1, 0, 1, "%[w2]", "%[u4]", "%[u2]") "\n\t"
+      "s_mov_b64 vcc, %[m2b] \n\t"
+      CM4STR(2, 3, 2, 3, "%[w3]", "%[u1]", "%[u3]") "\n\t"
+      CM4STR(2, 3, 2, 3, "%[w4]", "%[u2]", "%[u4]")
+      : [u1] "=&v" (u1), [u2] "=&v" (u2), [u3] "=&v" (u3), [u4] "=&v" (u4),
+        [w1] "=&v" (w1), [w2] "=&v" (w2), [w3] "=&v" (w3), [w4] "=&v" (w4)
+      : [m1a] "s" (mask1a), [m1b] "s" (mask1b), [m2a] "s" (mask2a), [m2b] "s" (mask2b),
+        [v1] "v" (v1), [v2] "v" (v2), [v3] "v" (v3), [v4] "v" (v4)
+      : "vcc");
+  // clang-format on
+#else
+  transpose4x4b32(w1, w2, w3, w4, v1, v2, v3, v4);
+#endif
+}
+
 /*
 // forward declares for structured buffer accessors
 // (for "canonical" float4 loads)

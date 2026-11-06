@@ -330,3 +330,27 @@ def test_asked_for_on_gfx942_the_products_read_moves():
     moved, fused = _built(True), _built(False)
     assert 'movdpp16<' in moved and 'v_fmac_f64_dpp' not in moved
     assert 'movdpp16<' not in fused and 'v_fmac_f64_dpp' in fused
+
+
+def test_the_fused_transpose_is_taken_where_asked():
+    """`amd_fused_transpose`: the 4x4 quads of the lane-batched MFMA path go
+    through `transpose4x4b32Fused` instead of `transpose4x4b32`."""
+    import contextlib
+    import io
+    import seissol_suite as suite
+    from tensorforge.common.context import Options
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+
+    def built(on):
+        d = DescriptionReader(None, {}).read(suite.description(
+            'elastic-linearck', 'elastic-linearck-o4-s', 'gpu_volume'))[0]
+        ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32,
+                      options=Options(amd_fused_transpose=on))
+        gen = Generator(d, ctx)
+        with contextlib.redirect_stdout(io.StringIO()):
+            gen.generate()
+        return gen.get_kernel()
+    on, off = built(True), built(False)
+    assert 'transpose4x4b32Fused(' in on and 'transpose4x4b32(' not in on
+    assert 'transpose4x4b32Fused(' not in off and 'transpose4x4b32(' in off
