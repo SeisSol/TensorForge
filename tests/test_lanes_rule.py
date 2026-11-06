@@ -306,6 +306,44 @@ def test_on_amd_the_spilling_goes_into_the_bound(monkeypatch):
     assert scorer.asked[:3] == [(32, None), (16, False), (16, True)]
 
 
+def test_where_the_default_spills_on_amd_a_clean_build_comes_first(monkeypatch):
+    """Order-8 `derivative` in single precision on MI300A: 32 lanes spill
+    1340 B, which the bound charges 8 %, sixteen spill past the guard, and 64
+    spill nothing at an 18 % higher count -- and run 38 % ahead of 32.
+    The compiler is asked past the bound until a clean build turns up.  On
+    NVIDIA the count and the price of the spilling decide as before."""
+    descr_factory = _local_flux()
+    bounds = {(32, None): 10603, (32, True): 10603, (32, False): 10603,
+              (16, True): 8909, (16, False): 8909, (8, True): 7328,
+              (8, False): 7328, (64, True): 12511, (64, False): 12511}
+    spills = {(32, None): 1340, (32, True): 1340, (32, False): 1340,
+              (16, True): 3552, (16, False): 3552, (8, True): 7476,
+              (8, False): 7476}
+    monkeypatch.setattr(tuning, 'pipe_bound', _bounds(bounds))
+    ctx = _amd()
+    origin, first = _origin(descr_factory, ctx)
+    scorer = TableScorer(spills)
+    pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
+                             generate=Generator.trial)
+    assert _key(pick)[0] == 64
+    assert {k[0] for k in scorer.asked} == {8, 16, 32, 64}
+    monkeypatch.setattr(tuning, 'CLEAN_FIRST', False)
+    pick = tuning.lanes_rule(descr_factory, ctx, TableScorer(spills), origin,
+                             first, generate=Generator.trial)
+    assert _key(pick)[0] == 32
+    # On NVIDIA the price of the spilling decides: 64 lanes counting more
+    # than 32 lanes' price stay out, clean or not.
+    monkeypatch.setattr(tuning, 'CLEAN_FIRST', True)
+    counts = dict(bounds)
+    counts[(64, True)] = counts[(64, False)] = 40000
+    monkeypatch.setattr(tuning, 'executed_instructions', _counting(counts))
+    nvidia = _context()
+    origin, first = _origin(descr_factory, nvidia)
+    pick = tuning.lanes_rule(descr_factory, nvidia, TableScorer(spills),
+                             origin, first, generate=Generator.trial)
+    assert _key(pick)[0] == 32
+
+
 def test_the_generator_builds_the_pick_and_remembers_it(monkeypatch):
     """Through `Options.autotune`: the kernel is built at the rule's pick, and
     a second generation of the same kernel asks the compiler nothing."""

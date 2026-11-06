@@ -1527,6 +1527,10 @@ def pipe_bound(result: Build, spill_bytes: float = 0.0) -> Optional[float]:
 #:     the pipe bound                2.2 /  9   61.4 / 227  3.6 / 32
 #:     the bound, waves stretched    2.2 /  9    7.7 / 30
 #:
+#: With order 8 in single precision on MI300A too (16 kernels) the default
+#: loses 8.2 / 37.5 % and the stretched bound 4.1 / 37.5, or 1.7 / 8.9 with
+#: a build that spills nothing taken first (`CLEAN_FIRST`).
+#:
 #: On the NVIDIA grids of `lanes_rule` the bound loses 14 to 20 % on average
 #: where the count loses 6 to 7: the bound takes the narrowest count wherever
 #: the issue port binds.  On MI300A the count takes eight lanes for order-6
@@ -1554,6 +1558,17 @@ RANKED_BY = {'nvidia': 'instructions', 'amd': 'bound',
 #: the difference.  An AMD part without an entry was never measured, and its
 #: default stands.
 LATENCY_WAVES_PER_SIMD = {'gfx942': 1, 'gfx90a': 8}
+
+#: Where the default build spills on AMD, take the cheapest candidate that
+#: spills nothing, if there is one, whatever the bound says of the spilling
+#: ones.  The bound prices a spill as the traffic it adds, and at one wave a
+#: SIMD that is not what it costs: order-8 `derivative` in single precision
+#: on MI300A spills 1340 B at 32 lanes, which the bound charges 8 %, and runs
+#: 38 % behind 64 lanes, which spill nothing and count 18 % more.  Over the
+#: 16 kernels of MI300A (orders 6 and 8, single and double) the rule's loss
+#: goes from 4.1 / 37.5 % (mean / worst) to 1.7 / 8.9 %; over MI210's 12 it
+#: is 7.7 / 30 % either way.
+CLEAN_FIRST = True
 
 
 def _ranked_by(context: Context) -> Optional[str]:
@@ -1664,7 +1679,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     the waves the part needs (`LATENCY_WAVES_PER_SIMD`); the guard, the
     margin and the order of the compiler's questions are the same, since the
     bound without either is as much a floor of the cost as the count is of
-    the count's.  On Intel, under DPC++, the count as on NVIDIA, starting
+    the count's -- except where the default spills: then the cheapest
+    candidate that spills nothing is taken first (`CLEAN_FIRST`).  On Intel, under DPC++, the count as on NVIDIA, starting
     from the sixteen lanes the target builds (`start`).
     """
     hw = context.target.hw
@@ -1711,8 +1727,17 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
 
     best, least = origin, cost(origin, report)
     default = least
+    # Where the default spills on AMD, a build that spills nothing wins over
+    # every build that does (`CLEAN_FIRST`): until one is found the compiler
+    # is asked about every candidate, after that only about those whose
+    # bound alone is still below the best clean one's cost.
+    clean_first = CLEAN_FIRST and by_bound and report.spill_bytes > 0
+    clean: Optional[Tuple[Candidate, float]] = None
     for cand in sorted((c for c in counts if c != origin), key=counts.get):
-        if counts[cand] >= least:
+        if clean is not None:
+            if counts[cand] >= clean[1]:
+                break
+        elif not clean_first and counts[cand] >= least:
             break
         try:
             seen = scorer.resources(builds[cand])
@@ -1721,8 +1746,14 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         if seen is None or seen.spill_bytes > limit:
             continue
         price = cost(cand, seen)
+        if clean_first and not seen.spill_bytes:
+            if clean is None or price < clean[1]:
+                clean = (cand, price)
+            continue
         if price < least:
             best, least = cand, price
+    if clean is not None:
+        return clean[0]
     return best if least < (1.0 - DEVIATION_MARGIN) * default else origin
 
 
