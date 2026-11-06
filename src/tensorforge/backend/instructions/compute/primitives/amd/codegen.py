@@ -286,8 +286,12 @@ def _transpose(writer, tile, ftype, threads, regs):
                           layout=TRANSPOSE4X4.produces(threads=threads))
            for _ in regs]
     callee = tile.transpose
-    if (callee == TRANSPOSE4X4.callee and getattr(
-            writer.context.get_user_options(), 'amd_fused_transpose', False)):
+    # A writer built without a context (the tiling tests build one) asks for
+    # nothing, and gets the plain exchange.
+    context = getattr(writer, 'context', None)
+    options = context.get_user_options() if context is not None else None
+    if (callee == TRANSPOSE4X4.callee
+            and getattr(options, 'amd_fused_transpose', False)):
         # The same exchange, shuffle and selection fused
         # (`Options.amd_fused_transpose`); `hip.h` falls back off gfx9.
         callee = FUSED_TRANSPOSE4X4
