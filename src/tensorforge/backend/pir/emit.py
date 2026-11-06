@@ -17,6 +17,7 @@ generated code still looks like something a human would write.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -294,6 +295,13 @@ class Emitter:
         self._prefetch_note = ''
         self._inline: set = set()
         self._pending: Dict[int, str] = {}   # load.async token id -> C++ name
+        #: Every how many loads from memory a fence keeps the compiler to the
+        #: body's order (`pin_loads`), 0 where nothing is pinned; the loads
+        #: since the last fence; and whether the statement being written runs
+        #: on every lane of its warp, which a full-mask fence needs.
+        self._pin_every = 0
+        self._pin_count = 0
+        self._converged = True
 
     def _record_work(self, op: Optional[str] = None, value=None,
                      work: bool = True) -> None:
@@ -953,6 +961,11 @@ class Emitter:
         if opts is not None and not getattr(opts, 'inline_pir_values', True):
             # Nothing inlined: every value is named where it is produced.
             return inline
+        if self._pin_every:
+            # Pinned, the text has to be the body's order: an inlined chain
+            # writes its loads first and its arithmetic as one expression at
+            # the last use, which is not the order the fences hold.
+            return inline
 
         def scan(stmts: Tuple[Stmt, ...]) -> None:
             # A value its one consumer spells twice would be computed twice,
@@ -990,6 +1003,9 @@ class Emitter:
         return inline
 
     def run(self, body: Tuple[Stmt, ...]) -> None:
+        self._pin_every = int(getattr(self.context, 'pin_loads', 0) or 0)
+        self._pin_count = 0
+        self._converged = True
         self._inline = self._plan_inlining(body)
         self._decide_async(body)
         if self._async_lex is None and self._async_note:
@@ -1017,10 +1033,53 @@ class Emitter:
             if (s.predicate is not None and s.op != Op.YIELD
                     and not _folds_predicate(s)):
                 with self.writer.If(self.operand(s.predicate)):
-                    self._emit_stmt(s, yield_to)
+                    with self._diverging(s.predicate):
+                        self._emit_stmt(s, yield_to)
             else:
                 self._emit_stmt(s, yield_to)
             at += 1
+
+    @contextlib.contextmanager
+    def _diverging(self, cond):
+        """The statements under `cond`: run on every lane of their warp only
+        where `cond` agrees across the warp, and where what is around it
+        does.  A multiplication's own value agrees across the warp where the
+        multiplication spans whole warps, which is where anything is pinned
+        (`abstract_instruction._pin_every`)."""
+        outer = self._converged
+        uniform = getattr(cond, 'uniformity', Uniformity.LANE)
+        self._converged = outer and uniform >= Uniformity.MULT
+        try:
+            yield
+        finally:
+            self._converged = outer
+
+    def _pin_load(self, s: Stmt) -> None:
+        """A fence in front of every `_pin_every`-th load from memory, where
+        the warp is converged (`pin_loads`).
+
+        `__syncwarp()` is no instruction in converged code -- ptxas writes a
+        `NOP` -- and yet one ptxas moves no memory access across, which no
+        other spelling achieves: an empty `asm volatile` with a memory clobber
+        holds the compiler in front of ptxas only, and ptxas reorders the PTX
+        as it likes.  So the fences keep ptxas to the body's order, in which
+        `pir.pressure` counts: every load at most this many loads ahead of
+        where the body reads it.  Under a lane guard, or a condition that
+        does not agree across the warp, a full-mask `__syncwarp` would wait
+        for lanes that never come, and the fence is left out there.
+        """
+        if not self._pin_every:
+            return
+        base = s.args[0] if s.args else None
+        space = getattr(getattr(base, 'type', None), 'space', None)
+        if space == MemSpace.REGISTER:
+            return
+        self._pin_count += 1
+        if self._pin_count < self._pin_every:
+            return
+        self._pin_count = 0
+        if self._converged:
+            self.writer('__syncwarp();')
 
     def _dpp_blocks(self):
         """`amd.dpp_block` where this target writes runs of fused DPP FMAs as
@@ -1208,6 +1267,7 @@ class Emitter:
             lex = self._lexic()
 
             v = s.target[0]
+            self._pin_load(s)
             addr = self.address(s.args[0], s.args[1:])
             # Clamp the address and hoist the load out of the select, where the
             # target asks for it: the read then happens in every lane, at an
@@ -1665,21 +1725,28 @@ class Emitter:
         share = (active[0] / active[1]
                  if active and active[1] else None)
         outer = self._lane_scale
+        converged = self._converged
+        diverges = share is not None or getattr(
+            s.cond, 'uniformity', Uniformity.LANE) < Uniformity.MULT
         with w.If(_unwrap(self.operand(s.cond))):
             if share is not None:
                 self._lane_scale = outer * share
+            self._converged = converged and not diverges
             try:
                 self._emit_body(s.regions[0].body, tuple(targets))
             finally:
                 self._lane_scale = outer
+                self._converged = converged
         if len(s.regions) > 1:
             with w.Block('else'):
                 if share is not None:
                     self._lane_scale = outer * max(0.0, 1.0 - share)
+                self._converged = converged and not diverges
                 try:
                     self._emit_body(s.regions[1].body, tuple(targets))
                 finally:
                     self._lane_scale = outer
+                    self._converged = converged
 
 
 def emit(body: Tuple[Stmt, ...], writer, context: Any = None,

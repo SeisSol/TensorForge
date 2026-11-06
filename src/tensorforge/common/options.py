@@ -904,6 +904,19 @@ declare('forward_memory',
             '(`pir.forward`); an element\'s mask is taken to hold where the '
             'body keeps its contract (`elementmask`).')
 
+declare('pin_loads',
+        default=0,
+        parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
+        doc='On NVIDIA, hold ptxas to the body\'s order: no chain inlined '
+            'into one expression, and a `__syncwarp()` -- a NOP in converged '
+            'code, and a point no memory access is moved across -- in front of '
+            'every this many loads.  ptxas otherwise schedules a body as it '
+            'likes, whatever order the text has, and its demand follows the '
+            'count of `pir.pressure` only loosely (66 + 0.83 x, 29 registers '
+            'off on average, on sm_90).  0 is off; `\'auto\'` fences every 32 '
+            'where ptxas would spill the body by that estimate.  Whole-warp '
+            'multiplications only.')
+
 declare('reassociate_products',
         default=False,
         parse=parse_bool,

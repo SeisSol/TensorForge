@@ -212,6 +212,53 @@ def _reread_if_over_budget(context, attempt, finish, builder, body,
   return builder, body
 
 
+#: What ptxas needs against what `pir.pressure` counts, in registers: the
+#: fewest at which it spills nothing (`.maxnreg` bisected), over 48 of SeisSol's
+#: kernels on sm_90 -- elastic and viscoelastic, orders 3 to 6, single and
+#: double -- fitted as ``need = a + b * peak / 4``: 66 + 0.83 x, 29 registers
+#: off on average and 56 at the most.  The offset is what the count leaves out
+#: (addresses, indices, predicates) and the slack ptxas schedules into.
+PTXAS_NEED = (66.0, 0.83)
+
+#: Every how many loads `pin_loads='auto'` fences where it fences.  On sm_120,
+#: with the body's order pinned so: viscoelastic order 5 single `derivative`
+#: (1360 B spilled) -61 %, order 4 double -15 %, while elastic order 6 single,
+#: which fits, moves -1 % (`derivative`) and +5 % (`localFluxAll`).  Every 8
+#: costs those +11 and +18 %, every load +65 and +120 %.
+PIN_EVERY = 32
+
+
+def _pin_every(context, body, num_threads) -> int:
+  """Every how many loads the emitter fences the body (`Options.pin_loads`),
+  0 for none.
+
+  CUDA only, where the fence is `__syncwarp()`, and only for multiplications
+  over whole warps: one narrower shares its warp with others whose batch loop
+  can end a trip earlier, and a full-mask `__syncwarp` there waits for lanes
+  that never come.  `'auto'` fences every `PIN_EVERY` loads where the body,
+  counted in its own order, needs more than the register file by
+  `PTXAS_NEED` -- where ptxas would spill it.
+  """
+  pin = getattr(context.get_user_options(), 'pin_loads', 0)
+  if not pin:
+    return 0
+  target = context.target
+  if (str(target.hw.vendor).lower() != 'nvidia'
+      or target.backend != 'cuda' or _explicit_simd(context)):
+    return 0
+  wave = max(1, getattr(target.hw, 'vec_unit_length', 32))
+  if not num_threads or num_threads % wave:
+    return 0
+  if pin != 'auto':
+    return int(pin)
+  budget = getattr(target.hw, 'max_reg_per_thread', None)
+  if budget is None:
+    return 0
+  total, _ = body_pressure(context, body, False, num_threads)
+  need = PTXAS_NEED[0] + PTXAS_NEED[1] * total / 4
+  return PIN_EVERY if need > budget / 4 else 0
+
+
 def _fused_if_over_budget(context, attempt, finish,
                           lanes: Optional[int] = None,
                           operations: bool = False):
@@ -675,7 +722,11 @@ class AbstractInstruction(ABC):
     if metrics is not None and metrics.pressure:
       _record_pressure(metrics, context, body, _explicit_simd(context),
                        num_threads)
-    pir.emit(body, writer, context, metrics)
+    context.pin_loads = _pin_every(context, body, num_threads)
+    try:
+      pir.emit(body, writer, context, metrics)
+    finally:
+      context.pin_loads = 0
 
   def through_pir(self, writer: Writer, build) -> None:
     """Route ``build(sink)`` through the pseudo-IR into ``writer``.
