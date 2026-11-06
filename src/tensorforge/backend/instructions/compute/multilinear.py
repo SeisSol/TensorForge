@@ -2802,6 +2802,18 @@ class MultilinearInstruction(ComputeInstruction):
         if (self._identity_reduction() is not None
                 or self._ell_plan() is not None):
             return False
+        # A contraction over more than one axis is flattened into one, the
+        # first axis fastest (`K`, `unwindK`), and every path reads `B` a block
+        # of lanes of that flat contraction at a time.  `unwindK` spreads only
+        # the first axis over the lanes, though, and takes the others from the
+        # block number: lane `l` of the block reads step `(l, 0)` where the
+        # paths multiply it into step `(l % n0, l // n0)`.  SeisSol's
+        # viscoelastic coupling `Iane[i,k,p] E[k,p,q]` (6 x 3) came out wrong
+        # in every row on AMD, gfx942 and gfx1150 alike -- the DPP chain read
+        # `E[l, 0, q]` for all 18 steps -- while the nest, which unwinds each
+        # step, is right.  The nest computes them.
+        if len(self._ks) > 1:
+            return False
 
         if plan[0].strategy is not Strategy.GENERIC:
             K = 1
