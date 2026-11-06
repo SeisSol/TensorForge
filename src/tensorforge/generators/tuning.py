@@ -1937,7 +1937,8 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
     origin = start(descrs, context)
     for name, value in (fixed or {}).items():
         origin = origin.set(name, value)
-    if _pins_by_compiler(context):
+    pins = _pins_by_compiler(context)
+    if pins:
         # Unpinned to begin with, and every candidate with it: the compiler
         # says where a pin pays (`PIN_SPILL`), not the estimate.
         origin = origin.set('pin_loads', 0)
@@ -1945,7 +1946,10 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
     if not first.ok:
         return None
     _load(cache)
-    key = _key(first, 'lanes')
+    # Remembered apart where the pin is the compiler's: the default's source
+    # is the same unpinned either way, and the pick of a walk without the
+    # pin in it is not this one's.
+    key = _key(first, 'lanes+pin' if pins else 'lanes')
     if key in _PICKS:
         return Candidate.from_dict(_PICKS[key])
     pick = lanes_rule(descr_factory, context, scorer, origin, first, fixed,

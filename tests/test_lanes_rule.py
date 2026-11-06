@@ -585,13 +585,18 @@ def test_the_pin_is_the_compilers_only_under_auto_and_whole_warps(
 
 def test_the_generator_builds_the_pinned_pick(monkeypatch):
     """Through `Options.autotune`: fenced, where the estimate alone
-    (`PTXAS_NEED`) leaves this small body as it is."""
+    (`PTXAS_NEED`) leaves this small body as it is -- also after the same
+    kernel was tuned without the pin, whose default build has the same
+    source and whose pick is remembered."""
     scorer = PinScorer({(32, 0): 3840, (32, 32): 80})
     monkeypatch.setattr(tuning.CompiledScore, 'available',
                         lambda self, context: True)
     monkeypatch.setattr(tuning.CompiledScore, 'resources',
                         lambda self, result: scorer.resources(result))
     monkeypatch.setattr(tuning, 'executed_instructions', _default_ahead)
+    unpinned = Generator(_local_flux()(), _context(autotune='lanes'))
+    unpinned.generate()
+    assert unpinned.tuned.get('pin_loads') is None
     gen = Generator(_local_flux()(), _context(autotune='lanes',
                                               pin_loads='auto'))
     gen.generate()
