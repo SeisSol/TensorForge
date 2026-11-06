@@ -630,6 +630,10 @@ class SlotMajorOrder(tuple):
 #: what lets the derivative's reads of one operator, one per order, share it.
 ORDERS_EVERY_READER = True
 
+#: No chain of products keeps its sum in the accumulators here
+#: (`MatrixPaths.D_CHAINS`).
+D_CHAINS = False
+
 #: DPAS first where it is offered, then the register-only chain, which beats
 #: staging operands through shared memory here.  Whether DPAS beats the chain
 #: in turn is a measurement rather than a preference -- the order says what to

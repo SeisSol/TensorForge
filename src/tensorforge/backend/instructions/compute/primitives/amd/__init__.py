@@ -114,6 +114,10 @@ ORDER = (Strategy.MATRIX, Strategy.DPP, Strategy.BROADCAST, Strategy.GENERIC)
 #: other readers is not offered one.
 ORDERS_EVERY_READER = False
 
+#: No chain of products keeps its sum in the accumulators here
+#: (`MatrixPaths.D_CHAINS`).
+D_CHAINS = False
+
 
 def strategies(shape, ctx):
     """What this target can emit for this shape.

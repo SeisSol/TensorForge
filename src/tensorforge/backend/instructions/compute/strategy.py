@@ -212,6 +212,10 @@ class MatrixPaths(Protocol):
     #: Whether an order `prepared_order` states holds for every reader of the
     #: operand, so that one with other readers may be offered one.
     ORDERS_EVERY_READER: bool
+    #: Whether `matmul` keeps the sum of products that add into one output in
+    #: the instruction's accumulators from the first to the last
+    #: (`MatmulOperands.chain`, `compute.dchain`).
+    D_CHAINS: bool
 
     def strategies(self, shape: ComputeShape, ctx) -> FrozenSet[Strategy]:
         """The arrangements this target can emit for `shape`."""
