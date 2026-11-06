@@ -299,9 +299,16 @@ def _tensorforge(descrs: List, workload: Workload, unit: BuildUnit,
     # unless the configuration says otherwise -- so testing it for
     # truthiness would pin every build, which is the whole of what this
     # is here to stop.
+    #
+    # So is a count the target gives by default (`Preferences.
+    # lanes_per_mult`, sixteen under DPC++): the generator applies it
+    # unasked, through the same `lanes.requested`, and handed over from
+    # here it would be pinned -- `autotune=lanes` on the Max 1550 could
+    # then turn merging and nothing else.
     ceiling = unit.config.lane_ceiling
     stated = unit.config.wave_wide or ceiling != lanes.DEFAULT_LANE_CEILING
-    asked = (lanes.requested(descrs, ctx)
+    pinned = stated or 'lanes_per_mult' in ctx.get_user_options().delta()
+    asked = ((lanes.requested(descrs, ctx) if pinned else None)
              or (lanes.deduce(descrs, ctx, ceiling=ceiling)
                  if stated else None))
     gen = Generator(descrs, ctx, attrs=workload.attrs, lanes=asked)

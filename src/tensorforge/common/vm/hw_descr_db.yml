@@ -42,6 +42,12 @@
 - arch: sm_80
   base: sm_60
   max_local_mem_size_per_block: 163kB
+  # Time per warp-instruction of written-out FFMA chains past 144 kB of code,
+  # against under 32 kB, at two warps a scheduler -- one block an SM of
+  # 255-register threads, where SeisSol's kernels run.  At sixteen warps it is
+  # 1.07-1.69 on all four parts measured.  A100's FFMA takes two clocks a
+  # scheduler, which hides most of the fetch.
+  icache_miss_factor: 1.28
 - arch: sm_86
   base: sm_60
   max_local_mem_size_per_block: 99kB
@@ -56,8 +62,10 @@
 - arch: sm_90
   base: sm_60
   max_local_mem_size_per_block: 227kB # shared with L1; together 256 kiB
+  icache_miss_factor: 3.0  # GH200, as on sm_80; assumed for sm_101 and sm_110
 - arch: sm_100
   base: sm_90
+  icache_miss_factor: 2.6  # GB200; as on sm_80
   max_argument_size: 32764B
 - arch: sm_101
   base: sm_90
@@ -67,6 +75,7 @@
   max_argument_size: 32764B
 - arch: sm_120
   base: sm_89
+  icache_miss_factor: 2.05  # RTX 5070 laptop; as on sm_80
   max_argument_size: 32764B
 
 # AMD

@@ -66,6 +66,23 @@ def icache_excess(code_units: Optional[int], hw) -> int:
     return max(0, size - capacity)
 
 
+def past_share(code: Optional[int], hw) -> float:
+    """The share of `code` bytes that lies past the instruction cache: 0
+    where it fits, or where the size or the capacity is not known.
+
+    A body run once an element streams through its code, so where it is
+    larger than the cache, about this share of what it executes has to be
+    fetched again for the next element -- if every instruction runs equally
+    often, which holds for code written out and less for a loop.  The size is
+    best the compiler's (`toolchain.Resources.code_bytes`): `code_bytes` from
+    the emitter's units can be a third short.
+    """
+    capacity = getattr(hw, 'icache_size', None)
+    if not code or not capacity or code <= capacity:
+        return 0.0
+    return (code - capacity) / code
+
+
 def hot_set(profile: Optional[dict], share: float = 0.9) -> Optional[tuple]:
     """`(code units carrying `share` of the executions, units in total)`.
 

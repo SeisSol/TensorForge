@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import struct
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -82,6 +83,11 @@ class Compiler:
         is not the whole account; None where it is."""
         return None
 
+    def code_bytes(self, product: str) -> Optional[int]:
+        """Bytes of machine code in the file `report_build` wrote, which the
+        log does not state; None where it cannot be read."""
+        return None
+
     def register_blocks(self, registers: int, threads: int,
                         hw) -> Optional[int]:
         """Blocks of `threads` an SM holds at `registers` per thread, where
@@ -120,6 +126,14 @@ class Nvcc(Compiler):
         # Registers are allocated per thread in units of eight.
         per_thread = -(-registers // 8) * 8
         return hw.max_reg_per_block // max(1, per_thread * threads)
+
+    def code_bytes(self, product):
+        # A cubin holds each kernel's code in a `.text.<name>` section, and
+        # the source holds one kernel: the sum is the kernel with whatever
+        # it calls and did not inline.
+        sizes = elf_section_sizes(product)
+        text = [size for name, size in sizes.items() if name.startswith('.text.')]
+        return sum(text) if text else None
 
 
 @dataclass(frozen=True)
@@ -368,6 +382,39 @@ class Resources:
     spill_bytes: int
     #: Blocks the register file admits per SM, where it can be said.
     register_blocks: Optional[int] = None
+    #: Bytes of machine code, where the build's file says (`code_bytes`).
+    code_bytes: Optional[int] = None
+
+
+def elf_section_sizes(path: str) -> Dict[str, int]:
+    """Section name to size for a 64-bit little-endian ELF file -- a cubin,
+    an AMD code object -- and empty for anything else or nothing at all."""
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return {}
+    if len(data) < 64 or data[:4] != b'\x7fELF' or data[4:6] != b'\x02\x01':
+        return {}
+    shoff, = struct.unpack_from('<Q', data, 0x28)
+    shentsize, shnum, shstrndx = struct.unpack_from('<HHH', data, 0x3A)
+    if shoff + shnum * shentsize > len(data) or shstrndx >= shnum:
+        return {}
+
+    def header(index):
+        # sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size
+        return struct.unpack_from('<IIQQQQ', data, shoff + index * shentsize)
+
+    names = header(shstrndx)[4]
+    sizes = {}
+    for index in range(shnum):
+        name, _, _, _, _, size = header(index)
+        start = names + name
+        end = data.find(b'\0', start)
+        if end < 0:
+            return {}
+        sizes[data[start:end].decode('ascii', 'replace')] = size
+    return sizes
 
 
 def resources(backend: str, log: str) -> Optional[Resources]:

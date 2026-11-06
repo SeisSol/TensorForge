@@ -69,6 +69,12 @@ class HwDecription:
     self.icache_size = (parseBytes(param_table['icache_size'])
                         if param_table.get('icache_size') is not None
                         else None)
+    #: How many times longer an instruction takes when the code it is in lies
+    #: past `icache_size`, by microbenchmark, or None where none was run --
+    #: and then nothing is charged for it (`tuning.lanes_rule`).
+    self.icache_miss_factor = (float(param_table['icache_miss_factor'])
+                               if param_table.get('icache_miss_factor')
+                               is not None else None)
     self.model = arch
     #: The device's backend: `oneapi` for both Intel lowerings.  Which one a
     #: kernel is written in is `Target.backend`.

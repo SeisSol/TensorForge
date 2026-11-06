@@ -54,6 +54,14 @@ def test_a_plus_adds_to_the_suites_configurations():
     assert [c.label for c in chosen.configs] == ['baseline', 'tensor-cores']
 
 
+def test_a_campaign_adds_the_lane_rule_beside_the_matrix_units():
+    spec = _suite(suite.CONFIGS['baseline'])
+    chosen = suite.select_configs(spec, '+tensor-cores,lanes')
+    assert ([c.label for c in chosen.configs]
+            == ['baseline', 'tensor-cores', 'lanes'])
+    assert chosen.configs[2].options.asked() == {'autotune': 'lanes'}
+
+
 def test_an_unknown_label_is_refused():
     with pytest.raises(ValueError, match="'nonsense'"):
         suite.select_configs(_suite(suite.CONFIGS['baseline']),

@@ -277,6 +277,53 @@ def test_intel_states_its_spilling_in_the_binary_and_not_on_the_console(tmp_path
     assert toolchain.resources('oneapi', 'spill memory used = 96 bytes').spill_bytes == 96
 
 
+def _elf(sections):
+    """A 64-bit little-endian ELF file holding `sections`, (name, size)
+    pairs, and the string table naming them -- the shape of a cubin."""
+    import struct
+    names = b'\0'
+    entries = [bytes(64)]
+    for name, size in sections + [('.shstrtab', None)]:
+        offset = len(names)
+        names += name.encode() + b'\0'
+        entries.append((offset, size))
+    table = 64                          # the names right after the header
+    shoff = table + len(names)
+    headers = [entries[0]] + [
+        struct.pack('<IIQQQQIIQQ', offset, 1 if size is not None else 3, 0, 0,
+                    table if size is None else 0,
+                    len(names) if size is None else size, 0, 0, 1, 0)
+        for offset, size in entries[1:]]
+    head = b'\x7fELF\x02\x01\x01' + bytes(9) + struct.pack(
+        '<HHIQQQIHHHHHH', 1, 190, 1, 0, 0, shoff, 0, 64, 0, 0, 64,
+        len(headers), len(headers) - 1)
+    return head + names + b''.join(headers)
+
+
+def test_a_cubin_states_its_code_in_its_text_sections(tmp_path):
+    """What ptxas laid down is in the cubin, one `.text.<kernel>` section a
+    function, and the console says nothing of it: the size the lanes rule
+    charges for code past the instruction cache is read from there.  The
+    emitter's own estimate of the build that charge is for is 176 kB, and the
+    sections say 258."""
+    cubin = tmp_path / 'k.cubin'
+    cubin.write_bytes(_elf([('.nv.info', 40), ('.text._Z6kernelPf', 2304),
+                            ('.nv.constant0._Z6kernelPf', 900),
+                            ('.text._Z6helperv', 256)]))
+    sizes = toolchain.elf_section_sizes(str(cubin))
+    assert sizes['.text._Z6kernelPf'] == 2304 and sizes['.nv.info'] == 40
+    nvcc = toolchain.compiler_for_vendor('nvidia')
+    assert nvcc.code_bytes(str(cubin)) == 2304 + 256, (
+        'the kernel and what it calls without inlining, and nothing else')
+    other = tmp_path / 'k.o'
+    other.write_bytes(b'not an ELF file at all')
+    assert toolchain.elf_section_sizes(str(other)) == {}
+    assert nvcc.code_bytes(str(other)) is None
+    assert nvcc.code_bytes(str(tmp_path / 'missing.cubin')) is None
+    assert toolchain.compiler_for_vendor('amd').code_bytes(str(cubin)) is None, (
+        'read where a ranking asks for it, which is NVIDIA so far')
+
+
 def test_the_igc_spelling_of_today_is_read_by_every_caller():
     """`Spill memory used = ... bytes for kernel ...`, one line per kernel.
 
