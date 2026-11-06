@@ -34,8 +34,17 @@ def _hint_allowed(loader) -> bool:
   (`pir.forward`).  With `Options.hint_outputs` also where it is the only
   *reader*, or the readers copy the same: the read of a `+=` destination,
   whose other users only write it.
+
+  And only from global memory.  The loader reads shared memory into
+  registers too -- a merged run's rotated slot, reached through its table
+  (`GetElementPtrBuilder.build`), is a binding named `glb_` and typed
+  `SharedMem` -- and a hint spells a global access: `__ldcg` read the slot's
+  shared address as a global one, and seissol60's viscoelastic derivative
+  family faulted on it at order 6 on sm_120 and sm_90.
   """
   src = loader._src
+  if src.stype not in (SymbolType.Global, SymbolType.Batch):
+    return False
   if getattr(src.obj, 'addressing', None) == Addressing.NONE:
     return False
   users = src.get_user_list()

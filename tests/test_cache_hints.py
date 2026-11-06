@@ -171,3 +171,28 @@ def test_a_batch_constant_operand_never_takes_the_hint():
     assert hinted
     assert not [h for h in hinted if re.search(rf"\b(?:ptr_)?glb_{a}\b", h)]
     assert re.search(rf"\b(?:ptr_)?glb_{a}\b", src)
+
+
+def test_a_load_from_shared_memory_never_takes_the_hint():
+    """The loader also reads shared memory into registers -- a merged run's
+    rotated slot, reached through its table, is a binding named `glb_` and
+    typed `SharedMem` -- and a hint spells a global access: `__ldcg` on the
+    slot's address faulted in seissol60's viscoelastic derivative family.
+    The same loader on a global source of one user takes it."""
+    from types import SimpleNamespace
+    from tensorforge.backend.instructions.memory import load
+    from tensorforge.backend.symbol import SymbolType
+    from tensorforge.common.basic_types import Addressing
+
+    def loader(stype):
+        src = SimpleNamespace(stype=stype,
+                              obj=SimpleNamespace(addressing=Addressing.STRIDED))
+        mine = SimpleNamespace(_src=src, _context=SimpleNamespace(
+            get_user_options=lambda: SimpleNamespace(hint_outputs=True)))
+        src.get_user_list = lambda: [mine]
+        return mine
+
+    assert not load._hint_allowed(loader(SymbolType.SharedMem))
+    assert not load._hint_allowed(loader(SymbolType.Register))
+    assert load._hint_allowed(loader(SymbolType.Global))
+    assert load._hint_allowed(loader(SymbolType.Batch))
