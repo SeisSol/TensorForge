@@ -915,6 +915,16 @@ declare('reassociate_products',
             'matrix instead of 56 -- and the operator products of a step all '
             'read the same X (`generators.reassociate`).')
 
+declare('amd_fused_transpose',
+        default=False,
+        parse=parse_bool,
+        doc='On gfx9, transpose the 4x4 quads of the lane-batched MFMA path '
+            'with `transpose4x4b32Fused`: eight `v_cndmask_b32_dpp` with the '
+            'lane mask in VCC -- the assembly `hip.h` kept in a comment, now '
+            'one block behind one wait for the DPP hazard -- instead of eight '
+            'DPP moves and eight selects.  MI300A, SeisSol F32: derivative '
+            '-3 to -16 %, localFluxAll -4 to -15 % over 16 to 64 lanes.')
+
 declare('amd_moved_broadcast',
         default=False,
         parse=parse_bool,

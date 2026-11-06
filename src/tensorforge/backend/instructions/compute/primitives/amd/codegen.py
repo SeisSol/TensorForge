@@ -25,6 +25,9 @@ from .select import (BroadcastForm, moved_on_cdna, packed_broadcast,
 #: which is what lets a layout ride on it and a pass see who consumed it.
 SPLIT_BF16 = 'tensorforge::splitFloatx4BF16'
 
+#: `TRANSPOSE4X4`'s exchange with the shuffle fused into the selection.
+FUSED_TRANSPOSE4X4 = 'tensorforge::transpose4x4b32Fused'
+
 #: The runtime's packing of four BF16 terms stored as floats into the
 #: k-vector an emulated MFMA takes (`prepare.split_bf16`, `amd.QuadOrder`).
 PACK_BF16 = 'tensorforge::packBF16x4'
@@ -282,7 +285,13 @@ def _transpose(writer, tile, ftype, threads, regs):
     out = [writer.declare(ftype, hint='tp',
                           layout=TRANSPOSE4X4.produces(threads=threads))
            for _ in regs]
-    writer.call_stmt(tile.transpose, *out, *regs, writes=tuple(out))
+    callee = tile.transpose
+    if (callee == TRANSPOSE4X4.callee and getattr(
+            writer.context.get_user_options(), 'amd_fused_transpose', False)):
+        # The same exchange, shuffle and selection fused
+        # (`Options.amd_fused_transpose`); `hip.h` falls back off gfx9.
+        callee = FUSED_TRANSPOSE4X4
+    writer.call_stmt(callee, *out, *regs, writes=tuple(out))
     return out
 
 
