@@ -905,7 +905,7 @@ declare('forward_memory',
             'body keeps its contract (`elementmask`).')
 
 declare('pin_loads',
-        default=0,
+        rule=lambda target: target.prefs.pin_loads,
         parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
         doc='On NVIDIA, hold ptxas to the body\'s order: no chain inlined '
             'into one expression, and a `__syncwarp()` -- a NOP in converged '
@@ -913,7 +913,9 @@ declare('pin_loads',
             'every this many loads.  ptxas otherwise schedules a body as it '
             'likes, whatever order the text has, and its demand follows the '
             'count of `pir.pressure` only loosely (66 + 0.83 x, 29 registers '
-            'off on average, on sm_90).  0 is off; `\'auto\'` fences every 32 '
+            'off on average, on sm_90).  0 is off, and the default off NVIDIA, '
+            'where it does nothing; `\'auto\'`, the default on NVIDIA '
+            '(`Preferences.pin_loads`), fences every 32 '
             'where ptxas would spill the body by that estimate -- and under '
             '`autotune=lanes` where ptxas does spill it, 192 B of spill '
             'traffic a lane or more, and pinned spills at most half of that '

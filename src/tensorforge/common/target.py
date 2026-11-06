@@ -28,7 +28,7 @@ does not have.
 """
 
 from dataclasses import dataclass, field, replace
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from tensorforge.backend.placement import VendorPolicy
 from tensorforge.common.basic_types import Datatype
@@ -119,6 +119,8 @@ class Preferences:
     wrap_loads: bool = True
     #: `lanes_per_mult`, 0 for the deduced count,
     lanes_per_mult: int = 0
+    #: `pin_loads`, 0 for none or `'auto'`,
+    pin_loads: Union[int, str] = 0
     #: and the rest under their own names.
     preload_globals: bool = False
     preload_shards: bool = False
@@ -194,6 +196,19 @@ PREFERENCES = {
         # 98 to 42 ns an element and `localFlux` from 90 to 42.
         ell_gather=64,
         tune_matrix_path=True,
+        # ptxas held to the body's order where it would spill, by the
+        # estimate or -- under `autotune=lanes` -- by ptxas's own report
+        # (`Options.pin_loads`).  Over 36 SeisSol kernels on GB200 (elastic
+        # and viscoelastic, orders 4 to 6, both precisions), as the loss
+        # against the faster of the unpinned build and one pinned every 32
+        # loads (mean / worst): never pinned 26.0 / 278 %, by the estimate
+        # 1.5 / 24 %, by ptxas 0.1 / 3 %.  The lanes rule with the pin in it
+        # ran those kernels 27.5 % faster than the default in geometric mean
+        # (worst +11 %, elastic order-6 `derivative` in single), without it
+        # 16.5 % (worst +42 %): the viscoelastic time derivatives 54 to 74 %.
+        # On sm_120 the rule picked the faster build of all 13 kernels
+        # measured.
+        pin_loads='auto',
         # ptxas sm_100a, 52 builds, residuals within 40.
         register_fit=(51.0, 1.05)),
     'amd': Preferences(
