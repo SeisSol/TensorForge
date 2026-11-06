@@ -131,6 +131,8 @@ class Preferences:
     inline_constants: int = 64
     argument_constants: bool = False
     ell_gather: int = 3
+    amd_fused_transpose: bool = False
+    reassociate_products: bool = False
     #: What the autotuner turns (`generators.tuning`): the matrix path,
     tune_matrix_path: bool = False
     #: staging the batch-constant operands,
@@ -278,7 +280,20 @@ PREFERENCES = {
         # at order 6, 279 for 166 -- so it cannot say that registers bind;
         # this can, where even it leaves fewer blocks than shared memory
         # would.
-        register_floor=0.74),
+        register_floor=0.74,
+        # The 4x4 quad transpose of the lane-batched MFMA path with the
+        # shuffle fused into the selection (`Options.amd_fused_transpose`,
+        # read on gfx9 alone), and the operator product ahead of the small
+        # product it feeds (`Options.reassociate_products`).  Over 48
+        # SeisSol kernels on MI300A (elastic and viscoelastic, orders 4 to
+        # 6, both precisions), in geometric mean over those whose code each
+        # changes: the transpose -3.0 % (21 kernels), the reassociation
+        # -6.4 % (18), both -6.1 % (30); the worst of both +4.5 % (elastic
+        # order-6 `neighboringFlux` in single), the transpose alone +9.4 %
+        # (the same at order 4, -6.1 % with both).  Checked against NumPy as
+        # before.
+        amd_fused_transpose=True,
+        reassociate_products=True),
     'intel': Preferences(
         # The sub-group broadcast is cheap enough here that an operand whose
         # lane axis is not where a reader expects it can be read in place.

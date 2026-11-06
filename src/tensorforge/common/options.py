@@ -922,7 +922,7 @@ declare('pin_loads',
             '(`tuning.PIN_SPILL`).  Whole-warp multiplications only.')
 
 declare('reassociate_products',
-        default=False,
+        rule=lambda target: target.prefs.reassociate_products,
         parse=parse_bool,
         doc='Write ``T = X S; Q (+)= A T`` as ``U = A X; Q (+)= U S`` where '
             'both are plain matrix products, T is a temporary nothing else '
@@ -930,17 +930,20 @@ declare('reassociate_products',
             'yateto puts the per-element product first, and in the other '
             'order it runs over the operator\'s rows -- 24 behind a face '
             'matrix instead of 56 -- and the operator products of a step all '
-            'read the same X (`generators.reassociate`).')
+            'read the same X (`generators.reassociate`).  On by default on '
+            'AMD (`Preferences.reassociate_products`).')
 
 declare('amd_fused_transpose',
-        default=False,
+        rule=lambda target: target.prefs.amd_fused_transpose,
         parse=parse_bool,
         doc='On gfx9, transpose the 4x4 quads of the lane-batched MFMA path '
             'with `transpose4x4b32Fused`: eight `v_cndmask_b32_dpp` with the '
             'lane mask in VCC -- the assembly `hip.h` kept in a comment, now '
             'one block behind one wait for the DPP hazard -- instead of eight '
             'DPP moves and eight selects.  MI300A, SeisSol F32: derivative '
-            '-3 to -16 %, localFluxAll -4 to -15 % over 16 to 64 lanes.')
+            '-3 to -16 %, localFluxAll -4 to -15 % over 16 to 64 lanes.  On '
+            'by default on AMD (`Preferences.amd_fused_transpose`); off gfx9 '
+            'nothing reads it.')
 
 declare('amd_moved_broadcast',
         default=False,
