@@ -545,18 +545,20 @@ def _pin_tuned(monkeypatch, spills, fixed=None, **opts):
 def test_under_the_lanes_rule_ptxas_decides_the_pin(monkeypatch):
     """`pin_loads='auto'`: the default built unpinned, and pinned too where
     ptxas spills `PIN_SPILL` bytes or more -- viscoelastic order-6
-    `derivative` in single precision on GB200, 3840 B and 80 B pinned, and
-    71 % faster pinned."""
-    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 3840, (32, 32): 80},
+    `derivative` in single precision on GB200, 7308 B stored and loaded,
+    148 B pinned, and 71 % faster pinned."""
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 7308, (32, 32): 148},
                               pin_loads='auto')
     assert pick.lanes.num_threads == 32 and pick.get('pin_loads') == 32
     assert scorer.asked == [(32, 0), (32, 32)]
 
 
 def test_a_small_spill_is_left_unpinned(monkeypatch):
-    """Elastic order-6 `derivative` in single precision on GB200: 72 B, 4 B
-    pinned and 90 % slower for it.  Pinned is not even built."""
-    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 72, (32, 32): 4},
+    """Elastic order-6 `derivative` in single precision on GB200: 148 B
+    stored and loaded, 8 B pinned and 90 % slower for it.  With the
+    threshold set for the stores alone the rule pinned it on sm_120, and
+    the kernel ran 39 % behind the default.  Pinned is not even built."""
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 148, (32, 32): 8},
                               pin_loads='auto')
     assert pick.get('pin_loads') == 0 and scorer.asked == [(32, 0)]
 

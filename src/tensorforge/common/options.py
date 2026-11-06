@@ -915,9 +915,9 @@ declare('pin_loads',
             'count of `pir.pressure` only loosely (66 + 0.83 x, 29 registers '
             'off on average, on sm_90).  0 is off; `\'auto\'` fences every 32 '
             'where ptxas would spill the body by that estimate -- and under '
-            '`autotune=lanes` where ptxas does spill it, 128 B a lane or more, '
-            'and pinned spills at most half of that (`tuning.PIN_SPILL`).  '
-            'Whole-warp multiplications only.')
+            '`autotune=lanes` where ptxas does spill it, 192 B of spill '
+            'traffic a lane or more, and pinned spills at most half of that '
+            '(`tuning.PIN_SPILL`).  Whole-warp multiplications only.')
 
 declare('reassociate_products',
         default=False,

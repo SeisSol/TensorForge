@@ -1633,25 +1633,29 @@ ISSUE_PER_WAVE = ('gfx9',)
 CLEAN_WAVE = True
 
 #: Where `Options.pin_loads` is `'auto'`, the rule has ptxas decide it rather
-#: than the estimate (`abstract_instruction.PTXAS_NEED`): a candidate that
-#: spills at least this many bytes a lane is built again pinned, and the
-#: pinned build stands in for it where it spills at most `PIN_KEEP` of that.
-#: A small spill is a cold value ptxas parks, and a pin there costs the
-#: latency the free schedule hid: order-6 `derivative` in single precision
-#: spills 72 B on GB200, 4 B pinned, and runs 90 % slower pinned.  The
-#: viscoelastic time derivatives at orders 4 to 6 spill 0.8 to 6.7 kB and run
-#: 20 to 74 % faster pinned.  Over 36 SeisSol kernels on GB200 (elastic and
-#: viscoelastic, orders 4 to 6, both precisions), as the loss against the
-#: faster of the two builds (mean / worst): never pinned 26.0 / 278 %, pinned
-#: by the estimate 1.5 / 24 % (it misses order-4 `derivative` in single
-#: precision, 808 B spilled, and pins order-6 `volume` in double for 12), and
-#: by this rule 0.1 / 3 %.  On sm_120 the rule picks the faster build of all
-#: 13 kernels measured there.
-PIN_SPILL = 128
+#: than the estimate (`abstract_instruction.PTXAS_NEED`): a candidate whose
+#: spilling -- stores and loads together, as `Resources.spill_bytes` counts
+#: it on NVIDIA -- comes to at least this many bytes a lane is built again
+#: pinned, and the pinned build stands in for it where it spills at most
+#: `PIN_KEEP` of that.  A small spill is a cold value ptxas parks, and a pin
+#: there costs the latency the free schedule hid: elastic order-6
+#: `derivative` in single precision spills 148 B on GB200 (72 stored, 76
+#: loaded), 8 B pinned, and runs 90 % slower pinned; viscoelastic order-5
+#: `volumeExt` in double spills 256 B and runs 8 % faster pinned, with
+#: nothing left.  The viscoelastic time derivatives at orders 4 to 6 spill
+#: 1.3 to 15 kB and run 20 to 74 % faster pinned.  Over 36 SeisSol kernels on
+#: GB200 (elastic and viscoelastic, orders 4 to 6, both precisions), as the
+#: loss against the faster of the two builds (mean / worst): never pinned
+#: 26.0 / 278 %, pinned by the estimate 1.5 / 24 % (it misses the
+#: viscoelastic order-4 `derivative` in single precision, 1.3 kB spilled, and
+#: pins elastic order-6 `volume` in double for 28 B), and by this rule
+#: 0.1 / 3 % anywhere from 160 to 256 B; on sm_120 it picks the faster build
+#: of all 13 kernels measured there.
+PIN_SPILL = 192
 
 #: The share of the spilling a pinned build may keep and still be taken.
-#: Viscoelastic order-6 `volumeExt` in single precision spills 104 B on
-#: sm_120 and 84 B pinned, and runs 24 % slower pinned; where the pin pays,
+#: Viscoelastic order-6 `volumeExt` in single precision spills 168 B on
+#: sm_120 and 196 B pinned, and runs 24 % slower pinned; where the pin pays,
 #: it removed 80 to 100 % of the spilling.
 PIN_KEEP = 0.5
 
