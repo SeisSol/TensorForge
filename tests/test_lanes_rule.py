@@ -344,6 +344,38 @@ def test_where_the_default_spills_on_amd_a_clean_build_comes_first(monkeypatch):
     assert _key(pick)[0] == 32
 
 
+def test_at_one_wave_on_cdna_every_instruction_takes_a_turn(monkeypatch):
+    """Viscoelastic order-4 `fluxLocalAll` in double precision on MI300A:
+    every build of up to 32 lanes holds one wave a SIMD, and sixteen merged
+    lanes are 3 % below the default's bound -- inside the margin -- and 13 %
+    below its count, and run 21 % faster.  At one wave the count over the
+    waves is a floor of the cost, and it moves the pick; by the bound alone
+    the default stands."""
+    descr_factory = _local_flux()
+    bounds = {(32, None): 1756, (32, True): 1756, (32, False): 1753,
+              (16, True): 1703, (16, False): 1678, (8, True): 2333,
+              (8, False): 2121, (64, True): 4084, (64, False): 3506}
+    counts = {(32, None): 2193, (32, True): 2193, (32, False): 2090,
+              (16, True): 1904, (16, False): 1804, (8, True): 2476,
+              (8, False): 2207, (64, True): 5092, (64, False): 4180}
+    waves = {key: 1 for key in bounds}
+    waves[(64, True)], waves[(64, False)] = 3, 2
+    spills = {(16, False): 36, (8, True): 284, (8, False): 5032}
+    monkeypatch.setattr(tuning, 'pipe_bound', _bounds(bounds))
+    monkeypatch.setattr(tuning, 'executed_instructions', _counting(counts))
+    ctx = _amd()
+    origin, first = _origin(descr_factory, ctx)
+    pick = tuning.lanes_rule(descr_factory, ctx,
+                             TableScorer(spills, waves=waves), origin, first,
+                             generate=Generator.trial)
+    assert _key(pick) == (16, True)
+    monkeypatch.setattr(tuning, 'ISSUE_PER_WAVE', ())
+    pick = tuning.lanes_rule(descr_factory, ctx,
+                             TableScorer(spills, waves=waves), origin, first,
+                             generate=Generator.trial)
+    assert _key(pick) == (32, None)
+
+
 def test_the_generator_builds_the_pick_and_remembers_it(monkeypatch):
     """Through `Options.autotune`: the kernel is built at the rule's pick, and
     a second generation of the same kernel asks the compiler nothing."""

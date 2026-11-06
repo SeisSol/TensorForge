@@ -1570,6 +1570,26 @@ LATENCY_WAVES_PER_SIMD = {'gfx942': 1, 'gfx90a': 8}
 #: is 7.7 / 30 % either way.
 CLEAN_FIRST = True
 
+#: AMD parts, by `hw.model` prefix, whose SIMDs issue one instruction of a
+#: wave per turn and send instructions of different kinds out together only
+#: from different waves: CDNA.  At one wave a SIMD every instruction --
+#: scalar, memory, branch, wait -- then takes the turn a vector instruction
+#: would have, and the rule charges a build at least the instructions an
+#: element executes over the waves the compiler gives it
+#: (`executed_instructions` over `Resources.register_blocks`), where that is
+#: above its bound.  Viscoelastic `fluxLocalAll` in double precision holds
+#: one wave a SIMD at 16 and 32 lanes on MI300A: at order 4 sixteen lanes
+#: are 3.0 % below the default's bound and 13.2 % below its count, and run
+#: 20.6 % faster; at order 5 the unmerged 32 lanes are 2.9 % and 6.7 % below
+#: and run 19.3 % faster -- both inside `DEVIATION_MARGIN` by the bound
+#: alone.  Over SeisSol's elastic kernels at orders 4 to 8 and the
+#: viscoelastic ones at orders 4 to 6, both precisions (56 kernels), the
+#: rule's loss against the fastest candidate goes from 4.8 / 31.3 % to
+#: 3.8 / 30.4 (mean / worst), and on the viscoelastic ones from 5.2 / 31.3
+#: to 3.1 / 18.8; those two are the only picks that move, and none of
+#: MI210's 12 does.
+ISSUE_PER_WAVE = ('gfx9',)
+
 
 def _ranked_by(context: Context) -> Optional[str]:
     """`RANKED_BY` for the target, or None where it was never measured: on
@@ -1680,7 +1700,9 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     margin and the order of the compiler's questions are the same, since the
     bound without either is as much a floor of the cost as the count is of
     the count's -- except where the default spills: then the cheapest
-    candidate that spills nothing is taken first (`CLEAN_FIRST`).  On Intel, under DPC++, the count as on NVIDIA, starting
+    candidate that spills nothing is taken first (`CLEAN_FIRST`).  On CDNA
+    the instructions an element executes, over the waves the compiler gives
+    a build, are a floor of its cost too (`ISSUE_PER_WAVE`).  On Intel, under DPC++, the count as on NVIDIA, starting
     from the sixteen lanes the target builds (`start`).
     """
     hw = context.target.hw
@@ -1688,6 +1710,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     elem = context.fp_type.size()
     by_bound = _ranked_by(context) == 'bound'
     latency = LATENCY_WAVES_PER_SIMD.get(hw.model, 1)
+    issue = by_bound and str(hw.model).startswith(ISSUE_PER_WAVE)
     figure = pipe_bound if by_bound else executed_instructions
     builds: Dict[Candidate, Build] = {origin: first}
     counts: Dict[Candidate, float] = {}
@@ -1720,6 +1743,10 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             spilled = (pipe_bound(builds[cand], seen.spill_bytes)
                        if seen.spill_bytes else counts[cand])
             waves = max(1, seen.register_blocks or 1)
+            if issue and seen.register_blocks:
+                issued = executed_instructions(builds[cand])
+                if issued is not None:
+                    spilled = max(spilled, issued / seen.register_blocks)
             return (spilled * max(1.0, latency / waves)
                     * (1.0 + refetch * past))
         return (counts[cand] * (1.0 + refetch * past)
