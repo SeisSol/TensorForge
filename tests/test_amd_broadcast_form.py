@@ -238,3 +238,95 @@ def test_a_body_rebuilt_over_budget_takes_no_move():
     ctx = _ctx('gfx942')
     ctx.force_fused_broadcast = True
     assert not amd.packed_broadcast(Datatype.F32, 16, 4, 8, ctx)
+
+
+# --------------------------------------------------------------------------- #
+# the move on CDNA, where the fused form is assembly (`amd_moved_broadcast`)
+# --------------------------------------------------------------------------- #
+
+def _asked(arch, dtype=Datatype.F64, on=True):
+    from tensorforge.common.context import Options
+    return Context(arch=arch, backend='hip', fp_type=dtype,
+                   options=Options(amd_moved_broadcast=on))
+
+
+@pytest.mark.parametrize('arch', CDNA)
+@pytest.mark.parametrize('dtype', [Datatype.F64, Datatype.F32])
+def test_cdna_takes_the_move_where_asked(arch, dtype):
+    """Nothing pairs a CDNA FMA in double precision, and in single the
+    caller holds no pairs: the modifier would stay -- but it is assembly
+    there, which the scheduler cannot enter, and the move a builtin it can.
+    Asked for, the move is taken from the reuse the other targets take it
+    from; not asked for, nothing changes."""
+    form = amd.select_broadcast_form(dtype, 16, MATERIALIZE_FROM,
+                                     _asked(arch, dtype), can_pack=False)
+    assert form is BroadcastForm.MOVED
+    form = amd.select_broadcast_form(dtype, 16, MATERIALIZE_FROM,
+                                     _asked(arch, dtype, on=False),
+                                     can_pack=False)
+    assert form is BroadcastForm.FUSED
+
+
+@pytest.mark.parametrize('arch', CDNA)
+def test_cdna_keeps_the_modifier_below_the_reuse(arch):
+    """One move per product below four is the tie region again."""
+    assert (amd.broadcast_form(Datatype.F64, 16, MATERIALIZE_FROM - 1,
+                               _asked(arch))
+            is BroadcastForm.FUSED)
+
+
+@pytest.mark.parametrize('arch', ['gfx908', 'gfx1150', 'gfx1251'])
+def test_the_move_on_cdna_is_cdna_only(arch):
+    """gfx908 has no row share to move; RDNA and gfx1251 decide by their own
+    doubling (VOPD, packed FP64), as before."""
+    on = amd.broadcast_form(Datatype.F64, 16, MATERIALIZE_FROM, _asked(arch))
+    off = amd.broadcast_form(Datatype.F64, 16, MATERIALIZE_FROM,
+                             _asked(arch, on=False))
+    assert on is off
+
+
+def _two_products(dtype=Datatype.F64, m=56, n=9):
+    """``T = A0 X; Q = A1 T`` over 56 rows: at sixteen lanes four lead slots a
+    lane, so every moved value feeds four products, and each product has an
+    operand of its own, as SeisSol's have."""
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import MultilinearDescr
+
+    def tensor(shape, alias, addressing, is_tmp=False):
+        return Tensor(list(shape), addressing, BoundingBox([0, 0], list(shape)),
+                      alias=alias, datatype=dtype, is_tmp=is_tmp)
+
+    a0 = tensor([m, m], 'A0', Addressing.NONE)
+    a1 = tensor([m, m], 'A1', Addressing.NONE)
+    x = tensor([m, n], 'X', Addressing.PTR_BASED)
+    t = tensor([m, n], 'T', Addressing.STRIDED, is_tmp=True)
+    q = tensor([m, n], 'Q', Addressing.PTR_BASED)
+    target, permute = [[0, -1], [-1, 1]], [[0, 1], [0, 1]]
+    return [MultilinearDescr(dest=SubTensor(t), ops=[SubTensor(a0), SubTensor(x)],
+                             target=target, permute=permute),
+            MultilinearDescr(dest=SubTensor(q), ops=[SubTensor(a1), SubTensor(t)],
+                             target=target, permute=permute)]
+
+
+def _built(on):
+    import contextlib
+    import io
+    from tensorforge.common.context import Options
+    from tensorforge.generators.generator import Generator
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F64,
+                  options=Options(lanes_per_mult=16, amd_moved_broadcast=on))
+    gen = Generator(_two_products(), ctx, attrs={})
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen.get_kernel()
+
+
+def test_asked_for_on_gfx942_the_products_read_moves():
+    """With the option every row share of the two products is a `movdpp16`
+    and no fused block is left; without it the blocks stay and no move is
+    written."""
+    moved, fused = _built(True), _built(False)
+    assert 'movdpp16<' in moved and 'v_fmac_f64_dpp' not in moved
+    assert 'movdpp16<' not in fused and 'v_fmac_f64_dpp' in fused

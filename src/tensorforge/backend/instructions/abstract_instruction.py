@@ -181,13 +181,23 @@ def _fused_if_over_budget(context, attempt, finish):
   used = pir.pressure(body, in_bytes=True, explicit_simd=simd)
   if used <= FIT_FRACTION * budget:
     return builder, body
+  # On CDNA a move is read by its products right behind it and holds no more
+  # than the fused form does (`amd.moved_on_cdna`), so a body over the budget
+  # is over it either way, and the fused form is taken only where it holds
+  # less.  Elsewhere the moved values are what went over: taken back as before.
+  compare = getattr(context.get_user_options(), 'amd_moved_broadcast', False)
+  moved = (builder, body)
   context.force_fused_broadcast = True
   try:
     builder, body = attempt()
-    return builder, finish(builder, body)
+    body = finish(builder, body)
   finally:
     context.force_fused_broadcast = False
     context.materialized_broadcast = False
+  if compare and pir.pressure(body, in_bytes=True,
+                              explicit_simd=simd) >= used:
+    return moved
+  return builder, body
 
 
 class RegisterBudgetWarning(UserWarning):

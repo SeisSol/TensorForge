@@ -205,6 +205,27 @@ def packed_broadcast_pays(datatype, step, products, moved_bytes, ctx) -> bool:
 MATERIALIZE_FROM = 4
 
 
+def moved_on_cdna(ctx) -> bool:
+    """Whether the move pays without a partner to pair the FMAs with
+    (`Options.amd_moved_broadcast`).
+
+    On CDNA the fused product is inline assembly (`DMADPP16`, `FMADPP16`):
+    LLVM fuses no DPP into an FMA there, so the modifier is to be had only as
+    text, which carries its own wait in front -- the hazard recognizer does
+    not look into it -- and into which nothing can be scheduled.  That is a
+    cost the issue count above does not see.  The move is a builtin LLVM
+    schedules and guards, and the FMAs behind it are ordinary ones the loads
+    and waits can be placed between: four steps of three 56x56 by 56x9
+    products, one move per product and row feeding four lead slots, ran 30 %
+    faster on MI300A in double precision and 19 % in single.  gfx90a, gfx942
+    and gfx950, where the fused form is the same text; measured on gfx942.
+    """
+    opts = ctx.get_user_options() if hasattr(ctx, 'get_user_options') else None
+    if not getattr(opts, 'amd_moved_broadcast', False):
+        return False
+    return cdna2(ctx) and not gfx1251(ctx)
+
+
 def broadcast_form(datatype, step, reuse, ctx) -> BroadcastForm:
     """Which form the broadcast of `reuse` products should take.
 
@@ -223,10 +244,12 @@ def broadcast_form(datatype, step, reuse, ctx) -> BroadcastForm:
         return BroadcastForm.FUSED
     if packed_fma_lanes(datatype, ctx) > 1:
         return BroadcastForm.PACKED
-    if dual_issue_fma_lanes(datatype, ctx) > 1:
+    if dual_issue_fma_lanes(datatype, ctx) > 1 or moved_on_cdna(ctx):
         return BroadcastForm.MOVED
     # Nothing here retires two of these at once, so the modifier is free after
-    # all and a move would be an instruction spent on nothing.
+    # all and a move would be an instruction spent on nothing -- in the issue
+    # count; what the assembly of the fused form costs besides is
+    # `moved_on_cdna`'s.
     return BroadcastForm.FUSED
 
 
@@ -250,7 +273,8 @@ def select_broadcast_form(datatype, step, reuse, ctx,
         return BroadcastForm.FUSED
     form = broadcast_form(datatype, step, reuse, ctx)
     if form is BroadcastForm.PACKED and not can_pack:
-        form = (BroadcastForm.MOVED if dual_issue_fma_lanes(datatype, ctx) > 1
+        form = (BroadcastForm.MOVED if (dual_issue_fma_lanes(datatype, ctx) > 1
+                                        or moved_on_cdna(ctx))
                 else BroadcastForm.FUSED)
     if form is not BroadcastForm.FUSED:
         # Told to the body, which is the only place the cost can be weighed:

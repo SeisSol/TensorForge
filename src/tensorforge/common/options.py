@@ -904,6 +904,19 @@ declare('forward_memory',
             '(`pir.forward`); an element\'s mask is taken to hold where the '
             'body keeps its contract (`elementmask`).')
 
+declare('amd_moved_broadcast',
+        default=False,
+        parse=parse_bool,
+        doc='On CDNA (gfx90a, gfx942, gfx950), take the row share of a DPP '
+            'product as a move of its own -- `movdpp16`, a builtin -- and '
+            'plain FMAs behind it, where the moved value feeds four products '
+            'or more (`select.MATERIALIZE_FROM`), instead of the modifier on '
+            'every FMA.  The fused form is inline assembly there, one wait in '
+            'front of every block, and nothing can be scheduled into a block: '
+            'four steps of three 56x56 by 56x9 products on MI300A took 40.1 ns '
+            'an element fused in double precision and 28.1 with the moves (one '
+            'per product and row), 26.3 against 21.3 in single.')
+
 declare('stage_group',
         default=8,
         doc='Multiplications a block holds under `stage_members`, and so how '

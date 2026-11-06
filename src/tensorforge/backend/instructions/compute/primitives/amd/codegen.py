@@ -17,8 +17,8 @@ from .relayout import (MOVDPP16, TRANSPOSE4X4, find_relayout,
                        nest_shared, reach, takes, transposed,
                        fmadpp_operand_layout)
 from tensorforge.common.exceptions import GenerationError
-from .select import (BroadcastForm, packed_broadcast, select_broadcast_form,
-                     select_fmadpp_step)
+from .select import (BroadcastForm, moved_on_cdna, packed_broadcast,
+                     select_broadcast_form, select_fmadpp_step)
 
 #: The runtime's BF16 split, in its out-parameter form: each term is a value
 #: the generator declared rather than a name bound by a structured binding,
@@ -201,7 +201,8 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                               else MOVDPP16.callee.format(**mv))
                     ax = [writer.call(callee, ftype, aa,
                                       hint='bc', movable=False,
-                                      layout=MOVDPP16.produces(**mv))
+                                      layout=MOVDPP16.produces(**mv),
+                                      pure=not moved_on_cdna(ctx))
                           for aa in a]
                     usebcst = True
                 elif bcst and all((B[bx][idx + jj] if idx + jj < len(B[bx]) else None) is not None for bx in range(localstep) for jj in range(repeat)):
@@ -1037,17 +1038,25 @@ def _fused_order(cols, M, K, dtype, step, threads, a_resident, a_vector=False):
 _FUSED = {1: fmascalar, 4: fmadpp4, 8: fmadpp8, 16: fmadpp16}
 
 
-def _row_products(writer, form, step, src, ftype, threads, row, terms):
+def _row_products(writer, form, step, src, ftype, threads, row, terms,
+                  own=False):
     """`acc += src[row] * a` for each `(acc, a)` in `terms`, as `hfma` writes
     them: the row share a modifier on every product, or -- `MOVED` -- one
-    move that plain FMAs read."""
+    move that plain FMAs read.
+
+    `own` keeps the move out of every merge with an identical one elsewhere
+    in the body -- the builder's sharing and `pir.cse` both, which take only
+    pure statements (`moved_on_cdna`): a later product whose operand is the
+    same register would otherwise take this one's moves, each live from here
+    to there.  The moves of three products over one operand held 10.6 KB of a
+    56-row chain in double precision, against 6.9 fused."""
     emit = _FUSED[step]
     if form is BroadcastForm.MOVED:
         mv = dict(threads=threads, row=row)
         callee = (f'tensorforge::movdpp16Kept<{row}>' if PIN_MOVED
                   else MOVDPP16.callee.format(**mv))
         src = writer.call(callee, ftype, src, hint='bc', movable=False,
-                          layout=MOVDPP16.produces(**mv))
+                          layout=MOVDPP16.produces(**mv), pure=not own)
         emit = fmascalar
     for acc, a in terms:
         emit(writer, acc, src, a, row)
@@ -1085,7 +1094,8 @@ def _fused_rows(writer, cols, C, A, B, M, K, kx, threads, dtype, ctx):
                     continue
                 for j in cols:
                     _row_products(writer, form, step, rows[j], ftype, threads,
-                                  r, [(acc[(j, s)], av) for s, av in avs])
+                                  r, [(acc[(j, s)], av) for s, av in avs],
+                                  own=moved_on_cdna(ctx))
                 _pin(writer, [acc[(j, s)] for j in cols for s, _ in avs])
     for j in cols:
         for s in range(M):
@@ -1351,7 +1361,8 @@ def _fused_rows_wide(writer, cols, C, A, sources, M, K, kx, threads, dtype,
                         _row_products(writer, form, step, rows[j], ftype,
                                       threads, r,
                                       [(acc[(j, s)][h], p) for s, ps in parts
-                                       for h, p in enumerate(ps)])
+                                       for h, p in enumerate(ps)],
+                                      own=moved_on_cdna(ctx))
                     _pin(writer, [a for j in cols for s, _ in avs
                                   for a in acc[(j, s)]])
     for j in cols:
