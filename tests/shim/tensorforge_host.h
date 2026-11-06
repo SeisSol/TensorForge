@@ -186,6 +186,11 @@ template <typename V> V fma(V x, V y, V z);
 template <typename T>
 void transpose4x4b32(T &w1, T &w2, T &w3, T &w4, T v1, T v2, T v3, T v4);
 
+// The same exchange with the shuffle fused into the selection
+// (`Options.amd_fused_transpose`).
+template <typename T>
+void transpose4x4b32Fused(T &w1, T &w2, T &w3, T &w4, T v1, T v2, T v3, T v4);
+
 // The data prefetch. A body would be inline PTX, which this front end reads
 // as its own assembler, so the signature is all the shim can carry -- and all
 // it needs to: what is checked here is that the generated call is well-formed.
