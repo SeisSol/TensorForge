@@ -330,7 +330,11 @@ def test_seissol_s_local_flux_copies_its_member_around_its_first_product(
 
     descrs = DescriptionReader(None, {}).read(fx.description(
         'elastic-linearck', 'elastic-linearck-o6-d', 'gpu_localFluxAll'))[0]
-    options = {} if lead is None else dict(split_member_lead=lead)
+    # The member copies of the kernel as yateto writes it: the reassociated
+    # products (on by default on AMD) read the element's data instead.
+    options = dict(reassociate_products=False)
+    if lead is not None:
+        options['split_member_lead'] = lead
     with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
         warnings.simplefilter('ignore')
         gen = Generator(descrs, Context(arch='gfx942', backend='hip',

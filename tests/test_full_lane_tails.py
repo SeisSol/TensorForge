@@ -127,9 +127,9 @@ def test_a_transfer_into_registers_reads_its_tail_on_every_lane():
     padding."""
     mod = _module('chain_five')
     off = _kernel(mod.descr_list(), backend='cuda', arch='sm_86',
-                  full_lane_tails=False)
+                  full_lane_tails=False, pin_loads=0)
     on = _kernel(mod.descr_list(), backend='cuda', arch='sm_86',
-                 full_lane_tails=True)
+                 full_lane_tails=True, pin_loads=0)
     folded = re.compile(r'v\d+_g \? \(__ldcg\(&peel_glb_m0\[')
     assert folded.search(on) and not folded.search(off)
     assert _guarded_reads(off, 'peel_glb_m0') and not _guarded_reads(

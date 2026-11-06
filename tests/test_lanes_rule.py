@@ -572,10 +572,11 @@ def test_a_pin_that_keeps_the_spilling_is_not_taken(monkeypatch):
 
 def test_the_pin_is_the_compilers_only_under_auto_and_whole_warps(
         monkeypatch):
-    """Off unless asked; and sixteen lanes share a warp with another
+    """Off where 0 is asked (on NVIDIA 'auto' is the default,
+    `Preferences.pin_loads`); and sixteen lanes share a warp with another
     multiplication, whose loop can end a trip earlier."""
-    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 3840})
-    assert pick.get('pin_loads') is None
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 3840}, pin_loads=0)
+    assert not pick.get('pin_loads')
     assert scorer.asked[0] == (32, 0)
     assert all(pin == 0 for _, pin in scorer.asked)
     sixteen = lane_config.LaneConfig(16, 40, 1)
@@ -596,9 +597,10 @@ def test_the_generator_builds_the_pinned_pick(monkeypatch):
     monkeypatch.setattr(tuning.CompiledScore, 'resources',
                         lambda self, result: scorer.resources(result))
     monkeypatch.setattr(tuning, 'executed_instructions', _default_ahead)
-    unpinned = Generator(_local_flux()(), _context(autotune='lanes'))
+    unpinned = Generator(_local_flux()(), _context(autotune='lanes',
+                                                   pin_loads=0))
     unpinned.generate()
-    assert unpinned.tuned.get('pin_loads') is None
+    assert not unpinned.tuned.get('pin_loads')
     gen = Generator(_local_flux()(), _context(autotune='lanes',
                                               pin_loads='auto'))
     gen.generate()

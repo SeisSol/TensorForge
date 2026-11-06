@@ -316,7 +316,8 @@ def _built(on):
     from tensorforge.common.context import Options
     from tensorforge.generators.generator import Generator
     ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F64,
-                  options=Options(lanes_per_mult=16, amd_moved_broadcast=on))
+                  options=Options(lanes_per_mult=16, amd_moved_broadcast=on,
+                                  reassociate_products=False))
     gen = Generator(_two_products(), ctx, attrs={})
     with contextlib.redirect_stdout(io.StringIO()):
         gen.generate()

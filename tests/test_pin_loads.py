@@ -83,7 +83,7 @@ def test_a_spilling_body_is_fenced_and_written_in_its_order():
     """Viscoelastic order 5, single precision: the derivative ptxas spills
     1.3 KB of; pinned, a fence every 32 loads and no chain inlined."""
     config, kernel = 'viscoelastic-linearckanelastic-o5-s', 'gpu_derivative'
-    base = _build(config, kernel)
+    base = _build(config, kernel, pin_loads=0)
     pinned = _build(config, kernel, pin_loads='auto')
     added = pinned.count('__syncwarp();') - base.count('__syncwarp();')
     assert added > 10

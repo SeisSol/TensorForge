@@ -32,6 +32,6 @@ def test_a_packed_lead_operand_takes_the_matrix_core_componentwise(arch):
     one = _kernel('local_flux', arch)
     two = _kernel('local_flux', arch, width=2)
     assert len(MFMA.findall(two)) >= len(MFMA.findall(one)) > 0
-    assert 'transpose4x4b32(' in two
+    assert 'transpose4x4b32(' in two or 'transpose4x4b32Fused(' in two
     assert 'VectorT<float, 2>' in two
     assert not NEST_BROADCAST.search(two), 'no product was left to the nest'
