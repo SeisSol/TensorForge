@@ -16,6 +16,17 @@ What the block reads is in its registers before it starts, and nothing can be
 scheduled into it, so its first instruction is the only one that can follow
 a write too closely.  Over the order of the products the emitter decides
 nothing: the run is written as the body has it.
+
+The same blindness has a second side: what the block writes, the hazard
+recognizer does not see written by a VALU instruction either, and an MFMA
+reads a VGPR two wait states after a VALU write of it at the earliest (LLVM:
+`LegacyVALUNotDotWritesVGPRWaitStates`).  With the operator products
+reassociated (`Options.reassociate_products`), SeisSol's elastic
+`derivative` at order 5 in single precision fed an accumulator of a block
+straight into the MFMA behind it, and came out 7 % off on MI300A and 15 %
+on MI210 in its largest number -- every run alike; 1.4e-7 with a wait behind
+the block, nothing changed with more in front.  So a block waits behind
+itself too (`WAIT_AFTER`).
 """
 
 import re
@@ -38,6 +49,9 @@ MAX_RUN = 32
 
 #: The wait in front of a block: two wait states.
 WAIT = 's_nop 1'
+
+#: The wait behind a block, for a VALU write of its an MFMA reads next: two.
+WAIT_AFTER = 's_nop 1'
 
 _INSTRUCTION = {Datatype.F32: 'v_fmac_f32_dpp', Datatype.F64: 'v_fmac_f64_dpp'}
 
@@ -137,6 +151,7 @@ def render(run: Sequence, operand: Callable) -> str:
         lines.append(f'{_INSTRUCTION[_base(acc)]} %{number(acc)}, '
                      f'%{number(src)}, %{number(mul)} {control} '
                      f'row_mask:0xf bank_mask:0xf bound_ctrl:1')
+    lines.append(WAIT_AFTER)
     template = '\n'.join(f'"{line}\\n\\t"' for line in lines)
     # Early-clobbered: a block writes an accumulator before its last product
     # reads its inputs, and an output without `&` may share its register with

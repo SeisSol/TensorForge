@@ -8,7 +8,10 @@
 into, and on gfx9 its broadcast source wants two wait states after the VALU
 write of it -- a reload from an AGPR right in front made SeisSol's F64
 derivative wrong on gfx942.  A block waits once in front: nothing can be
-scheduled into it.  Pinned here: what is a block and what is not, how its
+scheduled into it.  And once behind: an MFMA reads what the block wrote two
+wait states after the write at the earliest, which the recognizer does not
+see either -- SeisSol's elastic F32 derivative with the products reassociated
+came out wrong on MI300A and MI210 without it.  Pinned here: what is a block and what is not, how its
 operands are numbered, where a run has to break, that the kernel's own
 figures count the products as before, and that targets without the wait keep
 their calls.
@@ -71,9 +74,9 @@ def test_a_run_waits_once_and_holds_no_call():
     for template, _, _ in blocks:
         lines = re.findall(r'"([^"]*)\\n\\t"', template)
         assert lines[0] == dpp_block.WAIT
-        assert dpp_block.WAIT not in lines[1:]
-        assert 0 < len(lines) - 1 <= dpp_block.MAX_RUN
-        assert all(l.startswith('v_fmac_f64_dpp ') for l in lines[1:])
+        assert lines[-1] == dpp_block.WAIT_AFTER
+        assert 0 < len(lines) - 2 <= dpp_block.MAX_RUN
+        assert all(l.startswith('v_fmac_f64_dpp ') for l in lines[1:-1])
 
 
 def test_without_the_wait_to_keep_the_calls_stay():
@@ -116,7 +119,8 @@ def test_operands_are_numbered_outputs_first_and_once():
                      'v_fmac_f64_dpp %1, %2, %4 row_newbcast:0 row_mask:0xf '
                      'bank_mask:0xf bound_ctrl:1',
                      'v_fmac_f64_dpp %0, %2, %4 row_newbcast:5 row_mask:0xf '
-                     'bank_mask:0xf bound_ctrl:1']
+                     'bank_mask:0xf bound_ctrl:1',
+                     dpp_block.WAIT_AFTER]
     assert out.count('"+&v"(') == 2 and out.count('"v"(') == 3
 
 
@@ -147,3 +151,51 @@ def test_a_broadcast_of_what_the_run_wrote_starts_the_next_block():
                                            ('gfx1250', False)])
 def test_blocks_are_written_from_cdna2_and_on_gfx9_only(model, blocks):
     assert dpp_block.blocks_for(model) is blocks
+
+
+SNIPPET = r'''
+#include "tensorforge_device/hip.h"
+__global__ void k(float *o, double *p) {
+  float c = o[threadIdx.x], a = o[threadIdx.x + 64], b = o[threadIdx.x + 128];
+  tensorforge::fmacdpp16<3>(c, a, b);
+  tensorforge::fmacdpp4<1>(c, a, b);
+  double d = p[threadIdx.x];
+  tensorforge::fmacdpp16<2>(d, p[threadIdx.x + 64], p[threadIdx.x + 128]);
+  float w1, w2, w3, w4;
+  tensorforge::transpose4x4b32Fused(w1, w2, w3, w4, c, a, b, c * a);
+  o[threadIdx.x] = c + w1 + w2 * w3 * w4;
+  p[threadIdx.x] = d;
+}
+'''
+
+
+@pytest.mark.parametrize('arch', ['gfx90a', 'gfx942'])
+def test_on_gfx9_every_dpp_asm_waits_behind_itself(arch, tmp_path):
+    """`hip.h`'s own DPP assembly -- the single fused FMAs and the fused quad
+    transpose -- ends in a wait on gfx9, as a block does: hipcc's listing has
+    an `s_nop` right behind the last DPP instruction of each."""
+    import subprocess
+    from harness import syntax
+    from tensorforge import toolchain
+    hipcc = syntax.device_compiler('hip')
+    if hipcc is None:
+        pytest.skip('hipcc not found')
+    src = tmp_path / 'dpp.hip'
+    src.write_text(SNIPPET)
+    run = subprocess.run([hipcc, '-O3', '-std=c++17', f'--offload-arch={arch}',
+                          '-I', toolchain.include_dir(), '--cuda-device-only',
+                          '-S', '-o', '-', str(src)],
+                         capture_output=True, text=True, timeout=600)
+    if run.returncode and 'offload-arch' in run.stderr:
+        pytest.skip(f'hipcc does not know {arch}')
+    assert run.returncode == 0, run.stderr[-2000:]
+    body = [l.strip() for l in run.stdout.splitlines()
+            if l.startswith('\t') and not l.strip().startswith(';')]
+    # Wherever a run of DPP instructions ends -- the next one neither DPP nor
+    # the mask move between the transpose's pairs -- a wait follows.
+    ends = [i for i, line in enumerate(body[:-1]) if '_dpp' in line
+            and '_dpp' not in body[i + 1]
+            and not body[i + 1].startswith('s_mov_b64 vcc')]
+    assert len(ends) >= 3
+    for i in ends:
+        assert body[i + 1].startswith('s_nop'), body[i - 2:i + 3]

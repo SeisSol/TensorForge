@@ -402,10 +402,18 @@ __device__ __forceinline__ T swap(T value) {
 // So each of these waits by itself on gfx9.  The generator does not call
 // them there: it writes a run of them as one block with one wait in front
 // (`amd.dpp_block`), into which nothing can be scheduled.
+//
+// The recognizer does not see what such a block writes either, and an MFMA
+// reads a VGPR two wait states after a VALU write of it at the earliest: an
+// accumulator of a block fed straight into the MFMA behind it made SeisSol's
+// elastic F32 `derivative` at order 5 wrong in its largest number by 7 % on
+// MI300A and 15 % on MI210.  So each waits behind itself too (`DPPDONE`).
 #ifdef __GFX9__
 #define DPPWAIT "s_nop 1\n\t"
+#define DPPDONE "\n\ts_nop 1"
 #else
 #define DPPWAIT ""
+#define DPPDONE ""
 #endif
 
 #if defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__) ||          \
@@ -421,12 +429,14 @@ __device__ __forceinline__ T swap(T value) {
   __asm(DPPWAIT                                                                \
         "v_fmac_f32_dpp %0, %1, %2 quad_perm:[" STR(pos) "," STR(pos) "," STR( \
             pos) "," STR(pos) "] row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI \
+            DPPDONE                                                            \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
 #define FMADPP16(pos, c, a, b)                                                 \
-  __asm(DPPWAIT "v_fmac_f32_dpp %0, %1, %2 " ROW_BCST16                        \
-                ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI   \
+  __asm(DPPWAIT                                                                \
+        "v_fmac_f32_dpp %0, %1, %2 " ROW_BCST16                                \
+        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI DPPDONE   \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
@@ -440,8 +450,9 @@ __device__ __forceinline__ T swap(T value) {
       : "v"(a), "v"(b)                                                               \
       :)
 #define DMADPP16(pos, c, a, b)                                                 \
-  __asm(DPPWAIT "v_fmac_f64_dpp %0, %1, %2 " ROW_BCST16                        \
-                ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI   \
+  __asm(DPPWAIT                                                                \
+        "v_fmac_f64_dpp %0, %1, %2 " ROW_BCST16                                \
+        ":" STR(pos) " row_mask:0xf bank_mask:0xf bound_ctrl:1" CMFI DPPDONE   \
         : "+v"(c)                                                              \
         : "v"(a), "v"(b)                                                       \
         :)
@@ -1212,6 +1223,7 @@ __device__ __forceinline__ void transpose4x4b32Fused(T &w1, T &w2, T &w3, T &w4,
       "s_mov_b64 vcc, %[m2b] \n\t"
       CM4STR(2, 3, 2, 3, "%[w3]", "%[u1]", "%[u3]") "\n\t"
       CM4STR(2, 3, 2, 3, "%[w4]", "%[u2]", "%[u4]")
+      DPPDONE
       : [u1] "=&v" (u1), [u2] "=&v" (u2), [u3] "=&v" (u3), [u4] "=&v" (u4),
         [w1] "=&v" (w1), [w2] "=&v" (w2), [w3] "=&v" (w3), [w4] "=&v" (w4)
       : [m1a] "s" (mask1a), [m1b] "s" (mask1b), [m2a] "s" (mask2a), [m2b] "s" (mask2b),
