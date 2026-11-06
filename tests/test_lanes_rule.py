@@ -376,6 +376,41 @@ def test_at_one_wave_on_cdna_every_instruction_takes_a_turn(monkeypatch):
     assert _key(pick) == (32, None)
 
 
+def test_where_nothing_up_to_the_extent_is_clean_the_wave_is_asked(
+        monkeypatch):
+    """Viscoelastic order-4 `derivative` in double precision on MI300A
+    spreads 20 rows: every candidate up to 32 lanes spills, and 64 -- one
+    multiplication a wave, past the extent -- spills nothing and runs 30 %
+    ahead of the 32 lanes the walk takes without it.  Where something up to
+    the extent is clean, the wave is not asked about."""
+    descr_factory = _local_flux(m=20)
+    ctx = _amd()
+    origin, first = _origin(descr_factory, ctx)
+    bounds = {(32, None): 3666, (32, True): 3666, (32, False): 3469,
+              (16, True): 3325, (16, False): 2895, (8, True): 3901,
+              (8, False): 3433, (64, True): 7331, (64, False): 6937}
+    spills = {(32, None): 716, (32, True): 716, (32, False): 952,
+              (16, True): 1148, (16, False): 1388, (8, True): 2052,
+              (8, False): 6416}
+    monkeypatch.setattr(tuning, 'pipe_bound', _bounds(bounds))
+    scorer = TableScorer(spills)
+    pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
+                             generate=Generator.trial)
+    assert _key(pick) == (64, False)
+    assert {(64, False), (64, True)} <= set(scorer.asked)
+    clean = dict(spills)
+    clean[(16, True)] = 0
+    scorer = TableScorer(clean)
+    pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
+                             generate=Generator.trial)
+    assert _key(pick) == (16, True)
+    assert not {k for k in scorer.asked if k[0] == 64}
+    monkeypatch.setattr(tuning, 'CLEAN_WAVE', False)
+    pick = tuning.lanes_rule(descr_factory, ctx, TableScorer(spills), origin,
+                             first, generate=Generator.trial)
+    assert _key(pick)[0] == 32
+
+
 def test_the_generator_builds_the_pick_and_remembers_it(monkeypatch):
     """Through `Options.autotune`: the kernel is built at the rule's pick, and
     a second generation of the same kernel asks the compiler nothing."""

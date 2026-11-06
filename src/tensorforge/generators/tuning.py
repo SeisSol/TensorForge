@@ -335,6 +335,32 @@ def _wider(base, rows: int, hw) -> List[LaneConfig]:
     return out
 
 
+def _whole_wave(descrs, context: Context, origin: Candidate,
+                have: Iterable[Candidate],
+                fixed: Optional[Mapping[str, Any]] = None
+                ) -> List[Candidate]:
+    """The candidates of one multiplication a wave -- as many lanes as the
+    vector unit, merging both ways where `_mergeable` -- where the wave is
+    wider than every lane count in `have`; none where `fixed` names the
+    lanes.  What `lanes_rule` asks about where nothing up to the extent's
+    ceiling (`_wider`) spills nothing (`CLEAN_WAVE`)."""
+    fixed = fixed or {}
+    wave = getattr(context.target.hw, 'vec_unit_length', None)
+    if not wave or 'lanes' in fixed:
+        return []
+    widest = max((c.lanes.num_threads for c in have if c.lanes is not None),
+                 default=0)
+    if wave <= widest:
+        return []
+    base = lane_config.deduce(_flat(descrs), context)
+    cand = origin.set('lanes', LaneConfig(wave, base.num_active_threads,
+                                          base.lead_width))
+    if 'merge_variants' in fixed or not _mergeable(descrs, context):
+        return [cand]
+    return [cand.set('merge_variants', False),
+            cand.set('merge_variants', True)]
+
+
 def simple_space(descrs, context: Context,
                  mode: Optional[str] = None) -> List[Knob]:
     """The knobs `Options.autotune` turns: only those whose every value is
@@ -1590,6 +1616,22 @@ CLEAN_FIRST = True
 #: MI210's 12 does.
 ISSUE_PER_WAVE = ('gfx9',)
 
+#: Where the default spills on AMD and no candidate up to the extent's
+#: ceiling (`_wider`) spills nothing, ask about lanes as wide as the wave
+#: too (`_whole_wave`).  One multiplication a wave makes what is uniform over
+#: a multiplication uniform over the wave, and the compiler holds it in
+#: scalar registers -- what they cannot hold it parks in the lanes of vector
+#: registers, 64 values to one, rather than in scratch.  Viscoelastic order-4
+#: `derivative` in double precision spreads 20 rows: at the 32 unmerged lanes
+#: the rule took, hipcc on MI300A holds 512 registers and spills 952 B a lane
+#: to scratch (ROCm 7.2: 307 vector registers and 44 scalar ones spilled);
+#: at 64 it holds 404 and spills nothing to scratch (415 scalar registers
+#: parked, no vector one).  With twice the instructions an element executes
+#: it runs 30 % faster (38.0 ns an element against 54.5), and 51 % faster
+#: than the default.  Lanes past the extent hold nothing (`_wider`), which is
+#: why the whole wave is asked about only where nothing narrower is clean.
+CLEAN_WAVE = True
+
 
 def _ranked_by(context: Context) -> Optional[str]:
     """`RANKED_BY` for the target, or None where it was never measured: on
@@ -1700,7 +1742,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     margin and the order of the compiler's questions are the same, since the
     bound without either is as much a floor of the cost as the count is of
     the count's -- except where the default spills: then the cheapest
-    candidate that spills nothing is taken first (`CLEAN_FIRST`).  On CDNA
+    candidate that spills nothing is taken first (`CLEAN_FIRST`), the whole
+    wave asked about where nothing up to the extent is (`CLEAN_WAVE`).  On CDNA
     the instructions an element executes, over the waves the compiler gives
     a build, are a floor of its cost too (`ISSUE_PER_WAVE`).  On Intel, under DPC++, the count as on NVIDIA, starting
     from the sixteen lanes the target builds (`start`).
@@ -1779,6 +1822,24 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             continue
         if price < least:
             best, least = cand, price
+    if clean_first and clean is None and CLEAN_WAVE:
+        # Nothing up to the extent's ceiling spills nothing: the whole wave.
+        for cand in _whole_wave(descr_factory(), context, origin, counts,
+                                fixed):
+            result = build(descr_factory, context, cand, generate)
+            count = figure(result) if result.ok else None
+            if count is None:
+                continue
+            builds[cand], counts[cand] = result, count
+            try:
+                seen = scorer.resources(result)
+            except Exception:                 # noqa: BLE001
+                seen = None
+            if seen is None or seen.spill_bytes:
+                continue
+            price = cost(cand, seen)
+            if clean is None or price < clean[1]:
+                clean = (cand, price)
     if clean is not None:
         return clean[0]
     return best if least < (1.0 - DEVIATION_MARGIN) * default else origin
