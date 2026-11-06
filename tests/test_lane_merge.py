@@ -5,10 +5,11 @@
 
 `dppUpdate` carries a region in a row mask and a bank mask, which express a
 product and stop at four lanes.  One lane out of every four -- what transposing
-a 4x4 needs -- is outside them, and the merge selects it by lane id, which the
-path already reads: `transpose4x4b32` writes
-``__lane_id() % 2 == 0 ? v1 : vv2`` four times, and the assembly it keeps in a
-comment fuses that with the shuffle as `v_cndmask_b32_dpp`.
+a 4x4 needs -- is outside them, and the merge selects it by a fixed lane
+pattern, as the path already does: `transpose4x4b32` writes
+``laneIn<0x5555555555555555>() ? v1 : vv2`` four times -- the pattern as a
+constant mask, not a comparison of the lane id -- and the assembly it keeps
+in a comment fuses that with the shuffle as `v_cndmask_b32_dpp`.
 """
 
 from __future__ import annotations
@@ -44,17 +45,21 @@ def _merge(hip, lanes, into=True):
                                            ftype)
 
 
-# -- the path already reads the lane id ------------------------------------ #
+# -- the path already selects by lane pattern ------------------------------ #
 
-def test_the_runtime_transpose_already_reads_the_lane_id():
+def test_the_runtime_transpose_already_selects_by_lane_pattern():
     """Which is what makes the ternary a mechanism the path has rather than
-    one it introduces."""
+    one it introduces -- eight selections, each by a constant pattern
+    (`laneIn`), none by the lane id."""
     source = HEADER.read_text()
-    # The definition, not the forward declaration that precedes it.
-    body = source[source.rindex('void transpose4x4b32'):]
+    # The definition, not the forward declaration that precedes it, and not
+    # the fused form whose name it begins.
+    starts = [i for i in range(len(source))
+              if source.startswith('void transpose4x4b32(', i)]
+    body = source[starts[-1]:]
     body = body[:body.index('\n}')]
-    assert '__lane_id()' in body
-    assert body.count('__lane_id()') == 8, body.count('__lane_id()')
+    assert body.count('laneIn<') == 8, body.count('laneIn<')
+    assert '__lane_id()' not in body
 
 
 def test_the_fused_form_is_what_the_assembly_would_have_written():
