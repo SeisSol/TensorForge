@@ -706,6 +706,34 @@ def test_fit_tightens_until_the_images_fit():
     assert gen._pack_level == KINDS.index("rows")
 
 
+def test_a_retry_does_not_loosen_what_it_tightened(monkeypatch):
+    """Images that fit by the estimate and still leave a section no room.
+
+    Each attempt chooses its level again, from the same estimate that admitted
+    the one that failed; chosen from level zero, it handed that level back,
+    undid the step `_tighten_packing` had just taken and built the same
+    section once more, for ever -- SeisSol's order-8 single-precision volume
+    kernel on gfx942 never finished.  Here the placement refuses whatever is
+    preloaded, so the levels have to rise, run out, and leave the operators
+    in global memory."""
+    from tensorforge.common.matrix.packing import FIT_LEVELS
+
+    levels = []
+    place = Generator._place_section
+
+    def refuse_preloaded(self, index):
+        if self._section.preload:
+            levels.append(self._pack_level)
+            assert len(levels) <= FIT_LEVELS + 1, levels
+            return False
+        return place(self, index)
+
+    monkeypatch.setattr(Generator, "_place_section", refuse_preloaded)
+    gen, _ = _generated(_band(rows=24, cols=7), "fit", preload_globals=True)
+    assert levels == list(range(levels[0], FIT_LEVELS + 1))
+    assert not gen._preload_globals
+
+
 def test_a_window_the_matrix_paths_decline_is_not_stored_for_them():
     """`packed_boxed_runs` on gfx942: a window from row 9 over 32 lanes, which
     the matrix paths cannot place.
