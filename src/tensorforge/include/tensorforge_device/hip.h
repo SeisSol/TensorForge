@@ -226,6 +226,31 @@ __device__ __forceinline__ T broadcast_warp(T value, int lane) {
   return readlane(value, lane);
 }
 
+/// Whether this lane's bit is set in `Mask`, a lane pattern known at compile
+/// time -- read as a constant mask in scalar registers rather than as a
+/// comparison of the lane id: `__builtin_amdgcn_inverse_ballot` lowers to the
+/// mask itself, which a select takes as its condition, where the lane id costs
+/// two `v_mbcnt` and every pattern a shift or an `and` and a `v_cmp`.  The
+/// pattern is given for 64 lanes; a wave of 32 reads its low half.  Where the
+/// compiler has no such builtin, the comparison it replaces.  clang has each
+/// builtin only where the wave has its width, so each is asked about apart.
+template <std::uint64_t Mask> __device__ __forceinline__ bool laneIn() {
+  if constexpr (WaveSize == 32) {
+#if __has_builtin(__builtin_amdgcn_inverse_ballot_w32)
+    return __builtin_amdgcn_inverse_ballot_w32(
+        static_cast<std::uint32_t>(Mask & 0xffffffffULL));
+#else
+    return (Mask >> __lane_id()) & 1ULL;
+#endif
+  } else {
+#if __has_builtin(__builtin_amdgcn_inverse_ballot_w64)
+    return __builtin_amdgcn_inverse_ballot_w64(Mask);
+#else
+    return (Mask >> __lane_id()) & 1ULL;
+#endif
+  }
+}
+
 /// Lane `Lane * Subblock + p % Subblock` of every `Block` consecutive lanes,
 /// read by lane `p` of them.  Within one wave: the instructions that move a
 /// value between lanes end there, and the generator refuses a multiplication
@@ -245,9 +270,12 @@ __device__ __forceinline__ T broadcast(T value) {
     return broadcast_warp(value, Lane);
   } else if constexpr (Block == 32 && Subblock == 16 && AsmVersion >= 10000) {
     constexpr uint64_t LaneBcst = 0xfedcba9876543210_u64;
-    return (__lane_id() / 16) != Lane
-               ? permlanex16<true, false>(value, LaneBcst)
-               : value;
+    // The lanes of the other row of sixteen in each 32: lanes 16 to 31 where
+    // the broadcast reads row 0, lanes 0 to 15 where it reads row 1.
+    constexpr uint64_t OtherRow =
+        Lane == 0 ? 0xffff0000ffff0000ULL : 0x0000ffff0000ffffULL;
+    return laneIn<OtherRow>() ? permlanex16<true, false>(value, LaneBcst)
+                              : value;
   } else if constexpr (Block == 16 && Subblock == 1 && AsmVersion >= 9010) {
     // `row_newbcast` on CDNA 2 and 3, `row_share` from gfx10 on: the same
     // encoding, and both give every lane of a 16-lane row lane `Lane`'s value.
@@ -1081,12 +1109,12 @@ __device__ __forceinline__ void transpose16x4(T &w1, T &w2, T &w3, T &w4, T v1,
 ///
 /// `transpose4x4b32` below writes exactly this by hand, four times, and the
 /// assembly it keeps in a comment fuses it with the shuffle as
-/// `v_cndmask_b32_dpp`.  So the lane id is not a read this path avoids; it is
-/// one it already makes, inside a runtime function rather than in generated
-/// code.
+/// `v_cndmask_b32_dpp`.  The region is a constant, so the select reads it as
+/// one (`laneIn`): a mask in scalar registers rather than a comparison of the
+/// lane id.
 template <std::uint64_t Mask, typename T>
 __device__ __forceinline__ T laneMerge(T value, T into) {
-  return ((Mask >> __lane_id()) & 1ULL) ? value : into;
+  return laneIn<Mask>() ? value : into;
 }
 
 template <typename T>
@@ -1153,20 +1181,22 @@ __device__ __forceinline__ void transpose4x4b32(T &w1, T &w2, T &w3, T &w4,
   const auto vv1 = dpp<0xf5, 0xf, 0xf, true>(v1);
   const auto vv3 = dpp<0xf5, 0xf, 0xf, true>(v3);
 
-  const auto u1 = __lane_id() % 2 == 0 ? v1 : vv2;
-  const auto u2 = __lane_id() % 2 == 1 ? v2 : vv1;
-  const auto u3 = __lane_id() % 2 == 0 ? v3 : vv4;
-  const auto u4 = __lane_id() % 2 == 1 ? v4 : vv3;
+  // Even lanes, odd lanes, and the lower and upper halves of each quad: as
+  // constant masks (`laneIn`), as the assembly above has them.
+  const auto u1 = laneIn<0x5555555555555555ULL>() ? v1 : vv2;
+  const auto u2 = laneIn<0xaaaaaaaaaaaaaaaaULL>() ? v2 : vv1;
+  const auto u3 = laneIn<0x5555555555555555ULL>() ? v3 : vv4;
+  const auto u4 = laneIn<0xaaaaaaaaaaaaaaaaULL>() ? v4 : vv3;
 
   const auto uu1 = dpp<0xee, 0xf, 0xf, true>(u1);
   const auto uu2 = dpp<0xee, 0xf, 0xf, true>(u2);
   const auto uu3 = dpp<0x44, 0xf, 0xf, true>(u3);
   const auto uu4 = dpp<0x44, 0xf, 0xf, true>(u4);
 
-  w1 = __lane_id() % 4 < 2 ? u1 : uu3;
-  w2 = __lane_id() % 4 < 2 ? u2 : uu4;
-  w3 = __lane_id() % 4 >= 2 ? u3 : uu1;
-  w4 = __lane_id() % 4 >= 2 ? u4 : uu2;
+  w1 = laneIn<0x3333333333333333ULL>() ? u1 : uu3;
+  w2 = laneIn<0x3333333333333333ULL>() ? u2 : uu4;
+  w3 = laneIn<0xccccccccccccccccULL>() ? u3 : uu1;
+  w4 = laneIn<0xccccccccccccccccULL>() ? u4 : uu2;
 }
 
 /// `transpose4x4b32` with the shuffle and the selection fused: eight
