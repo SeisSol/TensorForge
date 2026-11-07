@@ -28,10 +28,10 @@ Design decisions (see the region-vs-CFG discussion):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from enum import IntEnum, IntFlag, auto, Enum
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple, Union
 
 from tensorforge.common.basic_types import Datatype
 
@@ -1003,6 +1003,30 @@ class Stmt:
     text: Optional[str] = None                      # raw ops only
     attrs: Tuple[Tuple[str, Any], ...] = ()         # small, hashable side data
 
+    #: What `operands` returns, once asked.  The statement is frozen, and the
+    #: passes ask the same statement over and over -- a million and a half
+    #: times in one generation of SeisSol's time derivative.  Neither compared
+    #: nor hashed, and not carried over by `replace` (no `init`).
+    _operands: Optional[Tuple[Value, ...]] = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
+    #: `(effect, accesses)` of the statement and everything in its regions,
+    #: once asked (`collect_effect`, `collect_accesses`): kept for the same
+    #: reason, and so that asking it of a loop and then of what is inside
+    #: does not walk the inside twice.
+    _deep: Optional[Tuple[int, Tuple['Access', ...]]] = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
+    #: The statement and everything in its regions, in pre-order, once
+    #: asked of a statement that has regions (`walk_stmts`).
+    _flat: Optional[Tuple['Stmt', ...]] = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
+    #: The ids of the values the statement and everything in its regions
+    #: read, once asked (`deep_uses`).
+    _uses: Optional[FrozenSet[int]] = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
+    #: `_cse_key`'s part that is the statement's own and fixed, once asked.
+    _cse: Optional[Tuple] = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
+
     def __post_init__(self):
         """An op name the IR does not know may not claim to be harmless.
 
@@ -1054,10 +1078,13 @@ class Stmt:
         return replace(self, attrs=rest + ((key, value),))
 
     def operands(self) -> Tuple[Value, ...]:
-        vs = list(value_operands(self.args))
-        if self.predicate is not None:
-            vs.append(self.predicate)
-        return tuple(vs)
+        got = self._operands
+        if got is None:
+            got = value_operands(self.args)
+            if self.predicate is not None:
+                got += (self.predicate,)
+            object.__setattr__(self, '_operands', got)
+        return got
 
     @property
     def has_side_effects(self) -> bool:
@@ -1226,18 +1253,47 @@ def walk_stmts(body: Tuple[Stmt, ...]) -> List[Stmt]:
     over a list.
     """
     out: List[Stmt] = []
-    stack: List[Stmt] = list(body)
-    stack.reverse()
-    while stack:
-        s = stack.pop()
-        out.append(s)
+    for s in body:
         if s.regions:
-            sub: List[Stmt] = []
-            for r in s.regions:
-                sub.extend(r.body)
-            sub.reverse()
-            stack.extend(sub)
+            out.extend(_flat(s))
+        else:
+            out.append(s)
     return out
+
+
+def deep_uses(s: Stmt) -> FrozenSet[int]:
+    """The ids of the values `s` reads -- operands and predicate -- and
+    everything in its regions reads, kept on the statement (`Stmt._uses`): a
+    pass replacing a handful of values in a body of thousands asks it to pass
+    over every statement none of them is in, loops whole."""
+    got = s._uses
+    if got is None:
+        ids = {v.id for v in s.operands()}
+        for r in s.regions:
+            for x in r.body:
+                ids |= deep_uses(x)
+        got = frozenset(ids)
+        object.__setattr__(s, '_uses', got)
+    return got
+
+
+def _flat(s: Stmt) -> Tuple[Stmt, ...]:
+    """`s` and everything in its regions, in pre-order: kept on the statement
+    (`Stmt._flat`), which is frozen, since the passes walk the same loop over
+    and over -- one statement at a time (`walk_stmts((s,))`) as often as the
+    body around it."""
+    got = s._flat
+    if got is None:
+        out: List[Stmt] = [s]
+        for r in s.regions:
+            for x in r.body:
+                if x.regions:
+                    out.extend(_flat(x))
+                else:
+                    out.append(x)
+        got = tuple(out)
+        object.__setattr__(s, '_flat', got)
+    return got
 
 
 def defined_here(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
@@ -1302,18 +1358,44 @@ def free_values(body: Tuple[Stmt, ...]) -> Dict[int, Value]:
     return out
 
 
+def _deep(s: Stmt) -> Tuple[int, Tuple[Access, ...]]:
+    """The effect of `s` and of everything in its regions, and their
+    accesses, each once, in the order `walk_stmts` meets them -- kept on the
+    statement (`Stmt._deep`)."""
+    got = s._deep
+    if got is None:
+        acc = int(s.effect)
+        out: List[Access] = []
+        seen = set()
+        for a in s.accesses:
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+        for r in s.regions:
+            for x in r.body:
+                e, xs = _deep(x)
+                acc |= e
+                for a in xs:
+                    if a not in seen:
+                        seen.add(a)
+                        out.append(a)
+        got = (acc, tuple(out))
+        object.__setattr__(s, '_deep', got)
+    return got
+
+
 def collect_effect(body: Tuple[Stmt, ...]) -> Effect:
     acc = 0
-    for s in walk_stmts(body):
-        acc |= int(s.effect)
+    for s in body:
+        acc |= _deep(s)[0]
     return Effect(acc)
 
 
 def collect_accesses(body: Tuple[Stmt, ...]) -> Tuple[Access, ...]:
     out: List[Access] = []
     seen = set()
-    for s in walk_stmts(body):
-        for a in s.accesses:
+    for s in body:
+        for a in _deep(s)[1]:
             if a not in seen:
                 seen.add(a)
                 out.append(a)

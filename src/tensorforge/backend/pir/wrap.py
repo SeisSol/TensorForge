@@ -318,8 +318,10 @@ def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
                 continue
         # What stands around the loop is the body without the loop as the
         # body holds it, which an inner loop rewritten makes a statement other
-        # than `s`.
-        around = tuple(x for x in body if x is not s)
+        # than `s` -- taken below, where a loop is rewritten: a body of
+        # thousands of statements and hundreds of loops would copy itself
+        # once per loop.
+        held = s
         regions = []
         for r in s.regions:
             inner, changed = _runs(r.body, allocs, scratch, distance, stages,
@@ -331,6 +333,7 @@ def _runs(body: Tuple[Stmt, ...], allocs, scratch, distance: int, stages: int,
             s = replace(s, regions=tuple(regions))
         kind = 'run' if s.attr('rolled') else 'counted loop'
         if counted(s) and (kind == 'run' or transfers(s.regions[0].body)):
+            around = tuple(x for x in body if x is not held)
             try:
                 rewrite = _Loop(_trips(s, scratch), allocs, scratch, report,
                                 stages, around, kind=kind, early=early,

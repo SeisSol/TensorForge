@@ -23,8 +23,9 @@ it does not know, a value text may name -- reads every lane.
 
 from __future__ import annotations
 
+import functools
 import re
-from typing import Callable, Dict, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .core import MemSpace, Op, Stmt, Value
 from .flow import Flow
@@ -61,12 +62,14 @@ _LOCAL = Op.ARITH | {Op.MATH}
 _DEPTH = 32
 
 
+@functools.lru_cache(maxsize=None)
 def lane_map(callee: str) -> Optional[Tuple[int, bool, int,
                                             Callable[[int], int]]]:
     """`(operand, of_result, block, lane)` for a primitive of `_READS`: lane
     `p` of a block of `block` reads lane `lane(p)` of the block of operand
     `operand` -- `p` a lane of the result where `of_result`, any lane the
-    call runs for otherwise.  None for any other callee."""
+    call runs for otherwise.  None for any other callee.  Kept per callee:
+    a body names a handful, and every use of every value asks."""
     for pattern, operand, of_result, make in _READS:
         m = pattern.match(callee or '')
         if m:
@@ -83,6 +86,8 @@ class Demand:
         self.flow = flow
         self._memo: Dict[Tuple, int] = {}
         self._open: Set[Tuple] = set()
+        #: The executions of a statement grouped by their hops (`_by_hops`).
+        self._grouped: Dict[Tuple, Any] = {}
 
     def lanes(self, v: Value, env: Dict[int, int], depth: int = 0) -> int:
         """The lanes of `v` anything reads, where `env` holds the hops of
@@ -213,8 +218,48 @@ class Demand:
                 and u.args[2] is not v and u.predicate is not v)
 
     def _executions(self, u: Stmt, env: Dict[int, int]) -> Sequence[int]:
-        """The executions of `u` at the hops `env` names."""
+        """The executions of `u` at the hops `env` names: those whose hops
+        agree with `env` on every loop both name.
+
+        Asked once per use and hop, of stores that run hundreds of times
+        inside the unrolled loops of a time derivative, so the executions are
+        grouped once per statement and set of loops (`_by_hops`) and looked
+        up rather than filtered anew on every question."""
         flow = self.flow
-        return [n for n in flow.executions(u)
-                if all(flow.insts[n].env().get(k, x) == x
-                       for k, x in env.items())]
+        if not env:
+            return flow.executions(u)
+        index = self._by_hops(u, tuple(sorted(env)))
+        if index is None:
+            return [n for n in flow.executions(u)
+                    if all(flow.insts[n].env().get(k, x) == x
+                           for k, x in env.items())]
+        named, groups = index
+        return groups.get(tuple(env[k] for k in named), ())
+
+    def _by_hops(self, u: Stmt, keys: Tuple[int, ...]):
+        """`(loops, {their hops: executions})` over the executions of `u`:
+        the loops of `keys` every execution names -- one that none names
+        leaves every execution in.  None where some executions name a loop
+        of `keys` and others do not, for which no grouping is exact."""
+        memo = self._grouped
+        got = memo.get((id(u), keys), memo)
+        if got is not memo:
+            return got
+        flow = self.flow
+        execs = flow.executions(u)
+        envs = [flow.insts[n].env() for n in execs]
+        named: List[int] = []
+        out = None
+        for k in keys:
+            has = sum(1 for e in envs if k in e)
+            if has == len(envs):
+                named.append(k)
+            elif has:
+                break
+        else:
+            groups: Dict[Tuple, List[int]] = {}
+            for n, e in zip(execs, envs):
+                groups.setdefault(tuple(e[k] for k in named), []).append(n)
+            out = (tuple(named), groups)
+        memo[(id(u), keys)] = out
+        return out

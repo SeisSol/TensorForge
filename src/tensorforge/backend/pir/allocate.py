@@ -54,6 +54,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .core import BufferType, Effect, MemSpace, Op, Stmt, Value, walk_stmts
 
+#: The flags `info` tests, as plain integers (a flag's `&` builds a flag).
+_WRITTEN = int(Effect.WRITE | Effect.ATOMIC)
+_READ = int(Effect.READ)
+_ATOMIC = int(Effect.ATOMIC)
+
 #: The two arenas.
 MULT = 'mult'
 BLOCK = 'block'
@@ -176,9 +181,10 @@ class _Liveness:
             m = self._mask(a.base)
             if not m:
                 continue
-            if a.kind & (Effect.WRITE | Effect.ATOMIC):
+            kind = int(a.kind)
+            if kind & _WRITTEN:
                 defs |= m
-            if a.kind & Effect.READ:
+            if kind & _READ:
                 uses |= m
         return uses, defs, 0
 
@@ -193,18 +199,29 @@ class _Liveness:
         the instruction put it -- the carry stores an accumulator behind its
         loop instead of ahead of it (`pir.carry`) -- and the buffer would
         be occupied over the whole loop for nothing."""
+        # Per statement, what everything in it without regions of its own
+        # does -- asked of every statement at every depth of the walk, so
+        # kept: a loop's figure is that of its contents, each counted once.
+        memo: Dict[int, Tuple[int, int, int]] = {}
+
         def effects(s: Stmt) -> Tuple[int, int, int]:
+            got = memo.get(id(s))
+            if got is not None:
+                return got
             uses = defs = kills = 0
-            for x in walk_stmts((s,)):
-                if x.regions:
-                    continue
-                u, d, k = self.info(x)
-                for a in x.accesses:
-                    if a.kind & Effect.ATOMIC:
-                        u |= (self._mask(a.base) if a.base is not None
-                              else self.everything)
-                uses, defs, kills = uses | u, defs | d, kills | k
-            return uses, defs, kills
+            if s.regions:
+                for r in s.regions:
+                    for x in r.body:
+                        u, d, k = effects(x)
+                        uses, defs, kills = uses | u, defs | d, kills | k
+            else:
+                uses, defs, kills = self.info(s)
+                for a in s.accesses:
+                    if int(a.kind) & _ATOMIC:
+                        uses |= (self._mask(a.base) if a.base is not None
+                                 else self.everything)
+            got = memo[id(s)] = (uses, defs, kills)
+            return got
 
         def walk(stmts: Sequence[Stmt]) -> None:
             pending = 0

@@ -1761,7 +1761,7 @@ def kept_masks(body: Sequence[Stmt], defs: Dict[int, Stmt],
         return frozenset()
     written = {id(a.base) for x in walk_stmts(body)
                for a in x.accesses if a.space is MemSpace.GLOBAL
-               and a.kind & (Effect.WRITE | Effect.ATOMIC)}
+               and int(a.kind) & _WRITTEN}
     loads = _MemoryReads(defs)
 
     def kept(stmts, under: bool) -> bool:
@@ -1798,7 +1798,7 @@ def kept_masks(body: Sequence[Stmt], defs: Dict[int, Stmt],
             if _stands_in(x):
                 continue
             for a in x.accesses:
-                if not a.kind & (Effect.WRITE | Effect.ATOMIC):
+                if not int(a.kind) & _WRITTEN:
                     continue
                 if a.space in (MemSpace.GLOBAL, MemSpace.UNKNOWN):
                     if not under:

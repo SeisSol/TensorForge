@@ -22,7 +22,7 @@ from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants, Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, collect_accesses, collect_effect,
-                   def_use, walk_stmts, Uniformity)
+                   deep_uses, def_use, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens
 from .transfers import tagged
 
@@ -639,7 +639,13 @@ def substitute(body: Tuple[Stmt, ...], mapping: Dict[int, Value]) -> Tuple[Stmt,
 
     out: List[Stmt] = []
     changed = False
+    keys = mapping.keys()
     for s in body:
+        if keys.isdisjoint(deep_uses(s)):
+            # None of the values is read here, nor anywhere inside: a loop
+            # of thousands is passed over whole.
+            out.append(s)
+            continue
         # Scanning before rebuilding, rather than rebuilding and comparing: a
         # mapping names a handful of values and the body is thirty thousand
         # statements, so the answer is almost always that this one is not
@@ -793,9 +799,15 @@ def _cse_key(s: Stmt, with_predicate: bool = True):
     #
     # The transfer a statement was written for is not: the lane index every
     # transfer computes is the same value in each of them.
-    attrs = tuple(a for a in s.attrs if a[0] != 'transfer')
-    return (s.op, tuple(k(a) for a in s.args), s.text, attrs,
-            tuple((t.layout, t.type) for t in s.target)) + (
+    own = s._cse
+    if own is None:
+        # What of the key is the statement's and so fixed, kept on it: a
+        # sweep to the fixed point keys every statement once a sweep.  The
+        # result's layout is read anew -- a builder may still set it.
+        attrs = tuple(a for a in s.attrs if a[0] != 'transfer')
+        own = (s.op, tuple(k(a) for a in s.args), s.text, attrs)
+        object.__setattr__(s, '_cse', own)
+    return own + (tuple((t.layout, t.type) for t in s.target),) + (
         (None if s.predicate is None else s.predicate.id,)
         if with_predicate else ())
 

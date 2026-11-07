@@ -65,6 +65,7 @@ from .core import (Effect, MemSpace, Op, Stmt, accesses_conflict, walk,
 
 #: Effects that no access analysis can reason across.
 _WALL = Effect.BARRIER | Effect.UNKNOWN
+_WALL_BITS = int(_WALL)
 
 
 def _defines(s: Stmt) -> Set[int]:
@@ -203,12 +204,12 @@ def _touches_fixed(s: Stmt) -> Optional[Tuple]:
     or an unknown effect anywhere inside still returns None, because those are
     about what crossing *means* rather than about who moves.
     """
-    if s.effect & _WALL:
+    if int(s.effect) & _WALL_BITS:
         return None
     out = list(s.accesses)
     for r in s.regions:
         for inner in walk_stmts(r.body):
-            if inner.effect & _WALL:
+            if int(inner.effect) & _WALL_BITS:
                 return None
             out.extend(inner.accesses)
     return tuple(out)

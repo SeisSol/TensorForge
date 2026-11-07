@@ -55,8 +55,13 @@ def tagged(s: Stmt, transfer: int) -> Stmt:
     return replace(s, attrs=s.attrs + (('transfer', transfer),))
 
 
+#: `Effect.WRITE | Effect.ATOMIC` as a plain integer: asked of every access
+#: of every statement, where the flag's own `&` would build a flag each time.
+_WRITTEN = int(Effect.WRITE | Effect.ATOMIC)
+
+
 def writes(a: Access) -> bool:
-    return bool(a.kind & (Effect.WRITE | Effect.ATOMIC))
+    return int(a.kind) & _WRITTEN != 0
 
 
 def opaque(a: Access) -> bool:
