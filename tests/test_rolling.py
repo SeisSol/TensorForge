@@ -1362,6 +1362,39 @@ def test_holes_that_share_members_are_one_buffer_to_the_passes():
     assert declared and not any('__restrict__' in d for d in declared)
 
 
+def test_a_member_read_behind_the_run_meets_the_runs_writes_of_it():
+    """The run writes the levels through its table; what reads the last one
+    behind the run reads it through the member's own binding.  The loop's
+    claim on its members (`Table._accesses`) is recorded against what such a
+    read names -- the buffer the binding reaches -- so the two conflict, and
+    no pass moves the read ahead of the loop.  Against the binding, the claim
+    met nothing: seissol60's time integral read its last derivative ahead of
+    the run that wrote it (`pir.move`)."""
+    from tensorforge.backend.pir.core import MemSpace, Op, walk_stmts
+    after = gemm(make('L3', [24, 5]), make('D', [5, 5]), make('P', [24, 5]))
+    gen = _merged_build(roll(_argument_chain()) + [after])
+    top = gen._sections[0].body
+    loop = next(s for s in walk_stmts(top)
+                if s.op is Op.FOR and s.attr('rolled'))
+    # The last level: the kernel's argument the read behind the run names.
+    last = gen._scopes.get_symbol(make('L3', [24, 5]).tensor)
+    claims = [a for x in walk_stmts(loop.regions[0].body)
+              if x.op not in (Op.STORE, Op.COPY_ASYNC) for a in x.accesses
+              if a.space is MemSpace.GLOBAL and a.writes]
+    assert any(a.base is last for a in claims), \
+        f'the run claims {[a.base for a in claims]}, not {last.name}'
+    # And so what reads it stands behind the loop, in the list both are in --
+    # its numbers: the binding ahead of everything reads the pointer only.
+    owner = top if loop in top else next(
+        r.body for s in walk_stmts(top) for r in s.regions if loop in r.body)
+    readers = [i for i, x in enumerate(owner) if x is not loop and any(
+        a.base is last and not a.writes
+        for y in walk_stmts((x,)) if y.op in (Op.LOAD, Op.COPY_ASYNC)
+        for a in y.accesses)]
+    assert readers, f'nothing reads {last.name} behind the run'
+    assert min(readers) > owner.index(loop)
+
+
 def test_holes_that_only_read_shared_members_stay_apart():
     """Two holes that read overlapping members and write nothing conflict
     nowhere, and one buffer would only cost them their `restrict`."""

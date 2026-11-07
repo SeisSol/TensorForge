@@ -962,6 +962,7 @@ class DeclareOperandTable(AbstractInstruction):
     from tensorforge.backend.pir.build import access_of
     from tensorforge.backend.pir.core import Access
     kind = Effect.READ | (Effect.WRITE if self._writable else Effect.NONE)
+    root = getattr(writer, 'alias_root', None)
     out = []
     for member in self._members:
       if member.stype == SymbolType.Data:
@@ -971,8 +972,17 @@ class DeclareOperandTable(AbstractInstruction):
       if window is not None:
         out.append(Access(Effect.WRITE if self._writable else Effect.READ,
                           MemSpace.SHARED, window))
-      else:
-        out.append(access_of(member, kind))
+        continue
+      access = access_of(member, kind)
+      if root is not None:
+        # Against what a load or a store of the member names outside the
+        # loop: the buffer the member's binding reaches (`alias_root`), not
+        # the binding.  Recorded against the binding, the claim met nothing
+        # -- a read of the last level behind the run (seissol60's time
+        # integral, `glb_m23`) was moved ahead of the loop that writes it
+        # through the table (`pir.move`), and read it unwritten.
+        access = Access(access.kind, access.space, root(member))
+      out.append(access)
     return tuple(out)
 
   def gen_ir(self, writer):
