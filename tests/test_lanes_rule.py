@@ -685,3 +685,54 @@ def test_a_candidate_the_band_settles_is_pinned_by_the_estimate(monkeypatch):
     assert scorer.asked == []
     assert _key(pick) == (8, False)
     assert pick.get('pin_loads') == 'auto'
+
+
+@pytest.mark.parametrize('pin', [0, 'auto'])
+def test_the_walk_picks_alike_one_at_a_time_and_several_at_once(monkeypatch,
+                                                                pin):
+    """`Options.autotune_jobs`: the candidates built in forked processes and
+    the compiler asked in threads ahead of the walk, which then takes from
+    there what it asks -- the pick is the one the walk makes one at a time,
+    pins included where the compiler decides them."""
+    picks = []
+    for jobs in (1, 4):
+        tuning._PICKS.clear()
+        ctx = _context(pin_loads=pin, autotune_jobs=jobs)
+        descr_factory = _local_flux()
+        origin, first = _origin(descr_factory, ctx)
+        counts = {(32, None): 1000, (32, True): 1000, (32, False): 900,
+                  (16, True): 950, (16, False): 700, (8, True): 800,
+                  (8, False): 500, (64, True): 1500, (64, False): 1400}
+        monkeypatch.setattr(tuning, 'executed_instructions',
+                            _counting(counts))
+        scorer = TableScorer({(8, False): 300, (32, None): 250})
+        picks.append(tuning.lanes_rule(descr_factory, ctx, scorer, origin,
+                                       first, generate=Generator.trial))
+    assert picks[0] == picks[1]
+
+
+@pytest.mark.parametrize('merge', [False, True])
+def test_a_build_written_again_pinned_is_the_pinned_build(merge):
+    """The fence is the emitter's alone, so a build written again with a pin
+    (`Generator.emitted_with_pin`) is what a build made with that pin writes
+    -- the same body and the same counts -- but for the options line and the
+    kernel's name; and a merged build, which hands its kernel to another
+    generator, is written again by that one."""
+    import re
+    descr_factory = _local_flux()
+
+    def trial(pin):
+        return Generator.trial(descr_factory(), _context(
+            pin_loads=pin, merge_variants=merge, autotune='off'))
+
+    def body(text):
+        text = re.sub(r'kernel_\w+\(', 'kernel(', text)
+        return [l for l in text.splitlines() if '// options:' not in l]
+    unpinned, pinned = trial(0), trial(32)
+    text, metrics = unpinned.emitted_with_pin(32)
+    assert body(text) == body(pinned.get_kernel())
+    assert text != unpinned.get_kernel()
+    assert metrics.issue_mix == pinned.metrics.issue_mix
+    assert metrics.code_units == pinned.metrics.code_units
+    # and the build itself is left as it was
+    assert unpinned.get_kernel() == trial(0).get_kernel()

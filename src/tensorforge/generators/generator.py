@@ -2188,6 +2188,9 @@ class Generator:
 
   def _generate_kernel(self):
 
+    # Where the writing starts naming, for a writing again
+    # (`emitted_with_pin`).
+    self._names_before_kernel = self._names.counter
     writer = Writer()
     # The allocator the bodies were named from, so that what is written is
     # what was built.
@@ -2217,6 +2220,36 @@ class Generator:
     self._warn_icache()
     self._lane_config = LaneConfig(self._num_threads,
                                    self._num_active_threads, self._lead_width)
+
+  @_of_the_build
+  def emitted_with_pin(self, pin: int):
+    """`(kernel, metrics)`: the kernel this build writes, written again with
+    its loads fenced every `pin` (`Options.pin_loads`), and what that writing
+    counted (`common.metrics.BuildMetrics`).
+
+    The fence is the emitter's alone (`abstract_instruction._pin_every`):
+    every body is the same pinned or not, so a tuner asking what the pinned
+    build costs needs the writing, not another build -- which is most of a
+    build (`tuning.lanes_rule`).  Named from where the first writing started,
+    so that the body written is the one a build with that pin writes; the
+    options line and the kernel's name stay this build's.  The build is left
+    as it was."""
+    import warnings
+    saved = (self._kernel, self._metrics, self._names.counter,
+             self._lane_config)
+    self._metrics = BuildMetrics(self._measure_pressure)
+    self._names.counter = self._names_before_kernel
+    self._context.forced_pin = pin
+    try:
+      with warnings.catch_warnings():
+        # Said once, of the build itself.
+        warnings.simplefilter('ignore')
+        self._generate_kernel()
+      return self._kernel, self._metrics
+    finally:
+      self._context.forced_pin = None
+      (self._kernel, self._metrics, self._names.counter,
+       self._lane_config) = saved
 
   def _warn_icache(self) -> None:
     """Say so when the kernel's code is larger than the instruction cache.

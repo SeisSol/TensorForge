@@ -1748,6 +1748,148 @@ def _ranked_by(context: Context) -> Optional[str]:
     return RANKED_BY.get(vendor)
 
 
+class _Ahead:
+    """A candidate built in another process (`_generate_ahead`): what the
+    walk asks of a build -- its lanes, its modeled footprint and code, its
+    loops, its source for the compiler -- and nothing else of the generator,
+    which stays behind in the process that built it."""
+
+    def __init__(self, summary: dict):
+        from types import SimpleNamespace
+        self.lanes = SimpleNamespace(num_threads=summary['lanes'])
+        self.metrics = SimpleNamespace(peak_pressure=summary['peak_pressure'],
+                                       code_units=summary['code_units'])
+        self._mults = summary['mults']
+        self._headers = list(summary['headers'])
+        self._kernel = summary['kernel']
+        # `_rolled` asks for descriptors with a loop of their own.
+        self._descr_list = ([SimpleNamespace(decompose=None, to_dict=None)]
+                            if summary['rolled'] else [])
+
+    def launch_config(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(mults_per_block=self._mults)
+
+    def get_helper_headers(self):
+        return list(self._headers)
+
+    def get_kernel(self):
+        return self._kernel
+
+
+def _rewritten(result: Build, alt: Candidate, pin: int, figure, context
+               ) -> Tuple[Build, Optional[float]]:
+    """`alt` -- `result`'s candidate pinned every `pin` loads -- as the
+    same build written again (`Generator.emitted_with_pin`), and its figure:
+    the fence is the emitter's alone, so the bodies are `result`'s.  A build
+    made for `alt` writes the same body under another kernel name."""
+    from types import SimpleNamespace
+    gen = result.generator
+    text, metrics = gen.emitted_with_pin(pin)
+    ctx = alt.context(context, autotune='off')
+    view = SimpleNamespace(candidate=alt, context=ctx, generator=SimpleNamespace(
+        metrics=metrics, lanes=gen.lanes, stack=getattr(gen, 'stack', 1)))
+    count = figure(view)
+    stub = _Ahead(dict(lanes=gen.lanes.num_threads,
+                       peak_pressure=metrics.peak_pressure,
+                       code_units=metrics.code_units, rolled=_rolled(result),
+                       mults=gen.launch_config().mults_per_block,
+                       headers=list(gen.get_helper_headers()), kernel=text))
+    return Build(alt, generator=stub, context=ctx), count
+
+
+#: What the forked workers of `_generate_ahead` build: set before the fork,
+#: read by index in the child, so that nothing but the index and the summary
+#: crosses between the processes.
+_FORKED: Optional[Tuple] = None
+
+
+def _summary_of(index: int) -> dict:
+    descr_factory, context, cands, generate, figure, pin = _FORKED
+    cand = cands[index]
+    result = build(descr_factory, context, cand, generate)
+    if not result.ok:
+        return dict(ok=False, error=repr(result.error))
+    gen = result.generator
+    out = dict(ok=True, count=figure(result), lanes=gen.lanes.num_threads,
+               peak_pressure=gen.metrics.peak_pressure,
+               code_units=gen.metrics.code_units, rolled=_rolled(result),
+               mults=gen.launch_config().mults_per_block,
+               headers=list(gen.get_helper_headers()),
+               kernel=gen.get_kernel())
+    wave = max(1, getattr(context.target.hw, 'vec_unit_length', 32))
+    if pin and not cand.get('pin_loads') and not gen.lanes.num_threads % wave:
+        # The pinned build the walk may ask about: the same build written
+        # again, a tenth of a second where a build takes a minute.
+        alt = cand.set('pin_loads', pin)
+        twin, count = _rewritten(result, alt, pin, figure, context)
+        out['pinned'] = dict(count=count, peak_pressure=twin.generator.metrics.peak_pressure,
+                             code_units=twin.generator.metrics.code_units,
+                             kernel=twin.generator.get_kernel())
+    return out
+
+
+def _generate_ahead(descr_factory, context: Context, cands: List[Candidate],
+                    generate, figure, jobs: int, pin: int = 0
+                    ) -> List[Tuple[Candidate, Build, Optional[float]]]:
+    """`cands` built `jobs` at a time in forked processes, each as
+    `(candidate, build, figure)`: the build an `_Ahead` in place of its
+    generator, or one with the error a build in this process would have.
+    With `pin`, each whole-warp candidate's pinned twin follows it, written
+    again by the process that built it (`_rewritten`)."""
+    global _FORKED
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+    if not cands:
+        return []
+    _FORKED = (descr_factory, context, list(cands), generate, figure, pin)
+    try:
+        with ProcessPoolExecutor(
+                max_workers=min(jobs, len(cands)),
+                mp_context=multiprocessing.get_context('fork')) as pool:
+            summaries = list(pool.map(_summary_of, range(len(cands))))
+    finally:
+        _FORKED = None
+    out = []
+    for cand, summary in zip(cands, summaries):
+        ctx = cand.context(context, autotune='off')
+        if not summary['ok']:
+            out.append((cand, Build(cand, context=ctx,
+                                    error=RuntimeError(summary['error'])),
+                        None))
+            continue
+        out.append((cand, Build(cand, generator=_Ahead(summary), context=ctx),
+                    summary['count']))
+        twin = summary.get('pinned')
+        if twin is not None:
+            alt = cand.set('pin_loads', pin)
+            out.append((alt, Build(alt, generator=_Ahead(dict(summary, **twin)),
+                                   context=alt.context(context,
+                                                       autotune='off')),
+                         twin['count']))
+    return out
+
+
+def _compile_ahead(scorer: 'CompiledScore', builds: Mapping[Candidate, Build],
+                   cands: Iterable[Candidate], jobs: int
+                   ) -> Dict[Candidate, Any]:
+    """What the compiler says of `cands`, `jobs` at a time: the report, or
+    the exception asking raised, which the walk raises again where it asks
+    (`lanes_rule`)."""
+    from concurrent.futures import ThreadPoolExecutor
+    cands = list(cands)
+
+    def ask(cand):
+        try:
+            return scorer.resources(builds[cand])
+        except Exception as exc:              # noqa: BLE001
+            return exc
+    if not cands:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(jobs, len(cands))) as pool:
+        return dict(zip(cands, pool.map(ask, cands)))
+
+
 def lane_candidates(descrs, context: Context, origin: Candidate,
                     fixed: Optional[Mapping[str, Any]] = None
                     ) -> List[Candidate]:
@@ -1862,20 +2004,61 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     figure = pipe_bound if by_bound else executed_instructions
     builds: Dict[Candidate, Build] = {origin: first}
     counts: Dict[Candidate, float] = {}
-    for cand in [origin] + lane_candidates(descr_factory(), context, origin,
-                                           fixed):
-        result = builds.get(cand) or build(descr_factory, context, cand,
-                                           generate)
-        builds[cand] = result
-        if result.ok:
-            count = figure(result)
+    # Several at once where the count ranks (`Options.autotune_jobs`): the
+    # candidates built in forked processes, the compiler asked about every
+    # one the estimate cannot settle, and the pinned builds that may be
+    # wanted, ahead of the walk -- which then takes what it asks from there
+    # and decides as it would one at a time.
+    jobs = max(1, int(getattr(context.get_user_options(), 'autotune_jobs', 1)
+                      or 1))
+    ahead = jobs > 1 and not by_bound
+    pins = _pins_by_compiler(context)
+    from tensorforge.backend.instructions.abstract_instruction import (
+        PIN_EVERY)
+    # The pinned builds the compiler's word may call for (`pinned`): each
+    # whole-warp candidate written again by the process that built it.
+    pinned_ahead: Dict[Candidate, Tuple[Build, Optional[float]]] = {}
+    cands = [origin] + lane_candidates(descr_factory(), context, origin,
+                                       fixed)
+    if ahead:
+        if first.ok:
+            count = figure(first)
+            if count is not None:
+                counts[origin] = count
+            if pins and not first.generator.lanes.num_threads % wave:
+                alt = origin.set('pin_loads', PIN_EVERY)
+                pinned_ahead[alt] = _rewritten(first, alt, PIN_EVERY, figure,
+                                               context)
+        rest: List[Candidate] = []
+        for cand in cands:
+            if cand not in builds and cand not in rest:
+                rest.append(cand)
+        for cand, result, count in _generate_ahead(
+                descr_factory, context, rest, generate, figure, jobs,
+                PIN_EVERY if pins else 0):
+            if cand.get('pin_loads') == PIN_EVERY and cand not in rest:
+                pinned_ahead[cand] = (result, count)
+                continue
+            builds[cand] = result
             if count is not None:
                 counts[cand] = count
+    else:
+        for cand in cands:
+            result = builds.get(cand) or build(descr_factory, context, cand,
+                                               generate)
+            builds[cand] = result
+            if result.ok:
+                count = figure(result)
+                if count is not None:
+                    counts[cand] = count
     if origin not in counts:
         return origin
     # Where the count ranks, the estimate settles what it can (`ASK_BAND`).
     banded = not by_bound and str(hw.vendor).lower() == 'nvidia'
     settled: set = set()
+
+    # Asked ahead: the reports, or what asking raised.
+    reports: Dict[Candidate, Any] = {}
 
     def resources(cand: Candidate) -> Optional[Resources]:
         if banded:
@@ -1883,7 +2066,17 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             if known is not None:
                 settled.add(cand)
                 return known
+        if cand in reports:
+            got = reports[cand]
+            if isinstance(got, Exception):
+                raise got
+            return got
         return scorer.resources(builds[cand])
+
+    if ahead:
+        reports.update(_compile_ahead(
+            scorer, builds, [c for c in counts if not banded
+                             or _settled(builds[c]) is None], jobs))
 
     try:
         report = resources(origin)
@@ -1891,7 +2084,16 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         report = None
     if report is None:
         return origin
-    pins = _pins_by_compiler(context)
+    if ahead and pins:
+        # Asked about ahead: the twins of what the compiler saw spill
+        # `PIN_SPILL` -- the ones `pinned` goes on to ask about.
+        wanted = [c.set('pin_loads', PIN_EVERY) for c, got in reports.items()
+                  if isinstance(got, Resources)
+                  and got.spill_bytes >= PIN_SPILL and not c.get('pin_loads')]
+        reports.update(_compile_ahead(
+            scorer, {a: b for a, (b, _) in pinned_ahead.items()},
+            [a for a in wanted if a in pinned_ahead
+             and pinned_ahead[a][0].ok], jobs))
 
     def pinned(cand: Candidate, seen: Optional[Resources]
                ) -> Tuple[Candidate, Optional[Resources]]:
@@ -1908,20 +2110,32 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 or cand.get('pin_loads')
                 or builds[cand].generator.lanes.num_threads % wave):
             return cand, seen
-        from tensorforge.backend.instructions.abstract_instruction import (
-            PIN_EVERY)
         alt = cand.set('pin_loads', PIN_EVERY)
-        result = build(descr_factory, context, alt, generate)
+        if alt in pinned_ahead:
+            result, count = pinned_ahead[alt]
+        elif hasattr(builds[cand].generator, 'emitted_with_pin'):
+            # The same build written again: the fence is the emitter's.
+            result, count = _rewritten(builds[cand], alt, PIN_EVERY, figure,
+                                       context)
+            pinned_ahead[alt] = (result, count)
+        else:
+            result, count = build(descr_factory, context, alt, generate), None
         if not result.ok:
             return cand, seen
         try:
-            other = scorer.resources(result)
+            if alt in reports:
+                other = reports[alt]
+                if isinstance(other, Exception):
+                    raise other
+            else:
+                other = scorer.resources(result)
         except Exception:                     # noqa: BLE001
             other = None
         if other is None or other.spill_bytes > PIN_KEEP * seen.spill_bytes:
             return cand, seen
         builds[alt] = result
-        count = figure(result)
+        if alt not in pinned_ahead:
+            count = figure(result)
         counts[alt] = counts[cand] if count is None else count
         return alt, other
 

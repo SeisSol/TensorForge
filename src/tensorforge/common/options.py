@@ -1437,6 +1437,17 @@ declare('autotune_budget',
             'included.  A coordinate walk over the simple space of '
             '`local_flux` takes 10 to 20.')
 
+declare('autotune_jobs',
+        default=1,
+        env='TF_AUTOTUNE_JOBS',
+        codegen=False,
+        doc='Processes `autotune=lanes` generates its candidates in, and threads '
+            'it asks the compiler in, at once.  The candidates are independent '
+            'builds of one kernel, and generating them is most of what the walk '
+            'costs (83 % on sm_90 over SeisSol\'s order-6 kernels, nvcc 12 %); 1 '
+            'builds them one after the other, as before.  Forked, so Linux and '
+            'macOS only; each process holds a build of its own.')
+
 declare('autotune_cache',
         default='',
         env='TF_AUTOTUNE_CACHE',

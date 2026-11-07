@@ -252,7 +252,10 @@ def _pin_every(context, body, num_threads) -> int:
   counted in its own order, needs by `PTXAS_NEED` more than the register file
   less `PIN_MARGIN` -- where ptxas would spill it.
   """
-  pin = getattr(context.get_user_options(), 'pin_loads', 0)
+  # A build written again with a pin of the tuner's (`Generator.emitted_with_pin`).
+  forced = getattr(context, 'forced_pin', None)
+  pin = (forced if forced is not None
+         else getattr(context.get_user_options(), 'pin_loads', 0))
   if not pin:
     return 0
   target = context.target
