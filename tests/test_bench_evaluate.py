@@ -143,3 +143,34 @@ def test_publish_takes_the_seissol_runs_and_clusterings(monkeypatch,
     command = plan['publish']
     assert (_flag(command, '--seissol'), _flag(command, '--clustering')) == (
         'runs', 'synthetic')
+
+
+def test_a_step_out_of_time_ends_what_it_started(tmp_path):
+    """A benchmark whose kernel hangs keeps the device busy for every later
+    measurement, so a timeout ends the step's whole process group -- the step
+    started a process that sleeps on, and both are gone -- and the log says
+    where it stopped."""
+    import os
+    import time
+    pidfile = tmp_path / 'grandchild.pid'
+    script = ('import subprocess, sys, time\n'
+              'p = subprocess.Popen([sys.executable, "-c", '
+              '"import time; time.sleep(600)"])\n'
+              f'open({str(pidfile)!r}, "w").write(str(p.pid))\n'
+              'print("started", flush=True)\n'
+              'time.sleep(600)\n')
+    log = tmp_path / 'step.log'
+    step = evaluate.run_step('hang', [sys.executable, '-c', script], log,
+                             timeout=3.0)
+    assert step.status == 'timeout'
+    assert 'started' in log.read_text() and 'timeout' in log.read_text()
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail('what the step started outlived its timeout')
