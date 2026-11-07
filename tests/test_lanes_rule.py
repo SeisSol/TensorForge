@@ -335,7 +335,9 @@ def test_where_the_default_spills_on_amd_a_clean_build_comes_first(monkeypatch):
     pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
                              generate=Generator.trial)
     assert _key(pick)[0] == 64
-    assert {k[0] for k in scorer.asked} == {8, 16, 32, 64}
+    # Eight lanes in single precision are out on AMD before anything is
+    # asked (`AMD_SINGLE_NARROWEST`).
+    assert {k[0] for k in scorer.asked} == {16, 32, 64}
     monkeypatch.setattr(tuning, 'CLEAN_FIRST', False)
     pick = tuning.lanes_rule(descr_factory, ctx, TableScorer(spills), origin,
                              first, generate=Generator.trial)
@@ -481,9 +483,11 @@ def test_under_dpcpp_the_rule_ranks_by_the_count(monkeypatch):
 def test_on_mi210_fewer_waves_stretch_the_bound(monkeypatch):
     """The same bounds as on MI300A, where sixteen merged lanes win; on MI210
     a build at one wave a SIMD is charged eight times its bound and one at
-    two four times, so 64 lanes at two waves win -- order-6 `derivative` in
-    single precision runs 33 % faster at 64 lanes there and twice as long at
-    sixteen."""
+    two four times, which made 64 lanes at two waves win -- but where the
+    default spills nothing, MI210 takes neither a wider candidate
+    (`WIDE_SPILL`: 25 such picks lost and won to -0.1 % together over
+    paper-1106, worst +371 %) nor a narrower one (`NARROW_WHERE_SPILLING`),
+    and the default stands.  Spilling, the stretch decides again."""
     descr_factory = _local_flux()
     bounds = {(32, None): 4449, (32, True): 4449, (32, False): 4449,
               (16, True): 3488, (16, False): 3488, (8, True): 2898,
@@ -500,7 +504,13 @@ def test_on_mi210_fewer_waves_stretch_the_bound(monkeypatch):
         picks[arch] = _key(tuning.lanes_rule(
             descr_factory, ctx, TableScorer(spills, waves=waves), origin,
             first, generate=Generator.trial))[0]
-    assert picks == {'gfx942': 16, 'gfx90a': 64}
+    assert picks == {'gfx942': 16, 'gfx90a': 32}
+    spilled = {**spills, (32, None): 600, (32, True): 600, (32, False): 600}
+    ctx = _amd('gfx90a')
+    origin, first = _origin(descr_factory, ctx)
+    assert _key(tuning.lanes_rule(
+        descr_factory, ctx, TableScorer(spilled, waves=waves), origin, first,
+        generate=Generator.trial))[0] == 64
 
 
 def test_an_amd_part_nobody_measured_keeps_its_default(monkeypatch):
@@ -573,10 +583,10 @@ def test_a_small_spill_is_left_unpinned(monkeypatch):
 
 
 def test_a_pin_that_keeps_the_spilling_is_not_taken(monkeypatch):
-    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 400, (32, 32): 300},
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 800, (32, 32): 600},
                               pin_loads='auto')
     assert pick.get('pin_loads') == 0
-    assert scorer.asked == [(32, 0), (32, 32)]
+    assert scorer.asked[:2] == [(32, 0), (32, 32)]
 
 
 def test_the_pin_is_the_compilers_only_under_auto_and_whole_warps(

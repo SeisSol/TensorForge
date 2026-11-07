@@ -1650,14 +1650,43 @@ CLEAN_WAVE = True
 #: viscoelastic order-4 `derivative` in single precision, 1.3 kB spilled, and
 #: pins elastic order-6 `volume` in double for 28 B), and by this rule
 #: 0.1 / 3 % anywhere from 160 to 256 B; on sm_120 it picks the faster build
-#: of all 13 kernels measured there.
-PIN_SPILL = 192
+#: of all 13 kernels measured there.  On four GPUs (A100, GH200, GB200,
+#: RTX 5070; 145 kernels) the pin cost 2 to 90 % at 128 to 600 B spilled in
+#: all but one (256 B, 8 % faster): elastic order-6 `derivative` in single
+#: precision spills 212 B on GH200 and ran 74 % slower pinned under the
+#: tuner (paper-1106).  What pays is kilobytes: the viscoelastic derivatives.
+PIN_SPILL = 512
 
 #: The share of the spilling a pinned build may keep and still be taken.
 #: Viscoelastic order-6 `volumeExt` in single precision spills 168 B on
 #: sm_120 and 196 B pinned, and runs 24 % slower pinned; where the pin pays,
 #: it removed 80 to 100 % of the spilling.
 PIN_KEEP = 0.5
+
+
+#: Spilled bytes past which the default's spilling lets the rule take a
+#: wider candidate than the default; at or below it no wider one is taken.
+#: Over paper-1106 (88 SeisSol kernels a GPU, the rule's picks against the
+#: default): where the default spilled the wider picks won (MI300A -50 %, MI210
+#: -28 %, GH200 -12 % geomean), where it did not they won nothing and lost
+#: big -- the Taylor expansions at 64 lanes 15 to 58 % on A100, GH200 and
+#: GB200, viscoelastic `fluxLocalAll` in double 74 and 371 % on MI210, 25
+#: picks there at -0.1 % together.
+WIDE_SPILL = 0
+
+#: Parts where a narrower candidate is taken only where the default spills.
+#: MI210's narrower picks lost 8 % together over paper-1106, the time
+#: derivatives at 16 lanes 57 and 84 % (elastic order 5 and viscoelastic order
+#: 4, both at the default's 256 registers and no scratch).
+NARROW_WHERE_SPILLING = ('gfx90a',)
+
+#: Lanes AMD does not take in single precision: eight.  Over the MI300A grid
+#: (56 kernels) they were the rule's worst picks -- elastic orders 3 to 5 lost
+#: 16 to 61 % to the default in paper-1106 -- and without them, with the
+#: wider ones held to where the default spills (`WIDE_SPILL`), the loss
+#: against the fastest candidate falls from 4.8 to 2.1 % (elastic orders 4
+#: and 5 from 7.0 to 0.2 %).
+AMD_SINGLE_NARROWEST = 16
 
 
 #: Where the rule ranks by the emitter's count (NVIDIA) and `Options.lanes_band`
@@ -2141,6 +2170,9 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         counts[alt] = counts[cand] if count is None else count
         return alt, other
 
+    # What the compiler said of the default as built, before any pin: the
+    # guards ask how much it spills and how many registers it holds.
+    unpinned = report
     base, report = pinned(origin, report)
     from tensorforge.analysis.icache import past_share
     limit = SPILL_GROWTH * report.spill_bytes
@@ -2171,6 +2203,25 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     # bound alone is still below the best clean one's cost.
     clean_first = CLEAN_FIRST and by_bound and report.spill_bytes > 0
     clean: Optional[Tuple[Candidate, float]] = None
+    vendor = str(hw.vendor).lower()
+    default_lanes = builds[origin].generator.lanes.num_threads
+
+    def guarded(cand: Candidate) -> bool:
+        """Whether the lanes of `cand` are out before any compiler is asked:
+        wider than the default where the default spills no more than
+        `WIDE_SPILL`, narrower where it spills nothing on the parts of
+        `NARROW_WHERE_SPILLING`, eight in single precision on AMD
+        (`AMD_SINGLE_NARROWEST`)."""
+        lanes = builds[cand].generator.lanes.num_threads
+        spills = unpinned.spill_bytes > WIDE_SPILL
+        if lanes > default_lanes and not spills:
+            return True
+        if (lanes < default_lanes and not unpinned.spill_bytes
+                and str(hw.model) in NARROW_WHERE_SPILLING):
+            return True
+        return (vendor == 'amd' and context.fp_type is Datatype.F32
+                and lanes < AMD_SINGLE_NARROWEST)
+
     for cand in sorted((c for c in counts if c not in (origin, base)),
                        key=counts.get):
         if clean is not None:
@@ -2178,6 +2229,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 break
         elif not clean_first and counts[cand] >= least:
             break
+        if guarded(cand):
+            continue
         try:
             seen = resources(cand)
         except Exception:                     # noqa: BLE001
