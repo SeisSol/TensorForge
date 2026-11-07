@@ -636,7 +636,7 @@ def test_the_band_leaves_the_compiler_out_where_the_estimate_settles(
     estimated at 330, spills 600 B where the default spills 300 (the
     compiler's word): out; 16 unmerged, clean in the compiler's word, wins.
     No pin: what the compiler would pin is asked about pinned as well."""
-    ctx = _context(pin_loads=0)
+    ctx = _context(pin_loads=0, lanes_band=True)
     descr_factory = _local_flux()
     origin, first = _origin(descr_factory, ctx)
     counts = {(32, None): 1000, (32, True): 1000, (32, False): 900,
@@ -671,7 +671,7 @@ def test_a_candidate_the_band_settles_is_pinned_by_the_estimate(monkeypatch):
     """Under `pin_loads='auto'` the compiler decides the pin of what it was
     asked about (`PIN_SPILL`); a candidate the estimate settled comes out
     with the estimate's pin, `'auto'` (`PIN_MARGIN`)."""
-    ctx = _context(pin_loads='auto')
+    ctx = _context(pin_loads='auto', lanes_band=True)
     descr_factory = _local_flux()
     origin, first = _origin(descr_factory, ctx)
     counts = {(32, None): 1000, (32, True): 1000, (32, False): 900,

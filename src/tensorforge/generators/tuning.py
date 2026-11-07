@@ -1660,8 +1660,9 @@ PIN_SPILL = 192
 PIN_KEEP = 0.5
 
 
-#: Where the rule ranks by the emitter's count (NVIDIA), the compiler is asked
-#: only about a candidate whose spilling the estimate cannot settle
+#: Where the rule ranks by the emitter's count (NVIDIA) and `Options.lanes_band`
+#: asks for it, the compiler is asked only about a candidate whose spilling
+#: the estimate cannot settle
 #: (`_settled`): one whose estimate (`abstract_instruction.PTXAS_NEED`) is
 #: within `ASK_BAND` registers of the file, one with a rolled loop -- a merged
 #: run, a rolled chain, where the estimate errs both ways -- from `ASK_LOOPS`
@@ -2054,7 +2055,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     if origin not in counts:
         return origin
     # Where the count ranks, the estimate settles what it can (`ASK_BAND`).
-    banded = not by_bound and str(hw.vendor).lower() == 'nvidia'
+    banded = (getattr(context.get_user_options(), 'lanes_band', False)
+              and not by_bound and str(hw.vendor).lower() == 'nvidia')
     settled: set = set()
 
     # Asked ahead: the reports, or what asking raised.
@@ -2248,7 +2250,8 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
     # is the same unpinned either way, and the pick of a walk without the
     # pin in it is not this one's.
     mode = 'lanes+pin' if pins else 'lanes'
-    if (_ranked_by(context) == 'instructions'
+    if (getattr(context.get_user_options(), 'lanes_band', False)
+            and _ranked_by(context) == 'instructions'
             and str(hw.vendor).lower() == 'nvidia'):
         # Picks of the walk that asks the compiler about every candidate are
         # not this one's (`ASK_BAND`).

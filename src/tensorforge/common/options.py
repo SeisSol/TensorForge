@@ -1437,6 +1437,19 @@ declare('autotune_budget',
             'included.  A coordinate walk over the simple space of '
             '`local_flux` takes 10 to 20.')
 
+declare('lanes_band',
+        default=False,
+        env='TF_LANES_BAND',
+        parse=parse_bool,
+        codegen=False,
+        doc='Under `autotune=lanes` on NVIDIA, ask the compiler only about the '
+            'candidates whose spilling the estimate cannot settle '
+            '(`tuning.ASK_BAND`) and take the estimate\'s word for the rest.  '
+            'Off: on GH200 the estimate dropped the fastest candidate of '
+            'viscoelastic order-6 `volumeExt` (16 lanes, +33 % with the band\'s '
+            '32), and asked in threads (`autotune_jobs`) the compiler costs '
+            'little time.')
+
 declare('autotune_jobs',
         default=1,
         env='TF_AUTOTUNE_JOBS',
