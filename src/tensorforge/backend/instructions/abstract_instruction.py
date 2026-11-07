@@ -227,6 +227,19 @@ PTXAS_NEED = (66.0, 0.83)
 #: costs those +11 and +18 %, every load +65 and +120 %.
 PIN_EVERY = 32
 
+#: How close to the register file the estimate may come before `'auto'`
+#: pins, in registers.  The estimate is 29 registers off on average, and a
+#: body it puts just under the file can spill kilobytes: seissol60's time
+#: kernels without the derivatives written out estimate at 251 of 255 and
+#: spill 7 kB on sm_120 (viscoelastic order 6, single), where the pin makes
+#: them 2.4 times faster.  Over 145 kernels and GPUs (A100, GH200, GB200,
+#: RTX 5070; SeisSol elastic and viscoelastic, orders 4 to 6, both
+#: precisions), as the loss against the faster of pinned and unpinned (mean
+#: / worst): pinned past the file 4.0 / 141 %, past the file less this 2.1 /
+#: 61 %.  The worst left is viscoelastic order-6 `fluxLocalAll` in double on
+#: A100, estimated at 373 and spilling 64 B, which ptxas copes with.
+PIN_MARGIN = 10
+
 
 def _pin_every(context, body, num_threads) -> int:
   """Every how many loads the emitter fences the body (`Options.pin_loads`),
@@ -236,8 +249,8 @@ def _pin_every(context, body, num_threads) -> int:
   over whole warps: one narrower shares its warp with others whose batch loop
   can end a trip earlier, and a full-mask `__syncwarp` there waits for lanes
   that never come.  `'auto'` fences every `PIN_EVERY` loads where the body,
-  counted in its own order, needs more than the register file by
-  `PTXAS_NEED` -- where ptxas would spill it.
+  counted in its own order, needs by `PTXAS_NEED` more than the register file
+  less `PIN_MARGIN` -- where ptxas would spill it.
   """
   pin = getattr(context.get_user_options(), 'pin_loads', 0)
   if not pin:
@@ -256,7 +269,7 @@ def _pin_every(context, body, num_threads) -> int:
     return 0
   total, _ = body_pressure(context, body, False, num_threads)
   need = PTXAS_NEED[0] + PTXAS_NEED[1] * total / 4
-  return PIN_EVERY if need > budget / 4 else 0
+  return PIN_EVERY if need > budget / 4 - PIN_MARGIN else 0
 
 
 def _fused_if_over_budget(context, attempt, finish,

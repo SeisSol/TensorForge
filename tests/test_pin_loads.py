@@ -67,10 +67,11 @@ def test_only_cuda_and_only_whole_warps():
 
 def test_auto_pins_where_ptxas_would_spill(monkeypatch):
     """`'auto'`: the count of the body, read through `PTXAS_NEED`, against
-    the register file -- 255 registers."""
+    the register file -- 255 registers -- less `PIN_MARGIN`."""
     a, b = ai.PTXAS_NEED
-    fits = int((255 - a) / b * 4) - 8
-    spills = int((255 - a) / b * 4) + 8
+    edge = 255 - ai.PIN_MARGIN
+    fits = int((edge - a) / b * 4) - 8
+    spills = int((edge - a) / b * 4) + 8
     monkeypatch.setattr(ai, 'body_pressure',
                         lambda ctx, body, simd, lanes: (fits, [fits, 0]))
     assert ai._pin_every(_context(pin='auto'), (), 32) == 0

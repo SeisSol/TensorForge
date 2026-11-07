@@ -68,6 +68,15 @@ def _forget_picks():
     tuning._LOADED.clear()
 
 
+@pytest.fixture(autouse=True)
+def _compiler_asked_throughout(request, monkeypatch):
+    """The stand-in compiler answers for every candidate, as the rule asks it
+    where the estimate cannot settle the spilling (`tuning.ASK_BAND`) -- but
+    in the tests about that band."""
+    if 'band' not in request.node.name:
+        monkeypatch.setattr(tuning, '_settled', lambda result: None)
+
+
 def _key(cand):
     lanes = cand.lanes.num_threads if cand.lanes is not None else None
     return lanes, cand.get('merge_variants')
@@ -609,3 +618,70 @@ def test_the_generator_builds_the_pinned_pick(monkeypatch):
     plain.generate()
     assert (gen.get_kernel().count('__syncwarp();')
             > plain.get_kernel().count('__syncwarp();'))
+
+
+def _needs(table):
+    """`_estimated_need` read from `table` by (lanes, merge)."""
+    def need(result):
+        return table[_key(result.candidate)]
+    return need
+
+
+def test_the_band_leaves_the_compiler_out_where_the_estimate_settles(
+        monkeypatch):
+    """Far below the register file a candidate spills nothing, far above it
+    the registers past it, without the compiler (`ASK_BAND`): asked are only
+    the candidates within the band the walk reaches -- the default at 240
+    and 16 unmerged at 270.  Eight unmerged, the fewest instructions,
+    estimated at 330, spills 600 B where the default spills 300 (the
+    compiler's word): out; 16 unmerged, clean in the compiler's word, wins.
+    No pin: what the compiler would pin is asked about pinned as well."""
+    ctx = _context(pin_loads=0)
+    descr_factory = _local_flux()
+    origin, first = _origin(descr_factory, ctx)
+    counts = {(32, None): 1000, (32, True): 1000, (32, False): 900,
+              (16, True): 950, (16, False): 700, (8, True): 800,
+              (8, False): 500, (64, True): 1500, (64, False): 1400}
+    needs = {(32, None): 240, (32, True): 240, (32, False): 150,
+             (16, True): 150, (16, False): 270, (8, True): 150,
+             (8, False): 330, (64, True): 120, (64, False): 120}
+    monkeypatch.setattr(tuning, 'executed_instructions', _counting(counts))
+    monkeypatch.setattr(tuning, '_estimated_need', _needs(needs))
+    scorer = TableScorer({(32, None): 300})
+    pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
+                             generate=Generator.trial)
+    assert _key(pick) == (16, False)
+    assert scorer.asked == [(32, None), (16, False)]
+
+
+def test_a_rolled_candidate_near_the_band_is_asked(monkeypatch):
+    """Where the operations keep a loop -- a merged run, a rolled chain --
+    the estimate errs both ways, and the compiler is asked from
+    `ASK_LOOPS` below the file up."""
+    ctx = _context()
+    descr_factory = _local_flux()
+    origin, first = _origin(descr_factory, ctx)
+    monkeypatch.setattr(tuning, '_estimated_need', lambda result: 200)
+    assert tuning._settled(first) is not None
+    monkeypatch.setattr(tuning, '_rolled', lambda result: True)
+    assert tuning._settled(first) is None
+
+
+def test_a_candidate_the_band_settles_is_pinned_by_the_estimate(monkeypatch):
+    """Under `pin_loads='auto'` the compiler decides the pin of what it was
+    asked about (`PIN_SPILL`); a candidate the estimate settled comes out
+    with the estimate's pin, `'auto'` (`PIN_MARGIN`)."""
+    ctx = _context(pin_loads='auto')
+    descr_factory = _local_flux()
+    origin, first = _origin(descr_factory, ctx)
+    counts = {(32, None): 1000, (32, True): 1000, (32, False): 900,
+              (16, True): 950, (16, False): 700, (8, True): 800,
+              (8, False): 500, (64, True): 1500, (64, False): 1400}
+    monkeypatch.setattr(tuning, 'executed_instructions', _counting(counts))
+    monkeypatch.setattr(tuning, '_estimated_need', lambda result: 120)
+    scorer = TableScorer({})
+    pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
+                             generate=Generator.trial)
+    assert scorer.asked == []
+    assert _key(pick) == (8, False)
+    assert pick.get('pin_loads') == 'auto'

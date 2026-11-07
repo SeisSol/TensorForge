@@ -1660,6 +1660,67 @@ PIN_SPILL = 192
 PIN_KEEP = 0.5
 
 
+#: Where the rule ranks by the emitter's count (NVIDIA), the compiler is asked
+#: only about a candidate whose spilling the estimate cannot settle
+#: (`_settled`): one whose estimate (`abstract_instruction.PTXAS_NEED`) is
+#: within `ASK_BAND` registers of the file, one with a rolled loop -- a merged
+#: run, a rolled chain, where the estimate errs both ways -- from `ASK_LOOPS`
+#: below the file up, and one whose code may be past the instruction cache
+#: (`ASK_ICACHE` of it), whose charge needs the compiler's size.  Elsewhere
+#: the estimate's spilling stands: none below the file, the registers past
+#: it stored and loaded above.  Over SeisSol's elastic kernels at orders 6
+#: and 8 on four GPUs (356 candidates; `~/tf-probe/nv/lanes/eval_band.py`),
+#: as the mean loss against the fastest candidate: estimate alone 15.3 %,
+#: worst 401 %; the compiler about every candidate 7.8 %; asked so, 7.1 %
+#: about 122 of them.  Its pin is the estimate's as well (`PIN_MARGIN`).
+ASK_BAND = 30
+ASK_LOOPS = 80
+ASK_ICACHE = 0.5
+
+
+def _estimated_need(result: Build) -> Optional[float]:
+    """The registers a lane of `result` is expected to need, as
+    `pin_loads='auto'` estimates them: `PTXAS_NEED` over the largest body's
+    modeled footprint."""
+    from tensorforge.backend.instructions.abstract_instruction import (
+        PTXAS_NEED)
+    peak = result.generator.metrics.peak_pressure
+    if not peak:
+        return None
+    return PTXAS_NEED[0] + PTXAS_NEED[1] * peak / 4
+
+
+def _rolled(result: Build) -> bool:
+    """Whether `result` keeps a loop of its operations: a merged run, a
+    rolled chain (what `Generator.kernel_info` lists as `loops`)."""
+    return any(hasattr(d, 'decompose') and hasattr(d, 'to_dict')
+               for d in getattr(result.generator, '_descr_list', ()))
+
+
+def _settled(result: Build) -> Optional[Resources]:
+    """What the estimate says of `result`'s spilling and code, where it can
+    say it (`ASK_BAND`); None where the compiler has to be asked."""
+    from tensorforge.analysis.icache import code_bytes
+    hw = result.context.target.hw
+    budget = getattr(hw, 'max_reg_per_thread', None)
+    need = _estimated_need(result)
+    if budget is None or need is None:
+        return None
+    file = budget / 4
+    if abs(need - file) <= ASK_BAND:
+        return None
+    if _rolled(result) and need > file - ASK_LOOPS:
+        return None
+    code = code_bytes(result.generator.metrics.code_units, hw)
+    capacity = getattr(hw, 'icache_size', None)
+    if (getattr(hw, 'icache_miss_factor', None) and capacity
+            and (code is None or code > ASK_ICACHE * capacity)):
+        return None
+    spill = 0 if need <= file else int(8 * (need - file))
+    return Resources(registers=int(min(need, file)), spill_bytes=spill,
+                     code_bytes=code)
+
+
 def _pins_by_compiler(context: Context) -> bool:
     """Whether the compiler decides `Options.pin_loads` here: `'auto'`, on
     NVIDIA under CUDA, where the fence is (`abstract_instruction._pin_every`).
@@ -1812,8 +1873,20 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 counts[cand] = count
     if origin not in counts:
         return origin
+    # Where the count ranks, the estimate settles what it can (`ASK_BAND`).
+    banded = not by_bound and str(hw.vendor).lower() == 'nvidia'
+    settled: set = set()
+
+    def resources(cand: Candidate) -> Optional[Resources]:
+        if banded:
+            known = _settled(builds[cand])
+            if known is not None:
+                settled.add(cand)
+                return known
+        return scorer.resources(builds[cand])
+
     try:
-        report = scorer.resources(first)
+        report = resources(origin)
     except Exception:                         # noqa: BLE001
         report = None
     if report is None:
@@ -1823,7 +1896,14 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     def pinned(cand: Candidate, seen: Optional[Resources]
                ) -> Tuple[Candidate, Optional[Resources]]:
         """`cand` and what the compiler says of it, or its pinned build and
-        what the compiler says of that, where the pin pays (`PIN_SPILL`)."""
+        what the compiler says of that, where the pin pays (`PIN_SPILL`).
+        A candidate the estimate settled is pinned by the estimate as well:
+        built with `pin_loads='auto'` (`abstract_instruction.PIN_MARGIN`)."""
+        if pins and cand in settled:
+            alt = cand.set('pin_loads', 'auto')
+            builds[alt], counts[alt] = builds[cand], counts[cand]
+            settled.add(alt)
+            return alt, seen
         if (not pins or seen is None or seen.spill_bytes < PIN_SPILL
                 or cand.get('pin_loads')
                 or builds[cand].generator.lanes.num_threads % wave):
@@ -1883,7 +1963,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         elif not clean_first and counts[cand] >= least:
             break
         try:
-            seen = scorer.resources(builds[cand])
+            seen = resources(cand)
         except Exception:                     # noqa: BLE001
             seen = None
         cand, seen = pinned(cand, seen)
@@ -1953,7 +2033,13 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
     # Remembered apart where the pin is the compiler's: the default's source
     # is the same unpinned either way, and the pick of a walk without the
     # pin in it is not this one's.
-    key = _key(first, 'lanes+pin' if pins else 'lanes')
+    mode = 'lanes+pin' if pins else 'lanes'
+    if (_ranked_by(context) == 'instructions'
+            and str(hw.vendor).lower() == 'nvidia'):
+        # Picks of the walk that asks the compiler about every candidate are
+        # not this one's (`ASK_BAND`).
+        mode += '+band'
+    key = _key(first, mode)
     if key in _PICKS:
         return Candidate.from_dict(_PICKS[key])
     pick = lanes_rule(descr_factory, context, scorer, origin, first, fixed,
