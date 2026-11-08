@@ -1325,6 +1325,21 @@ declare('k_unroll_max_tail',
             'steps is rolled by 7 at a cap of 16; at a tail of 2 by 11, with '
             'its last two steps written out.')
 
+declare('fission',
+        default=0,
+        env='TF_FISSION',
+        parse=parse_int,
+        doc='Run the batch this many times in one kernel, a piece of the '
+            'operation list each time, cut where nothing but the kernel\'s own '
+            'operands is live (`generator.fission_cuts`) -- SeisSol\'s '
+            'derivative between two of its derivatives, say -- so that each '
+            'piece\'s code is what the instruction cache has to hold.  Every '
+            'block takes the same elements in each piece, so a block barrier '
+            'orders them (`BlockBarrierDescr`), and the pieces share one '
+            'element count.  What crosses a cut goes through memory: the '
+            'piece after reads what the one before stored.  0 or 1 cuts '
+            'nothing; a list with too few such points stays whole.')
+
 declare('min_blocks_per_sm',
         default=1,
         env='TF_MIN_BLOCKS_PER_SM',

@@ -56,9 +56,15 @@ class BatchLoop(AbstractInstruction):
                  group_size: int = 1,
                  narrow_group: bool = False,
                  stack: int = 1,
-                 wave_rows: int = 0):
+                 wave_rows: int = 0,
+                 count_index: Optional[int] = None):
         super().__init__(context)
         self._section_index = section_index
+        #: Whose element count and flags this loop runs over: its own
+        #: section's, or that of the first section of its cut kernel
+        #: (`descriptions.BlockBarrierDescr`).
+        self._count_index = (section_index if count_index is None
+                             else count_index)
         self._mode = mode
         self._start = start
         self._stride = stride
@@ -188,7 +194,7 @@ class BatchLoop(AbstractInstruction):
         raw = f'{self._group_batch()} + {self._lane()}'
         cond = f'{raw} < {self._stacks()}'
         if self._flags is not FlagMode.ABSENT:
-            flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+            flags = f'{GeneralLexicon.FLAGS_NAME}{self._count_index}'
             read = f'static_cast<bool>({flags}[{raw}])'
             if self._flags is FlagMode.OPTIONAL:
                 read = f'({flags} == nullptr || {read})'
@@ -402,14 +408,14 @@ class BatchLoop(AbstractInstruction):
         return f'{GeneralLexicon.BATCH_ID_NAME}1'
 
     def _num_elements(self) -> str:
-        return f'{GeneralLexicon.NUM_ELEMENTS}{self._section_index}'
+        return f'{GeneralLexicon.NUM_ELEMENTS}{self._count_index}'
 
     def _stacks(self) -> str:
         """The trips the loop makes over the batch, as text: the element
         count, or the stacks it makes where a trip computes several elements
         (`stacking.count`).  What the index is compared against; an element of
         a stack is compared against the element count (`_stack_actives`)."""
-        return stacking.count(self._section_index, self._stack)
+        return stacking.count(self._count_index, self._stack)
 
     def _count(self, writer):
         """The element count, as a value where the body can hold one.
@@ -458,7 +464,7 @@ class BatchLoop(AbstractInstruction):
         `REQUIRED` has no null to check: the parameter has no default, so the
         caller supplied a pointer.
         """
-        flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+        flags = f'{GeneralLexicon.FLAGS_NAME}{self._count_index}'
         read = f'static_cast<bool>({flags}[{{0}}])'
         if self._flags is FlagMode.OPTIONAL:
             read = f'{flags} == nullptr ? true : {read}'
@@ -598,7 +604,7 @@ class BatchLoop(AbstractInstruction):
         """
         if self._flags is FlagMode.ABSENT:
             return None
-        flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+        flags = f'{GeneralLexicon.FLAGS_NAME}{self._count_index}'
         read = f'{flags}[{{0}}]'
         if self._stack > 1:
             # A stack's word: whether any of its elements is flagged.  Read
@@ -639,7 +645,7 @@ class BatchLoop(AbstractInstruction):
             cond = f'{element} < {n}'
             kind, space = Effect.NONE, None
             if self._flags is not FlagMode.ABSENT:
-                flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+                flags = f'{GeneralLexicon.FLAGS_NAME}{self._count_index}'
                 read = f'static_cast<bool>({flags}[{element}])'
                 if self._flags is FlagMode.OPTIONAL:
                     read = f'({flags} == nullptr || {read})'
@@ -1025,7 +1031,7 @@ class BatchLoop(AbstractInstruction):
         loop._flag_word = self._flag_word()
         cond = inside
         if self._flags is not FlagMode.ABSENT:
-            flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+            flags = f'{GeneralLexicon.FLAGS_NAME}{self._count_index}'
             read = f'static_cast<bool>({flags}[{{0}}])'
             if self._flags is FlagMode.OPTIONAL:
                 read = f'({flags} == nullptr || {read})'
@@ -1196,7 +1202,7 @@ class BatchLoop(AbstractInstruction):
             cond = '{0} < ' + self._num_elements()
             kind, space = Effect.NONE, None
             if self._flags is not FlagMode.ABSENT:
-                flags = f'{GeneralLexicon.FLAGS_NAME}{self._section_index}'
+                flags = f'{GeneralLexicon.FLAGS_NAME}{self._count_index}'
                 read = f'static_cast<bool>({flags}[{{0}}])'
                 if self._flags is FlagMode.OPTIONAL:
                     read = f'({flags} == nullptr || {read})'
