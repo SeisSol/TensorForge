@@ -1246,13 +1246,17 @@ declare('merge_variants',
 declare('merge_icache_fraction',
         default=0.25,
         parse=parse_float,
+        rule=lambda target: 0.5 if str(target.hw.model) == 'gfx90a' else 0.25,
         doc='How much of the instruction cache a kernel written out may take '
             'before `merge_variants=auto` merges its repeated runs.  Generous on '
             'purpose: merging measured faster wherever it was tried, and the '
             'code size is an estimate that runs up to +89 % over what the '
-            'compiler emits at the 90th percentile (`analysis.icache`).  Where '
-            'the target states no instruction cache (Intel), `auto` merges '
-            'nothing.')
+            'compiler emits at the 90th percentile (`analysis.icache`).  Half '
+            'on gfx90a, the 16 kB it merged at while its cache was stated as '
+            'twice the 32 KB it is: merged from 8 kB, the elastic '
+            '`localFluxAll` at orders 3 and 4, 12 to 15 kB, ran 13 to 18 % '
+            'slower on MI210.  Where the target states no instruction cache '
+            '(Intel), `auto` merges nothing.')
 
 declare('merge_min_count',
         default=3,
