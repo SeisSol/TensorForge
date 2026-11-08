@@ -154,7 +154,8 @@ def test_a_kernel_over_the_cache_says_so(monkeypatch):
 class TestTargets:
     @pytest.mark.parametrize('arch,backend,size', [
         ('sm_86', 'cuda', 128 * 1024), ('sm_120', 'cuda', 128 * 1024),
-        ('gfx942', 'hip', 64 * 1024), ('gfx90a', 'hip', 64 * 1024),
+        ('gfx942', 'hip', 64 * 1024), ('gfx950', 'hip', 64 * 1024),
+        ('gfx90a', 'hip', 32 * 1024),
         ('gfx1150', 'hip', 32 * 1024), ('gfx1250', 'hip', 32 * 1024)])
     def test_the_cache_is_stated(self, arch, backend, size):
         from tensorforge.common.basic_types import Datatype
@@ -164,13 +165,16 @@ class TestTargets:
 
     @pytest.mark.parametrize('arch,factor', [
         ('sm_80', 1.28), ('sm_90', 3.0), ('sm_100', 2.6), ('sm_120', 2.05),
-        ('sm_110', 3.0), ('sm_86', None)])
+        ('sm_110', 3.0), ('sm_86', None), ('gfx90a', 2.8), ('gfx942', None),
+        ('gfx950', None)])
     def test_the_miss_factor_is_stated_where_it_was_measured(self, arch,
                                                               factor):
-        """By microbenchmark on four parts, taken over by the parts based
-        on one (sm_110 on sm_90), and absent elsewhere."""
+        """By microbenchmark on five parts, taken over by the parts based
+        on one (sm_110 on sm_90), and absent elsewhere -- CDNA 3 states none
+        over CDNA 2's: it measured none worth charging."""
         from tensorforge.common.basic_types import Datatype
-        hw = Context(arch=arch, backend='cuda',
+        backend = 'hip' if arch.startswith('gfx') else 'cuda'
+        hw = Context(arch=arch, backend=backend,
                      fp_type=Datatype.F32).target.hw
         assert hw.icache_miss_factor == factor
 
