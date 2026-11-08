@@ -37,6 +37,26 @@ class MultilinearBuilder(OperationBuilder):
     #: finds them here (`_resolve_reuse`, `_get_target_symbol`).
     self._staged: Dict[str, StagedCopy] = {}
 
+  def _placement_policy(self):
+    """The hardware's placement preferences (`Target.prefs.placement`), and
+    on NVIDIA where `Options.stage_operands` asks -- every multiplication,
+    or one narrower than the warp -- the sources staged in shared memory
+    instead of loaded into registers: the copy moves sixteen bytes a lane,
+    asynchronously, where a register load moves one number, and the reads
+    come from shared memory after it."""
+    from dataclasses import replace
+    policy = self._context.target.prefs.placement
+    hw = self._context.target.hw
+    wave = max(1, getattr(hw, 'vec_unit_length', 32) or 32)
+    asked = getattr(self._context.get_user_options(), 'stage_operands', 'off')
+    if str(hw.vendor).lower() != 'nvidia' or asked in ('off', '', None, False):
+      return policy
+    if asked == 'narrow' and not (self._num_threads
+                                  and self._num_threads < wave):
+      return policy
+    return replace(policy, preload_operands_into_registers=False,
+                   preload_operands_into_shared=True)
+
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.
 
@@ -58,6 +78,7 @@ class MultilinearBuilder(OperationBuilder):
     """
     self._staged = {}
     self._descr = descr
+    self._policy = self._placement_policy()
     self._dest_obj = descr.dest
     self._ops = [self.view_of(op) for op in descr.ops]
 
@@ -712,9 +733,13 @@ class MultilinearBuilder(OperationBuilder):
       # staged for something else: it cannot serve as this destination, and
       # the ordinary path below stages the region this operation needs
       del self._staged[dest_symbol.name]
+    # The destination keeps the hardware's own preference: a destination
+    # staged in shared memory would have to be written back from there, which
+    # nothing here does (`_placement_policy` stages sources alone).
+    policy = self._context.target.prefs.placement
     if dest_symbol.name in self._staged:
       return self._staged[dest_symbol.name].image
-    elif (self._policy.preload_operands_into_registers
+    elif (policy.preload_operands_into_registers
           and dest_symbol.stype == SymbolType.Global and not next):
       view = self._dest_preload_view(dest_symbol)
       symbol, load_op = self._make_loader_and_symbol_reg(view, False)
@@ -723,7 +748,7 @@ class MultilinearBuilder(OperationBuilder):
           list(view.offset))
       self._instructions.append(load_op)
       return symbol.symbol
-    elif (self._policy.preload_operands_into_shared
+    elif (policy.preload_operands_into_shared
           and dest_symbol.stype == SymbolType.Global and not next):
       view = self._dest_preload_view(dest_symbol)
       symbol, load_op = self._make_loader_and_symbol(view, None)

@@ -1312,6 +1312,17 @@ declare('k_unroll_max',
             'minutes, and rolled at 56 the same kernel was the fastest FFMA '
             'variant on GB200.')
 
+declare('stage_operands',
+        default='off',
+        env='TF_STAGE_OPERANDS',
+        parse=parse_str,
+        doc='On NVIDIA, stage a multiplication\'s sources in shared memory '
+            'instead of loading them into registers: `all` for every '
+            'multiplication, `narrow` for one narrower than the warp, `off`.  '
+            'The copy moves sixteen bytes a lane, asynchronously, where a '
+            'register load moves one number a lane; the destination keeps its '
+            'registers.  An experiment.')
+
 declare('min_blocks_per_sm',
         default=1,
         env='TF_MIN_BLOCKS_PER_SM',
