@@ -113,19 +113,33 @@
   max_reg_per_block: 512kB
 - arch: gfx90a
   base: gfx908
-  # CDNA 2 and 3: 64 KB of instruction cache shared by two compute units.
-  icache_size: 64kB
+  # CDNA 2: 32 KB of instruction cache shared by two compute units, half of
+  # CDNA 3's (AMD's MI300X slides, Hot Chips 2024: "64 KiB, shared by two CU
+  # (vs. 32 KiB on MI200 Series)").  Measured on MI210 with a loop of
+  # written-out FMAs at one wave a SIMD, the residency of SeisSol's kernels
+  # past 256 registers: the same time per instruction up to 30 kB of body,
+  # more from 32 kB, and from 56 kB 2.8 times as much in double precision
+  # (2.3 in single).  SeisSol's kernels pay more than the probe: the elastic
+  # order-6 derivative in double, 66 kB, waits 89 % of its cycles, and runs
+  # five times longer than MI300A's clocks and compute units account for.
+  icache_size: 32kB
+  icache_miss_factor: 2.8
   # `FeatureGFX90AInsts`: one unified file of 512 VGPRs and AGPRs per lane
   # (`getAddressableNumVGPRs`), inherited by gfx940 to gfx950.
   max_reg_per_thread: 2kB
 - arch: gfx940
   base: gfx90a
+  # CDNA 3 and 4: 64 KB, eight-way, shared by two compute units.  The same
+  # loop on MI300A costs the same per instruction up to 64 kB and 2 to 6 %
+  # more up to 96 kB: no factor worth charging.
+  icache_size: 64kB
+  icache_miss_factor: null
 - arch: gfx941
-  base: gfx90a
+  base: gfx940
 - arch: gfx942
-  base: gfx90a
+  base: gfx940
 - arch: gfx950
-  base: gfx90a
+  base: gfx940
   max_local_mem_size_per_block: 160kB
 - arch: gfx1010
   # RDNA: 32 KB of instruction cache per work-group processor (two compute
