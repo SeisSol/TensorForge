@@ -528,18 +528,26 @@ def test_an_amd_part_nobody_measured_keeps_its_default(monkeypatch):
 
 
 class PinScorer:
-    """Reports the spilling `spills` names for a candidate's (lanes, pin),
+    """Reports the spilling `spills` and the code `code` name for a
+    candidate's (lanes, pin) -- (lanes, pin, 'global') where it fences on
+    global loads only, which reports as its fully fenced twin unless named --
     and counts the questions."""
 
-    def __init__(self, spills):
+    def __init__(self, spills, code=None):
         self.spills = spills
+        self.code = code or {}
         self.asked = []
 
     def resources(self, result):
         cand = result.candidate
         key = (cand.lanes.num_threads, cand.get('pin_loads', 0))
+        if cand.get('pin_shared') is False:
+            key += ('global',)
         self.asked.append(key)
-        return Resources(registers=255, spill_bytes=self.spills.get(key, 0))
+        return Resources(registers=255,
+                         spill_bytes=self.spills.get(key, self.spills.get(
+                             key[:2], 0)),
+                         code_bytes=self.code.get(key))
 
 
 def _default_ahead(result):
@@ -553,15 +561,16 @@ def _default_ahead(result):
             + (8000 if cand.get('merge_variants') is not None else 0))
 
 
-def _pin_tuned(monkeypatch, spills, fixed=None, **opts):
-    """`autotune=lanes` with `PinScorer(spills)` for the compiler and the
-    default ahead (`_default_ahead`)."""
-    scorer = PinScorer(spills)
+def _pin_tuned(monkeypatch, spills, fixed=None, code=None, scale=1, **opts):
+    """`autotune=lanes` with `PinScorer(spills, code)` for the compiler and
+    the default ahead (`_default_ahead`, its counts `scale` times)."""
+    scorer = PinScorer(spills, code)
     monkeypatch.setattr(tuning.CompiledScore, 'available',
                         lambda self, context: True)
     monkeypatch.setattr(tuning.CompiledScore, 'resources',
                         lambda self, result: scorer.resources(result))
-    monkeypatch.setattr(tuning, 'executed_instructions', _default_ahead)
+    monkeypatch.setattr(tuning, 'executed_instructions',
+                        lambda result: scale * _default_ahead(result))
     pick = tuning.autotune(_local_flux(), _context(autotune='lanes', **opts),
                            mode='lanes', fixed=fixed, generate=Generator.trial)
     return pick, scorer
@@ -575,6 +584,37 @@ def test_under_the_lanes_rule_ptxas_decides_the_pin(monkeypatch):
     pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 7308, (32, 32): 148},
                               pin_loads='auto')
     assert pick.lanes.num_threads == 32 and pick.get('pin_loads') == 32
+    assert pick.get('pin_shared') is None, (
+        'fenced on every load where its twin costs no less')
+    assert scorer.asked == [(32, 0), (32, 32), (32, 32, 'global')]
+
+
+def test_the_global_twin_is_taken_where_it_costs_less(monkeypatch):
+    """SeisSol's order-8 elastic `localFluxAll` in double on GH200: fenced
+    on every load 147 kB of code and 424 B spilled, on global loads only 100
+    kB and 660 B, and 28 % faster (`PIN_GLOBAL_TWIN`); counted at the
+    23 456 instructions an element executes there."""
+    pick, scorer = _pin_tuned(
+        monkeypatch, {(32, 0): 2000, (32, 32): 424, (32, 32, 'global'): 660},
+        code={(32, 32): 300 * 1024, (32, 32, 'global'): 100 * 1024},
+        scale=23.456, pin_loads='auto')
+    assert pick.get('pin_loads') == 32 and pick.get('pin_shared') is False
+
+
+def test_the_full_pin_stays_where_the_global_twin_spills(monkeypatch):
+    """The viscoelastic order-4 derivative in double: unfenced, the compiler
+    hoists the shared loads into 2924 B of spill, fenced on every load it
+    spills 192, and runs 0.6 times as long for it."""
+    pick, scorer = _pin_tuned(
+        monkeypatch, {(32, 0): 6000, (32, 32): 192, (32, 32, 'global'): 2924},
+        code={(32, 32): 84 * 1024, (32, 32, 'global'): 55 * 1024},
+        scale=8.264, pin_loads='auto')
+    assert pick.get('pin_loads') == 32 and pick.get('pin_shared') is None
+
+
+def test_no_global_twin_where_shared_loads_count_for_nothing(monkeypatch):
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 7308, (32, 32): 148},
+                              pin_loads='auto', pin_shared=False)
     assert scorer.asked == [(32, 0), (32, 32)]
 
 
@@ -777,3 +817,29 @@ def test_elsewhere_the_charge_is_the_share_past_the_cache():
     miss = hw.icache_miss_factor
     refetch = tuning.ICACHE_SHARE * (miss - 1.0) if miss else 0.0
     assert tuning.icache_charge(4 * hw.icache_size, hw, refetch) == 0.0
+
+
+def test_rolls_join_the_walk_where_the_code_is_past_the_cache():
+    """The default rolled by 16 and written out whole, where its code is
+    past the instruction cache by the emitter's estimate (`ROLL_UNROLLS`);
+    nothing where it fits, or where the caller fixed the unroll."""
+    from types import SimpleNamespace
+    ctx = _context()
+    hw = ctx.target.hw
+    origin = tuning.Candidate()
+
+    def first(units):
+        return SimpleNamespace(ok=True, generator=SimpleNamespace(
+            metrics=SimpleNamespace(code_units=units)))
+
+    from tensorforge.analysis.icache import code_bytes
+    big = 1
+    while code_bytes(big, hw) <= hw.icache_size:
+        big *= 2
+    rolls = tuning._roll_candidates(first(big), ctx, origin, None)
+    assert [c.get('k_unroll_max') for c in rolls] == [16, 0]
+    assert tuning._roll_candidates(first(10), ctx, origin, None) == []
+    assert tuning._roll_candidates(first(big), ctx, origin,
+                                   {'k_unroll_max': 8}) == []
+    asked = _context(k_unroll_max=32)
+    assert tuning._roll_candidates(first(big), asked, origin, None) == []

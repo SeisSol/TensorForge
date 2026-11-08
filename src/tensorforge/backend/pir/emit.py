@@ -1009,8 +1009,12 @@ class Emitter:
         self._pin_every = int(getattr(self.context, 'pin_loads', 0) or 0)
         self._pin_count = 0
         options = getattr(self.context, 'get_user_options', None)
-        self._pin_shared = bool(getattr(options(), 'pin_shared', True)
-                                if options else True)
+        # A build written again with the tuner's choice
+        # (`Generator.emitted_with_pin`) states its own.
+        forced = getattr(self.context, 'forced_pin_shared', None)
+        self._pin_shared = (bool(forced) if forced is not None
+                            else bool(getattr(options(), 'pin_shared', True)
+                                      if options else True))
         self._converged = True
         self._inline = self._plan_inlining(body)
         self._decide_async(body)

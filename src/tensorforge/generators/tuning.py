@@ -1696,6 +1696,51 @@ PIN_SPILL = 512
 #: it removed 80 to 100 % of the spilling.
 PIN_KEEP = 0.5
 
+#: Whether a pinned candidate also has a twin whose fences count the loads
+#: from global memory only (`Options.pin_shared`), and the cheaper of the two
+#: is taken.  A fence between two shared loads keeps the second from reusing
+#: what the first read, so pinned on every load, SeisSol's order-8 elastic
+#: kernels in double on GH200 ran 2.2 (`volume`), 1.4 (`localFluxAll`) and
+#: 1.2 times (`derivative`) as long as fenced on global loads only -- and the
+#: viscoelastic order-4 derivative in double 0.6 times, whose shared loads
+#: the compiler, unfenced, hoists into 2924 B of spill where fenced it
+#: spills 192.  Over 98 kernels each way is a geomean of -0.8 % (GH200) and
+#: -1.8 % (A100) with the worst at +68 and +146 %; the twin's code and
+#: spilling, priced as every candidate is, say which.
+PIN_GLOBAL_TWIN = True
+
+#: The reduction unrolls (`Options.k_unroll_max`) the walk builds beside the
+#: default's where the default's code is past the instruction cache: rolled
+#: by up to 16 steps, and written out whole.  At order 8 in double on GH200,
+#: fenced on global loads, `volume` ran 20 % faster rolled by 16 and 76 %
+#: slower written out, `localFluxAll` 9 % faster written out and 7 % slower
+#: rolled, the derivative 4 % faster written out: each kernel its own, which
+#: the count with the code past the cache priced in tells apart.
+ROLL_UNROLLS = (16, 0)
+
+
+def _roll_candidates(first: Build, context: Context, origin: Candidate,
+                     fixed: Optional[Mapping[str, Any]]) -> List[Candidate]:
+    """`origin` at each of `ROLL_UNROLLS` that differs from its own, where
+    its code is past the instruction cache by the emitter's estimate; none
+    where the caller fixed the unroll, or rolls by `k_roll`."""
+    from tensorforge.analysis.icache import code_bytes
+    opts = context.get_user_options()
+    if (fixed and 'k_unroll_max' in fixed) or getattr(opts, 'k_roll', 0):
+        return []
+    if 'k_unroll_max' in dict(context.get_asked_options().asked()):
+        return []
+    hw = context.target.hw
+    capacity = getattr(hw, 'icache_size', None)
+    if not first.ok or not capacity:
+        return []
+    code = code_bytes(first.generator.metrics.code_units, hw)
+    if code is None or code <= capacity:
+        return []
+    own = getattr(opts, 'k_unroll_max', None)
+    return [origin.set('k_unroll_max', value) for value in ROLL_UNROLLS
+            if value != own]
+
 
 #: Spilled bytes past which the default's spilling lets the rule take a
 #: wider candidate than the default; at or below it no wider one is taken.
@@ -1843,7 +1888,8 @@ class _Ahead:
         return self._kernel
 
 
-def _rewritten(result: Build, alt: Candidate, pin: int, figure, context
+def _rewritten(result: Build, alt: Candidate, pin: int, figure, context,
+               shared: Optional[bool] = None
                ) -> Tuple[Build, Optional[float]]:
     """`alt` -- `result`'s candidate pinned every `pin` loads -- as the
     same build written again (`Generator.emitted_with_pin`), and its figure:
@@ -1851,7 +1897,7 @@ def _rewritten(result: Build, alt: Candidate, pin: int, figure, context
     made for `alt` writes the same body under another kernel name."""
     from types import SimpleNamespace
     gen = result.generator
-    text, metrics = gen.emitted_with_pin(pin)
+    text, metrics = gen.emitted_with_pin(pin, shared)
     ctx = alt.context(context, autotune='off')
     view = SimpleNamespace(candidate=alt, context=ctx, generator=SimpleNamespace(
         metrics=metrics, lanes=gen.lanes, stack=getattr(gen, 'stack', 1)))
@@ -1892,7 +1938,23 @@ def _summary_of(index: int) -> dict:
         out['pinned'] = dict(count=count, peak_pressure=twin.generator.metrics.peak_pressure,
                              code_units=twin.generator.metrics.code_units,
                              kernel=twin.generator.get_kernel())
+        if _global_twin(context, alt):
+            alt = alt.set('pin_shared', False)
+            twin, count = _rewritten(result, alt, pin, figure, context,
+                                     shared=False)
+            out['pinned_global'] = dict(
+                count=count, peak_pressure=twin.generator.metrics.peak_pressure,
+                code_units=twin.generator.metrics.code_units,
+                kernel=twin.generator.get_kernel())
     return out
+
+
+def _global_twin(context: Context, alt: Candidate) -> bool:
+    """Whether pinned `alt` has a twin fenced on global loads only
+    (`PIN_GLOBAL_TWIN`): not where shared loads count for nothing already."""
+    if not PIN_GLOBAL_TWIN or alt.get('pin_shared') is False:
+        return False
+    return bool(getattr(context.get_user_options(), 'pin_shared', False))
 
 
 def _generate_ahead(descr_factory, context: Context, cands: List[Candidate],
@@ -1933,6 +1995,13 @@ def _generate_ahead(descr_factory, context: Context, cands: List[Candidate],
                                    context=alt.context(context,
                                                        autotune='off')),
                          twin['count']))
+            twin = summary.get('pinned_global')
+            if twin is not None:
+                alt = alt.set('pin_shared', False)
+                out.append((alt, Build(
+                    alt, generator=_Ahead(dict(summary, **twin)),
+                    context=alt.context(context, autotune='off')),
+                    twin['count']))
     return out
 
 
@@ -2086,6 +2155,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     pinned_ahead: Dict[Candidate, Tuple[Build, Optional[float]]] = {}
     cands = [origin] + lane_candidates(descr_factory(), context, origin,
                                        fixed)
+    cands += [c for c in _roll_candidates(first, context, origin, fixed)
+              if c not in cands]
     if ahead:
         if first.ok:
             count = figure(first)
@@ -2119,6 +2190,16 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                     counts[cand] = count
     if origin not in counts:
         return origin
+    # A roll the default's reductions are too short for builds the default.
+    own = getattr(builds[origin].generator, 'metrics', None)
+    for cand in cands:
+        if (cand.get('k_unroll_max') is not None and cand != origin
+                and cand.lanes == origin.lanes and cand in counts
+                and counts[cand] == counts[origin]
+                and getattr(getattr(builds[cand].generator, 'metrics', None),
+                            'code_units', None)
+                == getattr(own, 'code_units', None)):
+            del counts[cand]
     # Where the count ranks, the estimate settles what it can (`ASK_BAND`).
     banded = (getattr(context.get_user_options(), 'lanes_band', False)
               and not by_bound and str(hw.vendor).lower() == 'nvidia')
@@ -2157,38 +2238,32 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         wanted = [c.set('pin_loads', PIN_EVERY) for c, got in reports.items()
                   if isinstance(got, Resources)
                   and got.spill_bytes >= PIN_SPILL and not c.get('pin_loads')]
+        wanted += [a.set('pin_shared', False) for a in wanted
+                   if _global_twin(context, a)]
         reports.update(_compile_ahead(
             scorer, {a: b for a, (b, _) in pinned_ahead.items()},
             [a for a in wanted if a in pinned_ahead
              and pinned_ahead[a][0].ok], jobs))
 
-    def pinned(cand: Candidate, seen: Optional[Resources]
-               ) -> Tuple[Candidate, Optional[Resources]]:
-        """`cand` and what the compiler says of it, or its pinned build and
-        what the compiler says of that, where the pin pays (`PIN_SPILL`).
-        A candidate the estimate settled is pinned by the estimate as well:
-        built with `pin_loads='auto'` (`abstract_instruction.PIN_MARGIN`)."""
-        if pins and cand in settled:
-            alt = cand.set('pin_loads', 'auto')
-            builds[alt], counts[alt] = builds[cand], counts[cand]
-            settled.add(alt)
-            return alt, seen
-        if (not pins or seen is None or seen.spill_bytes < PIN_SPILL
-                or cand.get('pin_loads')
-                or builds[cand].generator.lanes.num_threads % wave):
-            return cand, seen
-        alt = cand.set('pin_loads', PIN_EVERY)
+    miss = getattr(hw, 'icache_miss_factor', None)
+    refetch = ICACHE_SHARE * max(0.0, miss - 1.0) if miss else 0.0
+
+    def twin(cand: Candidate, alt: Candidate
+             ) -> Optional[Tuple[Build, Optional[float], Resources]]:
+        """Pinned `alt` of `cand`: its build, its figure where known, and
+        what the compiler says of it; None where either fails."""
+        shared = False if alt.get('pin_shared') is False else None
         if alt in pinned_ahead:
             result, count = pinned_ahead[alt]
         elif hasattr(builds[cand].generator, 'emitted_with_pin'):
             # The same build written again: the fence is the emitter's.
             result, count = _rewritten(builds[cand], alt, PIN_EVERY, figure,
-                                       context)
+                                       context, shared=shared)
             pinned_ahead[alt] = (result, count)
         else:
             result, count = build(descr_factory, context, alt, generate), None
         if not result.ok:
-            return cand, seen
+            return None
         try:
             if alt in reports:
                 other = reports[alt]
@@ -2198,12 +2273,50 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 other = scorer.resources(result)
         except Exception:                     # noqa: BLE001
             other = None
-        if other is None or other.spill_bytes > PIN_KEEP * seen.spill_bytes:
-            return cand, seen
-        builds[alt] = result
-        if alt not in pinned_ahead:
+        if other is None:
+            return None
+        if count is None:
             count = figure(result)
-        counts[alt] = counts[cand] if count is None else count
+        return result, count, other
+
+    def pinned(cand: Candidate, seen: Optional[Resources]
+               ) -> Tuple[Candidate, Optional[Resources]]:
+        """`cand` and what the compiler says of it, or its pinned build and
+        what the compiler says of that, where the pin pays (`PIN_SPILL`):
+        fenced on every load, or on global loads only (`PIN_GLOBAL_TWIN`),
+        whichever costs less.  A candidate the estimate settled is pinned by
+        the estimate as well: built with `pin_loads='auto'`
+        (`abstract_instruction.PIN_MARGIN`)."""
+        if pins and cand in settled:
+            alt = cand.set('pin_loads', 'auto')
+            builds[alt], counts[alt] = builds[cand], counts[cand]
+            settled.add(alt)
+            return alt, seen
+        if (not pins or seen is None or seen.spill_bytes < PIN_SPILL
+                or cand.get('pin_loads')
+                or builds[cand].generator.lanes.num_threads % wave):
+            return cand, seen
+        alts = [cand.set('pin_loads', PIN_EVERY)]
+        if _global_twin(context, alts[0]):
+            alts.append(alts[0].set('pin_shared', False))
+        lanes = builds[cand].generator.lanes.num_threads
+        taken = None
+        for alt in alts:
+            got = twin(cand, alt)
+            if got is None or got[2].spill_bytes > PIN_KEEP * seen.spill_bytes:
+                continue
+            result, count, other = got
+            count = counts[cand] if count is None else count
+            price = (count * (1.0 + icache_charge(other.code_bytes, hw,
+                                                  refetch))
+                     + SPILL_WEIGHT * other.spill_bytes / elem * lanes / wave)
+            if taken is None or price < taken[0]:
+                taken = (price, alt, result, count, other)
+        if taken is None:
+            return cand, seen
+        _, alt, result, count, other = taken
+        builds[alt] = result
+        counts[alt] = count
         return alt, other
 
     # What the compiler said of the default as built, before any pin: the
@@ -2211,8 +2324,6 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     unpinned = report
     base, report = pinned(origin, report)
     limit = SPILL_GROWTH * report.spill_bytes
-    miss = getattr(hw, 'icache_miss_factor', None)
-    refetch = ICACHE_SHARE * max(0.0, miss - 1.0) if miss else 0.0
 
     def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
