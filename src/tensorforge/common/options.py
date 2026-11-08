@@ -1286,6 +1286,20 @@ declare('k_roll',
             'product of a kernel whole (a hundred times the code of a GPU '
             'target for SeisSol).')
 
+declare('pin_shared',
+        default=True,
+        parse=parse_bool,
+        env='TF_PIN_SHARED',
+        doc='Whether loads from shared memory count toward the fences of '
+            '`pin_loads`, or only loads from global memory do.  A fence is '
+            'there to keep the compiler from issuing a global load so far '
+            'ahead that its register is held for long; fenced, a shared load '
+            'can no longer be reused or moved across the fence either.  '
+            'SeisSol\'s order-8 elastic derivative in double precision on '
+            'sm_90: fenced on all loads 239 fences, 42408 SASS instructions, '
+            '12070 shared loads, 680 B spilled; on global loads only 52, '
+            '29648, 8029 and 308 B; unpinned 27984 instructions and 1020 B.')
+
 declare('k_unroll_max',
         default=64,
         env='TF_K_UNROLL_MAX',

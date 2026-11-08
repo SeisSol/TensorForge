@@ -2222,10 +2222,12 @@ class Generator:
                                    self._num_active_threads, self._lead_width)
 
   @_of_the_build
-  def emitted_with_pin(self, pin: int):
+  def emitted_with_pin(self, pin: int, shared: Optional[bool] = None):
     """`(kernel, metrics)`: the kernel this build writes, written again with
-    its loads fenced every `pin` (`Options.pin_loads`), and what that writing
-    counted (`common.metrics.BuildMetrics`).
+    its loads fenced every `pin` (`Options.pin_loads`) -- counting the loads
+    from shared memory or not where `shared` says (`Options.pin_shared`;
+    None keeps the build's) -- and what that writing counted
+    (`common.metrics.BuildMetrics`).
 
     The fence is the emitter's alone (`abstract_instruction._pin_every`):
     every body is the same pinned or not, so a tuner asking what the pinned
@@ -2240,6 +2242,7 @@ class Generator:
     self._metrics = BuildMetrics(self._measure_pressure)
     self._names.counter = self._names_before_kernel
     self._context.forced_pin = pin
+    self._context.forced_pin_shared = shared
     try:
       with warnings.catch_warnings():
         # Said once, of the build itself.
@@ -2248,6 +2251,7 @@ class Generator:
       return self._kernel, self._metrics
     finally:
       self._context.forced_pin = None
+      self._context.forced_pin_shared = None
       (self._kernel, self._metrics, self._names.counter,
        self._lane_config) = saved
 
