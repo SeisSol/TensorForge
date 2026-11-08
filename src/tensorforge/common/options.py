@@ -1312,6 +1312,19 @@ declare('k_unroll_max',
             'minutes, and rolled at 56 the same kernel was the fastest FFMA '
             'variant on GB200.')
 
+declare('k_unroll_max_tail',
+        default=0,
+        env='TF_K_UNROLL_MAX_TAIL',
+        parse=parse_int,
+        doc='Steps a reduction that `k_unroll_max` rolls may leave over.  The '
+            'count is then the largest up to `k_unroll_max` whose trips leave '
+            'at most this many steps: the loop runs whole trips, and the steps '
+            'left over are written out behind it.  0 takes a count that '
+            'divides the steps, or, where none does, leaves the rest to the '
+            'compiler\'s remainder loop.  SeisSol\'s order-5 reduction of 35 '
+            'steps is rolled by 7 at a cap of 16; at a tail of 2 by 11, with '
+            'its last two steps written out.')
+
 declare('min_blocks_per_sm',
         default=1,
         env='TF_MIN_BLOCKS_PER_SM',
