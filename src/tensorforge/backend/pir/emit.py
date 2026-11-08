@@ -301,6 +301,9 @@ class Emitter:
         #: on every lane of its warp, which a full-mask fence needs.
         self._pin_every = 0
         self._pin_count = 0
+        #: Whether loads from shared memory count toward a fence
+        #: (`Options.pin_shared`).
+        self._pin_shared = True
         self._converged = True
 
     def _record_work(self, op: Optional[str] = None, value=None,
@@ -1005,6 +1008,9 @@ class Emitter:
     def run(self, body: Tuple[Stmt, ...]) -> None:
         self._pin_every = int(getattr(self.context, 'pin_loads', 0) or 0)
         self._pin_count = 0
+        options = getattr(self.context, 'get_user_options', None)
+        self._pin_shared = bool(getattr(options(), 'pin_shared', True)
+                                if options else True)
         self._converged = True
         self._inline = self._plan_inlining(body)
         self._decide_async(body)
@@ -1073,6 +1079,14 @@ class Emitter:
         base = s.args[0] if s.args else None
         space = getattr(getattr(base, 'type', None), 'space', None)
         if space == MemSpace.REGISTER:
+            return
+        if not self._pin_shared and (
+                space == MemSpace.SHARED
+                or getattr(getattr(base, 'stype', None), 'name', None)
+                in ('SharedMem', 'Register')):
+            # Fenced, a shared load cannot be reused or moved across the
+            # fence: the order-8 derivative read shared memory 2.3x as often,
+            # and ptxas laid down twice the code (`Options.pin_shared`).
             return
         self._pin_count += 1
         if self._pin_count < self._pin_every:
