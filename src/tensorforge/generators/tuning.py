@@ -1713,6 +1713,18 @@ PIN_KEEP = 0.5
 #: in double, faster fenced on every load at no less code and spilling.
 PIN_GLOBAL_TWIN = True
 
+#: Arithmetic intensity (`analysis.cost.Cost.intensity`, flops per byte of
+#: the kernel's operands) below which a kernel is taken to be paced by its
+#: loads: where the default pins it (`pin_loads='auto'`), the walk keeps that
+#: pin whatever the compiler says it spills.  At one block an SM there is
+#: nothing but the body itself to overlap the loads with, and the fences
+#: spread them over it: SeisSol's viscoelastic order-6 `neighbor` in double
+#: (0.13 flop/B, 254 registers) moves the same 8.1 GB pinned and unpinned on
+#: GH200, at 3.5 TB/s pinned and 2.3 unpinned -- long-scoreboard stalls 31
+#: against 49 cycles an issue -- and the order-8 `neighboringFlux` at 2.8
+#: against 2.3.  The kernels that ran faster unpinned are 4 to 15 flop/B.
+PIN_PACED_INTENSITY = 1.0
+
 #: The reduction unrolls (`Options.k_unroll_max`) the walk builds beside the
 #: default's where the default's code is past the instruction cache: rolled
 #: by up to 16 steps, and written out whole.  At order 8 in double on GH200,
@@ -1810,6 +1822,17 @@ def _rolled(result: Build) -> bool:
     rolled chain (what `Generator.kernel_info` lists as `loops`)."""
     return any(hasattr(d, 'decompose') and hasattr(d, 'to_dict')
                for d in getattr(result.generator, '_descr_list', ()))
+
+
+def _pins_by_estimate(result: Build) -> bool:
+    """Whether `pin_loads='auto'` fences `result` (`abstract_instruction.
+    _pin_every`): its estimated need past the register file less
+    `PIN_MARGIN`."""
+    from tensorforge.backend.instructions.abstract_instruction import (
+        PIN_MARGIN)
+    budget = getattr(result.context.target.hw, 'max_reg_per_thread', None)
+    need = _estimated_need(result)
+    return bool(budget and need is not None and need > budget / 4 - PIN_MARGIN)
 
 
 def _settled(result: Build) -> Optional[Resources]:
@@ -2283,6 +2306,10 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             count = figure(result)
         return result, count, other
 
+    from tensorforge.analysis.cost import list_cost
+    intensity = list_cost(descr_factory()).intensity if pins else None
+    paced = intensity is not None and intensity < PIN_PACED_INTENSITY
+
     def pinned(cand: Candidate, seen: Optional[Resources]
                ) -> Tuple[Candidate, Optional[Resources]]:
         """`cand` and what the compiler says of it, or its pinned build and
@@ -2296,10 +2323,22 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             builds[alt], counts[alt] = builds[cand], counts[cand]
             settled.add(alt)
             return alt, seen
-        if (not pins or seen is None or seen.spill_bytes < PIN_SPILL
-                or cand.get('pin_loads')
+        if (not pins or seen is None or cand.get('pin_loads')
                 or builds[cand].generator.lanes.num_threads % wave):
             return cand, seen
+        if seen.spill_bytes < PIN_SPILL:
+            if not (paced and _pins_by_estimate(builds[cand])):
+                return cand, seen
+            # Paced by its loads (`PIN_PACED_INTENSITY`): the pin the default
+            # gives it, fenced on every load.
+            alt = cand.set('pin_loads', PIN_EVERY)
+            got = twin(cand, alt)
+            if got is None:
+                return cand, seen
+            result, count, other = got
+            builds[alt] = result
+            counts[alt] = counts[cand] if count is None else count
+            return alt, other
         alts = [cand.set('pin_loads', PIN_EVERY)]
         if _global_twin(context, alts[0]):
             alts.append(alts[0].set('pin_shared', False))

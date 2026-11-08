@@ -843,3 +843,45 @@ def test_rolls_join_the_walk_where_the_code_is_past_the_cache():
                                    {'k_unroll_max': 8}) == []
     asked = _context(k_unroll_max=32)
     assert tuning._roll_candidates(first(big), asked, origin, None) == []
+
+
+def _paced(monkeypatch, intensity, pins_by_estimate=True):
+    import tensorforge.analysis.cost as cost
+    real = cost.list_cost
+
+    def fake(descrs):
+        out = real(descrs)
+        return SimpleNamespace(flops=out.flops, bytes=out.bytes,
+                               intensity=intensity)
+
+    from types import SimpleNamespace
+    monkeypatch.setattr(cost, 'list_cost', fake)
+    monkeypatch.setattr(tuning, '_pins_by_estimate',
+                        lambda result: pins_by_estimate)
+
+
+def test_a_kernel_its_loads_pace_keeps_the_default_pin(monkeypatch):
+    """Viscoelastic order-6 `neighbor` in double, 0.13 flop/B on GH200:
+    nothing spilled either way, the same 8.1 GB moved, and pinned it runs at
+    3.5 TB/s where unpinned it ran at 2.3 (`PIN_PACED_INTENSITY`)."""
+    _paced(monkeypatch, 0.13)
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 0, (32, 32): 0},
+                              pin_loads='auto')
+    assert pick.get('pin_loads') == 32
+    assert (32, 32) in scorer.asked
+
+
+def test_a_paced_kernel_the_default_leaves_unpinned_stays_so(monkeypatch):
+    _paced(monkeypatch, 0.13, pins_by_estimate=False)
+    pick, _ = _pin_tuned(monkeypatch, {(32, 0): 0, (32, 32): 0},
+                         pin_loads='auto')
+    assert pick.get('pin_loads') == 0
+
+
+def test_an_arithmetic_kernel_is_left_unpinned_below_the_spill(monkeypatch):
+    """4 to 15 flop/B: there the unpinned candidate ran faster (elastic
+    order-6 `volume` -14 %, viscoelastic order-6 `fluxLocalAll` -20 %)."""
+    _paced(monkeypatch, 5.85)
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 148, (32, 32): 8},
+                              pin_loads='auto')
+    assert pick.get('pin_loads') == 0 and scorer.asked == [(32, 0)]
