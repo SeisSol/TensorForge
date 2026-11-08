@@ -335,7 +335,9 @@ def test_where_the_default_spills_on_amd_a_clean_build_comes_first(monkeypatch):
     pick = tuning.lanes_rule(descr_factory, ctx, scorer, origin, first,
                              generate=Generator.trial)
     assert _key(pick)[0] == 64
-    assert {k[0] for k in scorer.asked} == {8, 16, 32, 64}
+    # Eight lanes in single precision are out on AMD before anything is
+    # asked (`AMD_SINGLE_NARROWEST`).
+    assert {k[0] for k in scorer.asked} == {16, 32, 64}
     monkeypatch.setattr(tuning, 'CLEAN_FIRST', False)
     pick = tuning.lanes_rule(descr_factory, ctx, TableScorer(spills), origin,
                              first, generate=Generator.trial)
@@ -481,9 +483,13 @@ def test_under_dpcpp_the_rule_ranks_by_the_count(monkeypatch):
 def test_on_mi210_fewer_waves_stretch_the_bound(monkeypatch):
     """The same bounds as on MI300A, where sixteen merged lanes win; on MI210
     a build at one wave a SIMD is charged eight times its bound and one at
-    two four times, so 64 lanes at two waves win -- order-6 `derivative` in
-    single precision runs 33 % faster at 64 lanes there and twice as long at
-    sixteen."""
+    two four times, which made 64 lanes at two waves win -- but where the
+    default spills nothing, MI210 takes no wider candidate (`WIDE_SPILL`: 25
+    such picks lost and won to -0.1 % together over paper-1106, worst
+    +371 %).  A narrower one it takes as MI300A does where the code stays in
+    CDNA 2's 32 KB of instruction cache, and not where it takes the code
+    across (`ICACHE_RAMP`), which MI300A's 64 KB do not see.  Spilling, the
+    stretch decides again."""
     descr_factory = _local_flux()
     bounds = {(32, None): 4449, (32, True): 4449, (32, False): 4449,
               (16, True): 3488, (16, False): 3488, (8, True): 2898,
@@ -492,15 +498,25 @@ def test_on_mi210_fewer_waves_stretch_the_bound(monkeypatch):
              (16, False): 1, (8, True): 1, (8, False): 1, (64, True): 2,
              (64, False): 2}
     spills = {(8, True): 668, (8, False): 668}
+    fits = {key: 30 * 1024 for key in bounds}
+    across = {**fits, (16, True): 42 * 1024, (16, False): 42 * 1024}
     monkeypatch.setattr(tuning, 'pipe_bound', _bounds(bounds))
     picks = {}
-    for arch in ('gfx942', 'gfx90a'):
+    for arch, code in (('gfx942', across), ('gfx90a', fits),
+                       ('gfx90a', across)):
         ctx = _amd(arch)
         origin, first = _origin(descr_factory, ctx)
-        picks[arch] = _key(tuning.lanes_rule(
-            descr_factory, ctx, TableScorer(spills, waves=waves), origin,
-            first, generate=Generator.trial))[0]
-    assert picks == {'gfx942': 16, 'gfx90a': 64}
+        picks[arch, code is fits] = _key(tuning.lanes_rule(
+            descr_factory, ctx, TableScorer(spills, code=code, waves=waves),
+            origin, first, generate=Generator.trial))[0]
+    assert picks == {('gfx942', False): 16, ('gfx90a', True): 16,
+                     ('gfx90a', False): 32}
+    spilled = {**spills, (32, None): 600, (32, True): 600, (32, False): 600}
+    ctx = _amd('gfx90a')
+    origin, first = _origin(descr_factory, ctx)
+    assert _key(tuning.lanes_rule(
+        descr_factory, ctx, TableScorer(spilled, waves=waves), origin, first,
+        generate=Generator.trial))[0] == 64
 
 
 def test_an_amd_part_nobody_measured_keeps_its_default(monkeypatch):
@@ -573,10 +589,10 @@ def test_a_small_spill_is_left_unpinned(monkeypatch):
 
 
 def test_a_pin_that_keeps_the_spilling_is_not_taken(monkeypatch):
-    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 400, (32, 32): 300},
+    pick, scorer = _pin_tuned(monkeypatch, {(32, 0): 800, (32, 32): 600},
                               pin_loads='auto')
     assert pick.get('pin_loads') == 0
-    assert scorer.asked == [(32, 0), (32, 32)]
+    assert scorer.asked[:2] == [(32, 0), (32, 32)]
 
 
 def test_the_pin_is_the_compilers_only_under_auto_and_whole_warps(
@@ -736,3 +752,28 @@ def test_a_build_written_again_pinned_is_the_pinned_build(merge):
     assert metrics.code_units == pinned.metrics.code_units
     # and the build itself is left as it was
     assert unpinned.get_kernel() == trial(0).get_kernel()
+
+
+@pytest.mark.parametrize('kib,charge', [
+    (None, 0.0), (30, 0.0), (32, 0.0), (40, 1.0), (48, 2.0), (64, 4.0),
+    (90, 4.0)])
+def test_mi210_charges_the_fetch_on_a_ramp(kib, charge):
+    """From nothing at CDNA 2's 32 KB to four times every instruction at
+    twice that, and no further (`ICACHE_RAMP`)."""
+    hw = _amd('gfx90a').target.hw
+    code = None if kib is None else kib * 1024
+    assert tuning.icache_charge(code, hw, 0.85) == pytest.approx(charge)
+
+
+def test_elsewhere_the_charge_is_the_share_past_the_cache():
+    """NVIDIA keeps the share of the code past the cache, scaled as
+    calibrated; MI300A states no factor and is charged nothing."""
+    from tensorforge.common.basic_types import Datatype
+    hw = Context(arch='sm_90', backend='cuda',
+                 fp_type=Datatype.F32).target.hw
+    code = 2 * hw.icache_size
+    assert tuning.icache_charge(code, hw, 0.94) == pytest.approx(0.47)
+    hw = _amd('gfx942').target.hw
+    miss = hw.icache_miss_factor
+    refetch = tuning.ICACHE_SHARE * (miss - 1.0) if miss else 0.0
+    assert tuning.icache_charge(4 * hw.icache_size, hw, refetch) == 0.0

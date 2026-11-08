@@ -1502,6 +1502,39 @@ SPILL_WEIGHT = 64
 #: the order-6 move went to 32 lanes unmerged instead, 25 % slower on GH200.
 ICACHE_SHARE = 0.47
 
+#: Parts whose fetch past the instruction cache costs a kernel more than the
+#: share of its code past the cache says: the charge on every executed
+#: instruction grows from nothing at the capacity to this factor less one at
+#: twice the capacity, and stays there.  MI210, CDNA 2's 32 KB, measured on
+#: SeisSol's elastic derivatives of paper-1106 against MI300A, whose 64 KB
+#: hold them (time over MI300A's, scaled by clocks and compute units): 1.5 at
+#: 37.6 kB of code, 2.6 at 41.6, 3.3 at 47.1, 4.7 at 65.7 and 4.0 at 90.4 --
+#: where the probe's loop, which streams, levels off at 2.8 from 56 kB
+#: (`hw_descr.icache_miss_factor`).  The share past the cache charges 41.6 kB
+#: a fifth of what the ramp does, and took 16 lanes for the order-6
+#: derivative in single, which runs 94 % slower there.  With the ramp the
+#: rule picks the measured best of 16, 32 and 64 lanes in all eight of those
+#: kernels on both parts: 16 lanes at orders 4 and 6 in double, which fit or
+#: are past twice the cache either way, 32 at order 5 and at order 6 in
+#: single, where 16 lanes take the code across it.
+ICACHE_RAMP = {'gfx90a': 5.0}
+
+
+def icache_charge(code: Optional[int], hw, refetch: float) -> float:
+    """What an executed instruction costs on top of one from inside the
+    instruction cache in a body of `code` bytes: `refetch` times the share of
+    the code past the cache, or on the parts of `ICACHE_RAMP` the ramp up to
+    twice the capacity.  Nothing where the size or the capacity is not
+    known."""
+    from tensorforge.analysis.icache import past_share
+    ramp = ICACHE_RAMP.get(str(hw.model))
+    capacity = getattr(hw, 'icache_size', None)
+    if ramp is None:
+        return refetch * past_share(code, hw)
+    if not code or not capacity:
+        return 0.0
+    return (ramp - 1.0) * min(1.0, max(0.0, (code - capacity) / capacity))
+
 
 def executed_instructions(result: Build) -> Optional[float]:
     """Warp instructions one element of the batch executes, by the emitter's
@@ -1650,14 +1683,46 @@ CLEAN_WAVE = True
 #: viscoelastic order-4 `derivative` in single precision, 1.3 kB spilled, and
 #: pins elastic order-6 `volume` in double for 28 B), and by this rule
 #: 0.1 / 3 % anywhere from 160 to 256 B; on sm_120 it picks the faster build
-#: of all 13 kernels measured there.
-PIN_SPILL = 192
+#: of all 13 kernels measured there.  On four GPUs (A100, GH200, GB200,
+#: RTX 5070; 145 kernels) the pin cost 2 to 90 % at 128 to 600 B spilled in
+#: all but one (256 B, 8 % faster): elastic order-6 `derivative` in single
+#: precision spills 212 B on GH200 and ran 74 % slower pinned under the
+#: tuner (paper-1106).  What pays is kilobytes: the viscoelastic derivatives.
+PIN_SPILL = 512
 
 #: The share of the spilling a pinned build may keep and still be taken.
 #: Viscoelastic order-6 `volumeExt` in single precision spills 168 B on
 #: sm_120 and 196 B pinned, and runs 24 % slower pinned; where the pin pays,
 #: it removed 80 to 100 % of the spilling.
 PIN_KEEP = 0.5
+
+
+#: Spilled bytes past which the default's spilling lets the rule take a
+#: wider candidate than the default; at or below it no wider one is taken.
+#: Over paper-1106 (88 SeisSol kernels a GPU, the rule's picks against the
+#: default): where the default spilled the wider picks won (MI300A -50 %, MI210
+#: -28 %, GH200 -12 % geomean), where it did not they won nothing and lost
+#: big -- the Taylor expansions at 64 lanes 15 to 58 % on A100, GH200 and
+#: GB200, viscoelastic `fluxLocalAll` in double 74 and 371 % on MI210, 25
+#: picks there at -0.1 % together.
+WIDE_SPILL = 0
+
+#: Parts where a narrower candidate is taken only where the default spills.
+#: None any more: MI210's narrower picks lost 8 % together over paper-1106,
+#: the time derivatives at 16 lanes 57, 84 and 45 % (elastic order 5,
+#: viscoelastic orders 4 and 3 in single), and each of the three took its
+#: code across CDNA 2's 32 KB of instruction cache, which `ICACHE_RAMP` now
+#: charges; the narrower picks that won, up to 28 % at order 6, stayed inside
+#: it or were past twice it either way.
+NARROW_WHERE_SPILLING = ()
+
+#: Lanes AMD does not take in single precision: eight.  Over the MI300A grid
+#: (56 kernels) they were the rule's worst picks -- elastic orders 3 to 5 lost
+#: 16 to 61 % to the default in paper-1106 -- and without them, with the
+#: wider ones held to where the default spills (`WIDE_SPILL`), the loss
+#: against the fastest candidate falls from 4.8 to 2.1 % (elastic orders 4
+#: and 5 from 7.0 to 0.2 %).
+AMD_SINGLE_NARROWEST = 16
 
 
 #: Where the rule ranks by the emitter's count (NVIDIA) and `Options.lanes_band`
@@ -2141,15 +2206,17 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         counts[alt] = counts[cand] if count is None else count
         return alt, other
 
+    # What the compiler said of the default as built, before any pin: the
+    # guards ask how much it spills and how many registers it holds.
+    unpinned = report
     base, report = pinned(origin, report)
-    from tensorforge.analysis.icache import past_share
     limit = SPILL_GROWTH * report.spill_bytes
     miss = getattr(hw, 'icache_miss_factor', None)
     refetch = ICACHE_SHARE * max(0.0, miss - 1.0) if miss else 0.0
 
     def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
-        past = past_share(seen.code_bytes, hw)
+        charge = icache_charge(seen.code_bytes, hw, refetch)
         if by_bound:
             spilled = (pipe_bound(builds[cand], seen.spill_bytes)
                        if seen.spill_bytes else counts[cand])
@@ -2158,9 +2225,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 issued = executed_instructions(builds[cand])
                 if issued is not None:
                     spilled = max(spilled, issued / seen.register_blocks)
-            return (spilled * max(1.0, latency / waves)
-                    * (1.0 + refetch * past))
-        return (counts[cand] * (1.0 + refetch * past)
+            return spilled * max(1.0, latency / waves) * (1.0 + charge)
+        return (counts[cand] * (1.0 + charge)
                 + SPILL_WEIGHT * seen.spill_bytes / elem * lanes / wave)
 
     best, least = base, cost(base, report)
@@ -2171,6 +2237,25 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     # bound alone is still below the best clean one's cost.
     clean_first = CLEAN_FIRST and by_bound and report.spill_bytes > 0
     clean: Optional[Tuple[Candidate, float]] = None
+    vendor = str(hw.vendor).lower()
+    default_lanes = builds[origin].generator.lanes.num_threads
+
+    def guarded(cand: Candidate) -> bool:
+        """Whether the lanes of `cand` are out before any compiler is asked:
+        wider than the default where the default spills no more than
+        `WIDE_SPILL`, narrower where it spills nothing on the parts of
+        `NARROW_WHERE_SPILLING`, eight in single precision on AMD
+        (`AMD_SINGLE_NARROWEST`)."""
+        lanes = builds[cand].generator.lanes.num_threads
+        spills = unpinned.spill_bytes > WIDE_SPILL
+        if lanes > default_lanes and not spills:
+            return True
+        if (lanes < default_lanes and not unpinned.spill_bytes
+                and str(hw.model) in NARROW_WHERE_SPILLING):
+            return True
+        return (vendor == 'amd' and context.fp_type is Datatype.F32
+                and lanes < AMD_SINGLE_NARROWEST)
+
     for cand in sorted((c for c in counts if c not in (origin, base)),
                        key=counts.get):
         if clean is not None:
@@ -2178,6 +2263,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 break
         elif not clean_first and counts[cand] >= least:
             break
+        if guarded(cand):
+            continue
         try:
             seen = resources(cand)
         except Exception:                     # noqa: BLE001
