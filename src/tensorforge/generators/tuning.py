@@ -1705,8 +1705,12 @@ PIN_KEEP = 0.5
 #: viscoelastic order-4 derivative in double 0.6 times, whose shared loads
 #: the compiler, unfenced, hoists into 2924 B of spill where fenced it
 #: spills 192.  Over 98 kernels each way is a geomean of -0.8 % (GH200) and
-#: -1.8 % (A100) with the worst at +68 and +146 %; the twin's code and
-#: spilling, priced as every candidate is, say which.
+#: -2.4 % (A100) with the worst at +68 and +146 %.  Priced as every candidate
+#: is, the fully fenced twin's count scaled by each twin's code -- the
+#: emitter counts them alike, the compiler does not -- the choice is -1.6 %
+#: and -2.9 % (the better of the two each time: -2.7 and -3.6 %), worst +59
+#: and +30 %: order-8 `neighboringFlux` and viscoelastic order-6 `neighbor`
+#: in double, faster fenced on every load at no less code and spilling.
 PIN_GLOBAL_TWIN = True
 
 #: The reduction unrolls (`Options.k_unroll_max`) the walk builds beside the
@@ -2301,14 +2305,21 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             alts.append(alts[0].set('pin_shared', False))
         lanes = builds[cand].generator.lanes.num_threads
         taken = None
-        for alt in alts:
-            got = twin(cand, alt)
-            if got is None or got[2].spill_bytes > PIN_KEEP * seen.spill_bytes:
+        got = [(alt, twin(cand, alt)) for alt in alts]
+        # The twins are one build fenced two ways, and the emitter counts
+        # them alike; what the fences cost is the loads the compiler may not
+        # reuse across them, which its code says: the count of the fully
+        # fenced twin, scaled by the code of each (`PIN_GLOBAL_TWIN`).
+        ref = got[0][1][2].code_bytes if got[0][1] is not None else None
+        for alt, one in got:
+            if one is None or one[2].spill_bytes > PIN_KEEP * seen.spill_bytes:
                 continue
-            result, count, other = got
+            result, count, other = one
             count = counts[cand] if count is None else count
-            price = (count * (1.0 + icache_charge(other.code_bytes, hw,
-                                                  refetch))
+            scale = (other.code_bytes / ref if ref and other.code_bytes
+                     else 1.0)
+            price = (count * scale * (1.0 + icache_charge(other.code_bytes, hw,
+                                                          refetch))
                      + SPILL_WEIGHT * other.spill_bytes / elem * lanes / wave)
             if taken is None or price < taken[0]:
                 taken = (price, alt, result, count, other)
