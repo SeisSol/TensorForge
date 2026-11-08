@@ -1318,10 +1318,14 @@ declare('stage_operands',
         parse=parse_str,
         doc='On NVIDIA, stage a multiplication\'s sources in shared memory '
             'instead of loading them into registers: `all` for every '
-            'multiplication, `narrow` for one narrower than the warp, `off`.  '
+            'multiplication, `narrow` for one narrower than the warp, `stream` '
+            'for an operation that sums over no axis, `off`.  '
             'The copy moves sixteen bytes a lane, asynchronously, where a '
             'register load moves one number a lane; the destination keeps its '
-            'registers.  An experiment.')
+            'registers.  Staged is only a source no operation of the section '
+            'stores and no other reads -- the copy would read what other lanes '
+            'stored, or be what the next reader finds for the tensor.  An '
+            'experiment.')
 
 declare('min_blocks_per_sm',
         default=1,

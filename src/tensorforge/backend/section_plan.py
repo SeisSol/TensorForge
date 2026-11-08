@@ -89,6 +89,9 @@ class SectionPlan:
         #: earlier write defined them -- see `zero_first`.
         self._defined = {}
         self._zero_first = set()
+        #: id(tensor) -> how many operations read it, each once however
+        #: many of its operands name it.
+        self._readers = {}
 
         # Expanded rather than walked: a descriptor that stands for several
         # operations is asked for them, so a section's geometry is the same
@@ -111,10 +114,14 @@ class SectionPlan:
         # The guard's operands are read here too. They are not operands of the
         # operation and no builder resolves them as such, but the section has
         # to stage them all the same, and this is what decides that.
+        counted = set()
         for op in itertools.chain(descr.reads(), descr.condition_reads()):
             tensor = getattr(op, 'tensor', None)
             if tensor is None:
                 continue
+            if id(tensor) not in counted:
+                counted.add(id(tensor))
+                self._readers[id(tensor)] = self._readers.get(id(tensor), 0) + 1
             box = op.storage_box()
 
             # Recorded before the symbol lookup: a temporary has no symbol
@@ -300,6 +307,12 @@ class SectionPlan:
                     union = _hull(union, box)
             return union
         return self._operand_union.get(symbol_name)
+
+    def readers(self, tensor) -> int:
+        """How many operations of this section read `tensor` -- for a
+        stand-in, the most that read any one of its members."""
+        return max((self._readers.get(key, 0) for key in self._keys(tensor)),
+                   default=0)
 
     def dest_union(self, tensor) -> Optional[BoundingBox]:
         """Everything this tensor's writes cover, declared."""

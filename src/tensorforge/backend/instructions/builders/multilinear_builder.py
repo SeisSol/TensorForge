@@ -22,6 +22,17 @@ from tensorforge.backend.placement import (Placement,
 from tensorforge.common.operation import AddOperator, MulOperator
 
 
+def _contracts(descr) -> bool:
+  """Whether `descr` sums over an axis: an operand axis the destination
+  does not carry (a negative `target` entry).  An operation that does not is
+  a stream -- every source number read once into the one output number it
+  adds to."""
+  for axes in getattr(descr, 'target', None) or ():
+    if any(t is not None and t < 0 for t in axes or ()):
+      return True
+  return False
+
+
 class MultilinearBuilder(OperationBuilder):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
@@ -54,8 +65,27 @@ class MultilinearBuilder(OperationBuilder):
     if asked == 'narrow' and not (self._num_threads
                                   and self._num_threads < wave):
       return policy
+    if asked == 'stream' and _contracts(self._descr):
+      return policy
     return replace(policy, preload_operands_into_registers=False,
                    preload_operands_into_shared=True)
+
+  def _stages_alone(self, i) -> bool:
+    """Whether operand `i` is one `Options.stage_operands` may copy into
+    shared memory: a tensor no operation of this section writes, and no
+    other one reads -- for a merged run's stand-in, none of its members.
+
+    Written in the section, the copy would read numbers other lanes stored:
+    it moves sixteen bytes a lane where the store moved one number, and
+    nothing orders the stores ahead of it.  Read again, the next reader
+    would find the copy: staging rebinds the tensor to it in the scope, and
+    a merged run's table selects it among global members and reads it
+    through a binding typed global -- `__ldcg` on a shared address, which
+    gave the anelastic derivative wrong numbers."""
+    tensor = getattr(self._descr.ops[i], 'tensor', None)
+    return (tensor is not None
+            and self._plan.dest_union(tensor) is None
+            and self._plan.readers(tensor) <= 1)
 
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.
@@ -196,13 +226,20 @@ class MultilinearBuilder(OperationBuilder):
     window = 1
     for size in self._ops[i].bbox.sizes():
       window *= size
+    # What `Options.stage_operands` stages is an operand this operation alone
+    # reads and nothing in the section writes (`_stages_alone`); any other
+    # is placed as the hardware prefers.
+    policy = self._policy
+    if (policy is not self._context.target.prefs.placement
+            and not self._stages_alone(i)):
+      policy = self._context.target.prefs.placement
     placement = choose_operand_placement(
         legal_operand_placements(addressable=addressable,
                                  transposed=transpose,
                                  carries_lead_dim=has_lead_dim,
-                                 policy=self._policy,
+                                 policy=policy,
                                  single_element=window == 1),
-        self._policy, image_bytes=image_bytes, register_budget=budget)
+        policy, image_bytes=image_bytes, register_budget=budget)
 
     name = self._ops[i].symbol.name
 
