@@ -320,8 +320,25 @@ def test_a_cubin_states_its_code_in_its_text_sections(tmp_path):
     assert toolchain.elf_section_sizes(str(other)) == {}
     assert nvcc.code_bytes(str(other)) is None
     assert nvcc.code_bytes(str(tmp_path / 'missing.cubin')) is None
-    assert toolchain.compiler_for_vendor('amd').code_bytes(str(cubin)) is None, (
-        'read where a ranking asks for it, which is NVIDIA so far')
+
+
+def test_an_amd_code_object_states_its_code_in_text(tmp_path):
+    """hipcc's report build writes the code object itself, not a bundle
+    around it, and the code object keeps every function in one `.text`:
+    SeisSol's elastic order-6 derivative in double is 66 816 bytes of it on
+    gfx90a, twice MI210's instruction cache."""
+    hipcc = toolchain.compiler_for_vendor('amd')
+    cmd, product = hipcc.report_build('hipcc', 'k.hip', str(tmp_path),
+                                      'gfx90a', 'include')
+    assert '--offload-device-only' in cmd and '--no-gpu-bundle-output' in cmd
+    code = tmp_path / 'k.o'
+    code.write_bytes(_elf([('.note', 1200), ('.dynsym', 72), ('.rodata', 64),
+                           ('.text', 66816), ('.dynamic', 112)]))
+    assert hipcc.code_bytes(str(code)) == 66816
+    bundle = tmp_path / 'bundle.o'
+    bundle.write_bytes(b'__CLANG_OFFLOAD_BUNDLE__' + bytes(40))
+    assert hipcc.code_bytes(str(bundle)) is None, (
+        'a bundle is not read: unknown, as before')
 
 
 def test_the_igc_spelling_of_today_is_read_by_every_caller():

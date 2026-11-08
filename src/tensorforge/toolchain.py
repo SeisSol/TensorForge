@@ -145,11 +145,22 @@ class Hipcc(Compiler):
         return ['-Rpass-analysis=kernel-resource-usage']
 
     def report_build(self, compiler, src, out_dir, arch, include):
+        # The code object itself rather than an offload bundle around it,
+        # so that its size can be read (`code_bytes`).
         product = os.path.join(out_dir, 'k.o')
         return ([compiler, '-x', 'hip', '-c', *self.language_flags(),
                  *self.report_flags(), *self.target_flags(arch),
-                 '--offload-device-only', '-O3', '-I', include,
-                 '-o', product, src], product)
+                 '--offload-device-only', '--no-gpu-bundle-output', '-O3',
+                 '-I', include, '-o', product, src], product)
+
+    def code_bytes(self, product):
+        # A code object holds its functions in `.text`: the kernel with
+        # whatever it calls and did not inline.  MI210's 32 KB of
+        # instruction cache is where the size decides (`hw_descr_db.yml`).
+        sizes = elf_section_sizes(product)
+        text = [size for name, size in sizes.items()
+                if name == '.text' or name.startswith('.text.')]
+        return sum(text) if text else None
 
 
 @dataclass(frozen=True)
