@@ -206,6 +206,37 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     cap = self._barrier_cap()
     return mults if cap is None else min(mults, cap)
 
+#: The code a piece of a cut kernel may take, as a share of the instruction
+#: cache, by part, then by vendor (`Options.fission='auto'`); a part not here
+#: is not cut.  Measured with SeisSol's kernels cut into two to four pieces:
+#: on MI210 (32 KB) the elastic order-6 derivative in double, 66 kB, ran
+#: 246 ns whole, 138 in two pieces, 68 in three and 89 in four, and the
+#: kernels at 31 to 38 kB ran 12 to 155 % slower cut; on GH200 (128 KB) the
+#: order-8 derivative in double, 463 kB, 192 ns whole and 141 in three
+#: pieces, the order-8 volume, 273 kB, 41 whole and 40 in two (fenced on
+#: global loads both).  A share of three quarters on MI210 and five quarters
+#: on NVIDIA picks the fastest of those in each, and leaves every kernel
+#: under one and a half caches whole (`FISSION_PAST`).
+FISSION_PIECE = {'gfx90a': 0.75, 'nvidia': 1.25}
+
+#: How many instruction caches a kernel's code has to pass before
+#: `fission='auto'` cuts it at all.
+FISSION_PAST = 1.5
+
+
+def fission_pieces(code: Optional[int], hw) -> int:
+  """Into how many pieces `fission='auto'` cuts a kernel of `code` bytes
+  on `hw`: 1 where it stays whole."""
+  capacity = getattr(hw, 'icache_size', None)
+  share = FISSION_PIECE.get(str(hw.model),
+                            FISSION_PIECE.get(str(hw.vendor).lower()))
+  if not code or not capacity or share is None:
+    return 1
+  if code <= FISSION_PAST * capacity:
+    return 1
+  return max(2, -(-int(code) // int(share * capacity)))
+
+
 def fission_cuts(descrs) -> List[int]:
   """The indices `i` of `descrs` before which a list may be cut into two
   runs of the batch without a buffer of its own: no temporary (`is_tmp`)
@@ -468,6 +499,9 @@ class Generator:
     #: The generator this one handed its build to (`built`), or None where
     #: it builds its own kernel.
     self._built: Optional['Generator'] = None
+    #: The pieces `fission='auto'` decided (`_decide_fission`); None until
+    #: it has.
+    self._fission_pieces: Optional[int] = None
     #: How this build left its operands stored (`_stored_operands`), once it
     #: is built.
     self._storage: Dict[int, tuple] = {}
@@ -761,6 +795,7 @@ class Generator:
     if self._auto_merge():
       # built, by the generator this one has taken over
       return None
+    self._decide_fission()
 
     self.register()
 
@@ -1206,6 +1241,34 @@ class Generator:
       return self._sections[index].count_index
     return getattr(self._section, 'count_index', index)
 
+  def _decide_fission(self) -> None:
+    """`fission='auto'`: the pieces this kernel is cut into
+    (`fission_pieces`), from the code a build of it whole lays down -- a
+    sibling's, so that this generator builds once, cut or not.  Nothing to
+    decide on a part `FISSION_PIECE` does not name, or where a list cannot
+    be cut at all."""
+    if self._fission_pieces is not None:
+      return
+    self._fission_pieces = 0
+    opts = self._context.get_user_options()
+    hw = self._context.target.hw
+    if getattr(opts, 'fission', 0) != 'auto':
+      return
+    if fission_pieces(1 << 40, hw) <= 1 or not fission_cuts(self._given):
+      return
+    from tensorforge.analysis.icache import code_bytes
+    probe = self._sibling()
+    probe._fission_pieces = 0
+    try:
+      probe.generate()
+    except Exception:                         # noqa: BLE001
+      return
+    self._fission_pieces = fission_pieces(
+        code_bytes(probe.metrics.code_units, hw), hw)
+    # The probe named the shared operands for the list it built; this
+    # generator builds its own (`_keep_written_out`).
+    self._name_operands(self._descr_list)
+
   def count_heads(self) -> List[int]:
     """The sections whose element count (and flags) is a parameter: every
     section but one that follows a block barrier, which runs over its
@@ -1220,9 +1283,10 @@ class Generator:
     one is read or written after it -- and as near to equal shares of the
     arithmetic as those points allow.  The list as it is where no option, a
     barrier of its own or too few such points."""
-    pieces = int(getattr(self._context.get_user_options(), 'fission', 0) or 0)
+    asked = getattr(self._context.get_user_options(), 'fission', 0) or 0
+    pieces = (self._fission_pieces if asked == 'auto' else int(asked))
     descrs = list(descrs)
-    if pieces <= 1 or any(d.barrier() for d in descrs):
+    if not pieces or pieces <= 1 or any(d.barrier() for d in descrs):
       return descrs
     from tensorforge.analysis.cost import list_cost
     from tensorforge.generators.descriptions import BlockBarrierDescr

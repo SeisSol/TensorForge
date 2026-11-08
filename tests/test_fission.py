@@ -60,3 +60,27 @@ def test_without_the_option_the_kernel_stays_whole():
 def test_more_pieces_than_cuts_leave_the_kernel_whole():
     gen, _, _ = _source(fission=3)
     assert len(gen.built._sections) == 1
+
+
+def test_auto_cuts_by_the_code_and_the_part():
+    """Three pieces for the 66 kB derivative on MI210 and the 463 kB one on
+    GH200, two for the 273 kB volume, none under one and a half caches or on
+    a part not measured (`FISSION_PIECE`)."""
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.generators.generator import fission_pieces
+
+    def hw(arch, backend):
+        return Context(arch=arch, backend=backend,
+                       fp_type=Datatype.F64).target.hw
+
+    mi210, gh200, mi300a = (hw('gfx90a', 'hip'), hw('sm_90', 'cuda'),
+                            hw('gfx942', 'hip'))
+    kib = 1024
+    assert [fission_pieces(c * kib, mi210) for c in (66, 38, 31)] == [3, 1, 1]
+    assert [fission_pieces(c * kib, gh200) for c in (463, 273, 150)] == [3, 2, 1]
+    assert fission_pieces(463 * kib, mi300a) == 1
+
+
+def test_auto_leaves_a_small_kernel_whole():
+    gen, _, _ = _source(fission='auto')
+    assert len(gen.built._sections) == 1

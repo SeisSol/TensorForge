@@ -1328,7 +1328,7 @@ declare('k_unroll_max_tail',
 declare('fission',
         default=0,
         env='TF_FISSION',
-        parse=parse_int,
+        parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
         doc='Run the batch this many times in one kernel, a piece of the '
             'operation list each time, cut where nothing but the kernel\'s own '
             'operands is live (`generator.fission_cuts`) -- SeisSol\'s '
@@ -1338,7 +1338,11 @@ declare('fission',
             'orders them (`BlockBarrierDescr`), and the pieces share one '
             'element count.  What crosses a cut goes through memory: the '
             'piece after reads what the one before stored.  0 or 1 cuts '
-            'nothing; a list with too few such points stays whole.')
+            'nothing; a list with too few such points stays whole.  `auto` '
+            'cuts where the whole kernel\'s code is past one and a half '
+            'times the instruction cache, into as few pieces as keep the '
+            'largest under the share of the cache the part was measured at '
+            '(`generator.FISSION_PIECE`), and nowhere on a part not measured.')
 
 declare('min_blocks_per_sm',
         default=1,
