@@ -65,6 +65,16 @@ class _EllPlan:
     tables: dict = None
 
 
+def _copies(obj) -> bool:
+    """Whether `obj` is an operator copy (`Residence.MODULE`), or a merged
+    run's stand-in over nothing else."""
+    if getattr(obj, 'is_variant', False):
+        members = tuple(getattr(obj, 'variant_members', ()))
+        return bool(members) and all(
+            getattr(m, 'residence', None) is Residence.MODULE for m in members)
+    return getattr(obj, 'residence', None) is Residence.MODULE
+
+
 def _module_table_name(prefix: str, datatype, values) -> str:
     """A name that says which numbers it holds.
 
@@ -2525,8 +2535,10 @@ class MultilinearInstruction(ComputeInstruction):
         """
         # A copy the file defines (`operator_copies`) is filled by the
         # generator, so ordering it asks nothing of the caller; it exists to
-        # be ordered for the one operation that reads it.
-        copied = getattr(a_obj, 'residence', None) is Residence.MODULE
+        # be ordered for the one operation that reads it.  A merged run's
+        # stand-in is one where every member is: the run is that operation,
+        # once per member.
+        copied = _copies(a_obj)
         if not (copied or self._context.get_user_options().prepare_operands):
             return
         if self._lead_width != 1:
@@ -2636,9 +2648,10 @@ class MultilinearInstruction(ComputeInstruction):
         # outside unstored, which the setter allows only where they are known
         # zero; where they are not, the operand stays as it is.  A copy's
         # cells outside are read by nobody, and are made zero to say so.
-        if copied and not variant:
+        if copied:
             from tensorforge.generators.operator_copies import confine
-            confine(a_obj, order)
+            for member in members:
+                confine(member, order)
         for member in members:
             if member.storage_order is not None:
                 continue

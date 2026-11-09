@@ -68,14 +68,18 @@ def test_matrix_path_readers_get_copies_the_short_one_the_operator():
   assert all(d.ops[0].tensor is a for d in descrs)
 
 
-def test_one_window_one_copy():
+def test_one_window_two_readers_two_copies_one_table():
+  """A copy read twice would be offered no order, so each reader has its
+  own; with the same numbers in the same order they are one table."""
   a, d = _operator(), _strided('D')
   descrs = [_product(a, 35, 54, d), _product(a, 35, 54, d, add=True,
                                              source=_strided('E')),
             _product(a, 10, 9, d, add=True)]
   out, copies = copy_operators(descrs, 16)
-  assert len(copies) == 1
-  assert out[0].ops[0].tensor is out[1].ops[0].tensor is copies[0]
+  assert len(copies) == 2
+  assert out[0].ops[0].tensor is not out[1].ops[0].tensor
+  src = _generate(descrs, mma_operator_copies=True, mma_chunked_order=True)
+  assert len(_tables(src)) == 1
 
 
 def test_a_lone_reader_of_the_whole_operator_keeps_it_where_prepared():
@@ -108,7 +112,9 @@ def test_a_copy_is_a_table_of_the_file_and_no_parameter():
   tables = _tables(src)
   assert len(tables) == 2
   signature = re.search(r'kernel_\w+\(([^)]*)\)', src).group(1)
-  assert 'tf_op_' not in signature and 'OPERATOR_COPY' not in src
+  assert 'tf_op_' not in signature and 'OPERATOR_COPY' not in signature
+  # The placeholder names a binding at most, never the table it binds.
+  assert not re.search(r'(?<!\w)TENSORFORGE_OPERATOR_COPY_\d+\[', src)
   for name, _ in tables:
     assert f'&{name}[0]' in src
   # The operator the short product reads is still passed.
