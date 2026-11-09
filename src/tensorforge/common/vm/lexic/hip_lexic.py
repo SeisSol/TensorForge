@@ -18,12 +18,13 @@ class HipLexic(CudaLexic):
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
 
-  def module_constant(self, elem: str, name: str, values) -> str:
+  def module_constant(self, elem: str, name: str, values, align=None) -> str:
     # A uniform index into a module constant is an `s_load` out of the
     # scalar cache, which is the same read the kernarg segment gives.
     numbers = ', '.join(v if isinstance(v, str) else str(int(v))
                         for v in values)
-    return (f'__device__ const {elem} {name}[{len(values)}] = '
+    aligned = '' if not align else f'__attribute__((aligned({align}))) '
+    return (f'__device__ {aligned}const {elem} {name}[{len(values)}] = '
             f'{{{numbers}}};')
 
   def storage_class(self, space):

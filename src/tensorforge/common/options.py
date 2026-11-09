@@ -1558,6 +1558,20 @@ declare('mma_fragment_ld',
             '`stage_row_bytes`, which pads the same dimension for wide '
             'accesses.')
 
+declare('mma_operator_copies',
+        default=False,
+        env='TF_MMA_OPERATOR_COPIES',
+        parse=parse_bool,
+        doc='Give each multiplication the matrix path may take that reads a '
+            'batch-constant operator other operations read too a copy of it, '
+            'laid out in its own fragment order and defined in the generated '
+            'file (`Residence.MODULE`), where the description carries the '
+            'numbers.  An order is the reader\'s window and fragment layout, '
+            'so an operator with several readers is offered none and the '
+            'matrix path stages it element by element (`_offer_order`): '
+            'SeisSol\'s derivative reads each `kDivMT` five times.  The other '
+            'readers keep the operator as it is passed.')
+
 declare('mma_presplit',
         default=False,
         env='TF_MMA_PRESPLIT',

@@ -2483,13 +2483,18 @@ class MultilinearInstruction(ComputeInstruction):
         Idempotent: an operand already carrying an order keeps it, so
         regenerating does not re-decide.
         """
-        if not self._context.get_user_options().prepare_operands:
+        # A copy the file defines (`operator_copies`) is filled by the
+        # generator, so ordering it asks nothing of the caller; it exists to
+        # be ordered for the one operation that reads it.
+        copied = getattr(a_obj, 'residence', None) is Residence.MODULE
+        if not (copied or self._context.get_user_options().prepare_operands):
             return
         if self._lead_width != 1:
             # A packed lead operand is read as vectors of rows, and an order
             # stated for single rows would be read by coordinate -- wrongly.
             return
-        if getattr(a_obj, 'residence', Residence.MEMORY) is not Residence.MEMORY:
+        if getattr(a_obj, 'residence', Residence.MEMORY) not in (
+                Residence.MEMORY, Residence.MODULE):
             # An operand whose numbers are in the instruction stream or in a
             # kernel argument has no buffer, and every one of these orders is
             # a statement about a buffer.  Offered one, the matrix path asks
@@ -2530,7 +2535,8 @@ class MultilinearInstruction(ComputeInstruction):
         whole = tuple(int(x) for x in a_obj.get_actual_shape()) == (lead,
                                                                     depth)
         if not whole and not (
-                'prepare_operands' in self._context.get_asked_options().asked()
+                copied
+                or 'prepare_operands' in self._context.get_asked_options().asked()
                 or module.order_before_packing(self._shape(), self._context)):
             return
         # Where the contraction starts inside the shared operand's first block,
@@ -2588,7 +2594,11 @@ class MultilinearInstruction(ComputeInstruction):
                 return
         # An order laid over the window an operation reads leaves the cells
         # outside unstored, which the setter allows only where they are known
-        # zero; where they are not, the operand stays as it is.
+        # zero; where they are not, the operand stays as it is.  A copy's
+        # cells outside are read by nobody, and are made zero to say so.
+        if copied and not variant:
+            from tensorforge.generators.operator_copies import confine
+            confine(a_obj, order)
         for member in members:
             if member.storage_order is not None:
                 continue

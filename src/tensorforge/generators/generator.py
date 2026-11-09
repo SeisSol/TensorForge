@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import hashlib
+import re
 from tensorforge.generators.descriptions import OperationDescription, MultilinearDescr, ElementwiseDescr, RegionDescription, ReductionDescr
 from tensorforge.generators.rolling import ForDescr, roll
 from tensorforge.common.context import Context
@@ -372,6 +373,15 @@ def _of_the_build(method):
   return answer
 
 
+def _copies_apply(context) -> bool:
+  """Whether operator copies can pay here (`Options.mma_operator_copies`):
+  the matrix path on, on NVIDIA."""
+  if str(getattr(context.target.hw, 'vendor', '')).lower() != 'nvidia':
+    return False
+  from tensorforge.backend.instructions.compute.primitives import nvidia
+  return nvidia.enabled(context)
+
+
 class Generator:
   #: Hex characters of the digest that end up in the symbol.  Sixty-four bits
   #: rather than forty: the digest is the whole of the name's discriminating
@@ -385,6 +395,9 @@ class Generator:
   #: the text it will be -- the substitution has to leave everything except
   #: this token where it was.
   NAME_PLACEHOLDER = 'TENSORFORGE_UNNAMED_KERNEL'
+  #: What an operator copy is called until its numbers name it
+  #: (`_name_module_operands`), followed by its number in the kernel.
+  COPY_PLACEHOLDER = 'TENSORFORGE_OPERATOR_COPY_'
 
   #: `merge_within` for a build that merges every run it can: what
   #: `_auto_merge` probes with.
@@ -522,6 +535,22 @@ class Generator:
                               min_count=options.merge_min_count,
                               max_arity=options.merge_max_arity, **budget)
       self._emit_loops = True
+
+    #: Copies of batch-constant operators for the readers on the matrix path
+    #: (`operator_copies`): tensors the generated file defines
+    #: (`Residence.MODULE`), named after their numbers once the build has
+    #: ordered them (`_settle_module_operands`).  After the merge, which
+    #: leaves a run's members as they are: a run reads them through a table
+    #: of addresses the host fills, and the host has none for a copy.
+    self._module_operands: List = []
+    self._module_tables: Dict[str, tuple] = {}
+    self._module_names: Dict[str, str] = {}
+    if options.mma_operator_copies and _copies_apply(context):
+      from .operator_copies import copy_operators
+      from tensorforge.backend.instructions.compute.primitives import nvidia
+      self._descr_list, self._module_operands = copy_operators(
+          self._descr_list, nvidia.min_depth(context),
+          prepared=bool(options.prepare_operands))
 
     self._name_operands(self._descr_list)
 
@@ -889,6 +918,45 @@ class Generator:
     self._announce()
     return True
 
+  def _settle_module_operands(self) -> None:
+    """Name each operator copy after the numbers its table holds, in the
+    order the build laid it out (`Tensor.storage_values`), and keep the table
+    for the file (`module_table_definitions`).
+
+    After the build, because the order is the reader's and is decided while
+    it is built (`_offer_order`).  After the numbers, because a file holds
+    every kernel of a yateto module: two kernels with the same copy define
+    it once, and two with different ones never share a name.  The bodies
+    spell the placeholder they were built with; the text takes the name
+    (`_name_module_operands`)."""
+    from tensorforge.backend.instructions.compute.multilinear import (
+        _module_table_name)
+    self._module_tables = {}
+    self._module_names = {}
+    for tensor in self._module_operands:
+      if self._scopes.get_symbol(tensor) is None:
+        continue
+      values = tensor.storage_values()
+      if values is None:
+        raise InternalError(
+            f'{tensor.alias}: a copy the file defines has no numbers to '
+            f'define it with')
+      datatype = tensor.datatype or self._context.fp_type
+      name = _module_table_name('op', datatype, values)
+      # The tensor keeps the placeholder: a build again names its symbols
+      # after it, and the text is what takes the name.
+      self._module_names[self._scopes.get_symbol(tensor).name] = name
+      self._module_tables[name] = (datatype, tuple(values))
+
+  def _name_module_operands(self, text: str) -> str:
+    """`text` with each copy's placeholder spelled as its name
+    (`_settle_module_operands`), a binding's `glb_` prefix included."""
+    names = self._module_names
+    if not names:
+      return text
+    return re.sub(rf'{Generator.COPY_PLACEHOLDER}\d+\b',
+                  lambda m: names.get(m.group(0), m.group(0)), text)
+
   def _stored_operands(self) -> Dict[int, tuple]:
     """Each operand of this build with its `_STORAGE_FIELDS` as the build
     left them -- for a merged run's stand-in, its members too, which are the
@@ -896,6 +964,8 @@ class Generator:
     stored = {}
     for matrix in self._matrix_list or ():
       for tensor in (matrix,) + tuple(getattr(matrix, 'variant_members', ())):
+        if getattr(tensor, 'residence', None) is Residence.MODULE:
+          continue
         stored[id(tensor)] = (tensor, tuple(getattr(tensor, field)
                                             for field in _STORAGE_FIELDS))
     return stored
@@ -1121,6 +1191,7 @@ class Generator:
     if not pinned:
       self._base_kernel_name = Generator.NAME_PLACEHOLDER
 
+    self._settle_module_operands()
     self._launch = self._make_launch_config()
     self._generate_kernel()
     self._generate_launcher()
@@ -2216,7 +2287,7 @@ class Generator:
               self._context, writer, section.body, self._metrics,
               self._num_threads)
 
-    self._kernel = writer.get_src()
+    self._kernel = self._name_module_operands(writer.get_src())
     self._warn_icache()
     self._lane_config = LaneConfig(self._num_threads,
                                    self._num_active_threads, self._lead_width)
@@ -3408,8 +3479,15 @@ class Generator:
     self._matrix_list = list(pre_matrix_list.keys())
 
     variant_counter = 0
+    copy_counter = 0
     for matrix in self._matrix_list:
-      if getattr(matrix, 'is_variant', False):
+      if getattr(matrix, 'residence', None) is Residence.MODULE:
+        # Not a parameter either: an `m` number would move the parameters
+        # after it along.  Named after its numbers once they are ordered,
+        # which is after the bodies spell this (`_name_module_operands`).
+        matrix.name = f'{Generator.COPY_PLACEHOLDER}{copy_counter}'
+        copy_counter += 1
+      elif getattr(matrix, 'is_variant', False):
         # Its own series: a stand-in is not a parameter, so letting it take an
         # `m` number would move every later parameter along by one and change
         # the signature of a kernel that has nothing to do with it.
@@ -3571,14 +3649,17 @@ class Generator:
       walk(section.stream)
     lexic = self._context.target.lexic
     definitions = []
-    for name in sorted(tables):
-      datatype, values = tables[name]
+    copies = getattr(self, '_module_tables', {}) or {}
+    for name in sorted(set(tables) | set(copies)):
+      datatype, values = tables[name] if name in tables else copies[name]
       numbers = (list(values) if datatype is Datatype.I32
                  else [datatype.literal(v) for v in values])
       guard = f'TENSORFORGE_TABLE_{name.upper()}'
+      # An operator copy is read by fragments, sixteen bytes a lane at once.
+      align = 16 if name in copies else None
       definitions.append(
           f'#ifndef {guard}\n#define {guard}\n'
-          f'{lexic.module_constant(str(datatype), name, numbers)}\n#endif')
+          f'{lexic.module_constant(str(datatype), name, numbers, align=align)}\n#endif')
     return definitions
 
   def _write_kernel_meta_data(self, writer):
@@ -3631,9 +3712,11 @@ class Generator:
                  parts=int(obj.storage_parts),
                  ordered=obj.storage_order is not None,
                  variant=bool(getattr(obj, 'is_variant', False)))
-      # Only where the caller passes numbers where an address would be: the
+      # Only where the caller passes numbers where an address would be, or
+      # passes nothing because the file defines them (`operator_copies`): the
       # key is part of the source every kernel is named after.
-      if getattr(obj, 'passed_by_value', False):
+      if (getattr(obj, 'passed_by_value', False)
+              or getattr(obj, 'residence', None) is Residence.MODULE):
         row['residence'] = str(obj.residence)
       # The elements of the batch its last axis holds side by side
       # (`Options.stack_elements`): what the caller passes is still elements
@@ -3702,6 +3785,9 @@ class Generator:
     emitted_tables = set()
     for symbol in symbol_list:
       if getattr(symbol.obj, 'is_variant', False):
+        continue
+      if getattr(symbol.obj, 'residence', None) is Residence.MODULE:
+        # A table the file defines: nobody passes it.
         continue
       table = self._table_member.get(symbol.name) if substitute_tables else None
       if table is not None:

@@ -81,7 +81,7 @@ class Lexic(ABC):
     """
     return ''
 
-  def module_constant(self, elem: str, name: str, values) -> str:
+  def module_constant(self, elem: str, name: str, values, align=None) -> str:
     """Numbers the generator puts in the translation unit, at namespace
     scope, for the kernel to index at run time.
 

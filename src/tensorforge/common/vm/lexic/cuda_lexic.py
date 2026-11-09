@@ -64,13 +64,14 @@ class CudaLexic(Lexic):
   def declare_shared_memory(self, name, precision, size=None):
     return f'auto* {name} = reinterpret_cast<{precision}*>({GeneralLexicon.TOTAL_SHR_MEM}Ptr)'
 
-  def module_constant(self, elem: str, name: str, values) -> str:
+  def module_constant(self, elem: str, name: str, values, align=None) -> str:
     # nvcc materializes a `constexpr` array in device code only with
     # `--expt-relaxed-constexpr`, which a caller need not be passing; the
     # `__device__` spelling asks for nothing.
     numbers = ', '.join(v if isinstance(v, str) else str(int(v))
                         for v in values)
-    return (f'__device__ const {elem} {name}[{len(values)}] = '
+    aligned = '' if not align else f'__align__({align}) '
+    return (f'__device__ {aligned}const {elem} {name}[{len(values)}] = '
             f'{{{numbers}}};')
 
   def storage_class(self, space):

@@ -20,10 +20,16 @@ class Residence(enum.Enum):
   `CODE` is the one that changes what a generator has to do. There is no
   parameter and no address, so the numbers themselves are what the kernel
   reads, and they are only available because the description carries them.
+
+  `MODULE` is a copy the generator made of an operand the description
+  carries the numbers of, in the order one reader wants them
+  (`Options.mma_operator_copies`): a table the generated file defines, read
+  through an address into it, and no parameter -- the caller never sees it.
   """
   MEMORY = 0
   ARGUMENT = 1
   CODE = 2
+  MODULE = 3
 
   def __str__(self):
     return self.name.lower()
