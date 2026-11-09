@@ -1532,6 +1532,17 @@ declare('mma_d_layout',
             'one multiplication per warp; a product it does not reach keeps '
             'its epilogue.')
 
+declare('mma_stage_b_once',
+        default=False,
+        env='TF_MMA_STAGE_B_ONCE',
+        parse=parse_bool,
+        doc='On NVIDIA\'s matrix path, stage every contraction step\'s B tile '
+            'of a product at once, before its blocks of rows, instead of one '
+            'step at a time for every block of 32 rows: two warp barriers a '
+            'product instead of two a step and block, and B written once where '
+            'the rows span several blocks.  The tile grows by the number of '
+            'steps.  An experiment; off.')
+
 declare('mma_stack_mults',
         default=False,
         env='TF_MMA_STACK_MULTS',
