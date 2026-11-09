@@ -207,6 +207,72 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     cap = self._barrier_cap()
     return mults if cap is None else min(mults, cap)
 
+#: The code a piece of a cut kernel may take, as a share of the instruction
+#: cache, by part, then by vendor (`Options.fission='auto'`); a part not here
+#: is not cut.  Measured with SeisSol's kernels cut into two to four pieces:
+#: on MI210 (32 KB) the elastic order-6 derivative in double, 66 kB, ran
+#: 246 ns whole, 138 in two pieces, 68 in three and 89 in four, and the
+#: kernels at 31 to 38 kB ran 12 to 155 % slower cut; on GH200 (128 KB) the
+#: order-8 derivative in double, 463 kB, 192 ns whole and 141 in three
+#: pieces, the order-8 volume, 273 kB, 41 whole and 40 in two (fenced on
+#: global loads both).  A share of three quarters on MI210 and five quarters
+#: on NVIDIA picks the fastest of those in each, and leaves every kernel
+#: under one and a half caches whole (`FISSION_PAST`).
+FISSION_PIECE = {'gfx90a': 0.75, 'nvidia': 1.25}
+
+#: How many instruction caches a kernel's code has to pass before
+#: `fission='auto'` cuts it at all.
+FISSION_PAST = 1.5
+
+
+def fission_pieces(code: Optional[int], hw) -> int:
+  """Into how many pieces `fission='auto'` cuts a kernel of `code` bytes
+  on `hw`: 1 where it stays whole."""
+  capacity = getattr(hw, 'icache_size', None)
+  share = FISSION_PIECE.get(str(hw.model),
+                            FISSION_PIECE.get(str(hw.vendor).lower()))
+  if not code or not capacity or share is None:
+    return 1
+  if code <= FISSION_PAST * capacity:
+    return 1
+  return max(2, -(-int(code) // int(share * capacity)))
+
+
+def fission_cuts(descrs) -> List[int]:
+  """The indices `i` of `descrs` before which a list may be cut into two
+  runs of the batch without a buffer of its own: no temporary (`is_tmp`)
+  written by an operation ahead of `i` is read or written by one from `i`
+  on.  What crosses such a cut is the kernel's operands alone, which the
+  run before stores and the run after reads (`Options.fission`)."""
+  def tensors(descr):
+    out = []
+    for op in descr.operations():
+      dest = getattr(op, 'dest', None)
+      if dest is not None:
+        out.append((dest, True))
+      for src in getattr(op, 'ops', None) or ():
+        out.append((src, False))
+    return out
+
+  written = {}
+  touched = []
+  for i, descr in enumerate(descrs):
+    seen = []
+    for sub, is_dest in tensors(descr):
+      tensor = getattr(sub, 'tensor', sub)
+      if getattr(tensor, 'is_tmp', False):
+        seen.append(id(tensor))
+        if is_dest:
+          written.setdefault(id(tensor), i)
+    touched.append(seen)
+  cuts = []
+  for i in range(1, len(descrs)):
+    if all(written.get(t, len(descrs)) >= i
+           for later in touched[i:] for t in later):
+      cuts.append(i)
+  return cuts
+
+
 class Section:
   def __init__(self):
     # `global_ir` and `ir` are what the builders author: the section prologue
@@ -219,6 +285,12 @@ class Section:
     self.shr_mem_obj: Union[ShrMemObject, None] = None
     self.scopes: Scopes = Scopes()
     self.barrier = False
+    #: Whether a block barrier follows (`BlockBarrierDescr`): the next
+    #: section takes the same elements per block, unrotated, and shares this
+    #: one's element count.
+    self.block_barrier = False
+    #: The section whose element count and flags this one runs over.
+    self.count_index = 0
     #: The operators preloaded into shared memory, with their waits and the
     #: barrier after them: a run of `global_ir` that is emitted as one body.
     self.preload: List[AbstractInstruction] = []
@@ -440,6 +512,9 @@ class Generator:
     #: The generator this one handed its build to (`built`), or None where
     #: it builds its own kernel.
     self._built: Optional['Generator'] = None
+    #: The pieces `fission='auto'` decided (`_decide_fission`); None until
+    #: it has.
+    self._fission_pieces: Optional[int] = None
     #: How this build left its operands stored (`_stored_operands`), once it
     #: is built.
     self._storage: Dict[int, tuple] = {}
@@ -749,6 +824,7 @@ class Generator:
     if self._auto_merge():
       # built, by the generator this one has taken over
       return None
+    self._decide_fission()
 
     self.register()
 
@@ -1079,22 +1155,29 @@ class Generator:
     descrlist = []
     currlist = []
     barrier = []
-    for descr in self._descr_list:
+    blocks = []
+    for descr in self._cut_for_fission(self._descr_list):
+      block = bool(getattr(descr, 'blockBarrier', lambda: False)())
       if descr.barrier():
         # avoid empty sections
         if len(currlist) > 0:
           descrlist += [currlist]
           barrier += [descr.trueBarrier()]
+          blocks += [block]
         elif len(barrier) > 0:
           barrier[-1] = barrier[-1] or descr.trueBarrier()
+          # The same elements on either side only where every barrier
+          # between says so: a fence would rotate the next section.
+          blocks[-1] = blocks[-1] and block
         currlist = []
       else:
         currlist += [descr]
     if len(currlist) > 0:
       descrlist += [currlist]
       barrier += [False]
+      blocks += [False]
 
-    for codesection, lastbarrier in zip(descrlist, barrier):
+    for codesection, lastbarrier, lastblock in zip(descrlist, barrier, blocks):
       self._preload_drop = 0
       self._pack_level = 0
       self._pack_floor = 0
@@ -1121,6 +1204,10 @@ class Generator:
         index = len(self._sections)
         start, stride = self._section_traversal(index)
         group = self._group_size(index, start)
+        if index and self._sections[-1].block_barrier:
+          self._section.count_index = self._sections[-1].count_index
+        else:
+          self._section.count_index = index
         loop = BatchLoop(context=self._context,
                          section_index=index,
                          mode=self._batch_loop_mode(),
@@ -1133,7 +1220,8 @@ class Generator:
                          narrow_group=self._num_threads
                          < self._context.target.hw.vec_unit_length,
                          stack=self._stack,
-                         wave_rows=self._group_wave_rows(group))
+                         wave_rows=self._group_wave_rows(group),
+                         count_index=self._section.count_index)
 
         self._section.stream = list(self._section.global_ir) + [loop]
 
@@ -1178,6 +1266,8 @@ class Generator:
 
       if lastbarrier:
         self._section.barrier = True
+      if lastblock and not lastbarrier:
+        self._section.block_barrier = True
 
       while scopecnt < self._scopes.get_num_scopes():
         self._scopes.remove_scope()
@@ -1216,6 +1306,82 @@ class Generator:
       raise GenerationError(
           f'section {index} cannot be emitted:\n{format_diagnostics(errors)}')
 
+  def _count_index(self, index: int) -> int:
+    """The section whose element count section `index` runs over."""
+    if index < len(self._sections):
+      return self._sections[index].count_index
+    return getattr(self._section, 'count_index', index)
+
+  def _decide_fission(self) -> None:
+    """`fission='auto'`: the pieces this kernel is cut into
+    (`fission_pieces`), from the code a build of it whole lays down -- a
+    sibling's, so that this generator builds once, cut or not.  Nothing to
+    decide on a part `FISSION_PIECE` does not name, or where a list cannot
+    be cut at all."""
+    if self._fission_pieces is not None:
+      return
+    self._fission_pieces = 0
+    opts = self._context.get_user_options()
+    hw = self._context.target.hw
+    if getattr(opts, 'fission', 0) != 'auto':
+      return
+    if fission_pieces(1 << 40, hw) <= 1 or not fission_cuts(self._given):
+      return
+    from tensorforge.analysis.icache import code_bytes
+    probe = self._sibling()
+    probe._fission_pieces = 0
+    try:
+      probe.generate()
+    except Exception:                         # noqa: BLE001
+      return
+    self._fission_pieces = fission_pieces(
+        code_bytes(probe.metrics.code_units, hw), hw)
+    # The probe named the shared operands for the list it built; this
+    # generator builds its own (`_keep_written_out`).
+    self._name_operands(self._descr_list)
+
+  def count_heads(self) -> List[int]:
+    """The sections whose element count (and flags) is a parameter: every
+    section but one that follows a block barrier, which runs over its
+    predecessor's (`BlockBarrierDescr`).  What a caller passes one count for."""
+    return [i for i, section in enumerate(self._sections)
+            if getattr(section, 'count_index', i) == i]
+
+  def _cut_for_fission(self, descrs):
+    """`descrs` with the block barriers `Options.fission` asks for: the list
+    cut into that many runs of the batch, at points where nothing but the
+    kernel's operands is live across the cut -- no temporary written before
+    one is read or written after it -- and as near to equal shares of the
+    arithmetic as those points allow.  The list as it is where no option, a
+    barrier of its own or too few such points."""
+    asked = getattr(self._context.get_user_options(), 'fission', 0) or 0
+    pieces = (self._fission_pieces if asked == 'auto' else int(asked))
+    descrs = list(descrs)
+    if not pieces or pieces <= 1 or any(d.barrier() for d in descrs):
+      return descrs
+    from tensorforge.analysis.cost import list_cost
+    from tensorforge.generators.descriptions import BlockBarrierDescr
+    cuts = fission_cuts(descrs)
+    if len(cuts) < pieces - 1:
+      return descrs
+    flops = [list_cost([d]).flops for d in descrs]
+    total = sum(flops) or 1
+    before = {i: sum(flops[:i]) / total for i in cuts}
+    chosen = []
+    for piece in range(1, pieces):
+      want = piece / pieces
+      free = [i for i in cuts if i not in chosen
+              and (not chosen or i > chosen[-1])]
+      if not free:
+        break
+      chosen.append(min(free, key=lambda i: abs(before[i] - want)))
+    out = []
+    for i, d in enumerate(descrs):
+      if i in chosen:
+        out.append(BlockBarrierDescr())
+      out.append(d)
+    return out
+
   def _section_traversal(self, index: int):
     """``(start, stride)`` for one section's element traversal.
 
@@ -1244,7 +1410,7 @@ class Generator:
     offset = []
     idx = index - 1
     for ssection in reversed(self._sections[:index]):
-      if ssection.barrier:
+      if ssection.barrier or ssection.block_barrier:
         break
       offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
       idx -= 1
@@ -2144,8 +2310,9 @@ class Generator:
     # In stacks where the multiplication computes several elements at once:
     # the traversal's index is a stack's, and one past the last stack is
     # past the batch (`stacking.count`).
-    count = body.extern_value(stacking.count(index, self._stack), SIZE,
-                              uniform=Uniformity.GRID)
+    count = body.extern_value(
+        stacking.count(self._count_index(index), self._stack), SIZE,
+        uniform=Uniformity.GRID)
     out = {}
     parts = self._batch_parts(index, loop)
     if parts == 1:
@@ -2437,7 +2604,7 @@ class Generator:
     decides the launch at run time -- declared in the header, defined next to
     the launcher, which calls it."""
     params = [KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}')
-              for i in range(len(self._sections))]
+              for i in self.count_heads()]
     params.append(KernelParam.opaque(
         'void*', GeneralLexicon.STREAM_PTR_STR,
         ' = nullptr' if with_defaults else ''))
@@ -2459,7 +2626,7 @@ class Generator:
     if self._stack > 1:
       stacks = f'static_cast<size_t>{stacks}'
     with writer.Block(self._launch_config_proto(with_defaults=False)):
-      for i in range(len(self._sections)):
+      for i in self.count_heads():
         writer(f'(void){GeneralLexicon.NUM_ELEMENTS}{i};')
       writer(f'(void){GeneralLexicon.STREAM_PTR_STR};')
       writer(f'{lexic.kernel_range_object("block", f"{block_x}, {block_y}, {block_z}")};')
@@ -2549,7 +2716,7 @@ class Generator:
     self._generate_launch_config(writer, lexic, kernel_name, shmemsize)
     with writer.Block(self._generate_launcher_proto(with_defaults=False)):
       counts = [f'{GeneralLexicon.NUM_ELEMENTS}{i}'
-                for i in range(len(self._sections))]
+                for i in self.count_heads()]
       writer(f'const tensorforge::LaunchConfig config = '
              f'launch_config_{self._base_kernel_name}'
              f'({", ".join(counts + [GeneralLexicon.STREAM_PTR_STR])});')
@@ -3839,14 +4006,14 @@ class Generator:
         params.append(KernelParam.numbers(
             name, Datatype.I32, obj.packing.columns_table()))
 
-    for i, section in enumerate(self._sections):
+    for i in self.count_heads():
       params.append(KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}'))
 
     if self._flags is not FlagMode.ABSENT:
       # A mask the kernel dereferences unconditionally has no default: the
       # signature is where "you have to pass one" is stated.
       default = ' = nullptr' if self._flags is FlagMode.OPTIONAL else ''
-      for i, section in enumerate(self._sections):
+      for i in self.count_heads():
         params.append(dataclasses.replace(
             KernelParam.flags(f'{GeneralLexicon.FLAGS_NAME}{i}', default),
             promise=self._promise_arrays()))

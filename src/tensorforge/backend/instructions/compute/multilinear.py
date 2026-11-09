@@ -103,7 +103,8 @@ def _contiguous_first_axis(sym) -> bool:
 K_SEGMENT_GAIN = 0.03
 
 
-def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max, vector=1):
+def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max, vector=1,
+                tail=0):
     """The unroll count of a rolled reduction, or 0 to unroll it whole.
 
     `k_roll` where it is asked for.  Otherwise a reduction longer than
@@ -123,6 +124,12 @@ def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max, vector=1):
     the step count that is no larger than the cap, and the cap itself where
     the count is prime.  Whether the reduction can be rolled at all is
     `_rollable`'s question, not this one's.
+
+    With a `tail` (`Options.k_unroll_max_tail`) a count may leave up to that
+    many steps over, which the caller writes out behind the loop
+    (`_tail_split`): the largest such count, where it is larger than the
+    count above -- which itself leaves its remainder written out wherever
+    that is no longer than the tail.
     """
     if k_roll:
         return k_roll
@@ -133,9 +140,22 @@ def _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max, vector=1):
     if unit > 1 and k_unroll_max >= unit:
         counts = range(unit, k_unroll_max + 1, unit)
         whole = [d for d in counts if steps % d == 0]
-        return max(whole) if whole else max(counts)
-    best = max(d for d in range(1, k_unroll_max + 1) if steps % d == 0)
-    return best if best > 1 else k_unroll_max
+        count = max(whole) if whole else max(counts)
+    else:
+        counts = range(2, k_unroll_max + 1)
+        best = max(d for d in range(1, k_unroll_max + 1) if steps % d == 0)
+        count = best if best > 1 else k_unroll_max
+    fits = [d for d in counts if steps % d <= tail] if tail else []
+    return max(fits) if fits and max(fits) > count else count
+
+
+def _tail_split(lo, hi, count, tail):
+    """`[(lo, hi, count)]`, or the steps a trip of `count` leaves over cut
+    off and written out (`count` 0) where they are no more than `tail`."""
+    left = (hi - lo) % count if count > 0 else 0
+    if not tail or not left or left > tail or hi - lo - left < count:
+        return [(lo, hi, count)]
+    return [(lo, hi - left, count), (hi - left, hi, 0)]
 
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
@@ -734,7 +754,8 @@ class MultilinearInstruction(ComputeInstruction):
         rolled = self._rollable(
             len(self._ks) - 1, klo, khi, step,
             _roll_count(klo, khi, step, options.k_roll, options.k_unroll_max,
-                        self._roll_vector()))
+                        self._roll_vector(),
+                        options.k_unroll_max_tail if step == 1 else 0))
         slots, dense, sparse = {}, 0, 0
         for s in range(lo // block, (hi - 1) // block + 1):
             live = [r for r in range(s * block, (s + 1) * block)
@@ -1296,6 +1317,7 @@ class MultilinearInstruction(ComputeInstruction):
         # instead -- see `_rollable` and the option.
         opts = self._context.get_user_options()
         k_roll, k_unroll_max = opts.k_roll, opts.k_unroll_max
+        tail = opts.k_unroll_max_tail
 
         loopmap = {}
 
@@ -1323,7 +1345,8 @@ class MultilinearInstruction(ComputeInstruction):
                     # which costs more than the loads it saves.
                     step *= self._k_width
                 roll = _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max,
-                                   self._roll_vector())
+                                   self._roll_vector(),
+                                   tail if step == 1 else 0)
                 rolled = (i == len(self._ks) - 1
                           and self._rollable(i, dimmin, dimmax, step, roll))
                 loopstack += [Loop(f'k{i}', dimmin, dimmax, step,
@@ -1477,10 +1500,20 @@ class MultilinearInstruction(ComputeInstruction):
             self._vdest.store(writer, self._context, total, ns, False)
 
         segments = self._k_segments(loopstack, loopmap)
+        at = loopmap.get(f'k{len(self._ks) - 1}')
+        if segments is None and at is not None:
+            # The steps a rolled loop's trips leave over, written out behind
+            # it (`Options.k_unroll_max_tail`).
+            loop = loopstack[at]
+            if (not loop.unroll and loop.step == 1 and tail
+                    and isinstance(loop.pragma, int)
+                    and not isinstance(loop.pragma, bool)):
+                split = _tail_split(loop.start, loop.end, loop.pragma, tail)
+                if len(split) > 1:
+                    segments = split
         if segments is None:
             write_loops(self._context, writer, loopstack, nonlead_writer)
             return
-        at = loopmap[f'k{len(self._ks) - 1}']
         for lo, hi, roll in segments:
             loop = loopstack[at]
             rolled = roll > 0
@@ -1614,13 +1647,19 @@ class MultilinearInstruction(ComputeInstruction):
             # cap rolled.  Only a segment of a couple of vectors is written
             # out, where a loop would be all set-up.
             steps = b - a
+            tail = opts.k_unroll_max_tail
             counts = list(range(vector, min(roll, steps) + 1, vector))
             whole = [d for d in counts if steps % d == 0]
             count = (0 if steps <= 2 * vector or not counts
                      else max(whole) if whole else max(counts))
+            # A larger count whose trips leave no more than the tail, which
+            # `_tail_split` writes out behind the segment's loop.
+            fits = [d for d in counts if steps % d <= tail] if tail else []
+            if count and fits and max(fits) > count:
+                count = max(fits)
             if count and not self._rollable(len(self._ks) - 1, a, b, 1, count):
                 count = 0
-            out.append((a, b, count))
+            out.extend(_tail_split(a, b, count, tail))
         return out
 
     def _k_group(self, varlist, loopmap):
@@ -2235,7 +2274,8 @@ class MultilinearInstruction(ComputeInstruction):
         dimmin, dimmax = self._ks[i]
         step = self._k_width if self._k_width > 1 else 1
         roll = _roll_count(dimmin, dimmax, step, opts.k_roll,
-                           opts.k_unroll_max, self._roll_vector())
+                           opts.k_unroll_max, self._roll_vector(),
+                           opts.k_unroll_max_tail if step == 1 else 0)
         return self._rollable(i, dimmin, dimmax, step, roll)
 
     def _offer_packing(self, level: int = 0):

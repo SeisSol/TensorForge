@@ -244,7 +244,12 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
     # section. With a single descr or only fence-less chains the section
     # count is 1 — the default. ``GridFenceDescr`` / ``GridBarrierDescr``
     # between descrs split sections, raising the count.
-    num_sections = len(getattr(generator.built, "_sections", [None]))
+    built = generator.built
+    heads = getattr(built, "count_heads", None)
+    # Sections after a block barrier run over their predecessor's count
+    # (`BlockBarrierDescr`): one parameter per group, not per section.
+    num_sections = (len(heads()) if heads is not None
+                    else len(getattr(built, "_sections", [None])))
     for _ in range(num_sections):
         call_args.append(batch)
     # Whether a ``flags{i}`` parameter sits beside each of them is the

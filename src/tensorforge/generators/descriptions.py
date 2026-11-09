@@ -651,6 +651,23 @@ class GridBarrierDescr(BarrierDescription):
   def trueBarrier(self):
     return True
 
+class BlockBarrierDescr(BarrierDescription):
+  """A cut between two runs of the batch over the same elements.
+
+  Every block takes the same elements on either side, so what the run before
+  wrote to memory the run after reads past the block barrier at its head --
+  no grid barrier and no cooperative launch.  The two share one element
+  count.  What `Options.fission` cuts a kernel with, where nothing but its
+  outputs is live across the cut."""
+  def __str__(self):
+    return 'block barrier'
+
+  def trueBarrier(self):
+    return False
+
+  def blockBarrier(self):
+    return True
+
 class RegionDescription(OperationDescription):
   def __init__(self, name):
     self.name = name

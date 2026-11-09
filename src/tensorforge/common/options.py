@@ -1312,6 +1312,38 @@ declare('k_unroll_max',
             'minutes, and rolled at 56 the same kernel was the fastest FFMA '
             'variant on GB200.')
 
+declare('k_unroll_max_tail',
+        default=0,
+        env='TF_K_UNROLL_MAX_TAIL',
+        parse=parse_int,
+        doc='Steps a reduction that `k_unroll_max` rolls may leave over.  The '
+            'count is then the largest up to `k_unroll_max` whose trips leave '
+            'at most this many steps: the loop runs whole trips, and the steps '
+            'left over are written out behind it.  0 takes a count that '
+            'divides the steps, or, where none does, leaves the rest to the '
+            'compiler\'s remainder loop.  SeisSol\'s order-5 reduction of 35 '
+            'steps is rolled by 7 at a cap of 16; at a tail of 2 by 11, with '
+            'its last two steps written out.')
+
+declare('fission',
+        default=0,
+        env='TF_FISSION',
+        parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
+        doc='Run the batch this many times in one kernel, a piece of the '
+            'operation list each time, cut where nothing but the kernel\'s own '
+            'operands is live (`generator.fission_cuts`) -- SeisSol\'s '
+            'derivative between two of its derivatives, say -- so that each '
+            'piece\'s code is what the instruction cache has to hold.  Every '
+            'block takes the same elements in each piece, so a block barrier '
+            'orders them (`BlockBarrierDescr`), and the pieces share one '
+            'element count.  What crosses a cut goes through memory: the '
+            'piece after reads what the one before stored.  0 or 1 cuts '
+            'nothing; a list with too few such points stays whole.  `auto` '
+            'cuts where the whole kernel\'s code is past one and a half '
+            'times the instruction cache, into as few pieces as keep the '
+            'largest under the share of the cache the part was measured at '
+            '(`generator.FISSION_PIECE`), and nowhere on a part not measured.')
+
 declare('min_blocks_per_sm',
         default=1,
         env='TF_MIN_BLOCKS_PER_SM',
