@@ -50,6 +50,8 @@ def test_offered_where_the_matrix_units_are_faster(arch, dtype, wide):
   # padded for the fragment reads.
   assert all(t.get('mma_chunked_order') is wide for t in twins)
   assert all(t.get('mma_fragment_ld') is wide for t in twins)
+  # Deep products only (`MATRIX_TWIN_DEPTH`).
+  assert all(t.get('mma_min_depth') == tuning.MATRIX_TWIN_DEPTH for t in twins)
   # The first at the default unroll, the others rolled or written out.
   assert twins[0].get('k_unroll_max') is None
   assert {t.get('k_unroll_max') for t in twins[1:]} <= set(tuning.MATRIX_ROLLS)
@@ -132,3 +134,8 @@ def test_an_fp64_matrix_instruction_is_eight_on_blackwell():
   """sm_100 lowers every `mma.sync` f64 shape to `DMMA.8x8x4`: the
   m16n8k16 Hopper issues once is eight there, and the count says so."""
   assert _matrix_issues('sm_100') == 8 * _matrix_issues('sm_90')
+
+
+def test_a_depth_the_caller_asked_for_stands():
+  twins = _offered('sm_90', Datatype.F64, mma_min_depth=16)
+  assert twins and all(t.get('mma_min_depth') is None for t in twins)

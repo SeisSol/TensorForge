@@ -1767,6 +1767,16 @@ def _roll_candidates(first: Build, context: Context, origin: Candidate,
 #: order-6 kernels on GH200 the count ranks the faster of the two in five of six
 #: (the double-precision derivative, 3 % to the matrix path, is the miss), and
 #: declines the single-precision derivative, 22 % slower on the matrix path.
+#: The shortest contraction the matrix twin puts on the matrix path
+#: (`Options.mma_min_depth`), where the path's own default takes 16.  On GH200
+#: the products of 16 to 23 steps -- `localFluxAll`'s 21, the derivative's
+#: third order -- ran slower on it than beside it: order-6 `localFluxAll` 29 %
+#: (double) and 26 % (single) under SIMT with them on the nest against 21 and
+#: 4 % on the path, the derivative 28 against 24 %; order 5 `volume` in single
+#: no longer 19 % slower, in double 5 % of a gain given up.  The count ranks the
+#: two the other way round, so the twin is built at the one depth.
+MATRIX_TWIN_DEPTH = 24
+
 #: The reduction unrolls (`Options.k_unroll_max`) the matrix twin is built
 #: at beside the default's, as `ROLL_UNROLLS` for the default: on GH200 the
 #: order-8 `volume` on the matrix path ran 27 % (double) and 30 % (single)
@@ -1795,7 +1805,8 @@ def _matrix_candidates(descrs, first: Build, context: Context,
     and 7 % in single, where without the copies it lost up to 21 %; volume
     and `localFluxAll` 17 to 25 %.  Not the B layout in single precision,
     which took order-6 `volume`'s 19 % back.  None where the caller fixed the
-    path either way, or the default takes it already."""
+    path either way, or the default takes it already.  Products shorter than
+    `MATRIX_TWIN_DEPTH` stay beside the path."""
     if fixed and 'tensor_cores' in fixed:
         return []
     if 'tensor_cores' in dict(context.get_asked_options().asked()):
@@ -1813,6 +1824,9 @@ def _matrix_candidates(descrs, first: Build, context: Context,
     twin = origin.set('tensor_cores', True).set('mma_operator_copies', True)
     if context.fp_type is Datatype.F64:
         twin = twin.set('mma_chunked_order', True).set('mma_fragment_ld', True)
+    if ('mma_min_depth' not in dict(context.get_asked_options().asked())
+            and not (fixed and 'mma_min_depth' in fixed)):
+        twin = twin.set('mma_min_depth', MATRIX_TWIN_DEPTH)
     twins = [twin]
     # Rolled and written out as well (`MATRIX_ROLLS`), where a reduction is
     # long enough for the unroll to change it and the caller left it free.
