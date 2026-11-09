@@ -1221,6 +1221,203 @@ def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
                                         j + atom.n + ci)
 
 
+def _stacked(writer, ops, ctx, span, atom, M, N, K, kx, threads, mults,
+             lane, mine, sync, shift, nslots, ktiles, aregs, cregs, aparts,
+             threadrange, stagger, room):
+    """`matmul` for a warp shared by several multiplications of one `A`, the
+    multiplications stacked along N (`Options.mma_stack_mults`).
+
+    Unstacked, the warp runs a round of instructions per multiplication, each
+    over the multiplication's own columns: SeisSol's nine a tile of eight and
+    a ninth carried on the fragments (`TAIL_MAX`).  Stacked, column `c` of
+    multiplication `p` is column `p * width + c` of one wide `B`, and a tile of
+    eight takes whichever columns fall into it -- the ninth of the first and
+    the first seven of the second, at sixteen lanes.  `ceil(width * mults / 8)`
+    instructions a step and row tile, and no carried column.
+
+    The staging is the unstacked path's, every multiplication's `B` in its own
+    region; what changes is who reads it.  A lane's fragment column is
+    `lane / 4` of its tile, so the region it reads is the lane's own, and so is
+    the region a `D` slot goes back to: `(p - mine) * stride + p * pad`, with
+    `p` a value of the lane rather than a round.  Columns past the last
+    multiplication's read a real column (clamped) into rows nobody stores.
+    """
+    C, A, B = ops.C, ops.A, ops.B
+    wave = WAVE
+    ntile, ktile = 8, 4
+    kregs = atom.k // ktile
+    width = N - span.start
+    total = mults * width
+    ntiles = -(-total // atom.n)
+    stride = ops.mult_stride()
+    bpad, cpad = stagger(atom.k), stagger(8 // mults)
+    Bt = writer.alloc(atom.d, (atom.k * width + room,), MemSpace.SHARED,
+                      hint='btile', swizzle=XorSwizzle(atom.k))
+    crow = width
+    csize = -(-(atom.m * crow) // 32) * 32
+    Ct = writer.alloc(atom.d, (csize + room,), MemSpace.SHARED, hint='ctile',
+                      swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size()))
+    back = writer.op('mul', INDEX, mine, stride, hint='r')
+
+    def own(pad):
+        return writer.op('mul', INDEX, mine, pad, hint='r') if pad else None
+
+    def toward(p, pad):
+        """The shift to multiplication `p`'s copy of a tile, `p` a value."""
+        return writer.op('sub', INDEX,
+                         writer.op('mul', INDEX, p, stride + pad, hint='r'),
+                         back, hint='r')
+
+    steps = [(k, kk) for k in range(0, K, wave)
+             for kk in range(0, min(wave, K - k), atom.k)]
+    Bv = {}
+    for k in range(0, K + kx, threads):
+        for jj in range(width):
+            Bv[k // threads, jj] = B(writer, None, span.start + jj, k // threads)
+    chunk = a_chunk(atom, ctx)
+
+    for i in range(0, M, wave):
+        with writer.AnonymousScope():
+            tiles = list(range(0, min(wave, M - i), atom.m))
+            naccs = atom.terms if len(tiles) * ntiles < CHAINS_MIN else 1
+            accs = [[[[writer.declare(ScalarType(atom.d), hint='c',
+                                      uniform=_PER_LANE)
+                       for _ in range(wave // atom.m)]
+                      for _ in range(cregs)]
+                     for _ in range(ntiles)]
+                    for _ in range(naccs)]
+            Cvals = accs[0]
+            for k, kk in steps:
+                trueK = kk + kx
+                # Every multiplication stages its own rows of `B`, all its
+                # columns, in its own region.
+                writer.barrier('wave', **sync)
+                writer.mark('defines', Bt)
+                for s_, lo, cnt, sub in _lanes_of(k + trueK, atom.k, threads):
+                    with threadrange(lo, cnt):
+                        for jj in range(width):
+                            got = Bv.get((s_, jj))
+                            if got is None:
+                                got = writer.declare(ScalarType(atom.d), hint='bs')
+                            writer.store(Bt, got,
+                                         _index(writer, sub=sub, mod=atom.k,
+                                                add=jj * atom.k),
+                                         shift=own(bpad))
+                writer.barrier('wave', **sync)
+                # A lane's fragments of stacked tile `jt`: column `lane / 4`
+                # of the tile, multiplication `n / width`'s column `n % width`.
+                bfr = {}
+                for jt in range(ntiles):
+                    n = _index(writer, div=ktile, add=jt * atom.n, lane=lane)
+                    if (jt + 1) * atom.n > total:
+                        n = writer.op('min', INDEX, n, total - 1, hint='a')
+                    p = writer.op('div', INDEX, n, width, hint='a')
+                    c = writer.op('rem', INDEX, n, width, hint='a')
+                    base = writer.op('add', INDEX,
+                                     writer.op('mul', INDEX, c, atom.k, hint='a'),
+                                     _index(writer, mod=ktile, lane=lane), hint='a')
+                    sh = toward(p, bpad)
+                    bfr[jt] = [writer.load(Bt, base if not kkk else
+                                           writer.op('add', INDEX, base,
+                                                     kkk * ktile, hint='a'),
+                                           hint='b', shift=sh)
+                               for kkk in range(kregs)]
+                # `A`, as the order stored it, once for every multiplication.
+                afr = {}
+                for ii in tiles:
+                    mt = (i + ii) // atom.m
+                    kt = (k + kk) // atom.k
+                    tbase = (mt * ktiles + kt) * (aregs * wave)
+                    chunks = []
+                    for cc in range(0, aregs, chunk):
+                        got = ops.A_slot(writer, tbase + cc * wave, parts=aparts,
+                                         width=chunk, **shift)
+                        chunks.append(got if aparts > 1 else (got,))
+                    afr[ii] = [[(chunks[f // chunk][pt] if chunk == 1 else
+                                 writer.extract(chunks[f // chunk][pt], f % chunk,
+                                                hint='a'))
+                                for f in range(aregs)]
+                               for pt in range(aparts)]
+                live = [ii for ii in tiles
+                        if ops.A_zero is None
+                        or not ops.A_zero(i + ii, i + ii + atom.m,
+                                          k + kk, k + kk + atom.k)]
+                prods = {}
+                for ii in live:
+                    parts_ = afr[ii]
+                    split = ([tuple(_as_tf32(writer, parts_[pt][f])
+                                    for pt in range(aparts))
+                              for f in range(aregs)] if aparts > 1 else None)
+                    for jt in range(ntiles):
+                        prods[ii, jt] = atom.products(writer, parts_[0][:aregs],
+                                                      bfr[jt], a_split=split)
+                for term in range(len(prods[live[0], 0]) if live else 0):
+                    for ii in live:
+                        for jt in range(ntiles):
+                            a_op, b_op = prods[ii, jt][term]
+                            acc = [accs[term % naccs][jt][cc][ii // atom.m]
+                                   for cc in range(cregs)]
+                            atom.asmcall(writer, acc, a_op, b_op, acc)
+
+            for ii in (tiles if naccs > 1 else ()):
+                for jt in range(ntiles):
+                    for cc in range(cregs):
+                        part = [accs[a][jt][cc][ii // atom.m] for a in range(naccs)]
+                        corr = part[1]
+                        for more in part[2:]:
+                            corr = writer.op('add', ScalarType(atom.d), corr, more,
+                                             hint='c')
+                        Cvals[jt][cc][ii // atom.m] = writer.op(
+                            'add', ScalarType(atom.d), part[0], corr, hint='c')
+
+            Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c',
+                                            uniform=_PER_LANE)
+                    for q in range(mults) for jj in range(width)}
+            writer.barrier('wave', **sync)
+            for ii in range(0, wave, atom.m):
+                with writer.AnonymousScope():
+                    writer.mark('defines', Ct)
+                    # A `D` slot is cell `2 * lane + off` of its row-major
+                    # tile (`accumulator_slots`); its column is the stacked
+                    # one, and the row goes back to that column's
+                    # multiplication.
+                    for jt in range(ntiles):
+                        for slot, off in accumulator_slots(atom):
+                            cell = _index(writer, scale=2, add=off, lane=lane)
+                            row = writer.op('div', INDEX, cell, atom.n, hint='a')
+                            n = writer.op('add', INDEX,
+                                          writer.op('rem', INDEX, cell, atom.n,
+                                                    hint='a'),
+                                          jt * atom.n, hint='a')
+                            p = writer.op('div', INDEX, n, width, hint='a')
+                            c = writer.op('rem', INDEX, n, width, hint='a')
+                            to = writer.op('add', INDEX,
+                                           writer.op('mul', INDEX, row, crow,
+                                                     hint='a'), c, hint='a')
+                            cond = (writer.op('lt', BOOL, n, total, hint='g')
+                                    if (jt + 1) * atom.n > total else None)
+                            with _guarded(writer, cond):
+                                writer.store(Ct, Cvals[jt][slot][ii // atom.m],
+                                             to, shift=toward(p, cpad))
+                    writer.barrier('wave', **sync)
+                    for q, lo, cnt, sub in _lanes_of(ii, atom.m, threads):
+                        with threadrange(lo, cnt):
+                            for jj in range(width):
+                                idx = _index(writer, sub=sub, mod=atom.m,
+                                             scale=crow, add=jj)
+                                writer.assign(Cout[q, jj],
+                                              writer.load(Ct, idx, hint='data',
+                                                          shift=own(cpad)))
+                    writer.barrier('wave', **sync)
+
+            for q in range(mults):
+                if i // threads + q >= nslots:
+                    continue
+                for jj in range(width):
+                    C(writer, Cout[q, jj], i // threads + q, span.start + jj)
+    return True
+
+
 def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them a wave at a time.  The
@@ -1382,6 +1579,18 @@ def matmul(writer, ops, ctx, span):
             return writer.op('mul', INDEX, mine, pad, hint='r') if pad else None
         r = region(p)
         return writer.op('add', INDEX, r, p * pad, hint='r') if pad and p else r
+
+    # The multiplications of a warp stacked along N (`Options.mma_stack_mults`):
+    # where `A` is the same for all of them, one instruction serves the
+    # columns of several.  Taken here, before the tiles below are allocated,
+    # since it lays its own out.
+    if (mults > 1 and chain is None and ops.a_uniform and aordered
+            and ops.lead_width == 1
+            and atom.mode in (MMAMode.DIRECT, MMAMode.TF32)
+            and ctx is not None and ctx.get_user_options().mma_stack_mults):
+        return _stacked(writer, ops, ctx, span, atom, M, N, K, kx, threads,
+                        mults, lane, mine, sync, shift, nslots, ktiles,
+                        aregs, cregs, aparts, threadrange, stagger, room)
 
     # `B` split once, as its values are loaded, where it is staged at all.
     bsplit = BSPLIT_STAGED and not bdirect and atom.mode == MMAMode.TF32

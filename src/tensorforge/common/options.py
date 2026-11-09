@@ -1564,6 +1564,17 @@ declare('mma_d_layout',
             'one multiplication per warp; a product it does not reach keeps '
             'its epilogue.')
 
+declare('mma_stack_mults',
+        default=False,
+        env='TF_MMA_STACK_MULTS',
+        parse=parse_bool,
+        doc='Where several multiplications share a warp on NVIDIA\'s matrix '
+            'path (fewer than 32 lanes each) and read one batch-constant A in '
+            'a prepared order, stack them along N: column c of multiplication '
+            'p is column p * width + c of one wide B, so an instruction '
+            'serves the columns of several and no column is carried on the '
+            'fragments.  An experiment; off.')
+
 declare('mma_chunked_order',
         default=False,
         env='TF_MMA_CHUNKED_ORDER',
