@@ -1746,6 +1746,51 @@ def _roll_candidates(first: Build, context: Context, origin: Candidate,
             if value != own]
 
 
+#: Where the lanes rule offers the matrix path (`Options.tensor_cores`) as a
+#: twin of the default (`_matrix_candidates`): by compute capability, the
+#: precisions whose matrix units outrun the vector units of the part.  A100 and
+#: H100/GH200 in double (DMMA at twice the FP64 FMA rate) and in single (three
+#: TF32 products at several times the FP32 rate); B200/GB200 in single only, its
+#: FP64 matrix rate being its vector rate (`mma.sync` f64 is eight DMMA.8x8x4
+#: there).  The consumer parts are not in it: sm_120's HMMA runs at the FFMA
+#: rate, and none of them has a fast FP64 matrix unit.  Which kernels take the
+#: twin is the rule's count, as for every other twin: over SeisSol's elastic
+#: order-6 kernels on GH200 the count ranks the faster of the two in five of six
+#: (the double-precision derivative, 3 % to the matrix path, is the miss), and
+#: declines the single-precision derivative, 22 % slower on the matrix path.
+MATRIX_TWIN = {80: (Datatype.F64, Datatype.F32),
+               90: (Datatype.F64, Datatype.F32),
+               100: (Datatype.F32,)}
+
+
+def _matrix_candidates(descrs, first: Build, context: Context,
+                       origin: Candidate,
+                       fixed: Optional[Mapping[str, Any]]) -> List[Candidate]:
+    """`origin` on the matrix path, where the part's matrix units are faster
+    than its vector units in this precision (`MATRIX_TWIN`) and the kernel
+    contracts; in double precision with the operator laid out in 16-byte
+    chunks (`Options.mma_chunked_order`), which is what made the path pay on
+    GH200.  None where the caller fixed the path either way, or the default
+    takes it already."""
+    if fixed and 'tensor_cores' in fixed:
+        return []
+    if 'tensor_cores' in dict(context.get_asked_options().asked()):
+        return []
+    if (not first.ok or not context.target.prefs.tune_matrix_path
+            or getattr(context.get_user_options(), 'tensor_cores', None)):
+        return []
+    from tensorforge.backend.instructions.compute.primitives.nvidia import (
+        sm_of)
+    if context.fp_type not in MATRIX_TWIN.get(sm_of(context), ()):
+        return []
+    if not contraction_lengths(_flat(descrs)):
+        return []
+    twin = origin.set('tensor_cores', True)
+    if context.fp_type is Datatype.F64:
+        twin = twin.set('mma_chunked_order', True)
+    return [twin]
+
+
 #: Spilled bytes past which the default's spilling lets the rule take a
 #: wider candidate than the default; at or below it no wider one is taken.
 #: Over paper-1106 (88 SeisSol kernels a GPU, the rule's picks against the
@@ -2160,6 +2205,9 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     cands = [origin] + lane_candidates(descr_factory(), context, origin,
                                        fixed)
     cands += [c for c in _roll_candidates(first, context, origin, fixed)
+              if c not in cands]
+    cands += [c for c in _matrix_candidates(descr_factory(), first, context,
+                                            origin, fixed)
               if c not in cands]
     if ahead:
         if first.ok:
