@@ -412,7 +412,7 @@ def a_chunk(atom, ctx) -> int:
     return max(1, min(aregs, 16 // atom.d.size()))
 
 
-def fragment_order(shape, atom, threads=32, chunk=None):
+def fragment_order(shape, atom, threads=32, chunk=None, window=None):
     """Which bounding-box cell each slot of a pre-ordered A holds.
 
     The operand's storage in the order a lane reads it: tile by tile, and
@@ -453,8 +453,19 @@ def fragment_order(shape, atom, threads=32, chunk=None):
     (threads * (f // chunk) + lane) + f % chunk` of its tile.  A wide read of
     `aregs` slots a lane is then `aregs / chunk` reads of `chunk`, each of
     them a warp's 512 adjacent bytes.
+
+    `window`, `((r0, rows), (c0, depth))`, is the part of the operand the
+    operation reads: the tiles are laid over it from its corner, as many
+    along the contraction as the reader counts over its depth, and a cell
+    past it or past the operand is padding.  The reader names tiles from the
+    window's start (`matmul`), so an order laid over the whole operand reads
+    a window from column 1 a column back and one of 33 steps with the tile
+    stride of 56.  None is the whole operand.
     """
-    rows, cols = int(shape[0]), int(shape[1])
+    total_rows, total_cols = int(shape[0]), int(shape[1])
+    if window is None:
+        window = ((0, total_rows), (0, total_cols))
+    (r0, rows), (c0, cols) = ((int(a), int(b)) for a, b in window)
     mtile, ktile = 8, 4
     mregs, kregs = atom.m // mtile, atom.k // ktile
     aregs = mregs * kregs
@@ -487,8 +498,11 @@ def fragment_order(shape, atom, threads=32, chunk=None):
                     for f in range(c, c + chunk):
                         dm, dk = cell[(f, lane)]
                         row, col = m0 + dm, k0 + dk
-                        order.append(row + rows * col
-                                     if row < rows and col < cols else -1)
+                        inside = (row < rows and col < cols
+                                  and r0 + row < total_rows
+                                  and c0 + col < total_cols)
+                        order.append((r0 + row) + total_rows * (c0 + col)
+                                     if inside else -1)
     return tuple(order)
 
 
@@ -532,7 +546,19 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     # Over the wave and not over one multiplication: the fragment is the
     # warp's, and a narrower multiplication reads it with its neighbors'
     # lanes (`matmul`, `shift`).
-    order = fragment_order(shape, atom, WAVE, chunk=a_chunk(atom, ctx))
+    # Over the window the operation reads (`fragment_order`), as the reader
+    # counts it: `lead` rows -- whole slots of them where the operation does
+    # not read the whole box from its corner (`rows`) -- and `depth` steps,
+    # from `corner`.  Without them, the whole operand.
+    r0, c0 = (int(x) for x in corner)
+    window = None
+    if lead and depth:
+        if (r0 < 0 or c0 < 0 or r0 >= int(shape[0])
+                or c0 + depth > int(shape[1])):
+            return None
+        window = ((r0, int(rows) if rows else int(lead)), (c0, int(depth)))
+    order = fragment_order(shape, atom, WAVE, chunk=a_chunk(atom, ctx),
+                           window=window)
     if atom.mode == MMAMode.TF32 and presplit(ctx):
         # Stored as its two TF32 halves, planar: the three products read the
         # halves as they lie (`_as_tf32`) instead of splitting every fragment
