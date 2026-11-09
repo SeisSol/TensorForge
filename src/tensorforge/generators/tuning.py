@@ -1767,6 +1767,15 @@ def _roll_candidates(first: Build, context: Context, origin: Candidate,
 #: order-6 kernels on GH200 the count ranks the faster of the two in five of six
 #: (the double-precision derivative, 3 % to the matrix path, is the miss), and
 #: declines the single-precision derivative, 22 % slower on the matrix path.
+#: The reduction unrolls (`Options.k_unroll_max`) the matrix twin is built
+#: at beside the default's, as `ROLL_UNROLLS` for the default: on GH200 the
+#: order-8 `volume` on the matrix path ran 27 % (double) and 30 % (single)
+#: under SIMT written out, against 23 and 3 % at the default unroll -- the
+#: path's code is short enough to take it, where SIMT's written out ran 83 %
+#: slower -- and the order-6 derivative 28 % and 7 % rolled by 16, against
+#: 24 and 4 %.
+MATRIX_ROLLS = (16, 0)
+
 MATRIX_TWIN = {80: (Datatype.F64, Datatype.F32),
                90: (Datatype.F64, Datatype.F32),
                100: (Datatype.F32,)}
@@ -1798,12 +1807,27 @@ def _matrix_candidates(descrs, first: Build, context: Context,
         sm_of)
     if context.fp_type not in MATRIX_TWIN.get(sm_of(context), ()):
         return []
-    if not contraction_lengths(_flat(descrs)):
+    lengths = contraction_lengths(_flat(descrs))
+    if not lengths:
         return []
     twin = origin.set('tensor_cores', True).set('mma_operator_copies', True)
     if context.fp_type is Datatype.F64:
         twin = twin.set('mma_chunked_order', True).set('mma_fragment_ld', True)
-    return [twin]
+    twins = [twin]
+    # Rolled and written out as well (`MATRIX_ROLLS`), where a reduction is
+    # long enough for the unroll to change it and the caller left it free.
+    opts = context.get_user_options()
+    if not ((fixed and 'k_unroll_max' in fixed) or getattr(opts, 'k_roll', 0)
+            or 'k_unroll_max' in dict(context.get_asked_options().asked())):
+        own = getattr(opts, 'k_unroll_max', None)
+        longest = max(lengths)
+        for value in MATRIX_ROLLS:
+            # Written out changes something only past the default's roll,
+            # rolled by `value` only past `value`.
+            reach = own if value == 0 else value
+            if value != own and reach and longest > reach:
+                twins.append(twin.set('k_unroll_max', value))
+    return twins
 
 
 #: Spilled bytes past which the default's spilling lets the rule take a
