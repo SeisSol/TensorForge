@@ -399,7 +399,20 @@ def _fragment_cells(atom, threads: int = 32, bits=None):
     return cells
 
 
-def fragment_order(shape, atom, threads=32):
+def a_chunk(atom, ctx) -> int:
+    """Fragments a lane reads of a prepared A tile in one access: all of them
+    (`aregs`), or the 16 bytes' worth `Options.mma_chunked_order` asks for.
+
+    One statement for the order and its reader (`fragment_order`, `matmul`),
+    since a layout written one way and read the other is a permutation."""
+    aregs = (atom.m * atom.k) // WAVE
+    if (ctx is None or not ctx.get_user_options().mma_chunked_order
+            or atom.mode != MMAMode.DIRECT):
+        return aregs
+    return max(1, min(aregs, 16 // atom.d.size()))
+
+
+def fragment_order(shape, atom, threads=32, chunk=None):
     """Which bounding-box cell each slot of a pre-ordered A holds.
 
     The operand's storage in the order a lane reads it: tile by tile, and
@@ -433,11 +446,22 @@ def fragment_order(shape, atom, threads=32):
 
     Returned as `Tensor.storage_order` wants it -- F-order cell per slot -- so
     the host packer and the kernel take the layout from one statement.
+
+    `chunk` fragments a lane reads at once (`a_chunk`): with fewer than all
+    of them, a tile is that many fragments of every lane, the lanes adjacent,
+    then the next that many -- lane `lane`'s fragment `f` is slot `chunk *
+    (threads * (f // chunk) + lane) + f % chunk` of its tile.  A wide read of
+    `aregs` slots a lane is then `aregs / chunk` reads of `chunk`, each of
+    them a warp's 512 adjacent bytes.
     """
     rows, cols = int(shape[0]), int(shape[1])
     mtile, ktile = 8, 4
     mregs, kregs = atom.m // mtile, atom.k // ktile
     aregs = mregs * kregs
+    chunk = aregs if chunk is None else chunk
+    if aregs % chunk:
+        raise InternalError(f'{aregs} fragments a lane do not come in chunks '
+                            f'of {chunk}')
     cell = _fragment_cells(atom, threads)
     mstarts = tile_starts(rows, threads, atom.m)
     kstarts = tile_starts(cols, threads, atom.k)
@@ -458,12 +482,13 @@ def fragment_order(shape, atom, threads=32):
     for mt, m0 in enumerate(mstarts):
         for kt, k0 in enumerate(kstarts):
             assert len(order) == (mt * ktiles + kt) * aregs * threads
-            for lane in range(threads):
-                for f in range(aregs):
-                    dm, dk = cell[(f, lane)]
-                    row, col = m0 + dm, k0 + dk
-                    order.append(row + rows * col
-                                 if row < rows and col < cols else -1)
+            for c in range(0, aregs, chunk):
+                for lane in range(threads):
+                    for f in range(c, c + chunk):
+                        dm, dk = cell[(f, lane)]
+                        row, col = m0 + dm, k0 + dk
+                        order.append(row + rows * col
+                                     if row < rows and col < cols else -1)
     return tuple(order)
 
 
@@ -507,7 +532,7 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     # Over the wave and not over one multiplication: the fragment is the
     # warp's, and a narrower multiplication reads it with its neighbors'
     # lanes (`matmul`, `shift`).
-    order = fragment_order(shape, atom, WAVE)
+    order = fragment_order(shape, atom, WAVE, chunk=a_chunk(atom, ctx))
     if atom.mode == MMAMode.TF32 and presplit(ctx):
         # Stored as its two TF32 halves, planar: the three products read the
         # halves as they lie (`_as_tf32`) instead of splitting every fragment
@@ -1435,14 +1460,21 @@ def matmul(writer, ops, ctx, span):
         by several multiplications reads it once for all of them, over all of
         its lanes (`shift`)."""
         out = {}
+        chunk = a_chunk(atom, ctx)
         for ii in range(0, min(wave, M - i), atom.m):
             mt = (i + ii) // atom.m
             kt = (k + kk) // atom.k
             tbase = (mt * ktiles + kt) * (aregs * wave)
-            got = ops.A_slot(writer, tbase, parts=aparts, width=aregs, **shift)
-            got = got if aparts > 1 else (got,)
-            out[ii] = {None: [[(got[pt] if aregs == 1 else
-                                writer.extract(got[pt], f, hint='a'))
+            # One access per chunk of `chunk` fragments (`a_chunk`): the whole
+            # tile at once where the order is lane by lane per tile.
+            chunks = []
+            for c in range(0, aregs, chunk):
+                got = ops.A_slot(writer, tbase + c * wave, parts=aparts,
+                                 width=chunk, **shift)
+                chunks.append(got if aparts > 1 else (got,))
+            out[ii] = {None: [[(chunks[f // chunk][pt] if chunk == 1 else
+                                writer.extract(chunks[f // chunk][pt],
+                                               f % chunk, hint='a'))
                                for f in range(aregs)]
                               for pt in range(aparts)]}
         return out

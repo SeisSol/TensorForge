@@ -1532,6 +1532,20 @@ declare('mma_d_layout',
             'one multiplication per warp; a product it does not reach keeps '
             'its epilogue.')
 
+declare('mma_chunked_order',
+        default=False,
+        env='TF_MMA_CHUNKED_ORDER',
+        parse=parse_bool,
+        doc='Lay a prepared A operand out lane by lane per sixteen bytes '
+            'rather than per tile: a lane\'s fragments of a tile in 16-byte '
+            'chunks, the 32 lanes adjacent within each chunk.  A lane then '
+            'reads a tile as several 16-byte accesses instead of one wide one, '
+            'and every such access of a warp reads 512 adjacent bytes -- from '
+            'shared memory without a bank conflict, from global memory in '
+            'whole sectors.  Changes only the double-precision orders, whose '
+            'eight fragments are 64 bytes a lane; a single-precision lane\'s '
+            'fragments are one 16-byte chunk already.')
+
 declare('mma_presplit',
         default=False,
         env='TF_MMA_PRESPLIT',
