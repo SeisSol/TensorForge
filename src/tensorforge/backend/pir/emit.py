@@ -256,6 +256,10 @@ def _code_copies(unroll, trips: Optional[int]) -> int:
     return 1
 
 
+#: The shape an `mma.sync` names (`Emitter._issues`).
+_MMA_SHAPE = re.compile(r'mma\.sync\.aligned\.m(\d+)n(\d+)k(\d+)\.')
+
+
 class Emitter:
     def __init__(self, writer, context: Any = None, metrics: Any = None):
         self.writer = writer
@@ -350,6 +354,25 @@ class Emitter:
         if record is not None and written:
             record(units * self._written_scale)
 
+    def _issues(self, s: Stmt) -> int:
+        """Instructions a matrix statement issues where that is not one: an
+        FP64 `mma.sync` from sm_100 on, which ptxas lowers to `DMMA.8x8x4`
+        whatever its shape -- `m16n8k16` is eight of them (CUDA 13,
+        2026-09-11).  Counted as one, the FP64 matrix path would look eight
+        times shorter there than it is, in the issue mix the lanes rule ranks
+        by and in the code the instruction cache holds."""
+        text = s.attr('asm') if s.op == Op.CALL else None
+        if not text or '.f64' not in text:
+            return 1
+        shape = _MMA_SHAPE.search(text)
+        hw = getattr(getattr(self.context, 'target', None), 'hw', None)
+        if (shape is None or hw is None
+                or getattr(hw, 'family', None) != 'nvidia'
+                or (hw.sm_level() or 0) < 100):
+            return 1
+        m, n, k = (int(x) for x in shape.groups())
+        return max(1, (m * n * k) // (8 * 8 * 4))
+
     def _record_mix(self, s: Stmt) -> None:
         """What a statement occupies, and what it moves (`analysis.pipeline`).
 
@@ -366,7 +389,8 @@ class Emitter:
         category, moved = self._mix_category(s)
         if category is None:
             return
-        mix(category, self._work_scale, self._code_scale)
+        times = self._issues(s) if category == 'matrix' else 1
+        mix(category, self._work_scale * times, self._code_scale * times)
         hot = getattr(self.metrics, 'record_hot', None)
         if hot is not None:
             hot(self._work_scale, self._code_scale)
@@ -1159,6 +1183,8 @@ class Emitter:
             # (`IRBuilder.touches`) writes nothing, like a mark.
             return
         self._record_code(op)
+        if op == Op.CALL and s.attr('asm') is not None:
+            self._record_code_units(self._issues(s) - 1)
         self._record_mix(s)
 
         if op == Op.CONST:

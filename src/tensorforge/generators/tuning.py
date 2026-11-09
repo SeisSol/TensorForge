@@ -1768,10 +1768,16 @@ def _matrix_candidates(descrs, first: Build, context: Context,
                        fixed: Optional[Mapping[str, Any]]) -> List[Candidate]:
     """`origin` on the matrix path, where the part's matrix units are faster
     than its vector units in this precision (`MATRIX_TWIN`) and the kernel
-    contracts; in double precision with the operator laid out in 16-byte
-    chunks (`Options.mma_chunked_order`), which is what made the path pay on
-    GH200.  None where the caller fixed the path either way, or the default
-    takes it already."""
+    contracts -- with each reader of an operator that others read too given
+    a copy in its own fragment order (`Options.mma_operator_copies`), and in
+    double precision with the operator laid out in 16-byte chunks
+    (`Options.mma_chunked_order`) and the temporaries for the B reads
+    (`Options.mma_fragment_ld`).  That is what made the path pay on GH200:
+    the derivative 24 % (order 6) and 26 % (order 8) under SIMT in double, 5
+    and 7 % in single, where without the copies it lost up to 21 %; volume
+    and `localFluxAll` 17 to 25 %.  Not the B layout in single precision,
+    which took order-6 `volume`'s 19 % back.  None where the caller fixed the
+    path either way, or the default takes it already."""
     if fixed and 'tensor_cores' in fixed:
         return []
     if 'tensor_cores' in dict(context.get_asked_options().asked()):
@@ -1785,9 +1791,9 @@ def _matrix_candidates(descrs, first: Build, context: Context,
         return []
     if not contraction_lengths(_flat(descrs)):
         return []
-    twin = origin.set('tensor_cores', True)
+    twin = origin.set('tensor_cores', True).set('mma_operator_copies', True)
     if context.fp_type is Datatype.F64:
-        twin = twin.set('mma_chunked_order', True)
+        twin = twin.set('mma_chunked_order', True).set('mma_fragment_ld', True)
     return [twin]
 
 
