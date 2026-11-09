@@ -187,7 +187,8 @@ class StoreRegToShr(AbstractShrMemWrite):
     # snapshot looks plausible, and the only thing that would notice is a
     # numerical check the host oracle cannot yet run.
     loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
-                       self._num_threads, 1, width=self._lead_width)]
+                       self._num_threads, 1, width=self._lead_width,
+                       exact_head=True)]
     for i in range(1, src_bbox.rank()):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -353,7 +354,7 @@ class StoreRegToGlb(AbstractInstruction):
       pad = self._pad_writable(src_bbox, dest_bbox)
       loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
                          self._num_threads, 1, width=self._lead_width,
-                         full_lane=pad, pad=pad)]
+                         full_lane=pad, pad=pad, exact_head=True)]
       for i in range(1, src_bbox.rank()):
         unroll = (src_bbox.lower()[i], src_bbox.upper()[i]) != (dest_bbox.lower()[i], dest_bbox.upper()[i])
         lower = min(src_bbox.lower()[i], dest_bbox.lower()[i])

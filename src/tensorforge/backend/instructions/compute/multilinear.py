@@ -1341,7 +1341,8 @@ class MultilinearInstruction(ComputeInstruction):
                                        unroll=True,
                                        width=self._lead_width,
                                        full_lane=self._full_lane_tail(
-                                           i, dimmin, dimmax))]
+                                           i, dimmin, dimmax),
+                                       straddle=self._lead_width > 1)]
                 threads //= max(1, -(-(dimmax - dimmin) // self._lead_width))
                 stride *= dimmax - dimmin
 

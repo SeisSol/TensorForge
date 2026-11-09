@@ -897,8 +897,20 @@ class LeadLoop:
   """
 
   def __init__(self, name, start, end, threads, stride, unroll=False,
-               neutral=None, width=1, full_lane=False, pad=False):
+               neutral=None, width=1, full_lane=False, pad=False,
+               straddle=False, exact_head=False):
     self.start = start
+    #: At a width above one, `full_lane` also covers the lane whose vector
+    #: straddles the end (`Options.lead_straddle`): the caller checked that its
+    #: extra components may be computed.  Without it a full-lane tail stays
+    #: width one, as it always was.
+    self.straddle = straddle
+    #: The loop's accesses are writes to memory, which a head lane straddling
+    #: `start` must not make for the components before it: they would land
+    #: before the window -- before the buffer, where it starts there.  Such a
+    #: head is peeled, its components written one each by the lane that owns
+    #: them, and the vectors start at the next whole one.
+    self.exact_head = exact_head
     #: The lanes past the end are the destination's padding and may be
     #: written whole (`StoreRegToGlb._pad_writable`), not only computed on.
     self.pad = pad
@@ -1010,7 +1022,7 @@ class LeadLoop:
     At a lead width above one only where the caller checked that the
     straddling lane may compute its whole vector (`Options.lead_straddle`):
     then `valid` counts that lane in and nothing is peeled (`_full_hi`)."""
-    return self.full_lane and not lo
+    return self.full_lane and not lo and (self.width == 1 or self.straddle)
 
   def _full_hi(self, tail):
     """The lanes a full-lane tail holds data in: every lane whose vector
@@ -1126,6 +1138,21 @@ class LeadLoop:
     return writer.if_(cond, attrs=attrs)
 
   def write(self, context: Context, writer: Writer, inner):
+    if self.exact_head and self.width > 1 and self.start % self.width:
+      head = min(self.end, -(-self.start // self.width) * self.width)
+      for element in range(self.start, head):
+        inner([element])
+      if head >= self.end:
+        return
+      start, self.start = self.start, head
+      try:
+        self._write(context, writer, inner)
+      finally:
+        self.start = start
+      return
+    self._write(context, writer, inner)
+
+  def _write(self, context: Context, writer: Writer, inner):
     # A slot is `threads * width` elements wide, so every division that turns
     # an element range into a slot range takes the product.
     span = self.threads * self.width
@@ -1514,6 +1541,25 @@ class Symbol:
     """
     bound = getattr(builder, 'bound_buffer', None)
     return bound(self.name) if bound is not None else None
+
+  def _lead_stride(self, index):
+    """How far apart, in scalars, this buffer stores a lane's adjacent rows
+    -- the stride of the axis a wide lead index sits on -- or None where they
+    are adjacent: no wide lead index, no memory, or the axis is the innermost
+    one, whose stride is the element's own parts.  A `width`-wide access at a
+    lead index reads `width` adjacent elements, which are the lane's rows only
+    then."""
+    if self.stype not in (SymbolType.Global, SymbolType.Batch,
+                          SymbolType.SharedMem) or self.data_view is None:
+      return None
+    for p, entry in enumerate(index):
+      if isinstance(entry, LeadIndex) and entry.width > 1:
+        strides = self.data_view.get_dim_strides()
+        if p >= len(strides):
+          return None
+        stride = int(strides[p])
+        return None if stride == max(1, self.data_view._parts()) else stride
+    return None
 
   def swizzled(self, builder, width: int = 1) -> bool:
     """Would this buffer's permutation refuse a `width`-wide access?
@@ -3704,16 +3750,36 @@ class Symbol:
                                nontemporal=nontemp)
             return tuple(writer.extract(wide, i, hint='p')
                          for i in range(parts))
-        value = writer.load(self, addr,
-                            type_=ltype, hint='data',
-                            align=(None if w == 1
-                                   else self._wide_claim(read_index, w,
-                                                         part * plane if plane
-                                                         else part)),
-                            layout=layout_of(read_index, self.num_threads),
-                            nontemporal=nontemp,
-                            **self._valid_access(writer, read_index, valid, ltype,
-                                                 first))
+        apart = self._lead_stride(read_index) if w > 1 else None
+        if apart is not None:
+          # A lane's `w` rows are not adjacent here: the lead axis is not this
+          # buffer's contiguous one -- a transposed operand read in place,
+          # `kDivMT` in SeisSol's derivative -- so they are `apart` elements
+          # from each other, and one wide access at the first would read the
+          # next elements of the contiguous axis instead (every second row of
+          # the product wrong at width two).  One read each, packed.
+          from tensorforge.backend.pir.core import ScalarType
+          one = ScalarType(self.get_fptype())
+          layout = layout_of(read_index, self.num_threads)
+          comps = [writer.load(self, addr if c == 0 else writer.op(
+                                   'add', INDEX, addr, c * apart, hint='a'),
+                               type_=one, hint='data', layout=layout,
+                               nontemporal=nontemp,
+                               **self._valid_access(writer, read_index, valid,
+                                                    one, first))
+                   for c in range(w)]
+          value = writer.pack(ltype, *comps, hint='data')
+        else:
+          value = writer.load(self, addr,
+                              type_=ltype, hint='data',
+                              align=(None if w == 1
+                                     else self._wide_claim(read_index, w,
+                                                           part * plane if plane
+                                                           else part)),
+                              layout=layout_of(read_index, self.num_threads),
+                              nontemporal=nontemp,
+                              **self._valid_access(writer, read_index, valid, ltype,
+                                                   first))
         if bc_lane is None or not broadcast:
           # `broadcast=False` keeps the register index and drops the
           # cross-lane read of it.  The caller is then saying it will use the
