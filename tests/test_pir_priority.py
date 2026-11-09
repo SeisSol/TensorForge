@@ -80,3 +80,15 @@ def test_not_on_nvidia(mode):
 def test_an_unknown_mode_is_refused():
     with pytest.raises(ValueError):
         _kernel(amd_setprio='sideways')
+
+
+@pytest.mark.parametrize('mode, text', [
+    ('flat', '__builtin_amdgcn_s_setprio(0);'),
+    ('sched', '__builtin_amdgcn_sched_barrier(0);')])
+def test_the_controls_stand_where_loads_stands(mode, text):
+    """The same places as `loads`, with nothing of the priorities: the
+    controls that tell the order from the barrier the instruction is."""
+    marked = _kernel(amd_setprio='loads').splitlines()
+    control = _kernel(amd_setprio=mode).splitlines()
+    where = [n for n, ln in enumerate(marked) if 's_setprio' in ln]
+    assert where == [n for n, ln in enumerate(control) if text in ln]

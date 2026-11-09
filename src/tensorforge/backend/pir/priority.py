@@ -19,6 +19,10 @@ The modes, for measuring which order pays here:
 * ``compute``: the reverse -- the arithmetic first, the loads in its gaps.
 * ``alternate``: every other wave high for the whole kernel, a fixed
   order rather than a first-come one.
+* ``flat`` and ``sched``, the controls: where ``loads`` sets a priority,
+  priority 0 throughout, or a scheduling barrier and no priority -- for
+  telling what the priorities do from what an instruction the compiler
+  will not move across does.
 
 Placed behind every pass that moves a statement, so the markers stand where
 the transfers ended up; pinned, with no effect of their own.
@@ -35,13 +39,21 @@ from .transfers import glue, neutral, transfers
 HIGH = 2
 LOW = 0
 
-MODES = ('loads', 'compute', 'alternate')
+MODES = ('loads', 'compute', 'alternate', 'flat', 'sched')
+
+#: What the controls put where `loads` puts a priority: the same
+#: instruction at priority 0 throughout (`flat`), and a scheduling barrier
+#: alone (`sched`) -- `s_setprio` is an instruction with side effects, which
+#: the compiler does not move anything across.
+_FLAT = '__builtin_amdgcn_s_setprio(0);'
+_SCHED = '__builtin_amdgcn_sched_barrier(0);'
 
 
-def _prio(level: int) -> Stmt:
+def _prio(level) -> Stmt:
+    text = level if isinstance(level, str) else (
+        f'__builtin_amdgcn_s_setprio({level});')
     return Stmt(op=Op.RAWSTMT, target=(), args=(), pure=False, movable=False,
-                effect=Effect.NONE,
-                text=f'__builtin_amdgcn_s_setprio({level});')
+                effect=Effect.NONE, text=text)
 
 
 def _alternate() -> Stmt:
@@ -102,6 +114,10 @@ def set_priority(body: Tuple[Stmt, ...], mode: str) -> Tuple[Stmt, ...]:
         return (_alternate(),) + tuple(body)
     if mode == 'loads':
         return _mark(body, HIGH, LOW)
+    if mode == 'flat':
+        return _mark(body, _FLAT, _FLAT)
+    if mode == 'sched':
+        return _mark(body, _SCHED, _SCHED)
     if mode == 'compute':
         return (_prio(HIGH),) + _mark(body, LOW, HIGH)
     raise ValueError(f'amd_setprio: {mode!r} is none of {", ".join(MODES)}')
