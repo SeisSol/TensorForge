@@ -45,13 +45,13 @@ class _Code:
     return Resources(registers=128, spill_bytes=0, code_bytes=self.code)
 
 
-def _pick(monkeypatch, code, cut_count):
+def _pick(monkeypatch, code, cut_count, **asked):
   monkeypatch.setattr(tuning, '_settled', lambda result: None)
   monkeypatch.setattr(tuning, 'executed_instructions', lambda result: (
       cut_count if result.candidate.get('fission') else 1000.0))
   factory = _chain()
   context = Context(arch='sm_90', backend='cuda', fp_type=Datatype.F32,
-                    options=Options())
+                    options=Options(**asked))
   origin = tuning.start(factory(), context)
   first = tuning.build(factory, context, origin, Generator.trial)
   return tuning.lanes_rule(factory, context, _Code(code), origin, first,
@@ -67,6 +67,10 @@ def test_a_body_past_the_cache_is_cut_where_that_counts_less(monkeypatch):
 
 def test_a_cut_that_counts_far_more_is_not_taken(monkeypatch):
   assert not _pick(monkeypatch, 480 * 1024, 3000.0).get('fission')
+
+
+def test_a_cut_the_caller_asked_against_stands(monkeypatch):
+  assert not _pick(monkeypatch, 480 * 1024, 1100.0, fission=0).get('fission')
 
 
 def test_a_body_within_the_threshold_is_not_cut(monkeypatch):

@@ -2404,7 +2404,10 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         more -- every piece reads its operands again -- and each piece streams
         only its own code, which `cost` charges."""
         if (not FISSION_TWIN or seen is None or cand.get('fission')
-                or not getattr(seen, 'code_bytes', None)):
+                or not getattr(seen, 'code_bytes', None)
+                or 'fission' in dict(context.get_asked_options().asked())
+                or (fixed and 'fission' in fixed)):
+            # A cut the caller asked for either way stands.
             return cand, seen
         from .generator import fission_cuts, fission_pieces
         pieces = fission_pieces(seen.code_bytes, hw)
