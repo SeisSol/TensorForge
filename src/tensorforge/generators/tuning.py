@@ -1786,7 +1786,13 @@ MATRIX_TWIN_DEPTH = 24
 #: 24 and 4 %.
 MATRIX_ROLLS = (16, 0)
 
-MATRIX_TWIN = {80: (Datatype.F64, Datatype.F32),
+#:
+#: Not A100 in single precision any more: over SeisSol's elastic and
+#: viscoelastic kernels (orders 4, 6 and 8) the twin never beat the rule's
+#: best SIMT build there -- `localFluxAll` of order 6 13 % under the default on
+#: the path, 24 % at sixteen lanes beside it -- and the order-6 `volume` it was
+#: taken for ran 28 % slower than without it (3xTF32's chains, `wait`).
+MATRIX_TWIN = {80: (Datatype.F64,),
                90: (Datatype.F64, Datatype.F32),
                100: (Datatype.F32,)}
 

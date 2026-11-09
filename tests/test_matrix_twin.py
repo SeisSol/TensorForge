@@ -39,7 +39,7 @@ def _offered(arch, dtype, **opts):
 
 
 @pytest.mark.parametrize('arch, dtype, wide', [
-    ('sm_80', Datatype.F64, True), ('sm_80', Datatype.F32, None),
+    ('sm_80', Datatype.F64, True),
     ('sm_90', Datatype.F64, True), ('sm_90', Datatype.F32, None),
     ('sm_100', Datatype.F32, None)])
 def test_offered_where_the_matrix_units_are_faster(arch, dtype, wide):
@@ -72,6 +72,7 @@ def test_an_unroll_the_caller_asked_for_stands():
 
 
 @pytest.mark.parametrize('arch, dtype', [
+    ('sm_80', Datatype.F32),
     ('sm_100', Datatype.F64), ('sm_120', Datatype.F32), ('sm_120', Datatype.F64),
     ('sm_86', Datatype.F64), ('sm_89', Datatype.F32)])
 def test_not_offered_where_they_are_not(arch, dtype):
