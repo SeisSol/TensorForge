@@ -1502,6 +1502,15 @@ SPILL_WEIGHT = 64
 #: the order-6 move went to 32 lanes unmerged instead, 25 % slower on GH200.
 ICACHE_SHARE = 0.47
 
+#: Whether the lanes rule offers a candidate whose code the compiler wrote
+#: past `generator.FISSION_PAST` instruction caches cut into pieces as well
+#: (`Options.fission`), as many as `generator.fission_pieces` says for that
+#: size.  On GH200 the order-8 derivative in double ran 192 ns whole, 142 on
+#: the matrix path and 124 on it cut into three; in single 95, 89 and 71.
+#: The volume and the Taylor expansion stay whole (cut, 4 to 96 % slower): the
+#: one fits on the matrix path, the other is far below the threshold.
+FISSION_TWIN = True
+
 #: Parts whose fetch past the instruction cache costs a kernel more than the
 #: share of its code past the cache says: the charge on every executed
 #: instruction grows from nothing at the capacity to this factor less one at
@@ -2387,12 +2396,50 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     # What the compiler said of the default as built, before any pin: the
     # guards ask how much it spills and how many registers it holds.
     unpinned = report
+    def fissioned(cand: Candidate, seen: Optional[Resources]
+                  ) -> Tuple[Candidate, Optional[Resources]]:
+        """`cand`, or `cand` cut into as many pieces as its code takes past
+        the instruction cache (`fission_pieces`, from the size the compiler
+        wrote) where that costs less (`FISSION_TWIN`).  The cut build counts
+        more -- every piece reads its operands again -- and each piece streams
+        only its own code, which `cost` charges."""
+        if (not FISSION_TWIN or seen is None or cand.get('fission')
+                or not getattr(seen, 'code_bytes', None)):
+            return cand, seen
+        from .generator import fission_cuts, fission_pieces
+        pieces = fission_pieces(seen.code_bytes, hw)
+        if pieces <= 1 or not fission_cuts(descr_factory()):
+            return cand, seen
+        alt = cand.set('fission', pieces)
+        result = builds.get(alt) or build(descr_factory, context, alt, generate)
+        if not result.ok:
+            return cand, seen
+        count = figure(result)
+        if count is None:
+            return cand, seen
+        try:
+            other = scorer.resources(result)
+        except Exception:                     # noqa: BLE001
+            other = None
+        if other is None or other.spill_bytes > max(limit, seen.spill_bytes):
+            return cand, seen
+        builds[alt], counts[alt] = result, count
+        if cost(alt, other) < cost(cand, seen):
+            return alt, other
+        return cand, seen
+
     base, report = pinned(origin, report)
     limit = SPILL_GROWTH * report.spill_bytes
 
     def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
-        charge = icache_charge(seen.code_bytes, hw, refetch)
+        # A cut kernel runs its pieces one after another, each over its own
+        # code (`Options.fission`).
+        pieces = cand.get('fission')
+        code = seen.code_bytes
+        if code and isinstance(pieces, int) and pieces > 1:
+            code = code / pieces
+        charge = icache_charge(code, hw, refetch)
         if by_bound:
             spilled = (pipe_bound(builds[cand], seen.spill_bytes)
                        if seen.spill_bytes else counts[cand])
@@ -2405,8 +2452,11 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         return (counts[cand] * (1.0 + charge)
                 + SPILL_WEIGHT * seen.spill_bytes / elem * lanes / wave)
 
+    # The default as built, whole: what anything taken has to beat by the
+    # margin, its own cut twin included.
+    default, whole = cost(base, report), base
+    base, report = fissioned(base, report)
     best, least = base, cost(base, report)
-    default = least
     # Where the default spills on AMD, a build that spills nothing wins over
     # every build that does (`CLEAN_FIRST`): until one is found the compiler
     # is asked about every candidate, after that only about those whose
@@ -2448,6 +2498,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         cand, seen = pinned(cand, seen)
         if seen is None or seen.spill_bytes > limit:
             continue
+        cand, seen = fissioned(cand, seen)
         price = cost(cand, seen)
         if clean_first and not seen.spill_bytes:
             if clean is None or price < clean[1]:
@@ -2475,7 +2526,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 clean = (cand, price)
     if clean is not None:
         return clean[0]
-    return best if least < (1.0 - DEVIATION_MARGIN) * default else base
+    return best if least < (1.0 - DEVIATION_MARGIN) * default else whole
 
 
 def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
