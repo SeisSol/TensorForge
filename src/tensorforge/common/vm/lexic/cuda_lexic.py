@@ -97,6 +97,11 @@ class CudaLexic(Lexic):
   def sync_simd(self):
     return "__syncwarp();"
 
+  def pin_fence(self):
+    # No instruction in converged code, and one ptxas moves no memory access
+    # across (`Emitter._pin_load`); a full mask waits for every lane.
+    return "__syncwarp();", True
+
   def sync_grid(self):
     return "cooperative_groups::this_grid().sync();"
 

@@ -1089,8 +1089,9 @@ class Emitter:
             self._converged = outer
 
     def _pin_load(self, s: Stmt) -> None:
-        """A fence in front of every `_pin_every`-th load from memory, where
-        the warp is converged (`pin_loads`).
+        """A fence in front of every `_pin_every`-th load from memory
+        (`pin_loads`, `Lexic.pin_fence`): on CUDA where the warp is
+        converged, on AMD -- a scheduling barrier -- everywhere.
 
         `__syncwarp()` is no instruction in converged code -- ptxas writes a
         `NOP` -- and yet one ptxas moves no memory access across, which no
@@ -1120,8 +1121,13 @@ class Emitter:
         if self._pin_count < self._pin_every:
             return
         self._pin_count = 0
-        if self._converged:
-            self.writer('__syncwarp();')
+        lex = self._lexic()
+        fence = lex.pin_fence() if lex is not None else None
+        if fence is None:
+            return
+        text, converged = fence
+        if self._converged or not converged:
+            self.writer(text)
 
     def _dpp_blocks(self):
         """`amd.dpp_block` where this target writes runs of fused DPP FMAs as

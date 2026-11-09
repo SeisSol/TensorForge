@@ -220,6 +220,12 @@ class Lexic(ABC):
   def sync_simd(self):
     pass
 
+  def pin_fence(self):
+    """`(statement, converged)`: what keeps the compiler to the body's order
+    of its loads (`Options.pin_loads`), and whether it needs every lane of the
+    warp to arrive -- or None where the backend has no such statement."""
+    return None
+
   def loop_body_fence(self) -> str:
     """A statement for the head of a loop body that loads cannot be hoisted
     across, or empty where the backend's compiler needs none.

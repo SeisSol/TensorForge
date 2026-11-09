@@ -181,6 +181,16 @@ class HipLexic(CudaLexic):
   def get_headers(self):
     return ["hip/hip_runtime.h", "hip/hip_cooperative_groups.h", "tensorforge_device/hip.h"]
 
+  def pin_fence(self):
+    if self._underlying_hardware != 'amd':
+      return super().pin_fence()
+    # The scheduling barrier of `loop_body_fence`: nothing moves across it, and
+    # it is no rendezvous, so a lane guard does not keep it out.  On MI300A
+    # SeisSol's order-8 derivative in single precision, its third operator
+    # read from global memory, spilled 172 VGPRs with its loads hoisted and 42
+    # with barriers around them -- 22 % faster.
+    return '__builtin_amdgcn_sched_barrier(0);', False
+
   def loop_body_fence(self):
     if self._underlying_hardware != 'amd':
       return super().loop_body_fence()
