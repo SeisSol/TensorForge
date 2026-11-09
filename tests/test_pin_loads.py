@@ -44,10 +44,16 @@ def _normalized(src):
     return re.sub(r'kernel_kernel_[0-9a-f]+', 'K', src)
 
 
+_FENCES = {'cuda': ('__syncwarp();', True),
+           'hip': ('__builtin_amdgcn_sched_barrier(0);', False)}
+
+
 def _context(vendor='nvidia', backend='cuda', budget=1020, pin=32):
     hw = SimpleNamespace(vendor=vendor, vec_unit_length=32,
                          max_reg_per_thread=budget)
-    target = SimpleNamespace(hw=hw, backend=backend, explicit_simd=False)
+    lexic = SimpleNamespace(pin_fence=lambda: _FENCES.get(backend))
+    target = SimpleNamespace(hw=hw, backend=backend, explicit_simd=False,
+                             lexic=lexic)
     opts = SimpleNamespace(pin_loads=pin)
     return SimpleNamespace(target=target, get_user_options=lambda: opts)
 
@@ -57,12 +63,18 @@ def test_nothing_is_pinned_unless_asked():
     assert ai._pin_every(_context(pin=32), (), 32) == 32
 
 
-def test_only_cuda_and_only_whole_warps():
-    """The fence is `__syncwarp()`; a multiplication narrower than its warp
-    shares it with others whose batch loop can end a trip earlier."""
-    assert ai._pin_every(_context(vendor='amd', backend='hip'), (), 64) == 0
+def test_cuda_on_whole_warps_amd_anywhere():
+    """On CUDA the fence is `__syncwarp()`, and a multiplication narrower
+    than its warp shares it with others whose batch loop can end a trip
+    earlier; on AMD it is a scheduling barrier, no rendezvous, and goes in at
+    any width -- by number, since `'auto'` reads the body through a
+    calibration of ptxas.  A backend without a fence pins nothing."""
     assert ai._pin_every(_context(), (), 16) == 0
     assert ai._pin_every(_context(), (), 64) == 32
+    assert ai._pin_every(_context(vendor='amd', backend='hip'), (), 16) == 32
+    assert ai._pin_every(_context(vendor='amd', backend='hip', pin='auto'),
+                         (), 64) == 0
+    assert ai._pin_every(_context(vendor='intel', backend='sycl'), (), 32) == 0
 
 
 def test_auto_pins_where_ptxas_would_spill(monkeypatch):
@@ -124,3 +136,27 @@ def test_off_and_elsewhere_the_source_is_unchanged():
     amd = _build('elastic-linearck-o4-d', 'gpu_neighboringFlux[0]',
                  arch='gfx942', backend='hip', pin_loads=32)
     assert '__syncwarp();' not in amd
+
+
+def test_amd_fences_with_a_scheduling_barrier_under_guards_too():
+    """MI300A, SeisSol's order-8 derivative in single precision: its third
+    operator comes from global memory, and with its loads hoisted it spilled
+    172 VGPRs, with barriers around them 42 -- 22 % faster.  The barrier is
+    no rendezvous, so a lane guard does not keep it out."""
+    from tensorforge.generators.generator import Generator
+    from test_rolling import gemm, make
+
+    def kernel(pin):
+        descrs = [gemm(make('A', [24, 24]), make('B', [24, 5]),
+                       make('C', [24, 5])),
+                  gemm(make('C', [24, 5]), make('D', [5, 5]),
+                       make('E', [24, 5]))]
+        gen = Generator(descrs, Context(arch='gfx942', backend='hip',
+                                        fp_type=Datatype.F32,
+                                        options=Options(pin_loads=pin)))
+        with contextlib.redirect_stdout(io.StringIO()):
+            gen.generate()
+        return gen.get_kernel()
+    fence = '__builtin_amdgcn_sched_barrier(0);'
+    assert kernel(1).count(fence) > kernel(0).count(fence) + 4
+    assert '__syncwarp' not in kernel(1)
