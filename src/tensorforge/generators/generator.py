@@ -398,6 +398,9 @@ class Generator:
   #: What an operator copy is called until its numbers name it
   #: (`_name_module_operands`), followed by its number in the kernel.
   COPY_PLACEHOLDER = 'TENSORFORGE_OPERATOR_COPY_'
+  #: Zeros behind a copy no order was laid over (`_settle_module_operands`):
+  #: the rows a matrix tile reads past the box, at the widest lane span.
+  COPY_TAIL = 128
 
   #: `merge_within` for a build that merges every run it can: what
   #: `_auto_merge` probes with.
@@ -522,6 +525,22 @@ class Generator:
       # rewritten pairs are what it should group (`reassociate`).
       from .reassociate import reassociate
       self._descr_list = reassociate(self._descr_list)
+    #: Copies of batch-constant operators for the readers on the matrix path
+    #: (`operator_copies`): tensors the generated file defines
+    #: (`Residence.MODULE`), named after their numbers once the build has
+    #: ordered them (`_settle_module_operands`).  Ahead of the merge: a run
+    #: over copies reads them through a table the kernel builds from their
+    #: bindings (`TableForm`), and its members take the order its one body
+    #: is offered, as members always do.
+    self._module_operands: List = []
+    self._module_tables: Dict[str, tuple] = {}
+    self._module_names: Dict[str, str] = {}
+    if options.mma_operator_copies and _copies_apply(context):
+      from .operator_copies import copy_operators
+      from tensorforge.backend.instructions.compute.primitives import nvidia
+      self._descr_list, self._module_operands = copy_operators(
+          self._descr_list, nvidia.min_depth(context),
+          prepared=bool(options.prepare_operands))
     if options.merge_variants is True or merge_within is not None:
       # Before the operands are named, which is the first thing that reads the
       # list -- a stand-in arriving after it has no name and then no symbol,
@@ -535,22 +554,6 @@ class Generator:
                               min_count=options.merge_min_count,
                               max_arity=options.merge_max_arity, **budget)
       self._emit_loops = True
-
-    #: Copies of batch-constant operators for the readers on the matrix path
-    #: (`operator_copies`): tensors the generated file defines
-    #: (`Residence.MODULE`), named after their numbers once the build has
-    #: ordered them (`_settle_module_operands`).  After the merge, which
-    #: leaves a run's members as they are: a run reads them through a table
-    #: of addresses the host fills, and the host has none for a copy.
-    self._module_operands: List = []
-    self._module_tables: Dict[str, tuple] = {}
-    self._module_names: Dict[str, str] = {}
-    if options.mma_operator_copies and _copies_apply(context):
-      from .operator_copies import copy_operators
-      from tensorforge.backend.instructions.compute.primitives import nvidia
-      self._descr_list, self._module_operands = copy_operators(
-          self._descr_list, nvidia.min_depth(context),
-          prepared=bool(options.prepare_operands))
 
     self._name_operands(self._descr_list)
 
@@ -941,6 +944,12 @@ class Generator:
         raise InternalError(
             f'{tensor.alias}: a copy the file defines has no numbers to '
             f'define it with')
+      if tensor.storage_order is None:
+        # A copy no order was laid over is read as the operator is, and the
+        # matrix path reads whole tiles of rows: past the box's last column
+        # by up to a tile's rows -- in the caller's buffer a harmless read of
+        # rows nobody stores, past the end of a table an index out of range.
+        values = tuple(values) + (0.0,) * Generator.COPY_TAIL
       datatype = tensor.datatype or self._context.fp_type
       name = _module_table_name('op', datatype, values)
       # The tensor keeps the placeholder: a build again names its symbols
@@ -950,11 +959,13 @@ class Generator:
 
   def _name_module_operands(self, text: str) -> str:
     """`text` with each copy's placeholder spelled as its name
-    (`_settle_module_operands`), a binding's `glb_` prefix included."""
+    (`_settle_module_operands`) where it names the table.  Not in a
+    binding's name (`glb_...`): two copies with the same numbers are one
+    table, and their bindings two declarations, which have to differ."""
     names = self._module_names
     if not names:
       return text
-    return re.sub(rf'{Generator.COPY_PLACEHOLDER}\d+\b',
+    return re.sub(rf'(?<!\w){Generator.COPY_PLACEHOLDER}\d+\b',
                   lambda m: names.get(m.group(0), m.group(0)), text)
 
   def _stored_operands(self) -> Dict[int, tuple]:

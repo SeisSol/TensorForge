@@ -126,19 +126,22 @@ def copy_operators(descrs: List, depth: int, prepared: bool = False
     offered or not taken: over a window narrower than the operator, which is
     ordered only where the caller asks by name (`_offer_order`), or where
     the caller prepares no operands (`Options.prepare_operands`) and would
-    not lay one out.  A run's members stay: `roll` has made them a run
-    before, and the table that selects one per iteration is filled by the
-    host.
+    not lay one out.  Ahead of `roll`: a run then forms over the copies, its
+    members all ordered alike for its one body, and selected per iteration
+    by a table the kernel builds from their bindings.
 
-    One copy per reader window: two readers of the same window share one, as
-    they would share one order."""
+    One copy per reader, even where two read the same window: a copy read
+    twice is offered no order (`_offer_order`), and read in no order the
+    matrix path takes whole tiles of its rows, past the end of a table that
+    holds the box.  Two copies of one window come out as one table, as two of
+    the same numbers do (`Generator._settle_module_operands`)."""
     readers: Dict[int, set] = {}
     for n, descr in enumerate(descrs):
         for view in _views(descr):
             tensor = getattr(view, 'tensor', None)
             if tensor is not None:
                 readers.setdefault(id(tensor), set()).add(n)
-    copies: Dict[Tuple, object] = {}
+    copies: Dict[int, object] = {}
     out = []
     for n, descr in enumerate(descrs):
         ops = getattr(descr, 'ops', None)
@@ -153,19 +156,15 @@ def copy_operators(descrs: List, depth: int, prepared: bool = False
                 or not _takes_the_matrix_path(descr, view, depth)):
             out.append(descr)
             continue
-        key = (id(tensor), tuple(view.bbox.lower()), tuple(view.bbox.upper()),
-               tuple(getattr(view, 'offset', ())))
-        clone = copies.get(key)
-        if clone is None:
-            clone = copy.copy(tensor)
-            clone.residence = Residence.MODULE
-            clone.alias = f'{tensor.alias}@{len(copies)}'
-            # Stored as a tensor nobody has built for yet: the original may
-            # carry what an earlier build of the caller's list made of it.
-            for field, value in _UNSTORED.items():
-                setattr(clone, field, value)
-            clone._nonzero_pattern = None
-            copies[key] = clone
+        clone = copy.copy(tensor)
+        clone.residence = Residence.MODULE
+        clone.alias = f'{tensor.alias}@{len(copies)}'
+        # Stored as a tensor nobody has built for yet: the original may
+        # carry what an earlier build of the caller's list made of it.
+        for field, value in _UNSTORED.items():
+            setattr(clone, field, value)
+        clone._nonzero_pattern = None
+        copies[n] = clone
         new_view = copy.copy(view)
         new_view.tensor = clone
         new_descr = copy.copy(descr)
