@@ -1449,6 +1449,59 @@ def test_the_next_trips_level_is_fetched_behind_this_trips_write_of_it():
         assert min(fetched) > written, (early, min(fetched), written)
 
 
+def _chain_written_last(steps=3):
+    """`X = A L(k)` and `L(k + 1) = X C(k)`: the trip's last statement
+    writes the level the next trip reads first, as SeisSol's time derivative
+    writes its next order behind every product of the trip."""
+    out = []
+    for k in range(steps):
+        out.append(gemm(make('A', [24, 24]), make(f'L{k}', [24, 5]),
+                        make('X', [24, 5])))
+        out.append(gemm(make('X', [24, 5]), make(f'C{k}', [5, 5]),
+                        make(f'L{k + 1}', [24, 5])))
+    return out
+
+
+@pytest.mark.parametrize('lanes, options', [
+    (32, {'tensor_cores': True}), (64, {}), (64, {'tensor_cores': True})])
+def test_a_barrier_stands_between_the_trips_write_and_the_next_trips_fetch(
+        lanes, options):
+    """The store of a level is the lane's that holds its row, the fetch of
+    it for the next trip the lane's whose copy the row falls in: program
+    order says nothing between the two, a barrier of the trip does
+    (`pir.barriers`).  Right behind the store, SeisSol's viscoelastic
+    derivative at 128 lanes on the matrix path fetched its next order stale,
+    a column at a time -- the warps past the rows have nothing to store and
+    reach the copy first."""
+    from tensorforge.backend.pir.core import AliasClass, MemSpace, Op
+    from tensorforge.backend.pir.core import walk_stmts
+    gen = _merged_build(roll(_chain_written_last()), arch='sm_90',
+                        enable_wrap_loads=True, lanes_per_mult=lanes,
+                        **options)
+    loop, body = _run_body(gen)
+    ahead = {s.target[0].id for s in body if s.target
+             and str(s.attr('extern') or '').startswith('wrap_glb')}
+    top = list(loop.regions[0].body)
+
+    def holds(s, test):
+        return any(test(x) for x in walk_stmts((s,)))
+
+    def writes_family(x):
+        return any(isinstance(a.base, AliasClass) and a.writes
+                   and a.space is MemSpace.GLOBAL for a in x.accesses)
+
+    def reads_ahead(x):
+        return (any(v.id in ahead for v in x.operands())
+                and any(isinstance(a.base, AliasClass) and not a.writes
+                        for a in x.accesses))
+    written = max(i for i, s in enumerate(top) if holds(s, writes_family))
+    fetched = [i for i, s in enumerate(top) if holds(s, reads_ahead)]
+    assert fetched, 'nothing read through the next trip\'s pointer'
+    between = [s for s in top[written + 1:min(fetched)]
+               if s.op is Op.BARRIER]
+    assert between, (written, min(fetched))
+
+
 def test_a_window_the_loop_fills_is_declared_ahead_of_it():
     """A barrier in the run -- a multiplication wider than a warp meets on one
     of its own -- keeps the staging of what every iteration shares in the

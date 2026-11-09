@@ -38,6 +38,15 @@ they assume the worst about lanes -- what one lane writes, another reads:
   read back by all of them (`handoff`).  The barrier then also owes the
   compiler a fence where the rendezvous costs no instruction
   (`Lexic.handoff_fence`), which the emitter supplies for a barrier marked so.
+* **a merged run's level, read after it was written**: the members of a
+  run's tables in global memory (`AliasClass`), which one trip writes and the
+  next reads -- a chain's next level.  A row is stored by the lane that holds
+  it and read by whichever lane's copy it falls in; read after write only, as
+  a handoff, since a read of one level and a write of the next are different
+  members of the one family.  Fetched for the next trip behind the write
+  (`pir.wrap`) and nothing between, SeisSol's viscoelastic derivative at 128
+  lanes on the matrix path read its next order stale a column at a time: the
+  warps past the rows have nothing to store and reach the copy first.
 
 A barrier goes in front of the first statement that needs it, at the
 innermost level of the structure where every thread it waits for arrives:
@@ -63,8 +72,8 @@ from dataclasses import dataclass, replace
 from typing import (Any, Callable, Dict, FrozenSet, List, Mapping, Optional,
                     Sequence, Tuple)
 
-from .core import (BufferType, Effect, MemSpace, Op, Stmt, Uniformity, Value,
-                   walk_stmts)
+from .core import (AliasClass, BufferType, Effect, MemSpace, Op, Stmt,
+                   Uniformity, Value, walk_stmts)
 
 #: The two kinds of shared memory a window is part of: one copy per
 #: multiplication, and one for the whole block.
@@ -73,6 +82,10 @@ BLOCK = 'block'
 
 #: Where nothing says: anywhere, in any arena.
 _ANYWHERE = (None, None, None)
+
+#: Where a merged run's level lies: global memory, apart from every window
+#: of shared memory, and read after write alone.
+_LEVEL = ('level', None, None)
 
 #: The buffer a statement touches that does not say which: any of them.
 _OPAQUE = ('opaque',)
@@ -280,10 +293,14 @@ class _Pass:
             if a.base is None:
                 continue
             key = self.key(a.base)
-            if a.space != MemSpace.SHARED and key not in self.handoff:
+            if (a.space == MemSpace.GLOBAL and isinstance(a.base, AliasClass)
+                    and key not in self.handoff):
+                entry = (key, _LEVEL, MULT)
+            elif a.space != MemSpace.SHARED and key not in self.handoff:
                 continue
-            ext = self.extent(a.base)
-            entry = (key, ext, ext[0] or MULT)
+            else:
+                ext = self.extent(a.base)
+                entry = (key, ext, ext[0] or MULT)
             if int(a.kind) & _M_WRITES:
                 writes.append(entry)
             elif int(a.kind) & _M_READ:
@@ -310,6 +327,9 @@ class _Pass:
         if s.op == Op.WAIT:
             return needed, handoff, block
         for key, ext, root in writes:
+            if ext is _LEVEL:
+                # A level is fenced against its reads alone.
+                continue
             if key == _OPAQUE:
                 cleared = list(state.cleared.values())
             else:
@@ -360,9 +380,12 @@ class _Pass:
             writes = []
         out = state.copy()
         for key, ext, root in writes:
-            out.writes[key] = (key in self.handoff, root)
+            # A level's rows go from the lane that stores them to others: a
+            # handoff, which a rendezvous spelled as nothing still fences.
+            out.writes[key] = (key in self.handoff or ext is _LEVEL, root)
         for key, ext, root in reads:
-            out.reads[key] = ext
+            if ext is not _LEVEL:
+                out.reads[key] = ext
         return out
 
     def barrier(self, handoff: bool, block: bool, state: _State):
