@@ -1633,14 +1633,23 @@ def matmul(writer, ops, ctx, span):
     # bank width.  Padding moves the collision, transposing moves it to the
     # store; permuting each row costs nothing and clears both.  Measured over
     # the emitted addresses: 1-way, against 2-way unpermuted.
-    Bshm = writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k + room,),
+    #
+    # Staged once for every step of a product, before its rows, where the
+    # caller asks (`Options.mma_stage_b_once`): a step's tile `bstep` elements
+    # after the one before.  Otherwise once per step and block of rows, each
+    # between two barriers of the warp.
+    once = (not bdirect and chain is None and ctx is not None
+            and bool(ctx.get_user_options().mma_stage_b_once))
+    bstep = bregs * wave + tailed * ntail * atom.k
+    nsteps = sum(len(range(0, min(wave, K - k), atom.k))
+                 for k in range(0, K, wave)) if once else 1
+    Bshm = writer.alloc(atom.d, (bstep * nsteps + room,),
                         MemSpace.SHARED, hint='btile',
                         swizzle=XorSwizzle(atom.k))
     # The lower TF32 halves, where `B` is staged split (`BSPLIT_STAGED`): the
     # same layout, so one address reads both.
-    BshmLo = (writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
-                                    + room,), MemSpace.SHARED, hint='btilelo',
-                           swizzle=XorSwizzle(atom.k))
+    BshmLo = (writer.alloc(atom.d, (bstep * nsteps + room,), MemSpace.SHARED,
+                           hint='btilelo', swizzle=XorSwizzle(atom.k))
               if bsplit else None)
     # One tile with the parts *adjacent*, not one tile per part.
     #
@@ -1767,6 +1776,33 @@ def matmul(writer, ops, ctx, span):
                         h, l = tfconvert(writer, [Breg[k // threads, jj]])[0]
                         BregHi[k // threads, jj] = _as_float(writer, h)
                         BregLo[k // threads, jj] = _as_float(writer, l)
+            if once:
+                # Every step's tile at once, for every block of rows: two
+                # barriers a product rather than two a step and block.
+                writer.barrier('wave', **sync)
+                writer.mark('defines', *[t for t in (Bshm, BshmLo)
+                                         if t is not None])
+                for s0, (k0, kk0) in enumerate(steps):
+                    for s_, lo, cnt, sub in _lanes_of(k0 + kk0 + kx, atom.k,
+                                                      threads):
+                        with threadrange(lo, cnt):
+                            for jj in range(0, ncols):
+                                to = _index(writer, sub=sub, mod=atom.k,
+                                            add=jj * atom.k + s0 * bstep)
+                                src = BregHi if bsplit else Breg
+                                got = src.get((s_, jj))
+                                if got is None:
+                                    got = writer.declare(ScalarType(atom.d),
+                                                         hint='bs')
+                                writer.store(Bshm, got, to, shift=at(None, bpad))
+                                if bsplit:
+                                    low = BregLo.get((s_, jj))
+                                    if low is None:
+                                        low = writer.declare(ScalarType(atom.d),
+                                                             hint='bs')
+                                    writer.store(BshmLo, low, to,
+                                                 shift=at(None, bpad))
+                writer.barrier('wave', **sync)
             for i in range(0, M, wave):
                 with scope():
                     # One value per accumulator slot rather than a `[cregs][n]`
@@ -1800,7 +1836,10 @@ def matmul(writer, ops, ctx, span):
                     Tvals = {}
                     for s, (k, kk) in enumerate(steps):
                         trueK = kk + kx
-                        if not bdirect:
+                        # Where every step was staged before the rows, step
+                        # `s`'s tile is `s * bstep` in.
+                        boff = s * bstep if once else 0
+                        if not bdirect and not once:
                             # Read once per lane at one
                             # distribution and handed to the lanes
                             # that want it at another.  Where the
@@ -1873,9 +1912,9 @@ def matmul(writer, ops, ctx, span):
                                              add=jj * ntile,
                                              scale=atom.k, lane=lane)
                                 addr = writer.op('add', INDEX, col, row, hint='a')
-                                if kkk * ktile:
+                                if kkk * ktile + boff:
                                     addr = writer.op('add', INDEX, addr,
-                                                     kkk * ktile, hint='a')
+                                                     kkk * ktile + boff, hint='a')
                                 # Round `p` reads multiplication
                                 # `p`'s tile.
                                 for p in range(mults):
@@ -1901,7 +1940,8 @@ def matmul(writer, ops, ctx, span):
                                             N, K + kx, atom, threads)
                                         continue
                                     at_ = _index(writer, mod=ktile, lane=lane,
-                                                 add=kf * ktile + (atom.n + ci) * atom.k)
+                                                 add=kf * ktile + (atom.n + ci) * atom.k
+                                                 + boff)
                                     btail[p, kf, ci] = writer.load(
                                         Bshm, at_, hint='b', shift=at(p, bpad))
                                     if bsplit:
