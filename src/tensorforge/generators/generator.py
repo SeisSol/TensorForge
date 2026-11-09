@@ -401,6 +401,9 @@ class Generator:
   #: Zeros behind a copy no order was laid over (`_settle_module_operands`):
   #: the rows a matrix tile reads past the box, at the widest lane span.
   COPY_TAIL = 128
+  #: Bytes an operator copy's table is aligned to: what `cudaMalloc` and
+  #: `hipMalloc` give the buffer it stands in for.
+  COPY_ALIGN = 256
 
   #: `merge_within` for a build that merges every run it can: what
   #: `_auto_merge` probes with.
@@ -3674,8 +3677,11 @@ class Generator:
       numbers = (list(values) if datatype is Datatype.I32
                  else [datatype.literal(v) for v in values])
       guard = f'TENSORFORGE_TABLE_{name.upper()}'
-      # An operator copy is read by fragments, sixteen bytes a lane at once.
-      align = 16 if name in copies else None
+      # An operator copy is read by fragments, sixteen bytes a lane at once
+      # and 512 a warp, adjacent: aligned to less than a cache line, every
+      # such read spans one sector more than it fills -- as a buffer from the
+      # allocator, at 256, does not (`COPY_ALIGN`).
+      align = Generator.COPY_ALIGN if name in copies else None
       definitions.append(
           f'#ifndef {guard}\n#define {guard}\n'
           f'{lexic.module_constant(str(datatype), name, numbers, align=align)}\n#endif')

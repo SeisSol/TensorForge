@@ -102,7 +102,7 @@ def _generate(descrs, **opts):
 
 
 def _tables(src):
-  return re.findall(r'__device__ __align__\(16\) const double (tf_op_\w+)\[(\d+)\]',
+  return re.findall(r'__device__ __align__\(256\) const double (tf_op_\w+)\[(\d+)\]',
                     src)
 
 
