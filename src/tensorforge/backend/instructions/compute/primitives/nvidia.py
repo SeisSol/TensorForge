@@ -473,6 +473,9 @@ def fragment_order(shape, atom, threads=32, chunk=None, window=None):
     if aregs % chunk:
         raise InternalError(f'{aregs} fragments a lane do not come in chunks '
                             f'of {chunk}')
+    if threads > WAVE:
+        return _wide_fragment_order(total_rows, total_cols, r0, rows, c0, cols,
+                                    atom, threads, chunk, aregs)
     cell = _fragment_cells(atom, threads)
     mstarts = tile_starts(rows, threads, atom.m)
     kstarts = tile_starts(cols, threads, atom.k)
@@ -506,6 +509,44 @@ def fragment_order(shape, atom, threads=32, chunk=None, window=None):
     return tuple(order)
 
 
+def _wide_fragment_order(total_rows, total_cols, r0, rows, c0, cols, atom,
+                         threads, chunk, aregs):
+    """`fragment_order` for a multiplication over several warps.
+
+    Its rows lie a block of 32 to a warp: slot `s` of lane `32 w + t` is row
+    `s * threads + 32 w + t`, so the block of warp `w` in slot `s` starts at
+    `s * threads + 32 w`.  The warps run the same instructions on their own
+    blocks, and one step's fragments are read over all lanes at once: tile
+    `p` of a block, step `kt`, then chunk by chunk the lanes of every warp --
+    warp `w`'s 32 holding its own block's tile -- each lane's fragments
+    adjacent.  So a lane's read is slot `tbase + chunk * lane`, with `lane`
+    the multiplication's, as `A_slot` names it, and the emitter's tile is
+    `(s * tiles + p) * ktiles + kt` (`matmul`).  Rows past the window, and
+    the blocks of a last slot no warp fills, are padding."""
+    warps = threads // WAVE
+    cell = _fragment_cells(atom, WAVE)
+    tiles = WAVE // atom.m
+    slots = -(-rows // threads)
+    kstarts = tile_starts(cols, WAVE, atom.k)
+    order = []
+    for slot in range(slots):
+        for p in range(tiles):
+            for k0 in kstarts:
+                for c in range(0, aregs, chunk):
+                    for w in range(warps):
+                        for lane in range(WAVE):
+                            for f in range(c, c + chunk):
+                                dm, dk = cell[(f, lane)]
+                                row = slot * threads + WAVE * w + p * atom.m + dm
+                                col = k0 + dk
+                                inside = (row < rows and col < cols
+                                          and r0 + row < total_rows
+                                          and c0 + col < total_cols)
+                                order.append((r0 + row) + total_rows * (c0 + col)
+                                             if inside else -1)
+    return tuple(order)
+
+
 def order_before_packing(shape, ctx):
     """True: an operand `mma.sync` reads is stored in its fragment order, the
     window of it an operation reads included (`MatrixPaths.order_before_packing`).
@@ -534,7 +575,12 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     for.  A caller asks before it decides to prepare an operand, so a refusal
     has to be an answer rather than an exception.
     """
-    if threads > WAVE or WAVE % threads or len(shape) != 2:
+    if len(shape) != 2:
+        return None
+    if threads > WAVE:
+        if threads % WAVE or threads // WAVE not in WIDE_WARPS:
+            return None
+    elif WAVE % threads:
         return None
     # The same `sm` the emission will select with: an order laid out against
     # one table and read by an entry from another is a permutation nothing
@@ -557,8 +603,10 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                 or c0 + depth > int(shape[1])):
             return None
         window = ((r0, int(rows) if rows else int(lead)), (c0, int(depth)))
-    order = fragment_order(shape, atom, WAVE, chunk=a_chunk(atom, ctx),
-                           window=window)
+    # Over all lanes where a multiplication spans several warps: the warps'
+    # tiles of one step side by side (`fragment_order`).
+    order = fragment_order(shape, atom, max(WAVE, threads),
+                           chunk=a_chunk(atom, ctx), window=window)
     if atom.mode == MMAMode.TF32 and presplit(ctx):
         # Stored as its two TF32 halves, planar: the three products read the
         # halves as they lie (`_as_tf32`) instead of splitting every fragment
@@ -803,6 +851,11 @@ PREFETCH = 1
 #: round of the product per multiplication.
 WAVE = 32
 
+#: Warps a multiplication may span on the matrix path: its rows are spread
+#: over them a block of 32 at a time, and each warp runs the instructions for
+#: the blocks it holds (`matmul`, `wide`).
+WIDE_WARPS = (2, 4)
+
 #: One pass over the shared-memory banks: 32 of four bytes.
 BANK_ROW_BYTES = 128
 
@@ -855,11 +908,12 @@ def supports(threads, dtype, sparse, depth=0, min_depth=MIN_DEPTH) -> bool:
     perfectly well, so the preconditions have to be a question the caller can
     ask, not a crash the caller cannot avoid.
 
-    * ``threads`` divides the wave.  The instruction is the warp's; a
-      multiplication narrower than it shares the warp with its neighbors,
-      and `matmul` runs one round of fragments per multiplication, wiring
-      each one's `B` in and its `D` out through its own shared region.
-      Wider ones are a different instruction, which does not exist here yet.
+    * ``threads`` divides the wave, or is two or four of it (`WIDE_WARPS`).
+      The instruction is the warp's; a multiplication narrower than it shares
+      the warp with its neighbors, and `matmul` runs one round of fragments
+      per multiplication, wiring each one's `B` in and its `D` out through its
+      own shared region.  A wider one spreads its rows over its warps, each
+      running the instructions for its own (`matmul`, `wide`).
     * ``not sparse``.  `matmul` declines these by returning `False` as well;
       asked here, a sparse operand never reaches a plan that names a matrix
       arrangement it would only decline.
@@ -868,7 +922,9 @@ def supports(threads, dtype, sparse, depth=0, min_depth=MIN_DEPTH) -> bool:
       overrides with `Options.mma_min_depth`.  `depth == 0` is "the caller
       does not know", which is not the same as "shallow" and is admitted.
     """
-    return (threads <= WAVE and WAVE % threads == 0
+    narrow = threads <= WAVE and WAVE % threads == 0
+    wide = threads % WAVE == 0 and threads // WAVE in WIDE_WARPS
+    return ((narrow or wide)
             and dtype in (Datatype.F32, Datatype.F64)
             and not sparse and (depth == 0 or depth >= min_depth))
 
@@ -952,7 +1008,10 @@ def strategies(shape, ctx):
     """
     if not takes(lead_route(shape)):
         return frozenset()
-    if shape.threads < WAVE and not shape.a_uniform:
+    if shape.threads != WAVE and not shape.a_uniform:
+        # Wider, too: its warps read `A` in the order the operand is stored in
+        # (`fragment_order` over all of its lanes), and only a batch-constant
+        # operand has one.
         return frozenset()
     if (enabled(ctx)
             and supports(shape.threads, shape.accumulator, shape.sparse,
@@ -1436,10 +1495,30 @@ def matmul(writer, ops, ctx, span):
     # the multiplication's (`threadIdx.x`); the fragment reads and the `D`
     # stores are the warp's (`lane`).
     wave = WAVE
-    mults = wave // threads
+    # Wider than the warp: the multiplication's rows lie a block of 32 to a
+    # warp, and every warp runs the instructions for its own blocks.  `A` comes
+    # in the order it is stored in, over all lanes (`_wide_fragment_order`);
+    # `B` is the multiplication's, staged once for all of its warps behind a
+    # barrier of the multiplication; `D` goes back through a tile of each warp.
+    wide = threads > wave
+    mults = 1 if wide else wave // threads
+    # The lanes a block of rows spans in the order `A` is stored in.
+    span_lanes = threads if wide else wave
     # Lead slots per lane.  A wave of rows spans `mults` of them, and one past
     # the operand's last holds no rows at all.
     nslots = -(-M // threads)
+
+    def lanerange(start, size):
+        """`threadrange` by the lane in the warp, for a multiplication whose
+        warps take their own rows back (`wide`)."""
+        cond = None
+        if start > 0:
+            cond = writer.op('ge', BOOL, lane, start, hint='g')
+        if start + size < wave:
+            upper = writer.op('lt', BOOL, lane, start + size, hint='g')
+            cond = upper if cond is None else writer.op('and', BOOL, cond,
+                                                        upper, hint='g')
+        return writer.if_(cond) if cond is not None else writer.AnonymousScope()
 
     def threadrange(start, size):
         """The lanes that take part in one staging step.
@@ -1478,7 +1557,13 @@ def matmul(writer, ops, ctx, span):
     Breg = {}
 
     # `supports()` is the gate; this is the guard for a direct caller.
-    assert threads <= wave and wave % threads == 0
+    assert ((threads <= wave and wave % threads == 0)
+            or (threads % wave == 0 and threads // wave in WIDE_WARPS))
+    if wide and (ops.A_slot is None or ops.chain is not None
+                 or ops.lead_width != 1):
+        # Declined, and the nest computes it: the warps name their tiles in
+        # the stored order and nowhere else.
+        return False
     # A chain's sum stays in the accumulators from its first product to its
     # last (`MatmulOperands.chain`): one multiplication per warp, whose
     # lanes are the D layout's, one row per lane.
@@ -1487,12 +1572,26 @@ def matmul(writer, ops, ctx, span):
         raise InternalError(
             f'a chain of products over {threads} lanes at lead width '
             f'{ops.lead_width}: the D layout is a warp\'s, one row per lane')
-    lane, mine, region = _warp_group(writer, ops, threads, mults)
+    if wide:
+        tid = writer.thread_id('x')
+        lane = writer.op('rem', INDEX, tid, wave, hint='wl')
+        warp = writer.op('div', INDEX, tid, wave, hint='w')
+        mine, region = None, (lambda p: None)
+    else:
+        lane, mine, region = _warp_group(writer, ops, threads, mults)
     # A barrier here meets the warp.  Where the warp holds several
     # multiplications all of them have to arrive, and the count is what says
     # so to `barrier` -- as `convergence_scope` says it to the loop around.
+    # Where the multiplication holds several warps, it meets all of them: they
+    # share the `B` tile, and the epilogue's tiles lie over it.
     sync = {} if mults == 1 else {'threads': threads}
     shift = {} if mults == 1 else {'shift': mine}
+
+    def bar():
+        if wide:
+            writer.barrier('mult', threads=threads)
+        else:
+            writer.barrier('wave', **sync)
 
     ntile = 8
     mtile = 8
@@ -1532,7 +1631,7 @@ def matmul(writer, ops, ctx, span):
     # a path that staged half the fragments would still pay for it.
     # Only on a warp of its own: a neighbor's `B` lies behind a pointer this
     # lane does not hold, so it comes through the neighbor's tile.
-    bdirect = (mults == 1
+    bdirect = (mults == 1 and not wide
                and ops.B_frag is not None and ops.B_direct is not None
                and ops.B_direct(ktile, ntile) and atom.n == ntile)
     AregParts = [Areg] + [{} for _ in range(1, aparts)]
@@ -1687,10 +1786,21 @@ def matmul(writer, ops, ctx, span):
     # the elements of one pass over the banks, which for FP32 is the wave.
     #
     # A chain has none: its sum stays where the instruction leaves it.
+    #
+    # One tile a warp where the multiplication spans several: each takes its
+    # own rows back, `cstep` elements after the warp before it.
+    cstep = -(-(tailbase + tailed * ntail * tailcol) // 32) * 32
     Cshm = (None if chain is not None else
-            writer.alloc(atom.d, (tailbase + tailed * ntail * tailcol + room,),
+            writer.alloc(atom.d, ((cstep * (threads // wave) if wide else
+                                   tailbase + tailed * ntail * tailcol) + room,),
                          MemSpace.SHARED, hint='ctile',
                          swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size())))
+    cwarp = (writer.op('mul', INDEX, warp, cstep, hint='r') if wide and Cshm
+             is not None else None)
+
+    def cshift(p):
+        """The shift to round `p`'s epilogue tile, or the warp's own."""
+        return cwarp if wide else at(p, cpad)
 
     # Every step of the contraction, per block of rows.
     steps = [(k, kk) for k in range(0, K, wave)
@@ -1705,15 +1815,18 @@ def matmul(writer, ops, ctx, span):
         its lanes (`shift`)."""
         out = {}
         chunk = a_chunk(atom, ctx)
-        for ii in range(0, min(wave, M - i), atom.m):
-            mt = (i + ii) // atom.m
+        for ii in (range(0, wave, atom.m) if wide else
+                   range(0, min(wave, M - i), atom.m)):
+            # The block's tile, as the order counts tiles: over the lanes of a
+            # block of rows (`span_lanes`), the warps' tiles side by side.
+            mt = (i // span_lanes) * (wave // atom.m) + ii // atom.m
             kt = (k + kk) // atom.k
-            tbase = (mt * ktiles + kt) * (aregs * wave)
+            tbase = (mt * ktiles + kt) * (aregs * span_lanes)
             # One access per chunk of `chunk` fragments (`a_chunk`): the whole
             # tile at once where the order is lane by lane per tile.
             chunks = []
             for c in range(0, aregs, chunk):
-                got = ops.A_slot(writer, tbase + c * wave, parts=aparts,
+                got = ops.A_slot(writer, tbase + c * span_lanes, parts=aparts,
                                  width=chunk, **shift)
                 chunks.append(got if aparts > 1 else (got,))
             out[ii] = {None: [[(chunks[f // chunk][pt] if chunk == 1 else
@@ -1731,7 +1844,7 @@ def matmul(writer, ops, ctx, span):
     # scopes around both become plain statements to keep them visible there
     # (the names are the IR's and do not collide without them).
     ahead = prefetch(ctx) if aordered else 0
-    sequence = [(i, k, kk) for _ in jstops for i in range(0, M, wave)
+    sequence = [(i, k, kk) for _ in jstops for i in range(0, M, span_lanes)
                 for k, kk in steps]
     fetched, issued = {}, 0
     at_step = 0
@@ -1766,8 +1879,23 @@ def matmul(writer, ops, ctx, span):
                 # `var is None` asks the accessor for the value rather than a
                 # name to write into.  The padding slots are a `declare`:
                 # nothing loads them, and the MMA reads a zero.
+                # Over several warps, the lanes past the contraction's rows
+                # read nothing: a slot of 64 or 128 rows reaches far past a
+                # `B` of 33 staged in shared memory -- out of the arena, and
+                # what is there, a NaN times `A`'s padding zero, is a NaN.
+                past = wide and k + threads > K + kx
                 for jj in range(0, min(ncols, N - j)):
-                    Breg[k // threads, jj] = B(writer, None, j + jj, k // threads)
+                    if past:
+                        held = writer.declare(ScalarType(atom.d), hint='bs')
+                        within = writer.op('lt', BOOL, writer.thread_id('x'),
+                                           K + kx - k, hint='g')
+                        with writer.if_(within):
+                            writer.assign(held, B(writer, None, j + jj,
+                                                  k // threads))
+                        Breg[k // threads, jj] = held
+                    else:
+                        Breg[k // threads, jj] = B(writer, None, j + jj,
+                                                   k // threads)
                 for jj in range(min(ncols, N - j), ncols):
                     Breg[k // threads, jj] = writer.declare(ScalarType(atom.d),
                                                             hint='bs')
@@ -1779,7 +1907,7 @@ def matmul(writer, ops, ctx, span):
             if once:
                 # Every step's tile at once, for every block of rows: two
                 # barriers a product rather than two a step and block.
-                writer.barrier('wave', **sync)
+                bar()
                 writer.mark('defines', *[t for t in (Bshm, BshmLo)
                                          if t is not None])
                 for s0, (k0, kk0) in enumerate(steps):
@@ -1802,8 +1930,8 @@ def matmul(writer, ops, ctx, span):
                                                              hint='bs')
                                     writer.store(BshmLo, low, to,
                                                  shift=at(None, bpad))
-                writer.barrier('wave', **sync)
-            for i in range(0, M, wave):
+                bar()
+            for i in range(0, M, span_lanes):
                 with scope():
                     # One value per accumulator slot rather than a `[cregs][n]`
                     # array named by `varalloc`: such an array is a C++
@@ -1812,7 +1940,11 @@ def matmul(writer, ops, ctx, span):
                     # would have to stay raw text.  Each slot has a definition
                     # point and a use chain.  One set per round: round `p`
                     # accumulates multiplication `p`'s rows.
-                    tiles = list(range(0, min(wave, M - i), atom.m))
+                    # A warp of a wide multiplication runs every tile of its
+                    # block: the warps run one body, and the order holds
+                    # zeros for the rows a block does not have.
+                    tiles = list(range(0, wave, atom.m) if wide else
+                                 range(0, min(wave, M - i), atom.m))
                     # Where the step has too few chains for its HMMAs to
                     # issue back to back, every product gets an accumulator
                     # of its own (`CHAINS_MIN`).  `Cvals` is the first.
@@ -1849,7 +1981,7 @@ def matmul(writer, ops, ctx, span):
                             # rows in its own region, one run per
                             # slot the step spans -- the remainder's
                             # columns with them.
-                            writer.barrier('wave', **sync)
+                            bar()
                             writer.mark('defines', *[t for t in (Bshm, BshmLo)
                                                      if t is not None])
 
@@ -1879,7 +2011,7 @@ def matmul(writer, ops, ctx, span):
                                             writer.store(BshmLo,
                                                          breg(BregLo, s_, jj), to,
                                                          shift=at(None, bpad))
-                            writer.barrier('wave', **sync)
+                            bar()
 
                         for jj in range(0, nregs):
                             for kkk in range(0, kregs):
@@ -2015,7 +2147,7 @@ def matmul(writer, ops, ctx, span):
                             # that the products can be issued across tiles.
                             frags_by_ii = {}
                             for ii in tiles:
-                                writer.barrier('wave', **sync)
+                                bar()
                                 writer.mark('defines', Ashm)
                                 for q, lo, cnt, sub in _lanes_of(ii, atom.m, threads):
                                     with threadrange(lo, cnt):
@@ -2045,18 +2177,18 @@ def matmul(writer, ops, ctx, span):
                                             for n in range(ktile):
                                                 addr = base if n == 0 else writer.op(
                                                     'add', INDEX, base, n, hint='a')
-                                                wide = (addr if aparts == 1
-                                                        else writer.op('mul', INDEX, addr,
-                                                                       aparts, hint='a'))
+                                                first = (addr if aparts == 1
+                                                         else writer.op('mul', INDEX, addr,
+                                                                        aparts, hint='a'))
                                                 for pt in range(aparts):
-                                                    to = (wide if pt == 0
+                                                    to = (first if pt == 0
                                                           else writer.op('add', INDEX,
-                                                                         wide, pt,
+                                                                         first, pt,
                                                                          hint='a'))
                                                     writer.store(Ashm,
                                                                  AregParts[pt][q, kkk + n],
                                                                  to, shift=at(None, apad))
-                                writer.barrier('wave', **sync)
+                                bar()
 
                                 # Where `A` is the same for every
                                 # multiplication every lane reads
@@ -2105,10 +2237,16 @@ def matmul(writer, ops, ctx, span):
                         # for them.  Their fragments are still read -- a lane's
                         # load serves every tile of its slot -- so what goes is
                         # the instruction, and with it the remainder's FMAs.
+                        # Over several warps a tile is the same instruction
+                        # for all of them, each on its own block's rows: it
+                        # goes where it is zero in every one.
                         live = [ii for ii in tiles
                                 if ops.A_zero is None
-                                or not ops.A_zero(i + ii, i + ii + atom.m,
-                                                  k + kk, k + kk + atom.k)]
+                                or not all(ops.A_zero(i + w * wave + ii,
+                                                      i + w * wave + ii + atom.m,
+                                                      k + kk, k + kk + atom.k)
+                                           for w in range(threads // wave
+                                                          if wide else 1))]
                         prods = {}
                         for ii in live:
                             frags = frags_by_ii[ii]
@@ -2221,7 +2359,7 @@ def matmul(writer, ops, ctx, span):
                     # The first block of the epilogue stores where the steps
                     # read their tiles, wherever the allocator put `C` over
                     # them; every later block is behind the one before it.
-                    writer.barrier('wave', **sync)
+                    bar()
                     for ii in range(0, wave, atom.m):
                         with writer.AnonymousScope():
                             writer.mark('defines', Cshm)
@@ -2237,25 +2375,31 @@ def matmul(writer, ops, ctx, span):
                                 for slot, off in accumulator_slots(atom):
                                     writer.store(Cshm, Cvals[p][slot][ii // atom.m],
                                                  _index(writer, scale=2, add=off, lane=lane),
-                                                 shift=at(p, cpad))
+                                                 shift=cshift(p))
                                 for ci in range(tail if has_tail else 0):
                                     for iii in range(mregs):
                                         writer.store(Cshm, Tvals[p, ii, ci, iii],
                                                      _index(writer, lane=lane,
                                                             add=tailbase + ci * tailcol
                                                             + iii * mtile * ktile),
-                                                     shift=at(p, cpad))
+                                                     shift=cshift(p))
 
-                            writer.barrier('wave', **sync)
-                            for q, lo, cnt, sub in _lanes_of(ii, atom.m, threads):
-                                with threadrange(lo, cnt):
+                            bar()
+                            # A wide multiplication's warps take their rows
+                            # back by the lane in the warp, out of their own
+                            # tile; the block's slot is the multiplication's.
+                            for q, lo, cnt, sub in _lanes_of(
+                                    ii, atom.m, wave if wide else threads):
+                                with (lanerange(lo, cnt) if wide else
+                                      threadrange(lo, cnt)):
                                     for jj in range(0, atom.n):
-                                        idx = (_index(writer, mod=atom.m, scale=atom.n, add=jj)
+                                        idx = (_index(writer, mod=atom.m, scale=atom.n,
+                                                      add=jj, lane=lane if wide else None)
                                                if alone else
                                                _index(writer, sub=sub, mod=atom.m,
                                                       scale=atom.n, add=jj))
                                         _c = writer.load(Cshm, idx, hint='data',
-                                                         shift=at(None, cpad))
+                                                         shift=cshift(None))
                                         writer.assign(Cout[q, jj], _c)
                                     # A row's remainder: the four partials of
                                     # the lanes that shared it, summed.
@@ -2264,13 +2408,14 @@ def matmul(writer, ops, ctx, span):
                                         for tq in range(ktile):
                                             idx = _index(writer, sub=sub, mod=atom.m,
                                                          scale=ktile,
-                                                         add=tailbase + ci * tailcol + tq)
+                                                         add=tailbase + ci * tailcol + tq,
+                                                         lane=lane if wide else None)
                                             v = writer.load(Cshm, idx, hint='data',
-                                                            shift=at(None, cpad))
+                                                            shift=cshift(None))
                                             total = v if total is None else writer.op(
                                                 'add', ScalarType(atom.d), total, v, hint='t')
                                         writer.assign(Cout[q, atom.n + ci], total)
-                            writer.barrier('wave', **sync)
+                            bar()
 
                     for q in range(mults):
                         if i // threads + q >= nslots:

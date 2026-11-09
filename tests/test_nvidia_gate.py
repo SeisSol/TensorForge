@@ -49,10 +49,18 @@ def test_a_width_that_divides_the_wave_is_admitted(threads):
     assert nvidia.supports(threads, ATOM_TYPE, sparse=None)
 
 
-@pytest.mark.parametrize("threads", [3, 12, 24, 48, 64])
+@pytest.mark.parametrize("threads", [64, 128])
+def test_two_or_four_warps_are_admitted(threads):
+    """A multiplication wider than the warp spreads its rows over its warps a
+    block of 32 at a time, and each warp runs the instructions for its own
+    (`WIDE_WARPS`)."""
+    assert nvidia.supports(threads, ATOM_TYPE, sparse=None)
+
+
+@pytest.mark.parametrize("threads", [3, 12, 24, 48, 96, 256])
 def test_any_other_wave_width_is_turned_away(threads):
     """A width that does not divide the warp would split a multiplication
-    across two of them, and one wider than it is a different instruction."""
+    across two of them, and so would one that is not two or four of it."""
     assert not nvidia.supports(threads, ATOM_TYPE, sparse=None)
 
 

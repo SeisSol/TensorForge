@@ -10,6 +10,8 @@ non-GPU pieces (layout + reference) honest.
 
 from __future__ import annotations
 
+import pytest
+
 import numpy as np
 
 from harness.layout import make_batch, zeros_batch
@@ -23,7 +25,13 @@ from tensorforge.reference.descriptors import multilinear_reference
 # ----------------------------------------------------------------------
 
 def test_kernel(case, target, cache_root, tensorforge_include):
-    """Generate, build, run, and numerically validate one case on one target."""
+    """Generate, build, run, and numerically validate one case on one target.
+
+    A case may name the backends it is for (``BACKENDS``): a multiplication
+    over several waves is NVIDIA's matrix path and nothing on AMD computes it."""
+    backends = getattr(case, "BACKENDS", None)
+    if backends and target.backend not in backends:
+        pytest.skip(f"{case.NAME} is for {', '.join(backends)}")
     result = run_case(case, target, cache_root, tensorforge_include)
     assert result.passed, (
         f"{case.NAME} on {target.id} failed: "
