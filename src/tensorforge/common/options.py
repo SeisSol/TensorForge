@@ -1546,6 +1546,18 @@ declare('mma_chunked_order',
             'eight fragments are 64 bytes a lane; a single-precision lane\'s '
             'fragments are one 16-byte chunk already.')
 
+declare('mma_fragment_ld',
+        default=False,
+        env='TF_MMA_FRAGMENT_LD',
+        parse=parse_bool,
+        doc='With `tensor_cores`, give every temporary stored to shared memory '
+            'the smallest leading dimension at or above its rows under which a '
+            'B fragment of the matrix path is read without a bank conflict '
+            '(`store.fragment_ld`): 60 for 56 rows, in either precision, '
+            'where 56 is a two-way conflict on every read.  Not with '
+            '`stage_row_bytes`, which pads the same dimension for wide '
+            'accesses.')
+
 declare('mma_presplit',
         default=False,
         env='TF_MMA_PRESPLIT',
