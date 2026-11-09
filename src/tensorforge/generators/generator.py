@@ -2603,6 +2603,14 @@ class Generator:
     """Whether `preload_globals` may stage this batch-constant operand."""
     if passed_by_value(symbol):
       return False
+    if getattr(symbol.obj, 'residence', None) is Residence.MODULE:
+      # An operator copy (`operator_copies`) is read by one product, a
+      # fragment sixteen bytes a lane at a time, which the caches serve; staged
+      # it takes shared memory for every reader window.  SeisSol's order-8
+      # derivative in single precision has 266 kB of them: staged, the block
+      # held one multiplication at 225 kB and ran 5.4 times as long on GH200
+      # (507 against 94 ns an element); at order 6 in double, 33 against 29.
+      return False
     roles = self._context.get_user_options().preload_roles
     if roles == 'all':
       return True

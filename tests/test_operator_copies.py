@@ -127,3 +127,23 @@ def test_a_copy_is_named_after_its_numbers():
 
 def test_off_by_default():
   assert _tables(_generate(_derivative_like()[1])) == []
+
+
+def test_a_copy_is_not_staged_by_the_preload():
+  """The preload stages batch-constant operators into shared memory once per
+  block; a copy has one reader, which reads it a fragment at a time through
+  the caches.  Staged, SeisSol's order-8 derivative took one multiplication
+  a block at 225 kB and ran 5.4 times as long (GH200)."""
+  _, descrs = _derivative_like()
+  gen = Generator(descrs, Context(
+      arch='sm_90', backend='cuda', fp_type=F64,
+      options=Options(tensor_cores=True, mma_operator_copies=True,
+                      preload_globals=True, preload_partial=True)))
+  with contextlib.redirect_stdout(io.StringIO()):
+    gen.generate()
+  built = gen.built
+  copies = [t for t in built._module_operands]
+  assert copies
+  assert not any(id(t) in built._preloaded for t in copies)
+  # The operator the short product reads is still staged.
+  assert built._preloaded
