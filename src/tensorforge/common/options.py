@@ -1587,6 +1587,21 @@ declare('full_lane_tails',
             'a slice of a larger image (theta) never has its neighboring rows '
             'overwritten.')
 
+declare('lead_straddle',
+        default=False,
+        env='TF_LEAD_STRADDLE',
+        parse=parse_bool,
+        doc='With a lead dimension blocked wider than one element (a lead '
+            'width of 2 or 4), the lane whose vector reaches past the end of a '
+            'multiplication\'s rows computes the whole vector, as a full-lane '
+            'tail does, instead of having its valid components peeled into '
+            'scalar operations -- each a broadcast from the owning lane and a '
+            'store guarded to it, at every step of every column.  Only where the '
+            'accumulator is a register image of exactly the window, and every '
+            'operand read along that dimension has storage for the rounded-up '
+            'end, so that the extra component reads inside its own column and '
+            'is never stored.  An experiment.')
+
 declare('prefetch_data',
         default=False,
         env='TF_PREFETCH_DATA',

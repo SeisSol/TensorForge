@@ -1005,8 +1005,17 @@ class LeadLoop:
     return hi - base, elem_lo
 
   def _full(self, lo) -> bool:
-    """Is this a tail the caller let compute on every lane?"""
-    return self.full_lane and not lo and self.width == 1
+    """Is this a tail the caller let compute on every lane?
+
+    At a lead width above one only where the caller checked that the
+    straddling lane may compute its whole vector (`Options.lead_straddle`):
+    then `valid` counts that lane in and nothing is peeled (`_full_hi`)."""
+    return self.full_lane and not lo
+
+  def _full_hi(self, tail):
+    """The lanes a full-lane tail holds data in: every lane whose vector
+    reaches into the window, the straddling one included."""
+    return -(-tail // self.width)
 
   def _full_head(self, lo) -> bool:
     """The same for a head: every lane computes, and `LeadIndex.first` keeps
@@ -1166,18 +1175,21 @@ class LeadLoop:
         inner([LeadIndex(0, extent, self.stride, width=self.width,
                          offset=base, valid=valid,
                          pad=self.pad and valid is not None)])
-      elif hi > 0 and self._full(lo):
+      elif self._full(lo) and self._full_hi(tail) > 0:
         # SPMD: no guard around the block.  Its memory accesses hold
-        # themselves to `valid` (`Symbol._valid_access`).
+        # themselves to `valid` (`Symbol._valid_access`), and a straddling
+        # lane computes its whole vector, so nothing is left to peel.
         inner([LeadIndex(actualstart, self.threads, self.stride,
-                         width=self.width, valid=hi,
+                         width=self.width, valid=self._full_hi(tail),
                          pad=self.pad)])
+        hi = None
       elif hi > 0 or lo is not None:
         index = LeadIndex(actualstart, self.threads, self.stride,
                           width=self.width)
         with self._guard(writer, lead(), lo, hi):
           inner([index])
-      self._peel(inner, actualstart * span + hi * self.width, tail)
+      if hi is not None:
+        self._peel(inner, actualstart * span + hi * self.width, tail)
     else:
       if self.start % span != 0:
         # the guard compares against a *lane*, so the bound has to be the
@@ -1218,25 +1230,32 @@ class LeadLoop:
                            loop.induction, width=self.width)])
       if self.end % span != 0:
         hi = self._lane_hi(tail)
-        if hi > 0:
-          # the tail block starts at its slot boundary and stops at `end`
-          narrowed = self._narrow(writer, actualend - 1, None, hi,
-                                  (actualend - 1) * span, self.end)
-          if narrowed is not None:
-            extent, base, valid = self._widened(narrowed, None)
-            inner([LeadIndex(0, extent, self.stride, width=self.width,
-                             offset=base, valid=valid,
-                         pad=self.pad and valid is not None)])
-          elif self._full(None):
-            inner([LeadIndex(actualend - 1, self.threads, self.stride,
-                             width=self.width, valid=hi,
-                         pad=self.pad)])
-          else:
-            index = LeadIndex(actualend - 1, self.threads, self.stride,
-                              width=self.width)
-            with self._guard(writer, lead(), None, hi):
-              inner([index])
-        self._peel(inner, realend * span + hi * self.width, tail)
+        if self.width > 1 and self._full(None):
+          # A straddling lane computes its whole vector: `valid` counts it in,
+          # and no component is left to peel.
+          inner([LeadIndex(actualend - 1, self.threads, self.stride,
+                           width=self.width, valid=self._full_hi(tail),
+                           pad=self.pad)])
+        else:
+          if hi > 0:
+            # the tail block starts at its slot boundary and stops at `end`
+            narrowed = self._narrow(writer, actualend - 1, None, hi,
+                                    (actualend - 1) * span, self.end)
+            if narrowed is not None:
+              extent, base, valid = self._widened(narrowed, None)
+              inner([LeadIndex(0, extent, self.stride, width=self.width,
+                               offset=base, valid=valid,
+                           pad=self.pad and valid is not None)])
+            elif self._full(None):
+              inner([LeadIndex(actualend - 1, self.threads, self.stride,
+                               width=self.width, valid=hi,
+                           pad=self.pad)])
+            else:
+              index = LeadIndex(actualend - 1, self.threads, self.stride,
+                                width=self.width)
+              with self._guard(writer, lead(), None, hi):
+                inner([index])
+          self._peel(inner, realend * span + hi * self.width, tail)
 
 class Loop:
   def __init__(self, name, start, end, step=1, unroll=False, pragma=True):

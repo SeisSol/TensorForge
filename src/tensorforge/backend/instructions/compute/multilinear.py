@@ -1668,12 +1668,54 @@ class MultilinearInstruction(ComputeInstruction):
         opts = self._context.get_user_options()
         if not getattr(opts, 'full_lane_tails', False):
             return False
-        if self._theta or self._lead_width != 1:
+        if self._theta:
+            return False
+        if self._lead_width != 1 and not (
+                getattr(opts, 'lead_straddle', False)
+                and self._straddle_fits(i, dimmin, dimmax)):
             return False
         idest = self._idest
         if idest.stype in (SymbolType.Register, SymbolType.Scratch):
             box = idest.data_view.get_bbox()
             if (box.lower()[i], box.upper()[i]) != (dimmin, dimmax):
+                return False
+        return True
+
+    def _straddle_fits(self, i, dimmin, dimmax) -> bool:
+        """May the lane whose vector straddles the end of lead dimension `i`
+        compute the whole vector (`Options.lead_straddle`)?
+
+        Vectors sit on multiples of the width, so the last one reaches
+        `ceil(dimmax / width) * width`.  Its extra components have to land
+        somewhere nothing reads back and read from somewhere they may: the
+        accumulator a register image -- whose slots are whole vectors, and
+        whose store keeps to the window element by element -- and every
+        operand that carries the dimension either a register image too or
+        stored with room for the rounded-up end in its own column, so that
+        the read past the window stays inside the allocation.
+        """
+        width = self._lead_width
+        end = -(-dimmax // width) * width
+        if end == dimmax:
+            return True
+        if self._idest.stype not in (SymbolType.Register, SymbolType.Scratch):
+            return False
+        slot = f'n{i}'
+        for j, op in enumerate(self._ops):
+            dims = self._opdim_to_nks[j]
+            if slot not in dims:
+                continue
+            symbol = op.symbol
+            if symbol is None:
+                return False
+            if symbol.stype in (SymbolType.Register, SymbolType.Scratch):
+                continue
+            view = symbol.data_view
+            if view is None:
+                return False
+            p = dims.index(slot)
+            lower = view.get_bbox().lower()[p]
+            if end - lower > view.shape[p]:
                 return False
         return True
 
