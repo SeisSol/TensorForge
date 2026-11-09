@@ -289,6 +289,11 @@ class Field:
         name = f'{backend}-{machine}'
         return name if name in self.split else machine
 
+    def gpu(self, machine: str) -> str:
+        """The machine behind a machine of one backend (`split_backends`):
+        the GPU it ran on, as every view names it."""
+        return self.split.get(machine, (machine, ''))[0]
+
     def architecture(self, machine: str) -> str:
         """The architecture a machine is, as a row or a profile names it
         (`split_backends`, `name_machines`)."""

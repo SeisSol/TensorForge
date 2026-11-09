@@ -572,12 +572,12 @@ def table_bound(described: Sequence, kernels: Sequence[str],
         mine = [r for r in rows if r['precision'] == prec]
         if not mine:
             continue
-        # A ridge is the architecture's: the backends it ran under share it.
+        # A ridge is the GPU's: the backends it ran under share it.
         ridges: Dict[str, float] = {}
         for m in fieldset.archs if fieldset is not None else ():
             c = fieldset.ceiling(m, dt)
             if c is not None and c.ridge:
-                ridges.setdefault(fieldset.architecture(m), c.ridge)
+                ridges.setdefault(fieldset.gpu(m), c.ridge)
         if not ridges:
             skipped.append(f'bound-{dt.lower()}: no {_dt_name(dt)} ceiling '
                            'measured')
