@@ -39,21 +39,40 @@ def _offered(arch, dtype, **opts):
 
 
 @pytest.mark.parametrize('arch, dtype, wide', [
-    ('sm_80', Datatype.F64, True), ('sm_80', Datatype.F32, None),
+    ('sm_80', Datatype.F64, True),
     ('sm_90', Datatype.F64, True), ('sm_90', Datatype.F32, None),
     ('sm_100', Datatype.F32, None)])
 def test_offered_where_the_matrix_units_are_faster(arch, dtype, wide):
   twins = _offered(arch, dtype)
-  assert len(twins) == 1
-  assert twins[0].get('tensor_cores') is True
-  assert twins[0].get('mma_operator_copies') is True
+  assert twins and all(t.get('tensor_cores') is True for t in twins)
+  assert all(t.get('mma_operator_copies') is True for t in twins)
   # The double-precision layouts: A in 16-byte chunks, B's temporaries
   # padded for the fragment reads.
-  assert twins[0].get('mma_chunked_order') is wide
-  assert twins[0].get('mma_fragment_ld') is wide
+  assert all(t.get('mma_chunked_order') is wide for t in twins)
+  assert all(t.get('mma_fragment_ld') is wide for t in twins)
+  # Deep products only (`MATRIX_TWIN_DEPTH`).
+  assert all(t.get('mma_min_depth') == tuning.MATRIX_TWIN_DEPTH for t in twins)
+  # The first at the default unroll, the others rolled or written out.
+  assert twins[0].get('k_unroll_max') is None
+  assert {t.get('k_unroll_max') for t in twins[1:]} <= set(tuning.MATRIX_ROLLS)
+
+
+def test_rolled_twins_only_where_a_reduction_is_long_enough():
+  from tensorforge.generators.descriptions import contraction_lengths
+  from tensorforge.generators.tuning import _flat
+  longest = max(contraction_lengths(_flat(_local_flux()())))
+  rolls = {t.get('k_unroll_max') for t in _offered('sm_90', Datatype.F64)[1:]}
+  assert (16 in rolls) == (longest > 16)
+  assert (0 in rolls) == (longest > 64)
+
+
+def test_an_unroll_the_caller_asked_for_stands():
+  twins = _offered('sm_90', Datatype.F64, k_unroll_max=16)
+  assert len(twins) == 1 and twins[0].get('k_unroll_max') is None
 
 
 @pytest.mark.parametrize('arch, dtype', [
+    ('sm_80', Datatype.F32),
     ('sm_100', Datatype.F64), ('sm_120', Datatype.F32), ('sm_120', Datatype.F64),
     ('sm_86', Datatype.F64), ('sm_89', Datatype.F32)])
 def test_not_offered_where_they_are_not(arch, dtype):
@@ -116,3 +135,8 @@ def test_an_fp64_matrix_instruction_is_eight_on_blackwell():
   """sm_100 lowers every `mma.sync` f64 shape to `DMMA.8x8x4`: the
   m16n8k16 Hopper issues once is eight there, and the count says so."""
   assert _matrix_issues('sm_100') == 8 * _matrix_issues('sm_90')
+
+
+def test_a_depth_the_caller_asked_for_stands():
+  twins = _offered('sm_90', Datatype.F64, mma_min_depth=16)
+  assert twins and all(t.get('mma_min_depth') is None for t in twins)

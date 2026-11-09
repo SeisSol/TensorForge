@@ -1502,6 +1502,15 @@ SPILL_WEIGHT = 64
 #: the order-6 move went to 32 lanes unmerged instead, 25 % slower on GH200.
 ICACHE_SHARE = 0.47
 
+#: Whether the lanes rule offers a candidate whose code the compiler wrote
+#: past `generator.FISSION_PAST` instruction caches cut into pieces as well
+#: (`Options.fission`), as many as `generator.fission_pieces` says for that
+#: size.  On GH200 the order-8 derivative in double ran 192 ns whole, 142 on
+#: the matrix path and 124 on it cut into three; in single 95, 89 and 71.
+#: The volume and the Taylor expansion stay whole (cut, 4 to 96 % slower): the
+#: one fits on the matrix path, the other is far below the threshold.
+FISSION_TWIN = True
+
 #: Parts whose fetch past the instruction cache costs a kernel more than the
 #: share of its code past the cache says: the charge on every executed
 #: instruction grows from nothing at the capacity to this factor less one at
@@ -1758,7 +1767,32 @@ def _roll_candidates(first: Build, context: Context, origin: Candidate,
 #: order-6 kernels on GH200 the count ranks the faster of the two in five of six
 #: (the double-precision derivative, 3 % to the matrix path, is the miss), and
 #: declines the single-precision derivative, 22 % slower on the matrix path.
-MATRIX_TWIN = {80: (Datatype.F64, Datatype.F32),
+#: The shortest contraction the matrix twin puts on the matrix path
+#: (`Options.mma_min_depth`), where the path's own default takes 16.  On GH200
+#: the products of 16 to 23 steps -- `localFluxAll`'s 21, the derivative's
+#: third order -- ran slower on it than beside it: order-6 `localFluxAll` 29 %
+#: (double) and 26 % (single) under SIMT with them on the nest against 21 and
+#: 4 % on the path, the derivative 28 against 24 %; order 5 `volume` in single
+#: no longer 19 % slower, in double 5 % of a gain given up.  The count ranks the
+#: two the other way round, so the twin is built at the one depth.
+MATRIX_TWIN_DEPTH = 24
+
+#: The reduction unrolls (`Options.k_unroll_max`) the matrix twin is built
+#: at beside the default's, as `ROLL_UNROLLS` for the default: on GH200 the
+#: order-8 `volume` on the matrix path ran 27 % (double) and 30 % (single)
+#: under SIMT written out, against 23 and 3 % at the default unroll -- the
+#: path's code is short enough to take it, where SIMT's written out ran 83 %
+#: slower -- and the order-6 derivative 28 % and 7 % rolled by 16, against
+#: 24 and 4 %.
+MATRIX_ROLLS = (16, 0)
+
+#:
+#: Not A100 in single precision any more: over SeisSol's elastic and
+#: viscoelastic kernels (orders 4, 6 and 8) the twin never beat the rule's
+#: best SIMT build there -- `localFluxAll` of order 6 13 % under the default on
+#: the path, 24 % at sixteen lanes beside it -- and the order-6 `volume` it was
+#: taken for ran 28 % slower than without it (3xTF32's chains, `wait`).
+MATRIX_TWIN = {80: (Datatype.F64,),
                90: (Datatype.F64, Datatype.F32),
                100: (Datatype.F32,)}
 
@@ -1777,7 +1811,8 @@ def _matrix_candidates(descrs, first: Build, context: Context,
     and 7 % in single, where without the copies it lost up to 21 %; volume
     and `localFluxAll` 17 to 25 %.  Not the B layout in single precision,
     which took order-6 `volume`'s 19 % back.  None where the caller fixed the
-    path either way, or the default takes it already."""
+    path either way, or the default takes it already.  Products shorter than
+    `MATRIX_TWIN_DEPTH` stay beside the path."""
     if fixed and 'tensor_cores' in fixed:
         return []
     if 'tensor_cores' in dict(context.get_asked_options().asked()):
@@ -1789,12 +1824,30 @@ def _matrix_candidates(descrs, first: Build, context: Context,
         sm_of)
     if context.fp_type not in MATRIX_TWIN.get(sm_of(context), ()):
         return []
-    if not contraction_lengths(_flat(descrs)):
+    lengths = contraction_lengths(_flat(descrs))
+    if not lengths:
         return []
     twin = origin.set('tensor_cores', True).set('mma_operator_copies', True)
     if context.fp_type is Datatype.F64:
         twin = twin.set('mma_chunked_order', True).set('mma_fragment_ld', True)
-    return [twin]
+    if ('mma_min_depth' not in dict(context.get_asked_options().asked())
+            and not (fixed and 'mma_min_depth' in fixed)):
+        twin = twin.set('mma_min_depth', MATRIX_TWIN_DEPTH)
+    twins = [twin]
+    # Rolled and written out as well (`MATRIX_ROLLS`), where a reduction is
+    # long enough for the unroll to change it and the caller left it free.
+    opts = context.get_user_options()
+    if not ((fixed and 'k_unroll_max' in fixed) or getattr(opts, 'k_roll', 0)
+            or 'k_unroll_max' in dict(context.get_asked_options().asked())):
+        own = getattr(opts, 'k_unroll_max', None)
+        longest = max(lengths)
+        for value in MATRIX_ROLLS:
+            # Written out changes something only past the default's roll,
+            # rolled by `value` only past `value`.
+            reach = own if value == 0 else value
+            if value != own and reach and longest > reach:
+                twins.append(twin.set('k_unroll_max', value))
+    return twins
 
 
 #: Spilled bytes past which the default's spilling lets the rule take a
@@ -2387,12 +2440,53 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     # What the compiler said of the default as built, before any pin: the
     # guards ask how much it spills and how many registers it holds.
     unpinned = report
+    def fissioned(cand: Candidate, seen: Optional[Resources]
+                  ) -> Tuple[Candidate, Optional[Resources]]:
+        """`cand`, or `cand` cut into as many pieces as its code takes past
+        the instruction cache (`fission_pieces`, from the size the compiler
+        wrote) where that costs less (`FISSION_TWIN`).  The cut build counts
+        more -- every piece reads its operands again -- and each piece streams
+        only its own code, which `cost` charges."""
+        if (not FISSION_TWIN or seen is None or cand.get('fission')
+                or not getattr(seen, 'code_bytes', None)
+                or 'fission' in dict(context.get_asked_options().asked())
+                or (fixed and 'fission' in fixed)):
+            # A cut the caller asked for either way stands.
+            return cand, seen
+        from .generator import fission_cuts, fission_pieces
+        pieces = fission_pieces(seen.code_bytes, hw)
+        if pieces <= 1 or not fission_cuts(descr_factory()):
+            return cand, seen
+        alt = cand.set('fission', pieces)
+        result = builds.get(alt) or build(descr_factory, context, alt, generate)
+        if not result.ok:
+            return cand, seen
+        count = figure(result)
+        if count is None:
+            return cand, seen
+        try:
+            other = scorer.resources(result)
+        except Exception:                     # noqa: BLE001
+            other = None
+        if other is None or other.spill_bytes > max(limit, seen.spill_bytes):
+            return cand, seen
+        builds[alt], counts[alt] = result, count
+        if cost(alt, other) < cost(cand, seen):
+            return alt, other
+        return cand, seen
+
     base, report = pinned(origin, report)
     limit = SPILL_GROWTH * report.spill_bytes
 
     def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
-        charge = icache_charge(seen.code_bytes, hw, refetch)
+        # A cut kernel runs its pieces one after another, each over its own
+        # code (`Options.fission`).
+        pieces = cand.get('fission')
+        code = seen.code_bytes
+        if code and isinstance(pieces, int) and pieces > 1:
+            code = code / pieces
+        charge = icache_charge(code, hw, refetch)
         if by_bound:
             spilled = (pipe_bound(builds[cand], seen.spill_bytes)
                        if seen.spill_bytes else counts[cand])
@@ -2405,8 +2499,11 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         return (counts[cand] * (1.0 + charge)
                 + SPILL_WEIGHT * seen.spill_bytes / elem * lanes / wave)
 
+    # The default as built, whole: what anything taken has to beat by the
+    # margin, its own cut twin included.
+    default, whole = cost(base, report), base
+    base, report = fissioned(base, report)
     best, least = base, cost(base, report)
-    default = least
     # Where the default spills on AMD, a build that spills nothing wins over
     # every build that does (`CLEAN_FIRST`): until one is found the compiler
     # is asked about every candidate, after that only about those whose
@@ -2448,6 +2545,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         cand, seen = pinned(cand, seen)
         if seen is None or seen.spill_bytes > limit:
             continue
+        cand, seen = fissioned(cand, seen)
         price = cost(cand, seen)
         if clean_first and not seen.spill_bytes:
             if clean is None or price < clean[1]:
@@ -2475,7 +2573,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 clean = (cand, price)
     if clean is not None:
         return clean[0]
-    return best if least < (1.0 - DEVIATION_MARGIN) * default else base
+    return best if least < (1.0 - DEVIATION_MARGIN) * default else whole
 
 
 def _lanes_mode(descr_factory, context: Context, cache: Optional[str],

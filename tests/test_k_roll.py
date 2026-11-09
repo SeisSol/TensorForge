@@ -114,6 +114,45 @@ def test_a_cap_below_the_vector_keeps_the_divisor_rule(monkeypatch):
     assert [(count, extent) for count, extent, _ in loops] == [("3", "84")]
 
 
+def test_a_tail_lets_the_loop_run_whole_trips(monkeypatch):
+    """35 steps: no multiple of four divides them, so the loop runs by 16
+    and the compiler's remainder loop took the last three; with a tail of 3
+    the loop runs over 32 steps and the three are written out behind it
+    (`Options.k_unroll_max_tail`)."""
+    src = _kernel(monkeypatch, 56, 9, 35, k_unroll_max=16)
+    assert [(c, e) for c, e, _ in _rolled(src)] == [("16", "35")]
+    src = _kernel(monkeypatch, 56, 9, 35, k_unroll_max=16,
+                  k_unroll_max_tail=3)
+    assert [(c, e) for c, e, _ in _rolled(src)] == [("16", "32")]
+
+
+def test_a_tail_too_long_for_the_option_is_left_to_the_compiler(monkeypatch):
+    src = _kernel(monkeypatch, 56, 9, 35, k_unroll_max=16,
+                  k_unroll_max_tail=2)
+    assert [(c, e) for c, e, _ in _rolled(src)] == [("16", "35")]
+
+
+def test_the_count_may_leave_the_tail_over():
+    """Read a step at a time (no vector), 35 steps roll by 7 under a cap of
+    16 and by 11 with two left over; under 32 by 17 with one; 20 steps
+    under 8 by 6 with two.  No tail is the divisor rule as it was."""
+    from tensorforge.backend.instructions.compute.multilinear import (
+        _roll_count, _tail_split)
+    assert [_roll_count(0, s, 1, 0, cap, 1, 2)
+            for s, cap in ((35, 16), (35, 32), (20, 8), (56, 16), (120, 16),
+                           (37, 16))] == [11, 17, 6, 14, 15, 16]
+    # A vector of four: no multiple of it divides 35, and 2 leaves the
+    # tail of 2, but is no larger than the 16 the cap rolls by.
+    assert _roll_count(0, 35, 1, 0, 16, 4, 2) == 16
+    assert _roll_count(0, 35, 1, 0, 16, 4) == 16
+    assert [_roll_count(0, s, 1, 0, cap)
+            for s, cap in ((35, 16), (35, 32), (20, 8), (56, 16), (120, 16))
+            ] == [7, 7, 5, 14, 15]
+    assert _tail_split(0, 35, 11, 2) == [(0, 33, 11), (33, 35, 0)]
+    assert _tail_split(0, 35, 7, 2) == [(0, 35, 7)]
+    assert _tail_split(0, 35, 16, 2) == [(0, 35, 16)]
+
+
 def test_a_reduction_the_cap_covers_stays_unrolled(monkeypatch):
     assert _rolled(_kernel(monkeypatch, 56, 9, 64)) == []
 
