@@ -31,12 +31,44 @@ def _padded_row(sizes, context) -> List[int]:
   a group that does not fit whole in the box stays scalar.
   """
   sizes = list(sizes)
-  want = context.get_user_options().stage_row_bytes
-  if not want or not sizes:
+  opts = context.get_user_options()
+  want = opts.stage_row_bytes
+  if not sizes:
+    return sizes
+  if not want:
+    if (getattr(opts, 'mma_fragment_ld', False)
+            and getattr(opts, 'tensor_cores', None)
+            and str(getattr(context.target.hw, 'vendor', '')).lower()
+            == 'nvidia'):
+      sizes[0] = fragment_ld(sizes[0], context)
     return sizes
   unit = max(1, want // context.fp_type.size())
   sizes[0] = -(-sizes[0] // unit) * unit
   return sizes
+
+
+def fragment_ld(rows: int, context) -> int:
+  """The smallest leading dimension at or above `rows` under which NVIDIA's
+  matrix path reads a B fragment out of the buffer without a bank conflict
+  (`Options.mma_fragment_ld`); `rows` where none within a bank's width is.
+
+  A B fragment of `mma.sync` has lane `(t, g) = (lane % 4, lane // 4)` read
+  column `g` at row `t` (plus four per further register), so a register's
+  read is `t + ld * g` over the warp -- four adjacent elements eight columns
+  apart.  At `ld = 56` in double precision those land on eight bank pairs in
+  a half-warp's phase instead of sixteen, a two-way conflict on every read;
+  at 60 on sixteen.  The store that fills the buffer writes a row a lane,
+  adjacent whatever the stride, and every other reader addresses through the
+  view's strides, so the padding is never read and costs a few elements a
+  column."""
+  from tensorforge.backend.pir.banks import ways
+  size = context.fp_type.size()
+  banks = getattr(context.target.hw, 'shmem_banks', None) or 32
+  pattern = [(t, g) for g in range(8) for t in range(4)]
+  for ld in range(int(rows), int(rows) + banks + 1):
+    if ways([t + ld * g for t, g in pattern], size, 1, banks) == 1:
+      return ld
+  return int(rows)
 
 
 def _contains(outer, inner) -> bool:
@@ -187,7 +219,8 @@ class StoreRegToShr(AbstractShrMemWrite):
     # snapshot looks plausible, and the only thing that would notice is a
     # numerical check the host oracle cannot yet run.
     loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
-                       self._num_threads, 1, width=self._lead_width)]
+                       self._num_threads, 1, width=self._lead_width,
+                       exact_head=True)]
     for i in range(1, src_bbox.rank()):
       loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
@@ -353,7 +386,7 @@ class StoreRegToGlb(AbstractInstruction):
       pad = self._pad_writable(src_bbox, dest_bbox)
       loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
                          self._num_threads, 1, width=self._lead_width,
-                         full_lane=pad, pad=pad)]
+                         full_lane=pad, pad=pad, exact_head=True)]
       for i in range(1, src_bbox.rank()):
         unroll = (src_bbox.lower()[i], src_bbox.upper()[i]) != (dest_bbox.lower()[i], dest_bbox.upper()[i])
         lower = min(src_bbox.lower()[i], dest_bbox.lower()[i])

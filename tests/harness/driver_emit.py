@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from tensorforge.backend.symbol import SymbolType
-from tensorforge.common.basic_types import DataFlowDirection, FlagMode
+from tensorforge.common.basic_types import DataFlowDirection, FlagMode, Residence
 from tensorforge.generators import stacking
 
 from .layout import ctype
@@ -101,6 +101,9 @@ def collect_operands(generator) -> List[DriverOperand]:
     for sym in generator.built._scopes.get_global_scope().values():
         t = sym.obj
         if getattr(t, 'is_variant', False):
+            continue
+        if getattr(t, 'residence', None) is Residence.MODULE:
+            # A copy the file defines (`operator_copies`): no parameter.
             continue
         if sym.stype == SymbolType.Scalar:
             # A scalar literal (alpha) passes its value.  A runtime scalar --

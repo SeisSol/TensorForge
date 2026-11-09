@@ -399,7 +399,20 @@ def _fragment_cells(atom, threads: int = 32, bits=None):
     return cells
 
 
-def fragment_order(shape, atom, threads=32):
+def a_chunk(atom, ctx) -> int:
+    """Fragments a lane reads of a prepared A tile in one access: all of them
+    (`aregs`), or the 16 bytes' worth `Options.mma_chunked_order` asks for.
+
+    One statement for the order and its reader (`fragment_order`, `matmul`),
+    since a layout written one way and read the other is a permutation."""
+    aregs = (atom.m * atom.k) // WAVE
+    if (ctx is None or not ctx.get_user_options().mma_chunked_order
+            or atom.mode != MMAMode.DIRECT):
+        return aregs
+    return max(1, min(aregs, 16 // atom.d.size()))
+
+
+def fragment_order(shape, atom, threads=32, chunk=None, window=None):
     """Which bounding-box cell each slot of a pre-ordered A holds.
 
     The operand's storage in the order a lane reads it: tile by tile, and
@@ -433,11 +446,33 @@ def fragment_order(shape, atom, threads=32):
 
     Returned as `Tensor.storage_order` wants it -- F-order cell per slot -- so
     the host packer and the kernel take the layout from one statement.
+
+    `chunk` fragments a lane reads at once (`a_chunk`): with fewer than all
+    of them, a tile is that many fragments of every lane, the lanes adjacent,
+    then the next that many -- lane `lane`'s fragment `f` is slot `chunk *
+    (threads * (f // chunk) + lane) + f % chunk` of its tile.  A wide read of
+    `aregs` slots a lane is then `aregs / chunk` reads of `chunk`, each of
+    them a warp's 512 adjacent bytes.
+
+    `window`, `((r0, rows), (c0, depth))`, is the part of the operand the
+    operation reads: the tiles are laid over it from its corner, as many
+    along the contraction as the reader counts over its depth, and a cell
+    past it or past the operand is padding.  The reader names tiles from the
+    window's start (`matmul`), so an order laid over the whole operand reads
+    a window from column 1 a column back and one of 33 steps with the tile
+    stride of 56.  None is the whole operand.
     """
-    rows, cols = int(shape[0]), int(shape[1])
+    total_rows, total_cols = int(shape[0]), int(shape[1])
+    if window is None:
+        window = ((0, total_rows), (0, total_cols))
+    (r0, rows), (c0, cols) = ((int(a), int(b)) for a, b in window)
     mtile, ktile = 8, 4
     mregs, kregs = atom.m // mtile, atom.k // ktile
     aregs = mregs * kregs
+    chunk = aregs if chunk is None else chunk
+    if aregs % chunk:
+        raise InternalError(f'{aregs} fragments a lane do not come in chunks '
+                            f'of {chunk}')
     cell = _fragment_cells(atom, threads)
     mstarts = tile_starts(rows, threads, atom.m)
     kstarts = tile_starts(cols, threads, atom.k)
@@ -458,12 +493,16 @@ def fragment_order(shape, atom, threads=32):
     for mt, m0 in enumerate(mstarts):
         for kt, k0 in enumerate(kstarts):
             assert len(order) == (mt * ktiles + kt) * aregs * threads
-            for lane in range(threads):
-                for f in range(aregs):
-                    dm, dk = cell[(f, lane)]
-                    row, col = m0 + dm, k0 + dk
-                    order.append(row + rows * col
-                                 if row < rows and col < cols else -1)
+            for c in range(0, aregs, chunk):
+                for lane in range(threads):
+                    for f in range(c, c + chunk):
+                        dm, dk = cell[(f, lane)]
+                        row, col = m0 + dm, k0 + dk
+                        inside = (row < rows and col < cols
+                                  and r0 + row < total_rows
+                                  and c0 + col < total_cols)
+                        order.append((r0 + row) + total_rows * (c0 + col)
+                                     if inside else -1)
     return tuple(order)
 
 
@@ -507,7 +546,19 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     # Over the wave and not over one multiplication: the fragment is the
     # warp's, and a narrower multiplication reads it with its neighbors'
     # lanes (`matmul`, `shift`).
-    order = fragment_order(shape, atom, WAVE)
+    # Over the window the operation reads (`fragment_order`), as the reader
+    # counts it: `lead` rows -- whole slots of them where the operation does
+    # not read the whole box from its corner (`rows`) -- and `depth` steps,
+    # from `corner`.  Without them, the whole operand.
+    r0, c0 = (int(x) for x in corner)
+    window = None
+    if lead and depth:
+        if (r0 < 0 or c0 < 0 or r0 >= int(shape[0])
+                or c0 + depth > int(shape[1])):
+            return None
+        window = ((r0, int(rows) if rows else int(lead)), (c0, int(depth)))
+    order = fragment_order(shape, atom, WAVE, chunk=a_chunk(atom, ctx),
+                           window=window)
     if atom.mode == MMAMode.TF32 and presplit(ctx):
         # Stored as its two TF32 halves, planar: the three products read the
         # halves as they lie (`_as_tf32`) instead of splitting every fragment
@@ -1170,6 +1221,203 @@ def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
                                         j + atom.n + ci)
 
 
+def _stacked(writer, ops, ctx, span, atom, M, N, K, kx, threads, mults,
+             lane, mine, sync, shift, nslots, ktiles, aregs, cregs, aparts,
+             threadrange, stagger, room):
+    """`matmul` for a warp shared by several multiplications of one `A`, the
+    multiplications stacked along N (`Options.mma_stack_mults`).
+
+    Unstacked, the warp runs a round of instructions per multiplication, each
+    over the multiplication's own columns: SeisSol's nine a tile of eight and
+    a ninth carried on the fragments (`TAIL_MAX`).  Stacked, column `c` of
+    multiplication `p` is column `p * width + c` of one wide `B`, and a tile of
+    eight takes whichever columns fall into it -- the ninth of the first and
+    the first seven of the second, at sixteen lanes.  `ceil(width * mults / 8)`
+    instructions a step and row tile, and no carried column.
+
+    The staging is the unstacked path's, every multiplication's `B` in its own
+    region; what changes is who reads it.  A lane's fragment column is
+    `lane / 4` of its tile, so the region it reads is the lane's own, and so is
+    the region a `D` slot goes back to: `(p - mine) * stride + p * pad`, with
+    `p` a value of the lane rather than a round.  Columns past the last
+    multiplication's read a real column (clamped) into rows nobody stores.
+    """
+    C, A, B = ops.C, ops.A, ops.B
+    wave = WAVE
+    ntile, ktile = 8, 4
+    kregs = atom.k // ktile
+    width = N - span.start
+    total = mults * width
+    ntiles = -(-total // atom.n)
+    stride = ops.mult_stride()
+    bpad, cpad = stagger(atom.k), stagger(8 // mults)
+    Bt = writer.alloc(atom.d, (atom.k * width + room,), MemSpace.SHARED,
+                      hint='btile', swizzle=XorSwizzle(atom.k))
+    crow = width
+    csize = -(-(atom.m * crow) // 32) * 32
+    Ct = writer.alloc(atom.d, (csize + room,), MemSpace.SHARED, hint='ctile',
+                      swizzle=XorSwizzle(BANK_ROW_BYTES // atom.d.size()))
+    back = writer.op('mul', INDEX, mine, stride, hint='r')
+
+    def own(pad):
+        return writer.op('mul', INDEX, mine, pad, hint='r') if pad else None
+
+    def toward(p, pad):
+        """The shift to multiplication `p`'s copy of a tile, `p` a value."""
+        return writer.op('sub', INDEX,
+                         writer.op('mul', INDEX, p, stride + pad, hint='r'),
+                         back, hint='r')
+
+    steps = [(k, kk) for k in range(0, K, wave)
+             for kk in range(0, min(wave, K - k), atom.k)]
+    Bv = {}
+    for k in range(0, K + kx, threads):
+        for jj in range(width):
+            Bv[k // threads, jj] = B(writer, None, span.start + jj, k // threads)
+    chunk = a_chunk(atom, ctx)
+
+    for i in range(0, M, wave):
+        with writer.AnonymousScope():
+            tiles = list(range(0, min(wave, M - i), atom.m))
+            naccs = atom.terms if len(tiles) * ntiles < CHAINS_MIN else 1
+            accs = [[[[writer.declare(ScalarType(atom.d), hint='c',
+                                      uniform=_PER_LANE)
+                       for _ in range(wave // atom.m)]
+                      for _ in range(cregs)]
+                     for _ in range(ntiles)]
+                    for _ in range(naccs)]
+            Cvals = accs[0]
+            for k, kk in steps:
+                trueK = kk + kx
+                # Every multiplication stages its own rows of `B`, all its
+                # columns, in its own region.
+                writer.barrier('wave', **sync)
+                writer.mark('defines', Bt)
+                for s_, lo, cnt, sub in _lanes_of(k + trueK, atom.k, threads):
+                    with threadrange(lo, cnt):
+                        for jj in range(width):
+                            got = Bv.get((s_, jj))
+                            if got is None:
+                                got = writer.declare(ScalarType(atom.d), hint='bs')
+                            writer.store(Bt, got,
+                                         _index(writer, sub=sub, mod=atom.k,
+                                                add=jj * atom.k),
+                                         shift=own(bpad))
+                writer.barrier('wave', **sync)
+                # A lane's fragments of stacked tile `jt`: column `lane / 4`
+                # of the tile, multiplication `n / width`'s column `n % width`.
+                bfr = {}
+                for jt in range(ntiles):
+                    n = _index(writer, div=ktile, add=jt * atom.n, lane=lane)
+                    if (jt + 1) * atom.n > total:
+                        n = writer.op('min', INDEX, n, total - 1, hint='a')
+                    p = writer.op('div', INDEX, n, width, hint='a')
+                    c = writer.op('rem', INDEX, n, width, hint='a')
+                    base = writer.op('add', INDEX,
+                                     writer.op('mul', INDEX, c, atom.k, hint='a'),
+                                     _index(writer, mod=ktile, lane=lane), hint='a')
+                    sh = toward(p, bpad)
+                    bfr[jt] = [writer.load(Bt, base if not kkk else
+                                           writer.op('add', INDEX, base,
+                                                     kkk * ktile, hint='a'),
+                                           hint='b', shift=sh)
+                               for kkk in range(kregs)]
+                # `A`, as the order stored it, once for every multiplication.
+                afr = {}
+                for ii in tiles:
+                    mt = (i + ii) // atom.m
+                    kt = (k + kk) // atom.k
+                    tbase = (mt * ktiles + kt) * (aregs * wave)
+                    chunks = []
+                    for cc in range(0, aregs, chunk):
+                        got = ops.A_slot(writer, tbase + cc * wave, parts=aparts,
+                                         width=chunk, **shift)
+                        chunks.append(got if aparts > 1 else (got,))
+                    afr[ii] = [[(chunks[f // chunk][pt] if chunk == 1 else
+                                 writer.extract(chunks[f // chunk][pt], f % chunk,
+                                                hint='a'))
+                                for f in range(aregs)]
+                               for pt in range(aparts)]
+                live = [ii for ii in tiles
+                        if ops.A_zero is None
+                        or not ops.A_zero(i + ii, i + ii + atom.m,
+                                          k + kk, k + kk + atom.k)]
+                prods = {}
+                for ii in live:
+                    parts_ = afr[ii]
+                    split = ([tuple(_as_tf32(writer, parts_[pt][f])
+                                    for pt in range(aparts))
+                              for f in range(aregs)] if aparts > 1 else None)
+                    for jt in range(ntiles):
+                        prods[ii, jt] = atom.products(writer, parts_[0][:aregs],
+                                                      bfr[jt], a_split=split)
+                for term in range(len(prods[live[0], 0]) if live else 0):
+                    for ii in live:
+                        for jt in range(ntiles):
+                            a_op, b_op = prods[ii, jt][term]
+                            acc = [accs[term % naccs][jt][cc][ii // atom.m]
+                                   for cc in range(cregs)]
+                            atom.asmcall(writer, acc, a_op, b_op, acc)
+
+            for ii in (tiles if naccs > 1 else ()):
+                for jt in range(ntiles):
+                    for cc in range(cregs):
+                        part = [accs[a][jt][cc][ii // atom.m] for a in range(naccs)]
+                        corr = part[1]
+                        for more in part[2:]:
+                            corr = writer.op('add', ScalarType(atom.d), corr, more,
+                                             hint='c')
+                        Cvals[jt][cc][ii // atom.m] = writer.op(
+                            'add', ScalarType(atom.d), part[0], corr, hint='c')
+
+            Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c',
+                                            uniform=_PER_LANE)
+                    for q in range(mults) for jj in range(width)}
+            writer.barrier('wave', **sync)
+            for ii in range(0, wave, atom.m):
+                with writer.AnonymousScope():
+                    writer.mark('defines', Ct)
+                    # A `D` slot is cell `2 * lane + off` of its row-major
+                    # tile (`accumulator_slots`); its column is the stacked
+                    # one, and the row goes back to that column's
+                    # multiplication.
+                    for jt in range(ntiles):
+                        for slot, off in accumulator_slots(atom):
+                            cell = _index(writer, scale=2, add=off, lane=lane)
+                            row = writer.op('div', INDEX, cell, atom.n, hint='a')
+                            n = writer.op('add', INDEX,
+                                          writer.op('rem', INDEX, cell, atom.n,
+                                                    hint='a'),
+                                          jt * atom.n, hint='a')
+                            p = writer.op('div', INDEX, n, width, hint='a')
+                            c = writer.op('rem', INDEX, n, width, hint='a')
+                            to = writer.op('add', INDEX,
+                                           writer.op('mul', INDEX, row, crow,
+                                                     hint='a'), c, hint='a')
+                            cond = (writer.op('lt', BOOL, n, total, hint='g')
+                                    if (jt + 1) * atom.n > total else None)
+                            with _guarded(writer, cond):
+                                writer.store(Ct, Cvals[jt][slot][ii // atom.m],
+                                             to, shift=toward(p, cpad))
+                    writer.barrier('wave', **sync)
+                    for q, lo, cnt, sub in _lanes_of(ii, atom.m, threads):
+                        with threadrange(lo, cnt):
+                            for jj in range(width):
+                                idx = _index(writer, sub=sub, mod=atom.m,
+                                             scale=crow, add=jj)
+                                writer.assign(Cout[q, jj],
+                                              writer.load(Ct, idx, hint='data',
+                                                          shift=own(cpad)))
+                    writer.barrier('wave', **sync)
+
+            for q in range(mults):
+                if i // threads + q >= nslots:
+                    continue
+                for jj in range(width):
+                    C(writer, Cout[q, jj], i // threads + q, span.start + jj)
+    return True
+
+
 def matmul(writer, ops, ctx, span):
     C, A, B = ops.C, ops.A, ops.B
     # Elements, and the loop below walks them a wave at a time.  The
@@ -1332,6 +1580,18 @@ def matmul(writer, ops, ctx, span):
         r = region(p)
         return writer.op('add', INDEX, r, p * pad, hint='r') if pad and p else r
 
+    # The multiplications of a warp stacked along N (`Options.mma_stack_mults`):
+    # where `A` is the same for all of them, one instruction serves the
+    # columns of several.  Taken here, before the tiles below are allocated,
+    # since it lays its own out.
+    if (mults > 1 and chain is None and ops.a_uniform and aordered
+            and ops.lead_width == 1
+            and atom.mode in (MMAMode.DIRECT, MMAMode.TF32)
+            and ctx is not None and ctx.get_user_options().mma_stack_mults):
+        return _stacked(writer, ops, ctx, span, atom, M, N, K, kx, threads,
+                        mults, lane, mine, sync, shift, nslots, ktiles,
+                        aregs, cregs, aparts, threadrange, stagger, room)
+
     # `B` split once, as its values are loaded, where it is staged at all.
     bsplit = BSPLIT_STAGED and not bdirect and atom.mode == MMAMode.TF32
     BregHi, BregLo = {}, {}
@@ -1373,14 +1633,23 @@ def matmul(writer, ops, ctx, span):
     # bank width.  Padding moves the collision, transposing moves it to the
     # store; permuting each row costs nothing and clears both.  Measured over
     # the emitted addresses: 1-way, against 2-way unpermuted.
-    Bshm = writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k + room,),
+    #
+    # Staged once for every step of a product, before its rows, where the
+    # caller asks (`Options.mma_stage_b_once`): a step's tile `bstep` elements
+    # after the one before.  Otherwise once per step and block of rows, each
+    # between two barriers of the warp.
+    once = (not bdirect and chain is None and ctx is not None
+            and bool(ctx.get_user_options().mma_stage_b_once))
+    bstep = bregs * wave + tailed * ntail * atom.k
+    nsteps = sum(len(range(0, min(wave, K - k), atom.k))
+                 for k in range(0, K, wave)) if once else 1
+    Bshm = writer.alloc(atom.d, (bstep * nsteps + room,),
                         MemSpace.SHARED, hint='btile',
                         swizzle=XorSwizzle(atom.k))
     # The lower TF32 halves, where `B` is staged split (`BSPLIT_STAGED`): the
     # same layout, so one address reads both.
-    BshmLo = (writer.alloc(atom.d, (bregs * wave + tailed * ntail * atom.k
-                                    + room,), MemSpace.SHARED, hint='btilelo',
-                           swizzle=XorSwizzle(atom.k))
+    BshmLo = (writer.alloc(atom.d, (bstep * nsteps + room,), MemSpace.SHARED,
+                           hint='btilelo', swizzle=XorSwizzle(atom.k))
               if bsplit else None)
     # One tile with the parts *adjacent*, not one tile per part.
     #
@@ -1435,14 +1704,21 @@ def matmul(writer, ops, ctx, span):
         by several multiplications reads it once for all of them, over all of
         its lanes (`shift`)."""
         out = {}
+        chunk = a_chunk(atom, ctx)
         for ii in range(0, min(wave, M - i), atom.m):
             mt = (i + ii) // atom.m
             kt = (k + kk) // atom.k
             tbase = (mt * ktiles + kt) * (aregs * wave)
-            got = ops.A_slot(writer, tbase, parts=aparts, width=aregs, **shift)
-            got = got if aparts > 1 else (got,)
-            out[ii] = {None: [[(got[pt] if aregs == 1 else
-                                writer.extract(got[pt], f, hint='a'))
+            # One access per chunk of `chunk` fragments (`a_chunk`): the whole
+            # tile at once where the order is lane by lane per tile.
+            chunks = []
+            for c in range(0, aregs, chunk):
+                got = ops.A_slot(writer, tbase + c * wave, parts=aparts,
+                                 width=chunk, **shift)
+                chunks.append(got if aparts > 1 else (got,))
+            out[ii] = {None: [[(chunks[f // chunk][pt] if chunk == 1 else
+                                writer.extract(chunks[f // chunk][pt],
+                                               f % chunk, hint='a'))
                                for f in range(aregs)]
                               for pt in range(aparts)]}
         return out
@@ -1500,6 +1776,33 @@ def matmul(writer, ops, ctx, span):
                         h, l = tfconvert(writer, [Breg[k // threads, jj]])[0]
                         BregHi[k // threads, jj] = _as_float(writer, h)
                         BregLo[k // threads, jj] = _as_float(writer, l)
+            if once:
+                # Every step's tile at once, for every block of rows: two
+                # barriers a product rather than two a step and block.
+                writer.barrier('wave', **sync)
+                writer.mark('defines', *[t for t in (Bshm, BshmLo)
+                                         if t is not None])
+                for s0, (k0, kk0) in enumerate(steps):
+                    for s_, lo, cnt, sub in _lanes_of(k0 + kk0 + kx, atom.k,
+                                                      threads):
+                        with threadrange(lo, cnt):
+                            for jj in range(0, ncols):
+                                to = _index(writer, sub=sub, mod=atom.k,
+                                            add=jj * atom.k + s0 * bstep)
+                                src = BregHi if bsplit else Breg
+                                got = src.get((s_, jj))
+                                if got is None:
+                                    got = writer.declare(ScalarType(atom.d),
+                                                         hint='bs')
+                                writer.store(Bshm, got, to, shift=at(None, bpad))
+                                if bsplit:
+                                    low = BregLo.get((s_, jj))
+                                    if low is None:
+                                        low = writer.declare(ScalarType(atom.d),
+                                                             hint='bs')
+                                    writer.store(BshmLo, low, to,
+                                                 shift=at(None, bpad))
+                writer.barrier('wave', **sync)
             for i in range(0, M, wave):
                 with scope():
                     # One value per accumulator slot rather than a `[cregs][n]`
@@ -1533,7 +1836,10 @@ def matmul(writer, ops, ctx, span):
                     Tvals = {}
                     for s, (k, kk) in enumerate(steps):
                         trueK = kk + kx
-                        if not bdirect:
+                        # Where every step was staged before the rows, step
+                        # `s`'s tile is `s * bstep` in.
+                        boff = s * bstep if once else 0
+                        if not bdirect and not once:
                             # Read once per lane at one
                             # distribution and handed to the lanes
                             # that want it at another.  Where the
@@ -1606,9 +1912,9 @@ def matmul(writer, ops, ctx, span):
                                              add=jj * ntile,
                                              scale=atom.k, lane=lane)
                                 addr = writer.op('add', INDEX, col, row, hint='a')
-                                if kkk * ktile:
+                                if kkk * ktile + boff:
                                     addr = writer.op('add', INDEX, addr,
-                                                     kkk * ktile, hint='a')
+                                                     kkk * ktile + boff, hint='a')
                                 # Round `p` reads multiplication
                                 # `p`'s tile.
                                 for p in range(mults):
@@ -1634,7 +1940,8 @@ def matmul(writer, ops, ctx, span):
                                             N, K + kx, atom, threads)
                                         continue
                                     at_ = _index(writer, mod=ktile, lane=lane,
-                                                 add=kf * ktile + (atom.n + ci) * atom.k)
+                                                 add=kf * ktile + (atom.n + ci) * atom.k
+                                                 + boff)
                                     btail[p, kf, ci] = writer.load(
                                         Bshm, at_, hint='b', shift=at(p, bpad))
                                     if bsplit:

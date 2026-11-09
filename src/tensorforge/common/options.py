@@ -1547,6 +1547,68 @@ declare('mma_d_layout',
             'one multiplication per warp; a product it does not reach keeps '
             'its epilogue.')
 
+declare('mma_stage_b_once',
+        default=False,
+        env='TF_MMA_STAGE_B_ONCE',
+        parse=parse_bool,
+        doc='On NVIDIA\'s matrix path, stage every contraction step\'s B tile '
+            'of a product at once, before its blocks of rows, instead of one '
+            'step at a time for every block of 32 rows: two warp barriers a '
+            'product instead of two a step and block, and B written once where '
+            'the rows span several blocks.  The tile grows by the number of '
+            'steps.  An experiment; off.')
+
+declare('mma_stack_mults',
+        default=False,
+        env='TF_MMA_STACK_MULTS',
+        parse=parse_bool,
+        doc='Where several multiplications share a warp on NVIDIA\'s matrix '
+            'path (fewer than 32 lanes each) and read one batch-constant A in '
+            'a prepared order, stack them along N: column c of multiplication '
+            'p is column p * width + c of one wide B, so an instruction '
+            'serves the columns of several and no column is carried on the '
+            'fragments.  An experiment; off.')
+
+declare('mma_chunked_order',
+        default=False,
+        env='TF_MMA_CHUNKED_ORDER',
+        parse=parse_bool,
+        doc='Lay a prepared A operand out lane by lane per sixteen bytes '
+            'rather than per tile: a lane\'s fragments of a tile in 16-byte '
+            'chunks, the 32 lanes adjacent within each chunk.  A lane then '
+            'reads a tile as several 16-byte accesses instead of one wide one, '
+            'and every such access of a warp reads 512 adjacent bytes -- from '
+            'shared memory without a bank conflict, from global memory in '
+            'whole sectors.  Changes only the double-precision orders, whose '
+            'eight fragments are 64 bytes a lane; a single-precision lane\'s '
+            'fragments are one 16-byte chunk already.')
+
+declare('mma_fragment_ld',
+        default=False,
+        env='TF_MMA_FRAGMENT_LD',
+        parse=parse_bool,
+        doc='With `tensor_cores`, give every temporary stored to shared memory '
+            'the smallest leading dimension at or above its rows under which a '
+            'B fragment of the matrix path is read without a bank conflict '
+            '(`store.fragment_ld`): 60 for 56 rows, in either precision, '
+            'where 56 is a two-way conflict on every read.  Not with '
+            '`stage_row_bytes`, which pads the same dimension for wide '
+            'accesses.')
+
+declare('mma_operator_copies',
+        default=False,
+        env='TF_MMA_OPERATOR_COPIES',
+        parse=parse_bool,
+        doc='Give each multiplication the matrix path may take that reads a '
+            'batch-constant operator other operations read too a copy of it, '
+            'laid out in its own fragment order and defined in the generated '
+            'file (`Residence.MODULE`), where the description carries the '
+            'numbers.  An order is the reader\'s window and fragment layout, '
+            'so an operator with several readers is offered none and the '
+            'matrix path stages it element by element (`_offer_order`): '
+            'SeisSol\'s derivative reads each `kDivMT` five times.  The other '
+            'readers keep the operator as it is passed.')
+
 declare('mma_presplit',
         default=False,
         env='TF_MMA_PRESPLIT',
@@ -1601,6 +1663,21 @@ declare('full_lane_tails',
             'accumulator\'s register image exactly the loop\'s window, so that '
             'a slice of a larger image (theta) never has its neighboring rows '
             'overwritten.')
+
+declare('lead_straddle',
+        default=False,
+        env='TF_LEAD_STRADDLE',
+        parse=parse_bool,
+        doc='With a lead dimension blocked wider than one element (a lead '
+            'width of 2 or 4), the lane whose vector reaches past the end of a '
+            'multiplication\'s rows computes the whole vector, as a full-lane '
+            'tail does, instead of having its valid components peeled into '
+            'scalar operations -- each a broadcast from the owning lane and a '
+            'store guarded to it, at every step of every column.  Only where the '
+            'accumulator is a register image of exactly the window, and every '
+            'operand read along that dimension has storage for the rounded-up '
+            'end, so that the extra component reads inside its own column and '
+            'is never stored.  An experiment.')
 
 declare('prefetch_data',
         default=False,

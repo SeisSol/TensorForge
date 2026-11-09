@@ -65,6 +65,16 @@ class _EllPlan:
     tables: dict = None
 
 
+def _copies(obj) -> bool:
+    """Whether `obj` is an operator copy (`Residence.MODULE`), or a merged
+    run's stand-in over nothing else."""
+    if getattr(obj, 'is_variant', False):
+        members = tuple(getattr(obj, 'variant_members', ()))
+        return bool(members) and all(
+            getattr(m, 'residence', None) is Residence.MODULE for m in members)
+    return getattr(obj, 'residence', None) is Residence.MODULE
+
+
 def _module_table_name(prefix: str, datatype, values) -> str:
     """A name that says which numbers it holds.
 
@@ -1341,7 +1351,8 @@ class MultilinearInstruction(ComputeInstruction):
                                        unroll=True,
                                        width=self._lead_width,
                                        full_lane=self._full_lane_tail(
-                                           i, dimmin, dimmax))]
+                                           i, dimmin, dimmax),
+                                       straddle=self._lead_width > 1)]
                 threads //= max(1, -(-(dimmax - dimmin) // self._lead_width))
                 stride *= dimmax - dimmin
 
@@ -1668,12 +1679,54 @@ class MultilinearInstruction(ComputeInstruction):
         opts = self._context.get_user_options()
         if not getattr(opts, 'full_lane_tails', False):
             return False
-        if self._theta or self._lead_width != 1:
+        if self._theta:
+            return False
+        if self._lead_width != 1 and not (
+                getattr(opts, 'lead_straddle', False)
+                and self._straddle_fits(i, dimmin, dimmax)):
             return False
         idest = self._idest
         if idest.stype in (SymbolType.Register, SymbolType.Scratch):
             box = idest.data_view.get_bbox()
             if (box.lower()[i], box.upper()[i]) != (dimmin, dimmax):
+                return False
+        return True
+
+    def _straddle_fits(self, i, dimmin, dimmax) -> bool:
+        """May the lane whose vector straddles the end of lead dimension `i`
+        compute the whole vector (`Options.lead_straddle`)?
+
+        Vectors sit on multiples of the width, so the last one reaches
+        `ceil(dimmax / width) * width`.  Its extra components have to land
+        somewhere nothing reads back and read from somewhere they may: the
+        accumulator a register image -- whose slots are whole vectors, and
+        whose store keeps to the window element by element -- and every
+        operand that carries the dimension either a register image too or
+        stored with room for the rounded-up end in its own column, so that
+        the read past the window stays inside the allocation.
+        """
+        width = self._lead_width
+        end = -(-dimmax // width) * width
+        if end == dimmax:
+            return True
+        if self._idest.stype not in (SymbolType.Register, SymbolType.Scratch):
+            return False
+        slot = f'n{i}'
+        for j, op in enumerate(self._ops):
+            dims = self._opdim_to_nks[j]
+            if slot not in dims:
+                continue
+            symbol = op.symbol
+            if symbol is None:
+                return False
+            if symbol.stype in (SymbolType.Register, SymbolType.Scratch):
+                continue
+            view = symbol.data_view
+            if view is None:
+                return False
+            p = dims.index(slot)
+            lower = view.get_bbox().lower()[p]
+            if end - lower > view.shape[p]:
                 return False
         return True
 
@@ -2440,13 +2493,20 @@ class MultilinearInstruction(ComputeInstruction):
         Idempotent: an operand already carrying an order keeps it, so
         regenerating does not re-decide.
         """
-        if not self._context.get_user_options().prepare_operands:
+        # A copy the file defines (`operator_copies`) is filled by the
+        # generator, so ordering it asks nothing of the caller; it exists to
+        # be ordered for the one operation that reads it.  A merged run's
+        # stand-in is one where every member is: the run is that operation,
+        # once per member.
+        copied = _copies(a_obj)
+        if not (copied or self._context.get_user_options().prepare_operands):
             return
         if self._lead_width != 1:
             # A packed lead operand is read as vectors of rows, and an order
             # stated for single rows would be read by coordinate -- wrongly.
             return
-        if getattr(a_obj, 'residence', Residence.MEMORY) is not Residence.MEMORY:
+        if getattr(a_obj, 'residence', Residence.MEMORY) not in (
+                Residence.MEMORY, Residence.MODULE):
             # An operand whose numbers are in the instruction stream or in a
             # kernel argument has no buffer, and every one of these orders is
             # a statement about a buffer.  Offered one, the matrix path asks
@@ -2487,7 +2547,8 @@ class MultilinearInstruction(ComputeInstruction):
         whole = tuple(int(x) for x in a_obj.get_actual_shape()) == (lead,
                                                                     depth)
         if not whole and not (
-                'prepare_operands' in self._context.get_asked_options().asked()
+                copied
+                or 'prepare_operands' in self._context.get_asked_options().asked()
                 or module.order_before_packing(self._shape(), self._context)):
             return
         # Where the contraction starts inside the shared operand's first block,
@@ -2545,7 +2606,12 @@ class MultilinearInstruction(ComputeInstruction):
                 return
         # An order laid over the window an operation reads leaves the cells
         # outside unstored, which the setter allows only where they are known
-        # zero; where they are not, the operand stays as it is.
+        # zero; where they are not, the operand stays as it is.  A copy's
+        # cells outside are read by nobody, and are made zero to say so.
+        if copied:
+            from tensorforge.generators.operator_copies import confine
+            for member in members:
+                confine(member, order)
         for member in members:
             if member.storage_order is not None:
                 continue
