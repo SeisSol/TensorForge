@@ -114,14 +114,58 @@ def order_of(path: Path, rows: Sequence[Dict]) -> Optional[int]:
     return None
 
 
+#: Vendor words a device name carries that say nothing about which GPU it is.
+_VENDOR_WORDS = re.compile(r'\b(NVIDIA|AMD|Instinct|Intel\(R\)|Intel|Data Center GPU|'
+                           r'GeForce|Radeon|Graphics)\b\s*')
+
+
+def gpu_name(device: str) -> Optional[str]:
+    """The GPU a runtime's device name is, short: `MI300A` of `AMD Instinct
+    MI300A`, `GH200` of `NVIDIA GH200 480GB`, `A100` of `NVIDIA A100 80GB
+    PCIe`, `Max 1550` of `Intel(R) Data Center GPU Max 1550`, `RTX 5070
+    Laptop` of `NVIDIA GeForce RTX 5070 Laptop GPU`.  None where the name is
+    no device's: `requested <arch>`, `fake-<arch>` (`run.detect_devices`),
+    or nothing.
+
+    The architecture does not tell machines apart: MI300A and MI300X are one
+    gfx942 with other clocks, memory and CU counts, so another roof, another
+    peak and other kernel times."""
+    text = (device or '').strip()
+    if not text or text.startswith(('requested ', 'fake-')):
+        return None
+    m = re.search(r'\bMI\d+[A-Z]*\b', text)
+    if m:
+        return m.group(0)
+    m = re.search(r'\b(?:RTX|GTX)\s?\d{3,4}(?:\s?Ti|\s?SUPER)?(?:\s?Laptop)?', text)
+    if m:
+        return re.sub(r'\s+', ' ', m.group(0))
+    m = re.search(r'\bMax\s?\d{3,4}\b', text)
+    if m:
+        return m.group(0)
+    m = re.search(r'\bRadeon\s+(?:Pro\s+)?\S+', text)
+    if m:
+        return m.group(0)
+    m = re.search(r'\b[A-Z]{1,2}\d{2,3}[A-Z]?\b', text)
+    if m:
+        return m.group(0)
+    # A vendor's name for a GPU none of the above spells: its words without
+    # the vendor's.  Anything else names no GPU this can tell.
+    if not re.match(r'(NVIDIA|AMD|Intel)\b', text):
+        return None
+    short = _VENDOR_WORDS.sub('', text).strip()
+    return short or None
+
+
 @dataclass
 class Point:
     """One measurement, flattened out of whichever file carried it."""
     workload: str
     config: str
-    #: The machine, as every view names it: the architecture the row
-    #: gives, or where one architecture ran under several backends, the
-    #: backend and the architecture (`Field.split_backends`).
+    #: The machine, as every view names it: the GPU its tree's roofline
+    #: measured (`gpu_name`), else the architecture the row gives; where one
+    #: machine ran under several backends, the backend and the machine
+    #: (`Field.split_backends`).  `Field.architecture` names the
+    #: architecture behind it.
     arch: str
     backend: str
     device: str
@@ -212,6 +256,9 @@ class Field:
     #: The machines that are one architecture under one of several
     #: backends, by name: their architecture and backend.
     split: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+    #: The machines named after their GPU (`gpu_name`): the architecture
+    #: each one is.
+    isa: Dict[str, str] = field(default_factory=dict)
 
     def split_backends(self) -> None:
         """An architecture measured under more than one backend -- SPMD and
@@ -237,14 +284,16 @@ class Field:
 
     def machine_name(self, arch: str, backend: str) -> str:
         """What the views call the machine of a row of `arch` and
-        `backend` (`split_backends`)."""
-        name = f'{backend}-{arch}'
-        return name if name in self.split else arch
+        `backend` (`split_backends`, `_name_machines`)."""
+        machine = next((m for m, a in self.isa.items() if a == arch), arch)
+        name = f'{backend}-{machine}'
+        return name if name in self.split else machine
 
     def architecture(self, machine: str) -> str:
         """The architecture a machine is, as a row or a profile names it
-        (`split_backends`)."""
-        return self.split.get(machine, (machine, ''))[0]
+        (`split_backends`, `name_machines`)."""
+        name = self.split.get(machine, (machine, ''))[0]
+        return self.isa.get(name, name)
 
     def ceiling(self, arch: str, datatype: str) -> Optional[Ceiling]:
         """The roof a point of this precision on this machine is placed
@@ -418,6 +467,10 @@ def collect(targets: Sequence[Path]) -> Field:
     out = Field()
     seen: set = set()
     for target in targets:
+        # What this tree adds, named after the GPU its rooflines measured
+        # once it is read (`_name_machines`).
+        first_point, first_failed = len(out.points), len(out.failed)
+        ceilings: List[Ceiling] = []
         benches = ([target] if target.is_file()
                    else sorted(target.rglob('bench.json')))
         for bench in benches:
@@ -457,8 +510,7 @@ def collect(targets: Sequence[Path]) -> Field:
             for name in ('ceiling.json', 'roofline.json'):
                 ceiling = _load_ceiling(bench.parent / name)
                 if ceiling:
-                    out.ceilings.setdefault(
-                        (ceiling.arch, ceiling.datatype), ceiling)
+                    ceilings.append(ceiling)
         # A tree `evaluate.py` wrote keeps its ceilings in one place rather
         # than beside every run, which is the point of measuring them once.
         if target.is_dir():
@@ -467,10 +519,45 @@ def collect(targets: Sequence[Path]) -> Field:
                         'ceiling.json', 'roofline.json'):
                     ceiling = _load_ceiling(name)
                     if ceiling:
-                        out.ceilings.setdefault(
-                            (ceiling.arch, ceiling.datatype), ceiling)
+                        ceilings.append(ceiling)
+        _name_machines(out, out.points[first_point:] + out.failed[first_failed:],
+                       ceilings)
     out.split_backends()
     return out
+
+
+def _name_machines(out: Field, points: Sequence[Point],
+                   ceilings: Sequence[Ceiling]) -> None:
+    """The points and ceilings of one tree under the GPU's name (`gpu_name`)
+    where its rooflines say which GPU it was, else under the architecture.
+
+    A tree is a machine's (`campaign.py` fetches one per machine), and a
+    campaign passes `--arch`, so its rows say only `requested <arch>`: the
+    roofline, measured on the device itself, is what names it.  Keyed by the
+    architecture, two machines of one -- MI300A and MI300X -- were one
+    machine with one roof, the first ceiling read standing for both."""
+    by_arch: Dict[str, str] = {}
+    for c in ceilings:
+        name = gpu_name(c.device)
+        if name:
+            by_arch.setdefault(c.arch, name)
+    # Where no roofline names it, the rows may: one name for the points
+    # and the ceilings of an architecture alike.
+    for p in points:
+        if p.arch not in by_arch:
+            name = gpu_name(p.device)
+            if name:
+                by_arch[p.arch] = name
+    for p in points:
+        name = by_arch.get(p.arch)
+        if name and name != p.arch:
+            out.isa.setdefault(name, p.arch)
+            p.arch = name
+    for c in ceilings:
+        name = by_arch.get(c.arch) or c.arch
+        if name != c.arch:
+            out.isa.setdefault(name, c.arch)
+        out.ceilings.setdefault((name, c.datatype), c)
 
 
 # ----------------------------------------------------------------------

@@ -137,18 +137,21 @@ def test_one_gpu_under_two_backends_is_two_machines(tmp_path):
             'bytes_per_s': 2e12})
     got = compare.collect([tmp_path])
     kept = got.largest_batch(got.points)
+    # The GPU's name where the rows say it (`compare.gpu_name`), the
+    # architecture where they do not.
     assert sorted((p.arch, p.row['event_ns']) for p in kept) == [
-        ('esimd-pvc', 80.0), ('oneapi-pvc', 100.0), ('sm_90', 50.0)]
-    assert got.split == {'esimd-pvc': ('pvc', 'esimd'),
-                         'oneapi-pvc': ('pvc', 'oneapi')}
-    # Each under the architecture's roof, and told apart by name.
-    assert got.ceiling('esimd-pvc', 'F64') is got.ceiling('pvc', 'F64')
-    assert got.ceiling('oneapi-pvc', 'F64') is not None
-    assert got.device_of('esimd-pvc') == 'Max 1550 (esimd)'
+        ('esimd-Max 1550', 80.0), ('oneapi-Max 1550', 100.0), ('sm_90', 50.0)]
+    assert got.split == {'esimd-Max 1550': ('Max 1550', 'esimd'),
+                         'oneapi-Max 1550': ('Max 1550', 'oneapi')}
+    # Each under the GPU's roof, and told apart by name.
+    assert got.ceiling('esimd-Max 1550', 'F64') is got.ceiling('Max 1550', 'F64')
+    assert got.ceiling('oneapi-Max 1550', 'F64') is not None
+    assert got.device_of('esimd-Max 1550') == 'Max 1550 (esimd)'
     assert got.device_of('sm_90') == 'sm_90'
-    assert got.machine_name('pvc', 'esimd') == 'esimd-pvc'
+    assert got.architecture('esimd-Max 1550') == 'pvc'
+    assert got.machine_name('pvc', 'esimd') == 'esimd-Max 1550'
     assert got.machine_name('sm_90', 'cuda') == 'sm_90'
-    assert got.ceiling_archs == ['esimd-pvc', 'oneapi-pvc']
+    assert got.ceiling_archs == ['esimd-Max 1550', 'oneapi-Max 1550']
 
 
 # ----------------------------------------------------------------------
@@ -509,18 +512,56 @@ def test_a_bus_the_streaming_loop_outran_is_left_out(tmp_path, bus, kept):
     assert (drawn is None) == (not kept)
 
 
-@pytest.mark.parametrize('named, expected', [
-    ('AMD Instinct MI300A', 'AMD Instinct MI300A'),
-    ('', 'requested gfx942'),
+@pytest.mark.parametrize('named, machine, expected', [
+    ('AMD Instinct MI300A', 'MI300A', 'AMD Instinct MI300A'),
+    ('', 'gfx942', 'requested gfx942'),
 ])
-def test_a_device_is_named_as_its_runtime_names_it(tmp_path, named,
+def test_a_device_is_named_as_its_runtime_names_it(tmp_path, named, machine,
                                                    expected):
     """A run under `--arch` is on `requested gfx942`, and one where the
     environment declared the GPU on `fake-pvc`; the roofline asked the
-    device itself, and a caption takes its name where it has one."""
+    device itself, and the machine and its caption take its name where it
+    has one."""
     _write(tmp_path, 'elastic-4-s-s1',
            [_row('k', 'baseline', 'gfx942', 1024, 100.0,
                  device='requested gfx942')],
            ceiling={'arch': 'gfx942', 'datatype': 'F32', 'device': named,
                     'flops_per_s': 8e13, 'bytes_per_s': 3e12})
-    assert compare.collect([tmp_path]).device_of('gfx942') == expected
+    field = compare.collect([tmp_path])
+    assert field.archs == [machine]
+    assert field.device_of(machine) == expected
+    assert field.architecture(machine) == 'gfx942'
+
+
+def test_two_gpus_of_one_architecture_are_two_machines(tmp_path):
+    """MI300A and MI300X are one gfx942 with other clocks, memory and CU
+    counts: each tree under its own GPU's name, under its own roof --
+    keyed by the architecture, the first ceiling read stood for both."""
+    for gpu, ns, roof in (('MI300A', 100.0, 3e12), ('MI300X', 80.0, 4e12)):
+        _write(tmp_path / gpu, 'elastic-4-s-s1',
+               [_row('k', 'baseline', 'gfx942', 1024, ns,
+                     device='requested gfx942')],
+               ceiling={'arch': 'gfx942', 'datatype': 'F32',
+                        'device': f'AMD Instinct {gpu}',
+                        'flops_per_s': 8e13, 'bytes_per_s': roof})
+    field = compare.collect([tmp_path / 'MI300A', tmp_path / 'MI300X'])
+    assert field.archs == ['MI300A', 'MI300X']
+    assert sorted((p.arch, p.row['event_ns']) for p in field.points) == [
+        ('MI300A', 100.0), ('MI300X', 80.0)]
+    assert field.ceiling('MI300A', 'F32').bytes_per_s == 3e12
+    assert field.ceiling('MI300X', 'F32').bytes_per_s == 4e12
+    assert {field.architecture(m) for m in field.archs} == {'gfx942'}
+
+
+@pytest.mark.parametrize('device, name', [
+    ('AMD Instinct MI300A', 'MI300A'), ('AMD Instinct MI300X', 'MI300X'),
+    ('AMD Instinct MI250X/MI250', 'MI250X'), ('NVIDIA GH200 480GB', 'GH200'),
+    ('NVIDIA A100 80GB PCIe', 'A100'), ('NVIDIA A100-SXM4-80GB', 'A100'),
+    ('NVIDIA GB200', 'GB200'), ('Intel(R) Data Center GPU Max 1550', 'Max 1550'),
+    ('NVIDIA GeForce RTX 5070 Laptop GPU', 'RTX 5070 Laptop'),
+    ('AMD Radeon 890M Graphics', 'Radeon 890M'),
+    ('requested gfx942', None), ('fake-pvc', None), ('', None),
+    ('device A', None),
+])
+def test_a_gpu_is_named_short(device, name):
+    assert compare.gpu_name(device) == name
