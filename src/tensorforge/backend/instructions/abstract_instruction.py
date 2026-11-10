@@ -245,12 +245,14 @@ def _pin_every(context, body, num_threads) -> int:
   """Every how many loads the emitter fences the body (`Options.pin_loads`),
   0 for none.
 
-  CUDA only, where the fence is `__syncwarp()`, and only for multiplications
-  over whole warps: one narrower shares its warp with others whose batch loop
-  can end a trip earlier, and a full-mask `__syncwarp` there waits for lanes
-  that never come.  `'auto'` fences every `PIN_EVERY` loads where the body,
-  counted in its own order, needs by `PTXAS_NEED` more than the register file
-  less `PIN_MARGIN` -- where ptxas would spill it.
+  Where the target has a fence (`Lexic.pin_fence`): on CUDA `__syncwarp()`,
+  and only for multiplications over whole warps -- one narrower shares its
+  warp with others whose batch loop can end a trip earlier, and a full-mask
+  `__syncwarp` there waits for lanes that never come; on AMD a scheduling
+  barrier, which is no rendezvous and goes anywhere.  `'auto'` fences every
+  `PIN_EVERY` loads where the body, counted in its own order, needs by
+  `PTXAS_NEED` more than the register file less `PIN_MARGIN` -- where ptxas
+  would spill it; elsewhere the pin is asked for by number.
   """
   # A build written again with a pin of the tuner's (`Generator.emitted_with_pin`).
   forced = getattr(context, 'forced_pin', None)
@@ -259,14 +261,18 @@ def _pin_every(context, body, num_threads) -> int:
   if not pin:
     return 0
   target = context.target
-  if (str(target.hw.vendor).lower() != 'nvidia'
-      or target.backend != 'cuda' or _explicit_simd(context)):
+  fence = target.lexic.pin_fence()
+  if fence is None or _explicit_simd(context):
     return 0
   wave = max(1, getattr(target.hw, 'vec_unit_length', 32))
-  if not num_threads or num_threads % wave:
+  if fence[1] and (not num_threads or num_threads % wave):
     return 0
   if pin != 'auto':
     return int(pin)
+  if str(target.hw.vendor).lower() != 'nvidia':
+    # The estimate is calibrated against ptxas (`PTXAS_NEED`); elsewhere the
+    # pin is what a build asks for by number.
+    return 0
   budget = getattr(target.hw, 'max_reg_per_thread', None)
   if budget is None:
     return 0
