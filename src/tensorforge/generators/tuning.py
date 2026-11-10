@@ -353,6 +353,9 @@ def _whole_wave(descrs, context: Context, origin: Candidate,
     if wave <= widest:
         return []
     base = lane_config.deduce(_flat(descrs), context)
+    if base.num_active_threads < CLEAN_WAVE_SHARE * wave:
+        # Mostly idle lanes (`CLEAN_WAVE_SHARE`).
+        return []
     cand = origin.set('lanes', LaneConfig(wave, base.num_active_threads,
                                           base.lead_width))
     if 'merge_variants' in fixed or not _mergeable(descrs, context):
@@ -1673,6 +1676,16 @@ ISSUE_PER_WAVE = ('gfx9',)
 #: than the default.  Lanes past the extent hold nothing (`_wider`), which is
 #: why the whole wave is asked about only where nothing narrower is clean.
 CLEAN_WAVE = True
+
+#: The share of the wave's lanes the extent has to fill for `CLEAN_WAVE` to
+#: ask about it.  Order 3 has ten rows: at 64 lanes 54 of them hold nothing,
+#: and what keeps such a build out of scratch is the scalar registers it
+#: parks in vector ones -- 1019 for SeisSol's `localFluxAll` with eight
+#: simulations in single precision, 378 for viscoelastic `derivative` in
+#: double -- which on MI300A ran 72 and 20 % slower than the sixteen lanes of
+#: the default, spilling 1112 and 644 B to scratch.  Viscoelastic order-4
+#: `derivative` (20 rows, 31 % of the wave) is the case the step is for.
+CLEAN_WAVE_SHARE = 0.25
 
 #: Where `Options.pin_loads` is `'auto'`, the rule has ptxas decide it rather
 #: than the estimate (`abstract_instruction.PTXAS_NEED`): a candidate whose

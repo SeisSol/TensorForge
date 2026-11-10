@@ -422,6 +422,21 @@ def test_where_nothing_up_to_the_extent_is_clean_the_wave_is_asked(
     assert _key(pick)[0] == 32
 
 
+def test_a_wave_mostly_idle_is_not_asked_about():
+    """Ten rows -- order 3 -- leave 54 of a 64-lane wave idle: what keeps such
+    a build out of scratch is scalar registers parked in vector ones, and on
+    MI300A it ran 20 to 72 % behind the spilling default
+    (`CLEAN_WAVE_SHARE`).  Twenty rows keep the wave a third busy and are
+    asked about."""
+    ctx = _amd()
+    for rows, asked in ((10, False), (20, True)):
+        descr_factory = _local_flux(m=rows)
+        origin, _ = _origin(descr_factory, ctx)
+        have = [origin.set('lanes', lane_config.LaneConfig(16, rows, 1))]
+        wave = tuning._whole_wave(descr_factory(), ctx, origin, have)
+        assert bool(wave) is asked
+
+
 def test_the_generator_builds_the_pick_and_remembers_it(monkeypatch):
     """Through `Options.autotune`: the kernel is built at the rule's pick, and
     a second generation of the same kernel asks the compiler nothing."""
