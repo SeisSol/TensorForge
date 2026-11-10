@@ -176,6 +176,22 @@ def test_an_intel_build_reports_spills_and_no_register_count():
         'number would rank them equal instead of declining to rank them')
 
 
+def test_the_unitless_spill_of_oneapi_2025_is_read_with_its_register_file():
+    """The spelling of oneAPI 2025 and 2026 on PVC, from a SeisSol build on
+    SuperMUC-NG Phase 2: no "bytes" behind the amount, and the general
+    registers the thread was given -- 128 by default, 256 in large-GRF
+    mode."""
+    err = ("warning: kernel _ZTSZZ30kernel_kernel_b0a421bb38a57788PN4sycl3_V1"
+           "5queueE  compiled SIMD16 allocated 128 regs and spilled around "
+           "404\n"
+           "warning: kernel _ZTSZZ30kernel_kernel_eee7c1235480acb8PN4sycl3_V1"
+           "5queueE  compiled SIMD16 allocated 256 regs and spilled around "
+           "276\n")
+    f = toolchain.igc_fields(err)
+    assert f == {'vgprsspill': 404, 'grf': 256}
+    assert 'vgprs' not in f
+
+
 def test_a_silent_intel_build_is_not_an_error():
     """Nothing to say means it did not spill, which is the good case."""
     assert toolchain.igc_fields('') == {}

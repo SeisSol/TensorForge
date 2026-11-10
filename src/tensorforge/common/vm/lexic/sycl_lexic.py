@@ -116,7 +116,24 @@ class SyclLexic(Lexic):
     return (f'sycl::permute_group_by_xor(item.get_sub_group(), {variable}, '
             f'{mask})')
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None):
+  def _grf_property(self, grf) -> str:
+    """The `properties{...}` argument that asks IGC for a register file
+    (`Options.sycl_grf`), with its comma, or nothing.  The explicit vector
+    takes the large file by default: its register images are sized for it."""
+    grf = str(grf).strip() if grf is not None else 'default'
+    if grf == 'default':
+      grf = '256' if self._explicit_simd else ''
+    if not grf:
+      return ''
+    if grf == 'auto':
+      what = 'sycl::ext::intel::experimental::grf_size_automatic'
+    elif grf in ('128', '256'):
+      what = f'sycl::ext::intel::experimental::grf_size<{grf}>'
+    else:
+      raise ValueError(f'sycl_grf={grf!r}: 128, 256, auto or default')
+    return f'sycl::ext::oneapi::experimental::properties{{{what}}}, '
+
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None, grf=None):
     if self._explicit_simd:
       # The arena is reserved inside the kernel instead; see
       # `declare_shared_memory`.  Declaring an accessor as well would reserve
@@ -135,14 +152,13 @@ class SyclLexic(Lexic):
 
     props = ''
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
+      # The register file as a kernel property, not as the attribute
+      # `[[intel::grf_size(256)]]`, which DPC++ 2026 does not know: it warns
+      # "unknown attribute ignored" and compiles for the small file, so a
+      # kernel sized for 256 registers gets 128.
+      props = self._grf_property(grf)
       if self._explicit_simd:
         add_items = '[[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]]'
-        # The large register file as a kernel property, not as the attribute
-        # `[[intel::grf_size(256)]]`, which DPC++ 2026 does not know: it warns
-        # "unknown attribute ignored" and compiles for the small file, so a
-        # kernel sized for 256 registers gets 128.
-        props = ('sycl::ext::oneapi::experimental::properties{'
-                 'sycl::ext::intel::experimental::grf_size<256>}, ')
       else:
         # The sub-group follows the multiplication.  The lane search puts 32
         # lanes on a multiplication -- the ceiling is deliberately not the
@@ -268,6 +284,11 @@ class SyclLexic(Lexic):
     # which AdaptiveCpp does not have.
     if self._explicit_simd:
       return ['sycl/sycl.hpp', 'tensorforge_device/isycl.h']
+    if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
+      # The register file a kernel asks for (`_grf_property`), a DPC++
+      # extension; AdaptiveCpp has neither the header nor the property.
+      return ['sycl/sycl.hpp',
+              'sycl/ext/intel/experimental/grf_size_properties.hpp']
     return ['sycl/sycl.hpp']
 
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):

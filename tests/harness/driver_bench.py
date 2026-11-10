@@ -655,11 +655,18 @@ sycl::queue* tfb_queue = nullptr;
 #define DEV_STREAM_SYNC(s)     (s)->wait()
 #define DEV_STREAM_PTR(s)      ((void*)(s))
 #ifdef SYCL_EXT_ONEAPI_IN_ORDER_QUEUE_EVENTS
+#include <optional>
+/* The last event as an event: DPC++ 2025.0 returns one, 2025.2 an
+   `std::optional` of one, empty before the queue's first command. */
+inline sycl::event tfb_last_event(const sycl::event &e) { return e; }
+inline sycl::event tfb_last_event(const std::optional<sycl::event> &e) {
+  return e ? *e : sycl::event();
+}
 #define DEV_HAS_EVENTS         1
 #define DEV_EVENT_T            sycl::event
 #define DEV_EVENT_CREATE(e)    (void)(e)
 #define DEV_EVENT_DESTROY(e)   (void)(e)
-#define DEV_EVENT_RECORD(e,s)  ((e) = (s)->ext_oneapi_get_last_event())
+#define DEV_EVENT_RECORD(e,s)  ((e) = tfb_last_event((s)->ext_oneapi_get_last_event()))
 #define DEV_EVENT_SYNC(e)      (e).wait()
 #define DEV_EVENT_MS(o,a,b)    ((o) = (float)(1e-6 * (double)( \
     (b).get_profiling_info<sycl::info::event_profiling::command_end>() - \

@@ -84,7 +84,7 @@ class CudaLexic(Lexic):
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None,
-                        lanes=None):
+                        lanes=None, grf=None):
     args = [str(item) for item in kernel_bounds]
     bounds = f"\n__launch_bounds__({', '.join(args)})\n"
     header = f'__global__ void {bounds} kernel_{base_name}({params})'

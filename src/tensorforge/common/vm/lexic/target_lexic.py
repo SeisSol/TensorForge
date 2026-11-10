@@ -32,7 +32,7 @@ class TargetLexic(Lexic):
   def declare_shared_memory(self, name, precision, size=None):
     return ""
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None):
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None, grf=None):
     bounds = "*".join(str(kb) for kb in kernel_bounds)
     stream_type = self.stream_type
     backend = self._backend

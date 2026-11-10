@@ -163,8 +163,9 @@ private:
 
 // -- kernel properties ---------------------------------------------------
 
-// What the ESIMD launch passes between the range and the kernel: the large
-// register file as a compile-time property.  Only the shape matters here.
+// What a launch on Intel passes between the range and the kernel: the
+// register file as a compile-time property (`Options.sycl_grf`; the large one
+// by default under ESIMD).  Only the shape matters here.
 namespace ext::oneapi::experimental {
 template <typename... Ps> struct properties {
   constexpr properties(Ps...) {}
@@ -174,6 +175,8 @@ template <typename... Ps> properties(Ps...) -> properties<Ps...>;
 namespace ext::intel::experimental {
 template <unsigned N> struct grf_size_value {};
 template <unsigned N> inline constexpr grf_size_value<N> grf_size{};
+struct grf_size_automatic_value {};
+inline constexpr grf_size_automatic_value grf_size_automatic{};
 } // namespace ext::intel::experimental
 
 // -- queue / handler -------------------------------------------------------

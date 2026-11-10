@@ -781,6 +781,19 @@ declare('preload_shard_budget',
             'where they bind first, as on AMD at order 8, a block can take '
             'more than that at no cost.  0 is that default.')
 
+declare('sycl_grf',
+        default='default',
+        parse=lambda text: text.strip(),
+        doc='The register file a SYCL kernel on Intel asks IGC for, as a kernel '
+            'property (`grf_size`, DPC++ only): `128` or `256` general registers '
+            'a thread, `auto` for IGC to choose per kernel '
+            '(`grf_size_automatic`), `default` for no property -- IGC\'s small '
+            'file under SPMD, and 256 under the explicit vector, which is sized '
+            'for it.  256 halves the threads in flight and spills less: in '
+            'SeisSol on PVC (oneAPI 2025, elastic order 6) projectToDR went from '
+            '1477 to 397 us a call and the derivative from 294 to 191, but the '
+            'volume from 187 to 202.')
+
 declare('stream_shards',
         default=0.0,
         parse=parse_float,

@@ -209,8 +209,10 @@ class Lexic(ABC):
   @abstractmethod
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None,
-                        lanes=None):
-    pass
+                        lanes=None, grf=None):
+    """The kernel's head.  `grf` is the register file it asks for where the
+    backend can (`Options.sycl_grf`): `'128'`, `'256'`, `'auto'`, or None
+    for the backend's default."""
 
   @abstractmethod
   def sync_block(self):

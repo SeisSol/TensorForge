@@ -320,6 +320,15 @@ _IGC_SPILL = re.compile(
 #: IGC's word for a kernel it compiled twice: the first attempt blew the
 #: register file and it retries with another strategy.
 _IGC_RETRY = re.compile(r'\[RetryManager\]\s+Start recompilation', re.I)
+#: The warning IGC prints for a kernel that spills, with the register file it
+#: was given -- 128 or 256 general registers a thread (`Options.sycl_grf`) --
+#: and the spill, without a unit in oneAPI 2025 and 2026: `kernel _ZTS...
+#: compiled SIMD16 allocated 128 regs and spilled around 404`.  The first
+#: pattern of `_IGC_SPILL` needs the "bytes" older drivers wrote, so before
+#: this every SeisSol kernel on PVC read as one that fits.
+_IGC_ALLOC = re.compile(
+    r'compiled\s+SIMD\d+\s+allocated\s+(?P<grf>\d+)\s+regs'
+    r'(?:\s+and\s+spilled\s+around\s+(?P<spill>\d+))?', re.I)
 
 
 def _keep_max(fields: Dict[str, int], key: str, value: int) -> None:
@@ -363,16 +372,28 @@ def igc_fields(log: str) -> Dict[str, int]:
 
     `vgprsspill` in bytes where IGC states a size, and 1 -- spilled, amount
     unknown -- where it only reports a retry, so that such a build ranks
-    behind every one that did not.  Silence is the answer "no spill", not a
-    failure to parse: IGC says nothing about a kernel that fits.
+    behind every one that did not; `grf`, the general registers a thread was
+    given, where the spill warning names them.  Silence is the answer "no
+    spill", not a failure to parse: IGC says nothing about a kernel that
+    fits.
     """
     spill = 0
+    grf = 0
     for m in _IGC_SPILL.finditer(log):
         spill = max(spill, int(m.group('value') or m.group('value2')
                                or m.group('value3')))
+    for m in _IGC_ALLOC.finditer(log):
+        grf = max(grf, int(m.group('grf')))
+        if m.group('spill'):
+            spill = max(spill, int(m.group('spill')))
     if not spill and _IGC_RETRY.search(log):
         spill = 1
-    return {'vgprsspill': spill} if spill else {}
+    out = {'vgprsspill': spill} if spill else {}
+    if grf:
+        # General registers a thread, not registers a lane: a field of its
+        # own, which nothing reads as `vgprs`.
+        out['grf'] = grf
+    return out
 
 
 def report_fields(backend: str, log: str) -> Dict[str, int]:
