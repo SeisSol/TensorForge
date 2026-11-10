@@ -795,14 +795,17 @@ declare('sycl_grf',
             'volume from 187 to 202.')
 
 declare('stream_shards',
-        default=0.0,
+        rule=lambda target: target.prefs.stream_shards,
         parse=parse_float,
         doc='The share of the shards\' budget (`preload_shards`) that is a room '
             'for what of the batch-constant operands does not fit for the '
             'whole batch loop: copied in there by the block for every element, '
             'a product at a time, each ahead of the product that reads it '
             '(`pir.shards._rest`); the block is then one group on the same '
-            'elements.  0 holds what fits and leaves the rest in global memory.')
+            'elements.  0 holds what fits and leaves the rest in global memory.  '
+            'Only where the operators are more than the block\'s shared memory '
+            '(or `preload_shard_budget`); 0.25 by default on AMD '
+            '(`Target.prefs`).')
 
 declare('stage_members',
         rule=lambda target: target.prefs.stage_members,

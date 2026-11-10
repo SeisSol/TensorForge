@@ -285,6 +285,16 @@ def test_the_uses_share_one_room():
     assert end - start == 128
 
 
+@pytest.mark.parametrize('arch, backend, share', [
+    ('gfx942', 'hip', 0.25), ('gfx90a', 'hip', 0.25), ('gfx1250', 'hip', 0.25),
+    ('sm_90', 'cuda', 0.0), ('pvc', 'oneapi', 0.0)])
+def test_the_room_is_amds_default(arch, backend, share):
+    """A quarter of the shards' budget on AMD, where the shards are on and
+    the room is measured; nothing where the shards are off."""
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+    assert ctx.get_user_options().stream_shards == share
+
+
 def test_the_block_takes_the_loop_as_one_group():
     """The copies' barriers stand in the batch loop, which the whole block
     then takes in step: one group, as large as the block."""
@@ -506,6 +516,10 @@ def _dense_volume_f64(monkeypatch=None, **options):
         descrs.append(GemmDescr(False, False,
                                 t((56, 56), f'kDivM{d}', Addressing.NONE),
                                 tmp, q, alpha=1.0, beta=1.0))
+    # The budget the registers leave, without the room for what does not fit
+    # (`stream_shards`, on by default on AMD), which takes what the block has
+    # left instead.
+    options.setdefault('stream_shards', 0.0)
     seen = []
     if monkeypatch is not None:
         real = Generator._register_blocks_at_most

@@ -124,6 +124,7 @@ class Preferences:
     #: and the rest under their own names.
     preload_globals: bool = False
     preload_shards: bool = False
+    stream_shards: float = 0.0
     stage_members: bool = False
     split_member_copies: bool = False
     split_predicated_load: bool = False
@@ -244,6 +245,13 @@ PREFERENCES = {
         # `volume` 22 % faster in double precision, its merged `localFluxAll`
         # 27 % and at order 6 33 % (12 % in single), nothing slower.
         preload_shards=True,
+        # What does not fit for the whole loop, a product at a time through
+        # a quarter of the shards' budget -- only where the operators are more
+        # than a block's shared memory (`Generator._operators_past_block`).
+        # On the MI300A SeisSol's order-8 kernels 12.6 % faster in single
+        # precision (derivative 27 %, the volume 4 % slower) and 7.8 % in
+        # double (derivative 10 %, volume 17 %); order 6 unchanged.
+        stream_shards=0.25,
         stage_members=True,
         # A trip's member copy split around what the trip computes before it
         # reads the copy: on the MI300A SeisSol's `localFluxAll` 2.7 % faster
