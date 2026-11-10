@@ -688,6 +688,12 @@ class Generator:
     #: The loosest level the section's next attempt may choose
     #: (`_choose_pack_level`): where the last one stopped once it did not fit.
     self._pack_floor = 0
+    #: Whether a block may copy operator data a trip or a use at a time
+    #: (`Section.streams`); reset per section in `generate`.
+    self._streams_ok = True
+    #: Whether the attempt's block failed for the group of `stage_group`
+    #: multiplications alone (`_mults_for`).
+    self._group_unfit = False
     self._preloaded = set()
     self._preload_left = set()
     #: The launch every section runs under, once the sections are built.
@@ -1195,6 +1201,10 @@ class Generator:
       self._preload_drop = 0
       self._pack_level = 0
       self._pack_floor = 0
+      # Whether the block may copy operator data in a trip or a use at a
+      # time (`Section.streams`), which takes one group of `stage_group`
+      # multiplications a block: not once that group has failed to fit.
+      self._streams_ok = True
       # Two attempts, with the operators preloaded and without -- or, under
       # `pack_operands='fit'`, one more per tighter packing, and under
       # `preload_partial` one more per operator dropped.  Each failed attempt
@@ -1205,6 +1215,7 @@ class Generator:
         scopecnt = self._scopes.get_num_scopes()
         self._scopes.add_scope()
         self._section = Section()
+        self._group_unfit = False
 
         self._emit_global_ir()
         self._emit_ir(codesection)
@@ -1215,6 +1226,13 @@ class Generator:
           from tensorforge.backend.instructions.compute import dchain
           self._section.ir = dchain.link(self._context, self._section.ir)
 
+        options = self._context.get_user_options()
+        if (options.stream_shards and options.preload_shards
+            and self._streams_ok and self._operators_past_block()):
+          # What of the operators does not fit is copied in for every element
+          # by the whole block (`Options.stream_shards`), which then takes
+          # the elements as one group, as for the members a trip copies in.
+          self._section.streams = True
         index = len(self._sections)
         start, stride = self._section_traversal(index)
         group = self._group_size(index, start)
@@ -1256,6 +1274,17 @@ class Generator:
         settled = self._settle_storage()
         if self._place_section(index) and settled:
           break
+        if self._section.streams and self._streams_ok and self._group_unfit:
+          # The group the copies of a trip or a use need (`_mults_for`) holds
+          # more than the block's shared memory: the section is built again
+          # with nothing copied so -- what does not fit for the whole loop
+          # read from global memory, as without `stream_shards`.  At order 8
+          # in single precision on gfx1150 SeisSol's derivative took 23 kB a
+          # multiplication, and the group of eight 187 kB of 64.
+          self._streams_ok = False
+          while scopecnt < self._scopes.get_num_scopes():
+            self._scopes.remove_scope()
+          continue
         if not self._section.preload:
           self._refuse_unplaced()
         # The preloaded operators left no room for one multiplication: the
@@ -2199,11 +2228,29 @@ class Generator:
                 threads=self._num_threads, fptype=self._context.fp_type,
                 static=self._context.get_user_options().preload_shards,
                 stream=section.streams,
+                # Only where the block is one group (`Section.streams`), whose
+                # loop the room's block barriers can stand in.
+                stream_rest=(self._context.get_user_options().stream_shards
+                             if section.streams else 0.0),
                 split=self._context.get_user_options().split_member_copies,
                 lead=self._context.get_user_options().split_member_lead,
                 aligns=self._proven_alignments(),
                 extents=self._operand_extents(),
                 report=section.shard_report)
+
+  def _operators_past_block(self) -> bool:
+    """Whether the batch-constant operands take more than a block's shared
+    memory, stored (`_operand_extents`) -- or than the shards may take, where
+    `preload_shard_budget` says: where they do not, everything of them a
+    block holds fits for the whole batch loop, and a room for the rest
+    (`Options.stream_shards`) would hold nothing -- but cost the block its
+    size, one group of `stage_group` multiplications."""
+    total = sum(self._operand_extents().values()) * self._context.fp_type.size()
+    cap = self._context.target.hw.max_local_mem_size_per_block
+    budget = self._context.get_user_options().preload_shard_budget
+    if budget:
+      cap = min(cap, budget)
+    return total > cap
 
   def _operand_extents(self) -> dict:
     """How many elements each batch-constant operand is stored over, by the
@@ -3543,6 +3590,7 @@ class Generator:
     split = MultLayout(self._num_threads,
                        self._context.target.hw.vec_unit_length)
     return bool(self._context.get_user_options().stage_members
+                and self._streams_ok
                 and self._persistent_threading
                 and not _explicit_simd_lowering(self._context)
                 and (split.contiguous or split.whole_waves)
@@ -3590,6 +3638,23 @@ class Generator:
       policy.set_stages()
     num_mults_per_block = policy.get_num_mults_per_block()
     fits = num_mults_per_block >= 1
+    if self._section.streams and fits:
+      # The block is one group, whose loop the copies' block barriers stand
+      # in, and the rounding below takes the whole group whatever the policy
+      # would rather: the group within what a block can have at all, or the
+      # section is built without (`_streams_ok`).  Only where one
+      # multiplication would fit: a block past the limit with one -- the
+      # operators preloaded whole, say -- is the placement's to retry
+      # (`generate`), and not the group's.
+      hw = self._context.target.hw
+      group = self._stage_group()
+      size = self._context.fp_type.size()
+      cap = hw.max_local_mem_size_per_block
+      if ((global_size + size_per_mult) * size <= cap
+          and ((global_size + group * size_per_mult) * size > cap
+               or group * self._num_threads > hw.max_threads_per_block)):
+        fits = False
+        self._group_unfit = True
     # A block holds whole groups or the group is not a unit.  Rounding down
     # rather than up, because up would exceed whatever bound produced the
     # number -- shared memory, threads, or the barrier cap itself.

@@ -1188,9 +1188,13 @@ class BatchLoop(AbstractInstruction):
             # and so does each multiplication's row, that plus a constant --
             # and with it what the row reads.
             start = lexic.first_lane(start, wave, 'unsigned')
+        # The group's: the block's where the block is one group, whose
+        # multiplications then all take the same trips (`uniform_scope`) --
+        # as a block barrier in the body needs, which `pir.shards` puts there
+        # for what the whole block copies in.
         with writer.for_(start, self._stacks(), self._stride,
                          hint=self._group_batch(), index_type=SIZE,
-                         uniform=Uniformity.MULTGROUP,
+                         uniform=self.uniform_scope(),
                          peel_index=self._first_group(writer, start),
                          flag_word=self._flag_word()) as loop:
             group = loop.induction

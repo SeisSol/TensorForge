@@ -1,0 +1,1180 @@
+// === base name ===
+kernel_85130cb1a7a995b5
+
+// === header ===
+#ifndef TENSORFORGE_LAUNCH_TYPES
+#define TENSORFORGE_LAUNCH_TYPES
+#include <cstddef>
+namespace tensorforge {
+// Fixed when the kernel is generated: `launch_info_<kernel>`.
+struct LaunchInfo {
+  unsigned block[3];
+  unsigned threadsPerMult;
+  unsigned activeThreads;
+  unsigned leadWidth;
+  unsigned multsPerBlock;
+  std::size_t sharedMemBytes;
+  bool cooperative;
+  bool persistent;
+  unsigned sections;
+};
+// What one launch uses, the grid included: `launch_config_<kernel>`.
+struct LaunchConfig {
+  std::size_t grid[3];
+  std::size_t block[3];
+  std::size_t sharedMemBytes;
+  bool cooperative;
+};
+} // namespace tensorforge
+#endif
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_85130cb1a7a995b5 = {{16, 8, 1}, 16, 16, 1, 8, 8704, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_85130cb1a7a995b5(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_85130cb1a7a995b5(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+
+
+// === launcher ===
+#ifndef TENSORFORGE_LAUNCH_TYPES
+#define TENSORFORGE_LAUNCH_TYPES
+#include <cstddef>
+namespace tensorforge {
+// Fixed when the kernel is generated: `launch_info_<kernel>`.
+struct LaunchInfo {
+  unsigned block[3];
+  unsigned threadsPerMult;
+  unsigned activeThreads;
+  unsigned leadWidth;
+  unsigned multsPerBlock;
+  std::size_t sharedMemBytes;
+  bool cooperative;
+  bool persistent;
+  unsigned sections;
+};
+// What one launch uses, the grid included: `launch_config_<kernel>`.
+struct LaunchConfig {
+  std::size_t grid[3];
+  std::size_t block[3];
+  std::size_t sharedMemBytes;
+  bool cooperative;
+};
+} // namespace tensorforge
+#endif
+tensorforge::LaunchConfig launch_config_kernel_85130cb1a7a995b5(size_t numElements0, void* streamPtr) {
+  (void)numElements0;
+  (void)streamPtr;
+  dim3 block (16, 8, 1);
+  static std::size_t gridsize = 0;
+      if (gridsize == 0) {
+        int device, smCount, blocksPerSM;
+        cudaGetDevice(&device);
+        CHECK_ERR;
+        cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
+        CHECK_ERR;
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_85130cb1a7a995b5, block.x * block.y * block.z, 2176 * sizeof(float));
+        CHECK_ERR;
+        if (blocksPerSM > 0) {
+          gridsize = smCount * blocksPerSM;
+        }
+        else {
+          gridsize = smCount;
+        }
+      }
+      
+  tensorforge::LaunchConfig config{};
+  config.grid[0] = std::min(gridsize, numElements0);
+  config.grid[1] = 1;
+  config.grid[2] = 1;
+  config.block[0] = 16;
+  config.block[1] = 8;
+  config.block[2] = 1;
+  config.sharedMemBytes = 2176 * sizeof(float);
+  config.cooperative = false;
+  return config;
+}
+void launcher_kernel_85130cb1a7a995b5(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, float * m5, size_t m5_extraOffset, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_85130cb1a7a995b5(numElements0, streamPtr);
+  dim3 block (config.block[0], config.block[1], config.block[2]);
+  dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
+  static bool shmemsizeset = false;
+      if (!shmemsizeset) {
+        cudaFuncSetAttribute(kernel_kernel_85130cb1a7a995b5, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
+        CHECK_ERR;
+        shmemsizeset = true;
+      }
+      
+  cudaStream_t stream = (streamPtr != nullptr) ? static_cast<cudaStream_t>(streamPtr) : 0;
+  const unsigned * flags0Arg = (const unsigned *)flags0;
+  kernel_kernel_85130cb1a7a995b5<<<grid,block,config.sharedMemBytes,stream>>>(m0, m0_extraOffset, m1, m2, m2_extraOffset, m3, m3_extraOffset, m4, m5, m5_extraOffset, numElements0, flags0Arg);
+  CHECK_ERR;
+}
+
+
+// === kernel ===
+__global__ void 
+__launch_bounds__(128, 1)
+ kernel_kernel_85130cb1a7a995b5(float * m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, float * m3, size_t m3_extraOffset, const float * m4, float * m5, size_t m5_extraOffset, size_t numElements0, const unsigned * __restrict__ flags0) {
+  extern __shared__ char totalShrMemPtr[];
+   {
+    using namespace tensorforge::literals;
+    // generated with TensorForge. Version: 0.0.1
+    // options: default
+    // launch: 16 lanes x 8 per block = block 16x8x1, 8704 B shared, occupancy grid
+    // operands:
+    //   m0 16×16(16×16) {0..16}×{0..16} strided
+    //   m1 16×16(16×16) {0..16}×{0..16} none
+    //   m2 16×16(16×16) {0..16}×{0..16} strided
+    //   m3 16×16(16×16) {0..16}×{0..16} strided
+    //   m4 16×16(16×16) {0..16}×{0..16} none
+    //   m5 16×16(16×16) {0..16}×{0..16} strided
+    // operations:
+    //   m0[i,j] = m1[i,k] × m2[k,j]
+    //   m3[i,j] = m4[i,k] × m0[k,j]
+    //   m5[i,j] = m1[i,k] × m3[k,j]
+    // tensorforge-meta: {"fp":"float","launch":{"active_threads":16,"block":[16,8,1],"cooperative":false,"lead_width":1,"mults_per_block":8,"persistent":true,"sections":[{"barrier":false,"mults_per_block":8,"shared_elements":2176}],"shared_bytes":8704,"shared_elements":2176,"threads_per_mult":16},"loops":[],"operands":[{"addressing":"strided","alias":"C","bbox":[[0,0],[16,16]],"name":"m0","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"none","alias":"P","bbox":[[0,0],[16,16]],"name":"m1","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"strided","alias":"B","bbox":[[0,0],[16,16]],"name":"m2","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"strided","alias":"D","bbox":[[0,0],[16,16]],"name":"m3","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"none","alias":"Q","bbox":[[0,0],[16,16]],"name":"m4","ordered":false,"parts":1,"shape":[16,16],"variant":false},{"addressing":"strided","alias":"E","bbox":[[0,0],[16,16]],"name":"m5","ordered":false,"parts":1,"shape":[16,16],"variant":false}],"operations":[{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[16,16]},"kind":"multilinear","ops":[{"addressing":"none","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[16,16]},{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m2","offset":[0,0],"shape":[16,16]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m3","offset":[0,0],"shape":[16,16]},"kind":"multilinear","ops":[{"addressing":"none","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m4","offset":[0,0],"shape":[16,16]},{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m0","offset":[0,0],"shape":[16,16]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]},{"add":false,"dest":{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m5","offset":[0,0],"shape":[16,16]},"kind":"multilinear","ops":[{"addressing":"none","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m1","offset":[0,0],"shape":[16,16]},{"addressing":"strided","bbox":[[0,0],[16,16]],"is_tmp":false,"name":"m3","offset":[0,0],"shape":[16,16]}],"permute":[[0,1],[0,1]],"target":[[0,-1],[-1,1]]}],"version":"0.0.1"}
+    {
+      auto* totalShrMem = reinterpret_cast<float*>(totalShrMemPtr);
+      float* localShrMem0 = &totalShrMem[272 * threadIdx.y + 0];
+      size_t v3_batchId1 = ((threadIdx.y + blockDim.y * (blockIdx.x)) < numElements0) ? (threadIdx.y + blockDim.y * (blockIdx.x)) : 0u;
+      const float *const __restrict__ glb_m1 = &m1[0];
+      const float *const __restrict__ glb_m4 = &m4[0];
+      float * __restrict__ s0 = &localShrMem0[0];
+      float * __restrict__ s1 = &localShrMem0[0];
+      float * __restrict__ s2 = &localShrMem0[0];
+      const uint32_t flagWordFirst = flags0 == nullptr ? 1 : flags0[v3_batchId1];
+      size_t v3992_flagSecondAhead = v3_batchId1 + (gridDim.x * blockDim.y);
+      const uint32_t flagWordSecond = flags0 == nullptr ? 1 : flags0[((v3992_flagSecondAhead < numElements0) ? v3992_flagSecondAhead : v3_batchId1)];
+      const float *const __restrict__ peel_glb_m2 = &m2[v3_batchId1 * 256 + 0 + m2_extraOffset];
+      // s0 = load{g>s}(peel_glb_m2[0, 1])
+      #pragma unroll
+      for (int32_t v4002_i = 0; v4002_i < 16; ++v4002_i) {
+        int32_t v4004_a = threadIdx.x + (v4002_i * 16);
+        __pipeline_memcpy_async(&s0[v4004_a], &peel_glb_m2[v4004_a], 4);
+      }
+      __pipeline_commit();
+      uint32_t v3996_flagWord = flagWordFirst;
+      uint32_t v3997_flagWordNext = flagWordSecond;
+      for (size_t v12_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v12_batchId0 < numElements0; v12_batchId0 += (gridDim.x * blockDim.y)) {
+        size_t v13_ahead1 = v12_batchId0 + (gridDim.x * blockDim.y);
+        size_t v15_batchId1 = (v13_ahead1 < numElements0) ? v13_ahead1 : v12_batchId0;
+        const float *const __restrict__ wrap_glb_m2 = &m2[v15_batchId1 * 256 + 0 + m2_extraOffset];
+        size_t v4014_flagAheadAhead = v15_batchId1 + (gridDim.x * blockDim.y);
+        const uint32_t flagWordAhead = flags0 == nullptr ? 1 : flags0[((v4014_flagAheadAhead < numElements0) ? v4014_flagAheadAhead : v15_batchId1)];
+        const bool allowed = static_cast<bool>(v3996_flagWord);
+        if (allowed) {
+          float *const __restrict__ glb_m0 = &m0[v12_batchId0 * 256 + 0 + m0_extraOffset];
+          float *const __restrict__ glb_m3 = &m3[v12_batchId0 * 256 + 0 + m3_extraOffset];
+          float *const __restrict__ glb_m5 = &m5[v12_batchId0 * 256 + 0 + m5_extraOffset];
+          // wait(s0 = load{g>s}(glb_m2[0, 1]));
+          __pipeline_wait_prior(0);
+          float r0[16]{};
+          // ir0 = +(glb_m1 * s0)
+          // [(0, 16), (0, 16)] [(0, 16)]
+          float ir0[16]{};
+          int32_t v32_lead = threadIdx.x % 16;
+          float v36_data = glb_m1[v32_lead];
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
+          float v37_data = s0[0];
+          float v42_data = s0[16];
+          float v47_data = s0[32];
+          float v52_data = s0[48];
+          float v57_data = s0[64];
+          float v62_data = s0[80];
+          float v67_data = s0[96];
+          float v72_data = s0[112];
+          float v77_data = s0[128];
+          float v82_data = s0[144];
+          float v87_data = s0[160];
+          float v92_data = s0[176];
+          float v97_data = s0[192];
+          float v102_data = s0[208];
+          float v107_data = s0[224];
+          float v112_data = s0[240];
+          int32_t v116_a = v32_lead + 16;
+          float v117_data = glb_m1[v116_a];
+          float v118_data = s0[1];
+          float v123_data = s0[17];
+          float v128_data = s0[33];
+          float v133_data = s0[49];
+          float v138_data = s0[65];
+          float v143_data = s0[81];
+          float v148_data = s0[97];
+          float v153_data = s0[113];
+          float v158_data = s0[129];
+          float v163_data = s0[145];
+          float v168_data = s0[161];
+          float v173_data = s0[177];
+          float v178_data = s0[193];
+          float v183_data = s0[209];
+          float v188_data = s0[225];
+          float v193_data = s0[241];
+          int32_t v197_a = v32_lead + 32;
+          float v198_data = glb_m1[v197_a];
+          float v199_data = s0[2];
+          float v204_data = s0[18];
+          float v209_data = s0[34];
+          float v214_data = s0[50];
+          float v219_data = s0[66];
+          float v224_data = s0[82];
+          float v229_data = s0[98];
+          float v234_data = s0[114];
+          float v239_data = s0[130];
+          float v244_data = s0[146];
+          float v249_data = s0[162];
+          float v254_data = s0[178];
+          float v259_data = s0[194];
+          float v264_data = s0[210];
+          float v269_data = s0[226];
+          float v274_data = s0[242];
+          int32_t v278_a = v32_lead + 48;
+          float v279_data = glb_m1[v278_a];
+          float v280_data = s0[3];
+          float v285_data = s0[19];
+          float v290_data = s0[35];
+          float v295_data = s0[51];
+          float v300_data = s0[67];
+          float v305_data = s0[83];
+          float v310_data = s0[99];
+          float v315_data = s0[115];
+          float v320_data = s0[131];
+          float v325_data = s0[147];
+          float v330_data = s0[163];
+          float v335_data = s0[179];
+          float v340_data = s0[195];
+          float v345_data = s0[211];
+          float v350_data = s0[227];
+          float v355_data = s0[243];
+          int32_t v359_a = v32_lead + 64;
+          float v360_data = glb_m1[v359_a];
+          float v361_data = s0[4];
+          float v366_data = s0[20];
+          float v371_data = s0[36];
+          float v376_data = s0[52];
+          float v381_data = s0[68];
+          float v386_data = s0[84];
+          float v391_data = s0[100];
+          float v396_data = s0[116];
+          float v401_data = s0[132];
+          float v406_data = s0[148];
+          float v411_data = s0[164];
+          float v416_data = s0[180];
+          float v421_data = s0[196];
+          float v426_data = s0[212];
+          float v431_data = s0[228];
+          float v436_data = s0[244];
+          int32_t v440_a = v32_lead + 80;
+          float v441_data = glb_m1[v440_a];
+          float v442_data = s0[5];
+          float v447_data = s0[21];
+          float v452_data = s0[37];
+          float v457_data = s0[53];
+          float v462_data = s0[69];
+          float v467_data = s0[85];
+          float v472_data = s0[101];
+          float v477_data = s0[117];
+          float v482_data = s0[133];
+          float v487_data = s0[149];
+          float v492_data = s0[165];
+          float v497_data = s0[181];
+          float v502_data = s0[197];
+          float v507_data = s0[213];
+          float v512_data = s0[229];
+          float v517_data = s0[245];
+          int32_t v521_a = v32_lead + 96;
+          float v522_data = glb_m1[v521_a];
+          float v523_data = s0[6];
+          float v528_data = s0[22];
+          float v533_data = s0[38];
+          float v538_data = s0[54];
+          float v543_data = s0[70];
+          float v548_data = s0[86];
+          float v553_data = s0[102];
+          float v558_data = s0[118];
+          float v563_data = s0[134];
+          float v568_data = s0[150];
+          float v573_data = s0[166];
+          float v578_data = s0[182];
+          float v583_data = s0[198];
+          float v588_data = s0[214];
+          float v593_data = s0[230];
+          float v598_data = s0[246];
+          int32_t v602_a = v32_lead + 112;
+          float v603_data = glb_m1[v602_a];
+          float v604_data = s0[7];
+          float v609_data = s0[23];
+          float v614_data = s0[39];
+          float v619_data = s0[55];
+          float v624_data = s0[71];
+          float v629_data = s0[87];
+          float v634_data = s0[103];
+          float v639_data = s0[119];
+          float v644_data = s0[135];
+          float v649_data = s0[151];
+          float v654_data = s0[167];
+          float v659_data = s0[183];
+          float v664_data = s0[199];
+          float v669_data = s0[215];
+          float v674_data = s0[231];
+          float v679_data = s0[247];
+          int32_t v683_a = v32_lead + 128;
+          float v684_data = glb_m1[v683_a];
+          float v685_data = s0[8];
+          float v690_data = s0[24];
+          float v695_data = s0[40];
+          float v700_data = s0[56];
+          float v705_data = s0[72];
+          float v710_data = s0[88];
+          float v715_data = s0[104];
+          float v720_data = s0[120];
+          float v725_data = s0[136];
+          float v730_data = s0[152];
+          float v735_data = s0[168];
+          float v740_data = s0[184];
+          float v745_data = s0[200];
+          float v750_data = s0[216];
+          float v755_data = s0[232];
+          float v760_data = s0[248];
+          int32_t v764_a = v32_lead + 144;
+          float v765_data = glb_m1[v764_a];
+          float v766_data = s0[9];
+          float v771_data = s0[25];
+          float v776_data = s0[41];
+          float v781_data = s0[57];
+          float v786_data = s0[73];
+          float v791_data = s0[89];
+          float v796_data = s0[105];
+          float v801_data = s0[121];
+          float v806_data = s0[137];
+          float v811_data = s0[153];
+          float v816_data = s0[169];
+          float v821_data = s0[185];
+          float v826_data = s0[201];
+          float v831_data = s0[217];
+          float v836_data = s0[233];
+          float v841_data = s0[249];
+          int32_t v845_a = v32_lead + 160;
+          float v846_data = glb_m1[v845_a];
+          float v847_data = s0[10];
+          float v852_data = s0[26];
+          float v857_data = s0[42];
+          float v862_data = s0[58];
+          float v867_data = s0[74];
+          float v872_data = s0[90];
+          float v877_data = s0[106];
+          float v882_data = s0[122];
+          float v887_data = s0[138];
+          float v892_data = s0[154];
+          float v897_data = s0[170];
+          float v902_data = s0[186];
+          float v907_data = s0[202];
+          float v912_data = s0[218];
+          float v917_data = s0[234];
+          float v922_data = s0[250];
+          int32_t v926_a = v32_lead + 176;
+          float v927_data = glb_m1[v926_a];
+          float v928_data = s0[11];
+          float v933_data = s0[27];
+          float v938_data = s0[43];
+          float v943_data = s0[59];
+          float v948_data = s0[75];
+          float v953_data = s0[91];
+          float v958_data = s0[107];
+          float v963_data = s0[123];
+          float v968_data = s0[139];
+          float v973_data = s0[155];
+          float v978_data = s0[171];
+          float v983_data = s0[187];
+          float v988_data = s0[203];
+          float v993_data = s0[219];
+          float v998_data = s0[235];
+          float v1003_data = s0[251];
+          int32_t v1007_a = v32_lead + 192;
+          float v1008_data = glb_m1[v1007_a];
+          float v1009_data = s0[12];
+          float v1014_data = s0[28];
+          float v1019_data = s0[44];
+          float v1024_data = s0[60];
+          float v1029_data = s0[76];
+          float v1034_data = s0[92];
+          float v1039_data = s0[108];
+          float v1044_data = s0[124];
+          float v1049_data = s0[140];
+          float v1054_data = s0[156];
+          float v1059_data = s0[172];
+          float v1064_data = s0[188];
+          float v1069_data = s0[204];
+          float v1074_data = s0[220];
+          float v1079_data = s0[236];
+          float v1084_data = s0[252];
+          int32_t v1088_a = v32_lead + 208;
+          float v1089_data = glb_m1[v1088_a];
+          float v1090_data = s0[13];
+          float v1095_data = s0[29];
+          float v1100_data = s0[45];
+          float v1105_data = s0[61];
+          float v1110_data = s0[77];
+          float v1115_data = s0[93];
+          float v1120_data = s0[109];
+          float v1125_data = s0[125];
+          float v1130_data = s0[141];
+          float v1135_data = s0[157];
+          float v1140_data = s0[173];
+          float v1145_data = s0[189];
+          float v1150_data = s0[205];
+          float v1155_data = s0[221];
+          float v1160_data = s0[237];
+          float v1165_data = s0[253];
+          int32_t v1169_a = v32_lead + 224;
+          float v1170_data = glb_m1[v1169_a];
+          float v1171_data = s0[14];
+          float v1176_data = s0[30];
+          float v1179_p = ((((((((((((((v36_data * v42_data) + (v117_data * v123_data)) + (v198_data * v204_data)) + (v279_data * v285_data)) + (v360_data * v366_data)) + (v441_data * v447_data)) + (v522_data * v528_data)) + (v603_data * v609_data)) + (v684_data * v690_data)) + (v765_data * v771_data)) + (v846_data * v852_data)) + (v927_data * v933_data)) + (v1008_data * v1014_data)) + (v1089_data * v1095_data)) + (v1170_data * v1176_data);
+          float v1181_data = s0[46];
+          float v1184_p = ((((((((((((((v36_data * v47_data) + (v117_data * v128_data)) + (v198_data * v209_data)) + (v279_data * v290_data)) + (v360_data * v371_data)) + (v441_data * v452_data)) + (v522_data * v533_data)) + (v603_data * v614_data)) + (v684_data * v695_data)) + (v765_data * v776_data)) + (v846_data * v857_data)) + (v927_data * v938_data)) + (v1008_data * v1019_data)) + (v1089_data * v1100_data)) + (v1170_data * v1181_data);
+          float v1186_data = s0[62];
+          float v1189_p = ((((((((((((((v36_data * v52_data) + (v117_data * v133_data)) + (v198_data * v214_data)) + (v279_data * v295_data)) + (v360_data * v376_data)) + (v441_data * v457_data)) + (v522_data * v538_data)) + (v603_data * v619_data)) + (v684_data * v700_data)) + (v765_data * v781_data)) + (v846_data * v862_data)) + (v927_data * v943_data)) + (v1008_data * v1024_data)) + (v1089_data * v1105_data)) + (v1170_data * v1186_data);
+          float v1191_data = s0[78];
+          float v1194_p = ((((((((((((((v36_data * v57_data) + (v117_data * v138_data)) + (v198_data * v219_data)) + (v279_data * v300_data)) + (v360_data * v381_data)) + (v441_data * v462_data)) + (v522_data * v543_data)) + (v603_data * v624_data)) + (v684_data * v705_data)) + (v765_data * v786_data)) + (v846_data * v867_data)) + (v927_data * v948_data)) + (v1008_data * v1029_data)) + (v1089_data * v1110_data)) + (v1170_data * v1191_data);
+          float v1196_data = s0[94];
+          float v1199_p = ((((((((((((((v36_data * v62_data) + (v117_data * v143_data)) + (v198_data * v224_data)) + (v279_data * v305_data)) + (v360_data * v386_data)) + (v441_data * v467_data)) + (v522_data * v548_data)) + (v603_data * v629_data)) + (v684_data * v710_data)) + (v765_data * v791_data)) + (v846_data * v872_data)) + (v927_data * v953_data)) + (v1008_data * v1034_data)) + (v1089_data * v1115_data)) + (v1170_data * v1196_data);
+          float v1201_data = s0[110];
+          float v1204_p = ((((((((((((((v36_data * v67_data) + (v117_data * v148_data)) + (v198_data * v229_data)) + (v279_data * v310_data)) + (v360_data * v391_data)) + (v441_data * v472_data)) + (v522_data * v553_data)) + (v603_data * v634_data)) + (v684_data * v715_data)) + (v765_data * v796_data)) + (v846_data * v877_data)) + (v927_data * v958_data)) + (v1008_data * v1039_data)) + (v1089_data * v1120_data)) + (v1170_data * v1201_data);
+          float v1206_data = s0[126];
+          float v1209_p = ((((((((((((((v36_data * v72_data) + (v117_data * v153_data)) + (v198_data * v234_data)) + (v279_data * v315_data)) + (v360_data * v396_data)) + (v441_data * v477_data)) + (v522_data * v558_data)) + (v603_data * v639_data)) + (v684_data * v720_data)) + (v765_data * v801_data)) + (v846_data * v882_data)) + (v927_data * v963_data)) + (v1008_data * v1044_data)) + (v1089_data * v1125_data)) + (v1170_data * v1206_data);
+          float v1211_data = s0[142];
+          float v1214_p = ((((((((((((((v36_data * v77_data) + (v117_data * v158_data)) + (v198_data * v239_data)) + (v279_data * v320_data)) + (v360_data * v401_data)) + (v441_data * v482_data)) + (v522_data * v563_data)) + (v603_data * v644_data)) + (v684_data * v725_data)) + (v765_data * v806_data)) + (v846_data * v887_data)) + (v927_data * v968_data)) + (v1008_data * v1049_data)) + (v1089_data * v1130_data)) + (v1170_data * v1211_data);
+          float v1216_data = s0[158];
+          float v1219_p = ((((((((((((((v36_data * v82_data) + (v117_data * v163_data)) + (v198_data * v244_data)) + (v279_data * v325_data)) + (v360_data * v406_data)) + (v441_data * v487_data)) + (v522_data * v568_data)) + (v603_data * v649_data)) + (v684_data * v730_data)) + (v765_data * v811_data)) + (v846_data * v892_data)) + (v927_data * v973_data)) + (v1008_data * v1054_data)) + (v1089_data * v1135_data)) + (v1170_data * v1216_data);
+          float v1221_data = s0[174];
+          float v1224_p = ((((((((((((((v36_data * v87_data) + (v117_data * v168_data)) + (v198_data * v249_data)) + (v279_data * v330_data)) + (v360_data * v411_data)) + (v441_data * v492_data)) + (v522_data * v573_data)) + (v603_data * v654_data)) + (v684_data * v735_data)) + (v765_data * v816_data)) + (v846_data * v897_data)) + (v927_data * v978_data)) + (v1008_data * v1059_data)) + (v1089_data * v1140_data)) + (v1170_data * v1221_data);
+          float v1226_data = s0[190];
+          float v1229_p = ((((((((((((((v36_data * v92_data) + (v117_data * v173_data)) + (v198_data * v254_data)) + (v279_data * v335_data)) + (v360_data * v416_data)) + (v441_data * v497_data)) + (v522_data * v578_data)) + (v603_data * v659_data)) + (v684_data * v740_data)) + (v765_data * v821_data)) + (v846_data * v902_data)) + (v927_data * v983_data)) + (v1008_data * v1064_data)) + (v1089_data * v1145_data)) + (v1170_data * v1226_data);
+          float v1231_data = s0[206];
+          float v1234_p = ((((((((((((((v36_data * v97_data) + (v117_data * v178_data)) + (v198_data * v259_data)) + (v279_data * v340_data)) + (v360_data * v421_data)) + (v441_data * v502_data)) + (v522_data * v583_data)) + (v603_data * v664_data)) + (v684_data * v745_data)) + (v765_data * v826_data)) + (v846_data * v907_data)) + (v927_data * v988_data)) + (v1008_data * v1069_data)) + (v1089_data * v1150_data)) + (v1170_data * v1231_data);
+          float v1236_data = s0[222];
+          float v1239_p = ((((((((((((((v36_data * v102_data) + (v117_data * v183_data)) + (v198_data * v264_data)) + (v279_data * v345_data)) + (v360_data * v426_data)) + (v441_data * v507_data)) + (v522_data * v588_data)) + (v603_data * v669_data)) + (v684_data * v750_data)) + (v765_data * v831_data)) + (v846_data * v912_data)) + (v927_data * v993_data)) + (v1008_data * v1074_data)) + (v1089_data * v1155_data)) + (v1170_data * v1236_data);
+          float v1241_data = s0[238];
+          float v1244_p = ((((((((((((((v36_data * v107_data) + (v117_data * v188_data)) + (v198_data * v269_data)) + (v279_data * v350_data)) + (v360_data * v431_data)) + (v441_data * v512_data)) + (v522_data * v593_data)) + (v603_data * v674_data)) + (v684_data * v755_data)) + (v765_data * v836_data)) + (v846_data * v917_data)) + (v927_data * v998_data)) + (v1008_data * v1079_data)) + (v1089_data * v1160_data)) + (v1170_data * v1241_data);
+          float v1246_data = s0[254];
+          float v1249_p = ((((((((((((((v36_data * v112_data) + (v117_data * v193_data)) + (v198_data * v274_data)) + (v279_data * v355_data)) + (v360_data * v436_data)) + (v441_data * v517_data)) + (v522_data * v598_data)) + (v603_data * v679_data)) + (v684_data * v760_data)) + (v765_data * v841_data)) + (v846_data * v922_data)) + (v927_data * v1003_data)) + (v1008_data * v1084_data)) + (v1089_data * v1165_data)) + (v1170_data * v1246_data);
+          int32_t v1250_a = v32_lead + 240;
+          float v1251_data = glb_m1[v1250_a];
+          float v1252_data = s0[15];
+          ir0[0] = ((((((((((((((((v36_data * v37_data) + (v117_data * v118_data)) + (v198_data * v199_data)) + (v279_data * v280_data)) + (v360_data * v361_data)) + (v441_data * v442_data)) + (v522_data * v523_data)) + (v603_data * v604_data)) + (v684_data * v685_data)) + (v765_data * v766_data)) + (v846_data * v847_data)) + (v927_data * v928_data)) + (v1008_data * v1009_data)) + (v1089_data * v1090_data)) + (v1170_data * v1171_data)) + (v1251_data * v1252_data));
+          float v1257_data = s0[31];
+          ir0[1] = (v1179_p + (v1251_data * v1257_data));
+          float v1262_data = s0[47];
+          ir0[2] = (v1184_p + (v1251_data * v1262_data));
+          float v1267_data = s0[63];
+          ir0[3] = (v1189_p + (v1251_data * v1267_data));
+          float v1272_data = s0[79];
+          ir0[4] = (v1194_p + (v1251_data * v1272_data));
+          float v1277_data = s0[95];
+          ir0[5] = (v1199_p + (v1251_data * v1277_data));
+          float v1282_data = s0[111];
+          ir0[6] = (v1204_p + (v1251_data * v1282_data));
+          float v1287_data = s0[127];
+          ir0[7] = (v1209_p + (v1251_data * v1287_data));
+          float v1292_data = s0[143];
+          ir0[8] = (v1214_p + (v1251_data * v1292_data));
+          float v1297_data = s0[159];
+          ir0[9] = (v1219_p + (v1251_data * v1297_data));
+          float v1302_data = s0[175];
+          ir0[10] = (v1224_p + (v1251_data * v1302_data));
+          float v1307_data = s0[191];
+          ir0[11] = (v1229_p + (v1251_data * v1307_data));
+          float v1312_data = s0[207];
+          ir0[12] = (v1234_p + (v1251_data * v1312_data));
+          float v1317_data = s0[223];
+          ir0[13] = (v1239_p + (v1251_data * v1317_data));
+          float v1322_data = s0[239];
+          ir0[14] = (v1244_p + (v1251_data * v1322_data));
+          float v1327_data = s0[255];
+          ir0[15] = (v1249_p + (v1251_data * v1327_data));
+          // r0 = ir0
+          // glb_m0 = store{r>g}(r0);
+          #pragma unroll
+          for (int32_t v1339_i0 = 0; v1339_i0 < 1; ++v1339_i0) {
+            int32_t v1344_lead = v32_lead + (v1339_i0 * 16);
+            #pragma unroll
+            for (int32_t v1340_i1 = 0; v1340_i1 < 16; ++v1340_i1) {
+              float v1342_data = ir0[v1340_i1];
+              glb_m0[(v1344_lead + (v1340_i1 * 16))] = v1342_data;
+            }
+          }
+          // s1 = load{g>s}(glb_m0[0, 1])
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
+          #pragma unroll
+          for (int32_t v1347_i = 0; v1347_i < 16; ++v1347_i) {
+            int32_t v1349_a = threadIdx.x + (v1347_i * 16);
+            __pipeline_memcpy_async(&s1[v1349_a], &glb_m0[v1349_a], 4);
+          }
+          __pipeline_commit();
+          // wait(s1 = load{g>s}(glb_m0[0, 1]));
+          __pipeline_wait_prior(0);
+          float r1[16]{};
+          // ir1 = +(glb_m4 * s1)
+          // [(0, 16), (0, 16)] [(0, 16)]
+          float ir1[16]{};
+          float v1358_data = glb_m4[v32_lead];
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
+          float v1359_data = s1[0];
+          float v1364_data = s1[16];
+          float v1369_data = s1[32];
+          float v1374_data = s1[48];
+          float v1379_data = s1[64];
+          float v1384_data = s1[80];
+          float v1389_data = s1[96];
+          float v1394_data = s1[112];
+          float v1399_data = s1[128];
+          float v1404_data = s1[144];
+          float v1409_data = s1[160];
+          float v1414_data = s1[176];
+          float v1419_data = s1[192];
+          float v1424_data = s1[208];
+          float v1429_data = s1[224];
+          float v1434_data = s1[240];
+          float v1439_data = glb_m4[v116_a];
+          float v1440_data = s1[1];
+          float v1445_data = s1[17];
+          float v1450_data = s1[33];
+          float v1455_data = s1[49];
+          float v1460_data = s1[65];
+          float v1465_data = s1[81];
+          float v1470_data = s1[97];
+          float v1475_data = s1[113];
+          float v1480_data = s1[129];
+          float v1485_data = s1[145];
+          float v1490_data = s1[161];
+          float v1495_data = s1[177];
+          float v1500_data = s1[193];
+          float v1505_data = s1[209];
+          float v1510_data = s1[225];
+          float v1515_data = s1[241];
+          float v1520_data = glb_m4[v197_a];
+          float v1521_data = s1[2];
+          float v1526_data = s1[18];
+          float v1531_data = s1[34];
+          float v1536_data = s1[50];
+          float v1541_data = s1[66];
+          float v1546_data = s1[82];
+          float v1551_data = s1[98];
+          float v1556_data = s1[114];
+          float v1561_data = s1[130];
+          float v1566_data = s1[146];
+          float v1571_data = s1[162];
+          float v1576_data = s1[178];
+          float v1581_data = s1[194];
+          float v1586_data = s1[210];
+          float v1591_data = s1[226];
+          float v1596_data = s1[242];
+          float v1601_data = glb_m4[v278_a];
+          float v1602_data = s1[3];
+          float v1607_data = s1[19];
+          float v1612_data = s1[35];
+          float v1617_data = s1[51];
+          float v1622_data = s1[67];
+          float v1627_data = s1[83];
+          float v1632_data = s1[99];
+          float v1637_data = s1[115];
+          float v1642_data = s1[131];
+          float v1647_data = s1[147];
+          float v1652_data = s1[163];
+          float v1657_data = s1[179];
+          float v1662_data = s1[195];
+          float v1667_data = s1[211];
+          float v1672_data = s1[227];
+          float v1677_data = s1[243];
+          float v1682_data = glb_m4[v359_a];
+          float v1683_data = s1[4];
+          float v1688_data = s1[20];
+          float v1693_data = s1[36];
+          float v1698_data = s1[52];
+          float v1703_data = s1[68];
+          float v1708_data = s1[84];
+          float v1713_data = s1[100];
+          float v1718_data = s1[116];
+          float v1723_data = s1[132];
+          float v1728_data = s1[148];
+          float v1733_data = s1[164];
+          float v1738_data = s1[180];
+          float v1743_data = s1[196];
+          float v1748_data = s1[212];
+          float v1753_data = s1[228];
+          float v1758_data = s1[244];
+          float v1763_data = glb_m4[v440_a];
+          float v1764_data = s1[5];
+          float v1769_data = s1[21];
+          float v1774_data = s1[37];
+          float v1779_data = s1[53];
+          float v1784_data = s1[69];
+          float v1789_data = s1[85];
+          float v1794_data = s1[101];
+          float v1799_data = s1[117];
+          float v1804_data = s1[133];
+          float v1809_data = s1[149];
+          float v1814_data = s1[165];
+          float v1819_data = s1[181];
+          float v1824_data = s1[197];
+          float v1829_data = s1[213];
+          float v1834_data = s1[229];
+          float v1839_data = s1[245];
+          float v1844_data = glb_m4[v521_a];
+          float v1845_data = s1[6];
+          float v1850_data = s1[22];
+          float v1855_data = s1[38];
+          float v1860_data = s1[54];
+          float v1865_data = s1[70];
+          float v1870_data = s1[86];
+          float v1875_data = s1[102];
+          float v1880_data = s1[118];
+          float v1885_data = s1[134];
+          float v1890_data = s1[150];
+          float v1895_data = s1[166];
+          float v1900_data = s1[182];
+          float v1905_data = s1[198];
+          float v1910_data = s1[214];
+          float v1915_data = s1[230];
+          float v1920_data = s1[246];
+          float v1925_data = glb_m4[v602_a];
+          float v1926_data = s1[7];
+          float v1931_data = s1[23];
+          float v1936_data = s1[39];
+          float v1941_data = s1[55];
+          float v1946_data = s1[71];
+          float v1951_data = s1[87];
+          float v1956_data = s1[103];
+          float v1961_data = s1[119];
+          float v1966_data = s1[135];
+          float v1971_data = s1[151];
+          float v1976_data = s1[167];
+          float v1981_data = s1[183];
+          float v1986_data = s1[199];
+          float v1991_data = s1[215];
+          float v1996_data = s1[231];
+          float v2001_data = s1[247];
+          float v2006_data = glb_m4[v683_a];
+          float v2007_data = s1[8];
+          float v2012_data = s1[24];
+          float v2017_data = s1[40];
+          float v2022_data = s1[56];
+          float v2027_data = s1[72];
+          float v2032_data = s1[88];
+          float v2037_data = s1[104];
+          float v2042_data = s1[120];
+          float v2047_data = s1[136];
+          float v2052_data = s1[152];
+          float v2057_data = s1[168];
+          float v2062_data = s1[184];
+          float v2067_data = s1[200];
+          float v2072_data = s1[216];
+          float v2077_data = s1[232];
+          float v2082_data = s1[248];
+          float v2087_data = glb_m4[v764_a];
+          float v2088_data = s1[9];
+          float v2093_data = s1[25];
+          float v2098_data = s1[41];
+          float v2103_data = s1[57];
+          float v2108_data = s1[73];
+          float v2113_data = s1[89];
+          float v2118_data = s1[105];
+          float v2123_data = s1[121];
+          float v2128_data = s1[137];
+          float v2133_data = s1[153];
+          float v2138_data = s1[169];
+          float v2143_data = s1[185];
+          float v2148_data = s1[201];
+          float v2153_data = s1[217];
+          float v2158_data = s1[233];
+          float v2163_data = s1[249];
+          float v2168_data = glb_m4[v845_a];
+          float v2169_data = s1[10];
+          float v2174_data = s1[26];
+          float v2179_data = s1[42];
+          float v2184_data = s1[58];
+          float v2189_data = s1[74];
+          float v2194_data = s1[90];
+          float v2199_data = s1[106];
+          float v2204_data = s1[122];
+          float v2209_data = s1[138];
+          float v2214_data = s1[154];
+          float v2219_data = s1[170];
+          float v2224_data = s1[186];
+          float v2229_data = s1[202];
+          float v2234_data = s1[218];
+          float v2239_data = s1[234];
+          float v2244_data = s1[250];
+          float v2249_data = glb_m4[v926_a];
+          float v2250_data = s1[11];
+          float v2255_data = s1[27];
+          float v2260_data = s1[43];
+          float v2265_data = s1[59];
+          float v2270_data = s1[75];
+          float v2275_data = s1[91];
+          float v2280_data = s1[107];
+          float v2285_data = s1[123];
+          float v2290_data = s1[139];
+          float v2295_data = s1[155];
+          float v2300_data = s1[171];
+          float v2305_data = s1[187];
+          float v2310_data = s1[203];
+          float v2315_data = s1[219];
+          float v2320_data = s1[235];
+          float v2325_data = s1[251];
+          float v2330_data = glb_m4[v1007_a];
+          float v2331_data = s1[12];
+          float v2336_data = s1[28];
+          float v2341_data = s1[44];
+          float v2346_data = s1[60];
+          float v2351_data = s1[76];
+          float v2356_data = s1[92];
+          float v2361_data = s1[108];
+          float v2366_data = s1[124];
+          float v2371_data = s1[140];
+          float v2376_data = s1[156];
+          float v2381_data = s1[172];
+          float v2386_data = s1[188];
+          float v2391_data = s1[204];
+          float v2396_data = s1[220];
+          float v2401_data = s1[236];
+          float v2406_data = s1[252];
+          float v2411_data = glb_m4[v1088_a];
+          float v2412_data = s1[13];
+          float v2417_data = s1[29];
+          float v2422_data = s1[45];
+          float v2427_data = s1[61];
+          float v2432_data = s1[77];
+          float v2437_data = s1[93];
+          float v2442_data = s1[109];
+          float v2447_data = s1[125];
+          float v2452_data = s1[141];
+          float v2457_data = s1[157];
+          float v2462_data = s1[173];
+          float v2467_data = s1[189];
+          float v2472_data = s1[205];
+          float v2477_data = s1[221];
+          float v2482_data = s1[237];
+          float v2487_data = s1[253];
+          float v2492_data = glb_m4[v1169_a];
+          float v2493_data = s1[14];
+          float v2498_data = s1[30];
+          float v2501_p = ((((((((((((((v1358_data * v1364_data) + (v1439_data * v1445_data)) + (v1520_data * v1526_data)) + (v1601_data * v1607_data)) + (v1682_data * v1688_data)) + (v1763_data * v1769_data)) + (v1844_data * v1850_data)) + (v1925_data * v1931_data)) + (v2006_data * v2012_data)) + (v2087_data * v2093_data)) + (v2168_data * v2174_data)) + (v2249_data * v2255_data)) + (v2330_data * v2336_data)) + (v2411_data * v2417_data)) + (v2492_data * v2498_data);
+          float v2503_data = s1[46];
+          float v2506_p = ((((((((((((((v1358_data * v1369_data) + (v1439_data * v1450_data)) + (v1520_data * v1531_data)) + (v1601_data * v1612_data)) + (v1682_data * v1693_data)) + (v1763_data * v1774_data)) + (v1844_data * v1855_data)) + (v1925_data * v1936_data)) + (v2006_data * v2017_data)) + (v2087_data * v2098_data)) + (v2168_data * v2179_data)) + (v2249_data * v2260_data)) + (v2330_data * v2341_data)) + (v2411_data * v2422_data)) + (v2492_data * v2503_data);
+          float v2508_data = s1[62];
+          float v2511_p = ((((((((((((((v1358_data * v1374_data) + (v1439_data * v1455_data)) + (v1520_data * v1536_data)) + (v1601_data * v1617_data)) + (v1682_data * v1698_data)) + (v1763_data * v1779_data)) + (v1844_data * v1860_data)) + (v1925_data * v1941_data)) + (v2006_data * v2022_data)) + (v2087_data * v2103_data)) + (v2168_data * v2184_data)) + (v2249_data * v2265_data)) + (v2330_data * v2346_data)) + (v2411_data * v2427_data)) + (v2492_data * v2508_data);
+          float v2513_data = s1[78];
+          float v2516_p = ((((((((((((((v1358_data * v1379_data) + (v1439_data * v1460_data)) + (v1520_data * v1541_data)) + (v1601_data * v1622_data)) + (v1682_data * v1703_data)) + (v1763_data * v1784_data)) + (v1844_data * v1865_data)) + (v1925_data * v1946_data)) + (v2006_data * v2027_data)) + (v2087_data * v2108_data)) + (v2168_data * v2189_data)) + (v2249_data * v2270_data)) + (v2330_data * v2351_data)) + (v2411_data * v2432_data)) + (v2492_data * v2513_data);
+          float v2518_data = s1[94];
+          float v2521_p = ((((((((((((((v1358_data * v1384_data) + (v1439_data * v1465_data)) + (v1520_data * v1546_data)) + (v1601_data * v1627_data)) + (v1682_data * v1708_data)) + (v1763_data * v1789_data)) + (v1844_data * v1870_data)) + (v1925_data * v1951_data)) + (v2006_data * v2032_data)) + (v2087_data * v2113_data)) + (v2168_data * v2194_data)) + (v2249_data * v2275_data)) + (v2330_data * v2356_data)) + (v2411_data * v2437_data)) + (v2492_data * v2518_data);
+          float v2523_data = s1[110];
+          float v2526_p = ((((((((((((((v1358_data * v1389_data) + (v1439_data * v1470_data)) + (v1520_data * v1551_data)) + (v1601_data * v1632_data)) + (v1682_data * v1713_data)) + (v1763_data * v1794_data)) + (v1844_data * v1875_data)) + (v1925_data * v1956_data)) + (v2006_data * v2037_data)) + (v2087_data * v2118_data)) + (v2168_data * v2199_data)) + (v2249_data * v2280_data)) + (v2330_data * v2361_data)) + (v2411_data * v2442_data)) + (v2492_data * v2523_data);
+          float v2528_data = s1[126];
+          float v2531_p = ((((((((((((((v1358_data * v1394_data) + (v1439_data * v1475_data)) + (v1520_data * v1556_data)) + (v1601_data * v1637_data)) + (v1682_data * v1718_data)) + (v1763_data * v1799_data)) + (v1844_data * v1880_data)) + (v1925_data * v1961_data)) + (v2006_data * v2042_data)) + (v2087_data * v2123_data)) + (v2168_data * v2204_data)) + (v2249_data * v2285_data)) + (v2330_data * v2366_data)) + (v2411_data * v2447_data)) + (v2492_data * v2528_data);
+          float v2533_data = s1[142];
+          float v2536_p = ((((((((((((((v1358_data * v1399_data) + (v1439_data * v1480_data)) + (v1520_data * v1561_data)) + (v1601_data * v1642_data)) + (v1682_data * v1723_data)) + (v1763_data * v1804_data)) + (v1844_data * v1885_data)) + (v1925_data * v1966_data)) + (v2006_data * v2047_data)) + (v2087_data * v2128_data)) + (v2168_data * v2209_data)) + (v2249_data * v2290_data)) + (v2330_data * v2371_data)) + (v2411_data * v2452_data)) + (v2492_data * v2533_data);
+          float v2538_data = s1[158];
+          float v2541_p = ((((((((((((((v1358_data * v1404_data) + (v1439_data * v1485_data)) + (v1520_data * v1566_data)) + (v1601_data * v1647_data)) + (v1682_data * v1728_data)) + (v1763_data * v1809_data)) + (v1844_data * v1890_data)) + (v1925_data * v1971_data)) + (v2006_data * v2052_data)) + (v2087_data * v2133_data)) + (v2168_data * v2214_data)) + (v2249_data * v2295_data)) + (v2330_data * v2376_data)) + (v2411_data * v2457_data)) + (v2492_data * v2538_data);
+          float v2543_data = s1[174];
+          float v2546_p = ((((((((((((((v1358_data * v1409_data) + (v1439_data * v1490_data)) + (v1520_data * v1571_data)) + (v1601_data * v1652_data)) + (v1682_data * v1733_data)) + (v1763_data * v1814_data)) + (v1844_data * v1895_data)) + (v1925_data * v1976_data)) + (v2006_data * v2057_data)) + (v2087_data * v2138_data)) + (v2168_data * v2219_data)) + (v2249_data * v2300_data)) + (v2330_data * v2381_data)) + (v2411_data * v2462_data)) + (v2492_data * v2543_data);
+          float v2548_data = s1[190];
+          float v2551_p = ((((((((((((((v1358_data * v1414_data) + (v1439_data * v1495_data)) + (v1520_data * v1576_data)) + (v1601_data * v1657_data)) + (v1682_data * v1738_data)) + (v1763_data * v1819_data)) + (v1844_data * v1900_data)) + (v1925_data * v1981_data)) + (v2006_data * v2062_data)) + (v2087_data * v2143_data)) + (v2168_data * v2224_data)) + (v2249_data * v2305_data)) + (v2330_data * v2386_data)) + (v2411_data * v2467_data)) + (v2492_data * v2548_data);
+          float v2553_data = s1[206];
+          float v2556_p = ((((((((((((((v1358_data * v1419_data) + (v1439_data * v1500_data)) + (v1520_data * v1581_data)) + (v1601_data * v1662_data)) + (v1682_data * v1743_data)) + (v1763_data * v1824_data)) + (v1844_data * v1905_data)) + (v1925_data * v1986_data)) + (v2006_data * v2067_data)) + (v2087_data * v2148_data)) + (v2168_data * v2229_data)) + (v2249_data * v2310_data)) + (v2330_data * v2391_data)) + (v2411_data * v2472_data)) + (v2492_data * v2553_data);
+          float v2558_data = s1[222];
+          float v2561_p = ((((((((((((((v1358_data * v1424_data) + (v1439_data * v1505_data)) + (v1520_data * v1586_data)) + (v1601_data * v1667_data)) + (v1682_data * v1748_data)) + (v1763_data * v1829_data)) + (v1844_data * v1910_data)) + (v1925_data * v1991_data)) + (v2006_data * v2072_data)) + (v2087_data * v2153_data)) + (v2168_data * v2234_data)) + (v2249_data * v2315_data)) + (v2330_data * v2396_data)) + (v2411_data * v2477_data)) + (v2492_data * v2558_data);
+          float v2563_data = s1[238];
+          float v2566_p = ((((((((((((((v1358_data * v1429_data) + (v1439_data * v1510_data)) + (v1520_data * v1591_data)) + (v1601_data * v1672_data)) + (v1682_data * v1753_data)) + (v1763_data * v1834_data)) + (v1844_data * v1915_data)) + (v1925_data * v1996_data)) + (v2006_data * v2077_data)) + (v2087_data * v2158_data)) + (v2168_data * v2239_data)) + (v2249_data * v2320_data)) + (v2330_data * v2401_data)) + (v2411_data * v2482_data)) + (v2492_data * v2563_data);
+          float v2568_data = s1[254];
+          float v2571_p = ((((((((((((((v1358_data * v1434_data) + (v1439_data * v1515_data)) + (v1520_data * v1596_data)) + (v1601_data * v1677_data)) + (v1682_data * v1758_data)) + (v1763_data * v1839_data)) + (v1844_data * v1920_data)) + (v1925_data * v2001_data)) + (v2006_data * v2082_data)) + (v2087_data * v2163_data)) + (v2168_data * v2244_data)) + (v2249_data * v2325_data)) + (v2330_data * v2406_data)) + (v2411_data * v2487_data)) + (v2492_data * v2568_data);
+          float v2573_data = glb_m4[v1250_a];
+          float v2574_data = s1[15];
+          ir1[0] = ((((((((((((((((v1358_data * v1359_data) + (v1439_data * v1440_data)) + (v1520_data * v1521_data)) + (v1601_data * v1602_data)) + (v1682_data * v1683_data)) + (v1763_data * v1764_data)) + (v1844_data * v1845_data)) + (v1925_data * v1926_data)) + (v2006_data * v2007_data)) + (v2087_data * v2088_data)) + (v2168_data * v2169_data)) + (v2249_data * v2250_data)) + (v2330_data * v2331_data)) + (v2411_data * v2412_data)) + (v2492_data * v2493_data)) + (v2573_data * v2574_data));
+          float v2579_data = s1[31];
+          ir1[1] = (v2501_p + (v2573_data * v2579_data));
+          float v2584_data = s1[47];
+          ir1[2] = (v2506_p + (v2573_data * v2584_data));
+          float v2589_data = s1[63];
+          ir1[3] = (v2511_p + (v2573_data * v2589_data));
+          float v2594_data = s1[79];
+          ir1[4] = (v2516_p + (v2573_data * v2594_data));
+          float v2599_data = s1[95];
+          ir1[5] = (v2521_p + (v2573_data * v2599_data));
+          float v2604_data = s1[111];
+          ir1[6] = (v2526_p + (v2573_data * v2604_data));
+          float v2609_data = s1[127];
+          ir1[7] = (v2531_p + (v2573_data * v2609_data));
+          float v2614_data = s1[143];
+          ir1[8] = (v2536_p + (v2573_data * v2614_data));
+          float v2619_data = s1[159];
+          ir1[9] = (v2541_p + (v2573_data * v2619_data));
+          float v2624_data = s1[175];
+          ir1[10] = (v2546_p + (v2573_data * v2624_data));
+          float v2629_data = s1[191];
+          ir1[11] = (v2551_p + (v2573_data * v2629_data));
+          float v2634_data = s1[207];
+          ir1[12] = (v2556_p + (v2573_data * v2634_data));
+          float v2639_data = s1[223];
+          ir1[13] = (v2561_p + (v2573_data * v2639_data));
+          float v2644_data = s1[239];
+          ir1[14] = (v2566_p + (v2573_data * v2644_data));
+          float v2649_data = s1[255];
+          ir1[15] = (v2571_p + (v2573_data * v2649_data));
+          // r1 = ir1
+          // glb_m3 = store{r>g}(r1);
+          #pragma unroll
+          for (int32_t v2661_i0 = 0; v2661_i0 < 1; ++v2661_i0) {
+            int32_t v2666_lead = v32_lead + (v2661_i0 * 16);
+            #pragma unroll
+            for (int32_t v2662_i1 = 0; v2662_i1 < 16; ++v2662_i1) {
+              float v2664_data = ir1[v2662_i1];
+              glb_m3[(v2666_lead + (v2662_i1 * 16))] = v2664_data;
+            }
+          }
+          // s2 = load{g>s}(glb_m3[0, 1])
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
+          #pragma unroll
+          for (int32_t v2669_i = 0; v2669_i < 16; ++v2669_i) {
+            int32_t v2671_a = threadIdx.x + (v2669_i * 16);
+            __pipeline_memcpy_async(&s2[v2671_a], &glb_m3[v2671_a], 4);
+          }
+          __pipeline_commit();
+          // wait(s2 = load{g>s}(glb_m3[0, 1]));
+          __pipeline_wait_prior(0);
+          float r2[16]{};
+          // ir2 = +(glb_m1 * s2)
+          // [(0, 16), (0, 16)] [(0, 16)]
+          float ir2[16]{};
+          float v2680_data = glb_m1[v32_lead];
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
+          float v2681_data = s2[0];
+          float v2686_data = s2[16];
+          float v2691_data = s2[32];
+          float v2696_data = s2[48];
+          float v2701_data = s2[64];
+          float v2706_data = s2[80];
+          float v2711_data = s2[96];
+          float v2716_data = s2[112];
+          float v2721_data = s2[128];
+          float v2726_data = s2[144];
+          float v2731_data = s2[160];
+          float v2736_data = s2[176];
+          float v2741_data = s2[192];
+          float v2746_data = s2[208];
+          float v2751_data = s2[224];
+          float v2756_data = s2[240];
+          float v2761_data = glb_m1[v116_a];
+          float v2762_data = s2[1];
+          float v2767_data = s2[17];
+          float v2772_data = s2[33];
+          float v2777_data = s2[49];
+          float v2782_data = s2[65];
+          float v2787_data = s2[81];
+          float v2792_data = s2[97];
+          float v2797_data = s2[113];
+          float v2802_data = s2[129];
+          float v2807_data = s2[145];
+          float v2812_data = s2[161];
+          float v2817_data = s2[177];
+          float v2822_data = s2[193];
+          float v2827_data = s2[209];
+          float v2832_data = s2[225];
+          float v2837_data = s2[241];
+          float v2842_data = glb_m1[v197_a];
+          float v2843_data = s2[2];
+          float v2848_data = s2[18];
+          float v2853_data = s2[34];
+          float v2858_data = s2[50];
+          float v2863_data = s2[66];
+          float v2868_data = s2[82];
+          float v2873_data = s2[98];
+          float v2878_data = s2[114];
+          float v2883_data = s2[130];
+          float v2888_data = s2[146];
+          float v2893_data = s2[162];
+          float v2898_data = s2[178];
+          float v2903_data = s2[194];
+          float v2908_data = s2[210];
+          float v2913_data = s2[226];
+          float v2918_data = s2[242];
+          float v2923_data = glb_m1[v278_a];
+          float v2924_data = s2[3];
+          float v2929_data = s2[19];
+          float v2934_data = s2[35];
+          float v2939_data = s2[51];
+          float v2944_data = s2[67];
+          float v2949_data = s2[83];
+          float v2954_data = s2[99];
+          float v2959_data = s2[115];
+          float v2964_data = s2[131];
+          float v2969_data = s2[147];
+          float v2974_data = s2[163];
+          float v2979_data = s2[179];
+          float v2984_data = s2[195];
+          float v2989_data = s2[211];
+          float v2994_data = s2[227];
+          float v2999_data = s2[243];
+          float v3004_data = glb_m1[v359_a];
+          float v3005_data = s2[4];
+          float v3010_data = s2[20];
+          float v3015_data = s2[36];
+          float v3020_data = s2[52];
+          float v3025_data = s2[68];
+          float v3030_data = s2[84];
+          float v3035_data = s2[100];
+          float v3040_data = s2[116];
+          float v3045_data = s2[132];
+          float v3050_data = s2[148];
+          float v3055_data = s2[164];
+          float v3060_data = s2[180];
+          float v3065_data = s2[196];
+          float v3070_data = s2[212];
+          float v3075_data = s2[228];
+          float v3080_data = s2[244];
+          float v3085_data = glb_m1[v440_a];
+          float v3086_data = s2[5];
+          float v3091_data = s2[21];
+          float v3096_data = s2[37];
+          float v3101_data = s2[53];
+          float v3106_data = s2[69];
+          float v3111_data = s2[85];
+          float v3116_data = s2[101];
+          float v3121_data = s2[117];
+          float v3126_data = s2[133];
+          float v3131_data = s2[149];
+          float v3136_data = s2[165];
+          float v3141_data = s2[181];
+          float v3146_data = s2[197];
+          float v3151_data = s2[213];
+          float v3156_data = s2[229];
+          float v3161_data = s2[245];
+          float v3166_data = glb_m1[v521_a];
+          float v3167_data = s2[6];
+          float v3172_data = s2[22];
+          float v3177_data = s2[38];
+          float v3182_data = s2[54];
+          float v3187_data = s2[70];
+          float v3192_data = s2[86];
+          float v3197_data = s2[102];
+          float v3202_data = s2[118];
+          float v3207_data = s2[134];
+          float v3212_data = s2[150];
+          float v3217_data = s2[166];
+          float v3222_data = s2[182];
+          float v3227_data = s2[198];
+          float v3232_data = s2[214];
+          float v3237_data = s2[230];
+          float v3242_data = s2[246];
+          float v3247_data = glb_m1[v602_a];
+          float v3248_data = s2[7];
+          float v3253_data = s2[23];
+          float v3258_data = s2[39];
+          float v3263_data = s2[55];
+          float v3268_data = s2[71];
+          float v3273_data = s2[87];
+          float v3278_data = s2[103];
+          float v3283_data = s2[119];
+          float v3288_data = s2[135];
+          float v3293_data = s2[151];
+          float v3298_data = s2[167];
+          float v3303_data = s2[183];
+          float v3308_data = s2[199];
+          float v3313_data = s2[215];
+          float v3318_data = s2[231];
+          float v3323_data = s2[247];
+          float v3328_data = glb_m1[v683_a];
+          float v3329_data = s2[8];
+          float v3334_data = s2[24];
+          float v3339_data = s2[40];
+          float v3344_data = s2[56];
+          float v3349_data = s2[72];
+          float v3354_data = s2[88];
+          float v3359_data = s2[104];
+          float v3364_data = s2[120];
+          float v3369_data = s2[136];
+          float v3374_data = s2[152];
+          float v3379_data = s2[168];
+          float v3384_data = s2[184];
+          float v3389_data = s2[200];
+          float v3394_data = s2[216];
+          float v3399_data = s2[232];
+          float v3404_data = s2[248];
+          float v3409_data = glb_m1[v764_a];
+          float v3410_data = s2[9];
+          float v3415_data = s2[25];
+          float v3420_data = s2[41];
+          float v3425_data = s2[57];
+          float v3430_data = s2[73];
+          float v3435_data = s2[89];
+          float v3440_data = s2[105];
+          float v3445_data = s2[121];
+          float v3450_data = s2[137];
+          float v3455_data = s2[153];
+          float v3460_data = s2[169];
+          float v3465_data = s2[185];
+          float v3470_data = s2[201];
+          float v3475_data = s2[217];
+          float v3480_data = s2[233];
+          float v3485_data = s2[249];
+          float v3490_data = glb_m1[v845_a];
+          float v3491_data = s2[10];
+          float v3496_data = s2[26];
+          float v3501_data = s2[42];
+          float v3506_data = s2[58];
+          float v3511_data = s2[74];
+          float v3516_data = s2[90];
+          float v3521_data = s2[106];
+          float v3526_data = s2[122];
+          float v3531_data = s2[138];
+          float v3536_data = s2[154];
+          float v3541_data = s2[170];
+          float v3546_data = s2[186];
+          float v3551_data = s2[202];
+          float v3556_data = s2[218];
+          float v3561_data = s2[234];
+          float v3566_data = s2[250];
+          float v3571_data = glb_m1[v926_a];
+          float v3572_data = s2[11];
+          float v3577_data = s2[27];
+          float v3582_data = s2[43];
+          float v3587_data = s2[59];
+          float v3592_data = s2[75];
+          float v3597_data = s2[91];
+          float v3602_data = s2[107];
+          float v3607_data = s2[123];
+          float v3612_data = s2[139];
+          float v3617_data = s2[155];
+          float v3622_data = s2[171];
+          float v3627_data = s2[187];
+          float v3632_data = s2[203];
+          float v3637_data = s2[219];
+          float v3642_data = s2[235];
+          float v3647_data = s2[251];
+          float v3652_data = glb_m1[v1007_a];
+          float v3653_data = s2[12];
+          float v3658_data = s2[28];
+          float v3663_data = s2[44];
+          float v3668_data = s2[60];
+          float v3673_data = s2[76];
+          float v3678_data = s2[92];
+          float v3683_data = s2[108];
+          float v3688_data = s2[124];
+          float v3693_data = s2[140];
+          float v3698_data = s2[156];
+          float v3703_data = s2[172];
+          float v3708_data = s2[188];
+          float v3713_data = s2[204];
+          float v3718_data = s2[220];
+          float v3723_data = s2[236];
+          float v3728_data = s2[252];
+          float v3733_data = glb_m1[v1088_a];
+          float v3734_data = s2[13];
+          float v3739_data = s2[29];
+          float v3744_data = s2[45];
+          float v3749_data = s2[61];
+          float v3754_data = s2[77];
+          float v3759_data = s2[93];
+          float v3764_data = s2[109];
+          float v3769_data = s2[125];
+          float v3774_data = s2[141];
+          float v3779_data = s2[157];
+          float v3784_data = s2[173];
+          float v3789_data = s2[189];
+          float v3794_data = s2[205];
+          float v3799_data = s2[221];
+          float v3804_data = s2[237];
+          float v3809_data = s2[253];
+          float v3814_data = glb_m1[v1169_a];
+          float v3815_data = s2[14];
+          float v3820_data = s2[30];
+          float v3823_p = ((((((((((((((v2680_data * v2686_data) + (v2761_data * v2767_data)) + (v2842_data * v2848_data)) + (v2923_data * v2929_data)) + (v3004_data * v3010_data)) + (v3085_data * v3091_data)) + (v3166_data * v3172_data)) + (v3247_data * v3253_data)) + (v3328_data * v3334_data)) + (v3409_data * v3415_data)) + (v3490_data * v3496_data)) + (v3571_data * v3577_data)) + (v3652_data * v3658_data)) + (v3733_data * v3739_data)) + (v3814_data * v3820_data);
+          float v3825_data = s2[46];
+          float v3828_p = ((((((((((((((v2680_data * v2691_data) + (v2761_data * v2772_data)) + (v2842_data * v2853_data)) + (v2923_data * v2934_data)) + (v3004_data * v3015_data)) + (v3085_data * v3096_data)) + (v3166_data * v3177_data)) + (v3247_data * v3258_data)) + (v3328_data * v3339_data)) + (v3409_data * v3420_data)) + (v3490_data * v3501_data)) + (v3571_data * v3582_data)) + (v3652_data * v3663_data)) + (v3733_data * v3744_data)) + (v3814_data * v3825_data);
+          float v3830_data = s2[62];
+          float v3833_p = ((((((((((((((v2680_data * v2696_data) + (v2761_data * v2777_data)) + (v2842_data * v2858_data)) + (v2923_data * v2939_data)) + (v3004_data * v3020_data)) + (v3085_data * v3101_data)) + (v3166_data * v3182_data)) + (v3247_data * v3263_data)) + (v3328_data * v3344_data)) + (v3409_data * v3425_data)) + (v3490_data * v3506_data)) + (v3571_data * v3587_data)) + (v3652_data * v3668_data)) + (v3733_data * v3749_data)) + (v3814_data * v3830_data);
+          float v3835_data = s2[78];
+          float v3838_p = ((((((((((((((v2680_data * v2701_data) + (v2761_data * v2782_data)) + (v2842_data * v2863_data)) + (v2923_data * v2944_data)) + (v3004_data * v3025_data)) + (v3085_data * v3106_data)) + (v3166_data * v3187_data)) + (v3247_data * v3268_data)) + (v3328_data * v3349_data)) + (v3409_data * v3430_data)) + (v3490_data * v3511_data)) + (v3571_data * v3592_data)) + (v3652_data * v3673_data)) + (v3733_data * v3754_data)) + (v3814_data * v3835_data);
+          float v3840_data = s2[94];
+          float v3843_p = ((((((((((((((v2680_data * v2706_data) + (v2761_data * v2787_data)) + (v2842_data * v2868_data)) + (v2923_data * v2949_data)) + (v3004_data * v3030_data)) + (v3085_data * v3111_data)) + (v3166_data * v3192_data)) + (v3247_data * v3273_data)) + (v3328_data * v3354_data)) + (v3409_data * v3435_data)) + (v3490_data * v3516_data)) + (v3571_data * v3597_data)) + (v3652_data * v3678_data)) + (v3733_data * v3759_data)) + (v3814_data * v3840_data);
+          float v3845_data = s2[110];
+          float v3848_p = ((((((((((((((v2680_data * v2711_data) + (v2761_data * v2792_data)) + (v2842_data * v2873_data)) + (v2923_data * v2954_data)) + (v3004_data * v3035_data)) + (v3085_data * v3116_data)) + (v3166_data * v3197_data)) + (v3247_data * v3278_data)) + (v3328_data * v3359_data)) + (v3409_data * v3440_data)) + (v3490_data * v3521_data)) + (v3571_data * v3602_data)) + (v3652_data * v3683_data)) + (v3733_data * v3764_data)) + (v3814_data * v3845_data);
+          float v3850_data = s2[126];
+          float v3853_p = ((((((((((((((v2680_data * v2716_data) + (v2761_data * v2797_data)) + (v2842_data * v2878_data)) + (v2923_data * v2959_data)) + (v3004_data * v3040_data)) + (v3085_data * v3121_data)) + (v3166_data * v3202_data)) + (v3247_data * v3283_data)) + (v3328_data * v3364_data)) + (v3409_data * v3445_data)) + (v3490_data * v3526_data)) + (v3571_data * v3607_data)) + (v3652_data * v3688_data)) + (v3733_data * v3769_data)) + (v3814_data * v3850_data);
+          float v3855_data = s2[142];
+          float v3858_p = ((((((((((((((v2680_data * v2721_data) + (v2761_data * v2802_data)) + (v2842_data * v2883_data)) + (v2923_data * v2964_data)) + (v3004_data * v3045_data)) + (v3085_data * v3126_data)) + (v3166_data * v3207_data)) + (v3247_data * v3288_data)) + (v3328_data * v3369_data)) + (v3409_data * v3450_data)) + (v3490_data * v3531_data)) + (v3571_data * v3612_data)) + (v3652_data * v3693_data)) + (v3733_data * v3774_data)) + (v3814_data * v3855_data);
+          float v3860_data = s2[158];
+          float v3863_p = ((((((((((((((v2680_data * v2726_data) + (v2761_data * v2807_data)) + (v2842_data * v2888_data)) + (v2923_data * v2969_data)) + (v3004_data * v3050_data)) + (v3085_data * v3131_data)) + (v3166_data * v3212_data)) + (v3247_data * v3293_data)) + (v3328_data * v3374_data)) + (v3409_data * v3455_data)) + (v3490_data * v3536_data)) + (v3571_data * v3617_data)) + (v3652_data * v3698_data)) + (v3733_data * v3779_data)) + (v3814_data * v3860_data);
+          float v3865_data = s2[174];
+          float v3868_p = ((((((((((((((v2680_data * v2731_data) + (v2761_data * v2812_data)) + (v2842_data * v2893_data)) + (v2923_data * v2974_data)) + (v3004_data * v3055_data)) + (v3085_data * v3136_data)) + (v3166_data * v3217_data)) + (v3247_data * v3298_data)) + (v3328_data * v3379_data)) + (v3409_data * v3460_data)) + (v3490_data * v3541_data)) + (v3571_data * v3622_data)) + (v3652_data * v3703_data)) + (v3733_data * v3784_data)) + (v3814_data * v3865_data);
+          float v3870_data = s2[190];
+          float v3873_p = ((((((((((((((v2680_data * v2736_data) + (v2761_data * v2817_data)) + (v2842_data * v2898_data)) + (v2923_data * v2979_data)) + (v3004_data * v3060_data)) + (v3085_data * v3141_data)) + (v3166_data * v3222_data)) + (v3247_data * v3303_data)) + (v3328_data * v3384_data)) + (v3409_data * v3465_data)) + (v3490_data * v3546_data)) + (v3571_data * v3627_data)) + (v3652_data * v3708_data)) + (v3733_data * v3789_data)) + (v3814_data * v3870_data);
+          float v3875_data = s2[206];
+          float v3878_p = ((((((((((((((v2680_data * v2741_data) + (v2761_data * v2822_data)) + (v2842_data * v2903_data)) + (v2923_data * v2984_data)) + (v3004_data * v3065_data)) + (v3085_data * v3146_data)) + (v3166_data * v3227_data)) + (v3247_data * v3308_data)) + (v3328_data * v3389_data)) + (v3409_data * v3470_data)) + (v3490_data * v3551_data)) + (v3571_data * v3632_data)) + (v3652_data * v3713_data)) + (v3733_data * v3794_data)) + (v3814_data * v3875_data);
+          float v3880_data = s2[222];
+          float v3883_p = ((((((((((((((v2680_data * v2746_data) + (v2761_data * v2827_data)) + (v2842_data * v2908_data)) + (v2923_data * v2989_data)) + (v3004_data * v3070_data)) + (v3085_data * v3151_data)) + (v3166_data * v3232_data)) + (v3247_data * v3313_data)) + (v3328_data * v3394_data)) + (v3409_data * v3475_data)) + (v3490_data * v3556_data)) + (v3571_data * v3637_data)) + (v3652_data * v3718_data)) + (v3733_data * v3799_data)) + (v3814_data * v3880_data);
+          float v3885_data = s2[238];
+          float v3888_p = ((((((((((((((v2680_data * v2751_data) + (v2761_data * v2832_data)) + (v2842_data * v2913_data)) + (v2923_data * v2994_data)) + (v3004_data * v3075_data)) + (v3085_data * v3156_data)) + (v3166_data * v3237_data)) + (v3247_data * v3318_data)) + (v3328_data * v3399_data)) + (v3409_data * v3480_data)) + (v3490_data * v3561_data)) + (v3571_data * v3642_data)) + (v3652_data * v3723_data)) + (v3733_data * v3804_data)) + (v3814_data * v3885_data);
+          float v3890_data = s2[254];
+          float v3893_p = ((((((((((((((v2680_data * v2756_data) + (v2761_data * v2837_data)) + (v2842_data * v2918_data)) + (v2923_data * v2999_data)) + (v3004_data * v3080_data)) + (v3085_data * v3161_data)) + (v3166_data * v3242_data)) + (v3247_data * v3323_data)) + (v3328_data * v3404_data)) + (v3409_data * v3485_data)) + (v3490_data * v3566_data)) + (v3571_data * v3647_data)) + (v3652_data * v3728_data)) + (v3733_data * v3809_data)) + (v3814_data * v3890_data);
+          float v3895_data = glb_m1[v1250_a];
+          float v3896_data = s2[15];
+          ir2[0] = ((((((((((((((((v2680_data * v2681_data) + (v2761_data * v2762_data)) + (v2842_data * v2843_data)) + (v2923_data * v2924_data)) + (v3004_data * v3005_data)) + (v3085_data * v3086_data)) + (v3166_data * v3167_data)) + (v3247_data * v3248_data)) + (v3328_data * v3329_data)) + (v3409_data * v3410_data)) + (v3490_data * v3491_data)) + (v3571_data * v3572_data)) + (v3652_data * v3653_data)) + (v3733_data * v3734_data)) + (v3814_data * v3815_data)) + (v3895_data * v3896_data));
+          float v3901_data = s2[31];
+          ir2[1] = (v3823_p + (v3895_data * v3901_data));
+          float v3906_data = s2[47];
+          ir2[2] = (v3828_p + (v3895_data * v3906_data));
+          float v3911_data = s2[63];
+          ir2[3] = (v3833_p + (v3895_data * v3911_data));
+          float v3916_data = s2[79];
+          ir2[4] = (v3838_p + (v3895_data * v3916_data));
+          float v3921_data = s2[95];
+          ir2[5] = (v3843_p + (v3895_data * v3921_data));
+          float v3926_data = s2[111];
+          ir2[6] = (v3848_p + (v3895_data * v3926_data));
+          float v3931_data = s2[127];
+          ir2[7] = (v3853_p + (v3895_data * v3931_data));
+          float v3936_data = s2[143];
+          ir2[8] = (v3858_p + (v3895_data * v3936_data));
+          float v3941_data = s2[159];
+          ir2[9] = (v3863_p + (v3895_data * v3941_data));
+          float v3946_data = s2[175];
+          ir2[10] = (v3868_p + (v3895_data * v3946_data));
+          float v3951_data = s2[191];
+          ir2[11] = (v3873_p + (v3895_data * v3951_data));
+          float v3956_data = s2[207];
+          ir2[12] = (v3878_p + (v3895_data * v3956_data));
+          float v3961_data = s2[223];
+          ir2[13] = (v3883_p + (v3895_data * v3961_data));
+          float v3966_data = s2[239];
+          ir2[14] = (v3888_p + (v3895_data * v3966_data));
+          float v3971_data = s2[255];
+          ir2[15] = (v3893_p + (v3895_data * v3971_data));
+          // r2 = ir2
+          // glb_m5 = store{r>g}(r2);
+          #pragma unroll
+          for (int32_t v3983_i0 = 0; v3983_i0 < 1; ++v3983_i0) {
+            int32_t v3988_lead = v32_lead + (v3983_i0 * 16);
+            #pragma unroll
+            for (int32_t v3984_i1 = 0; v3984_i1 < 16; ++v3984_i1) {
+              float v3986_data = ir2[v3984_i1];
+              glb_m5[(v3988_lead + (v3984_i1 * 16))] = v3986_data;
+            }
+          }
+          __syncwarp(0x0000ffffu << (threadIdx.y % 2 * 16));
+        }
+        else {
+          __pipeline_wait_prior(0);
+        }
+        // s0 = load{g>s}(wrap_glb_m2[0, 1])
+        #pragma unroll
+        for (int32_t v4006_i = 0; v4006_i < 16; ++v4006_i) {
+          int32_t v4008_a = threadIdx.x + (v4006_i * 16);
+          __pipeline_memcpy_async(&s0[v4008_a], &wrap_glb_m2[v4008_a], 4);
+        }
+        __pipeline_commit();
+        v3996_flagWord = v3997_flagWordNext;
+        v3997_flagWordNext = flagWordAhead;
+      }
+      __pipeline_wait_prior(0);
+    }
+  }
+}
+

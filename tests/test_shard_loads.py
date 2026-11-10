@@ -236,6 +236,109 @@ def test_nothing_to_hold_leaves_the_kernel_as_it_was():
 
 
 # --------------------------------------------------------------------------- #
+# What does not fit, a use at a time (`stream_shards`)
+# --------------------------------------------------------------------------- #
+
+#: The room the uses share.
+ROOM = re.compile(r'\bfloat \* (v\d+_rest) = &totalShrMem\[')
+
+
+def _in_turn(**options):
+    """`operators_in_turn` with half of one operator's bytes held for the
+    whole loop and half a room: `P` half held, the rest of it and half of
+    `Q` copied in a use at a time."""
+    report = []
+    src, geometry = _build('operators_in_turn', report=report,
+                           preload_shards=True, preload_shard_budget=1024,
+                           stream_shards=0.5, **options)
+    return src, geometry, report
+
+
+def test_what_does_not_fit_is_copied_in_a_use_at_a_time():
+    """`P` is read, then `Q`, then `P` again: two uses of `P`, one of `Q`,
+    and what the kernel computes over several trips of the batch loop, with
+    every multiplication of the block, is what it computes without."""
+    src, at, report = _in_turn()
+    uses = {re.search(r'glb_(m\d+)', r).group(1):
+            int(re.search(r'in (\d+) use', r).group(1))
+            for r in report if 'use(s)' in r}
+    assert sorted(uses.values()) == [1, 2]
+    plain, plain_at = _build('operators_in_turn')
+    assert _written(src, at, elements=24) == _written(plain, plain_at,
+                                                      elements=24)
+
+
+def test_the_uses_share_one_room():
+    """One buffer for all of them, as large as the largest use -- the
+    room's share of the budget, 128 elements -- where the uses together
+    copy three times that."""
+    src, _, report = _in_turn()
+    rooms = ROOM.findall(src)
+    assert len(rooms) == 1
+    copied = sum(int(re.search(r'(\d+) element\(s\) an element', r).group(1))
+                 for r in report if 'use(s)' in r)
+    assert copied == 3 * 128
+    start = int(re.search(rf'{rooms[0]} = &totalShrMem\[(\d+)\]',
+                          src).group(1))
+    end = int(re.search(r'localShrMem0 = &totalShrMem\[\d+ \* threadIdx\.y '
+                        r'\+ (\d+)\]', src).group(1))
+    assert end - start == 128
+
+
+def test_the_block_takes_the_loop_as_one_group():
+    """The copies' barriers stand in the batch loop, which the whole block
+    then takes in step: one group, as large as the block."""
+    src, (lanes, mults), _ = _in_turn()
+    group = int(re.search(r'threadIdx\.y - threadIdx\.y % (\d+)\)', src).group(1))
+    assert group == mults > 1
+
+
+def test_nothing_is_copied_a_use_at_a_time_in_a_loop_out_of_step():
+    """A batch loop each multiplication takes on its own: a block barrier
+    there waits for threads that left it, and their share of the copy is
+    missing.  So no room, whatever the caller asks."""
+    b, body = _section()
+    report = []
+    out = S.shard_loads(body, b.scratch, arena='totalShrMem', align=4,
+                        budget=16, mults=2, threads=32, fptype=Datatype.F32,
+                        stream_rest=0.5, report=report)
+    assert ('- a batch loop the block does not take in step: nothing copied '
+            'a trip or a use at a time') in report
+    assert not any(a.space is MemSpace.SHARED and 'rest' in str(a.base)
+                   for x in S.walk_stmts(out) for a in x.accesses)
+
+
+@pytest.mark.parametrize('side', ['ahead', 'behind'])
+def test_a_use_is_fenced_on_both_sides(side):
+    """No race with both barriers of a use's copy, and one without either:
+    ahead of the copy, the use before still reads the room; behind it, the
+    use reads what other multiplications' threads copied.  The second
+    use's copy, whose room the first use read."""
+    src, (lanes, mults), _ = _in_turn()
+    assert mults > 1
+
+    def races(text):
+        found = []
+        ke.evaluate_wave(text, lanes, seed=3, races=found, elements=16,
+                         mults=mults, block=True)
+        return found
+
+    assert races(src) == []
+    lines = src.split('\n')
+    room = ROOM.search(src).group(1)
+    syncs = [k for k, line in enumerate(lines) if _SYNC.search(line)]
+    stores = [k for k, line in enumerate(lines)
+              if re.search(rf'\b{room}\[[^]]*\] = ', line)]
+    # A copy is the stores between two barriers.
+    copies = sorted({max(j for j in syncs if j < k) for k in stores})
+    assert len(copies) >= 2, 'one use only'
+    ahead = copies[1]
+    barrier = ahead if side == 'ahead' else min(j for j in syncs if j > ahead)
+    without = '\n'.join(line for k, line in enumerate(lines) if k != barrier)
+    assert races(without)
+
+
+# --------------------------------------------------------------------------- #
 # What a load to hold is
 # --------------------------------------------------------------------------- #
 
