@@ -1729,6 +1729,19 @@ PIN_GLOBAL_TWIN = True
 #: slower written out, `localFluxAll` 9 % faster written out and 7 % slower
 #: rolled, the derivative 4 % faster written out: each kernel its own, which
 #: the count with the code past the cache priced in tells apart.
+#: Whether `lanes_rule` builds a candidate IGC spills again with the large
+#: register file (`Options.sycl_grf`, 256 general registers a thread), on
+#: Intel under DPC++, and takes that build where it spills less and costs
+#: less.  Measured on a Max 1550 stack (oneAPI 2025.2, the wall clock of a
+#: launch at 262144 elements): every SeisSol kernel of elastic order 6 and
+#: viscoelastic order 6 that IGC spills at 128 ran 2 to 57 % faster at 256 --
+#: but the volume kernels, `volume` in single precision +38 % and `volumeExt`
+#: +45 %, whose spilling shrinks as much as the others' (471 to 316 bytes);
+#: nothing a build says about itself, the count, the bound or the spill, tells
+#: them apart.  Over the suites the large file is still 18 to 26 % faster;
+#: at 16 elements every kernel is (11 to 61 %).
+GRF_TWIN = True
+
 ROLL_UNROLLS = (16, 0)
 
 
@@ -2477,6 +2490,34 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
 
     base, report = pinned(origin, report)
     limit = SPILL_GROWTH * report.spill_bytes
+    large_grf = _grf_twin(context, fixed)
+
+    def grf(cand: Candidate, seen: Optional[Resources]
+            ) -> Tuple[Candidate, Optional[Resources]]:
+        """`cand`, or `cand` with the large register file where IGC spills
+        it and spills the large build less, at a lower cost (`GRF_TWIN`).
+        The code is the same and so is its count: what changes is the
+        spilling the compiler reports, which `cost` charges."""
+        if (not large_grf or seen is None or not seen.spill_bytes
+                or str(cand.get('sycl_grf', 'default')) != 'default'):
+            return cand, seen
+        alt = cand.set('sycl_grf', '256')
+        result = builds.get(alt) or build(descr_factory, context, alt, generate)
+        if not result.ok:
+            return cand, seen
+        try:
+            other = scorer.resources(result)
+        except Exception:                     # noqa: BLE001
+            other = None
+        if other is None or other.spill_bytes >= seen.spill_bytes:
+            return cand, seen
+        builds[alt] = result
+        counts[alt] = counts[cand] if cand in counts else figure(result)
+        if counts[alt] is None:
+            return cand, seen
+        if cost(alt, other) < cost(cand, seen):
+            return alt, other
+        return cand, seen
 
     def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
@@ -2503,6 +2544,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     # margin, its own cut twin included.
     default, whole = cost(base, report), base
     base, report = fissioned(base, report)
+    base, report = grf(base, report)
     best, least = base, cost(base, report)
     # Where the default spills on AMD, a build that spills nothing wins over
     # every build that does (`CLEAN_FIRST`): until one is found the compiler
@@ -2546,6 +2588,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         if seen is None or seen.spill_bytes > limit:
             continue
         cand, seen = fissioned(cand, seen)
+        cand, seen = grf(cand, seen)
         price = cost(cand, seen)
         if clean_first and not seen.spill_bytes:
             if clean is None or price < clean[1]:
@@ -2574,6 +2617,19 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     if clean is not None:
         return clean[0]
     return best if least < (1.0 - DEVIATION_MARGIN) * default else whole
+
+
+def _grf_twin(context: Context, fixed: Optional[Mapping[str, Any]]) -> bool:
+    """Whether `lanes_rule` offers the large register file (`GRF_TWIN`):
+    Intel under DPC++'s SPMD lowering -- the explicit vector takes it already
+    -- and a register file the caller did not state."""
+    hw = context.target.hw
+    asked = dict(context.get_asked_options().asked())
+    return bool(GRF_TWIN and str(hw.vendor).lower() == 'intel'
+                and context.target.backend == 'oneapi'
+                and not context.target.explicit_simd
+                and 'sycl_grf' not in asked
+                and not (fixed and 'sycl_grf' in fixed))
 
 
 def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
