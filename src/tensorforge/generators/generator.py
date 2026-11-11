@@ -2174,7 +2174,8 @@ class Generator:
     place = pir.PlaceBuffers(
         arenas={obj.name: allocate.MULT,
                 GeneralLexicon.TOTAL_SHR_MEM: allocate.BLOCK},
-        align=self._shared_align(), block_align=self._shared_align())
+        align=self._shared_align(), block_align=self._shared_align(),
+        unit=self._context.fp_type.size())
     body = AbstractInstruction.optimized_body(
         self._context, self._names,
         lambda body: self._emit_section(body, index, section),

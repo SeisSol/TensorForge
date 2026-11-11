@@ -282,8 +282,34 @@ class _Liveness:
         return head
 
 
+def _units(t, unit: int) -> int:
+    """The arena elements a buffer of type `t` takes: its own elements, or as
+    many of the arena's as hold them where its elements are wider.
+
+    The arena is an array of the kernel's floating-point type, and a buffer
+    of another element is a window of that type into it (`emit`).  One no
+    larger -- the boolean a comparison writes -- fits in as many arena
+    elements as it has.  One wider does not: the double temporary that a
+    widening cast writes, in a kernel that reads floats, takes two floats an
+    element, and counted in its own elements it ran past its window into the
+    next multiplication's (SeisSol's `toCanonical` from order 5 in single
+    precision, 315 doubles in 320 floats).  `unit` is the arena's element in
+    bytes; 0 where it is not known, and the buffer is taken as no wider."""
+    volume = t.volume
+    if not unit:
+        return volume
+    elem = getattr(t.elem, 'base', t.elem)
+    try:
+        size = elem.size()
+    except (AttributeError, ValueError):  # no byte size of its own
+        return volume
+    if not size or size <= unit:
+        return volume
+    return -(-volume * size // unit)
+
+
 def _collect(body: Sequence[Stmt], arenas: Mapping[str, str],
-             default_align: Mapping[str, int]):
+             default_align: Mapping[str, int], unit: int = 0):
     buffers: Dict[Any, _Buffer] = {}
     value_key: Dict[int, Any] = {}
     windows_of: Dict[Any, int] = {}
@@ -303,7 +329,7 @@ def _collect(body: Sequence[Stmt], arenas: Mapping[str, str],
             b.align = default_align.get(arena, 1)
         b.windows.append(s)
         stages = s.attr('stages', 1) or 1
-        b.size = max(b.size, v.type.volume * stages)
+        b.size = max(b.size, _units(v.type, unit) * stages)
         b.align = max(b.align, s.attr('place_align', 1) or 1)
         value_key[v.id] = key
         windows_of[key] = windows_of.get(key, 0) + 1
@@ -318,7 +344,7 @@ def _aligned(n: int, align: int) -> int:
 
 def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
              align: int = 1, block_align: int = 1,
-             report: Optional[List[str]] = None
+             report: Optional[List[str]] = None, unit: int = 0
              ) -> Tuple[Tuple[Stmt, ...], Layout]:
     """`body` with every unplaced shared buffer at an offset, and where the
     arenas end.
@@ -326,10 +352,12 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
     ``arenas`` maps the arena an `Op.ALLOC` names to `MULT` or `BLOCK`;
     ``align`` is what every buffer of the multiplication's arena starts on,
     ``block_align`` the block's, both in elements -- a window may ask for more
-    (`place_align`).
+    (`place_align`).  ``unit`` is the arena's element in bytes, which a
+    buffer of a wider element takes several of (`_units`); 0 counts every
+    buffer in its own elements.
     """
     buffers, value_key, single = _collect(
-        body, arenas, {MULT: max(1, align), BLOCK: max(1, block_align)})
+        body, arenas, {MULT: max(1, align), BLOCK: max(1, block_align)}, unit)
     offsets: Dict[Any, int] = {}
 
     # The block's, back to back in the order allocated.
@@ -378,34 +406,37 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
         offsets[b.key] = at
         end_mult = max(end_mult, at + b.size)
 
-    out = _place(body, value_key, offsets, buffers)
+    out = _place(body, value_key, offsets, buffers, unit)
     return out, Layout(end_mult, end_block, offsets)
 
 
-def _offset_of(s: Stmt, base: int, buffer: _Buffer):
+def _offset_of(s: Stmt, base: int, buffer: _Buffer, unit: int = 0):
     """Where window `s` of `buffer` starts: at the buffer, or one stage
     further per count of the stage it names.
 
     The stage is the window's operand -- a value the loop carries -- so the
-    offset is text the emitter completes: ``{0}`` is that operand.
+    offset is text the emitter completes: ``{0}`` is that operand.  A stage
+    is as many arena elements apart as the window takes (`_units`).
     """
     if not s.args:
         return base
-    size = s.target[0].type.volume
+    size = _units(s.target[0].type, unit)
     return f'{base} + ({{0}}) * {size}'
 
 
-def _place(body: Tuple[Stmt, ...], value_key, offsets, buffers):
+def _place(body: Tuple[Stmt, ...], value_key, offsets, buffers,
+           unit: int = 0):
     out: List[Stmt] = []
     for s in body:
         if s.regions:
             s = replace(s, regions=tuple(
-                replace(r, body=_place(r.body, value_key, offsets, buffers))
+                replace(r, body=_place(r.body, value_key, offsets, buffers,
+                                       unit))
                 for r in s.regions))
         elif s.op == Op.ALLOC and s.target:
             key = value_key.get(s.target[0].id)
             if key is not None and key in offsets:
                 s = s.with_attr('offset', _offset_of(s, offsets[key],
-                                                     buffers[key]))
+                                                     buffers[key], unit))
         out.append(s)
     return tuple(out)
