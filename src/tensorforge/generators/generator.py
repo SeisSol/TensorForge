@@ -136,6 +136,18 @@ _STORAGE_FIELDS = ('storage_parts', 'storage_planar', 'storage_order',
                    'simt_interleave', 'slot_major', 'packing',
                    'packing_table', 'packing_table_param')
 
+
+def _store_as(stored: Dict[int, tuple]) -> None:
+  """Put each tensor's `_STORAGE_FIELDS` back as `stored` holds them
+  (`Generator._stored_operands`, `Generator._operand_storage`)."""
+  for tensor, state in stored.values():
+    # Cleared first, as `_offer_packing` replaces one: the order's setter
+    # checks it against the box.
+    tensor.storage_order = None
+    tensor.packing = None
+    for field, value in zip(_STORAGE_FIELDS, state):
+      setattr(tensor, field, value)
+
 #: Work-items a block holds under the explicit-vector lowering when it
 #: preloads operators into shared memory.  Measured, not a hardware
 #: constant: see `RegmaxBlockPolicy.get_num_mults_per_block`.
@@ -1155,13 +1167,23 @@ class Generator:
     wrong in every value that way -- face operators of 196 and 616 slots read
     as 812.
     """
-    for tensor, state in self._storage.values():
-      # Cleared first, as `_offer_packing` replaces one: the order's setter
-      # checks it against the box.
-      tensor.storage_order = None
-      tensor.packing = None
-      for field, value in zip(_STORAGE_FIELDS, state):
-        setattr(tensor, field, value)
+    _store_as(self._storage)
+
+  def _operand_storage(self, *lists) -> Dict[int, tuple]:
+    """Every operand the description `lists` read or write -- and the members
+    of a merged run's stand-in -- with its `_STORAGE_FIELDS` as they stand
+    now, for `_store_as` to put back."""
+    stored = {}
+    for descrs in lists:
+      for descr in descrs or ():
+        views = list(descr.matrix_list()) + list(descr.condition_reads())
+        for view in views:
+          matrix = getattr(view, 'tensor', view)
+          for tensor in ((matrix,)
+                         + tuple(getattr(matrix, 'variant_members', ()))):
+            stored[id(tensor)] = (tensor, tuple(
+                getattr(tensor, field) for field in _STORAGE_FIELDS))
+    return stored
 
   def _hand_over(self, other: 'Generator') -> None:
     """Make `other` the generator that builds this one's kernel (`built`).
@@ -1463,12 +1485,21 @@ class Generator:
       if list_cost(self._given).flops < FISSION_PROBE_FLOPS:
         return
     from tensorforge.analysis.icache import code_bytes
+    # The probe shares the caller's tensors and states its storage on them:
+    # orders, packings, and through a merged run's stand-in its members'.
+    # This build decides its own, from where the probe started.  Left as the
+    # probe stored them, SeisSol's `localFluxAll` with its face variants
+    # merged (the lanes rule's pick on PVC at orders 6 to 8) read its
+    # operators through the probe's layout and came out NaN.
+    before = self._operand_storage(self._given, self._descr_list)
     probe = self._sibling()
     probe._fission_pieces = 0
     try:
       probe.generate()
     except Exception:                         # noqa: BLE001
       return
+    finally:
+      _store_as(before)
     self._fission_pieces = fission_pieces(
         code_bytes(probe.metrics.code_units, hw), hw)
     # The probe named the shared operands for the list it built; this
