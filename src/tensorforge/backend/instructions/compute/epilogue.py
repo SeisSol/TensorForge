@@ -53,6 +53,25 @@ def _splat(writer, ftype, v):
     return writer.pack(ftype, *([v] * ftype.length), hint='splat')
 
 
+def _first_row(var) -> int:
+    """The first row a lead index's block stands for, in the destination's
+    coordinates: its slots (`lead`) and, on a `LeadIndex`, the shift it
+    carries (`offset`, in elements).  The explicit vector writes a tail block
+    as slot 0 shifted to the tail -- `LeadIndex(0, block=3, offset=32)` for
+    rows 32..34 of 35 -- where SPMD writes slot 1 of the 32-lane block; read
+    without the shift, the tail looked like rows 0..2, the accumulator of
+    `I += dQ(1)` (rows 0..19) seemed to cover it, and order 5's time integral
+    took rows 32..34 out of the next column's slots and out of bounds: NaN on
+    PVC.  None where the shift is not a number."""
+    start = int(var.lead())
+    if isinstance(var, LeadIndex):
+        shift = var.offset()
+        if not isinstance(shift, (int, Immediate)):
+            return None
+        start += int(shift._value if isinstance(shift, Immediate) else shift)
+    return start
+
+
 class MultilinearEpilogue(ComputeInstruction):
     """`dest = scalars * accumulator (+ prev)` over the destination's box.
 
@@ -179,7 +198,9 @@ class MultilinearEpilogue(ComputeInstruction):
                 return True
             if isinstance(var.nonlead(), (str,)):
                 return True
-            start = int(var.lead())
+            start = _first_row(var)
+            if start is None:
+                return True
             if isinstance(var, LeadIndex):
                 return start < hi_i and lo_i < start + var._block * var.width
             return lo_i <= start < hi_i
@@ -204,7 +225,9 @@ class MultilinearEpilogue(ComputeInstruction):
                     continue
                 acc = self._acc.data_view.get_bbox()
                 dest = self._dest.data_view.get_bbox()
-                start = int(var.lead())
+                start = _first_row(var)
+                if start is None:
+                    continue
                 end = start + var._block
                 bounds = []
                 if before and dest.lower()[i] < acc.lower()[i] and (
@@ -250,12 +273,21 @@ class MultilinearEpilogue(ComputeInstruction):
                     self._sumOperation.neutral(self._context.fp_type),
                     ftype))
 
-            if len(self._scalars) > 0:
+            # Where the accumulator has no slot, the scalars scale the sum's
+            # neutral element, which they leave as it is: the term is absent.
+            # Not multiplied out, since under the explicit vector the product
+            # of two scalars has no lanes to be spread over, and a block of
+            # the destination stored from it has no type (`EsimdEmitter`).
+            if len(self._scalars) > 0 and (needsLoad or self._empty_product):
                 valvar = _emit_binop(writer, btype, self._productOperation, valvar,
                                      _splat(writer, btype, scalar_var))
             if self._prev is not None:
                 oldvalue = self._prev.load(writer, self._context, None, [add_offset(varlist[loopmap[f'n{i}']], self._prev_offset[i]) if self._prev_offset else varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
-                valvar = _emit_binop(writer, btype, self._sumOperation, oldvalue, valvar)
+                # Beside the accumulator the sum adds its neutral element:
+                # the previous value is the answer, as it stands.
+                valvar = (oldvalue if not (needsLoad or self._empty_product)
+                          else _emit_binop(writer, btype, self._sumOperation,
+                                           oldvalue, valvar))
 
             self._dest.store(writer, self._context, valvar, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
 
