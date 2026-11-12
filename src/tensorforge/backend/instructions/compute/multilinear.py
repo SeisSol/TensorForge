@@ -1720,6 +1720,15 @@ class MultilinearInstruction(ComputeInstruction):
             return False
         if self._theta:
             return False
+        # A window that starts inside a slot computes the whole slot as well,
+        # under the explicit vector too: its image is laid out by row, lane
+        # `j` of a slot the slot's row `j`, so `Q[1:19] star` reads `Q[0:32]`
+        # and stores rows 1..18 back.  Refused here for a day on the strength
+        # of a wrong `dQ(1)` on PVC that was the device compiler's (IGC
+        # 2.41.5 VC, which computes the narrow form wrong as well), it cost
+        # ESIMD's `volume` a 31-wide vector per column that VC splits into
+        # 16 + 8 + 4 + 2 + 1 (order 5: 216 full-width mads against 2782
+        # narrow ones).  Run on the CPU (tfemu), both forms agree with NumPy.
         if self._lead_width != 1 and not (
                 getattr(opts, 'lead_straddle', False)
                 and self._straddle_fits(i, dimmin, dimmax)):

@@ -745,6 +745,16 @@ def join_layout(operands) -> Optional[RegisterLayout]:
     if not spread and len(seen) == 1:
         # every operand replicated, and they agree on the rank
         return next(iter(seen))
+    if not spread and len(seen - {SCALAR_LAYOUT}) == 1:
+        # Every operand replicated, one of them with a rank: a rank-0 one is a
+        # scalar every lane holds, and it scales the other where it stands,
+        # as a literal does.  The one-row block of a product under the
+        # explicit vector is the case -- `kDivMT[k, l]` read for a row of one,
+        # replicated with the rank of its tensor, times `tmp[l, p]` out of
+        # shared memory -- and `None` here left its product untyped: ESIMD's
+        # order-5 and order-6 time derivative did not generate without
+        # full-lane tails.
+        return next(iter(seen - {SCALAR_LAYOUT}))
     return None
 
 

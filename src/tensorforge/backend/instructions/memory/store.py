@@ -496,13 +496,35 @@ class StoreRegToGlb(AbstractInstruction):
                        max(src_bbox.upper()[i], dest_bbox.upper()[i]), 1)]
 
       def zero(indices):
-        value = writer.const(0) # TODO: dtype
+        value = self._spread_zero(writer, indices[0])
         self._dest.store(writer, self._context, value,
                          [add_offset(x, self._dest_offset[i])
                           for i, x in enumerate(indices)],
                          allow_nontemporal)
 
       write_loops(self._context, writer, loops, zero)
+
+  def _spread_zero(self, writer, at):
+    """The zero a remainder row is written, spread as the row index is.
+
+    A constant is the same on every lane, which under SPMD every lane stores
+    at its own address.  Under the explicit vector one work-item stores for
+    all of them, at the block's first address, as wide as the value: a
+    constant wrote one element, so of `dQ(1)`'s rows 10..15 at order 4 only
+    row 10 became the zero its storage promises, the rest kept what the
+    buffer held.  A select over the block's lanes (`lane_index`, as
+    `PromisedZeros` builds its mask) carries their distribution, and the
+    store is the block's vector of zeros.
+    """
+    zero = writer.const(0) # TODO: dtype
+    from tensorforge.backend.symbol import LeadIndex
+    if (not getattr(self._context.target, 'explicit_simd', False)
+        or not isinstance(at, LeadIndex) or not hasattr(writer, 'lane_index')):
+      return zero
+    from tensorforge.backend.pir.core import BOOL
+    lane = writer.lane_index(at._block, at._stride, hint='lead')
+    every = writer.op('ge', BOOL, lane, 0, hint='o')
+    return writer.op('select', zero.type, every, zero, zero, hint='z')
 
   def __str__(self) -> str:
     return f'{self._dest.name} = store{{r>g}}({self._src.name});'
