@@ -596,3 +596,36 @@ def zeinfo_spill(path: str) -> Optional[int]:
     if _ZEINFO_NOTE.search(blob):
         return 0                       # the note is there and does not
     return None                        # no note: nothing is known either
+
+
+_NEO_REVISION: Dict[str, Optional[str]] = {}
+
+
+def intel_neo_revision(ocloc: Optional[str] = None) -> Optional[str]:
+    """The compute-runtime build `ocloc` belongs to, or None where there is no
+    `ocloc` to ask: `39758` for 26.35.39758.x, `40196.8` for 26.40.40196.8.
+
+    The runtime pins the IGC it ships with, and IGC is what a kernel's
+    correctness can depend on: 26.35 pairs with IGC 2.41.5, which miscompiles
+    a lane-guarded register write that 2.40.13 and 2.42.6 get right
+    (`GlbToRegLoader._fresh_window`).  Asked once per `ocloc`, in a directory
+    of its own: `ocloc query` writes its answer into a file there too.
+    """
+    import subprocess
+    import tempfile
+    path = ocloc or shutil.which('ocloc')
+    if path is None:
+        return None
+    if path not in _NEO_REVISION:
+        answer = None
+        try:
+            with tempfile.TemporaryDirectory() as cwd:
+                p = subprocess.run([path, 'query', 'NEO_REVISION'], cwd=cwd,
+                                   capture_output=True, text=True, timeout=60)
+                lines = [l.strip() for l in p.stdout.splitlines() if l.strip()]
+                if p.returncode == 0 and lines:
+                    answer = lines[-1]
+        except (OSError, subprocess.SubprocessError):
+            answer = None
+        _NEO_REVISION[path] = answer
+    return _NEO_REVISION[path]

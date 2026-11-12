@@ -639,6 +639,22 @@ declare('split_predicated_load',
             'a value, there is no other lane to read from, and an address '
             'clamped by a mask is not an address.')
 
+declare('unguard_window_loads',
+        default='auto',
+        env='TF_UNGUARD_WINDOW_LOADS',
+        parse=parse_bool_or_auto,
+        doc='Write a window loaded into a register image of its own on every '
+            'lane, the load held to the window by a select, instead of under '
+            'the lane guard (`GlbToRegLoader._fresh_window`; F32, where lane '
+            'guards are lowered to selects).  For a miscompilation: IGC 2.41.5 '
+            '(compute-runtime 26.35) computes SeisSol\'s order-3 and order-5 '
+            'F32 `volume` wrong around the guarded writes on the Max 1550, and '
+            '2.40.13 and 2.42.6 compute them right.  Not free: the unguarded '
+            'form costs IGC registers, F32 `volume` 22 to 29 % and '
+            '`neighboringFlux` 10 to 15 % on PVC.  `auto` writes it where the '
+            '`ocloc` on PATH is of the 26.35 runtime (`toolchain.'
+            'intel_neo_revision`).')
+
 declare('convert_lane_guards',
         rule=lambda target: target.prefs.convert_lane_guards,
         parse=parse_bool,

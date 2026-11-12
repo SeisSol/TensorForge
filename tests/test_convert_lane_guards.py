@@ -73,3 +73,66 @@ def test_the_derivative_keeps_branches_only_around_what_writes():
                              r'#pragma unroll\s*for \(')
     assert around_loop.search(plain)
     assert not around_loop.search(converted)
+
+
+def _volume_source(convert: bool, backend: str = 'oneapi',
+                   unguard=True) -> str:
+    """The order-3 F32 volume kernel of SeisSol's elastic system on PVC, which
+    IGC 2.41.5 computed wrong around a guarded register write.  The
+    workaround stated, not left to the `ocloc` on PATH."""
+    import seissol_suite as fx
+    from tensorforge.frontend.yateto import DescriptionReader
+    from tensorforge.generators.generator import Generator
+    descrs = DescriptionReader(None, {}).read(fx.description(
+        'elastic-linearck', 'elastic-linearck-o3-s', 'gpu_volume'))[0]
+    ctx = Context(arch='pvc', backend=backend, fp_type=Datatype.F32,
+                  options=Options(convert_lane_guards=convert,
+                                  unguard_window_loads=unguard))
+    gen = Generator(descrs, ctx)
+    gen.generate()
+    return gen.get_kernel()
+
+
+def _load_block(src: str, operand: str) -> str:
+    """The text of the register load of `operand`, up to the next one."""
+    marker = f'= load{{g>r}}({operand});'
+    start = src.index(marker)
+    end = src.find('load{g>r}', start + len(marker))
+    return src[start:end if end > 0 else len(src)]
+
+
+def test_a_window_loads_into_its_own_image_without_a_guard():
+    """`I`'s rows 0..3 and `Q`'s rows 1..7 into the products' own images:
+    held to the window by the load, on both sides, and written on every
+    lane, no branch around the write -- the form IGC 2.41.5 computes right.
+    Without the conversion the guard is a branch around the whole load, as
+    before."""
+    import re
+    converted = _load_block(_volume_source(True), 'glb_m0')
+    assert not re.search(r'if \(v\d+_g\)', converted)
+    assert re.search(r'r\d+\[v\d+_\w+\] = v\d+_data;', converted)
+    assert re.search(r'v\d+_g \? \(v\d+_data_pre\) : \(0\.0f\)', converted)
+    shifted = _load_block(_volume_source(True), 'glb_m2')
+    assert not re.search(r'if \(v\d+_g\)', shifted.split('// r')[0])
+    plain = _load_block(_volume_source(False), 'glb_m0')
+    assert re.search(r'if \(v\d+_g\) \{', plain)
+
+
+def test_without_the_workaround_a_window_keeps_its_guard():
+    """Asked off -- an IGC other than 2.41.5 -- the guarded write stays, and
+    the unguarded one costs no registers."""
+    import re
+    block = _load_block(_volume_source(True, unguard=False), 'glb_m0')
+    assert re.search(r'if \(v\d+_g\) \{\s*r\d+\[', block)
+
+
+@pytest.mark.parametrize('revision,expected', [
+    ('39758', True), ('39758.10', True), ('40196.8', False),
+    ('39395.13', False), (None, False)])
+def test_auto_follows_the_runtime_of_the_ocloc_on_path(monkeypatch, revision,
+                                                       expected):
+    from tensorforge import toolchain
+    from tensorforge.backend.instructions.memory import load
+    monkeypatch.setattr(toolchain, 'intel_neo_revision', lambda *a: revision)
+    assert load._unguard_window_loads(
+        Options(unguard_window_loads='auto')) is expected

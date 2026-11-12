@@ -1061,6 +1061,17 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     return f'{self._dest.name} = load{{g>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'
 
 
+def _unguard_window_loads(opts) -> bool:
+  """`Options.unguard_window_loads`, `auto` answered by the `ocloc` on PATH:
+  the 26.35 runtime, which ships IGC 2.41.5."""
+  asked = getattr(opts, 'unguard_window_loads', 'auto')
+  if asked != 'auto':
+    return bool(asked)
+  from tensorforge.toolchain import intel_neo_revision
+  revision = intel_neo_revision()
+  return revision is not None and revision.split('.')[0] == '39758'
+
+
 class GlbToRegLoader(MemoryInstruction, LoadInstruction):
   _transfer = True
 
@@ -1233,7 +1244,48 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       return False
     box = self._src.obj.get_bbox()
     window = (self._bbox.lower()[i], self._bbox.upper()[i])
-    return window == (0, box.upper()[i]) and box.lower()[i] == 0
+    if window == (0, box.upper()[i]) and box.lower()[i] == 0:
+      return True
+    return self._fresh_window(i, window)
+
+  def _fresh_window(self, i, window) -> bool:
+    """A window into an image of its own, where lane guards are lowered to
+    selects (`convert_lane_guards`, SPMD only).
+
+    The multiplication's own image (`MultilinearBuilder`) is declared zero
+    and spans exactly the window (`zero_past`), so no other row of the tensor
+    sits in its slots: the load, held to the window's lanes on both sides
+    (`lane >= 1 && lane < 8 ? p[i] : 0`), writes the lanes beside it the zero
+    they hold already, and the guard around the store says nothing.  It is
+    not harmless there.  IGC 2.41.5, optimizing, computes SeisSol's order-3
+    and order-5 F32 `volume` wrong on the Max 1550 around the guarded writes
+    of these loads -- `if (lane < 4) r0[i] = v;` for `I`'s rows 0..3, read
+    against `star` broadcast from lanes 0..8, and `if (lane >= 1 && lane <
+    8) r4[i] = v;` for `Q`'s rows 1..7 -- and right with the writes made
+    unconditional (job 560225); a select in their place (`r0[i] = g ? v :
+    r0[i]`) is the same miscompile (job 560236), and the first window alone
+    is not enough (job 560239).
+    """
+    # Single precision only.  The miscompile showed in F32 (orders 3 and 5)
+    # and never in F64, where the unguarded form costs IGC registers instead:
+    # order-4 F64 `volume` spilled 3328 B against 448 and ran 2.2x slower,
+    # 1.069x geomean over SeisSol's elastic kernels with both (job 560278).
+    # And only for the IGC that miscompiles it (`Options.unguard_window_loads`):
+    # in F32 too the form costs 22 to 29 % of `volume` under 2.41.5 and
+    # 2.42.6 alike, and 2.40.13 and 2.42.6 compute the guarded one right.
+    from tensorforge.common.basic_types import Datatype
+    if self._context.fp_type is not Datatype.F32:
+      return False
+    opts = self._context.get_user_options()
+    if (not getattr(opts, 'convert_lane_guards', False)
+        or getattr(self._context.target, 'explicit_simd', False)):
+      return False
+    if not _unguard_window_loads(opts):
+      return False
+    if not getattr(self._dest, 'zero_past', False):
+      return False
+    image = self._dest.data_view.get_bbox()
+    return (image.lower()[i], image.upper()[i]) == window
 
   def __str__(self) -> str:
     return f'{self._dest.name} = load{{g>r}}({self._src.name});'
