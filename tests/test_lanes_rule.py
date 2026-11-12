@@ -251,10 +251,12 @@ def test_without_a_compiler_or_off_the_measured_lowerings_the_default_stands(
     with pytest.warns(UserWarning, match='no compiler'):
         assert tuning.autotune(_local_flux(), _amd(autotune='lanes'),
                                mode='lanes', generate=Generator.trial) is None
-    for backend in ('esimd', 'acpp'):
+    # The explicit vector has a rule of its own (`esimd_width_rule`), which
+    # needs the compiler as much; AdaptiveCpp was never measured.
+    for backend, says in (('esimd', 'no compiler'), ('acpp', 'not measured')):
         intel = Context(arch='pvc', backend=backend, fp_type=Datatype.F32,
                         options=Options(autotune='lanes'))
-        with pytest.warns(UserWarning, match='not measured'):
+        with pytest.warns(UserWarning, match=says):
             assert tuning.autotune(_local_flux(), intel, mode='lanes',
                                    generate=Generator.trial) is None
 

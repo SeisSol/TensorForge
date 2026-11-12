@@ -2799,15 +2799,124 @@ def _grf_twin(context: Context, fixed: Optional[Mapping[str, Any]]) -> bool:
                 and not (fixed and 'sycl_grf' in fixed))
 
 
+#: Where VC -- IGC's vector backend, which builds every explicit-SIMD kernel
+#: -- spills a kernel at every width, the width that spills least: in double
+#: precision, and not in single (`esimd_width_rule`).  Measured on the Max
+#: 1550 at a batch of 262144 (sng2 jobs 560300 and 560306, IGC 2.41.5),
+#: against the deduced 32 lanes, which VC spills 13.8 to 33.8 kB at:
+#:
+#: - double precision, eight lanes spilling 4.3 to 22 kB: order-5
+#:   `derivative` -48 %; order-6 `derivative` -37 %, `localFluxAll` -75 %,
+#:   `volume` -38 %;
+#: - single precision, order-6 `volume`: sixteen lanes spill 3.3 kB against
+#:   5.8 and run 17 % longer.
+ESIMD_LEAST_SPILL = frozenset({Datatype.F64})
+
+
+def _register_lanes(context: Context) -> int:
+    """How many elements of the kernel's type one vector register holds: the
+    narrowest width `esimd_width_rule` weighs.  Narrower, a vector leaves part
+    of every register and every instruction it occupies empty.  64 bytes on
+    PVC: sixteen floats, eight doubles."""
+    hw = context.target.hw
+    width = (getattr(hw, 'vec_unit_length', 16)
+             * getattr(hw, 'hw_fp_word_size', 4))
+    return max(1, width // context.fp_type.size())
+
+
+def esimd_width_rule(descr_factory, context: Context, scorer: 'CompiledScore',
+                     origin: Candidate, first: Build, *, generate
+                     ) -> Candidate:
+    """The vector width under the explicit vector (`autotune=lanes` there).
+
+    The widest width VC builds without spilling, from the deduced count down
+    to one register's worth (`_register_lanes`).  Where every width spills,
+    the one that spills least in double precision (`ESIMD_LEAST_SPILL`), and
+    the default otherwise.
+
+    Spilling and nothing else, because nothing else ranks these widths.
+    Ranked by the instructions an element executes, eight lanes come out
+    ahead of 32 for order-5 `neighboringFlux` in double precision.  That
+    kernel spills at neither width and runs 37 % longer at eight (sng2
+    560300).  The walk of `autotune=compiled` (`CompiledScore`) asks VC about
+    the same builds: the widest unless it spills, and where all spill, the
+    widest.  It kept 32 lanes for the order-6 kernels in double precision and
+    missed the -37 to -75 % above.  Its rolled twins (`k_roll`) that spill
+    nothing at 32 lanes ran no faster than the default (order-5 `derivative`
+    +3 %), so this rule turns the width alone.
+
+    Asked from the widest down, stopping at the first build that spills
+    nothing: a kernel whose default spills nothing costs one compile.
+    """
+    base = origin.lanes
+    floor = _register_lanes(context)
+    spilled: List[Tuple[int, int, Candidate]] = []
+    t = base.num_threads
+    while t >= floor:
+        cand = origin if t == base.num_threads else origin.set(
+            'lanes', LaneConfig(t, base.num_active_threads, base.lead_width))
+        result = (first if cand == origin
+                  else build(descr_factory, context, cand, generate))
+        report = None
+        if result.ok:
+            try:
+                report = scorer.resources(result)
+            except Exception:                 # noqa: BLE001
+                report = None
+        if report is not None:
+            if not report.spill_bytes:
+                return cand
+            spilled.append((report.spill_bytes, -t, cand))
+        if t & (t - 1):
+            break
+        t //= 2
+    if spilled and context.fp_type in ESIMD_LEAST_SPILL:
+        return min(spilled, key=lambda s: s[:2])[2]
+    return origin
+
+
+def _esimd_mode(descr_factory, context: Context, cache: Optional[str],
+                fixed: Optional[Mapping[str, Any]], generate
+                ) -> Optional[Candidate]:
+    """`autotune=lanes` under the explicit vector: `esimd_width_rule` where
+    `icpx` can be asked and the caller left the width open, the default
+    otherwise.  Remembered by the default build's source, as the lanes rule's
+    picks are (`Options.autotune_cache`)."""
+    if fixed and 'lanes' in fixed:
+        return None
+    scorer = CompiledScore()
+    if not scorer.available(context):
+        warnings.warn('autotune=lanes: no compiler for this target '
+                      '(Toolchain, TF_ICPX); the default stands')
+        return None
+    origin = start(descr_factory(), context)
+    for name, value in (fixed or {}).items():
+        origin = origin.set(name, value)
+    first = build(descr_factory, context, origin, generate)
+    if not first.ok:
+        return None
+    _load(cache)
+    key = _key(first, 'esimd-width')
+    if key in _PICKS:
+        return Candidate.from_dict(_PICKS[key])
+    pick = esimd_width_rule(descr_factory, context, scorer, origin, first,
+                            generate=generate)
+    _store(cache, key, pick)
+    return pick
+
+
 def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
                 fixed: Optional[Mapping[str, Any]], generate,
                 dispatch: Optional[Dict[str, Any]] = None
                 ) -> Optional[Candidate]:
     """`autotune=lanes`: `lanes_rule` where a compiler can be asked, the
     default where none can or the vendor was never measured (`RANKED_BY`).
+    Under the explicit vector the width alone (`esimd_width_rule`).
     Remembered by the default build's source, as the walk's picks are
     (`Options.autotune_cache`)."""
     hw = context.target.hw
+    if context.target.explicit_simd and str(hw.vendor).lower() == 'intel':
+        return _esimd_mode(descr_factory, context, cache, fixed, generate)
     if _ranked_by(context) is None:
         warnings.warn(f'autotune=lanes: not measured for {hw.model} under '
                       f'{context.target.backend}; the default stands')
