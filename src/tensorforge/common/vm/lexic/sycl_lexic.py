@@ -216,6 +216,17 @@ class SyclLexic(Lexic):
     # narrow enough (16 on PVC) for ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
 
+  def pin_fence(self):
+    """The sub-group barrier, as `__syncwarp()` is on CUDA: no work in
+    converged code -- a sub-group is one hardware thread, its lanes already
+    in step -- and, as a barrier with a memory fence, nothing IGC moves a
+    load across (`Options.pin_loads`).  Every lane of the sub-group has to
+    arrive, so it is a converged fence.  None under the explicit vector,
+    whose work-item is the vector and has no lanes to keep in order."""
+    if self._explicit_simd:
+      return None
+    return "sycl::group_barrier(item.get_sub_group());", True
+
   def sync_mult(self, num_threads: int, hw):
     if self._explicit_simd:
       return None
