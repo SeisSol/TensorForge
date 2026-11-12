@@ -95,6 +95,18 @@ class Compiler:
         None elsewhere."""
         return None
 
+    def listing_env(self, out_dir: str) -> Optional[Dict[str, str]]:
+        """Environment under which `report_build` also writes the compiler's
+        listing of the kernel into `out_dir`, for `spill_references`; None
+        where the compiler writes none that says it."""
+        return None
+
+    def spill_references(self, out_dir: str) -> Optional[int]:
+        """How often the kernel touches what was spilled, by the compiler's
+        own estimate in the listing `listing_env` had it write; None where
+        no listing says."""
+        return None
+
 
 @dataclass(frozen=True)
 class Nvcc(Compiler):
@@ -193,6 +205,13 @@ class Icpx(Compiler):
 
     def reported_spill(self, product):
         return zeinfo_spill(product)
+
+    def listing_env(self, out_dir):
+        return {'IGC_ShaderDumpEnable': '1',
+                'IGC_DumpToCustomDir': os.path.join(out_dir, 'listing')}
+
+    def spill_references(self, out_dir):
+        return igc_spill_references(os.path.join(out_dir, 'listing'))
 
 
 @dataclass(frozen=True)
@@ -475,6 +494,44 @@ def resources(backend: str, log: str) -> Optional[Resources]:
 
 #: `spill_size:      13888` in the binary's `.ze_info`, which is the only
 #: place IGC states it for a SPMD build.
+_IGC_SPILL_REFS = re.compile(r'//\.spill GRF est\. ref count\s+(\d+)')
+_IGC_INSTRUCTIONS = re.compile(r'//\.instCount\s+(\d+)')
+
+
+def igc_spill_references(listing_dir: str) -> Optional[int]:
+    """IGC's estimate of how often a kernel references what it spilled, from
+    the listings its shader dump writes (`IGC_ShaderDumpEnable`): the header
+    line `//.spill GRF est. ref count N` of each `.asm`, the largest where a
+    build left more than one (a retried compile writes a second, a few
+    references apart).  None where no listing states it -- no dump, or a
+    kernel that spills nothing, whose header has no such line, which is
+    then 0 if a listing exists at all.
+
+    The scratch IGC reports (`zeinfo_spill`) is how much it spilled, and
+    not how often it goes there: eight lanes of the order-6
+    `neighboringFlux` in double precision hold 1.38 times the scratch of
+    sixteen and reference it 7.6 times as often (5086 against 672,
+    IGC 2.41.5).
+    """
+    listings = []
+    for root, _, files in os.walk(listing_dir):
+        listings += [os.path.join(root, f) for f in files
+                     if f.endswith('.asm')]
+    if not listings:
+        return None
+    refs = 0
+    for path in listings:
+        try:
+            with open(path, errors='replace') as f:
+                head = f.read(65536)
+        except OSError:
+            continue
+        m = _IGC_SPILL_REFS.search(head)
+        if m:
+            refs = max(refs, int(m.group(1)))
+    return refs
+
+
 _ZEINFO_SPILL = re.compile(rb'spill_size:\s*(\d+)')
 #: The note itself, to tell "it says no spilling" from "it does not say
 #: anything because it is not there".

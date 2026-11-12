@@ -29,6 +29,10 @@ class Context:
     #: name the first while generation reads the second.
     self._asked_options: Options = Options() if options is None else options
     self._options: ResolvedOptions = self._asked_options.resolve(self.target)
+    # A spelling the options choose, and the lexic is where spellings live:
+    # how a narrow multiplication's broadcast reads (`SyclLexic.broadcast`).
+    if hasattr(self.target.lexic, 'split_broadcast'):
+      self.target.lexic.split_broadcast = self._options.sycl_split_broadcast
     #: The permutation each staged window is built with, by the window's
     #: symbol, where `pir.banks.propose` chose one from a body built without
     #: (`Options.swizzle` `decide`; `AbstractShrMemWrite._swizzle`).  Kept

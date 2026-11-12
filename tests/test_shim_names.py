@@ -36,7 +36,7 @@ HEADERS = {
 #: Each shim, and the headers it stands in for.
 SHIMS = {
     "tensorforge_host.h": ("base.h", "cuda.h", "hip.h", "hip_wave.h"),
-    "tensorforge_sycl.h": ("base.h", "isycl.h"),
+    "tensorforge_sycl.h": ("base.h", "isycl.h", "sycl_spmd.h"),
 }
 
 _KERNEL = re.compile(r"^// === kernel ===\n(.*?)(?=^// === |\Z)", re.M | re.S)

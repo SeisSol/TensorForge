@@ -89,8 +89,10 @@ def test_where_the_size_is_the_devices_each_multiplication_reads_at_its_base():
 
 
 def test_a_narrow_multiplication_under_a_stated_sub_group_reads_at_its_base():
+    # Four to a sub-group: more than `Options.sycl_split_broadcast` splits
+    # (two, by default; test_sycl_split_broadcast.py).
     lexic = _lexic('oneapi')
-    assert 'select_from_group' in lexic.broadcast('v', 3, 8)
+    assert 'select_from_group' in lexic.broadcast('v', 3, 4)
     assert lexic.broadcast('v', 3, 16).startswith('sycl::group_broadcast(')
 
 

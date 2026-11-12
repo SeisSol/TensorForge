@@ -51,6 +51,11 @@ class SyclLexic(Lexic):
     # The sub-group sizes the kernel states, or None where the device picks
     # its own (`Target.pinned_sub_groups`).
     self._sub_groups = sub_groups
+    #: The most blocks of a sub-group a narrow multiplication's broadcast is
+    #: split over, one `group_broadcast` each (`Options.sycl_split_broadcast`;
+    #: the context sets it, 0 here: a lexic no context made writes the
+    #: spelling that needs no header).
+    self.split_broadcast = 0
 
   @staticmethod
   def kernel_name_class(func_name: str) -> str:
@@ -312,6 +317,16 @@ class SyclLexic(Lexic):
               f'sub-group and replicate it instead')
         if size == block:
           return f'sycl::group_broadcast({group}, {variable}, {lane})'
+        if size // block <= self.split_broadcast:
+          # Several multiplications in a sub-group of known size: one
+          # broadcast per block from a lane every work-item agrees on, and a
+          # select by block (`tensorforge::split_broadcast`).  IGC writes the
+          # index per work-item below as an indirect register access, which
+          # on the Max 1550 made eight lanes a multiplication an order of
+          # magnitude slower; split, the order-4 kernels of eight fused
+          # simulations ran up to 62 % faster than at the default lanes.
+          return (f'tensorforge::split_broadcast<{block}, {size}>'
+                  f'({group}, {variable}, {lane})')
       base = f'({group}.get_local_linear_id() / {block}) * {block}'
       return f'sycl::select_from_group({group}, {variable}, {base} + ({lane}))'
 
@@ -335,8 +350,12 @@ class SyclLexic(Lexic):
     if self._underlying_hardware == 'intel' and self._backend == 'oneapi':
       # The register file a kernel asks for (`_grf_property`), a DPC++
       # extension; AdaptiveCpp has neither the header nor the property.
-      return ['sycl/sycl.hpp',
-              'sycl/ext/intel/experimental/grf_size_properties.hpp']
+      headers = ['sycl/sycl.hpp',
+                 'sycl/ext/intel/experimental/grf_size_properties.hpp']
+      if self.split_broadcast and self._sub_groups is not None:
+        # `tensorforge::split_broadcast`, which `broadcast` writes.
+        headers.append('tensorforge_device/sycl_spmd.h')
+      return headers
     return ['sycl/sycl.hpp']
 
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):

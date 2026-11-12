@@ -411,9 +411,7 @@ def simple_space(descrs, context: Context,
     # 12.7 at sixteen.  So the floor is the vector unit there
     # (`Preferences.lanes_down_to_wave`), and `MIN_LANES` elsewhere, where a
     # narrow multiplication shares its wave.
-    floor = lane_config.MIN_LANES
-    if context.target.prefs.lanes_down_to_wave:
-        floor = max(floor, getattr(hw, 'vec_unit_length', 1))
+    floor = lane_floor(context, rule=False)
     # Under the explicit vector, the deduced width alone.  The scorers do not
     # rank these: over the twenty elastic kernels on pvc, against the fastest
     # of 8, 16 and 32, the implemented order picks the best 3 times at a
@@ -951,6 +949,14 @@ def _over_budget(result: Build) -> float:
         # sends between the two builds.
         lanes = result.generator.lanes
         share = lanes.num_threads if lanes else 1
+        # The sub-group, where it is wider than one multiplication: eight
+        # lanes on PVC are two multiplications in one 16-wide sub-group
+        # (`Options.lanes_split_floor`), whose thread holds both footprints.
+        # Counted as eight, a split candidate would be measured against
+        # twice the file it has.
+        width = getattr(target, 'sub_group_width', lambda n: None)(share)
+        if width and width > share:
+            share = width
         return max(0, peak * share - budget) + _over_scalar_budget(result)
     return max(0, peak - budget) + _over_scalar_budget(result)
 
@@ -1064,6 +1070,35 @@ class CompiledScore:
         self.reports[result.candidate] = report
         return report
 
+    def spill_references(self, result: Build) -> Optional[int]:
+        """How often the compiler expects `result`'s kernel to touch what it
+        spilled (`Compiler.spill_references`, IGC's listing), or None where
+        the compiler writes no such listing or the build fails.  A build of
+        its own, with the listing on: it writes megabytes, so `resources`
+        does not ask for it, and the lanes rule asks only where it decides
+        (`SPLIT_REF_GROWTH`)."""
+        if result.candidate in self.references:
+            return self.references[result.candidate]
+        hw = result.context.target.hw
+        compiler = self.toolchain.compiler(hw.vendor)
+        entry = toolchain.compiler_for_vendor(hw.vendor)
+        refs = code = None
+        if compiler is not None and entry is not None:
+            with tempfile.TemporaryDirectory(prefix='tf-tune-') as tmp:
+                env = entry.listing_env(tmp)
+                if env is not None:
+                    src = os.path.join(tmp, 'kernel' + entry.suffix)
+                    with open(src, 'w') as f:
+                        f.write(kernel_source(result))
+                    cmd, _ = entry.report_build(
+                        compiler, src, tmp, hw.model,
+                        self.toolchain.include_dir())
+                    run = subprocess.run(cmd + list(self.flags),
+                                         capture_output=True, text=True,
+                                         timeout=self.timeout,
+                                         env={**os.environ, **env})
+                    if not run.returncode:
+                        refs = entry.spill_references(tmp)
     def __call__(self, result: Build):
         if not result.ok:
             return None
@@ -1471,6 +1506,21 @@ def _worth_it(descr_factory, context: Context, best: Candidate,
 #: -- the same 212 B of spilling cost order-8 `volume` 47 % on A100 at sixteen
 #: lanes, and 112 B of it gained 13 % on sm_120.
 SPILL_GROWTH = 1.5
+
+#: How much more often, per element, a split sub-group may reference what
+#: IGC spilled than the default does, where both spill (`lanes_rule`;
+#: `Options.lanes_split_floor`: two multiplications of eight lanes in one
+#: sub-group of 16).  Its scratch alone does not show it.  The order-6
+#: `neighboringFlux` in double precision at eight lanes holds 20160 B of
+#: scratch against the default's 14592, 1.38 times and within
+#: `SPILL_GROWTH`.  IGC's listing counts 5086 references to it against 672,
+#: 3.8 times an element, and the build ran 2.3 times as long (sng2 559986,
+#: IGC 2.41.5).  The eight-lane builds that won where both spill reference
+#: 0.6 to 1.5 times the default's: in double precision, s8 order-4
+#: `localFluxAll` -48 %; in single, s8 order-4 `localFluxAll` -34 %, order-3
+#: `neighboringFlux` -47 % and `localFluxAll` -7 %, order-4
+#: `neighboringFlux` -5 %.
+SPLIT_REF_GROWTH = 2.0
 
 #: What a spilled value is worth against one executed instruction, per byte of
 #: spill traffic ptxas reports and element of the data type, per warp.  A
@@ -1892,6 +1942,26 @@ def _matrix_candidates(descrs, first: Build, context: Context,
 #: picks there at -0.1 % together.
 WIDE_SPILL = 0
 
+
+def _resident_warps(result: Build, seen: Optional[Resources], hw
+                    ) -> Optional[int]:
+    """Warps an SM holds of `result` (`Options.lanes_occupancy_keep`): the
+    blocks the compiler's registers admit (`Resources.register_blocks`, on
+    NVIDIA a count of blocks), no more than shared memory and threads admit,
+    times the warps a block holds.  None where the compiler did not say."""
+    if seen is None or not seen.register_blocks:
+        return None
+    gen = result.generator
+    wave = max(1, getattr(hw, 'vec_unit_length', 32))
+    threads = gen.lanes.num_threads * gen.launch_config().mults_per_block
+    per_block = -(-threads // wave)
+    blocks = seen.register_blocks
+    resident = getattr(gen, 'resident_blocks', None)
+    if resident:
+        blocks = min(blocks, resident)
+    cap = (getattr(hw, 'max_threads_per_sm', None) or 2048) // wave
+    return min(cap, blocks * per_block)
+
 #: Parts where a narrower candidate is taken only where the default spills.
 #: None any more: MI210's narrower picks lost 8 % together over paper-1106,
 #: the time derivatives at 16 lanes 57, 84 and 45 % (elastic order 5,
@@ -2014,6 +2084,9 @@ class _Ahead:
         #: built.
         self.chain = summary.get('chain')
         self.storage = summary.get('storage')
+        #: Blocks an SM holds by shared memory and threads (`Generator.
+        #: resident_blocks`), for `_resident_warps`.
+        self.resident_blocks = summary.get('resident')
         self._mults = summary['mults']
         self._headers = list(summary['headers'])
         self._kernel = summary['kernel']
@@ -2050,7 +2123,9 @@ def _rewritten(result: Build, alt: Candidate, pin: int, figure, context,
                        peak_pressure=metrics.peak_pressure,
                        code_units=metrics.code_units, rolled=_rolled(result),
                        mults=gen.launch_config().mults_per_block,
-                       headers=list(gen.get_helper_headers()), kernel=text))
+                       headers=list(gen.get_helper_headers()), kernel=text,
+                       resident=getattr(gen, 'resident_blocks', None),
+                       **_dispatch_figures(result)))
     return Build(alt, generator=stub, context=ctx), count
 
 
@@ -2072,7 +2147,8 @@ def _summary_of(index: int) -> dict:
                code_units=gen.metrics.code_units, rolled=_rolled(result),
                mults=gen.launch_config().mults_per_block,
                headers=list(gen.get_helper_headers()),
-               kernel=gen.get_kernel())
+               kernel=gen.get_kernel(), resident=gen.resident_blocks,
+               **_dispatch_figures(result))
     wave = max(1, getattr(context.target.hw, 'vec_unit_length', 32))
     if pin and not cand.get('pin_loads') and not gen.lanes.num_threads % wave:
         # The pinned build the walk may ask about: the same build written
@@ -2169,6 +2245,35 @@ def _compile_ahead(scorer: 'CompiledScore', builds: Mapping[Candidate, Build],
         return dict(zip(cands, pool.map(ask, cands)))
 
 
+def lane_floor(context: Context, rule: bool = True) -> int:
+    """The narrowest lane count the scorers weigh.
+
+    `lanes.MIN_LANES`, or the vector unit where narrower multiplications
+    leave it idle (`Preferences.lanes_down_to_wave`, PVC under SPMD) -- unless
+    the caller lets a sub-group hold several, as many as their broadcasts are
+    split over (`Options.lanes_split_floor`, `Options.sycl_split_broadcast`):
+    split, a narrow multiplication reads its lanes by register regions instead
+    of indirect register accesses, and eight lanes of the order-4 kernels of
+    eight fused simulations ran up to 62 % faster than sixteen on the Max
+    1550, where the order-6 derivative still lost three-fold.
+    """
+    floor = lane_config.MIN_LANES
+    if not context.target.prefs.lanes_down_to_wave:
+        return floor
+    wave = getattr(context.target.hw, 'vec_unit_length', 1)
+    opts = context.get_user_options()
+    blocks = 1
+    # The lanes rule only (`rule`): its guards on the compiler's spill
+    # (`SPILL_GROWTH`, `SPLIT_REF_GROWTH`) are what keep eight lanes out
+    # where they lose.  The walks of `autotune=static` and `compiled` have
+    # neither, and took order-6 `derivative` in single precision to eight
+    # lanes at 66.1 ns an element against 12.7 at sixteen.
+    if (rule and getattr(opts, 'lanes_split_floor', False)
+            and context.target.pinned_sub_groups is not None):
+        blocks = max(1, int(getattr(opts, 'sycl_split_broadcast', 0) or 0))
+    return max(floor, wave // blocks)
+
+
 def lane_candidates(descrs, context: Context, origin: Candidate,
                     fixed: Optional[Mapping[str, Any]] = None
                     ) -> List[Candidate]:
@@ -2193,9 +2298,7 @@ def lane_candidates(descrs, context: Context, origin: Candidate,
     if 'lanes' in fixed:
         geometries = [origin.lanes]
     else:
-        floor = lane_config.MIN_LANES
-        if context.target.prefs.lanes_down_to_wave:
-            floor = max(floor, getattr(hw, 'vec_unit_length', 1))
+        floor = lane_floor(context)
         geometries = []
         t = base.num_threads
         while t >= floor:
@@ -2515,7 +2618,16 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         return cand, seen
 
     base, report = pinned(origin, report)
-    limit = SPILL_GROWTH * report.spill_bytes
+    # Where the count ranks on NVIDIA, the caller may let a few hundred bytes
+    # of spilling count as none (`Options.lanes_spill_floor`) and keep the
+    # warps a multiprocessor holds (`Options.lanes_occupancy_keep`).
+    opts = context.get_user_options()
+    counted = not by_bound and str(hw.vendor).lower() == 'nvidia'
+    floor = int(getattr(opts, 'lanes_spill_floor', 0) or 0) if counted else 0
+    keep = (float(getattr(opts, 'lanes_occupancy_keep', 0.0) or 0.0)
+            if counted else 0.0)
+    limit = max(SPILL_GROWTH * report.spill_bytes, floor)
+    held = _resident_warps(builds[origin], unpinned, hw) if keep else None
     large_grf = _grf_twin(context, fixed)
 
     def grf(cand: Candidate, seen: Optional[Resources]
@@ -2581,6 +2693,31 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     vendor = str(hw.vendor).lower()
     default_lanes = builds[origin].generator.lanes.num_threads
 
+    def per_element(refs: int, lanes: int) -> float:
+        """`refs` of a build at `lanes` per element: a sub-group wider than
+        the multiplication holds several elements, and its thread spills for
+        all of them."""
+        width = context.target.sub_group_width(lanes) or lanes
+        return refs * lanes / max(lanes, width)
+
+    def split_traffic(cand: Candidate, seen: Resources) -> bool:
+        """Whether `cand` is a split sub-group that references what IGC
+        spilled more than `SPLIT_REF_GROWTH` times as often per element as
+        the default, where both spill.  Asked of the compiler's listing only
+        then: two builds more, the default's once."""
+        lanes = builds[cand].generator.lanes.num_threads
+        width = context.target.sub_group_width(lanes)
+        ask = getattr(scorer, 'spill_references', None)
+        if not (ask and width and lanes < width and seen.spill_bytes
+                and unpinned.spill_bytes):
+            return False
+        mine = ask(builds[cand])
+        theirs = ask(builds[origin])
+        if mine is None or not theirs:
+            return False
+        return (per_element(mine, lanes)
+                > SPLIT_REF_GROWTH * per_element(theirs, default_lanes))
+
     def guarded(cand: Candidate) -> bool:
         """Whether the lanes of `cand` are out before any compiler is asked:
         wider than the default where the default spills no more than
@@ -2588,7 +2725,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         `NARROW_WHERE_SPILLING`, eight in single precision on AMD
         (`AMD_SINGLE_NARROWEST`)."""
         lanes = builds[cand].generator.lanes.num_threads
-        spills = unpinned.spill_bytes > WIDE_SPILL
+        spills = unpinned.spill_bytes > max(WIDE_SPILL, floor)
         if lanes > default_lanes and not spills:
             return True
         if (lanes < default_lanes and not unpinned.spill_bytes
@@ -2612,6 +2749,10 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             seen = None
         cand, seen = pinned(cand, seen)
         if seen is None or seen.spill_bytes > limit:
+            continue
+        if split_traffic(cand, seen):
+            continue
+        if held and (_resident_warps(builds[cand], seen, hw) or 0) < keep * held:
             continue
         cand, seen = fissioned(cand, seen)
         cand, seen = grf(cand, seen)
@@ -2700,6 +2841,14 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
         # Picks of the walk that asks the compiler about every candidate are
         # not this one's (`ASK_BAND`).
         mode += '+band'
+    opts = context.get_user_options()
+    for name, tag in (('lanes_occupancy_keep', 'occ'),
+                      ('lanes_spill_floor', 'floor'),
+                      ('lanes_split_floor', 'split')):
+        value = getattr(opts, name, 0)
+        if value:
+            # Picks of a walk with another guard are not this one's.
+            mode += f'+{tag}{value}'
     key = _key(first, mode)
     # The small batches' candidate apart, so that the picks of a walk without
     # it are still this one's.

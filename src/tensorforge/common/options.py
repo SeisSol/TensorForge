@@ -794,6 +794,25 @@ declare('sycl_grf',
             '1477 to 397 us a call and the derivative from 294 to 191, but the '
             'volume from 187 to 202.')
 
+declare('sycl_split_broadcast',
+        default=2,
+        env='TF_SYCL_SPLIT_BROADCAST',
+        parse=parse_int,
+        doc='Under SPMD SYCL with a stated sub-group (oneAPI on Intel), how many '
+            'multiplications a sub-group may hold for their broadcasts to be '
+            'split: one `group_broadcast` per multiplication, each from a lane '
+            'the whole sub-group agrees on, and a select by the work-item\'s '
+            'own (`tensorforge::split_broadcast`, '
+            '`tensorforge_device/sycl_spmd.h`).  Beyond it, and at 0, a '
+            'broadcast reads at an index per work-item (`select_from_group`), '
+            'which IGC writes as an indirect register access.  On the Max 1550 '
+            '(IGC 2.41) two a sub-group -- eight lanes a multiplication -- '
+            'split ran the order-4 kernels of eight fused simulations up to '
+            '62 % faster than the default lanes, where the indirect read had '
+            'gained only in `localFluxAll` in double precision; four a '
+            'sub-group split lost to the default almost everywhere, at four '
+            'broadcasts and three selects a read.')
+
 declare('stream_shards',
         rule=lambda target: target.prefs.stream_shards,
         parse=parse_float,
@@ -1540,6 +1559,56 @@ declare('lanes_band',
             'viscoelastic order-6 `volumeExt` (16 lanes, +33 % with the band\'s '
             '32), and asked in threads (`autotune_jobs`) the compiler costs '
             'little time.')
+
+declare('lanes_occupancy_keep',
+        default=0.0,
+        env='TF_LANES_OCCUPANCY_KEEP',
+        parse=parse_float,
+        codegen=False,
+        doc='Under `autotune=lanes` on NVIDIA, leave out a candidate whose '
+            'resident warps a multiprocessor -- the blocks the compiler\'s '
+            'registers admit, times the warps a block holds -- fall below this '
+            'share of the default\'s; 0 leaves every one in.  Fewer '
+            'instructions bought with half the warps lose where the kernel '
+            'waits on memory: single-precision viscoelastic `neighbor` at eight '
+            'lanes holds 224 and 255 registers (orders 5 and 6) against 117 at '
+            '32, and ran 115 and 24 % slower on GH200.  '
+            'Over the GH200 viscoelastic grid (17 kernels, 8 to 64 lanes) 0.75 '
+            'took the rule\'s mean loss against the fastest candidate from 23.3 '
+            'to 14.5 %, with `lanes_spill_floor` 512 to 8.9 % (worst 115 to '
+            '44 %); over the elastic grid of four GPUs it moves nothing.')
+
+declare('lanes_spill_floor',
+        default=0,
+        env='TF_LANES_SPILL_FLOOR',
+        parse=parse_int,
+        codegen=False,
+        doc='Bytes a thread may spill that the lanes rule on NVIDIA still counts '
+            'as none: the guard admits builds spilling up to this much, and the '
+            'wider lane counts stay out unless the default spills more '
+            '(`tuning.WIDE_SPILL`); 0 counts every byte.  A few hundred bytes '
+            'stay in the L1: viscoelastic `volumeExt` in double precision spills '
+            '260 and 488 bytes at 32 lanes (orders 5 and 6), and the 64 lanes '
+            'the rule took to avoid that ran 42 and 36 % slower than 32 on '
+            'GH200.')
+
+declare('lanes_split_floor',
+        default=True,
+        env='TF_LANES_SPLIT_FLOOR',
+        parse=parse_bool,
+        codegen=False,
+        doc='Let the lanes rule weigh lane counts below the vector unit where a '
+            'sub-group can hold several multiplications with their broadcasts '
+            'split (`Options.sycl_split_broadcast`; PVC under SPMD, where the '
+            'floor is otherwise the 16-wide vector unit, '
+            '`Preferences.lanes_down_to_wave`): eight lanes at the default '
+            'split of two.  `tuning.lane_floor`.  On by default since the '
+            'guard on spill references (`tuning.SPLIT_REF_GROWTH`): over 60 '
+            'elastic kernels on the Max 1550 (orders 3-6, s1 and s8, IGC '
+            '2.41.5, a batch of 262144) the rule with it runs 1.008 times the '
+            'best of the default, the rule without it and the rule with it, '
+            'in geometric mean, against 1.050 without it and 1.065 for the '
+            'default; worst 1.32, where the rule without it is the same.')
 
 declare('batch_dispatch',
         default=0.0,

@@ -168,6 +168,22 @@ def _crosslane_category(text: str) -> str:
     return 'xlane'
 
 
+#: `tensorforge::split_broadcast<B, S>` (`SyclLexic.broadcast`).
+_SPLIT_BROADCAST = re.compile(r'split_broadcast<\s*(\d+)\s*,\s*(\d+)\s*>')
+
+
+def _split_issues(s) -> int:
+    """Instructions a split broadcast issues: one broadcast for each of the
+    `S / B` blocks of the sub-group and a select fewer (`tensorforge_device/
+    sycl_spmd.h`) -- three at two blocks, where counted as one the lanes rule
+    saw eight lanes a multiplication on PVC as cheaper than they ran."""
+    m = _SPLIT_BROADCAST.search(getattr(s, 'text', None) or '')
+    if m is None:
+        return 1
+    blocks = int(m.group(2)) // max(1, int(m.group(1)))
+    return max(1, 2 * blocks - 1)
+
+
 def _mfma_category(callee: str) -> str:
     """One AMD matrix builtin as `mfma.<shape>`, the shape as the builtin
     names it (`mfma.f32_4x4x1f32`): the instructions differ by an order of
@@ -389,7 +405,8 @@ class Emitter:
         category, moved = self._mix_category(s)
         if category is None:
             return
-        times = self._issues(s) if category == 'matrix' else 1
+        times = (self._issues(s) if category == 'matrix'
+                 else _split_issues(s) if category == 'xlane' else 1)
         mix(category, self._work_scale * times, self._code_scale * times)
         hot = getattr(self.metrics, 'record_hot', None)
         if hot is not None:

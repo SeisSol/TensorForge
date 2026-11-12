@@ -279,6 +279,22 @@ template <typename T> T popcount(T x) { return x; }
 
 namespace tensorforge {
 
+// `tensorforge_device/sycl_spmd.h`: the broadcast of a multiplication narrower
+// than its sub-group, one `group_broadcast` per block and a select.  Its
+// signature, and that it takes what the generator passes, is what parsing can
+// check; the lanes it reads wait for a device.
+template <int Block, int Size, typename T>
+inline T split_broadcast(const sycl::sub_group &group, T value, int lane) {
+  static_assert(Size % Block == 0, "the blocks tile the sub-group");
+  T out = sycl::group_broadcast(group, value, lane);
+  const int block = static_cast<int>(group.get_local_linear_id()) / Block;
+  for (int b = 1; b < Size / Block; ++b) {
+    const T other = sycl::group_broadcast(group, value, b * Block + lane);
+    out = block == b ? other : out;
+  }
+  return out;
+}
+
 namespace intel_esimd {
 
 template <typename T, int N> class simd;

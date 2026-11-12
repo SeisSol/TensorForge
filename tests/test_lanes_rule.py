@@ -473,14 +473,21 @@ def test_under_dpcpp_the_walk_starts_at_the_sixteen_lanes_it_builds():
     assert origin.lanes.num_threads == 16
     assert tuning.start(descrs, _context()).lanes.num_threads == 32
     cands = tuning.lane_candidates(descrs, _pvc(), origin)
+    # Eight as well: two multiplications a sub-group, their broadcasts split
+    # (`Options.lanes_split_floor`, on by default).
+    assert {_key(c)[0] for c in cands} == {8, 16, 32, 64}
+    cands = tuning.lane_candidates(descrs, _pvc(lanes_split_floor=False),
+                                   origin)
     assert {_key(c)[0] for c in cands} == {16, 32, 64}
 
 
 def test_under_dpcpp_the_rule_ranks_by_the_count(monkeypatch):
     """Sixteen lanes spill where 32 do not, and the price of it moves the
     kernel: order-6 `neighboringFlux` in single precision on the Max 1550,
-    11.8 kB of IGC spill at sixteen lanes and none at 32, 8 % faster at 32."""
-    ctx = _pvc()
+    11.8 kB of IGC spill at sixteen lanes and none at 32, 8 % faster at 32.
+    Without the eight lanes of a split sub-group, which the table does not
+    price."""
+    ctx = _pvc(lanes_split_floor=False)
     descr_factory = _local_flux()
     origin, first = _origin(descr_factory, ctx)
     assert _key(origin)[0] == 16
