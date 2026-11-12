@@ -2153,6 +2153,17 @@ class MultilinearInstruction(ComputeInstruction):
                         and user._reads_interleavable(sym, a_obj))
                for user in sym.get_user_list()):
             return
+        # Nor where another section reads the operand at all (`Tensor.
+        # read_elsewhere`), the rule of `_offer_order`: whether that reader is
+        # a nest of these lanes is a question of a section built before or
+        # after this one.  Before, it read the storage as it was then: cut in
+        # two (`Options.fission`), `Y = E A` before `X = A (B C)` left `Y`
+        # wrong by 31 in double precision, `A` interleaved for `X` under
+        # `Y`'s plain reads.  After, it meets rows it cannot address: the
+        # other way round, `Y` raises (`interleaved rows need a lead index`).
+        # SeisSol's kernels cut on PVC interleave no operand across sections.
+        if any(getattr(m, 'read_elsewhere', False) for m in (a_obj,) + members):
+            return
         rows, cols = shape
         # `Tensor.alignment` is deliberately not consulted.  It describes
         # the layout the frontend gave the operand, and preparing *replaces*
@@ -2395,6 +2406,17 @@ class MultilinearInstruction(ComputeInstruction):
                         and user._lead_width == grain
                         and user._reads_packable(sym, a_obj))
                for user in sym.get_user_list()):
+            return
+        # Nor over an operand a section built before this one read already
+        # (`Tensor.read_before`): it read the storage as it was then, and the
+        # host lays out the one this would make.  `Y = E A` cut off before
+        # `X = A (B C)` read `A` plain and was wrong by 63 once it was packed.
+        # The first section to read an operand decides, and one built after it
+        # reads the packing as a later reader in one section does -- `Y` after
+        # `X` is exact.  Unlike the interleave this has to stay open across
+        # sections: SeisSol's kernels cut on PVC read two to four packed
+        # operators in both of their sections.
+        if any(getattr(m, 'read_before', False) for m in (a_obj,) + members):
             return
         shape = tuple(int(x) for x in a_obj.get_actual_shape())
         lower = list(a_obj.get_bbox().lower())

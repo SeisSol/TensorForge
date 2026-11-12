@@ -90,3 +90,102 @@ def test_the_sections_each_operand_is_read_in():
     descrs, a, _ = _chain(second_operator=False)
     reading = sections_reading([descrs[:2], descrs[2:]])
     assert reading[id(a)][1] == {0, 1}
+
+
+# --------------------------------------------------------------------------- #
+# The interleave and the packing across the runs, on the host oracle
+# --------------------------------------------------------------------------- #
+
+def _cross(form: str, y_first: bool):
+    """``Y = E A`` and ``X = A (B C)``, cut between them in the order given:
+    ``A`` the B operand of one run and the A operand of the other.  Dense
+    for the interleave (`_offer_simt_order`); a band with its numbers known
+    for the packing (`_offer_packing`), which only an operand with numbers
+    is offered."""
+    import numpy as np
+    n = 56
+    rng = np.random.default_rng(1)
+    if form == 'packing':
+        vals = np.zeros((n, n))
+        band = np.random.default_rng(7)
+        for c in range(n):
+            vals[c:min(n - 1, c + 9) + 1, c] = band.uniform(
+                0.5, 1.5, size=min(n - 1, c + 9) + 1 - c)
+        a = SubTensor(Tensor([n, n], Addressing.NONE,
+                             BoundingBox([0, 0], [n, n]),
+                             alias="A", datatype=DTYPE, data=vals))
+    else:
+        vals = rng.standard_normal((n, n))
+        a = _t(n, n, "A", Addressing.NONE)
+    numbers = {'A': vals, 'B': rng.standard_normal((n, 9)),
+               'C': rng.standard_normal((9, 9)),
+               'E': rng.standard_normal((9, n))}
+    b, c = _t(n, 9, "B"), _t(9, 9, "C")
+    x, e, y = _t(n, 9, "X"), _t(9, n, "E"), _t(9, n, "Y")
+    t1 = SubTensor(generate_tmp_matrix(b, c))
+    xs = [GemmDescr(trans_a=False, trans_b=False, a=b, b=c, c=t1),
+          GemmDescr(trans_a=False, trans_b=False, a=a, b=t1, c=x,
+                    alpha=1.0, beta=0.0)]
+    ys = [GemmDescr(trans_a=False, trans_b=False, a=e, b=a, c=y,
+                    alpha=1.0, beta=0.0)]
+    want = {'X': vals @ (numbers['B'] @ numbers['C']),
+            'Y': numbers['E'] @ vals}
+    return (ys + xs if y_first else xs + ys), numbers, want, a.tensor
+
+
+def _oracle_errors(descrs, numbers, want):
+    import numpy as np
+    from harness.driver_emit import collect_operands
+    from tensorforge.reference import kernel_eval as ke
+    gen = Generator(descrs, Context(arch='sm_90', backend='cuda',
+                                    fp_type=DTYPE,
+                                    options=Options(tensor_cores=False,
+                                                    fission=2)))
+    gen.generate()
+    lanes, mults = ke.launch_geometry(gen.get_launcher())
+    preset, ops = {}, {}
+    for op in collect_operands(gen):
+        ops[op.alias] = op
+        if op.alias in numbers:
+            flat = numbers[op.alias].flatten(order='F')
+            smap = op.pack_index
+            preset[op.kernel_name] = (list(flat) if smap is None else
+                                      [flat[i] if i >= 0 else 0.0
+                                       for i in smap])
+    mem = ke.evaluate_wave(gen.get_kernel(), lanes, seed=3, preset=preset,
+                           races=[], mults=mults, block=True, elements=1)
+    errors = {}
+    for alias, w in want.items():
+        name = ops[alias].kernel_name
+        got = np.array([mem[(name, i)] for i in range(w.size)]
+                       ).reshape(w.shape, order='F')
+        errors[alias] = float(np.abs(got - w).max())
+    return errors
+
+
+def test_a_run_built_first_reads_an_operand_plain_and_the_next_one_stores_it_so():
+    """`Y = E A` built first reads `A` as it lies, so the run after it lays
+    neither the interleave nor a packing over `A`: both were offered before,
+    and left `Y` wrong by 31 and 63."""
+    for form in ('interleave', 'packing'):
+        descrs, numbers, want, _ = _cross(form, y_first=True)
+        errors = _oracle_errors(descrs, numbers, want)
+        assert max(errors.values()) < 1e-9, (form, errors)
+
+
+def test_a_packing_the_first_run_lays_is_read_by_the_next_one():
+    """The other way round the packing stays: `Y` built after `X` reads the
+    packed `A` as a second reader in one run does."""
+    descrs, numbers, want, a = _cross('packing', y_first=False)
+    errors = _oracle_errors(descrs, numbers, want)
+    assert max(errors.values()) < 1e-9, errors
+    assert a.packing is not None
+
+
+def test_no_interleave_over_an_operand_another_run_reads():
+    """And the interleave stays off: `Y` after `X` could not address it
+    (`interleaved rows need a lead index`)."""
+    descrs, numbers, want, a = _cross('interleave', y_first=False)
+    errors = _oracle_errors(descrs, numbers, want)
+    assert max(errors.values()) < 1e-9, errors
+    assert a.simt_interleave is None

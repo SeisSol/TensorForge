@@ -1299,12 +1299,15 @@ class Generator:
     # lays it out once -- and a section is built before the next one
     # exists, so what one offers an operand cannot ask the readers of the
     # others (`MultilinearInstruction._offer_order`).  Each is told which of
-    # its operands another section reads (`Tensor.read_elsewhere`).
+    # its operands another section reads (`Tensor.read_elsewhere`), and
+    # which of them a section built before it read already, as they were
+    # stored then (`Tensor.read_before`).
     reading = sections_reading(descrlist)
     for position, (codesection, lastbarrier, lastblock) in enumerate(
         zip(descrlist, barrier, blocks)):
       for tensor, where in reading.values():
         tensor.read_elsewhere = bool(where - {position})
+        tensor.read_before = any(w < position for w in where)
       self._preload_drop = 0
       self._pack_level = 0
       self._pack_floor = 0
