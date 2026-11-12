@@ -79,11 +79,16 @@ def test_esimd_asks_for_the_pointers_in_one_message():
     assert src.count('tensorforge::prefetchL2(') == 0
 
 
-def test_cuda_asks_one_line_per_hint():
+def test_cuda_asks_each_line_once_round_the_lanes():
     """A `prefetch.global.L2` names the 128-byte line holding its address:
-    16 lines for 504 floats and 3 for each of 81."""
+    16 lines for 504 floats and 3 for each of 81.  The 32 lanes of a
+    multiplication go round them, lane `j` asking for line `j`: one hint an
+    operand, where every lane asking for every line issued 28 -- and the
+    lanes past an operand's lines ask for none of what lies behind it."""
     src = _kernel('cuda', 'sm_100', prefetch_data=True)
-    assert len(re.findall(r'prefetchL2\(&pf_', src)) == 16 + 4 * 3
+    assert len(re.findall(r'prefetchL2\(&pf_', src)) == 1 + 4
+    assert re.search(r'_hintAt = \(threadIdx\.x % 32\) \* 32;', src), src
+    assert re.search(r'_hintAt < 504', src) and re.search(r'_hintAt < 81', src)
 
 
 def test_the_transfers_stay_where_they_are():
@@ -135,5 +140,7 @@ def test_a_compressed_operand_is_asked_for_as_it_is_stored():
     view is 16 x 16: two lines of 128 bytes, and nothing of the elements
     behind it."""
     src = _kernel('cuda', 'sm_86', case='sparsity_band', prefetch_data=True)
-    starts = re.findall(r'prefetchL2\(&pf_glb_m2\[(\d+)\]\)', src)
-    assert starts == ['0', '32'], src
+    # The lanes go round the two lines: one hint, lanes 0 and 1 asking for
+    # floats 0 and 32, the rest held back by the stored extent.
+    assert len(re.findall(r'prefetchL2\(&pf_glb_m2\[', src)) == 1, src
+    assert re.search(r'_hintAt < 46\b', src), src

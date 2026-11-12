@@ -619,7 +619,8 @@ class AbstractInstruction(ABC):
         lambda builder, body: cls._optimize_shared_body(context, builder, body,
                                                         place, barriers,
                                                         metrics, shards,
-                                                        trips, carry),
+                                                        trips, carry,
+                                                        lanes=lanes),
         lanes=lanes, operations=True)
     return body
 
@@ -630,7 +631,8 @@ class AbstractInstruction(ABC):
 
   @staticmethod
   def _optimize_shared_body(context, builder, body, place=None, barriers=None,
-                            metrics=None, shards=None, trips=None, carry=None):
+                            metrics=None, shards=None, trips=None, carry=None,
+                            lanes=None):
     """A shared body through the pipeline, with the transfers issued ahead
     where that is asked for: within their statement list, and across the
     batch loop's back edge.
@@ -663,7 +665,10 @@ class AbstractInstruction(ABC):
                               data=options.prefetch_data,
                               level=options.prefetch_level,
                               line_bytes=context.target.prefetch_line_bytes(),
-                              report=hints)
+                              report=hints,
+                              # The lanes of a multiplication take turns
+                              # at the data hints (`prefetch.prefetch_hints`).
+                              spread=int(lanes or 1))
     if shards is not None:
       spec = dict(shards)
       kept = spec.pop('report', kept)

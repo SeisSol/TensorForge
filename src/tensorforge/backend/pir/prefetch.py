@@ -22,7 +22,10 @@ memory request and not a number.  Two kinds, each its own switch:
     element, with the transfer left where it is.  A pointer to that element
     is bound at the head, its computation cloned with the successor's index,
     and the tail asks for the whole of what the binding reaches, one span
-    per `Target.prefetch_line_bytes`.
+    per `Target.prefetch_line_bytes`.  Under SPMD with `spread` lanes to a
+    multiplication, the spans go round the lanes, each lane asking for every
+    `spread`-th: one instruction then names `spread` lines, where every lane
+    naming the same one sent the whole list `spread` times over.
 
 Which pointers and which transfers: those whose address is computed per
 element in the body, each pointer once.  A batch-invariant operand is the
@@ -49,21 +52,24 @@ from dataclasses import replace
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from .ahead import Clone, ElementLoop, Refusal, behind_defs
-from .core import BufferType, MemSpace, Op, Region, Stmt, Value, walk_stmts
+from .core import (BOOL, INDEX, BufferType, MemSpace, Op, Region, Stmt,
+                   Value, walk_stmts)
 from .transfers import transfers, writes
 
 
 def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                    pointers: bool = False, data: bool = False,
                    level: str = 'l2', line_bytes: int = 128,
-                   report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+                   report: Optional[List[str]] = None,
+                   spread: int = 1) -> Tuple[Stmt, ...]:
     """`body` with the hints for the next element in each batch loop.
 
     A batch loop is a `for` that names its successor index (`next`).
     `scratch` makes the builder for the statements this adds
     (`IRBuilder.scratch`); `level` is the cache asked for, `line_bytes` the
     span one hint covers.  `report` collects a line per hint: `+` and what it
-    asks for, `-` and why a pointer or a loop has none.
+    asks for, `-` and why a pointer or a loop has none.  `spread` is the
+    lanes the data hints go round (SPMD), 1 where every lane asks for all.
     """
     if not (pointers or data):
         return body
@@ -76,7 +82,7 @@ def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
         try:
             loop = _Hints(ElementLoop(s, scratch, report), pointers=pointers,
                           data=data, level=level,
-                          line_bytes=line_bytes).run()
+                          line_bytes=line_bytes, spread=spread).run()
         except Refusal as why:
             if report is not None:
                 report.append(f'- loop: {why}')
@@ -89,12 +95,13 @@ def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
 
 class _Hints:
     def __init__(self, l: ElementLoop, *, pointers: bool, data: bool,
-                 level: str, line_bytes: int):
+                 level: str, line_bytes: int, spread: int = 1):
         self.l = l
         self.pointers = pointers
         self.data = data
         self.level = level
         self.line_bytes = line_bytes
+        self.spread = max(1, int(spread or 1))
         self.b = l.scratch()
 
     def _note(self, line: str) -> None:
@@ -190,6 +197,20 @@ class _Hints:
         elem = ahead.type.elem.size() if ahead.type.elem is not None else 4
         per = max(1, self.line_bytes // elem)
         b = self.l.scratch()
+        spans = -(-extent // per)
+        if self.spread > 1 and spans > 1:
+            # Round the lanes: lane `j` asks for spans `j`, `j + spread`, ...
+            # A whole line each, the last one included -- what lies past the
+            # extent in it is the same line.
+            lane = b.lane_index(self.spread)
+            mine = b.op('mul', INDEX, lane, per, hint='hintAt')
+            for first in range(0, spans, self.spread):
+                start = b.op('add', INDEX, mine, first * per, hint='hintAt')
+                inside = (None if first + self.spread <= spans else
+                          b.op('lt', BOOL, start, extent, hint='hintIn'))
+                b.prefetch(ahead, start, level=self.level, elems=per,
+                           predicate=inside)
+            return list(b.finish())
         for start in range(0, extent, per):
             # The run as it is: a target that needs a message-sized length
             # rounds it, one that names a line ignores it.

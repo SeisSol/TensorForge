@@ -279,20 +279,26 @@ class Prefetch(Pass):
 
     def __init__(self, scratch, pointers: bool = False, data: bool = False,
                  level: str = 'l2', line_bytes: int = 128,
-                 report: Optional[List[str]] = None):
+                 report: Optional[List[str]] = None, spread: int = 1):
         self._scratch = scratch
         self._pointers = pointers
         self._data = data
         self._level = level
         self._line_bytes = line_bytes
         self._report = report
+        self._spread = spread
 
     def run(self, pc: BodyContext) -> None:
+        # The lanes go round the spans under SPMD alone: under the explicit
+        # vector one work-item is the multiplication, and its runs go out as
+        # one gather already (`Lexic.prefetch_runs`).
         pc.body = prefetch_hints(pc.body, self._scratch,
                                  pointers=self._pointers, data=self._data,
                                  level=self._level,
                                  line_bytes=self._line_bytes,
-                                 report=self._report)
+                                 report=self._report,
+                                 spread=(1 if pc.explicit_simd
+                                         else self._spread))
 
 
 class CarryTrips(Pass):
