@@ -256,6 +256,24 @@ class BatchLoop(AbstractInstruction):
             return Uniformity.MULTGROUP
         return Uniformity.MULT
 
+    def _index_uniformity(self):
+        """How uniform the element index is, and with it every guard on it.
+
+        The multiplication's own, except where `uniform_scope` finds the
+        whole block alike: one multiplication a block, whose `batchId0` is
+        the block's.  Stated as the multiplication's there, the size and flag
+        guards made the body a region a block barrier may not enter, and a
+        multiplication spread over several sub-groups -- 64 lanes on PVC's
+        32-wide ones, which only the block meets -- exchanged its stagings
+        through shared memory with no barrier between the writes and the
+        reads (`pir.barriers` reported it and nothing else said a word):
+        SeisSol's order-5 F64 `neighboringFlux` and `volume` raced on the
+        Max 1550.
+        """
+        from tensorforge.backend.pir.core import Uniformity
+        return (Uniformity.BLOCK if self.uniform_scope() is Uniformity.BLOCK
+                else Uniformity.MULT)
+
     # -- data flow ------------------------------------------------------- #
     #
     # The union over the region, so the loop is not opaque to any pass.  A
@@ -843,7 +861,7 @@ class BatchLoop(AbstractInstruction):
                 with writer.for_(start, self._count(writer),
                                  stride, hint=self._batch(0),
                                  index_type=SIZE, peel_index=peel,
-                                 uniform=Uniformity.MULT,
+                                 uniform=self._index_uniformity(),
                                  flag_word=self._flag_word()) as loop:
                     # The induction *value*, not just its name.  Anything
                     # inside that mentions `batchId0` has to say so as an
@@ -918,7 +936,8 @@ class BatchLoop(AbstractInstruction):
             from tensorforge.backend.pir.core import BOOL, SIZE, Uniformity
             index = writer.rawexpr(self._block_id(), type_=SIZE,
                                    hint=self._batch(0), pure=True,
-                                   movable=True, uniform=Uniformity.MULT)
+                                   movable=True,
+                                   uniform=self._index_uniformity())
             inside = writer.op('lt', BOOL, index, self._count(writer),
                                hint='inbatch0')
             with BatchLoop.batch_indices(writer) as bound:

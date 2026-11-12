@@ -2212,13 +2212,22 @@ class Generator:
         arenas={obj.name: allocate.MULT,
                 GeneralLexicon.TOTAL_SHR_MEM: allocate.BLOCK},
         align=self._shared_align(), block_align=self._shared_align())
+    unfenced: List[str] = []
     body = AbstractInstruction.optimized_body(
         self._context, self._names,
         lambda body: self._emit_section(body, index, section),
-        arena=obj.name, place=place, barriers=self._barriers(section),
+        arena=obj.name, place=place,
+        barriers=self._barriers(section, unfenced),
         metrics=self._metrics, shards=self._shard_spec(section),
         trips=self._trip_spec(), carry=self._carry_spec(section),
         lanes=self._num_threads)
+    if unfenced:
+      # Shared accesses the threads of a multiplication meet at, in a region
+      # no barrier may enter: emitted anyway, the kernel races.  A
+      # multiplication over two 32-wide sub-groups on PVC did, its stagings
+      # read before the other sub-group wrote them (SeisSol order 5 F64).
+      raise GenerationError(f'section {index} cannot be emitted: '
+                            + '; '.join(unfenced))
     return body, place.layout
 
   def _trip_spec(self) -> Optional[dict]:
@@ -2331,7 +2340,7 @@ class Generator:
         instr.gen_ir(builder)
     return tuple(builder.finish()) + tuple(body)
 
-  def _barriers(self, section) -> 'pir.PlaceBarriers':
+  def _barriers(self, section, report=None) -> 'pir.PlaceBarriers':
     """Where the multiplication's threads meet in `section` (`pir.barriers`).
 
     The section is one body, so the pass sees every access a barrier has to
@@ -2360,7 +2369,7 @@ class Generator:
       return barrier_stmt(who, wave, self._num_threads, handoff)
 
     return pir.PlaceBarriers(arena, make, sync.barrier_scope(),
-                             _one_lane_stores(section.stream))
+                             _one_lane_stores(section.stream), report=report)
 
   def _emit_section(self, body, index: int, section) -> None:
     """One section, as one body: the arena and its windows, the operators
