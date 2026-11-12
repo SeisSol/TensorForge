@@ -651,6 +651,12 @@ class Emitter:
         # a mask is not an address at all.
         return not getattr(self._target(), 'explicit_simd', False)
 
+    @staticmethod
+    def _in_registers(s: Stmt) -> bool:
+        """Whether every access of `s` is to the work-item's own registers."""
+        return bool(s.accesses) and all(
+            a.space is MemSpace.REGISTER for a in s.accesses)
+
     def _infix(self, op: str, v: Value, args: Sequence[str]) -> str:
         """`a op b`.  A hook: the explicit-vector emitter spells a comparison
         by the type its result is declared as."""
@@ -1342,7 +1348,13 @@ class Emitter:
             # only the value.  `split_predicated_load` says why.
             split = (s.predicate is not None and _folds_predicate(s)
                      and self._split_predicated_load())
-            if split:
+            if split and not self._in_registers(s):
+                # Memory only.  A register image has no address to keep in
+                # bounds, and a clamped subscript is one that varies by lane:
+                # IGC can then keep no element of the array in a register of
+                # its own, and SeisSol's F64 time derivative on PVC ran 2.7x
+                # slower once its register-to-register copies were read
+                # through `r6[g ? i : 0]` (`GlbToRegLoader._fresh_window`).
                 addr = f'{self.operand(s.predicate)} ? ({addr}) : (0)'
             nontemporal = s.attr('nontemporal')
             access = self.elem_access(s.args[0], addr, v.type,
