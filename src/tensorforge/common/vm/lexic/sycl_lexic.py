@@ -52,19 +52,49 @@ class SyclLexic(Lexic):
     # its own (`Target.pinned_sub_groups`).
     self._sub_groups = sub_groups
 
+  @staticmethod
+  def kernel_name_class(func_name: str) -> str:
+    """The kernel name type of `func_name` (`kernel_definition`)."""
+    return f'{func_name}_k'
+
   def get_launch_size(self, func_name, block, shmem, resident=False):
     # Declares `gridsize`, which the grid right after this reads:
-    # `std::min(gridsize, ...)`.  One work-group per compute unit, which is
-    # what the CUDA/HIP launchers fall back to when their occupancy query
-    # answers nothing; SYCL has no such query.  The queue is read from the
-    # pointer here because the launcher binds `stream` only after this, and
-    # not dereferenced when null -- the null check that follows is what
-    # reports that.
+    # `std::min(gridsize, ...)`.  One work-group per compute unit (XVE), and
+    # under DPC++ no more than the device holds of this kernel at once
+    # (`max_num_work_groups` of `sycl_ext_oneapi_launch_queries`, at this
+    # work-group's size and shared memory).  Not more: a work-group that stages
+    # the operators (`preload_globals`) does so once for the elements it loops
+    # over, and the most the device holds made the loop 30 % slower than one
+    # round at 262144 elements over SeisSol's orders 3 to 5, and a sub-group
+    # for every hardware thread no better -- their work-groups hold one or two
+    # sub-groups.  The queue is read from the pointer here because the
+    # launcher binds `stream` only after this, and not dereferenced when null
+    # -- the null check that follows is what reports that.
     ptr = GeneralLexicon.STREAM_PTR_STR
+    queue = f"static_cast<{self.stream_type} *>({ptr})"
+    units = (f"{queue}->get_device().get_info<sycl::info::device::"
+             f"max_compute_units>()")
+    query = ''
+    if self._backend == 'oneapi':
+      name = self.kernel_name_class(func_name)
+      query = (f"  try {{\n"
+               f"    const auto id = sycl::get_kernel_id<{name}>();\n"
+               f"    const auto kernel = sycl::get_kernel_bundle<sycl::bundle_state::executable>("
+               f"{queue}->get_context(), {{id}}).get_kernel(id);\n"
+               f"    const std::size_t most = kernel.ext_oneapi_get_info<sycl::ext::oneapi::experimental::info::"
+               f"kernel_queue_specific::max_num_work_groups>(*{queue}, "
+               f"sycl::range<3>({block}[2], {block}[1], {block}[0]), "
+               f"static_cast<std::size_t>({shmem}));\n"
+               f"    gridsize = most > 0 ? std::min<std::size_t>(most, {units}) : 0;\n"
+               f"  }} catch (...) {{\n"
+               f"    gridsize = 0;\n"
+               f"  }}\n")
     return (f"static std::size_t gridsize = 0;\n"
             f"if (gridsize == 0 && {ptr} != nullptr) {{\n"
-            f"  gridsize = static_cast<{self.stream_type} *>({ptr})->get_device()"
-            f".get_info<sycl::info::device::max_compute_units>();\n"
+            f"{query}"
+            f"  if (gridsize == 0) {{\n"
+            f"    gridsize = {units};\n"
+            f"  }}\n"
             f"}}")
 
   def set_shmem_size(self, func_name, shmem):
@@ -178,9 +208,16 @@ class SyclLexic(Lexic):
 
     l1 = f"inline void kernel_{base_name}(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, {params})"
     l2 = "stream->submit([&](sycl::handler &cgh)"
+    # Named, so that the launcher can ask DPC++ how many work-groups of it the
+    # device holds (`get_launch_size`); the name at namespace scope, where
+    # both the kernel and the launcher see it.
+    name = ''
+    if self._backend == 'oneapi':
+      file(f'class {self.kernel_name_class(f"kernel_{base_name}")};')
+      name = f'<{self.kernel_name_class(f"kernel_{base_name}")}>'
     # `group_count` and `group_size` come in CUDA order (x, y, z) and go out in
     # SYCL order, x last; see the index spellings in `__init__`.
-    l3 = (f"cgh.parallel_for(sycl::nd_range<3>{{{{group_count.get(2) * group_size.get(2), "
+    l3 = (f"cgh.parallel_for{name}(sycl::nd_range<3>{{{{group_count.get(2) * group_size.get(2), "
           f"group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}}, "
           f"{{group_size.get(2), group_size.get(1), group_size.get(0)}}}}, "
           f"{props}[=](sycl::nd_item<3> item) {add_items}")

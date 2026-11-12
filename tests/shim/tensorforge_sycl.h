@@ -190,6 +190,16 @@ public:
   void parallel_for(nd_range<Dim>, P, F &&f) {
     (void)sizeof(f);
   }
+  // A named kernel (`SyclLexic.kernel_name_class`): the name a type the call
+  // states, which the launch's occupancy query looks the kernel up by.
+  template <typename Name, int Dim, typename F>
+  void parallel_for(nd_range<Dim>, F &&f) {
+    (void)sizeof(f);
+  }
+  template <typename Name, int Dim, typename P, typename F>
+  void parallel_for(nd_range<Dim>, P, F &&f) {
+    (void)sizeof(f);
+  }
 };
 
 class event {};
