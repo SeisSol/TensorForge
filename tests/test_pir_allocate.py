@@ -25,7 +25,8 @@ import pytest
 from tensorforge.backend.pir import emit
 from tensorforge.backend.pir.allocate import BLOCK, MULT, allocate
 from tensorforge.backend.pir.build import IRBuilder
-from tensorforge.backend.pir.core import INDEX, IRError, MemSpace, Op, walk
+from tensorforge.backend.pir.core import (INDEX, IRError, MemSpace, Op,
+                                          ScalarType, walk)
 from tensorforge.backend.writer import Writer
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.target import Target
@@ -337,6 +338,56 @@ def test_the_block_s_buffers_are_back_to_back_in_allocation_order():
                                  block_align=4)
     assert offsets == {'first': 0, 'second': 12}
     assert layout.block == 18
+
+
+# --------------------------------------------------------------------------- #
+# Buffers of another element than the arena's
+# --------------------------------------------------------------------------- #
+
+def _wide(b):
+    return b.const(1.0, ScalarType(Datatype.F64))
+
+
+def test_a_wider_buffer_takes_as_many_arena_elements_as_hold_it():
+    """A double buffer in the float arena -- the temporary a widening cast
+    writes, in a kernel that reads floats -- takes two floats an element, and
+    the buffer occupied together with it starts behind all of them.  Counted
+    in its own elements, SeisSol's `toCanonical` from order 5 in single
+    precision wrote 315 doubles into a window of 320 floats."""
+    b = _builder()
+    lane = b.thread_id('x')
+    wide = b.alloc(Datatype.F64, (35, 9), MemSpace.SHARED, hint='wide')
+    other = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='other')
+    b.store(wide, _wide(b), lane)
+    b.store(other, b.const(1.0), lane)
+    b.load(wide, lane, hint='d')
+    b.load(other, lane, hint='d')
+    _, layout, offsets = _layout(b.finish(), unit=4)
+    assert offsets == {'wide': 0, 'other': 630}
+    assert layout.per_mult == 662
+
+
+def test_a_buffer_no_wider_than_the_arena_s_element_keeps_its_count():
+    b = _builder()
+    lane = b.thread_id('x')
+    flags = b.alloc(Datatype.BOOL, (64,), MemSpace.SHARED, hint='flags')
+    b.store(flags, b.const(True, ScalarType(Datatype.BOOL)), lane)
+    b.load(flags, lane, hint='d')
+    _, layout, _ = _layout(b.finish(), unit=4)
+    assert layout.per_mult == 64
+
+
+def test_the_stages_of_a_wider_buffer_are_as_far_apart_as_it_takes():
+    b = _builder()
+    lane = b.thread_id('x')
+    stage = b.op('bitand', INDEX, lane, 1, hint='stage')
+    w = b.alloc(Datatype.F64, (16,), MemSpace.SHARED, hint='w',
+                identity=object(), stages=2, stage=stage)
+    b.store(w, _wide(b), lane)
+    b.load(w, lane, hint='d')
+    _, layout, offsets = _layout(b.finish(), unit=4)
+    assert offsets['w'] == '0 + ({0}) * 32'
+    assert layout.per_mult == 64
 
 
 # --------------------------------------------------------------------------- #

@@ -136,16 +136,19 @@ class PlaceBuffers(Pass):
     preserves = ('flat',)
     is_transform = True
 
-    def __init__(self, arenas, align: int = 1, block_align: int = 1):
+    def __init__(self, arenas, align: int = 1, block_align: int = 1,
+                 unit: int = 0):
         self._arenas = dict(arenas)
         self._align = align
         self._block_align = block_align
+        self._unit = unit
         self.layout = None
 
     def run(self, pc: BodyContext) -> None:
         pc.body, self.layout = allocate(pc.body, arenas=self._arenas,
                                         align=self._align,
-                                        block_align=self._block_align)
+                                        block_align=self._block_align,
+                                        unit=self._unit)
 
 
 class PlaceBarriers(Pass):
