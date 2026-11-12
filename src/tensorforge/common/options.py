@@ -829,6 +829,36 @@ declare('sycl_split_broadcast',
             'sub-group split lost to the default almost everywhere, at four '
             'broadcasts and three selects a read.')
 
+declare('lead_split',
+        rule=lambda target: (2 if (target.hw.vendor == 'intel'
+                                   and target.backend == 'oneapi'
+                                   and not target.explicit_simd) else 1),
+        env='TF_LEAD_SPLIT',
+        parse=parse_int,
+        doc='Blocks of a second destination axis a multiplication spreads over '
+            'the lanes its lead leaves idle (a two-level lead): lane `t` holds '
+            'lead row `t % R` and the rows `b, b + B, ...` of axis 1, `b = t // '
+            'R`, where `R` is the lead extent and `B` this number.  Where a '
+            'section runs more lanes than an operation\'s lead fills -- the '
+            'eight simulations of a fused build in the sixteen lanes '
+            '`localFluxAll` runs -- every lane works, and a lane holds `1/B` '
+            'of what it held before.  The lanes are the section\'s: a section '
+            'whose lead fills its lanes is left alone, since two '
+            'multiplications a sub-group fill it already '
+            '(`Options.sycl_split_broadcast`).  A product that contracts over '
+            'the split axis reads the other blocks by exchange '
+            '(`Lexic.exchange_xor`: SPMD SYCL).  1 is off; 2 is what is built '
+            '(`MultilinearBuilder._split_axes`), and the default under DPC++\'s '
+            'SPMD lowering: on the Max 1550 (IGC 2.41.5) the s8 kernels of '
+            'SeisSol\'s elastic system at orders 3 and 4 ran 0.79 times their '
+            'time without it in geometric mean at a batch of 262144, '
+            '`localFluxAll` 0.27-0.38 and `neighboringFlux` 0.52-0.81 '
+            '(e3-d +9 %), the rest unchanged (sng2 560412).  Not in a '
+            'multiplication narrower than the vector unit, whose sub-group '
+            'another one fills: the ten single-simulation kernels that led '
+            'with four rows in eight lanes ran up to 21 % slower split '
+            '(sng2 560417).')
+
 declare('stream_shards',
         rule=lambda target: target.prefs.stream_shards,
         parse=parse_float,

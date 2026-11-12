@@ -2238,6 +2238,31 @@ def flatten_scopes(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
 # If-conversion
 # --------------------------------------------------------------------------- #
 
+def _crosslane_sources(body: Tuple[Stmt, ...]) -> Set[int]:
+    """Ids of the values a cross-lane statement of `body` reads, directly or
+    through pure arithmetic."""
+    defs = {t.id: st for st in body for t in st.target}
+    seen: Set[int] = set()
+    work = [v.id for st in body if st.attr('crosslane')
+            for v in st.operands()]
+    while work:
+        vid = work.pop()
+        if vid in seen:
+            continue
+        seen.add(vid)
+        st = defs.get(vid)
+        if (st is not None and st.pure and not st.accesses
+                and not st.has_side_effects):
+            work.extend(v.id for v in st.operands())
+    return seen
+
+
+def _own_register_read(s: Stmt) -> bool:
+    """A load of the lane's own registers and nothing else."""
+    return (s.op == Op.LOAD and bool(s.accesses)
+            and all(a.space is MemSpace.REGISTER for a in s.accesses))
+
+
 def _convertible(s: Stmt) -> bool:
     """A guard whose body may carry the predicate statement by statement."""
     if s.op != Op.IF or s.target or len(s.regions) != 1:
@@ -2340,11 +2365,18 @@ def if_convert(body: Tuple[Stmt, ...],
                 continue
         if _convertible(s):
             cond = s.cond
+            shared = _crosslane_sources(s.regions[0].body)
             for inner in s.regions[0].body:
                 # Pure arithmetic needs no predicate: computing it for a
                 # masked-out lane is harmless, and predicating it anyway
                 # produces a nested select per operation.
                 if inner.pure and not inner.has_side_effects and not inner.accesses:
+                    out.append(inner)
+                elif _own_register_read(inner) and any(
+                        t.id in shared for t in inner.target):
+                    # Read for another lane (`crosslane`): that lane needs
+                    # the value, not the zero a masked-out lane would load,
+                    # and a lane's own registers are in bounds on every lane.
                     out.append(inner)
                 else:
                     out.append(replace(inner, predicate=cond))

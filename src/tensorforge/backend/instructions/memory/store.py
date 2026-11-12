@@ -86,6 +86,50 @@ def _intersect(a, b):
   return BoundingBox(lower, upper)
 
 
+def _split_axes_of(symbol):
+  """`{axis: (block, stride)}` of a register image with a two-level lead
+  (`Options.lead_split`), in lane order; None for a one-axis image."""
+  if (getattr(symbol, 'lead_axes', None) is None
+      or len(getattr(symbol, 'lead_dims', ())) < 2):
+    return None
+  layout = symbol.register_layout()
+  if layout is None:
+    return None
+  return {dim: (layout.axis(n).block, layout.axis(n).stride)
+          for n, dim in enumerate(symbol.lead_dims)}
+
+
+def _split_loops(split, bbox):
+  """The nest over `bbox` of a two-level image: a lead loop per axis at the
+  block and lane stride the image states, a plain loop elsewhere."""
+  loops = []
+  for i in range(bbox.rank()):
+    if i in split:
+      block, stride = split[i]
+      loops += [LeadLoop(f'i{i}', bbox.lower()[i], bbox.upper()[i], block,
+                         stride)]
+    else:
+      loops += [Loop(f'i{i}', bbox.lower()[i], bbox.upper()[i], 1)]
+  return loops
+
+
+def _complement(lo, hi, own_lo, own_hi):
+  """Disjoint boxes covering `[lo, hi)` less `[own_lo, own_hi)`."""
+  lo, hi = list(lo), list(hi)
+  boxes = []
+  for d in range(len(lo)):
+    a = min(max(lo[d], own_lo[d]), hi[d])
+    b = max(min(hi[d], own_hi[d]), a)
+    if lo[d] < a:
+      boxes.append((lo[:d] + [lo[d]] + lo[d + 1:], hi[:d] + [a] + hi[d + 1:]))
+    if b < hi[d]:
+      boxes.append((lo[:d] + [b] + lo[d + 1:], hi[:d] + [hi[d]] + hi[d + 1:]))
+    lo[d], hi[d] = a, b
+    if a == b:
+      break
+  return boxes
+
+
 class StoreRegToShr(AbstractShrMemWrite):
   def __init__(self,
                context: Context,
@@ -211,18 +255,22 @@ class StoreRegToShr(AbstractShrMemWrite):
       return
 
     loops = []
-    # The width the compute instruction used, not 1.  The register image is
-    # blocked by it -- lane `l` holds elements `w*l .. w*l+w-1` -- and reading
-    # it back cyclically maps register float `r` to element `l + r*threads`
-    # instead of `w*(l + slot*block) + c`.  Fourteen of sixteen entries land
-    # in the wrong place for `w = 2`, silently: the code compiles, the
-    # snapshot looks plausible, and the only thing that would notice is a
-    # numerical check the host oracle cannot yet run.
-    loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
-                       self._num_threads, 1, width=self._lead_width,
-                       exact_head=True)]
-    for i in range(1, src_bbox.rank()):
-      loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
+    split = _split_axes_of(self._src)
+    if split is not None:
+      loops = _split_loops(split, src_bbox)
+    else:
+      # The width the compute instruction used, not 1.  The register image
+      # is blocked by it -- lane `l` holds elements `w*l .. w*l+w-1` -- and
+      # reading it back cyclically maps register float `r` to element
+      # `l + r*threads` instead of `w*(l + slot*block) + c`.  Fourteen of
+      # sixteen entries land in the wrong place for `w = 2`, silently: the
+      # code compiles, the snapshot looks plausible, and the only thing that
+      # would notice is a numerical check the host oracle cannot yet run.
+      loops += [LeadLoop('i0', src_bbox.lower()[0], src_bbox.upper()[0],
+                         self._num_threads, 1, width=self._lead_width,
+                         exact_head=True)]
+      for i in range(1, src_bbox.rank()):
+        loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 
     def inner(indices):
       value = self._src.load(writer, self._context, None, indices, False)
@@ -374,6 +422,11 @@ class StoreRegToGlb(AbstractInstruction):
       self._dest.store(writer, self._context, value, [], allow_nontemporal)
       return
     with writer.Scope():
+      split = _split_axes_of(self._src)
+      if split is not None:
+        self._store_split(writer, split, src_bbox, dest_bbox,
+                          allow_nontemporal)
+        return
       loops = []
       # The lead loop is built from the accumulator alone: it drives the thread
       # mapping, and widening it would hand `inner` a LeadIndex outside what
@@ -440,6 +493,34 @@ class StoreRegToGlb(AbstractInstruction):
       filled = (-(-src_bbox.upper()[0] // threads) * threads) if pad else None
       self._fill_lead_remainder(writer, src_bbox, dest_bbox, allow_nontemporal,
                                 upper_from=filled)
+
+  def _store_split(self, writer, split, src_bbox, dest_bbox,
+                   allow_nontemporal) -> None:
+    """The store of a two-level image (`Options.lead_split`): a lead loop
+    per axis over what the image holds, each element written by the lane
+    that holds it, and where the store zero-fills, zeros over the rest of
+    the promised box, as the shared store clears around its own
+    (`StoreRegToShr._clear_rest`)."""
+    def inner(indices):
+      value = self._src.load(writer, self._context, None, indices, False)
+      self._dest.store(writer, self._context, value,
+                       [add_offset(x, self._dest_offset[i])
+                        for i, x in enumerate(indices)], allow_nontemporal)
+
+    write_loops(self._context, writer, _split_loops(split, src_bbox), inner)
+    if not self._zero_fill:
+      return
+
+    def zero(indices):
+      self._dest.store(writer, self._context, writer.const(0),
+                       [add_offset(x, self._dest_offset[i])
+                        for i, x in enumerate(indices)], allow_nontemporal)
+
+    for blo, bhi in _complement(dest_bbox.lower(), dest_bbox.upper(),
+                                src_bbox.lower(), src_bbox.upper()):
+      loops = [LeadLoop('z0', blo[0], bhi[0], self._num_threads, 1)]
+      loops += [Loop(f'z{i}', blo[i], bhi[i], 1) for i in range(1, len(blo))]
+      write_loops(self._context, writer, loops, zero)
 
   def _pad_writable(self, src_bbox, dest_bbox) -> bool:
     """May the ragged end of the lead dimension be written whole?

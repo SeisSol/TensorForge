@@ -1038,11 +1038,16 @@ class Emitter:
                     # deliberately interleaved schedule, which is the whole
                     # point of having placed the statement where it is.
                     pending.clear()
+                # Nor a cross-lane read: its one consumer may be a write the
+                # emitter guards (`if (pred)`), and inside that the lanes it
+                # reads do not run it -- a sub-group collective in divergent
+                # code, which SYCL leaves undefined.
                 if (s.pure and not s.regions and not s.has_side_effects
                         and s.effect == Effect.NONE and len(s.target) == 1
                         and s.op not in (Op.CONST, Op.PACK)
                         and not s.attr('escapes')
-                        and not s.attr('no_inline')):
+                        and not s.attr('no_inline')
+                        and not s.attr('crosslane')):
                     t = s.target[0]
                     if len(uses.get(t.id, ())) == 1 and here.get(t.id, 0) == 1:
                         pending.add(t.id)

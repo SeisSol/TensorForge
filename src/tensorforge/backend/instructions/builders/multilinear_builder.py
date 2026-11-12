@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 from tensorforge.common.basic_types import Addressing
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.allocate import RegisterAlloc
@@ -314,7 +314,8 @@ class MultilinearBuilder(OperationBuilder):
             staged, load_op = self._make_loader_and_symbol_reg(
                 self._stage_view(i, shift), linearize=linearize,
                 lead_pos=lead_pos,
-                carries_lead=0 in self._descr.target[i])
+                carries_lead=0 in self._descr.target[i],
+                second=self._second_axis(i, lead_pos))
             self._mem_regions[i] = self._staged_region(i, staged, shift)
             self._staged[self._ops[i].symbol.name] = StagedCopy(
                 self._mem_regions[i].symbol,
@@ -343,7 +344,8 @@ class MultilinearBuilder(OperationBuilder):
         staged, load_op = self._make_loader_and_symbol_reg(
             self._stage_view(i, shift), linearize=linearize,
             lead_pos=lead_pos,
-            carries_lead=0 in self._descr.target[i])
+            carries_lead=0 in self._descr.target[i],
+            second=self._second_axis(i, lead_pos))
         self._mem_regions[i] = self._staged_region(i, staged, shift)
         self._instructions.append(load_op)
       elif self._ops[i].symbol.stype == SymbolType.SharedMem or self._ops[i].symbol.stype == SymbolType.Register:
@@ -535,6 +537,46 @@ class MultilinearBuilder(OperationBuilder):
     view.offset = [o - s for o, s in zip(view.offset, copy.shift)]
     return True
 
+  def _split_axes(self):
+    """The two lane axes of a two-level lead (`Options.lead_split`), as
+    `(rows, blocks)`: the destination's lead rows on lanes `t % rows`, and
+    `blocks` blocks of its axis 1 on `t // rows`; None where the option is
+    off or the operation does not fit it.
+
+    It fits where the lead rows times the blocks fill the lanes exactly --
+    the eight simulations of a fused build, twice, in a sub-group of 16 --
+    the destination has an axis 1, and the lead loop runs one element wide
+    from its own origin.  The exchange a product over the split axis reads
+    its other block through needs `Lexic.exchange_xor` (SPMD SYCL), and two
+    blocks: one exchange and a select a read."""
+    split = int(getattr(self._context.get_user_options(), 'lead_split', 1)
+                or 1)
+    if split != 2 or not self._num_threads or self._lead_width != 1:
+      return None
+    if self._context.target.lexic.exchange_xor('{0}', 1) is None:
+      return None
+    group = self._context.target.sub_group_width(self._num_threads)
+    if group is None or self._num_threads > group:
+      # The exchange reaches within one sub-group: a multiplication over
+      # several would read its other block from another sub-group.
+      return None
+    wave = getattr(self._context.target.hw, 'vec_unit_length', 0) or 0
+    if self._num_threads < wave:
+      # A multiplication narrower than the vector unit shares its sub-group
+      # with another (`Options.sycl_split_broadcast`), which fills the
+      # lanes the split would.  On the Max 1550 the products leading with
+      # four rows in eight lanes ran up to 21 % slower split: acoustic
+      # `projectDerivativeToNodalBoundaryRotated` at order 3 in double
+      # (sng2 560417).
+      return None
+    box = self._dest_obj.bbox
+    if box.rank() < 2 or box.lower()[0] != 0:
+      return None
+    rows = box.upper()[0]
+    if rows * split != self._num_threads or self._theta:
+      return None
+    return rows, split
+
   def _lead_origin_shift(self):
     """The origin of the lead loop: where the destination's rows compute.
 
@@ -556,9 +598,27 @@ class MultilinearBuilder(OperationBuilder):
       return 0
     return (self._dest_obj.offset[0] if self._dest_obj.offset else 0) % span
 
+  def _second_axis(self, i, lead_pos):
+    """Which dimension of operand `i` a two-level lead (`_split_axes`) puts
+    on the high lanes: the one after its lead, where that is the
+    destination's axis 1 or a contraction axis and no other dimension of the
+    operand is the destination's axis 1.  None otherwise, and the operand's
+    rows are then copied into every block."""
+    if self._split_axes() is None:
+      return None
+    target = self._descr.target[i]
+    if 0 not in target or target.index(0) != lead_pos \
+        or len(target) <= lead_pos + 1:
+      return None
+    after = target[lead_pos + 1]
+    if after == 1 or (after < 0 and 1 not in target):
+      return lead_pos + 1
+    return None
+
   def _make_loader_and_symbol_reg(self, opview, linearize,
                                   lead_pos: int = 0,
-                                  carries_lead: bool = True
+                                  carries_lead: bool = True,
+                                  second: Optional[int] = 1
                                   ) -> Tuple[Symbol, GlbToRegLoader]:
     operand = opview.symbol
 
@@ -592,6 +652,18 @@ class MultilinearBuilder(OperationBuilder):
       group = self._context.target.sub_group_width(self._num_threads)
       if group is not None and group < self._num_threads:
         lead = [(lead_pos, group)]
+    split = self._split_axes() if carries_lead and not linearize else None
+    if split is not None:
+      # Two-level lead: the lead rows on the low lanes, and `second` in
+      # blocks on the high ones -- the destination's axis 1 where the operand
+      # carries it there, otherwise an axis the product walks in steps, whose
+      # other block a read takes by exchange (`Symbol.load`).  Without a
+      # second axis the rows are copied into every block, which is what a
+      # lead loop over the low lanes alone reads.
+      rows, blocks = split
+      lead = [(lead_pos, rows)]
+      if second is not None:
+        lead.append((second, blocks))
     registers, registerAlloc = self._temporaries.register_array(
         bbox, lead,
         spp=None if operand.obj.is_dense() else operand.obj.spp)
@@ -674,8 +746,10 @@ class MultilinearBuilder(OperationBuilder):
     on that.  A per-operand answer would come from
     `[t for t in self._descr.target[0] if t >= 0]` once there is one.
     """
+    split = self._split_axes()
+    lead = 0 if split is None else [(0, split[0]), (1, split[1])]
     registers, registerAlloc = self._temporaries.register_array(
-        self._dest_obj.bbox, lead=0, shift=self._theta)
+        self._dest_obj.bbox, lead=lead, shift=self._theta)
     self._instructions.append(registerAlloc)
     return registers
 

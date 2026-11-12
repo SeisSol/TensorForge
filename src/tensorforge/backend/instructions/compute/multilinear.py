@@ -475,6 +475,17 @@ class MultilinearInstruction(ComputeInstruction):
                 None, _explicit_simd(self._context), self._num_threads)
         for l,u in self._ns[1:]:
             self._iregs *= u - l
+        split = self._split_lead()
+        if split is not None and len(self._ns) > 0:
+            # A two-level lead: every axis in slots of its own block
+            # (`Options.lead_split`), as `Temporaries.register_array` sizes
+            # the destination's image.
+            self._iregs = 1
+            for i, (l, u) in enumerate(self._ns):
+                if i in split:
+                    self._iregs *= slots_for(l, u, split[i][0], 1)
+                else:
+                    self._iregs *= u - l
 
         if self._theta:
             # the accumulator is indexed by the shifted lead loop, so it takes
@@ -532,7 +543,23 @@ class MultilinearInstruction(ComputeInstruction):
         # to anything else.  Taking it from the symbol is what makes the two
         # statements one: `multilinear_builder` already sets `lead_dims` on a
         # staged register image, and `Symbol.load` addresses through it.
-        self._lead_dims = [self.lead_dim(self._dest)]
+        split = self._split_lead()
+        self._lead_dims = (list(split) if split is not None
+                           else [self.lead_dim(self._dest)])
+
+    def _split_lead(self):
+        """`{axis: (block, stride)}` of a destination with a two-level lead
+        (`Options.lead_split`, `MultilinearBuilder._split_axes`), in lane
+        order; None for the one-axis image every other build has."""
+        dest = self._dest
+        if (getattr(dest, 'lead_axes', None) is None
+                or len(dest.lead_dims) < 2):
+            return None
+        layout = dest.register_layout()
+        if layout is None:
+            return None
+        return {dim: (layout.axis(n).block, layout.axis(n).stride)
+                for n, dim in enumerate(dest.lead_dims)}
 
     def _known_zero(self, i, idx) -> bool:
         """Is operand `i` zero at every cell one step of the loop reads?
@@ -654,7 +681,8 @@ class MultilinearInstruction(ComputeInstruction):
         or None for a cell outside the operand's box -- or None.
         `skip_known_zeros` turns it off.
         """
-        if not self._context.get_user_options().skip_known_zeros:
+        if (not self._context.get_user_options().skip_known_zeros
+                or self._split_lead() is not None):
             return None
         if (self._productOperation.irop() != 'mul'
                 or self._sumOperation.irop() != 'add'):
@@ -736,7 +764,8 @@ class MultilinearInstruction(ComputeInstruction):
         """
         most = self._context.get_user_options().ell_gather
         block = self._num_threads
-        if not most or not block or _explicit_simd(self._context):
+        if (not most or not block or _explicit_simd(self._context)
+                or self._split_lead() is not None):
             return None
         value = self._lane_side_values()
         if value is None:
@@ -1330,6 +1359,10 @@ class MultilinearInstruction(ComputeInstruction):
         tail = opts.k_unroll_max_tail
 
         loopmap = {}
+        # A two-level lead (`Options.lead_split`): its lead loops below, and
+        # every reduction unrolled -- a read across the split axis takes its
+        # element by number (`Symbol._exchanged_axis`).
+        split = self._split_lead()
 
         diagonal = self._identity_reduction()
         ell = self._ell_plan() if diagonal is None else None
@@ -1357,7 +1390,7 @@ class MultilinearInstruction(ComputeInstruction):
                 roll = _roll_count(dimmin, dimmax, step, k_roll, k_unroll_max,
                                    self._roll_vector(),
                                    tail if step == 1 else 0)
-                rolled = (i == len(self._ks) - 1
+                rolled = (i == len(self._ks) - 1 and split is None
                           and self._rollable(i, dimmin, dimmax, step, roll))
                 loopstack += [Loop(f'k{i}', dimmin, dimmax, step,
                                    unroll=not rolled,
@@ -1367,6 +1400,13 @@ class MultilinearInstruction(ComputeInstruction):
         threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
             loopmap[f'n{i}'] = len(loopstack)
+            if split is not None and i in split:
+                # A two-level lead: each axis on its own lanes, at the block
+                # and the lane stride the destination's image states.
+                block, lane_stride = split[i]
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, block,
+                                       lane_stride, unroll=True)]
+                continue
             if i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=True)]
             else:
@@ -2084,7 +2124,7 @@ class MultilinearInstruction(ComputeInstruction):
         """
         if not self._context.get_user_options().prepare_operands:
             return
-        if not self._ops:
+        if not self._ops or self._split_lead() is not None:
             return
         sym = self._ops[0].symbol
         a_obj = getattr(sym, 'obj', None)
@@ -2325,7 +2365,7 @@ class MultilinearInstruction(ComputeInstruction):
         saves nothing, which `pack` returns as `None`.
         """
         kind = self._context.get_user_options().pack_operands
-        if kind == 'off' or not self._ops:
+        if kind == 'off' or not self._ops or self._split_lead() is not None:
             return
         fit = kind == 'fit'
         sym = self._ops[0].symbol
@@ -2894,6 +2934,9 @@ class MultilinearInstruction(ComputeInstruction):
     def _nonleading_dim_test(self, writer: Writer):
         # if len(self._ks) == 0 and len(self._ops) == 1:
         #     return False
+        if self._split_lead() is not None:
+            # The matrix paths are written for one lead axis.
+            return False
 
         plan = self._plan()
 

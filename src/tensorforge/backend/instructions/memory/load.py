@@ -1197,9 +1197,17 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
       # writing the image with the lane on dimension 0 while every reader
       # addresses it through `lead_dims` puts the two out of step.
       lead_pos = self._dest.lead_dims[0]
+      # Every axis the image states, each with its own block and lane stride
+      # (a two-level lead, `Options.lead_split`); the one-axis image is the
+      # first axis alone at stride 1.
+      axes = {lead_pos: (self._dest.lead_block(lead_pos), 1)}
+      layout = self._dest.register_layout()
+      if len(self._dest.lead_dims) > 1 and layout is not None:
+        axes = {dim: (layout.axis(n).block, layout.axis(n).stride)
+                for n, dim in enumerate(self._dest.lead_dims)}
       loops = []
       for i in range(src_bbox.rank()):
-        if i == lead_pos:
+        if i in axes:
           # The destination's block, not the multiplication's lane count.
           # They are the same for an image spread over every lane, and differ
           # for a replicated one -- and it is the block `LeadIndex` divides
@@ -1207,10 +1215,12 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
           # filling with the wider number writes each lane a different element
           # of an image whose readers expect every run of `block` lanes to
           # hold the same ones.
+          block, stride = axes[i]
           loops += [LeadLoop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i],
-                             self._dest.lead_block(lead_pos), 1,
-                             width=self._lead_width,
-                             full_lane=self._full_lane_tail(i))]
+                             block, stride,
+                             width=self._lead_width if i == lead_pos else 1,
+                             full_lane=(self._full_lane_tail(i)
+                                        if i == lead_pos else False))]
         else:
           loops += [Loop(f'i{i}', src_bbox.lower()[i], src_bbox.upper()[i], 1)]
 

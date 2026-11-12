@@ -2687,7 +2687,13 @@ class Symbol:
               if rng is None:
                 rng = i
                 startValue = value
-              elif rng is not None and (value - startValue) != (i - rng) * index[leadidx]._stride:
+              # A run steps one stored element a row: the read below adds the
+              # row to the run's base.  Not the lead index's `_stride`, which
+              # says how far apart its *lanes* are -- one for the lead axis,
+              # the lead rows for the second axis of a two-level lead
+              # (`Options.lead_split`), where it cut the runs at the wrong
+              # rows and read the wrong entries of a sparse operand.
+              elif rng is not None and (value - startValue) != (i - rng):
                 rngs += [(rng, i)]
                 rng = i
                 startValue = value
@@ -3227,6 +3233,101 @@ class Symbol:
       return None
     return holders[0]
 
+  def _exchanged_axis(self, index):
+    """The distributed dimension of a two-level image (`Options.lead_split`)
+    that `index` names a fixed element of, while every other one is the
+    reading lane's own: `(dimension, element, block, stride)`, or None where
+    the read is not of that kind.
+
+    That is a contraction over the split axis -- or a loop over it that is
+    not the lead loop -- and the element sits at the same slot of the lane
+    whose block coordinate is `element % block`: this lane's or, at two
+    blocks, the one `stride` lanes over (`_exchanged`).
+    """
+    layout = self.register_layout()
+    if layout is None:
+      return None
+    fixed, own = [], 0
+    for n, dim in enumerate(self.lead_dims):
+      idx = index[dim]
+      if isinstance(idx, Immediate):
+        idx = idx._value
+      axis = layout.axis(n)
+      if isinstance(idx, (int, np.integer)):
+        fixed.append((dim, int(idx), axis.block, axis.stride))
+        continue
+      lead = unwrap_lead(idx)
+      if lead is None:
+        return None
+      lead_index, lead_shift = lead
+      if (lead_shift or lead_index._block != axis.block
+              or lead_index._stride != axis.stride):
+        raise InternalError(
+            f'{self.name}: dimension {dim} is read in lanes other than the '
+            f'ones its image holds it in')
+      own += 1
+    if len(fixed) != 1 or not own:
+      return None
+    if fixed[0][2] != 2:
+      raise InternalError(
+          f'{self.name}: a fixed element of an axis in {fixed[0][2]} blocks; '
+          f'the exchange reads two')
+    return fixed[0]
+
+  def _broadcast_per_block(self, writer, context, index, dim, nontemp):
+    """A broadcast read that spreads `dim` over a few lanes: the second axis
+    of a two-level lead (`Options.lead_split`), where every lane wants the
+    row of its own block.  One broadcast per block -- the owner holds every
+    row of `dim` within its registers -- and a select by the lane's block,
+    in place of a read of memory per lane.  None where `dim` is not spread
+    that way, or by more than four blocks."""
+    lead = unwrap_lead(index[dim])
+    if lead is None:
+      return None
+    li, shift = lead
+    if (not isinstance(li._nonlead, (int, np.integer)) or li.width != 1
+        or li._block > 4 or li._vaddr is not None):
+      return None
+    box = self.data_view.get_bbox()
+    values = []
+    for c in range(li._block):
+      element = int(li._nonlead) * li._block + c + shift
+      if not box.lower()[dim] <= element < box.upper()[dim]:
+        # Past the image: a row this block holds nothing of.
+        values.append(None)
+        continue
+      fixed = list(index)
+      fixed[dim] = element
+      values.append(self.load(writer, context, None, fixed, nontemp))
+    held = [v for v in values if v is not None]
+    if not held:
+      return None
+    zero = writer.const(0.0, held[0].type)
+    from tensorforge.backend.pir.core import BOOL
+    lane = writer.lane_index(li._block, li._stride, hint='blk')
+    out = values[0] if values[0] is not None else zero
+    for c in range(1, li._block):
+      mine = values[c] if values[c] is not None else zero
+      at = writer.op('eq', BOOL, lane, c, hint='own')
+      out = writer.op('select', held[0].type, at, mine, out, hint='rows')
+    return out
+
+  def _exchanged(self, writer, context, mine, owner, block, stride):
+    """`mine`, this lane's value at the slot, where the lane's own block is
+    `owner`, and its partner's otherwise -- the lane `stride` over, which
+    holds the other block at the same slot (`_exchanged_axis`)."""
+    from tensorforge.backend.pir.core import BOOL
+    text = context.target.lexic.exchange_xor('{0}', stride)
+    if text is None:
+      raise InternalError(
+          f'{self.name}: a two-level image read across its blocks, and the '
+          f'target has no exchange')
+    other = writer.rawexpr(text, mine, type_=mine.type, hint='x', pure=True,
+                           movable=False, crosslane=True)
+    lane = writer.lane_index(block, stride, hint='blk')
+    here = writer.op('eq', BOOL, lane, owner, hint='own')
+    return writer.op('select', mine.type, here, mine, other, hint='xc')
+
   def _holders(self, index, layout):
     """The lanes holding a fixed element, or `()` where the question does not
     resolve -- shared by `owning_lane` and `reading_lane` so the two cannot
@@ -3439,6 +3540,23 @@ class Symbol:
       if bound is not None:
         return bound
 
+    if (variable is None and self.stype == SymbolType.Register
+        and len(self.lead_dims) > 1 and hasattr(writer, 'rawexpr')):
+      # A two-level image read at the reading lane's own row of one axis and
+      # a fixed element of the other (`Options.lead_split`): the element is
+      # in this lane's registers or in its partner's, at the same slot.
+      mixed = self._exchanged_axis(index)
+      if mixed is not None:
+        dim, element, block, stride = mixed
+        local = list(index)
+        local[dim] = LeadIndex(element // block, block, stride)
+        mine = self.load(writer, context, None, local, nontemp, broadcast,
+                         part, parts, shift)
+        if mine is None:
+          return None
+        return self._exchanged(writer, context, mine, element % block,
+                               block, stride)
+
     addrs = []
     # A register image of a sparse operand keeps the pattern, but not its
     # storage: it is laid out densely over the box, in slots
@@ -3541,6 +3659,11 @@ class Symbol:
           spread = ([dim for dim, value in enumerate(index)
                      if dim not in self.lead_dims and _spreads(value)]
                     if bc_lane is not None else [])
+          if spread and len(spread) == 1 and variable is None:
+            rows = self._broadcast_per_block(writer, context, index,
+                                             spread[0], nontemp)
+            if rows is not None:
+              return rows
           if spread:
             raise InternalError(
                 f'{self.name}: the element is held by lane {bc_lane}, and the '
@@ -3905,6 +4028,15 @@ class Symbol:
 
     from tensorforge.backend.pir.core import Value as _Value
     lead = index[self.lead_dims[0]] if len(self.lead_dims) == 1 else None
+    if (lead is None and len(self.lead_dims) > 1
+        and self.register_layout() is not None
+        and all(unwrap_lead(index[d]) is not None for d in self.lead_dims)):
+      # A two-level image (`Options.lead_split`), every axis at the lane's
+      # own element: an address `build_address` resolves like any other.
+      # As text, the store would name the whole array, and no pass could
+      # take a later read of it from the register that holds the value
+      # (`pir.forward`) -- the image would go through shared memory.
+      lead = index[self.lead_dims[0]]
     # A sliced store qualifies as well: its slicing offset sits in the
     # `LeadIndex` itself (`add_offset` folds it), so its address is an operand
     # here rather than a pinned name on the text path.

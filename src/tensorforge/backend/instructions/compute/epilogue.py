@@ -146,6 +146,9 @@ class MultilinearEpilogue(ComputeInstruction):
         # TODO: not fully ideal; might need only a copy paritally (i.e. use the original dimmin/dimmax)
         stride = 1
         threads = self._num_threads
+        from tensorforge.backend.instructions.memory.store import (
+            _split_axes_of)
+        split = _split_axes_of(self._acc)
         for i, (dimmin, dimmax) in enumerate(self._ns):
             loopmap[f'n{i}'] = len(loopstack)
             dimmin = self._dest.data_view.get_bbox().lower()[i]
@@ -155,7 +158,13 @@ class MultilinearEpilogue(ComputeInstruction):
             dimmaxi = self._acc.data_view.get_bbox().upper()[i]
 
             unroll = dimmini != dimmin or dimmaxi != dimmax
-            if i not in self._lead_dims or threads == 0:
+            if split is not None and i in split:
+                # A two-level lead (`Options.lead_split`): each axis on the
+                # lanes the accumulator's image states.
+                block, lane_stride = split[i]
+                loopstack += [LeadLoop(f'n{i}', dimmin, dimmax, block,
+                                       lane_stride, unroll=unroll)]
+            elif i not in self._lead_dims or threads == 0:
                 loopstack += [Loop(f'n{i}', dimmin, dimmax, 1, unroll=unroll)]
             else:
                 # Same width as the contraction's nest.  This one walks the
