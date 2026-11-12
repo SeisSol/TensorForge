@@ -11,6 +11,8 @@ fission_chain.py`.
 """
 
 import importlib.util
+
+import pytest
 import re
 from pathlib import Path
 
@@ -84,3 +86,46 @@ def test_auto_cuts_by_the_code_and_the_part():
 def test_auto_leaves_a_small_kernel_whole():
     gen, _, _ = _source(fission='auto')
     assert len(gen.built._sections) == 1
+
+
+def test_auto_on_intel_cuts_in_two_past_the_code_measured_there():
+    """No instruction cache stated for PVC: two pieces from
+    `FISSION_CODE` on, none below (`fission_pieces`)."""
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.generators.generator import FISSION_CODE, fission_pieces
+    hw = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F64).target.hw
+    limit = FISSION_CODE['intel']
+    assert [fission_pieces(c, hw) for c in (limit - 1, limit, 4 * limit)] \
+        == [1, 2, 2]
+
+
+@pytest.mark.parametrize('arch,backend,expected', [
+    ('pvc', 'oneapi', 'auto'), ('pvc', 'esimd', 0), ('pvc', 'acpp', 0),
+    ('sm_90', 'cuda', 0), ('gfx942', 'hip', 0)])
+def test_auto_is_the_default_under_dpcpp_spmd_alone(arch, backend, expected):
+    from tensorforge.common.basic_types import Datatype
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F64)
+    assert ctx.get_user_options().fission == expected
+
+
+def test_a_list_of_few_flops_is_not_built_twice_to_decide(monkeypatch):
+    """Below `FISSION_PROBE_FLOPS` the whole build that decides `auto` is not
+    made; above, it is, and a kernel whose code stays under `FISSION_CODE`
+    stays whole.  The chain is 129024 flops."""
+    from tensorforge.generators import generator as G
+    built = []
+    real = G.Generator._sibling
+    monkeypatch.setattr(G.Generator, '_sibling',
+                        lambda self: built.append(1) or real(self))
+    case = _case()
+
+    def sections():
+        gen = Generator(case.descr_list(), Context(
+            arch='pvc', backend='oneapi', fp_type=case.DTYPE))
+        gen.generate()
+        return len(gen.built._sections)
+
+    monkeypatch.setattr(G, 'FISSION_PROBE_FLOPS', 200_000)
+    assert sections() == 1 and not built
+    monkeypatch.setattr(G, 'FISSION_PROBE_FLOPS', 100_000)
+    assert sections() == 1 and built

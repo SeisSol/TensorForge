@@ -107,6 +107,11 @@ class Compiler:
         no listing says."""
         return None
 
+    def listed_instructions(self, out_dir: str) -> Optional[int]:
+        """How many instructions the listing `listing_env` had the compiler
+        write counts; None where no listing says."""
+        return None
+
 
 @dataclass(frozen=True)
 class Nvcc(Compiler):
@@ -212,6 +217,9 @@ class Icpx(Compiler):
 
     def spill_references(self, out_dir):
         return igc_spill_references(os.path.join(out_dir, 'listing'))
+
+    def listed_instructions(self, out_dir):
+        return igc_instructions(os.path.join(out_dir, 'listing'))
 
 
 @dataclass(frozen=True)
@@ -530,6 +538,28 @@ def igc_spill_references(listing_dir: str) -> Optional[int]:
         if m:
             refs = max(refs, int(m.group(1)))
     return refs
+
+
+def igc_instructions(listing_dir: str) -> Optional[int]:
+    """How many instructions IGC wrote for the kernel, from the header line
+    `//.instCount N` of the listings its shader dump writes -- the largest
+    where a build left more than one; None where none says.  What the
+    kernel's code comes to, where the build reports no size of its own: an
+    order-8 `derivative` in double is 95188 of them (IGC 2.41.5)."""
+    count = None
+    for root, _, files in os.walk(listing_dir):
+        for name in files:
+            if not name.endswith('.asm'):
+                continue
+            try:
+                with open(os.path.join(root, name), errors='replace') as f:
+                    head = f.read(65536)
+            except OSError:
+                continue
+            m = _IGC_INSTRUCTIONS.search(head)
+            if m:
+                count = max(count or 0, int(m.group(1)))
+    return count
 
 
 _ZEINFO_SPILL = re.compile(rb'spill_size:\s*(\d+)')

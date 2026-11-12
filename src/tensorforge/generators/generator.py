@@ -224,6 +224,29 @@ FISSION_PIECE = {'gfx90a': 0.75, 'nvidia': 1.25}
 #: `fission='auto'` cuts it at all.
 FISSION_PAST = 1.5
 
+#: Where a vendor's parts state no instruction cache to weigh a cut by, the
+#: code past which `fission='auto'` cuts a kernel in two -- bytes of the
+#: emitter's estimate (`icache.code_bytes`), by vendor.  Measured on a Max
+#: 1550 stack (IGC 2.41.5, 262144 elements, sng2 560632 and 560633), the
+#: cut in two against the whole kernel: the seventeen SeisSol kernels at
+#: 357960 bytes and more -- elastic orders 7 and 8, viscoelastic order 7,
+#: and order 8 in single -- 14 % faster in the geometric mean, order 8 in
+#: double `derivative` -35 %, `volume` -25 %, `localFluxAll` -15 %, in single
+#: `derivative` -23 %, order 7 in single `derivative` -38 %, viscoelastic
+#: order 7 in double `fluxLocalAll` -26 %, order 8 in single `volumeExt`
+#: -39 %; the worst order-7 double `derivative`, +7 %.  Below, between
+#: 231636 and 266844 bytes, the cut was as often slower as faster:
+#: viscoelastic `volumeExt` +12 %, order-6 `derivative` in single +2 % and in
+#: double -31 %.
+FISSION_CODE = {'intel': 340_000}
+
+#: Flops below which a list is not built whole to decide `fission='auto'`
+#: by `FISSION_CODE`: the probe doubles the generation, and no kernel that
+#: crossed the threshold had fewer than 389088 (whose code was 357960
+#: bytes); the densest code per flop, the order-4 `derivative`, would need
+#: 117000 to reach it.
+FISSION_PROBE_FLOPS = 100_000
+
 
 def fission_pieces(code: Optional[int], hw) -> int:
   """Into how many pieces `fission='auto'` cuts a kernel of `code` bytes
@@ -231,7 +254,10 @@ def fission_pieces(code: Optional[int], hw) -> int:
   capacity = getattr(hw, 'icache_size', None)
   share = FISSION_PIECE.get(str(hw.model),
                             FISSION_PIECE.get(str(hw.vendor).lower()))
-  if not code or not capacity or share is None:
+  if not capacity or share is None:
+    limit = FISSION_CODE.get(str(hw.vendor).lower())
+    return 2 if limit is not None and code and code >= limit else 1
+  if not code:
     return 1
   if code <= FISSION_PAST * capacity:
     return 1
@@ -1431,6 +1457,11 @@ class Generator:
       return
     if fission_pieces(1 << 40, hw) <= 1 or not fission_cuts(self._given):
       return
+    if (not getattr(hw, 'icache_size', None)
+        and str(hw.vendor).lower() in FISSION_CODE):
+      from tensorforge.analysis.cost import list_cost
+      if list_cost(self._given).flops < FISSION_PROBE_FLOPS:
+        return
     from tensorforge.analysis.icache import code_bytes
     probe = self._sibling()
     probe._fission_pieces = 0

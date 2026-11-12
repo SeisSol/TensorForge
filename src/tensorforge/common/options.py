@@ -1432,7 +1432,10 @@ declare('k_unroll_max_tail',
             'its last two steps written out.')
 
 declare('fission',
-        default=0,
+        rule=lambda target: ('auto' if (target.hw.vendor == 'intel'
+                                        and target.backend == 'oneapi'
+                                        and not target.explicit_simd)
+                             else 0),
         env='TF_FISSION',
         parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
         doc='Run the batch this many times in one kernel, a piece of the '
@@ -1448,7 +1451,12 @@ declare('fission',
             'cuts where the whole kernel\'s code is past one and a half '
             'times the instruction cache, into as few pieces as keep the '
             'largest under the share of the cache the part was measured at '
-            '(`generator.FISSION_PIECE`), and nowhere on a part not measured.')
+            '(`generator.FISSION_PIECE`); on a vendor whose parts state no '
+            'cache, in two past the code measured there '
+            '(`generator.FISSION_CODE`), and nowhere else.  `auto` by default '
+            'on Intel under DPC++\'s SPMD lowering: SeisSol\'s order-7 and '
+            'order-8 kernels it cuts 14 % faster (Max 1550), 0 everywhere '
+            'else.')
 
 declare('min_blocks_per_sm',
         default=1,

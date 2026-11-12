@@ -1026,6 +1026,9 @@ class CompiledScore:
         self.flags = tuple(flags)
         self.timeout = timeout
         self.reports: Dict[Candidate, Resources] = {}
+        self.references: Dict[Candidate, Optional[int]] = {}
+        #: What the same listing counts of instructions (`listed_instructions`).
+        self.instructions: Dict[Candidate, Optional[int]] = {}
 
     def available(self, context: Context) -> bool:
         return self.toolchain.compiler(context.target.hw.vendor) is not None
@@ -1099,6 +1102,19 @@ class CompiledScore:
                                          env={**os.environ, **env})
                     if not run.returncode:
                         refs = entry.spill_references(tmp)
+                        code = entry.listed_instructions(tmp)
+        self.references[result.candidate] = refs
+        self.instructions[result.candidate] = code
+        return refs
+
+    def listed_instructions(self, result: Build) -> Optional[int]:
+        """How many instructions the compiler's listing of `result` counts,
+        or None where it writes none: the size of the code where the build
+        reports none (`Icpx`).  From the build `spill_references` makes."""
+        if result.candidate not in self.instructions:
+            self.spill_references(result)
+        return self.instructions.get(result.candidate)
+
     def __call__(self, result: Build):
         if not result.ok:
             return None
@@ -1569,6 +1585,51 @@ ICACHE_SHARE = 0.47
 #: The volume and the Taylor expansion stay whole (cut, 4 to 96 % slower): the
 #: one fits on the matrix path, the other is far below the threshold.
 FISSION_TWIN = True
+
+#: On Intel, where IGC states no code size to weigh a cut by, the twin is
+#: the build IGC spills cut in two, taken where IGC's listing references
+#: what it spilled at most `FISSION_REF_SHARE` as often as the whole build
+#: does, for at most `FISSION_COUNT_GROWTH` as much to execute -- or where
+#: the cut saves `FISSION_REF_SAVING` references or more for every
+#: instruction an element executes whole, for at most `FISSION_DENSE_GROWTH`
+#: as much.  The cut changes how IGC allocates, which neither the count nor
+#: the scratch says by itself, and the references alone weigh it wrongly
+#: both ways: no one price of a reference in instructions orders the
+#: order-6 and order-7 `derivative` in double.  Measured on a Max 1550 stack
+#: at 262144 elements (sng2 560632, 560633, 560645, 560665; IGC 2.41.5),
+#: the cut in two against the whole build:
+#:
+#: - taken: order-6 double `derivative` -31 % (14017 references against
+#:   8450, 1.9 % more executed), `localFluxAll` -10 % (4567 against 2162),
+#:   `volume` -11 % (453 against 130); order-7 single `derivative` -38 %
+#:   (19192 against 8426 for 25652 instructions, 7.4 % more); order-7
+#:   double `volume` +4 % (2946 against 1811, 1.4 % more);
+#: - not taken, slower: order-7 double `derivative` +7 % (43633 against
+#:   36120); order-4 double `derivative` +16 % (282 against 95, 3.4 % more),
+#:   its s8 build +27 % (12827 against 6610, 11 % more), single +20 % and
+#:   +7 %, where the cut executes 19 and 27 % more; order-4 double
+#:   `localFluxAll` +83 %, which the cut makes spill;
+#: - not taken, faster: order-4 double `volume` -29 % (20 references against
+#:   none), the s8 `localFluxAll` -13 and -18 % (0.61 and 0.86 of the
+#:   references, 11 and 1.6 % more executed), order-7 double `localFluxAll`
+#:   -8 % (0.85).
+#:
+#: And where IGC wrote `FISSION_LISTED` instructions or more for the whole
+#: build, for at most `FISSION_LARGE_GROWTH` as much to execute: there the
+#: references barely move, and the cut gains anyway, as on NVIDIA past its
+#: instruction cache (`FISSION_TWIN`).  Order 8, elastic, cut in two: in
+#: double `derivative` -35 % (95188 instructions, 0.92 of the references),
+#: `localFluxAll` -15 %, `volume` -25 %; in single `derivative` -23 %
+#: (65518, 6.4 % more executed), `localFluxAll` -8 %.  Order-7 double
+#: `localFluxAll` -8 % (32021), viscoelastic `fluxLocalAll` -26 % (47053);
+#: the s8 order-4 `localFluxAll` -18 % (41703).  Taken as well, and lost:
+#: order-7 double `derivative` +7 % (44363), viscoelastic +2 % (202826).
+FISSION_REF_SHARE = 0.65
+FISSION_COUNT_GROWTH = 1.02
+FISSION_REF_SAVING = 0.3
+FISSION_DENSE_GROWTH = 1.10
+FISSION_LISTED = 30000
+FISSION_LARGE_GROWTH = 1.08
 
 #: Parts whose fetch past the instruction cache costs a kernel more than the
 #: share of its code past the cache says: the charge on every executed
@@ -2582,6 +2643,55 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     # What the compiler said of the default as built, before any pin: the
     # guards ask how much it spills and how many registers it holds.
     unpinned = report
+
+    def spill_cut(cand: Candidate, seen: Resources
+                  ) -> Tuple[Candidate, Optional[Resources]]:
+        """`cand`, or `cand` cut in two where IGC spills it and the cut
+        references what IGC spilled far less often for little more to execute
+        (`FISSION_REF_SHARE` and the rest): Intel, where the compiler states
+        no code size for `fissioned` to weigh."""
+        ask = getattr(scorer, 'spill_references', None)
+        if (not ask or not seen.spill_bytes
+                or str(hw.vendor).lower() != 'intel'):
+            return cand, seen
+        from .generator import fission_cuts
+        if not fission_cuts(descr_factory()):
+            return cand, seen
+        mine = ask(builds[cand])
+        if not mine:
+            return cand, seen
+        alt = cand.set('fission', 2)
+        result = builds.get(alt) or build(descr_factory, context, alt, generate)
+        if not result.ok:
+            return cand, seen
+        count = figure(result)
+        whole = counts[cand]
+        if count is None or count > FISSION_DENSE_GROWTH * whole:
+            return cand, seen
+        try:
+            other = scorer.resources(result)
+        except Exception:                     # noqa: BLE001
+            other = None
+        theirs = ask(result) if other is not None else None
+        if theirs is None:
+            return cand, seen
+        # References are the thread's, the count an element's: a sub-group
+        # wider than the multiplication holds several elements.
+        lanes = builds[cand].generator.lanes.num_threads
+        share = lanes / max(lanes, context.target.sub_group_width(lanes)
+                            or lanes)
+        fewer = (theirs <= FISSION_REF_SHARE * mine
+                 and count <= FISSION_COUNT_GROWTH * whole)
+        denser = (mine - theirs) * share >= FISSION_REF_SAVING * whole
+        listed = getattr(scorer, 'listed_instructions', None)
+        code = listed(builds[cand]) if listed else None
+        bulky = (code is not None and code >= FISSION_LISTED
+                 and count <= FISSION_LARGE_GROWTH * whole)
+        if not (fewer or denser or bulky):
+            return cand, seen
+        builds[alt], counts[alt] = result, count
+        return alt, other
+
     def fissioned(cand: Candidate, seen: Optional[Resources]
                   ) -> Tuple[Candidate, Optional[Resources]]:
         """`cand`, or `cand` cut into as many pieces as its code takes past
@@ -2590,11 +2700,12 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         more -- every piece reads its operands again -- and each piece streams
         only its own code, which `cost` charges."""
         if (not FISSION_TWIN or seen is None or cand.get('fission')
-                or not getattr(seen, 'code_bytes', None)
                 or 'fission' in dict(context.get_asked_options().asked())
                 or (fixed and 'fission' in fixed)):
             # A cut the caller asked for either way stands.
             return cand, seen
+        if not getattr(seen, 'code_bytes', None):
+            return spill_cut(cand, seen)
         from .generator import fission_cuts, fission_pieces
         pieces = fission_pieces(seen.code_bytes, hw)
         if pieces <= 1 or not fission_cuts(descr_factory()):
