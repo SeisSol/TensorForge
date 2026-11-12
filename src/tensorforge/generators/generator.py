@@ -238,6 +238,21 @@ def fission_pieces(code: Optional[int], hw) -> int:
   return max(2, -(-int(code) // int(share * capacity)))
 
 
+def sections_reading(sections) -> Dict[int, tuple]:
+  """Per operand, by id: the operand and the indices of the sections whose
+  operations read it -- the members of a merged run's stand-in where the
+  stand-in is read, since those are the buffers the host stores."""
+  out: Dict[int, tuple] = {}
+  for n, section in enumerate(sections):
+    for descr in section:
+      for op in descr.operations():
+        for view in list(op.reads()) + list(op.condition_reads()):
+          tensor = getattr(view, 'tensor', view)
+          for t in (tensor,) + tuple(getattr(tensor, 'variant_members', ())):
+            out.setdefault(id(t), (t, set()))[1].add(n)
+  return out
+
+
 def fission_cuts(descrs) -> List[int]:
   """The indices `i` of `descrs` before which a list may be cut into two
   runs of the batch without a buffer of its own: no temporary (`is_tmp`)
@@ -1232,7 +1247,16 @@ class Generator:
       barrier += [False]
       blocks += [False]
 
-    for codesection, lastbarrier, lastblock in zip(descrlist, barrier, blocks):
+    # How an operand is stored is one decision for the kernel -- the host
+    # lays it out once -- and a section is built before the next one
+    # exists, so what one offers an operand cannot ask the readers of the
+    # others (`MultilinearInstruction._offer_order`).  Each is told which of
+    # its operands another section reads (`Tensor.read_elsewhere`).
+    reading = sections_reading(descrlist)
+    for position, (codesection, lastbarrier, lastblock) in enumerate(
+        zip(descrlist, barrier, blocks)):
+      for tensor, where in reading.values():
+        tensor.read_elsewhere = bool(where - {position})
       self._preload_drop = 0
       self._pack_level = 0
       self._pack_floor = 0

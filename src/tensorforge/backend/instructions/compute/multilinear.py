@@ -2624,6 +2624,17 @@ class MultilinearInstruction(ComputeInstruction):
                             and user.get_dest() is sym)]
         if module is None or (readers and not module.ORDERS_EVERY_READER):
             return
+        # Nor where another section reads it (`Tensor.read_elsewhere`).  That
+        # reader is built before or after this one, so it is none of
+        # `readers`, and whatever it is it reads the order laid here: a
+        # matrix path there takes its own fragments out of this one's slots.
+        # SeisSol's order-8 derivative cut in two (`Options.fission`) read
+        # `kDivMT(1)` ordered for `dQ(1)`'s window into `dQ(2)`'s, wrong in
+        # every value of `dQ(2)` (sm_100, sm_120).
+        if any(getattr(t, 'read_elsewhere', False)
+               for t in (a_obj,) + tuple(getattr(a_obj, 'variant_members',
+                                                 ()))):
+            return
         span = self._num_threads * self._lead_width
         read = -(-(self._ns[0][1] - self._ns[0][0]) // span) * span
         corner = self._read_corner(a_obj)
