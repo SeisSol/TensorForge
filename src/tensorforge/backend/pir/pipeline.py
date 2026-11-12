@@ -36,8 +36,9 @@ from .atomics import accumulate_atomically
 from .forward import drop_promises, forward_memory
 from .sink import sink_numbers
 from .barriers import place_barriers
+from .blocks import RegisterBlocks
 from .carry import carry_trips, keep_own
-from .core import Stmt, dump
+from .core import IRError, Stmt, dump
 from .move import cap_cover, move_loads
 from .transfers import memory_path
 from .prefetch import prefetch_hints
@@ -53,7 +54,8 @@ class BodyContext(PassContext):
     """One body, and what is known about it."""
 
     def __init__(self, body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
-                 convert_guards: bool = False, where: str = ''):
+                 convert_guards: bool = False, register_blocks: bool = False,
+                 where: str = ''):
         super().__init__()
         self.body = body
         #: What built the body, for the findings reported about it.
@@ -64,6 +66,9 @@ class BodyContext(PassContext):
         #: Whether such a guard is converted under SPMD too, where it could be
         #: a branch (`Options.convert_lane_guards`).
         self.convert_guards = convert_guards
+        #: Whether a register image is declared as blocks, the loops it is
+        #: addressed through written out first (`Options.register_blocks`).
+        self.register_blocks = register_blocks
         #: What `schedule_async` could not determine statically.
         self.diagnostics: List[str] = []
         self._reported: frozenset = frozenset()
@@ -547,7 +552,8 @@ def standard_pipeline(debug: str = '',
                       atomics: Optional[Atomics] = None,
                       forward: Optional[Forward] = None,
                       early_forward: Optional[Forward] = None,
-                      own: Optional[KeepOwn] = None) -> PassManager:
+                      own: Optional[KeepOwn] = None,
+                      blocks: Optional[RegisterBlocks] = None) -> PassManager:
     """The passes every body goes through, in their order.
 
     ``fold`` runs first: it turns expressions into constants and removes
@@ -666,6 +672,23 @@ def standard_pipeline(debug: str = '',
     ``fold`` follows -- and a ``dce`` for the lane's element that no binding
     reads any more.
 
+    ``blocks``, where the body asks for it (`BodyContext.register_blocks`),
+    runs behind all of these and ahead of the allocator: the loops a register
+    image is addressed through are written out, and an image every access of
+    which then lands inside one block is replaced by its blocks
+    (`blocks.RegisterBlocks`).  Behind them, because they make the accesses
+    an image ends up with: the carry and ``own`` give buffers registers of
+    their own, the forward takes loads away and the stores nothing reads
+    with them, and the wrap and ``rows`` copy statements.  The split asks of
+    every access to an image whether it lands inside one block, and an
+    access a later pass added would not have been asked.  Ahead of the
+    allocator and the barriers, because a written-out loop is its copies,
+    and which statement touches shared memory where is what those two
+    decide from -- and of the scheduler, which counts in the final order.  A
+    ``dce`` follows for the arithmetic only the old offsets read; the
+    copies' own is folded where they are written out, and nothing else is
+    (`blocks._fold_offsets` says why not ``fold``).
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
@@ -731,6 +754,12 @@ def standard_pipeline(debug: str = '',
         pm.add(rows)
         for name, fn in (('rows-fold', fold), ('rows-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',)))
+    if blocks is not None:
+        for name, fn in (('blocks-unroll', blocks.unroll),
+                         ('blocks-split', blocks.split),
+                         ('blocks-dce', dce)):
+            pm.add(Rewrite(name, fn, preserves=('flat',),
+                           when=lambda pc: pc.register_blocks))
     if place is not None:
         pm.add(place)
     if barriers is not None:
@@ -740,7 +769,8 @@ def standard_pipeline(debug: str = '',
 
 
 def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
-             convert_guards: bool = False,
+             convert_guards: bool = False, register_blocks: bool = False,
+             scratch=None, unroll_fence: int = 0,
              debug: str = '', diagnostics: Optional[List[str]] = None,
              move: Optional[MoveLoads] = None,
              wrap: Optional[WrapLoads] = None,
@@ -770,13 +800,25 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     what it wrote itself in registers;
     ``convert_guards`` lowers a lane guard to selects under SPMD as well
     (`Options.convert_lane_guards`);
+    ``register_blocks`` declares a register image as blocks
+    (`Options.register_blocks`), which takes ``scratch``, the builder of the
+    statements it adds (`IRBuilder.scratch`), and writes a fence of the mask
+    ``unroll_fence`` between written-out trips under the explicit vector
+    (`Options.esimd_unroll_fence`);
     ``where`` names what built the body in the findings `debug` reports.
     """
+    if register_blocks and scratch is None:
+        raise IRError('register blocks add statements, and no builder for '
+                      'them was given (`scratch`)')
     pc = BodyContext(body, explicit_simd=explicit_simd,
-                     convert_guards=convert_guards, where=where)
+                     convert_guards=convert_guards,
+                     register_blocks=register_blocks, where=where)
+    blocks = (RegisterBlocks(scratch, explicit_simd=explicit_simd,
+                             fence=unroll_fence)
+              if scratch is not None else None)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
                       shards, rows, carry, atomics, forward,
-                      early_forward, own).run(pc)
+                      early_forward, own, blocks).run(pc)
     if diagnostics is not None:
         diagnostics.extend(pc.diagnostics)
     return pc.body

@@ -714,6 +714,9 @@ class AbstractInstruction(ABC):
       rows = pir.GroupRows(builder.scratch, context.target.lexic.pick)
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         convert_guards=options.convert_lane_guards,
+                        register_blocks=options.register_blocks,
+                        scratch=builder.scratch,
+                        unroll_fence=options.esimd_unroll_fence,
                         debug=options.ir_debug, move=move, wrap=wrap,
                         place=place, barriers=barriers, prefetch=prefetch,
                         shards=held, rows=rows, carry=carried,
@@ -782,8 +785,9 @@ class AbstractInstruction(ABC):
       return
 
     simd = _explicit_simd(self._context)
-    debug = self._context.get_user_options().ir_debug
-    convert = self._context.get_user_options().convert_lane_guards
+    options = self._context.get_user_options()
+    debug = options.ir_debug
+    convert = options.convert_lane_guards
     def attempt():
       builder = pir.IRBuilder(fptype=self._context.fp_type,
                               context=self._context,
@@ -792,10 +796,12 @@ class AbstractInstruction(ABC):
       return builder, builder.finish()
     _, body = _fused_if_over_budget(
         self._context, _deciding_swizzles(self._context, attempt),
-        lambda _builder, body: pir.optimize(body, explicit_simd=simd,
-                                            convert_guards=convert,
-                                            debug=debug,
-                                            where=type(self).__name__))
+        lambda builder, body: pir.optimize(
+            body, explicit_simd=simd, convert_guards=convert,
+            register_blocks=options.register_blocks,
+            scratch=builder.scratch,
+            unroll_fence=options.esimd_unroll_fence, debug=debug,
+            where=type(self).__name__))
 
     self._check_register_budget(body, simd)
     if self._context.get_user_options().ir_stats:
