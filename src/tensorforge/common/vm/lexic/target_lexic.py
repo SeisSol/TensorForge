@@ -26,6 +26,11 @@ class TargetLexic(Lexic):
   def set_shmem_size(self, func_name, shmem):
     return ''
 
+  def multiprocessor_count(self, var):
+    """Statements that leave the device's multiprocessors (SMs, CUs) in
+    `var`, an `int` they declare; None where the target cannot ask."""
+    return None
+
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     return f"{func_name}({stream}, {grid}[0], {block}[0], {block}[1], {func_params})"
 

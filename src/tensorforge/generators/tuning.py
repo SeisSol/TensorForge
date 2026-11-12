@@ -1307,8 +1307,8 @@ def _load(path: Optional[str]) -> None:
         pass
 
 
-def _store(path: Optional[str], key: str, pick: Candidate) -> None:
-    _PICKS[key] = pick.to_dict()
+def _store(path: Optional[str], key: str, pick) -> None:
+    _PICKS[key] = pick.to_dict() if isinstance(pick, Candidate) else pick
     if not path:
         return
     tmp = f'{path}.{os.getpid()}.tmp'
@@ -1324,7 +1324,8 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
              budget: Optional[int] = 24,
              cache: Optional[str] = None,
              fixed: Optional[Mapping[str, Any]] = None, *,
-             generate) -> Optional[Candidate]:
+             generate,
+             dispatch: Optional[Dict[str, Any]] = None) -> Optional[Candidate]:
     """The configuration `Options.autotune` builds a kernel with.
 
     One build of the default first: its source is the cache key, and a kernel
@@ -1339,6 +1340,10 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     tune" -- `elastic-o6s:derivative` is built at a geometry the benchmark
     harness passes explicitly, and with the whole space abandoned for it
     nothing would be tuned there.
+
+    With `dispatch`, a dict, `autotune=lanes` also says which candidate runs
+    small batches (`Options.batch_dispatch`): `dispatch['small']`, None where
+    the pick's own chain is as short (`small_variant`).
     """
     descrs = descr_factory()
     # A measurement first: where one says what is best for this device and
@@ -1355,7 +1360,8 @@ def autotune(descr_factory, context: Context, mode: str = 'static',
     if mode == 'prefer':
         return None
     if mode == 'lanes':
-        return _lanes_mode(descr_factory, context, cache, fixed, generate)
+        return _lanes_mode(descr_factory, context, cache, fixed, generate,
+                           dispatch)
     # The scorer first: the space depends on which one ranks it.
     if mode == 'compiled':
         scorer = CompiledScore()
@@ -2004,6 +2010,10 @@ class _Ahead:
         self.lanes = SimpleNamespace(num_threads=summary['lanes'])
         self.metrics = SimpleNamespace(peak_pressure=summary['peak_pressure'],
                                        code_units=summary['code_units'])
+        #: `chain_cycles` and `storage_key` of the build, taken where it was
+        #: built.
+        self.chain = summary.get('chain')
+        self.storage = summary.get('storage')
         self._mults = summary['mults']
         self._headers = list(summary['headers'])
         self._kernel = summary['kernel']
@@ -2212,7 +2222,8 @@ def lane_candidates(descrs, context: Context, origin: Candidate,
 def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                origin: Candidate, first: Build,
                fixed: Optional[Mapping[str, Any]] = None, *,
-               generate) -> Candidate:
+               generate,
+               builds: Optional[Dict[Candidate, Build]] = None) -> Candidate:
     """The configuration `autotune=lanes` builds: the fewest instructions an
     element executes, among the candidates that spill no more than the
     default allows, with the spilling (`SPILL_WEIGHT`) and the code past the
@@ -2271,7 +2282,9 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     latency = LATENCY_WAVES_PER_SIMD.get(hw.model, 1)
     issue = by_bound and str(hw.model).startswith(ISSUE_PER_WAVE)
     figure = pipe_bound if by_bound else executed_instructions
-    builds: Dict[Candidate, Build] = {origin: first}
+    # The caller's, where it asks for them (`small_variant`).
+    builds = {} if builds is None else builds
+    builds[origin] = first
     counts: Dict[Candidate, float] = {}
     # Several at once where the count ranks (`Options.autotune_jobs`): the
     # candidates built in forked processes, the compiler asked about every
@@ -2646,7 +2659,8 @@ def _grf_twin(context: Context, fixed: Optional[Mapping[str, Any]]) -> bool:
 
 
 def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
-                fixed: Optional[Mapping[str, Any]], generate
+                fixed: Optional[Mapping[str, Any]], generate,
+                dispatch: Optional[Dict[str, Any]] = None
                 ) -> Optional[Candidate]:
     """`autotune=lanes`: `lanes_rule` where a compiler can be asked, the
     default where none can or the vendor was never measured (`RANKED_BY`).
@@ -2687,9 +2701,169 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
         # not this one's (`ASK_BAND`).
         mode += '+band'
     key = _key(first, mode)
-    if key in _PICKS:
+    # The small batches' candidate apart, so that the picks of a walk without
+    # it are still this one's.
+    small_key = None if dispatch is None else _key(first, mode + '+small')
+    if key in _PICKS and (small_key is None or small_key in _PICKS):
+        if small_key is not None:
+            small = _PICKS[small_key].get('small')
+            dispatch['small'] = (None if small is None
+                                 else Candidate.from_dict(small))
         return Candidate.from_dict(_PICKS[key])
+    builds: Dict[Candidate, Build] = {}
     pick = lanes_rule(descr_factory, context, scorer, origin, first, fixed,
-                      generate=generate)
+                      generate=generate, builds=builds)
     _store(cache, key, pick)
+    if small_key is not None:
+        small = small_variant(descr_factory, context, builds, pick, generate)
+        _store(cache, small_key,
+               {'small': None if small is None else small.to_dict()})
+        dispatch['small'] = small
     return pick
+
+
+#: How much shorter the small batches' candidate's chain has to be than the
+#: pick's before a second kernel is built for them (`small_variant`): the
+#: lanes rule's own margin.  It hardly matters for the time: over the
+#: paper-1106 sweeps none, 5 and 10 % leave the same against the faster of
+#: the two to within half a percent on every GPU; it saves the kernels that
+#: would win by less than it.
+DISPATCH_MARGIN = 0.05
+
+
+#: What the small batches' kernel (`small_variant`) is built with on top of
+#: its candidate, where the caller did not ask otherwise: no transfer issued
+#: ahead within the element (`Options.enable_move_loads`) or for the next one
+#: (`Options.enable_wrap_loads`).  Below the switch a lane group has one
+#: element at most, so there is no next one to fetch for, and what the moved
+#: transfers hold costs registers in a launch that is one wave's chain long.
+#: Measured as the small-batch sweep's `nomw` against the default, geomean
+#: over 20 kernels (elastic orders 4 and 6, viscoelastic order 4) at 16 to
+#: 1024 elements: MI300A 0.92-0.94 (AAC7 15837; Taylor -10..-19 %), GB200
+#: 0.94-0.97 (Horizon 88742); worst +3 and +13 %.
+SMALL_BATCH_OPTIONS = {'enable_move_loads': False, 'enable_wrap_loads': False}
+
+
+#: Waves one SIMD (on NVIDIA, one scheduler) runs side by side before they
+#: lengthen each other's chain: what a wave's launch takes per clock it issues
+#: at up to 64 elements, over the paper-1106 sweeps (a fit of the launch time
+#: over `chain_cycles`, times the clock: 5.5 on GH200, 10 on A100, 6.1 on
+#: GB200, 1.4 on MI300A, 3.8 on MI210), in whole waves.  Up to that many waves
+#: a SIMD the small batches' kernel (`small_variant`) launches as fast as with
+#: one; past it every wave more is a turn more, and the throughput pick takes
+#: over (`Generator._generate_dispatch`).  On MI300A, the small kernels the
+#: tuner takes for SeisSol's elastic order 4 and 6 and viscoelastic order 4
+#: against the lanes pick, switching at one wave a SIMD left 1.1 % against the
+#: faster of the two at every batch, at four 1.5 %, and the lanes pick alone
+#: 9.7 % (AAC7 15837); at the pick's own resident capacity, where the runtime
+#: put the switch first, 64-lane kernels ran 4096 elements up to 53 % slower.
+#: Over the paper-1106 pairs both switches leave the same to within 0.6 %.
+#: A part without an entry takes its vendor's narrowest measured.
+DISPATCH_OVERLAP = {'sm_80': 10, 'sm_90': 5, 'sm_100': 6, 'gfx942': 1,
+                    'gfx90a': 3}
+
+
+def dispatch_overlap(hw) -> int:
+    """`DISPATCH_OVERLAP` for `hw`."""
+    model = str(getattr(hw, 'model', ''))
+    if model in DISPATCH_OVERLAP:
+        return DISPATCH_OVERLAP[model]
+    return 5 if str(getattr(hw, 'vendor', '')).lower() == 'nvidia' else 1
+
+
+def chain_cycles(result: Build) -> Optional[float]:
+    """Clocks one wave of `result` keeps the busiest pipe busy: the pipe
+    bound of an element (`pipeline.of`, not stretched for waves or spills)
+    times the elements a wave holds.  None where the build counted no mix.
+
+    What a launch the device holds at once lasts, give or take its fixed
+    cost: every wave runs its chain once, side by side with the others, and
+    the longest decides.  Over the paper-1106 sweeps (88 kernels, the default
+    and the lanes pick, 16 to 64 elements) it ranks the pair the way the
+    launches do in 73 of 88 kernels on GH200, 84 on A100, 72 on GB200, 77 on
+    MI300A and 70 on MI210; a fit of the launch time over it and the loads and
+    code a wave issues ranks no better (73/84/72/75/68), and the same with the
+    code left out (73/84/72/77/69).
+    """
+    gen = result.generator
+    if isinstance(gen, _Ahead):
+        return gen.chain
+    from tensorforge.analysis import pipeline
+    if not getattr(getattr(gen, 'metrics', None), 'issue_mix', None):
+        return None
+    bound = pipeline.of(gen)
+    if bound is None:
+        return None
+    wave = max(1, getattr(result.context.target.hw, 'vec_unit_length', 32))
+    return bound.cycles * wave / max(1, gen.lanes.num_threads) * _stack_of(gen)
+
+
+def _dispatch_figures(result: Build) -> Dict[str, Any]:
+    """What `small_variant` asks of a build made in another process
+    (`_Ahead`), where a second kernel was asked for at all
+    (`Options.batch_dispatch`).  A figure that cannot be had is missing, and
+    the build is then no small batches' candidate."""
+    if not getattr(result.context.get_user_options(), 'batch_dispatch', 0):
+        return {}
+    out = {}
+    for name, figure in (('chain', chain_cycles), ('storage', storage_key)):
+        try:
+            out[name] = figure(result)
+        except Exception:                     # noqa: BLE001
+            pass
+    return out
+
+
+def storage_key(result: Build) -> Optional[tuple]:
+    """How the build stores the operands the host lays out, by name
+    (`Generator._stored_operands`): what two kernels launched on one set of
+    buffers have to agree on.  None where the build does not say."""
+    gen = result.generator
+    if isinstance(gen, _Ahead):
+        return gen.storage
+    built = getattr(gen, 'built', None)
+    stored = getattr(built, '_stored_operands', None)
+    if stored is None:
+        return None
+    return tuple(sorted(((tensor.alias,) + tuple(state)
+                         for tensor, state in stored().values()),
+                        key=lambda entry: str(entry[0])))
+
+
+def small_variant(descr_factory, context: Context,
+                  builds: Mapping[Candidate, Build], pick: Candidate,
+                  generate) -> Optional[Candidate]:
+    """The candidate that runs a batch the device holds at once
+    (`Options.batch_dispatch`): of everything the lanes rule built that
+    stores the operands as `pick` does (`storage_key`), the one with the
+    shortest chain (`chain_cycles`), where it is `DISPATCH_MARGIN` shorter
+    than `pick`'s; None otherwise.
+
+    Ranked by the chain alone, without the compiler's word: the measured
+    pairs ranked as well without the spilling as with it, and the waves a
+    build holds do not matter where the batch fills fewer.  The storage,
+    because the host lays the operands out once for both kernels: an
+    operator interleaved for sixteen lanes is not one 64 can read.  `pick`
+    itself is built again where the walk took it as a twin it never built on
+    its own (pinned, fissioned).
+    """
+    own_build = builds.get(pick)
+    if own_build is None:
+        own_build = build(descr_factory, context, pick, generate)
+    if not own_build.ok:
+        return None
+    own, stored = chain_cycles(own_build), storage_key(own_build)
+    if not own or stored is None:
+        return None
+    chains: Dict[Candidate, float] = {}
+    for cand, result in builds.items():
+        if result.ok and storage_key(result) == stored:
+            chain = chain_cycles(result)
+            if chain is not None:
+                chains[cand] = chain
+    if not chains:
+        return None
+    best = min(chains, key=chains.get)
+    if best == pick or chains[best] >= (1.0 - DISPATCH_MARGIN) * own:
+        return None
+    return best

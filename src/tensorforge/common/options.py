@@ -1541,6 +1541,31 @@ declare('lanes_band',
             '32), and asked in threads (`autotune_jobs`) the compiler costs '
             'little time.')
 
+declare('batch_dispatch',
+        default=0.0,
+        env='TF_BATCH_DISPATCH',
+        parse=parse_float,
+        doc='Under `autotune=lanes`, a second kernel for small batches, and a '
+            'launcher that runs it below this many times the elements it holds '
+            'at the waves a SIMD overlaps (`tuning.dispatch_overlap`, the '
+            'multiprocessors asked of the runtime at the first launch); 0 '
+            'builds one kernel.  At a batch the device '
+            'holds at once a launch lasts as long as one wave\'s chain, and the '
+            'candidate with the shortest one -- the pipe bound of a wave, '
+            '`tuning.chain_cycles` -- is a different one from the throughput '
+            'pick in most of SeisSol\'s kernels: over the paper-1106 sweeps (16 '
+            'to 262144 elements, the default and the lanes pick of 88 kernels) '
+            'the shorter chain was the faster launch at up to 64 elements in '
+            '72 to 84 of 88 kernels on NVIDIA, 77 on MI300A and 70 on MI210; '
+            'switching between the two left 1.2 to 2.4 % against the faster '
+            'one over all batches (5.0 on MI210), where the lanes pick alone '
+            'left 6.7 to 8.5 %.  On MI300A, with the small kernels the walk '
+            'takes (16 to 32 and 64 lanes, elastic orders 4 and 6, '
+            'viscoelastic order 4), 1.1 % against 9.7 %.  Built only where '
+            'both kernels store the operands alike and the second asks for '
+            'no argument the first is not given, on CUDA and HIP, and where '
+            'the short chain is `tuning.DISPATCH_MARGIN` shorter.')
+
 declare('autotune_jobs',
         default=1,
         env='TF_AUTOTUNE_JOBS',

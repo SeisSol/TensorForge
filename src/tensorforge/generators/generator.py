@@ -515,6 +515,17 @@ class Generator:
     self._given: List[OperationDescription] = gemm_list
     #: The configuration `Options.autotune` chose (`tuned`).
     self._tuned = None
+    #: The configuration the tuner chose for small batches, its context and
+    #: a holder for its build (`Options.batch_dispatch`), and the build this
+    #: kernel launches there (`_attach_small`); None where there is none.
+    self._small_pick = None
+    self._small: Optional['Generator'] = None
+    #: This launcher's parameters in the order the small kernel's launcher
+    #: takes them (`_attach_small`).
+    self._small_args: List[str] = []
+    #: Why the small batches' kernel the tuner chose was not taken, for the
+    #: record (`kernel_info`).
+    self._small_refused: Optional[str] = None
     #: The generator this one handed its build to (`built`), or None where
     #: it builds its own kernel.
     self._built: Optional['Generator'] = None
@@ -823,6 +834,7 @@ class Generator:
     other._announce_identity = False
     other._base_kernel_name = self._base_kernel_name
     other._tuned = self._tuned
+    other._small_pick = self._small_pick
     if emit_loops is not None:
       other._emit_loops = emit_loops
     return other
@@ -897,10 +909,16 @@ class Generator:
     for name in ('stack_elements', 'matrix_columns'):
       if name in self._context.get_asked_options().asked():
         fixed[name] = getattr(opts, name)
+    # A second kernel for small batches is the lanes rule's to pick, from
+    # the candidates it builds anyway (`tuning.small_variant`).
+    dispatch = ({} if opts.batch_dispatch > 0 and opts.autotune == 'lanes'
+                else None)
+    asked = {} if dispatch is None else {'dispatch': dispatch}
     pick = tuning.autotune(lambda: copy.deepcopy(given), self._context,
                            mode=opts.autotune, budget=opts.autotune_budget,
                            cache=opts.autotune_cache or None,
-                           fixed=fixed or None, generate=Generator.trial)
+                           fixed=fixed or None, generate=Generator.trial,
+                           **asked)
     if pick is None:
       return None
     tuned = Generator(given, pick.context(self._context),
@@ -911,6 +929,23 @@ class Generator:
     tuned._announce_identity = self._announce_identity
     tuned._base_kernel_name = self._base_kernel_name
     tuned._tuned = pick
+    small = (dispatch or {}).get('small')
+    # Its context is the caller's with its own options on top, as the pick's
+    # is; its descriptors are copied now, while the caller's tensors are as
+    # the caller left them -- the pick's build stores its own order on them,
+    # and a build from copies made after it would inherit that.  The holder
+    # goes to every sibling the merge decision builds of the pick, so that
+    # the small kernel is built once (`_attach_small`).
+    if small is not None:
+      memo = {}
+      holder = {'descrs': copy.deepcopy(given, memo), 'memo': memo}
+      # With what a launch of one wave's chain wants on top, where the caller
+      # did not ask otherwise (`tuning.SMALL_BATCH_OPTIONS`).
+      asked = dict(self._context.get_asked_options().asked())
+      extra = {name: value for name, value in tuning.SMALL_BATCH_OPTIONS.items()
+               if name not in asked and name not in dict(small.options)}
+      tuned._small_pick = (small, small.context(self._context, **extra),
+                           holder)
     return tuned
 
   def _auto_merge(self) -> bool:
@@ -1326,7 +1361,9 @@ class Generator:
 
     self._settle_module_operands()
     self._launch = self._make_launch_config()
+    self._attach_small()
     self._generate_kernel()
+    self._append_small_kernel()
     self._generate_launcher()
     self._generate_header()
 
@@ -2497,8 +2534,7 @@ class Generator:
     # Ahead of the signature that names them, and ahead of the launcher that
     # builds one: both sit in this translation unit, and the kernel comes
     # first in it.
-    definitions = (self.param_table_types() + self.packing_table_definitions()
-                   + self.module_table_definitions())
+    definitions = self._definitions()
     for definition in definitions:
       writer(definition)
     if definitions:
@@ -2655,6 +2691,183 @@ class Generator:
         persistent=bool(self._persistent_threading),
         sections=sections)
 
+  #: What the name of the kernel small batches run carries on top of this
+  #: one's (`Options.batch_dispatch`).
+  SMALL_SUFFIX = '_small'
+
+  def _attach_small(self) -> None:
+    """Build the kernel small batches run (`Options.batch_dispatch`), where
+    the tuner chose one and this launcher can hand them to it.
+
+    From copies of the caller's descriptors made before any build
+    (`_autotune`), as the tuner's candidates are: a build leaves its storage
+    on the tensors.  Kept only where it stores every operand as this build
+    does -- the host lays them out once, for both -- asks for no argument
+    this launcher is not given, each of the same type, and defines no table
+    under a name this build defines otherwise.  Its launcher is called with
+    this one's arguments, matched by the tensor they pass rather than by
+    position or name: a build that copies an operator (`operator_copies`)
+    names and orders the rest differently.  On CUDA and HIP, whose runtimes
+    say what this kernel holds resident (`_generate_dispatch`), and over one
+    batch count.  Why not, where not, goes on record (`_small_refused`,
+    `kernel_info`).
+    """
+    if self._small_pick is None:
+      return
+    pick, context, holder = self._small_pick
+    if (self._context.target.backend not in ('cuda', 'hip')
+        or self._context.target.lexic.multiprocessor_count('n') is None):
+      self._small_refused = 'backend'
+      return
+    if len(self.count_heads()) != 1:
+      self._small_refused = 'counts'
+      return
+    if 'built' not in holder:
+      # Once for every sibling of the merge decision: what it builds does not
+      # depend on theirs.
+      holder['built'] = None
+      small = Generator(holder['descrs'], context,
+                        self._thread_block_policy_type,
+                        lanes=pick.lanes, attrs=self._attrs,
+                        measure_pressure=self._measure_pressure)
+      small._may_tune = False
+      small._announce_identity = False
+      small._base_kernel_name = (self._base_kernel_name
+                                 + Generator.SMALL_SUFFIX)
+      import warnings
+      try:
+        small.generate()
+        holder['built'] = small.built
+      except Exception as exc:                 # noqa: BLE001
+        warnings.warn(f'batch_dispatch: the small-batch build '
+                      f'({pick.label()}) failed, one kernel instead: {exc}')
+    small, memo = holder['built'], holder['memo']
+    if small is None:
+      self._small_refused = 'build'
+      return
+    for tensor, state in self._stored_operands().values():
+      twin = memo.get(id(tensor))
+      if twin is None:
+        # A merged run's stand-in and a temporary the build made are its own
+        # and have no copy; the stand-in's members, which the host lays out,
+        # do.  Anything else without one is a tensor the comparison cannot
+        # see.
+        if (getattr(tensor, 'variant_members', ())
+            or getattr(tensor, 'is_tmp', False)):
+          continue
+        self._small_refused = f'storage of {tensor.alias}: no copy'
+        return
+      if tuple(getattr(twin, field) for field in _STORAGE_FIELDS) != state:
+        self._small_refused = f'storage of {tensor.alias}'
+        return
+    args = self._arguments_for(small, memo)
+    if args is None:
+      self._small_refused = 'arguments'
+      return
+    mine = {t.struct_name(): t.struct_definition() for t in self._param_tables}
+    if any(mine.get(t.struct_name(), t.struct_definition())
+           != t.struct_definition() for t in small._param_tables):
+      self._small_refused = 'tables'
+      return
+    self._small, self._small_args = small, args
+
+  def _host_params(self) -> List[tuple]:
+    """The launcher's parameters as `(name, tensor, offset, type)`: the
+    tensor it passes, or None for a count, a flag mask, a table of numbers
+    and the stream; whether it is the tensor's offset; and its declaration
+    without the name."""
+    lexic = self._context.target.lexic
+    symbols = list(self._scopes.get_global_scope().values())
+    tensors = {symbol.name: symbol.obj for symbol in symbols}
+    params = self._base_params(symbols)
+    params.append(KernelParam.opaque('void*', GeneralLexicon.STREAM_PTR_STR))
+    suffix = GeneralLexicon.EXTRA_OFFSET
+    out = []
+    for param in params:
+      declared = param.declaration(lexic, host=True)
+      if declared is None:
+        continue
+      offset = param.name.endswith(suffix)
+      base = param.name[:-len(suffix)] if offset else param.name
+      kind = (declared[:-len(param.name)].strip()
+              if declared.endswith(param.name) else declared)
+      out.append((param.name, tensors.get(base), offset, kind))
+    return out
+
+  def _arguments_for(self, small: 'Generator', memo: dict
+                     ) -> Optional[List[str]]:
+    """This launcher's parameters in the order `small`'s launcher takes
+    them, or None where it asks for one this launcher does not have, or has
+    with another type.  `small` was built from copies (`memo`, the caller's
+    tensors to theirs): a tensor parameter is matched by the tensor it is a
+    copy of, anything else by name."""
+    mine = self._host_params()
+    by_tensor = {(id(tensor), offset): (name, kind)
+                 for name, tensor, offset, kind in mine if tensor is not None}
+    by_name = {name: kind for name, tensor, _, kind in mine if tensor is None}
+    original = {id(twin): key for key, twin in memo.items()}
+    args = []
+    for name, tensor, offset, kind in small._host_params():
+      if tensor is None:
+        if by_name.get(name) != kind:
+          return None
+        args.append(name)
+        continue
+      hit = by_tensor.get((original.get(id(tensor)), offset))
+      if hit is None or hit[1] != kind:
+        return None
+      args.append(hit[0])
+    return args
+
+  def _definitions(self) -> List[str]:
+    """What `_generate_kernel` writes ahead of the kernel."""
+    return (self.param_table_types() + self.packing_table_definitions()
+            + self.module_table_definitions())
+
+  def _append_small_kernel(self) -> None:
+    """The small batches' kernel after this one, without the definitions
+    this one's text holds already: the module tables are guarded, the
+    packing tables and the structs are not."""
+    small = self._small
+    if small is None:
+      return
+    text = small._kernel
+    mine = set(self._definitions())
+    for definition in small._definitions():
+      if definition in mine:
+        text = text.replace(f'{definition}\n', '', 1)
+    self._kernel = f'{self._kernel}\n{text}'
+
+  def _dispatch_below(self) -> str:
+    return f'dispatch_below_{self._base_kernel_name}()'
+
+  def _generate_dispatch(self, writer, lexic) -> None:
+    """The small batches' entry points, declared, and the count below which
+    the launcher takes them (`Options.batch_dispatch`): that many times the
+    elements the small kernel holds at `tuning.dispatch_overlap` waves a
+    SIMD -- the multiprocessors, as the runtime says at the first launch,
+    times the waves a multiprocessor needs for one a SIMD
+    (`pipeline.latency_waves`), times the overlap, times the elements a wave
+    of the small kernel computes.  Past it the small kernel's waves take
+    turns, and the throughput pick's longer chain is the shorter launch."""
+    from tensorforge.analysis import pipeline
+    small = self._small
+    writer(f'{small._launch_config_proto(with_defaults=False)};')
+    writer(f'{small._generate_launcher_proto(with_defaults=False)};')
+    hw = self._context.target.hw
+    launch = small._launch
+    waves = -(-launch.threads_per_block // max(1, hw.vec_unit_length))
+    per_wave = launch.mults_per_block * max(1, small._stack) / max(1, waves)
+    per_sm = (float(self._context.get_user_options().batch_dispatch)
+              * (pipeline.latency_waves(hw) or 4.0)
+              * tuning.dispatch_overlap(hw) * per_wave)
+    with writer.Block(f'static std::size_t {self._dispatch_below()}'):
+      writer('static std::size_t below = 0;')
+      with writer.If('below == 0'):
+        writer(lexic.multiprocessor_count('smCount'))
+        writer(f'below = static_cast<std::size_t>({per_sm!r} * smCount);')
+      writer('return below;')
+
   @_of_the_build
   def launch_config(self) -> LaunchConfig:
     """The launch this kernel runs under; `None` before `generate`."""
@@ -2687,6 +2900,12 @@ class Generator:
     if self._stack > 1:
       stacks = f'static_cast<size_t>{stacks}'
     with writer.Block(self._launch_config_proto(with_defaults=False)):
+      if self._small is not None:
+        counts = [f'{GeneralLexicon.NUM_ELEMENTS}{i}'
+                  for i in self.count_heads()]
+        with writer.If(f'{counts[0]} < {self._dispatch_below()}'):
+          writer(f'return launch_config_{self._small._base_kernel_name}'
+                 f'({", ".join(counts + [GeneralLexicon.STREAM_PTR_STR])});')
       for i in self.count_heads():
         writer(f'(void){GeneralLexicon.NUM_ELEMENTS}{i};')
       writer(f'(void){GeneralLexicon.STREAM_PTR_STR};')
@@ -2774,10 +2993,17 @@ class Generator:
     # Guarded, and here as well as in the header: a translation unit holding
     # the launcher need not include the header.
     writer(launch_types())
+    if self._small is not None:
+      self._generate_dispatch(writer, lexic)
     self._generate_launch_config(writer, lexic, kernel_name, shmemsize)
     with writer.Block(self._generate_launcher_proto(with_defaults=False)):
       counts = [f'{GeneralLexicon.NUM_ELEMENTS}{i}'
                 for i in self.count_heads()]
+      if self._small is not None:
+        with writer.If(f'{counts[0]} < {self._dispatch_below()}'):
+          writer(f'launcher_{self._small._base_kernel_name}'
+                 f'({", ".join(self._small_args)});')
+          writer('return;')
       writer(f'const tensorforge::LaunchConfig config = '
              f'launch_config_{self._base_kernel_name}'
              f'({", ".join(counts + [GeneralLexicon.STREAM_PTR_STR])});')
@@ -2803,6 +3029,10 @@ class Generator:
       writer(f'{call_site};')
       writer('CHECK_ERR;')
     self._launcher = writer.get_src()
+    if self._small is not None:
+      # After this one's: tests and `kernel_eval.launch_geometry` read the
+      # first `block (`.
+      self._launcher = f'{self._launcher}\n{self._small._launcher}'
 
   def _generate_header(self):
     """The launcher's prototype, and what host code may ask about the launch
@@ -3926,6 +4156,11 @@ class Generator:
     writer(f'// options: {self._context.get_user_options().describe()}')
     if self._tuned is not None:
       writer(f'// tuned: {self._tuned.label()}')
+    if self._small is not None:
+      writer(f'// batch_dispatch: below '
+             f'{self._context.get_user_options().batch_dispatch!r} x the '
+             f'elements held resident, {self._small._base_kernel_name} '
+             f'({self._small_pick[0].label()})')
     if self._launch is not None:
       writer(f'// launch: {self._launch.describe()}')
     writer('// operands:')
@@ -4012,13 +4247,22 @@ class Generator:
       for op in descr.operations():
         operations.append(compact(op.to_dict()) if hasattr(op, 'to_dict')
                           else dict(kind=str(op)))
-    return dict(version=get_version(),
+    info = dict(version=get_version(),
                 fp=self._context.fp_as_str(),
                 launch=self._launch.to_dict() if self._launch else None,
                 operands=[operand(s)
                           for s in self._scopes.get_global_scope().values()],
                 operations=operations,
                 loops=loops)
+    if self._small is not None:
+      info['dispatch'] = dict(
+          below=self._context.get_user_options().batch_dispatch,
+          small=self._small_pick[0].label(),
+          launch=self._small._launch.to_dict())
+    elif self._small_refused is not None:
+      info['dispatch'] = dict(small=self._small_pick[0].label(),
+                              refused=self._small_refused)
+    return info
 
   def register_param_table(self, table) -> None:
     """Take a table into the kernel's signature in place of its members.
@@ -4182,6 +4426,8 @@ class Generator:
       for irinst in section.ir:
         for header in irinst.get_headers():
           headerset.add(header)
+    if self._small is not None:
+      headerset.update(self._small.get_helper_headers())
     # Sorted, not set order.  Iteration over a set of strings depends on
     # `PYTHONHASHSEED`, so the include list this produces varies between
     # processes -- which puts a run-to-run difference into the emitted file,

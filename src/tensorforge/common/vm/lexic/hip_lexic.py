@@ -116,6 +116,14 @@ class HipLexic(CudaLexic):
     }}
     """
 
+  def multiprocessor_count(self, var):
+    return f"""int {var} = 0;
+    {{
+      int device = 0;
+      CHECK_RES(hipGetDevice(&device));
+      CHECK_RES(hipDeviceGetAttribute(&{var}, hipDeviceAttributeMultiprocessorCount, device));
+    }}"""
+
   def set_shmem_size(self, func_name, shmem):
     return f"""static bool shmemsizeset = false;
     if (!shmemsizeset) {{

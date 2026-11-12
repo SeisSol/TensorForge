@@ -43,6 +43,16 @@ class CudaLexic(Lexic):
     }}
     """
 
+  def multiprocessor_count(self, var):
+    return f"""int {var} = 0;
+    {{
+      int device = 0;
+      cudaGetDevice(&device);
+      CHECK_ERR;
+      cudaDeviceGetAttribute(&{var}, cudaDevAttrMultiProcessorCount, device);
+      CHECK_ERR;
+    }}"""
+
   def set_shmem_size(self, func_name, shmem):
     return f"""static bool shmemsizeset = false;
     if (!shmemsizeset) {{
