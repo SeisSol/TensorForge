@@ -249,7 +249,7 @@ class MultilinearEpilogue(ComputeInstruction):
                     continue
                 lane = writer.lane_index(var._block, var._stride, hint='lead')
                 neutral = _splat(writer, btype, writer.const(
-                    self._sumOperation.neutral(self._context.fp_type), ftype))
+                    self._sumOperation.neutral(ftype.base), ftype))
                 for cmp, at in bounds:
                     inside = writer.op(cmp, BOOL, lane, at, hint='o')
                     valvar = writer.op('select', btype, inside, valvar,
@@ -272,14 +272,14 @@ class MultilinearEpilogue(ComputeInstruction):
             needsLoad = all(_dim_covered(i, varlist[loopmap[f'n{i}']]) for i,_ in enumerate(self._ns))
             if self._empty_product:
                 valvar = _splat(writer, btype, writer.const(
-                    self._productOperation.neutral(self._context.fp_type),
+                    self._productOperation.neutral(ftype.base),
                     ftype))
             elif needsLoad:
                 valvar = self._acc.load(writer, self._context, None, [varlist[loopmap[f'n{i}']] for i,_ in enumerate(self._ns)], False)
                 valvar = held_to_range(valvar, varlist, btype)
             else:
                 valvar = _splat(writer, btype, writer.const(
-                    self._sumOperation.neutral(self._context.fp_type),
+                    self._sumOperation.neutral(ftype.base),
                     ftype))
 
             # Where the accumulator has no slot, the scalars scale the sum's

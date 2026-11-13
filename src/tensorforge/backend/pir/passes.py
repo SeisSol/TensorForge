@@ -21,8 +21,8 @@ from tensorforge.common.basic_types import Datatype
 from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants, Region, ScalarType, Stmt, TokenType, Value,
-                   accesses_conflict, collect_accesses, collect_effect,
-                   deep_uses, def_use, walk_stmts, Uniformity)
+                   accesses_conflict, base_elem, collect_accesses,
+                   collect_effect, deep_uses, def_use, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens
 from .transfers import tagged
 
@@ -295,6 +295,25 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                     diag.append(
                         f'{s.op}: {wide[0].type} access needs {need}-byte '
                         f'alignment but only {claim} is claimed')
+
+            # -- ... and the element of the buffer it goes through --------- #
+            #
+            # The cast is spelled from the value's type, not the buffer's, so
+            # a value of another element is not converted but reinterpreted:
+            # `*(VectorRelaxedT<float, 2>*)&s28[i] = v` wrote 8 bytes of
+            # float bits over two of SeisSol's `damageStep` booleans at a lead
+            # width of two -- 1.0f is the byte 0x00 where the first one sits
+            # -- and the double temporary of `toCanonical` in single precision
+            # took float pairs, and its float image double pairs, past its
+            # end.  Scalar accesses convert as an assignment does and are
+            # left alone.
+            if wide and s.args:
+                elem = base_elem(s.args[0])
+                if elem is not None and wide[0].type.base != elem:
+                    diag.append(
+                        f'{s.op}: {wide[0].type} access through a buffer of '
+                        f'{elem}; a wide access reinterprets its bytes rather '
+                        f'than converting them')
 
         # -- distribution agrees with uniformity --------------------------- #
         #

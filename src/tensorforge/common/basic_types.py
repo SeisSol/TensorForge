@@ -265,6 +265,45 @@ class Datatype(enum.Enum):
     return map[as_str]
 
 
+#: The floating types a computation is carried out in, by how wide they are.
+#: A computation over several of them runs in the widest (`work_type`); the
+#: two halves rank alike, and the two of them meet in single precision, as
+#: NumPy promotes them.  `TF32` is not among them: it is a storage format the
+#: matrix units read, and nothing computes in it.
+_FLOAT_RANK = {Datatype.F16: 0, Datatype.BF16: 0, Datatype.F32: 1,
+               Datatype.F64: 2, Datatype.F128: 3}
+
+
+def is_floating(datatype) -> bool:
+  """Whether `datatype` is a type a computation is carried out in."""
+  return datatype in _FLOAT_RANK
+
+
+def work_type(datatypes, default: Datatype) -> Datatype:
+  """The type a computation over values of `datatypes` is carried out in.
+
+  The widest floating type among them -- the operands' and the
+  destination's, as NumPy promotes them.  A product written into a double is
+  accumulated in double although the kernel reads floats, which SeisSol's
+  `toCanonical` in single precision does: its accumulator was a float, and
+  so were the double operator's numbers it multiplied.  A narrowing cast is
+  computed in the type it narrows from and rounded where it is stored.
+
+  `default`, the kernel's floating-point type, where none of them is
+  floating: a boolean or an integer tensor's register image holds 1 and 0 of
+  that type, and what is computed into it is computed in it.
+  """
+  found = [d for d in datatypes if d in _FLOAT_RANK]
+  if not found:
+    return default
+  top = max(_FLOAT_RANK[d] for d in found)
+  widest = {d for d in found if _FLOAT_RANK[d] == top}
+  if len(widest) > 1:
+    # F16 and BF16: neither holds the other.
+    return Datatype.F32
+  return widest.pop()
+
+
 class GeneralLexicon:
   BATCH_ID_NAME = 'batchId'
   NUM_ELEMENTS = 'numElements'

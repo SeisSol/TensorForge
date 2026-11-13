@@ -30,6 +30,7 @@ from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 from tensorforge.backend.instructions.allocate import RegisterAlloc
 from tensorforge.backend.pir.core import LaneAxis
 from tensorforge.backend.symbol import slots_for, DataView, Symbol, SymbolType
+from tensorforge.common.basic_types import work_type
 from tensorforge.common.exceptions import InternalError
 from tensorforge.common.matrix.boundingbox import BoundingBox
 
@@ -135,7 +136,8 @@ class Temporaries:
 
     def register_array(self, bbox: BoundingBox, lead,
                        shift: int = 0,
-                       spp=None) -> Tuple[Symbol, RegisterAlloc]:
+                       spp=None,
+                       datatype=None) -> Tuple[Symbol, RegisterAlloc]:
         """An array holding `bbox`, with the named axes spread over the lanes.
 
         `lead` is a dimension index for the one-axis image everything asks for
@@ -159,6 +161,17 @@ class Temporaries:
         indexed in the theta-shifted space, and straddling one more block
         boundary is the price of not needing a shuffle.  Everything else
         indexes at origin 0 and leaves it alone.
+
+        `datatype` is the element of what the image holds: the tensor's own,
+        or what a computation into it is carried out in (`work_type`).  A
+        floating one is the image's element.  Any other -- the boolean a
+        comparison writes, an integer -- and none at all give the kernel's
+        floating-point type, whose 1 and 0 such an image holds by convention
+        (`SyclLexic._esimd_operation`).  Typed by the kernel alone, a double
+        temporary in a kernel that reads floats was a float image: SeisSol's
+        `toCanonical` in single precision accumulated its double product in
+        float, and a wide copy into or out of such an image moved the bytes
+        of the one type into the other.
         """
         # A box without axes is one value, the same on every lane: nothing is
         # spread, whatever the caller named as its lead.
@@ -186,8 +199,10 @@ class Temporaries:
                 None, _explicit_simd(self._context), self._num_threads)
 
         name = self.next_register_name()
+        elem = work_type((datatype,), self._context.fp_type)
         registers = Symbol(name=name, stype=SymbolType.Register,
-                           obj=RegMemObject(name, regsize, spp=spp))
+                           obj=RegMemObject(name, regsize, datatype=elem,
+                                            spp=spp))
         registers.lead_dims = list(axes)
         registers.num_threads = self._num_threads
         # `None` means "one axis over the whole wave", which is the default
@@ -204,6 +219,6 @@ class Temporaries:
         # positions the same way -- the loops that walk it, and the
         # fixed-element reads that go through the broadcast path.
         registers.lead_width = getattr(self, '_lead_width', 1)
-        registers.datatype = self._context.fp_type
+        registers.datatype = elem
         self._scopes.add_symbol(registers)
         return registers, RegisterAlloc(self._context, registers, regsize, 0.0)

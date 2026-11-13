@@ -30,7 +30,7 @@ from .core import (INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Participants, Effect, IRError, LaneAxis, MemSpace, Op,
                    Operand, Region, RegisterLayout, ScalarType, Stmt,
                    TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
-                   base_space, Uniformity, SIZE, StackedAddress)
+                   base_elem, base_space, Uniformity, SIZE, StackedAddress)
 from .transfers import tagged
 
 
@@ -1347,6 +1347,11 @@ class IRBuilder:
         this path -- a caller that asks the lexic for a finished statement has
         nothing structured left to emit."""
         base, indices = self._unstacked(base, indices)
+        apart = self._converting_store(base, value, indices, space=space,
+                                       predicate=predicate, atomic=atomic,
+                                       nontemporal=nontemporal, shift=shift)
+        if apart is not None:
+            return apart
         if space is None:
             space = (base.type.space if isinstance(base, Value)
                      and isinstance(base.type, BufferType)
@@ -1373,6 +1378,53 @@ class IRBuilder:
                              effect=kind, attrs=attrs,
                              accesses=(Access(kind, space,
                                               self.alias_root(base)),))
+
+    def _converting_store(self, base: Any, value: Operand,
+                          indices: Tuple[Operand, ...], **kw
+                          ) -> Optional[Stmt]:
+        """A wide store of a value whose element is not the buffer's, as one
+        store an element, each converting as an assignment does; None where
+        the store is not one.
+
+        A wide store is a reinterpret cast spelled from the value's type, so
+        another element is not converted but reinterpreted (`passes.verify`).
+        It happens where a register image holds the kernel's floating-point
+        type by convention and the buffer does not: the booleans a comparison
+        writes.  SeisSol's `damageStep` at a lead width of two wrote
+        `*(VectorRelaxedT<float, 2>*)&s28[i] = v` over two of them -- eight
+        bytes of float bits, 1.0f the byte 0x00 where the first one sits --
+        which `s28[i] = v[0]; s28[i + 1] = v[1];` writes as `true`.
+
+        Only over the one linear address every wide store here has: its
+        elements are the next ones, which a store of each names.  Not under
+        the explicit vector, whose value is the lane axis as well -- an
+        element of it is not one lane's -- and whose stores convert by their
+        own spelling (`EsimdEmitter._as_buffer_elem`).
+        """
+        t = getattr(value, 'type', None)
+        if not (isinstance(t, ScalarType) and t.length is not None):
+            return None
+        elem = base_elem(base)
+        if elem is None or elem == t.base or len(indices) != 1:
+            return None
+        index = indices[0]
+        if not isinstance(index, (int, Value)) or self._explicit_simd():
+            return None
+        # The address in its own type: a global one may be counted in
+        # `size_t`, and the next element's is no narrower.
+        itype = (index.type if isinstance(index, Value)
+                 and isinstance(index.type, ScalarType) else INDEX)
+        last = None
+        for c in range(t.length):
+            part = self.extract(value, c, hint='part')
+            if c == 0:
+                at = index
+            elif isinstance(index, int):
+                at = index + c
+            else:
+                at = self.op('add', itype, index, c, hint='part')
+            last = self.store(base, part, at, **kw)
+        return last
 
     def copy_async(self, dst: Any, src: Any, *,
                    dst_index: Sequence[Operand] = (),
@@ -2314,8 +2366,16 @@ class IRBuilder:
 
     def extract(self, vec: Value, lane: int, type_=None,
                 hint: str = 'el') -> Value:
-        """``v[i]`` on a packed vector -- the inverse of :meth:`pack`."""
-        type_ = type_ or ScalarType(self._fptype)
+        """``v[i]`` on a packed vector -- the inverse of :meth:`pack`.
+
+        An element of the vector's own type unless `type_` says otherwise.
+        The kernel's type in its place narrowed every double a kernel reading
+        floats took out of a vector: the double operator of SeisSol's
+        `toCanonical` in single precision went into its product as floats,
+        one `float v_p = vec[0]` per element."""
+        if type_ is None:
+            base = getattr(getattr(vec, 'type', None), 'base', None)
+            type_ = ScalarType(base if base is not None else self._fptype)
         v = self.value(type_, hint=hint, uniform=_join((vec,)),
                        layout=vec.layout)
         self._emit_op(Op.EXTRACT, (v,), (vec,), pure=True,

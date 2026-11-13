@@ -415,6 +415,27 @@ def base_space(base) -> Optional[MemSpace]:
     return None if space is MemSpace.UNKNOWN else space
 
 
+def base_elem(base) -> Optional[Datatype]:
+    """The element a base holds, or ``None`` where it states none.
+
+    A buffer value's type says it.  A symbol of the macro layer says it in the
+    order `Symbol.get_fptype` asks, its own type ahead of its tensor's --
+    without the error that one raises for a symbol that states neither, since
+    this only asks.  It is what a wide access through the base has to agree
+    with: `*(T2*)&buf[i]` over a buffer of another element moves the bytes of
+    the one type into the other (`passes.verify`, `IRBuilder.store`).
+    """
+    t = getattr(base, 'type', None)
+    if isinstance(t, BufferType):
+        return getattr(t.elem, 'base', t.elem)
+    if isinstance(base, Value):
+        return None
+    elem = getattr(base, 'datatype', None)
+    if elem is None:
+        elem = getattr(getattr(base, 'obj', None), 'datatype', None)
+    return getattr(elem, 'base', elem)
+
+
 def may_alias(a: Access, b: Access) -> bool:
     """Three cheap levels; level 1 already covers most of a static codegen."""
     if MemSpace.UNKNOWN in (a.space, b.space):

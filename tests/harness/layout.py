@@ -79,6 +79,20 @@ def ctype(dt: Datatype) -> str:
     return _CTYPE_MAP[dt]
 
 
+def datatype_of(spelling: str, default: Datatype) -> Datatype:
+    """The `Datatype` a C++ element type spells, `default` where it is none
+    the harness writes.
+
+    What an operand's buffer holds, which is its own element and not the
+    case's: a kernel that reads floats may write doubles -- SeisSol's
+    `toCanonical` in single precision -- and a file of floats read as one of
+    doubles is half the bytes and every number wrong."""
+    for dt, spelled in _CTYPE_MAP.items():
+        if spelled == spelling:
+            return dt
+    return default
+
+
 def volume(shape: Iterable[int]) -> int:
     return reduce(lambda x, y: x * y, shape, 1)
 

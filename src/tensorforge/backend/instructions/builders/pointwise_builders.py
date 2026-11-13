@@ -22,6 +22,7 @@ from tensorforge.backend.instructions.compute.reduction import (
     ReductionInstruction)
 from tensorforge.backend.instructions.compute.scalar import (
     ScalarContractionInstruction)
+from tensorforge.common.basic_types import work_type
 from tensorforge.generators.descriptions import MultilinearDescr
 
 
@@ -115,7 +116,13 @@ class ScalarBuilder(OperationBuilder):
 
         lo, hi = box
         extent = BoundingBox([0], [hi - lo])
-        registers, alloc = self._temporaries.register_array(extent, 0)
+        # The products, in what the contraction is computed in: its operands'
+        # and its destination's widest floating type (`work_type`).
+        registers, alloc = self._temporaries.register_array(
+            extent, 0, datatype=work_type(
+                [getattr(getattr(view, 'tensor', None), 'datatype', None)
+                 for view in [descr.dest] + list(descr.ops)],
+                self._context.fp_type))
         product = SymbolView(registers, extent, [0])
         # Each operand over the part all of them cover, read at `i + lo`:
         # `ElementwiseInstruction` indexes a source by the loop value plus its

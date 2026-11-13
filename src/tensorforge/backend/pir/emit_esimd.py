@@ -32,10 +32,10 @@ import re
 
 from typing import Any, Optional
 
-from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import Datatype, is_floating
 
 from .core import (BufferType, IRError, MemSpace, Op, ScalarType, TokenType,
-                   Value, walk_stmts)
+                   Value, base_elem, walk_stmts)
 from .emit import Emitter
 
 
@@ -444,13 +444,22 @@ class EsimdEmitter(Emitter):
         which is the kernel's floating-point type -- is 1 and 0 of that type:
         a `simd_mask` has no `copy_to` into one (every SeisSol `damageStep`).
         Into a boolean buffer it stays a mask; `slmStore` writes it as bytes.
+
+        A vector of one floating type written into a buffer of another is
+        converted to the buffer's: `simd<float, N>` has no `copy_to` a
+        `double*` and `slmStore<float>` takes no `SlmPtr<double>`, which every
+        store of a float result into a double temporary or output was --
+        SeisSol's `toCanonical` in single precision did not compile.
         """
         velem = val.type.base.ctype()
-        belem = getattr(getattr(buf, 'type', None), 'elem', None)
-        belem = getattr(belem, 'base', belem)
+        belem = base_elem(buf)
+        floating = is_floating(belem) and is_floating(val.type.base)
         belem = belem.ctype() if belem is not None else None
         if velem == 'bool' and belem not in (None, 'bool'):
             return f'tensorforge::maskAs<{belem}>({expr})', belem
+        if floating and belem != velem:
+            return (f'{self.simd_type(belem, self._vector_width(val))}({expr})',
+                    belem)
         return expr, velem
 
     def _emit_stmt(self, s, yield_to) -> None:

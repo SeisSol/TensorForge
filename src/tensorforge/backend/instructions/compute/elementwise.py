@@ -147,16 +147,38 @@ class ElementwiseInstruction(ComputeInstruction):
                 result = self._select(writer, *values)
             else:
                 # The operation itself, spelled by the emitter for its
-                # target; a number stays a number, which the kernel's type
-                # spells as it reads it (`Datatype.literal`, through `float`).
+                # target, in the type it is computed in (`_work_type`): which
+                # function the lexic names -- `rsqrtf` or `rsqrt` -- and how
+                # a number is spelled, which stays a number until that type
+                # reads it (`Datatype.literal`, through `float`).
                 result = writer.math(
-                    self._op, ScalarType(self._context.fp_type),
+                    self._op, ScalarType(self._work_type()),
                     *(float(x) if isinstance(x, ScalarLike) else x
                       for x in values), hint='e')
             self._dest.symbol.store(writer, self._context, result,
                                     self._index(self._dest, varlist), False)
 
         return inner
+
+    def _work_type(self):
+        """What the operation is computed in: the widest floating type of its
+        destination and its tensor operands (`work_type`), the kernel's where
+        none of them states one.
+
+        Not the kernel's type outright.  In a kernel that reads floats, an
+        operation on doubles was computed in float wherever its value was
+        named rather than inlined, its numbers were float literals, and a
+        function with a float spelling took the float one (`rsqrtf`).  A
+        narrowing cast is computed in the type it narrows from, and its store
+        rounds it.  A boolean adds nothing of its own: a boolean buffer is no
+        floating type, and a boolean tensor's register image holds 1 and 0 of
+        the kernel's type by convention -- a comparison is computed in the
+        type of what it compares and stored into the image as 1 or 0."""
+        from tensorforge.backend.pir.core import base_elem
+        from tensorforge.common.basic_types import work_type
+        return work_type([base_elem(view.symbol) for view
+                          in [self._dest] + self._tensor_srcs()],
+                         self._context.fp_type)
 
     def _select(self, writer, yes, no, cond):
         """`cond ? yes : no`, from yateto's operand order into PIR's.
@@ -168,7 +190,7 @@ class ElementwiseInstruction(ComputeInstruction):
         zero, as C would.
         """
         from tensorforge.backend.pir.core import BOOL, ScalarType
-        fp = ScalarType(self._context.fp_type)
+        fp = ScalarType(self._work_type())
 
         def value(x):
             return writer.const(float(x), fp) if isinstance(x, ScalarLike) else x
@@ -185,9 +207,10 @@ class ElementwiseInstruction(ComputeInstruction):
             writer(f'auto n{i} = {varlist[i].write(self._context)};')
         operands: List[str] = []
         counter = 0
+        work = self._work_type()
         for src in self._srcs:
             if isinstance(src, ScalarLike):
-                operands.append(self._context.fp_type.literal(src))
+                operands.append(work.literal(src))
                 continue
             var = f'v{counter}'
             counter += 1
@@ -202,8 +225,7 @@ class ElementwiseInstruction(ComputeInstruction):
             yes, no, cond = operands
             expression = f'(({cond}) ? ({yes}) : ({no}))'
         else:
-            expression = lexic.get_operation(self._op, self._context.fp_type,
-                                             *padded)
+            expression = lexic.get_operation(self._op, work, *padded)
         writer(f'const auto {result} = {expression};')
         self._dest.symbol.store(writer, self._context, result,
                                 [f'(n{i} + {o})'

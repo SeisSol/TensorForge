@@ -92,14 +92,20 @@ class ScalarContractionInstruction(ComputeInstruction):
         return [v.symbol for v in self._ops]
 
     def gen_code_inner(self, writer: Writer):
-        from tensorforge.backend.pir.core import ScalarType
-        fp = ScalarType(self._context.fp_type)
+        from tensorforge.backend.pir.core import ScalarType, base_elem
+        from tensorforge.common.basic_types import work_type
+        # In the widest floating type of the destination and the operands
+        # (`work_type`): a sum written into a double is summed in double in a
+        # kernel that reads floats, and its literals are doubles.
+        fp = ScalarType(work_type(
+            [base_elem(view.symbol) for view in [self._dest] + list(self._ops)],
+            self._context.fp_type))
         total = self._fold(writer, {}, 0, fp)
         if total is None:
             # every term had a zero in the code among its factors
             total = writer.const(0.0, fp)
         if self._add:
-            old = self._load(writer, self._dest, [])
+            old = self._load(writer, self._dest, [], fp)
             total = writer.op(AddOperator().irop(), fp, old, total, hint='s',
                               pure=True)
         self._dest.symbol.store(writer, self._context, total, [], False)
@@ -150,14 +156,14 @@ class ScalarContractionInstruction(ComputeInstruction):
                     return None
                 factor = writer.const(float(number), fp)
             else:
-                factor = self._load(writer, view, coords)
+                factor = self._load(writer, view, coords, fp)
             value = factor if value is None else writer.op(
                 MulOperator().irop(), fp, value, factor, hint='s', pure=True)
         return value if value is not None else writer.const(1.0, fp)
 
-    def _load(self, writer: Writer, view, coords):
-        """`view` at `coords`, in its own index space."""
-        from tensorforge.backend.pir.core import ScalarType
+    def _load(self, writer: Writer, view, coords, fp):
+        """`view` at `coords`, in its own index space; a factor passed by
+        value with no binding in this body, as a name of type `fp`."""
         if view.symbol.stype == SymbolType.Scalar:
             # A factor passed by value: the number its binding published, if
             # the binding belongs to the body being built.
@@ -179,7 +185,7 @@ class ScalarContractionInstruction(ComputeInstruction):
             # stand-in's is pinned so that the fallback cannot do what the
             # value prevents.
             return writer.rawexpr(
-                view.symbol.name, type_=ScalarType(self._context.fp_type),
+                view.symbol.name, type_=fp,
                 hint='s', pure=True,
                 movable=not getattr(view.symbol.obj, 'is_variant', False))
         offset = list(getattr(view, 'offset', None) or [0] * len(coords))

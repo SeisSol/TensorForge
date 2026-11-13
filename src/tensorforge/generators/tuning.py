@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Tuple)
 
-from tensorforge.common.basic_types import Addressing, Datatype
+from tensorforge.common.basic_types import Addressing, Datatype, work_type
 from tensorforge.common.context import Context, Options
 from tensorforge import toolchain
 from tensorforge.toolchain import Resources, Toolchain
@@ -148,6 +148,32 @@ def _tensors(descrs):
                 yield tensor
 
 
+def _product_types(descrs, context: Context) -> set:
+    """What the list's products are computed in: for every multilinear of
+    two operands or more that contracts an axis -- the ones
+    `contraction_lengths` counts -- the widest floating type of its operands
+    and its destination (`work_type`), the kernel's where none states one.
+
+    The matrix path is chosen per product for that type
+    (`MultilinearInstruction._plan`), and so is what the tuner weighs it for:
+    asked of the kernel's type, the twin took SeisSol's `toCanonical` in
+    single precision onto the TF32 path on sm_100, a double product split
+    into halves of eleven bits."""
+    out = set()
+    for d in _flat(descrs):
+        target = getattr(d, 'target', None)
+        ops = list(getattr(d, 'ops', ()))
+        if target is None or len(ops) < 2:
+            continue
+        if not any(t == -1 for axes in target for t in axes):
+            continue
+        out.add(work_type(
+            [getattr(getattr(view, 'tensor', None), 'datatype', None)
+             for view in ops + [getattr(d, 'dest', None)]],
+            context.fp_type))
+    return out
+
+
 def _roll_values(descrs) -> List[int]:
     """0, the largest divisors of the longest reduction at up to 32 and up to
     8 steps, and 2 -- the ends of what rolling buys and the smallest body it
@@ -244,7 +270,7 @@ def space(descrs, context: Context) -> List[Knob]:
                           lambda c: ((1, 2) if c.get('tensor_cores') else (None,))))
         knobs.append(Knob('mma_min_depth',
                           lambda c: ((None, 8) if c.get('tensor_cores') else (None,))))
-        if context.fp_type is Datatype.F32:
+        if Datatype.F32 in _product_types(descrs, context):
             knobs.append(Knob('mma_presplit',
                               lambda c: ((False, True) if c.get('tensor_cores') else (False,))))
     if _stackable(descrs):
@@ -279,12 +305,18 @@ def _matrix_widths(descrs, context: Context):
     module = matrix_paths(context.target)
     if module is None or not contraction_lengths(descrs):
         return lambda c: ()
+    # The widths of the instruction for the type the products are computed
+    # in, where they all agree on one; a knob over several would set one
+    # width for instructions of different types.
+    works = _product_types(descrs, context)
+    if len(works) != 1:
+        return lambda c: ()
+    work = next(iter(works))
     deduced = lane_config.deduce(_flat(descrs), context)
 
     def widths(candidate):
         lanes = candidate.lanes or deduced
-        found = tuple(module.widths(lanes.num_threads, context.fp_type,
-                                    context))
+        found = tuple(module.widths(lanes.num_threads, work, context))
         return found if len(found) > 1 else ()
     return widths
 
@@ -1965,13 +1997,16 @@ def _matrix_candidates(descrs, first: Build, context: Context,
         return []
     from tensorforge.backend.instructions.compute.primitives.nvidia import (
         sm_of)
-    if context.fp_type not in MATRIX_TWIN.get(sm_of(context), ()):
+    # Every product in a type the part's matrix units are faster in, which
+    # is what each one is computed in and not the kernel's type.
+    works = _product_types(descrs, context)
+    if not works or not works <= set(MATRIX_TWIN.get(sm_of(context), ())):
         return []
     lengths = contraction_lengths(_flat(descrs))
     if not lengths:
         return []
     twin = origin.set('tensor_cores', True).set('mma_operator_copies', True)
-    if context.fp_type is Datatype.F64:
+    if works == {Datatype.F64}:
         twin = twin.set('mma_chunked_order', True).set('mma_fragment_ld', True)
     if ('mma_min_depth' not in dict(context.get_asked_options().asked())
             and not (fixed and 'mma_min_depth' in fixed)):

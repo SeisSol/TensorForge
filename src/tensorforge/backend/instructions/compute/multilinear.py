@@ -10,8 +10,9 @@ from tensorforge.backend.writer import Writer
 from tensorforge.common.context import Context
 from tensorforge.common.operation import ReductionOperator
 from typing import Union, List, Tuple
-from tensorforge.common.basic_types import Addressing, Datatype, Residence
-from tensorforge.backend.pir.core import INDEX, MemSpace
+from tensorforge.common.basic_types import (Addressing, Datatype, Residence,
+                                            is_floating)
+from tensorforge.backend.pir.core import INDEX, MemSpace, base_elem
 from tensorforge.backend.instructions.abstract_instruction import _explicit_simd
 
 from tensorforge.common.matrix.tensor import Tensor
@@ -950,7 +951,10 @@ class MultilinearInstruction(ComputeInstruction):
             return b
         w = (writer.const(weight, fp) if wkind == 'k'
              else entry(plan.weights, weight, fp, 'w'))
-        return writer.op('mul', fp, w, b, hint='p')
+        # The weight is a number of `A`, in `A`'s type; the product is in
+        # what the operation is computed in.
+        return writer.op('mul', ScalarType(self._idest.get_fptype()), w, b,
+                         hint='p')
 
     def module_tables(self):
         """Numbers this instruction reads by name from the generated file,
@@ -975,7 +979,10 @@ class MultilinearInstruction(ComputeInstruction):
         weights only, the product.
         """
         from tensorforge.backend.pir.core import BOOL, ScalarType
+        # The weights are numbers of `A`, in `A`'s type; what they multiply
+        # and select is in what the operation is computed in.
         fp = ScalarType(self._ops[0].symbol.get_fptype())
+        work = ScalarType(self._idest.get_fptype())
         lo = self._ns[0][0]
         values = set(diagonal)
         if values == {1.0}:
@@ -993,15 +1000,16 @@ class MultilinearInstruction(ComputeInstruction):
                                    weight if weight is not None else zero,
                                    hint='weight')
             if weight is None:
-                return zero
+                return writer.const(0.0, work)
         if 0.0 not in values:
-            return writer.op('mul', fp, weight, b, hint='p')
+            return writer.op('mul', work, weight, b, hint='p')
         live = writer.op('ne', BOOL, weight, zero, hint='live')
         if values <= {0.0, 1.0}:
-            return writer.op('select', fp, live, b, zero, hint='p')
-        return writer.op('select', fp, live,
-                         writer.op('mul', fp, weight, b, hint='p'), zero,
-                         hint='p')
+            return writer.op('select', work, live, b,
+                             writer.const(0.0, work), hint='p')
+        return writer.op('select', work, live,
+                         writer.op('mul', work, weight, b, hint='p'),
+                         writer.const(0.0, work), hint='p')
 
     @staticmethod
     def _indexed_as_tensor(symbol) -> bool:
@@ -2920,6 +2928,19 @@ class MultilinearInstruction(ComputeInstruction):
         n = self._output_extent()
         module = _vendor_module(self._context)
         if module is None or not is_contraction(len(self._ops)):
+            return whole(Strategy.GENERIC, n)
+        # The vendor paths read `A` and `B` as the type they accumulate in --
+        # a fragment, a broadcast, a pair of halves is that type -- and their
+        # instruction is chosen for it.  A product over an operand of another
+        # floating type is the nest's, which reads each as its own and
+        # converts it where it multiplies.  Chosen for the kernel's type
+        # instead, SeisSol's `toCanonical` in single precision split its
+        # doubles into TF32 halves on sm_100 (`autotune=lanes`), and on
+        # gfx90a and gfx942 the path stored the operator in an order it then
+        # declined to read.
+        work = self._idest.get_fptype()
+        if any(is_floating(t) and t != work
+               for t in (base_elem(op.symbol) for op in self._ops[:2])):
             return whole(Strategy.GENERIC, n)
         # A second operand whose numbers are in the code has no memory: the
         # vendor paths read B through it -- spread over the lanes and

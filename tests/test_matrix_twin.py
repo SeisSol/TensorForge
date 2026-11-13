@@ -28,7 +28,7 @@ def _forget_picks():
 
 
 def _offered(arch, dtype, **opts):
-  descr_factory = _local_flux()
+  descr_factory = _local_flux(datatype=dtype)
   context = Context(arch=arch, backend='cuda', fp_type=dtype,
                     options=Options(**opts))
   origin = tuning.start(descr_factory(), context)

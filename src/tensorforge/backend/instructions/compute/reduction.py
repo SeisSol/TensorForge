@@ -26,7 +26,8 @@ from tensorforge.backend.symbol import (LeadLoop, Loop, SymbolType,
                                         SymbolView, Variable, add_offset,
                                         write_loops)
 from tensorforge.backend.writer import Writer
-from tensorforge.common.basic_types import Datatype
+from tensorforge.backend.pir.core import base_elem
+from tensorforge.common.basic_types import Datatype, is_floating, work_type
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
 from tensorforge.common.operation import ReductionOperator
@@ -92,9 +93,15 @@ class ReductionInstruction(CrossLaneFold, ComputeInstruction):
         over booleans, instantiate `ReductionOperation<float, And>`, whose
         `&&` does not exist for `float`: no target would compile it.  The
         kernel's type is only the answer where the operand states none.
+
+        A floating operand is reduced in the wider of its own type and the
+        destination's (`work_type`): a sum of floats written into a double is
+        summed in double, as NumPy promotes them.
         """
         dtype = (getattr(self._op.symbol.obj, 'datatype', None)
                  or self._context.fp_type)
+        if is_floating(dtype):
+            dtype = work_type((dtype, base_elem(self._dest.symbol)), dtype)
         # Narrower than a register, a value is widened for the exchange: the
         # cross-lane moves are defined in whole 32-bit words (`hip.h` asserts
         # it, and gfx1150 refuses `all` over booleans), and 0/1 in an int is

@@ -148,7 +148,9 @@ class OperationBuilder(AbstractBuilder):
                 f'a {type(descr).__name__} -- only the contraction\'s store '
                 f'clears a buffer so far (`SectionPlan.zero_first`).')
         home = self._temporaries.shared_symbol(dest.tensor)
-        registers, alloc = self._temporaries.register_array(dest.bbox, lead_pos)
+        registers, alloc = self._temporaries.register_array(
+            dest.bbox, lead_pos,
+            datatype=getattr(dest.tensor, 'datatype', None))
         self._instructions.append(alloc)
         self._home_store = lambda: StoreRegToShr(
             context=self._context, src=registers, dest=home,
@@ -265,7 +267,8 @@ class OperationBuilder(AbstractBuilder):
         """
         rank = dest.bbox.rank()
         box = BoundingBox([0] * rank, list(dest.bbox.sizes()))
-        registers, alloc = self._temporaries.register_array(box, lead_pos)
+        registers, alloc = self._temporaries.register_array(
+            box, lead_pos, datatype=getattr(dest.tensor, 'datatype', None))
         self._instructions.append(alloc)
         return registers, SymbolView(registers, box, [0] * rank), \
             list(dest.storage_box().lower())

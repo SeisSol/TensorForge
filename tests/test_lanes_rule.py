@@ -21,11 +21,12 @@ from tensorforge.generators import tuning
 from tensorforge.generators.generator import Generator
 from tensorforge.toolchain import Resources
 
-def _local_flux(m=40, n=4, faces=4):
+def _local_flux(m=40, n=4, faces=4, datatype=Datatype.F32):
     """`tests/cases/local_flux.py` at a size a test can build eight times:
     `faces` faces of ``R += (A_f @ B) @ C_f`` over `m` rows -- 40, so that
     the deduced 32 lanes have a wider count above them (64) -- and `n`
-    columns."""
+    columns, in `datatype`: the precision a product is computed in is its
+    tensors' (`work_type`), whatever the kernel's type."""
     from tensorforge.common.basic_types import Addressing
     from tensorforge.common.matrix.boundingbox import BoundingBox
     from tensorforge.common.matrix.tensor import SubTensor, Tensor
@@ -33,7 +34,7 @@ def _local_flux(m=40, n=4, faces=4):
 
     def tensor(shape, alias, addressing, is_tmp=False):
         return Tensor(list(shape), addressing, BoundingBox([0, 0], list(shape)),
-                      alias=alias, datatype=Datatype.F32, is_tmp=is_tmp)
+                      alias=alias, datatype=datatype, is_tmp=is_tmp)
 
     def descr_list():
         b = tensor([m, n], "B", Addressing.PTR_BASED)

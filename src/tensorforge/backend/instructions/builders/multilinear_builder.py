@@ -2,7 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 from typing import Dict, Optional, Tuple
-from tensorforge.common.basic_types import Addressing
+from tensorforge.common.basic_types import Addressing, work_type
+from tensorforge.backend.pir.core import base_elem
 from tensorforge.backend.symbol import Symbol, SymbolType, SymbolView
 from tensorforge.backend.instructions.allocate import RegisterAlloc
 from tensorforge.backend.instructions.memory.load import GlbToShrLoader, GlbToRegLoader
@@ -666,7 +667,8 @@ class MultilinearBuilder(OperationBuilder):
         lead.append((second, blocks))
     registers, registerAlloc = self._temporaries.register_array(
         bbox, lead,
-        spp=None if operand.obj.is_dense() else operand.obj.spp)
+        spp=None if operand.obj.is_dense() else operand.obj.spp,
+        datatype=base_elem(operand))
     # Past the rows it loads, the image holds a zero: the loader's accesses
     # are held to them (`LeadIndex.valid`), or keep off the slot's other
     # lanes, which hold the zeros the image is declared with.  Not said of a
@@ -745,13 +747,30 @@ class MultilinearBuilder(OperationBuilder):
     count to the destination's axis 0 and the whole multilinear path is built
     on that.  A per-operand answer would come from
     `[t for t in self._descr.target[0] if t >= 0]` once there is one.
+
+    Of the type the operation is computed in (`_work_type`), which is what
+    the products are summed in and what the compute instruction reads off
+    this array -- the partial sums, the epilogue, and the matrix path it
+    chooses (`MultilinearInstruction._plan`).
     """
     split = self._split_axes()
     lead = 0 if split is None else [(0, split[0]), (1, split[1])]
     registers, registerAlloc = self._temporaries.register_array(
-        self._dest_obj.bbox, lead=lead, shift=self._theta)
+        self._dest_obj.bbox, lead=lead, shift=self._theta,
+        datatype=self._work_type())
     self._instructions.append(registerAlloc)
     return registers
+
+  def _work_type(self):
+    """What this operation is computed in: the widest floating type of its
+    destination and its operands (`work_type`), the kernel's where none of
+    them states one.  A product written into a double is summed in double
+    in a kernel that reads floats, as SeisSol's `toCanonical` in single
+    precision has it; summed in the kernel's float, its double operator's
+    numbers were rounded to floats on the way in, and so was every sum."""
+    tensors = [self._descr.dest] + list(self._descr.ops)
+    return work_type([getattr(getattr(view, 'tensor', None), 'datatype', None)
+                      for view in tensors], self._context.fp_type)
 
   def _target_image_fits(self, name):
     """Does the copy staged under `name` hold exactly this destination?

@@ -183,9 +183,13 @@ def run_case(case, target: Target, cache_root: Path,
 
     inputs_by_alias: Dict[str, np.ndarray] = {}
     flats: Dict[str, np.ndarray] = {}          # kernel_name -> flat buffer
+    #: Each operand's own element, which the driver sizes and reads its file
+    #: in (`DriverOperand.ctype`); the case's `DTYPE` is the kernel's.
+    elems: Dict[str, object] = {}
     dest_in_view = None
     for op in ops_meta:
         key = op.alias or op.kernel_name
+        elems[op.kernel_name] = odt = layout.datatype_of(op.ctype, dt)
         # Batch-constant operands (Addressing.NONE) live in one shared
         # storage block, not (batch, *shape). We still keep the leading
         # ``1`` axis in NumPy so the reference can broadcast it against
@@ -193,21 +197,21 @@ def run_case(case, target: Target, cache_root: Path,
         op_batch = 1 if op.addressing == "none" else batch
         if op.is_sink and not op.is_source:
             # pure output: init to zero so reference can read a defined C_in
-            view, flat = layout.zeros_batch(op.shape, op_batch, dt)
+            view, flat = layout.zeros_batch(op.shape, op_batch, odt)
             if op is sink_op:
                 dest_in_view = np.array(view, copy=True)   # snapshot pre-kernel
         elif op.is_source and not op.is_sink:
-            view, flat = layout.make_batch(rng, op.shape, op_batch, dt)
+            view, flat = layout.make_batch(rng, op.shape, op_batch, odt)
             if key in input_transform:
                 view[...] = input_transform[key](np.asarray(view)).astype(
-                    layout.np_dtype(dt), copy=False)
+                    layout.np_dtype(odt), copy=False)
             inputs_by_alias[key] = np.array(view, copy=True)
         else:
             # SOURCESINK: acts as both input and initial accumulator (beta!=0).
-            view, flat = layout.make_batch(rng, op.shape, op_batch, dt)
+            view, flat = layout.make_batch(rng, op.shape, op_batch, odt)
             if key in input_transform:
                 view[...] = input_transform[key](np.asarray(view)).astype(
-                    layout.np_dtype(dt), copy=False)
+                    layout.np_dtype(odt), copy=False)
             inputs_by_alias[key] = np.array(view, copy=True)
             if op is sink_op:
                 dest_in_view = np.array(view, copy=True)
@@ -216,7 +220,7 @@ def run_case(case, target: Target, cache_root: Path,
             # reads is not the dense view the reference works on.  They stop
             # aliasing here: the view stays dense for the reference, the flat
             # buffer carries only the stored cells.
-            flat = layout.pack(view, np.asarray(op.pack_index), dt)
+            flat = layout.pack(view, np.asarray(op.pack_index), odt)
         if op.storage_parts == 2:
             # The same seam, one step further on: `pack` changed which cells
             # the buffer holds, this changes how many scalars each of them
@@ -224,7 +228,7 @@ def run_case(case, target: Target, cache_root: Path,
             # of `view` above -- the tensor is the same matrix either way, and
             # only the kernel's reading of it differs.
             flat = layout.split_tf32(
-                flat, dt, planar=(op.storage_volume // 2
+                flat, odt, planar=(op.storage_volume // 2
                                   if op.storage_planar else 0))
         elif op.storage_parts != 1:
             raise NotImplementedError(
@@ -243,8 +247,10 @@ def run_case(case, target: Target, cache_root: Path,
         out_dir = tmp / "out"; out_dir.mkdir()
         for op in ops_meta:
             if op.is_source:
+                elem = elems[op.kernel_name]
                 (in_dir / f"in_{op.kernel_name}.bin").write_bytes(
-                    flats[op.kernel_name].astype(layout.np_export_dtype(dt)).tobytes()
+                    flats[op.kernel_name].astype(
+                        layout.np_export_dtype(elem)).tobytes()
                 )
             # SINK that is also SOURCE (beta != 0): the kernel needs the
             # initial C on device, so dump it under the input name too.
@@ -278,7 +284,8 @@ def run_case(case, target: Target, cache_root: Path,
 
         # Read back the chosen output buffer.
         got_bytes = (out_dir / f"out_{sink_op.kernel_name}.bin").read_bytes()
-        got_flat = np.frombuffer(got_bytes, dtype=layout.np_export_dtype(dt)).astype(layout.np_dtype(dt))
+        elem = elems[sink_op.kernel_name]
+        got_flat = np.frombuffer(got_bytes, dtype=layout.np_export_dtype(elem)).astype(layout.np_dtype(elem))
         if sink_op.pack_index is not None:
             got_view = layout.unpack(got_flat, np.asarray(sink_op.pack_index),
                                      sink_op.shape, batch)

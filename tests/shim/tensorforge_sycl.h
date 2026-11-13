@@ -599,6 +599,13 @@ constexpr SlmRef<T> SlmPtr<T>::operator[](I n) const {
   return SlmRef<T>(*this + n);
 }
 
+/// Mirrors `slmCast` in `isycl.h`: a window of one element into an arena of
+/// another -- the double temporary of a kernel that reads floats -- the same
+/// bytes counted in the window's element.
+template <typename T, typename U> constexpr SlmPtr<T> slmCast(SlmPtr<U> at) {
+  return SlmPtr<T>(at.bytes() / static_cast<std::uint32_t>(sizeof(T)));
+}
+
 template <typename T, int N> intel_esimd::simd<T, N> slmLoad(SlmPtr<T>) {
   return {};
 }
