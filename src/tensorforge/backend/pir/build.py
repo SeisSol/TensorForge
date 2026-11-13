@@ -2382,6 +2382,35 @@ class IRBuilder:
                       attrs=(('lane', lane),))
         return v
 
+    def splat(self, value, type_, layout: Optional[RegisterLayout] = None,
+              hint: str = 'splat') -> Value:
+        """`value` in every element of a vector of `type_` spread over the
+        lanes as `layout` says: a constant, which the emitter spells as the
+        vector it is where a bare number would not do -- a `simd` under the
+        explicit vector, a `VectorT` under SPMD.  Not shared like `const`,
+        whose constants are the lanes' one number."""
+        v = self.value(type_, hint=hint, layout=layout)
+        self._emit_op(Op.CONST, (v,), (), attrs=(('value', value),))
+        return v
+
+    def slice_(self, vec: Value, offset: int, type_, layout=None,
+               hint: str = 'part') -> Value:
+        """The elements of `vec` from `offset` on, as many as `type_` and
+        `layout` span (`Op.SLICE`)."""
+        v = self.value(type_, hint=hint, uniform=_join((vec,)),
+                       layout=layout)
+        self._emit_op(Op.SLICE, (v,), (vec, offset), pure=True)
+        return v
+
+    def insert(self, vec: Value, part: Operand, offset: int,
+               hint: str = 'with') -> Value:
+        """`vec` with its elements from `offset` on replaced by `part`
+        (`Op.INSERT`): a new value, as wide as `vec`."""
+        v = self.value(vec.type, hint=hint, uniform=_join((vec, part)),
+                       layout=vec.layout)
+        self._emit_op(Op.INSERT, (v,), (vec, part, offset), pure=True)
+        return v
+
     def accumulate(self, target: Value, value: Operand) -> Stmt:
         """``target += value;`` on a declared register.
 

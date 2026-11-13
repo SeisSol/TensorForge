@@ -219,6 +219,23 @@ class EsimdEmitter(Emitter):
             return
         return self._declare_unpredicated(v, expr, s, name)
 
+    def splat(self, v: Value, literal: str, value) -> str:
+        """A constant spread over the lanes, or a vector of slots, is the
+        `simd` of it.
+
+        The broadcast constructor is explicit (`initializer`), so a bare
+        number is no vector wherever one is taken: as the object of a call --
+        `0.0f.copy_to(p)`, which `fold` made of a column read where nothing
+        wrote the zero-initialized image, is not C++ -- or as an argument --
+        `slmStore<float, 16>(p, 0.0f)`.  Spelled as the vector it is, it is
+        all of these, and an operand of arithmetic as well.
+        """
+        t = v.type
+        if isinstance(t, ScalarType) and v.layout is not None and (
+                v.distributed or t.is_vector):
+            return f'{self.ctype(t, v)}({literal})'
+        return literal
+
     def zero(self, t, value=None) -> str:
         """A scalar, whatever the width -- which the base emitter cannot say.
 
@@ -503,6 +520,34 @@ class EsimdEmitter(Emitter):
                         self.operand(s.args[1], v.type),
                         self.operand(s.args[2], v.type),
                         arms=(s.args[1], s.args[2]))
+            return
+        if op == Op.SLICE:
+            # A run of a vector's elements, as the vector it is: `select` is a
+            # view of the vector, and the view would not outlive it.  One
+            # element is the element, read as `Op.EXTRACT` reads it -- a view
+            # of one converts to a vector of one, not to a number.
+            v = s.target[0]
+            vec, offset = s.args
+            width = self._width(v)
+            if width == 1 and not v.type.is_vector:
+                expr = (f'static_cast<{self.ctype(v.type, v)}>('
+                        f'{self.operand(vec)}[{offset}])')
+            else:
+                expr = (f'{self.ctype(v.type, v)}({self.operand(vec)}'
+                        f'.template select<{width}, 1>({offset}))')
+            self.declare(v, expr, s)
+            return
+        if op == Op.INSERT:
+            # A copy, with the run written into it through a view: two
+            # statements, never inlined (`_plan_inlining`).
+            v = s.target[0]
+            vec, part, offset = s.args
+            nm = self.name(v)
+            self.writer(f'{self.ctype(v.type, v)} {nm}({self.operand(vec)});')
+            width = self._width(part)
+            at = (f'{nm}[{offset}]' if width == 1
+                  else f'{nm}.template select<{width}, 1>({offset})')
+            self.writer(f'{at} = {self.operand(part)};')
             return
         if getattr(s, 'op', None) == Op.EXTRACT:
             # One element of a vector, as the element.  `x[i]` on a `simd` is

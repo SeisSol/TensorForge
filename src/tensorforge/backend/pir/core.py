@@ -971,6 +971,13 @@ class Op:
     ACCUM = 'accum'         # `target += value;` -- in-place, no result
     PACK = 'pack'           # `VecTy v{a, b};`  -- aggregate initialization
     EXTRACT = 'extract'     # `v[i]`            -- element of a packed vector
+    # A run of `width` elements of a vector from `offset` on, and a vector
+    # with such a run of it replaced: `slice` reads the part a narrower access
+    # reads of a register block, `insert` writes the part a narrower one
+    # writes (`values`).  Pure -- the vector is a value, and `insert` makes a
+    # new one rather than changing the one it is given.
+    SLICE = 'slice'         # `v.select<w, 1>(o)`, `{v[o], ...}`
+    INSERT = 'insert'       # `u = v; u.select<w, 1>(o) = p;`
     SPLIT = 'split'         # one argument, several results; `callee` names it
     # Emits nothing, and tells a later pass something about the buffers it
     # names: `mark` says what (`'cleared'`: a clearing store wrote them, and a

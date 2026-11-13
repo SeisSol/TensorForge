@@ -699,6 +699,39 @@ declare('inline_pir_values',
             'default, so what the compiler minds is a *predicated* load and '
             'not how deeply an expression nests.')
 
+declare('register_blocks',
+        default=False,
+        env='TF_REGISTER_BLOCKS',
+        parse=parse_bool,
+        doc='Declare a register image as blocks -- one buffer per run of its '
+            'widest access, a column of the image -- where every access has a '
+            'known offset inside one block, the short loops it is addressed '
+            'through written out first so that the offsets are known '
+            '(`pir.blocks`).  A whole image is one variable to the compiler: '
+            'under the explicit vector one `simd` of its volume, which VC '
+            'spills and fills in pieces around every `mad` once it is past '
+            'the register file, and each column read is a copy out of it.  '
+            'As blocks, the allocator can keep the live columns and spill the '
+            'cold.  Under SPMD an access is one element of a lane\'s array, '
+            'and the blocks are one-element arrays.\n'
+            'Measured on PVC with the emitter-level prototype, under the '
+            'explicit vector: `volume` spilled 60 to 95 % fewer scratch '
+            'messages, and `localFluxAll` got worse.')
+
+declare('register_values',
+        default=False,
+        env='TF_REGISTER_VALUES',
+        parse=parse_bool,
+        doc='Take the blocks of `register_blocks` to values -- which it '
+            'implies: a store is what the block holds from there on, a load '
+            'what it holds where the load stands, a narrower access a part '
+            'inserted or sliced, a predicated one a select, and what a branch '
+            'or a loop that stays stores a result of it or an argument of the '
+            'loop (`pir.values`).  No block is memory then, and which column '
+            'is live where is what the body says.  An option of its own, so '
+            'that the arrays and the values can be measured apart, and the '
+            'values switched off where they cost.')
+
 declare('preload_partial',
         default=False,
         parse=parse_bool,
@@ -809,6 +842,15 @@ declare('sycl_grf',
             'SeisSol on PVC (oneAPI 2025, elastic order 6) projectToDR went from '
             '1477 to 397 us a call and the derivative from 294 to 191, but the '
             'volume from 187 to 202.')
+
+declare('esimd_unroll_fence',
+        default=0,
+        env='TF_ESIMD_UNROLL_FENCE',
+        parse=parse_int,
+        doc='The mask of an `esimd::fence` written between the trips of a loop '
+            '`register_blocks` writes out, under the explicit vector only; 0 '
+            'for none.  128 is vISA\'s software fence, a barrier to the '
+            'scheduler that emits nothing.')
 
 declare('sycl_split_broadcast',
         default=2,

@@ -932,6 +932,22 @@ class Emitter:
             return
         self.writer(f'{self.ctype(v.type, v)} {name or self.name(v)} = {expr};')
 
+    def splat(self, v: Value, literal: str, value) -> str:
+        """The constant `v` holds, `literal` in every element.
+
+        A number where `v` is one.  A vector of them is spelled whole: no
+        number converts to a `VectorT`, a GNU vector, or to a `sycl::vec`
+        where a vector is taken -- an argument, an assignment -- so a bare one
+        would not compile there.  Zero is the value-initialized vector, as
+        `zero` spells it.
+        """
+        t = v.type
+        if not (isinstance(t, ScalarType) and t.is_vector):
+            return literal
+        if value == 0:
+            return f'{self.ctype(t, v)}{{}}'
+        return f'{self.ctype(t, v)}{{{", ".join([literal] * t.length)}}}'
+
     def window_expr(self, arena: str, offset) -> str:
         """A window `offset` elements into the shared arena.
 
@@ -1044,7 +1060,7 @@ class Emitter:
                 # code, which SYCL leaves undefined.
                 if (s.pure and not s.regions and not s.has_side_effects
                         and s.effect == Effect.NONE and len(s.target) == 1
-                        and s.op not in (Op.CONST, Op.PACK)
+                        and s.op not in (Op.CONST, Op.PACK, Op.INSERT)
                         and not s.attr('escapes')
                         and not s.attr('no_inline')
                         and not s.attr('crosslane')):
@@ -1224,7 +1240,7 @@ class Emitter:
         if op == Op.CONST:
             v = s.target[0]
             lit = v.type.base.literal(s.attr('value'))
-            self._consts[v.id] = lit
+            self._consts[v.id] = self.splat(v, lit, s.attr('value'))
             return
 
         if op == Op.YIELD:
@@ -1626,6 +1642,39 @@ class Emitter:
         if op == Op.EXTRACT:
             v = s.target[0]
             self.declare(v, f'{self.operand(s.args[0])}[{s.attr("lane")}]', s)
+            return
+
+        if op == Op.SLICE:
+            # Elements of a vector: one is the element, more are a vector
+            # of them.  A lane's value under SPMD is its own, so the width is
+            # the type's.
+            v = s.target[0]
+            vec, offset = s.args
+            src = self.operand(vec)
+            width = v.type.length or 1
+            if width == 1:
+                expr = f'{src}[{offset}]'
+            else:
+                parts = ', '.join(f'{src}[{offset + i}]' for i in range(width))
+                expr = f'{self.ctype(v.type, v)}{{{parts}}}'
+            self.declare(v, expr, s)
+            return
+
+        if op == Op.INSERT:
+            # A copy, with the run assigned into it: two statements, which
+            # is why it is never inlined (`_plan_inlining`).
+            v = s.target[0]
+            vec, part, offset = s.args
+            nm = self.name(v)
+            w(f'{self.ctype(v.type, v)} {nm} = {self.operand(vec)};')
+            width = (part.type.length or 1) if isinstance(part, Value) else 1
+            if width == 1:
+                w(f'{nm}[{offset}] = '
+                  f'{self.operand(part, ScalarType(v.type.base))};')
+            else:
+                src = self.operand(part)
+                for i in range(width):
+                    w(f'{nm}[{offset + i}] = {src}[{i}];')
             return
 
         if op == Op.ACCUM:

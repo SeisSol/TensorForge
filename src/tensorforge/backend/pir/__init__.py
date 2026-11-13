@@ -35,6 +35,7 @@ from .passes import (check_barrier_budget, cluster_loads, flatten_scopes,
                      if_convert, pressure, cse, dce, fold, licm, load_cse,
                      substitute, verify)
 from .barriers import Arena
+from .blocks import RegisterBlocks
 from .pipeline import (Atomics, BodyContext, CarryTrips, Forward, GroupRows,
                        KeepOwn, MoveLoads, PlaceBarriers, PlaceBuffers,
                        Prefetch, ShardLoads, WrapLoads, optimize,
@@ -55,6 +56,6 @@ __all__ = [
     'substitute', 'verify', 'GroupRows', 'KeepOwn', 'MoveLoads',
     'PlaceBarriers',
     'PlaceBuffers',
-    'Prefetch', 'ShardLoads', 'WrapLoads',
+    'Prefetch', 'RegisterBlocks', 'ShardLoads', 'WrapLoads',
     'walk',
 ]
