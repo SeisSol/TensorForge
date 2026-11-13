@@ -2092,6 +2092,43 @@ declare('k_width',
             'removes loads of the broadcast operand rather than instructions on '
             'the vectorized one, and it works with or without a lead width at all.')
 
+declare('fma_interleave',
+        default=False,
+        env='TF_FMA_INTERLEAVE',
+        doc='Write each step of the nest\'s accumulation as a statement of its '
+            'own, where the nest puts it: the reduction outermost, every '
+            'output a lane holds -- slot and column -- inside it, so that two '
+            'FMAs in a row write different accumulators.  Off, the emitter '
+            'folds an accumulator\'s single-use chain into one expression at '
+            'its last use (`inline_pir_values`), and the text, and the IR the '
+            'device compiler is handed, run the reduction innermost: one '
+            'accumulator\'s FMAs back to back, each waiting for the one before '
+            'it.  IGC keeps that order: on PVC 82 % of the accumulating `mad`s '
+            'of `localFluxAll` at order 6 in double wait on the one right '
+            'before them, and 0.3 % with this.  The same additions in the same '
+            'order per accumulator, so the numbers do not change, and no '
+            'register is added.  The products stay inlined into their '
+            'accumulation, so a compiler that contracts only within one '
+            'expression still forms the FMA.  Nothing changes where nothing '
+            'is inlined (`inline_pir_values` off, or `pin_loads` pinning), '
+            'nor for the matrix and DPP paths, which write their own order.')
+
+declare('fma_partial_sums',
+        default=1,
+        env='TF_FMA_PARTIAL_SUMS',
+        doc='Accumulate each output of the nest in this many partial sums, '
+            'the steps of the reduction dealt to them in turn, and add them '
+            'up behind the reduction.  For a lane that holds too few outputs '
+            'for `fma_interleave` to hide an FMA\'s latency behind the '
+            'others\'.  Each partial sum beyond the first is a register image '
+            'as large as the accumulator, and the sum is reassociated: the '
+            'result differs from the plain order by rounding.  Only a '
+            'reduction written out whole (not one `k_roll` or `k_unroll_max` '
+            'rolls, whose step is a run-time value), at `k_width` 1, and a '
+            'sum; it implies `fma_interleave`, without which the compiler '
+            'would get the partial chains one after the other again.  1 is '
+            'off.')
+
 declare('swizzle',
         default='decide',
         parse=parse_str,

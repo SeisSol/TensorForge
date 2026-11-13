@@ -168,6 +168,22 @@ def _tail_split(lo, hi, count, tail):
         return [(lo, hi, count)]
     return [(lo, hi - left, count), (hi - left, hi, 0)]
 
+
+def _deal_key(index):
+    """What names one output of the nest across the bodies of a reduction,
+    for an index the output loops hand over: a lead index by its slot and
+    distribution, a number by itself.  Only `Options.fma_partial_sums` asks,
+    to deal the steps of an output in turn, and an output it took for two
+    would be dealt unevenly, not wrongly: every step adds into the image it
+    reads, and `_add_partials` adds them all."""
+    if isinstance(index, LeadIndex):
+        return ('lead', repr(index._nonlead), repr(index._offset),
+                index._block, index._stride, index.width)
+    if isinstance(index, Immediate):
+        return ('number', index._value)
+    return ('other', id(index))
+
+
 class MultilinearInstruction(ComputeInstruction):
     def __init__(self,
                context: Context,
@@ -1404,6 +1420,9 @@ class MultilinearInstruction(ComputeInstruction):
                                    unroll=not rolled,
                                    pragma=roll if rolled else True)]
 
+        # The outputs' loops start here: the reduction's are all outside them,
+        # so a body writes every output a lane holds before the next step.
+        n_from = len(loopstack)
         stride = 1
         threads = self._num_threads
         for i, (dimmin, dimmax) in enumerate(self._ns):
@@ -1426,6 +1445,19 @@ class MultilinearInstruction(ComputeInstruction):
                                        straddle=self._lead_width > 1)]
                 threads //= max(1, -(-(dimmax - dimmin) // self._lead_width))
                 stride *= dimmax - dimmin
+
+        # That order is the body's, and the emitter undoes it: every step's
+        # sum is the next step's only operand, so `inline_pir_values` folds an
+        # output's whole reduction into one expression at its last step, and
+        # the device compiler is handed the steps of one accumulator back to
+        # back.  Kept a statement each, the sums stay where the loops put
+        # them (`Options.fma_interleave`).
+        partials = self._partial_images(writer, loopstack[:n_from])
+        acc_attrs = ((('no_inline', True),)
+                     if opts.fma_interleave or partials else ())
+        #: Steps folded into each output so far, which deals the next one to
+        #: a partial sum (`Options.fma_partial_sums`).
+        dealt = {}
 
         def nonlead_writer(varlist):
             """Fully structured: loads hand back values, products and the
@@ -1532,7 +1564,19 @@ class MultilinearInstruction(ComputeInstruction):
             if not prods:
                 return
             ns = [varlist[loopmap[f'n{i}']] for i, _ in enumerate(self._ns)]
-            value = self._vdest.load(writer, self._context, None, ns, False)
+            image = self._vdest
+            if partials:
+                # In turn over the steps this output has, not over the step
+                # numbers: a step whose product is known to be zero is left
+                # out above, and dealing by number could give one partial sum
+                # all the steps of an output.
+                key = tuple(_deal_key(x) for x in ns)
+                turn = dealt.get(key, 0)
+                dealt[key] = turn + 1
+                turn %= len(partials) + 1
+                if turn:
+                    image = partials[turn - 1]
+            value = image.load(writer, self._context, None, ns, False)
             if value is None:
                 assert False
             # Folded into the destination one product at a time, and the
@@ -1551,12 +1595,21 @@ class MultilinearInstruction(ComputeInstruction):
                                                 self._productOperation,
                                                 head, factor)
                     total = writer.op('fma', ftype, head, term[-1], total,
-                                      hint='p')
+                                      hint='p', attrs=acc_attrs)
                     continue
                 total = self._emit_binop(writer, ftype, self._sumOperation,
-                                         total, term)
-            self._vdest.store(writer, self._context, total, ns, False)
+                                         total, term, attrs=acc_attrs)
+            image.store(writer, self._context, total, ns, False)
 
+        self._write_reduction(writer, loopstack, loopmap, nonlead_writer, tail)
+        if partials:
+            self._add_partials(writer, loopstack[n_from:], partials, acc_attrs)
+
+    def _write_reduction(self, writer, loopstack, loopmap, nonlead_writer,
+                         tail):
+        """The nest's loops around `nonlead_writer`: as they stand, or the
+        rolled reduction cut into segments (`_k_segments`) or a loop and the
+        steps its trips leave over (`Options.k_unroll_max_tail`)."""
         segments = self._k_segments(loopstack, loopmap)
         at = loopmap.get(f'k{len(self._ks) - 1}')
         if segments is None and at is not None:
@@ -1583,6 +1636,70 @@ class MultilinearInstruction(ComputeInstruction):
                 write_loops(self._context, writer, stack, nonlead_writer)
             finally:
                 self._k_span = None
+
+    def _partial_images(self, writer, reduction) -> List[Symbol]:
+        """The register images the steps past the first partial sum of each
+        output go to (`Options.fma_partial_sums`), or none.
+
+        Images of the accumulator's own box, `_idest`'s, indexed by the same
+        output indices as whichever image the body accumulates into, and
+        zeroed like it, so that `fold` takes the first step into each for a
+        plain product (`zero-sums`) and an image no step reached adds
+        nothing.
+
+        Only where every step is a number the generator knows: the body
+        deals the steps out in turn, and a rolled reduction's step is the
+        loop's at run time -- one body for all of them.  Only at `k_width`
+        1, whose body folds one step; a sum, the one reduction this
+        reassociates; and the nest's plain products, not a two-level lead,
+        nor a collapsed reduction (`_identity_reduction`, `_ell_plan`),
+        which has no loop in `reduction`.
+        """
+        parts = int(self._context.get_user_options().fma_partial_sums or 1)
+        if parts <= 1 or not callable(getattr(writer, 'alloc', None)):
+            return []
+        if (not reduction or self._k_width != 1
+                or self._sumOperation.irop() != 'add'
+                or self._split_lead() is not None
+                or any(not isinstance(loop, Loop) or not loop.unroll
+                       for loop in reduction)):
+            return []
+        steps = 1
+        for loop in reduction:
+            steps *= max(0, -(-(loop.end - loop.start) // loop.step))
+        if steps < 2 * parts:
+            return []
+        images = []
+        for p in range(1, parts):
+            image = copy(self._idest)
+            image.name = f'{self._idest.name}_s{p}'
+            value = writer.alloc(self._dest.get_fptype(), (self._iregs,),
+                                 MemSpace.REGISTER, hint=image.name,
+                                 init='{}')
+            image.set_pir_buffer(writer, value)
+            images.append(image)
+        return images
+
+    def _add_partials(self, writer, outputs, partials, attrs) -> None:
+        """Each output's partial sums added into the image the first went to,
+        over the same output loops as the reduction, so that every lane and
+        slot a step wrote is reached and the guards are the ones it had."""
+        from tensorforge.backend.pir.core import ScalarType
+        from tensorforge.backend.symbol import lead_width_of
+
+        def add(varlist):
+            width = lead_width_of(varlist)
+            ftype = (ScalarType(self._idest.get_fptype()) if width == 1
+                     else ScalarType(self._idest.get_fptype(), width))
+            total = self._vdest.load(writer, self._context, None, varlist,
+                                     False)
+            for image in partials:
+                part = image.load(writer, self._context, None, varlist, False)
+                total = self._emit_binop(writer, ftype, self._sumOperation,
+                                         total, part, attrs=attrs)
+            self._vdest.store(writer, self._context, total, varlist, False)
+
+        write_loops(self._context, writer, outputs, add)
 
     def _k_segments(self, loopstack, loopmap):
         """The rolled reduction cut where lane slots of `A` start and stop
@@ -1975,11 +2092,14 @@ class MultilinearInstruction(ComputeInstruction):
             return v
         return writer.pack(ftype, *([v] * ftype.length), hint='splat')
 
-    def _emit_binop(self, writer, ftype, operator, a, b):
-        """`operator` as an IR op if it has one, else its format string."""
+    def _emit_binop(self, writer, ftype, operator, a, b, attrs=()):
+        """`operator` as an IR op if it has one, else its format string.
+
+        `attrs` go to the op (`IRBuilder.op`); the format string takes
+        none."""
         name = operator.irop()
         if name is not None:
-            return writer.op(name, ftype, a, b, hint='p')
+            return writer.op(name, ftype, a, b, hint='p', attrs=attrs)
         return writer.rawexpr(operator.format('{0}', '{1}'), a, b,
                               type_=ftype, hint='p', pure=True, movable=True)
 
