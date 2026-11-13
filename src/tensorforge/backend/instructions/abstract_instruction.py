@@ -715,6 +715,7 @@ class AbstractInstruction(ABC):
     body = pir.optimize(body, explicit_simd=_explicit_simd(context),
                         convert_guards=options.convert_lane_guards,
                         register_blocks=options.register_blocks,
+                        register_values=options.register_values,
                         scratch=builder.scratch,
                         unroll_fence=options.esimd_unroll_fence,
                         debug=options.ir_debug, move=move, wrap=wrap,
@@ -799,6 +800,7 @@ class AbstractInstruction(ABC):
         lambda builder, body: pir.optimize(
             body, explicit_simd=simd, convert_guards=convert,
             register_blocks=options.register_blocks,
+            register_values=options.register_values,
             scratch=builder.scratch,
             unroll_fence=options.esimd_unroll_fence, debug=debug,
             where=type(self).__name__))

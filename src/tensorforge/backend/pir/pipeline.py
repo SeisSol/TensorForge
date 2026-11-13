@@ -55,7 +55,7 @@ class BodyContext(PassContext):
 
     def __init__(self, body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
                  convert_guards: bool = False, register_blocks: bool = False,
-                 where: str = ''):
+                 register_values: bool = False, where: str = ''):
         super().__init__()
         self.body = body
         #: What built the body, for the findings reported about it.
@@ -68,7 +68,9 @@ class BodyContext(PassContext):
         self.convert_guards = convert_guards
         #: Whether a register image is declared as blocks, the loops it is
         #: addressed through written out first (`Options.register_blocks`).
-        self.register_blocks = register_blocks
+        self.register_blocks = register_blocks or register_values
+        #: Whether the blocks are taken to values (`Options.register_values`).
+        self.register_values = register_values
         #: What `schedule_async` could not determine statically.
         self.diagnostics: List[str] = []
         self._reported: frozenset = frozenset()
@@ -689,6 +691,14 @@ def standard_pipeline(debug: str = '',
     copies' own is folded where they are written out, and nothing else is
     (`blocks._fold_offsets` says why not ``fold``).
 
+    ``values``, where the body asks for it (`BodyContext.register_values`),
+    runs right behind the blocks: each becomes what it holds, a value a
+    store defines and a load reads (`values.block_values`).  It needs the
+    blocks as the split leaves them -- every access at an offset that is
+    known, nothing else touching them -- and nothing behind it may add an
+    access to one.  A ``dce`` follows for the zeros and the parts nothing
+    reads, and for what was stored where nothing read it.
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
@@ -760,6 +770,9 @@ def standard_pipeline(debug: str = '',
                          ('blocks-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',),
                            when=lambda pc: pc.register_blocks))
+        for name, fn in (('values', blocks.as_values), ('values-dce', dce)):
+            pm.add(Rewrite(name, fn, preserves=('flat',),
+                           when=lambda pc: pc.register_values))
     if place is not None:
         pm.add(place)
     if barriers is not None:
@@ -770,6 +783,7 @@ def standard_pipeline(debug: str = '',
 
 def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              convert_guards: bool = False, register_blocks: bool = False,
+             register_values: bool = False,
              scratch=None, unroll_fence: int = 0,
              debug: str = '', diagnostics: Optional[List[str]] = None,
              move: Optional[MoveLoads] = None,
@@ -804,17 +818,19 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     (`Options.register_blocks`), which takes ``scratch``, the builder of the
     statements it adds (`IRBuilder.scratch`), and writes a fence of the mask
     ``unroll_fence`` between written-out trips under the explicit vector
-    (`Options.esimd_unroll_fence`);
+    (`Options.esimd_unroll_fence`); ``register_values`` takes the blocks to
+    values, and implies them (`Options.register_values`);
     ``where`` names what built the body in the findings `debug` reports.
     """
-    if register_blocks and scratch is None:
+    if (register_blocks or register_values) and scratch is None:
         raise IRError('register blocks add statements, and no builder for '
                       'them was given (`scratch`)')
     pc = BodyContext(body, explicit_simd=explicit_simd,
                      convert_guards=convert_guards,
-                     register_blocks=register_blocks, where=where)
+                     register_blocks=register_blocks,
+                     register_values=register_values, where=where)
     blocks = (RegisterBlocks(scratch, explicit_simd=explicit_simd,
-                             fence=unroll_fence)
+                             fence=unroll_fence, values=register_values)
               if scratch is not None else None)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
                       shards, rows, carry, atomics, forward,

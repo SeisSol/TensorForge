@@ -718,6 +718,20 @@ declare('register_blocks',
             'explicit vector: `volume` spilled 60 to 95 % fewer scratch '
             'messages, and `localFluxAll` got worse.')
 
+declare('register_values',
+        default=False,
+        env='TF_REGISTER_VALUES',
+        parse=parse_bool,
+        doc='Take the blocks of `register_blocks` to values -- which it '
+            'implies: a store is what the block holds from there on, a load '
+            'what it holds where the load stands, a narrower access a part '
+            'inserted or sliced, a predicated one a select, and what a branch '
+            'or a loop that stays stores a result of it or an argument of the '
+            'loop (`pir.values`).  No block is memory then, and which column '
+            'is live where is what the body says.  An option of its own, so '
+            'that the arrays and the values can be measured apart, and the '
+            'values switched off where they cost.')
+
 declare('preload_partial',
         default=False,
         parse=parse_bool,

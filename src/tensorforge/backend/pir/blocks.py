@@ -317,12 +317,20 @@ class _Body:
     # -- images -------------------------------------------------------------- #
 
     def images(self, written_out: bool = False,
-               refused: Optional[Dict[str, str]] = None) -> List[_Image]:
+               refused: Optional[Dict[str, str]] = None,
+               predicated: bool = False,
+               whole: bool = False) -> List[_Image]:
         """The register images that are blocks once the loops they are
         addressed through are written out -- or, `written_out`, as they
         stand.  `refused` collects why the others are not, by name: an image
         a loop that stands addresses says why the loop could not be written
-        out, where it could not."""
+        out, where it could not.
+
+        `predicated` takes an access under a predicate as one, where what
+        follows makes it a select (`values.block_values`); `whole` takes an
+        image that is a block already: one a split made (`block_of`), whose
+        block is all of it whatever its widest access, or one whose widest
+        access spans it."""
         refused = {} if refused is None else refused
 
         def refuse(name: str, why: str) -> None:
@@ -365,7 +373,7 @@ class _Body:
                         and len(s.accesses) == 1
                         and (s.op == Op.STORE
                              or isinstance(s.target[0].type, ScalarType))):
-                    if s.predicate is not None:
+                    if s.predicate is not None and not predicated:
                         refuse(name, 'an access under a predicate')
                     else:
                         reached[name].append(s)
@@ -381,7 +389,7 @@ class _Body:
         for name, alloc in held.items():
             if name in refused or not reached[name]:
                 continue
-            image = self._image(name, alloc, reached[name])
+            image = self._image(name, alloc, reached[name], whole)
             if isinstance(image, str):
                 refuse(name, image)
             else:
@@ -394,7 +402,8 @@ class _Body:
             out = [im for im in out if not im.loops]
         return out
 
-    def _image(self, name: str, alloc: Stmt, reached: List[Stmt]):
+    def _image(self, name: str, alloc: Stmt, reached: List[Stmt],
+               whole: bool = False):
         """`name` as blocks, or why it cannot be."""
         volume = alloc.target[0].type.volume
         seen: List[Tuple[Stmt, List[int], int]] = []
@@ -426,7 +435,9 @@ class _Body:
             seen.append((s, flats, width))
             loops |= reads
         block = max(w for _, _, w in seen)
-        if block >= volume:
+        if whole and alloc.attr('block_of') is not None and block <= volume:
+            block = volume
+        if block > volume or (block == volume and not whole):
             return 'its widest access spans it whole'
         if volume % block:
             return f'blocks of {block} do not tile {volume} elements'
@@ -475,6 +486,7 @@ class _Body:
 
 def unroll_register_loops(body: Tuple[Stmt, ...], scratch, *,
                           explicit_simd: bool = False, fence: int = 0,
+                          predicated: bool = False,
                           report: Optional[List[str]] = None
                           ) -> Tuple[Stmt, ...]:
     """`body` with every loop written out that an image is addressed through
@@ -492,11 +504,11 @@ def unroll_register_loops(body: Tuple[Stmt, ...], scratch, *,
 
     `scratch` makes the builder the copies' values are numbered by; `fence`,
     under the explicit vector (`explicit_simd`), is the mask of a fence
-    between the copies (`Options.esimd_unroll_fence`); `report` collects the
-    loops written out.
+    between the copies (`Options.esimd_unroll_fence`); `predicated` is
+    `split_register_images`'s; `report` collects the loops written out.
     """
     seen = _Body(body, explicit_simd)
-    images = seen.images()
+    images = seen.images(predicated=predicated)
     plan = set().union(*(im.loops for im in images))
     if not plan:
         return body
@@ -646,6 +658,7 @@ def _fold_offsets(stmts: Tuple[Stmt, ...], known: Dict[int, int],
 
 def split_register_images(body: Tuple[Stmt, ...], scratch, *,
                           explicit_simd: bool = False,
+                          predicated: bool = False,
                           report: Optional[List[str]] = None
                           ) -> Tuple[Stmt, ...]:
     """`body` with every register image whose accesses all land inside one
@@ -660,12 +673,17 @@ def split_register_images(body: Tuple[Stmt, ...], scratch, *,
     declared.  Each access becomes the same access to its block, at the
     offset inside it.
 
+    An access under a predicate keeps an image whole, but where `predicated`
+    says that the blocks become values next (`values.block_values`), which
+    make the access a select: the block is the access's own then.
+
     `scratch` makes the builder the blocks are numbered by; `report`
     collects what was split and why the rest was not.
     """
     refused: Dict[str, str] = {}
     seen = _Body(body, explicit_simd)
-    images = seen.images(written_out=True, refused=refused)
+    images = seen.images(written_out=True, refused=refused,
+                         predicated=predicated)
     replaced: Dict[int, Tuple[Stmt, ...]] = {}
     b = scratch() if images else None
     for image in images:
@@ -680,8 +698,9 @@ def split_register_images(body: Tuple[Stmt, ...], scratch, *,
                     hint=f'{v.hint}_b{k}', uniform=v.uniformity,
                     layout=v.layout, quals=v.quals)
             replaced[id(s)] = (_moved(s, blocks[k], offset),)
-        replaced[id(image.alloc)] = tuple(_declared(image.alloc, blocks[k], k)
-                                          for k in sorted(blocks))
+        replaced[id(image.alloc)] = tuple(
+            _declared(image.alloc, blocks[k], k, image.name)
+            for k in sorted(blocks))
         if report is not None:
             report.append(f'blocks: {image.name}: {v.type.volume} elements as '
                           f'{len(blocks)} of {v.type.volume // image.block} '
@@ -700,11 +719,14 @@ def _moved(s: Stmt, block: Value, offset: int) -> Stmt:
                                     block),))
 
 
-def _declared(alloc: Stmt, block: Value, k: int) -> Stmt:
-    """The allocation of an image, as that of its block `k`."""
+def _declared(alloc: Stmt, block: Value, k: int, image: str) -> Stmt:
+    """The allocation of an image, as that of its block `k`, which says
+    whose block it is (`block_of`): a block is all of itself, whatever its
+    widest access (`_Body.images`)."""
     return replace(alloc, target=(block,),
                    attrs=tuple((key, f'{val}_b{k}' if key == 'extern' else val)
-                               for key, val in alloc.attrs))
+                               for key, val in alloc.attrs)
+                   + (('block_of', image),))
 
 
 def _rebuild(stmts: Tuple[Stmt, ...],
@@ -730,23 +752,36 @@ def _rebuild(stmts: Tuple[Stmt, ...],
 
 
 class RegisterBlocks:
-    """The two passes as the pipeline runs them (`pipeline.standard_pipeline`):
+    """The passes as the pipeline runs them (`pipeline.standard_pipeline`):
     with the builder of what they add, whether the body is under the explicit
-    vector, and the fence between written-out trips."""
+    vector, the fence between written-out trips, and whether the blocks
+    become values (`values.block_values`), which takes an access under a
+    predicate into a block too."""
 
     def __init__(self, scratch, explicit_simd: bool = False, fence: int = 0,
+                 values: bool = False,
                  report: Optional[List[str]] = None):
         self.scratch = scratch
         self.explicit_simd = explicit_simd
         self.fence = fence
+        self.values = values
         self.report = report
 
     def unroll(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
         return unroll_register_loops(body, self.scratch,
                                      explicit_simd=self.explicit_simd,
-                                     fence=self.fence, report=self.report)
+                                     fence=self.fence,
+                                     predicated=self.values,
+                                     report=self.report)
 
     def split(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
         return split_register_images(body, self.scratch,
                                      explicit_simd=self.explicit_simd,
+                                     predicated=self.values,
                                      report=self.report)
+
+    def as_values(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        from .values import block_values
+        return block_values(body, self.scratch,
+                            explicit_simd=self.explicit_simd,
+                            report=self.report)
