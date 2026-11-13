@@ -55,7 +55,8 @@ class BodyContext(PassContext):
 
     def __init__(self, body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
                  convert_guards: bool = False, register_blocks: bool = False,
-                 register_values: bool = False, where: str = ''):
+                 register_values: bool = False, register_spill: str = 'off',
+                 where: str = ''):
         super().__init__()
         self.body = body
         #: What built the body, for the findings reported about it.
@@ -68,9 +69,13 @@ class BodyContext(PassContext):
         self.convert_guards = convert_guards
         #: Whether a register image is declared as blocks, the loops it is
         #: addressed through written out first (`Options.register_blocks`).
-        self.register_blocks = register_blocks or register_values
+        self.register_blocks = (register_blocks or register_values
+                                or register_spill != 'off')
         #: Whether the blocks are taken to values (`Options.register_values`).
-        self.register_values = register_values
+        self.register_values = register_values or register_spill != 'off'
+        #: What is done where more is live than the register budget
+        #: (`Options.register_spill`).
+        self.register_spill = register_spill
         #: What `schedule_async` could not determine statically.
         self.diagnostics: List[str] = []
         self._reported: frozenset = frozenset()
@@ -699,6 +704,16 @@ def standard_pipeline(debug: str = '',
     access to one.  A ``dce`` follows for the zeros and the parts nothing
     reads, and for what was stored where nothing read it.
 
+    ``remat``, where the body asks for it (`BodyContext.register_spill`),
+    runs behind the values, which make the columns what it decides over,
+    and last of everything that adds or moves a value: where more is live
+    than the register budget, a value that is a load of memory nothing
+    writes is loaded again before its next read, where that pays
+    (`budget.rematerialize`) -- and where nothing but constants would be,
+    the body goes on as it came to the blocks, its images whole
+    (`RegisterBlocks.remat`).  Ahead of the allocator and the barriers,
+    which the loads it adds read nothing of, and of the scheduler.
+
     ``schedule_async`` runs last on purpose: the wait counts depend on the
     final issue order, so anything that may still move statements has to have
     happened already.
@@ -773,17 +788,29 @@ def standard_pipeline(debug: str = '',
         for name, fn in (('values', blocks.as_values), ('values-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',),
                            when=lambda pc: pc.register_values))
+        pm.add(Rewrite('remat', blocks.remat, preserves=('flat',),
+                       when=lambda pc: pc.register_spill == 'remat'))
     if place is not None:
         pm.add(place)
     if barriers is not None:
         pm.add(barriers)
     pm.add(ScheduleAsync())
+    if blocks is not None:
+        # Last: nothing behind it moves a statement, and what it adds reads a
+        # value without adding a use any pass would need to know of.
+        pm.add(Rewrite('pin-crosslane', blocks.pin,
+                       preserves=('flat', 'scheduled'),
+                       when=lambda pc: pc.register_values))
     return pm
 
 
 def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              convert_guards: bool = False, register_blocks: bool = False,
-             register_values: bool = False,
+             register_values: bool = False, register_spill: str = 'off',
+             register_budget=None,
+             folded_crosslane: bool = False,
+             predicated_values: bool = True,
+             pin_crosslane: bool = False,
              scratch=None, unroll_fence: int = 0,
              debug: str = '', diagnostics: Optional[List[str]] = None,
              move: Optional[MoveLoads] = None,
@@ -819,18 +846,35 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     statements it adds (`IRBuilder.scratch`), and writes a fence of the mask
     ``unroll_fence`` between written-out trips under the explicit vector
     (`Options.esimd_unroll_fence`); ``register_values`` takes the blocks to
-    values, and implies them (`Options.register_values`);
+    values, and implies them (`Options.register_values`); ``register_spill``
+    says what is done where more is live than ``register_budget`` holds
+    (`budget.Budget`), and implies the values (`Options.register_spill`),
+    counted as `pressure` counts them, a cross-lane read an operand where
+    ``folded_crosslane``; ``predicated_values`` False keeps a block an
+    access under a predicate reaches as it is rather than a select
+    (`RegisterBlocks.select_predicated`); ``pin_crosslane`` pins what another
+    lane reads where it is defined once the blocks are values
+    (`RegisterBlocks.pin_crosslane`);
     ``where`` names what built the body in the findings `debug` reports.
     """
-    if (register_blocks or register_values) and scratch is None:
+    if register_spill != 'off' and register_budget is None:
+        register_spill = 'off'
+    if (register_blocks or register_values
+            or register_spill != 'off') and scratch is None:
         raise IRError('register blocks add statements, and no builder for '
                       'them was given (`scratch`)')
     pc = BodyContext(body, explicit_simd=explicit_simd,
                      convert_guards=convert_guards,
                      register_blocks=register_blocks,
-                     register_values=register_values, where=where)
+                     register_values=register_values,
+                     register_spill=register_spill, where=where)
     blocks = (RegisterBlocks(scratch, explicit_simd=explicit_simd,
-                             fence=unroll_fence, values=register_values)
+                             fence=unroll_fence,
+                             values=pc.register_values,
+                             budget=register_budget,
+                             folded_crosslane=folded_crosslane,
+                             select_predicated=predicated_values,
+                             pin_crosslane=pin_crosslane)
               if scratch is not None else None)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
                       shards, rows, carry, atomics, forward,

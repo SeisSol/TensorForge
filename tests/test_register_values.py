@@ -279,6 +279,95 @@ def test_the_images_a_predicate_kept_whole_split_where_values_follow():
         assert _registers(body) == left
 
 
+def test_where_a_select_is_not_wanted_a_predicated_block_stays_memory():
+    """`select_predicated` False (SYCL's SPMD lowering on Intel, where IGC
+    computes what feeds a sub-group broadcast only in the lanes such a select
+    keeps): the block a predicated store reaches keeps its buffer, the block
+    beside it is a value all the same."""
+    for selects, left in ((True, set()), (False, {'r1_b1'})):
+        b = _builder()
+        img = b.alloc(Datatype.F32, (2,), MemSpace.REGISTER, extern='r1',
+                      init='{}')
+        out = b.alloc(Datatype.F32, (8,), MemSpace.GLOBAL, hint='o')
+        lane = b.rawexpr('threadIdx.x', type_=INDEX, hint='tid')
+        inside = b.op('lt', BOOL, lane, 9, hint='inside')
+        b.store(img, b.const(2.0), 0)
+        b.store(img, b.const(1.0), 1, predicate=inside)
+        b.store(out, b.load(img, 0, hint='x'), 0)
+        b.store(out, b.load(img, 1, hint='y'), 1)
+        blocks = RegisterBlocks(b.scratch, values=True,
+                                select_predicated=selects)
+        body = blocks.as_values(blocks.split(b.finish()))
+        assert verify(body, strict=False) == []
+        assert _registers(body) == left
+        assert bool(_ops(body, 'select')) is selects
+
+
+def test_what_another_lane_reads_is_pinned_where_it_enters_a_guard():
+    """`pin_crosslane_sources`: what comes of a cross-lane read is handed to
+    an empty volatile asm where it enters a lane guard -- the last value
+    outside the guard every use of which keeps to some lanes -- and nowhere
+    where a lane outside the guard uses it as well."""
+    from tensorforge.backend.pir.values import pin_crosslane_sources
+
+    def build(guarded):
+        b = _builder()
+        glb = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g')
+        lane = b.rawexpr('threadIdx.x', type_=INDEX, hint='tid',
+                         uniform=False)
+        inside = b.op('lt', BOOL, lane, 3, hint='inside')
+        y = b.op('mul', F32, b.load(glb, 0, hint='x'), 2.0, hint='y')
+        picks = [b.rawexpr(f'sycl::group_broadcast(item.get_sub_group(), '
+                           f'{{0}}, {k})', y, type_=F32, hint='bc',
+                           pure=True, crosslane=True) for k in range(3)]
+        s = picks[0]
+        for p in picks[1:]:
+            s = b.op('add', F32, s, p, hint='s')
+        b.store(glb, s, 1, predicate=inside if guarded else None)
+        return s, pin_crosslane_sources(b.finish())
+
+    s, body = build(True)
+    order = list(walk_stmts(body))
+    pins = [i for i, st in enumerate(order)
+            if st.op == Op.RAWSTMT and 'asm' in (st.text or '')]
+    assert len(pins) == 1
+    assert order[pins[0]].args == (s,)
+    assert order[pins[0] - 1].target[0] is s
+    assert '__asm__ volatile("" :: "r"(' in _spmd(body, 'pvc', 'oneapi')
+    _, body = build(False)
+    assert not [st for st in walk_stmts(body)
+                if st.op == Op.RAWSTMT and 'asm' in (st.text or '')]
+
+
+def test_on_intel_under_spmd_values_pin_what_another_lane_reads():
+    oneapi = _kernel('add_true_f64', 'oneapi', register_values=True)
+    assert '__asm__ volatile' in oneapi
+    assert '__asm__ volatile' not in _kernel('add_true_f64', 'oneapi')
+    assert '__asm__ volatile' not in _kernel('add_true_f64', 'esimd',
+                                             register_values=True)
+
+
+def test_on_intel_under_spmd_no_block_is_a_select():
+    """The order-6 dense derivative as values on the Max 1550 wrote the
+    first column of dQ(1) wrong where its last block's select kept three
+    lanes (`abstract_instruction._predicated_values`): under oneapi a block a
+    predicate reaches stays memory and no block value is a select; the
+    explicit vector, which merges under a mask, keeps its selects."""
+    from tensorforge.backend.instructions.abstract_instruction import (
+        _predicated_values)
+    pick = re.compile(r'(?:double|float) v\d+_i?r\d+_b\d+ = v\d+_g \?')
+    oneapi = _kernel('add_true_f64', 'oneapi', register_values=True)
+    assert not pick.search(oneapi), oneapi
+    assert re.search(r'\bi?r\d+_b\d+\[\d+\]', oneapi)
+    for arch, backend, kept in (('pvc', 'oneapi', False),
+                                ('pvc', 'esimd', True),
+                                ('sm_90', 'cuda', True),
+                                ('gfx942', 'hip', True)):
+        context = Context(arch=arch, backend=backend, fp_type=Datatype.F64,
+                          options=Options())
+        assert _predicated_values(context) is kept, (arch, backend)
+
+
 # --------------------------------------------------------------------------
 # constants a vector holds
 # --------------------------------------------------------------------------
@@ -344,10 +433,24 @@ def _kernel(name, backend, **options):
 
 
 def test_off_nothing_changes_and_on_no_block_is_memory():
+    """Off, the build is the default's; on, no block is memory -- but under
+    oneapi the blocks a predicate reaches, which stay
+    (`test_on_intel_under_spmd_no_block_is_a_select`)."""
     for backend in ('esimd', 'oneapi'):
         default = _kernel('chain', backend)
         assert _kernel('chain', backend, register_values=False) == default
         values = _kernel('chain', backend, register_values=True)
         assert values != default
-        assert not re.search(r'\w+_b\d+\[\d+\]', values), values
         assert not re.search(r'simd<\w+, \d+> r\d+_b\d+\(', values), values
+        if backend == 'esimd':
+            assert not re.search(r'\w+_b\d+\[\d+\]', values), values
+        else:
+            # Every block left memory is one a guarded store writes or a
+            # guarded load reads.
+            for name in set(re.findall(r'\b(i?r\d+_b\d+)\[', values)):
+                store = re.search(rf'if \(v\d+_g\) \{{\s*{name}\[', values)
+                pre = re.findall(rf'(v\d+_data_pre) = {name}\[\d+\];',
+                                 values)
+                read = any(re.search(rf'v\d+_g \? \({p}\)', values)
+                           for p in pre)
+                assert store or read, name

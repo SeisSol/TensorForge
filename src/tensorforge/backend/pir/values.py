@@ -45,9 +45,9 @@ from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .blocks import _JUMPS, _Body, _comment, _is_buffer, _width
-from .core import (SCALAR_LAYOUT, LaneAxis, Op, Operand, Region,
-                   RegisterLayout, ScalarType, Stmt, Uniformity, Value, walk,
-                   walk_stmts)
+from .core import (SCALAR_LAYOUT, Effect, LaneAxis, MemSpace, Op, Operand,
+                   Region, RegisterLayout, ScalarType, Stmt, Uniformity, Value,
+                   walk, walk_stmts)
 
 
 class _Block:
@@ -68,7 +68,7 @@ class _Block:
 
 
 def block_values(body: Tuple[Stmt, ...], scratch, *,
-                 explicit_simd: bool = False,
+                 explicit_simd: bool = False, predicated: bool = True,
                  report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with every register block that can be taken to values taken
     to them (see the module): its allocation a zero splat, its stores and
@@ -77,7 +77,8 @@ def block_values(body: Tuple[Stmt, ...], scratch, *,
 
     A block is a register image every access of which has a known offset
     and lies inside it, under the restrictions `blocks.split_register_images`
-    takes an image apart under, an access under a predicate included: one
+    takes an image apart under, an access under a predicate included unless
+    `predicated` is False (`blocks.RegisterBlocks.select_predicated`): one
     the split made (`block_of`), or one whose widest access spans it.
     `scratch` makes the builder the values are numbered by; `report`
     collects what was taken and why the rest was not.
@@ -87,7 +88,7 @@ def block_values(body: Tuple[Stmt, ...], scratch, *,
     images = [im for im in seen.images(written_out=True, refused=refused,
                                        predicated=True, whole=True)
               if im.block == im.value.type.volume]
-    blocks, why = _blocks(seen, body, images, explicit_simd)
+    blocks, why = _blocks(seen, body, images, explicit_simd, predicated)
     if report is not None:
         for name, reason in why.items():
             report.append(f'values: - {name}: {reason}')
@@ -111,10 +112,12 @@ def block_values(body: Tuple[Stmt, ...], scratch, *,
     return tuple(out)
 
 
-def _blocks(seen: _Body, body: Tuple[Stmt, ...], images, explicit_simd: bool
+def _blocks(seen: _Body, body: Tuple[Stmt, ...], images, explicit_simd: bool,
+            predicated: bool = True
             ) -> Tuple[Dict[str, _Block], Dict[str, str]]:
     """The blocks of `images` that can be taken to values, by name, and why
-    the others cannot."""
+    the others cannot -- not one an access under a predicate reaches unless
+    `predicated`."""
     where: Dict[int, Tuple[Stmt, ...]] = {}
     for s, parents in walk(body):
         where[id(s)] = parents
@@ -137,6 +140,9 @@ def _blocks(seen: _Body, body: Tuple[Stmt, ...], images, explicit_simd: bool
                     whole.append(value)
             if s.op == Op.LOAD and (s.attr('extern') or s.attr('escapes')):
                 reason = 'a load raw text names'
+                break
+            if s.predicate is not None and not predicated:
+                reason = 'an access under a predicate, which would be a select'
                 break
             if s.op == Op.STORE:
                 inside = where[id(s)][len(around):]
@@ -451,3 +457,172 @@ class _Values:
             self.kinds.setdefault(b, set()).add('for')
         return replace(s, args=s.args + inits, target=s.target + results,
                        regions=(replace(arm, args=region.args + args),))
+
+
+#: An empty asm the value goes into: no instruction, but a use of the value
+#: right where it is defined (`pin_crosslane_sources`).
+_PIN = '__asm__ volatile("" :: "r"({0}));'
+
+
+class _Guards:
+    """Which statements run under a lane guard -- in an `if` on a
+    lane-dependent condition, or under a predicate -- and which values keep to
+    some lanes only (`kept`): every use of the value under a guard, an arm of
+    a select on a lane-dependent condition, a store into a register buffer
+    every load of which keeps to some lanes -- IGC sees through register
+    buffers -- or a statement whose results all keep to some lanes in turn.
+    A value with no use, a yield out of anything but a lane-guarded `if`, a
+    store or raw text outside a guard all count as every lane's.  And which
+    values come of a cross-lane read (`crossed`), through register buffers
+    alike."""
+
+    def __init__(self, body: Tuple[Stmt, ...]):
+        self.guarded: Dict[int, bool] = {}
+
+        def lane_dependent(x) -> bool:
+            return isinstance(x, Value) and x.uniformity <= Uniformity.LANE
+        self.lane_dependent = lane_dependent
+
+        def mark(stmts, inside: bool):
+            for st in stmts:
+                g = inside or st.predicate is not None
+                self.guarded[id(st)] = g
+                for r in st.regions:
+                    arm = g or (st.op == Op.IF and st.args
+                                and lane_dependent(st.args[0]))
+                    mark(r.body, arm)
+        mark(body, False)
+        self.uses: Dict[int, List[Tuple[Stmt, int]]] = {}
+        self.order = list(walk_stmts(body))
+        self.loads: Dict[int, List[Stmt]] = {}
+        stores: Dict[int, List[Stmt]] = {}
+        for st in self.order:
+            for k, a in enumerate(st.args):
+                if isinstance(a, Value):
+                    self.uses.setdefault(a.id, []).append((st, k))
+            if st.predicate is not None:
+                self.uses.setdefault(st.predicate.id, []).append((st, -1))
+            if self.register(st):
+                (self.loads if st.op == Op.LOAD else stores).setdefault(
+                    id(st.args[0]), []).append(st)
+        self.kept: Set[int] = set()
+        for st in reversed(self.order):
+            for t in st.target:
+                us = self.uses.get(t.id, ())
+                if us and all(self.keeps(u, k) for u, k in us):
+                    self.kept.add(t.id)
+        self.crossed: Set[int] = set()
+        filled: Set[int] = set()
+        for _ in range(2):
+            for st in self.order:
+                hit = bool(st.attr('crosslane')) or any(
+                    v.id in self.crossed for v in st.operands())
+                if st.op == Op.LOAD and self.register(st):
+                    hit = hit or id(st.args[0]) in filled
+                if st.op == Op.STORE and self.register(st) and len(
+                        st.args) > 1 and isinstance(st.args[1], Value):
+                    if st.args[1].id in self.crossed:
+                        filled.add(id(st.args[0]))
+                if hit:
+                    self.crossed.update(t.id for t in st.target)
+
+    @staticmethod
+    def register(st: Stmt) -> bool:
+        return (st.op in (Op.LOAD, Op.STORE) and bool(st.accesses)
+                and st.accesses[0].space is MemSpace.REGISTER)
+
+    def held_back(self, u: Stmt, k: int) -> bool:
+        """Whether the use `u` (operand `k`) is one a guard keeps to some
+        lanes: under the guard, a select's arm, or a store into a register
+        buffer read only so."""
+        if self.guarded.get(id(u)):
+            return True
+        if (u.op == 'select' and k in (1, 2) and u.args
+                and self.lane_dependent(u.args[0])):
+            return True
+        return (u.op == Op.STORE and k == 1 and self.register(u)
+                and all(x.id in self.kept for ld in self.loads.get(
+                    id(u.args[0]), ()) for x in ld.target))
+
+    def keeps(self, u: Stmt, k: int) -> bool:
+        if self.held_back(u, k):
+            return True
+        return bool(u.target) and u.op not in (Op.STORE, Op.YIELD) and all(
+            x.id in self.kept for x in u.target)
+
+
+def _lane_kept(body: Tuple[Stmt, ...]) -> Set[int]:
+    """The values every use of which keeps to some lanes (`_Guards.kept`)."""
+    return _Guards(body).kept
+
+
+def pin_crosslane_sources(body: Tuple[Stmt, ...], at_risk: bool = True
+                          ) -> Tuple[Stmt, ...]:
+    """`body` with the result of every cross-lane read handed to an empty
+    volatile asm right where it is read (`blocks.RegisterBlocks.
+    pin_crosslane`): the read then stays where it stands, with every lane
+    taking part.
+
+    IGC 2.40.13 to 2.42.6 moves a sub-group broadcast whose result is used
+    only under a lane guard into the guard, and there the lanes the guard
+    leaves out read 0.  Measured on the Max 1550, as the right value less
+    exactly the products broadcast from those lanes: with the blocks as
+    values, the order-6 dense derivative's dQ(1), first column, rows 32 to 34
+    under `lane < 3`, less lanes 3 to 15 of one direction (to 1e-13); the
+    single-precision `localFluxAll`'s Q, first column, rows 48 to 55 under
+    `lane < 8`, less lanes 8 to 15 of one face (F32's last digit); with every
+    load that pays put back, the derivative's dQ(4) under `lane < 4`.
+    Whether the guard is a select or a branch around a store does not
+    matter; as written the kernel escapes only because what it reads goes
+    through arrays a loop indexes, which reach IGC later.  The asm emits
+    nothing, but it is not free -- every cross-lane read pinned cost the
+    order-6 dense `localFluxAll`, all loads that pay put back, 21 % more
+    instructions on IGC 2.41.5 -- so `at_risk` pins only where what came of
+    a cross-lane read enters a guard: the last value outside it every use of
+    which keeps to some lanes (`_Guards`), which holds all it is computed
+    from outside too.
+    """
+    sources = {}
+    if at_risk:
+        # Where what came of a cross-lane read enters a guard: the last value
+        # outside it, every use of which keeps to some lanes.  Pinned there,
+        # it and all it is computed from stay outside.
+        g = _Guards(body)
+        for st in g.order:
+            if g.guarded.get(id(st)) or st.op == Op.LOAD:
+                continue
+            for t in st.target:
+                if (t.id in g.kept and t.id in g.crossed
+                        and isinstance(t.type, ScalarType)
+                        and any(g.held_back(u, k)
+                                for u, k in g.uses.get(t.id, ()))):
+                    sources.setdefault(t.id, t)
+    else:
+        for s in walk_stmts(body):
+            if s.attr('crosslane'):
+                for t in s.target:
+                    if isinstance(t.type, ScalarType):
+                        sources.setdefault(t.id, t)
+    if not sources:
+        return body
+    pinned = set()
+
+    def pin(v: Value) -> Stmt:
+        pinned.add(v.id)
+        return Stmt(op=Op.RAWSTMT, target=(), args=(v,), text=_PIN,
+                    pure=False, movable=False, effect=Effect.UNKNOWN,
+                    accesses=(), attrs=(('fmt', True),))
+
+    def rewrite(stmts: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        out: List[Stmt] = []
+        for s in stmts:
+            if s.regions:
+                s = replace(s, regions=tuple(replace(r, body=rewrite(r.body))
+                                             for r in s.regions))
+            out.append(s)
+            for t in s.target:
+                if t.id in sources and t.id not in pinned:
+                    out.append(pin(t))
+        return tuple(out)
+
+    return rewrite(body)

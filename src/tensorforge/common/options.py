@@ -100,6 +100,17 @@ def parse_float(text: str) -> float:
   return float(text.strip())
 
 
+def parse_register_spill(text: str) -> str:
+  """`off` or `remat` (`Options.register_spill`)."""
+  value = text.strip().lower()
+  if value not in REGISTER_SPILL:
+    raise ValueError(f'expected one of {REGISTER_SPILL}, got {text!r}')
+  return value
+
+
+#: What `Options.register_spill` takes.
+REGISTER_SPILL = ('off', 'remat')
+
 _DEFAULT_PARSERS = {bool: parse_bool, int: parse_int, str: parse_str}
 
 
@@ -731,6 +742,44 @@ declare('register_values',
             'is live where is what the body says.  An option of its own, so '
             'that the arrays and the values can be measured apart, and the '
             'values switched off where they cost.')
+
+declare('register_spill',
+        default='off',
+        env='TF_REGISTER_SPILL',
+        parse=parse_register_spill,
+        doc='What the body does with a value it cannot keep in registers where '
+            'more is live than the budget (`register_budget`): `off`, nothing '
+            '-- the compiler spills as it does; `remat`, a value that is a '
+            'load of memory the kernel does not write, or a constant, is had '
+            'again before its next read instead of kept across the gap, the '
+            'one read again furthest ahead first (`pir.budget`).  Implies '
+            '`register_values`: '
+            'the values a column holds are what is decided over.  Named for '
+            'what the body does in place of the compiler\'s spill, and a '
+            'choice of how, because the ways differ in what they cost: '
+            'loading again costs a load and no memory.')
+
+declare('register_budget',
+        default=0,
+        env='TF_REGISTER_BUDGET',
+        parse=parse_int,
+        doc='Bytes the register model (`pir.pressure`) may count live in a '
+            'lane -- a work-item under the explicit vector -- before '
+            '`register_spill` acts, or 0 for the target\'s own '
+            '(`abstract_instruction.register_budget`).  In the model\'s own '
+            'bytes, not the compiler\'s registers, so that a calibration '
+            'moves it without a change of code.')
+
+declare('register_left_over',
+        default=-1.0,
+        env='TF_REGISTER_LEFT_OVER',
+        parse=parse_float,
+        doc='The share of the excess over the register budget of a body as '
+            'written that may be left once its blocks are values and every '
+            'load that pays is put back, for `register_spill` to put any back '
+            '(`pir.budget.CLOSED_MIN`); negative for the default, 1 or more '
+            'to put back wherever a load pays.  For calibrating the stop '
+            'against timings.')
 
 declare('preload_partial',
         default=False,
