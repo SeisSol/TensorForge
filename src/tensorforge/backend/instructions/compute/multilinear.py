@@ -169,6 +169,21 @@ def _tail_split(lo, hi, count, tail):
     return [(lo, hi - left, count), (hi - left, hi, 0)]
 
 
+#: `Options.fma_interleave_cut` `auto` keeps every output in flight from this
+#: many slots a lane, and cuts between columns below.  Measured on the Max 1550
+#: (IGC 2.41.5, 51 SeisSol kernels, elastic orders 3 to 8 and viscoelastic 4
+#: to 6, job 561195).  From four slots -- order 6 and up -- every output in
+#: flight was the fastest: 27.6 % below the default in geometric mean, where
+#: one slot a group, though it spills less in the listings, gave back a good
+#: part of it (`localFluxAll` at order 8 +80 % on every output in flight).
+#: Below four, groups of eight cut between columns took the orders 3 to 5 from
+#: +0.1 % to -4.5 %: in flight at once, `localFluxAll` at order 4 in double
+#: and the derivative at order 5 in single keep IGC's first attempt and its
+#: 17 and 16 KB of spill, where cut, IGC compiles them again, as it does the
+#: default, and they spill nothing.
+AUTO_SLOT_CUT_FROM = 4
+
+
 def _deal_key(index):
     """What names one output of the nest across the bodies of a reduction,
     for an index the output loops hand over: a lead index by its slot and
@@ -1601,9 +1616,125 @@ class MultilinearInstruction(ComputeInstruction):
                                          total, term, attrs=acc_attrs)
             image.store(writer, self._context, total, ns, False)
 
-        self._write_reduction(writer, loopstack, loopmap, nonlead_writer, tail)
+        groups = (self._interleave_groups(loopstack, n_from)
+                  if acc_attrs else None)
+        # The whole reduction of one group of outputs, then the next
+        # (`Options.fma_interleave_group`).
+        for stack in groups or [loopstack]:
+            self._write_reduction(writer, stack, loopmap, nonlead_writer,
+                                  tail)
         if partials:
             self._add_partials(writer, loopstack[n_from:], partials, acc_attrs)
+
+    def _interleave_groups(self, loopstack, n_from):
+        """The nest's loops once for each group of outputs, where the outputs
+        a lane holds are more than `Options.fma_interleave_group`; None to
+        write all of them in one reduction.
+
+        Interleaved over every output, a lane holds the partial sum of each
+        from the reduction's first step to its last: on PVC that tipped
+        `localFluxAll` at order 4 in double from no spill (in IGC's second
+        attempt) into 17 KB (in its first, which it kept).  Cut into groups,
+        a group's sums are final before the next group's first step.
+
+        Where to cut is `Options.fma_interleave_cut`.  Between slots, a group
+        takes whole slots of the lead loop, cut where a slot starts, and
+        every column of them: the first operand's `A[i, k]`, a lane's own
+        value, is read by its group alone, and the second operand's step
+        `B[k, j]` once a group -- under SPMD a broadcast from a constant lane,
+        which IGC reads as a region of the register that holds it, not an
+        instruction.  Between columns, a group takes every slot of its
+        columns, and `A[i, k]` is read once a group, or once and held across
+        the groups where a compiler merges the reads.  A slot, or a column,
+        is the smallest group.  `auto` cuts no group where the product's
+        tensors span `AUTO_SLOT_CUT_FROM` slots or more
+        (`_declared_lead_slots`), and between columns below.
+        """
+        opts = self._context.get_user_options()
+        size = int(opts.fma_interleave_group or 0)
+        if size <= 0 or n_from == 0:
+            return None
+        cut = opts.fma_interleave_cut
+        if cut not in ('slots', 'columns', 'auto'):
+            raise GenerationError(
+                f'fma_interleave_cut={cut!r}: `slots`, `columns` or `auto`')
+        leads = [i for i in range(n_from, len(loopstack))
+                 if isinstance(loopstack[i], LeadLoop)]
+        plain = [i for i in range(n_from, len(loopstack))
+                 if not isinstance(loopstack[i], LeadLoop)]
+        slots = {i: slots_for(loopstack[i].start, loopstack[i].end,
+                              loopstack[i].threads, loopstack[i].width)
+                 for i in leads}
+        extent = {i: max(0, -(-(loopstack[i].end - loopstack[i].start)
+                                // loopstack[i].step)) for i in plain}
+        outputs = math.prod(slots.values()) * math.prod(extent.values())
+        if outputs <= size:
+            return None
+        if cut == 'auto':
+            if self._declared_lead_slots() >= AUTO_SLOT_CUT_FROM:
+                return None
+            cut = 'columns'
+        if cut == 'slots':
+            if len(leads) != 1 or loopstack[leads[0]].width != 1:
+                return None
+            at = leads[0]
+            loop = loopstack[at]
+            per = max(1, size // max(1, math.prod(extent.values())))
+            span = loop.threads * per
+            first = (loop.start // loop.threads + per) * loop.threads
+            bounds = [(loop.start, min(first, loop.end))]
+            bounds += [(lo, min(lo + span, loop.end))
+                       for lo in range(first, loop.end, span)]
+            stacks = []
+            for lo, hi in bounds:
+                stack = list(loopstack)
+                stack[at] = copy(loop)
+                stack[at].start, stack[at].end = lo, hi
+                stacks.append(stack)
+            return stacks
+        candidates = [i for i in plain if isinstance(loopstack[i], Loop)
+                      and loopstack[i].unroll]
+        if not candidates:
+            return None
+        at = candidates[0]
+        loop = loopstack[at]
+        inner = outputs // max(1, extent[at])
+        per = max(1, size // max(1, inner)) * loop.step
+        stacks = []
+        for lo in range(loop.start, loop.end, per):
+            stack = list(loopstack)
+            stack[at] = Loop(loop.var, lo, min(lo + per, loop.end), loop.step,
+                             unroll=True)
+            stacks.append(stack)
+        return stacks
+
+    def _declared_lead_slots(self) -> int:
+        """Slots a lane would hold of the longest axis this product runs its
+        lead or its reduction over, by the tensors' declared shapes rather
+        than the boxes it computes.
+
+        What `Options.fma_interleave_cut` `auto` goes by.  It was measured by
+        kernel -- from order 6, with 56 basis functions to a tensor, every
+        output in flight; below, groups -- and the boxes of one kernel do not
+        say its order: the derivative at order 6 computes 35, 20, 10 and 4
+        rows of its 56, and `localFluxAll` its face products over 21 rows of
+        an operator 56 wide.  Every tensor of them is declared over the 56,
+        and the face products reduce over them as well.
+        """
+        threads = max(1, self._num_threads * self._lead_width)
+        longest = 0
+        views = [(op.symbol.obj, self._opdim_to_nks[i])
+                 for i, op in enumerate(self._ops)]
+        views.append((getattr(self._dest_obj, 'tensor', None),
+                      [f'n{d}' for d in range(len(self._ns))]))
+        for obj, nks in views:
+            shape = getattr(obj, 'shape', None)
+            if shape is None:
+                continue
+            for extent, nk in zip(shape, nks):
+                if nk == 'n0' or nk.startswith('k'):
+                    longest = max(longest, int(extent))
+        return -(-longest // threads)
 
     def _write_reduction(self, writer, loopstack, loopmap, nonlead_writer,
                          tail):

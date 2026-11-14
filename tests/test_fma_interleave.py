@@ -2,7 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 """The nest's accumulation in the order the nest writes it
-(`Options.fma_interleave`), and in partial sums (`Options.fma_partial_sums`).
+(`Options.fma_interleave`), in groups of outputs (`Options.
+fma_interleave_group`), and in partial sums (`Options.fma_partial_sums`).
 
 The nest runs the reduction outermost and every output a lane holds inside
 it, and the emitter used to undo that: each step's sum is the next step's
@@ -117,3 +118,109 @@ def test_a_rolled_reduction_keeps_one_sum():
     assert re.search(r'#pragma unroll 2', src)
     assert not ADDED.search(src)
     assert '_s1' not in src
+
+
+# -- groups of outputs ------------------------------------------------------- #
+
+#: A step of the nest's accumulation, whatever its first factor is called (a
+#: lane's component of a vector read is a `_p` too).
+ANY_STEP = re.compile(r'double (v\d+_p) = (v\d+_p|\(v\d+_\w+ \* v\d+_bc\)) '
+                      r'\+ \(v\d+_\w+ \* v\d+_bc\);')
+#: An output's sum written into the accumulator's image.
+STORED = re.compile(r'ir\d+\[(\d+)\] = (v\d+_p);')
+
+
+def _grouped(rows, **options):
+    """`C = A B` over `rows` rows on sixteen lanes, four columns and eight
+    steps, interleaved with `options`."""
+    gen = Generator([GemmDescr(False, False,
+                               a=_t([rows, STEPS], 'A', Addressing.NONE),
+                               b=_t([STEPS, OUTPUTS], 'B'),
+                               c=_t([rows, OUTPUTS], 'C'))],
+                    Context(arch='pvc', backend='oneapi', fp_type=Datatype.F64,
+                            options=Options(fma_interleave=True, **options)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen.get_kernel()
+
+
+def _groups(src, slots):
+    """The outputs whose reductions overlap, `[{(slot, column), ...}, ...]`
+    in the order they run: each output's chain of sums from its first step
+    to its last, named by the image entry it ends in."""
+    chain_of, spans, ends = {}, [], {}
+    for at, line in enumerate(src.splitlines()):
+        step = ANY_STEP.search(line)
+        if step:
+            name, addend = step.groups()
+            chain = chain_of.get(addend)
+            if chain is None:
+                chain = len(spans)
+                spans.append([at, at])
+            spans[chain][1] = at
+            chain_of[name] = chain
+            continue
+        stored = STORED.search(line)
+        if stored and stored.group(2) in chain_of:
+            entry = int(stored.group(1))
+            ends[chain_of[stored.group(2)]] = (entry % slots, entry // slots)
+    assert len(ends) == len(spans) == slots * OUTPUTS
+    groups, last = [], -1
+    for chain in sorted(range(len(spans)), key=lambda c: spans[c][0]):
+        if spans[chain][0] > last:
+            groups.append(set())
+        groups[-1].add(ends[chain])
+        last = max(last, spans[chain][1])
+    return groups
+
+
+def test_without_a_group_every_output_is_in_flight():
+    assert _groups(_grouped(32), 2) == [{(s, c) for s in range(2)
+                                         for c in range(OUTPUTS)}]
+
+
+def test_a_group_of_columns_takes_every_slot_of_them():
+    """Four outputs at two slots a lane: two columns, both slots, and the
+    group done before the next one starts."""
+    groups = _groups(_grouped(32, fma_interleave_group=4,
+                              fma_interleave_cut='columns'), 2)
+    assert groups == [{(s, c) for s in range(2) for c in (0, 1)},
+                      {(s, c) for s in range(2) for c in (2, 3)}]
+
+
+def test_a_group_of_slots_takes_every_column_of_them():
+    groups = _groups(_grouped(32, fma_interleave_group=4,
+                              fma_interleave_cut='slots'), 2)
+    assert groups == [{(s, c) for c in range(OUTPUTS)} for s in range(2)]
+
+
+def test_a_column_or_a_slot_is_the_smallest_group():
+    assert _groups(_grouped(32, fma_interleave_group=1,
+                            fma_interleave_cut='columns'), 2) == [
+        {(s, c) for s in range(2)} for c in range(OUTPUTS)]
+    assert _groups(_grouped(32, fma_interleave_group=1,
+                            fma_interleave_cut='slots'), 2) == [
+        {(s, c) for c in range(OUTPUTS)} for s in range(2)]
+
+
+def test_auto_cuts_between_columns_below_four_slots():
+    """`auto`: between columns at two slots a lane; at four, every output in
+    flight -- the text but for the kernel's name and options."""
+    two = _groups(_grouped(32, fma_interleave_group=4), 2)
+    assert two == _groups(_grouped(32, fma_interleave_group=4,
+                                   fma_interleave_cut='columns'), 2)
+    assert _unnamed(_grouped(64, fma_interleave_group=4)) == _unnamed(
+        _grouped(64))
+
+
+def _unnamed(src):
+    return [line for line in re.sub(r'kernel_kernel_[0-9a-f]+', 'k',
+                                    src).splitlines()
+            if '// options:' not in line]
+
+
+def test_a_group_as_large_as_the_outputs_is_no_group():
+    """Eight outputs a lane in a group of eight: the order of every output in
+    flight, and the text but for the kernel's name and options."""
+    assert _unnamed(_grouped(32, fma_interleave_group=8)) == _unnamed(
+        _grouped(32))

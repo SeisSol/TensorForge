@@ -2113,6 +2113,37 @@ declare('fma_interleave',
             'is inlined (`inline_pir_values` off, or `pin_loads` pinning), '
             'nor for the matrix and DPP paths, which write their own order.')
 
+declare('fma_interleave_group',
+        default=0,
+        env='TF_FMA_INTERLEAVE_GROUP',
+        doc='Under `fma_interleave`, at most this many outputs a lane holds in '
+            'flight: the reduction runs over a group of them to its end before '
+            'the next group starts, so a group\'s partial sums are final '
+            'before the next group\'s first step.  0 interleaves every output.  '
+            'Where the groups are cut is `fma_interleave_cut`; a group is never '
+            'smaller than one column, or one slot.  On PVC, in flight at once, '
+            '`localFluxAll` at order 4 in double kept IGC\'s first attempt and '
+            '17 KB of spill (2.5x the default\'s time); in groups, IGC '
+            'compiles it again, as it does the default, without spill.')
+
+declare('fma_interleave_cut',
+        default='auto',
+        env='TF_FMA_INTERLEAVE_CUT',
+        parse=parse_str,
+        doc='Where `fma_interleave_group` cuts the outputs a lane holds: '
+            '`columns`, a group every slot of some columns; `slots`, a group '
+            'every column of some whole slots (at lead width 1); or `auto`, '
+            'for each product: no cut where a lane holds at least '
+            '`multilinear.AUTO_SLOT_CUT_FROM` slots of it, between columns '
+            'below.  Between slots the first operand\'s values die with the '
+            'group that reads them; between columns they are read once a '
+            'group, or held across the groups where the compiler merges the '
+            'reads, as IGC does.  The broadcast of the second operand\'s step, '
+            'which a cut between slots repeats once a group, is under SPMD a '
+            'register region IGC reads in place, not an instruction.  On the '
+            'Max 1550 every output in flight was the fastest from four slots '
+            '(order 6 and up), and groups of eight columns-wise below.')
+
 declare('fma_partial_sums',
         default=1,
         env='TF_FMA_PARTIAL_SUMS',
