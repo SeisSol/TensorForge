@@ -21,6 +21,8 @@ import contextlib
 import io
 import re
 
+import pytest
+
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -58,14 +60,26 @@ def _kernel(b=Addressing.STRIDED, **options):
     return gen.get_kernel()
 
 
-def test_asked_off_it_is_the_default():
-    assert _kernel(fma_interleave=False) == _kernel()
+def test_asked_on_in_groups_of_eight_it_is_the_default():
+    assert _kernel(fma_interleave=True, fma_interleave_group=8) == _kernel()
+
+
+@pytest.mark.parametrize('arch, backend, on', [
+    ('pvc', 'oneapi', True), ('pvc', 'esimd', False), ('pvc', 'acpp', False),
+    ('sm_90', 'cuda', False), ('gfx942', 'hip', False)])
+def test_the_default_is_dpcpps_alone(arch, backend, on):
+    """Measured under DPC++'s SPMD lowering alone: the explicit vector and
+    AdaptiveCpp keep the plain default, and so does every other vendor."""
+    options = Context(arch=arch, backend=backend,
+                      fp_type=Datatype.F64).get_user_options()
+    assert options.fma_interleave == on
+    assert options.fma_interleave_group == (8 if on else 0)
 
 
 def test_without_it_an_output_is_one_expression():
     """What the option is for: the steps of one output nested into a single
     expression, the reduction innermost."""
-    src = _kernel()
+    src = _kernel(fma_interleave=False)
     assert not STEP.search(src)
     assert any(line.count(' * ') >= STEPS - 1 for line in src.splitlines())
 

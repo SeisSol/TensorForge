@@ -134,6 +134,8 @@ class Preferences:
     ell_gather: int = 3
     amd_fused_transpose: bool = False
     reassociate_products: bool = False
+    fma_interleave: bool = False
+    fma_interleave_group: int = 0
     #: What the autotuner turns (`generators.tuning`): the matrix path,
     tune_matrix_path: bool = False
     #: staging the batch-constant operands,
@@ -338,16 +340,34 @@ PREFERENCES = {
         # (`Options.split_predicated_load`, `Options.convert_lane_guards`).
         split_predicated_load=True,
         convert_lane_guards=True,
+        # The nest's accumulation in the order the nest writes it: IGC keeps
+        # the order of the text, and inlined into one expression an
+        # accumulator's FMAs ran back to back, each waiting for the one
+        # before (`Options.fma_interleave`) -- in groups of eight outputs
+        # where a lane holds fewer than four slots, so that a body near the
+        # GRF's edge keeps IGC's retry (`Options.fma_interleave_group`).
+        # Over 51 SeisSol kernels (elastic orders 3 to 8, viscoelastic 4 to
+        # 6) on the Max 1550 (IGC 2.41.5, a batch of 262144) 0.85x the time
+        # in geometric mean and 0.70x summed, every result bit-identical;
+        # order 8 0.51x summed.  Slower by more than 5 % the order-5 sparse
+        # `volume` (+11 %), the order-8 sparse `volume` and the
+        # viscoelastic order-4 sparse `fluxLocalAll` (+7 %).  The explicit
+        # vector and AdaptiveCpp are not measured (`_explicit_simd`,
+        # `ONEAPI_ONLY`).
+        fma_interleave=True,
+        fma_interleave_group=8,
         tune_preload_globals=True,
         lanes_down_to_wave=True),
 }
 
 
 #: The preferences measured under DPC++'s SPMD lowering (`oneapi`) alone, on
-#: the Max 1550: the moves and wraps that spill there, and the sixteen lanes.
-#: Any other lowering of the device -- AdaptiveCpp's, the explicit vector --
-#: keeps the plain defaults (`Target.prefs`).
-ONEAPI_ONLY = ('move_loads', 'wrap_loads', 'lanes_per_mult')
+#: the Max 1550: the moves and wraps that spill there, the sixteen lanes and
+#: the accumulation in the nest's order.  Any other lowering of the device --
+#: AdaptiveCpp's, the explicit vector -- keeps the plain defaults
+#: (`Target.prefs`).
+ONEAPI_ONLY = ('move_loads', 'wrap_loads', 'lanes_per_mult', 'fma_interleave',
+               'fma_interleave_group')
 
 
 def _explicit_simd(prefs: Preferences) -> Preferences:
@@ -369,7 +389,8 @@ def _explicit_simd(prefs: Preferences) -> Preferences:
                                      broadcast_without_staging=False),
                    preload_globals=True, tune_preload_globals=False,
                    lanes_down_to_wave=False,
-                   move_loads=True, wrap_loads=True, lanes_per_mult=0)
+                   move_loads=True, wrap_loads=True, lanes_per_mult=0,
+                   fma_interleave=False, fma_interleave_group=0)
 
 
 class Target:

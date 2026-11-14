@@ -2093,8 +2093,9 @@ declare('k_width',
             'the vectorized one, and it works with or without a lead width at all.')
 
 declare('fma_interleave',
-        default=False,
+        rule=lambda target: target.prefs.fma_interleave,
         env='TF_FMA_INTERLEAVE',
+        parse=parse_bool,
         doc='Write each step of the nest\'s accumulation as a statement of its '
             'own, where the nest puts it: the reduction outermost, every '
             'output a lane holds -- slot and column -- inside it, so that two '
@@ -2111,11 +2112,13 @@ declare('fma_interleave',
             'accumulation, so a compiler that contracts only within one '
             'expression still forms the FMA.  Nothing changes where nothing '
             'is inlined (`inline_pir_values` off, or `pin_loads` pinning), '
-            'nor for the matrix and DPP paths, which write their own order.')
+            'nor for the matrix and DPP paths, which write their own order.  '
+            'On by default under DPC++ on Intel (`Preferences.fma_interleave`).')
 
 declare('fma_interleave_group',
-        default=0,
+        rule=lambda target: target.prefs.fma_interleave_group,
         env='TF_FMA_INTERLEAVE_GROUP',
+        parse=parse_int,
         doc='Under `fma_interleave`, at most this many outputs a lane holds in '
             'flight: the reduction runs over a group of them to its end before '
             'the next group starts, so a group\'s partial sums are final '
@@ -2124,7 +2127,9 @@ declare('fma_interleave_group',
             'smaller than one column, or one slot.  On PVC, in flight at once, '
             '`localFluxAll` at order 4 in double kept IGC\'s first attempt and '
             '17 KB of spill (2.5x the default\'s time); in groups, IGC '
-            'compiles it again, as it does the default, without spill.')
+            'compiles it again, as it does the default, without spill.  Eight '
+            'by default under DPC++ on Intel '
+            '(`Preferences.fma_interleave_group`).')
 
 declare('fma_interleave_cut',
         default='auto',
