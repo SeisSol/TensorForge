@@ -37,7 +37,10 @@ saves (`RELOAD_PRICE`, `Budget.spill_price`); and loads go only where
 the body as written was well over the capacity and what pays -- the blocks'
 values and the loads put back together -- would close most of that excess
 (`CLOSED_MIN`, `EXCESS_MIN`): where what cannot go holds it, the compiler
-spills whatever is put back, and only constants go.  A first version took
+spills whatever is put back, and only constants go.  Under IGC with the
+interleave the bar is half the values' own excess, and a body no load goes
+from stays values unless what pays closes next to nothing of it
+(`Budget.stop`, `Budget.fallback`, `VALUES_CLOSED_MIN`, `IMAGES_BELOW`).  A first version took
 every load it could wherever the
 model was over: the viscoelastic derivative put back 1773 loads for sm_90,
 and its SASS grew by 79 % for 40 % less spill; on PVC every volume kernel
@@ -114,6 +117,34 @@ LEFT_OVER = 0.3
 CLOSED_MIN = 0.53
 EXCESS_MIN = 0.9
 
+#: Under IGC with `fma_interleave` in the default (`Budget.stop` `values`):
+#: the share of the *values'* excess over the capacity that what pays must
+#: close for loads to go (`VALUES_CLOSED_MIN`), and below which, nothing put
+#: back, the images stay whole rather than the values (`IMAGES_BELOW`).
+#: Fitted per kernel on the Max 1550 (IGC 2.41.5, 262144 elements; jobs
+#: 561373, 561385, 561394 and 561395) against the values alone, every load
+#: that pays put back and the images, over 15 SeisSol kernels (elastic
+#: orders 6 and 8, viscoelastic 6 dense).  Loads won where they close a
+#: quarter of that excess or more -- the elastic derivatives (0.54 to 1.00:
+#: -23 to -30 % against -1 to -12 % as values), the order-8 dense
+#: `localFluxAll` (0.32: -9 against +1 %), the viscoelastic `derivative`
+#: (0.35 and 0.37: -20 against -16 %) -- and lost below it, the
+#: viscoelastic `volumeExt` (0.17: +37 against -2 %).  Between, the
+#: viscoelastic `fluxLocalAll` (0.40) is 8 % faster as values; a bar at half
+#: would keep it so and give the three above up: -14.5 % in geometric mean
+#: against -15.2 %.  The values beat the images where the budget holds the
+#: body or nothing pays (the order-6 sparse `volume` -4 %), except where
+#: what pays closes next to nothing: the order-8 dense `volume` (0.06 and
+#: 0.00 in its two pieces) +13 % as values.  The choice decides the cut too
+#: (`Options.fission`): with its loads put back that `volume` is long enough
+#: to be cut in two, and the pieces keep their images.  Over the 15 kernels
+#: -15.2 % against the images, where `CLOSED_MIN` gave -9.6 % and the values
+#: alone -9.1 %, the best of the three per kernel -17.7 %; over 18 kernels
+#: the fit never saw (elastic orders 5 and 7, viscoelastic 6 sparse and 5
+#: dense) -10.8 %, against -6.0, -12.4 and -16.6 %.
+VALUES_CLOSED_MIN = 0.25
+IMAGES_BELOW = 0.1
+
 
 @dataclass(frozen=True)
 class Budget:
@@ -142,6 +173,15 @@ class Budget:
     shared: int = 0
     #: Whether those slots are accessed volatile (`spill_shared`).
     shared_volatile: bool = True
+    #: Which excess the stop judges what pays by, where the body as written
+    #: is known: `written`, the images' (`CLOSED_MIN`, `EXCESS_MIN`), or
+    #: `values`, the values' own (`VALUES_CLOSED_MIN`).
+    stop: str = 'written'
+    #: What a body goes out as where no load goes -- within the budget, or
+    #: the stop leaving only constants: `images`, as it came, its images
+    #: whole; or `values`, the blocks' values, unless what pays would close
+    #: less than `IMAGES_BELOW` of their excess (`RegisterBlocks.remat`).
+    fallback: str = 'images'
 
     @property
     def trigger(self) -> int:
@@ -411,7 +451,7 @@ def rematerialize(body: Tuple[Stmt, ...], scratch, *,
                   budget: Union[Budget, int], explicit_simd: bool = False,
                   folded_crosslane: bool = False,
                   report: Optional[List[str]] = None,
-                  taken: Optional[Dict[str, int]] = None,
+                  taken: Optional[dict] = None,
                   as_written: Optional[int] = None
                   ) -> Tuple[Stmt, ...]:
     """`body` with the values that are loads of memory nothing writes loaded
@@ -425,7 +465,9 @@ def rematerialize(body: Tuple[Stmt, ...], scratch, *,
 
     `scratch` makes the builder the loads put back are numbered by;
     `report` collects the peak before and after, and what was put back;
-    `taken` counts the reloads by what they reload (`RELOAD_PRICE`'s keys).
+    `taken` counts the reloads by what they reload (`RELOAD_PRICE`'s keys),
+    and holds under `closed` the share of the values' excess what pays would
+    close -- None where the body is within the budget.
     `as_written` is the model's peak of the body as written, before its
     blocks were values: where given, loads go only where what pays closes enough of
     that body's excess (`CLOSED_MIN`, `EXCESS_MIN`), else where it would
@@ -442,6 +484,8 @@ def rematerialize(body: Tuple[Stmt, ...], scratch, *,
     live = Liveness(body, explicit_simd, folded_crosslane)
     before = live.peak
     if before <= budget.trigger:
+        if taken is not None:
+            taken['closed'] = None
         if report is not None:
             report.append(f'budget: {before} B live at most, within '
                           f'{budget.trigger} B ({budget.capacity} B and '
@@ -480,8 +524,17 @@ def rematerialize(body: Tuple[Stmt, ...], scratch, *,
                    {}, {k: 0 for k in RELOAD_PRICE})[1]
     share = (max(0, left - budget.capacity)
              / max(1, before - budget.capacity))
+    # The share of the values' own excess what pays closes.
+    closed_values = ((before - left) / max(1, before - budget.capacity))
+    if taken is not None:
+        taken['closed'] = closed_values
     if budget.left_over >= 1:
         acts = True
+    elif budget.stop == 'values' and as_written is not None:
+        need = (1 - budget.left_over if budget.left_over >= 0
+                else VALUES_CLOSED_MIN)
+        acts = closed_values >= need
+        share = 1 - closed_values
     elif as_written is not None:
         excess = as_written - budget.capacity
         need = (1 - budget.left_over if budget.left_over >= 0

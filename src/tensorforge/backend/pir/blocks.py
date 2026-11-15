@@ -838,14 +838,17 @@ class RegisterBlocks:
     def remat(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
         """`body` held to the budget (`budget.rematerialize`) -- or, where
         that would put back no load, the body as it came to `unroll`, its
-        images whole.
+        images whole; where the budget says so (`Budget.fallback`), the
+        values instead, unless what pays would close next to nothing of
+        their excess (`budget.IMAGES_BELOW`).
 
         The images are taken apart for what the budget then does with the
         values.  Where it does nothing but put constants back, the values
         are all that is left of it, and on PVC those alone made every volume
-        kernel slower (`values`: order 6 dense +23 %, order 8 +111 % dense,
-        +170 % sparse); and the elastic `localFluxAll` and `volume` at order
-        6, sparse, which IGC holds without a spill, stay as they were."""
+        kernel slower before `fma_interleave` (`values`: order 6 dense
+        +23 %, order 8 +111 % dense, +170 % sparse) -- with it, 14 of 15
+        SeisSol kernels as fast or faster, the order-8 sparse `volume` 27 %
+        (`budget.VALUES_CLOSED_MIN`), which is why IGC's budget keeps them."""
         from .budget import rematerialize
         if self.budget is None:
             return body
@@ -878,6 +881,14 @@ class RegisterBlocks:
                                 report=self.report)
         if (self.whole is not None
                 and not (taken.get('load') or taken.get('guarded'))):
+            from .budget import IMAGES_BELOW
+            closed = taken.get('closed')
+            if (self.budget.fallback == 'values'
+                    and (closed is None or closed >= IMAGES_BELOW)):
+                if self.report is not None:
+                    self.report.append('budget: no load put back; the '
+                                       'blocks stay values')
+                return out
             if self.report is not None:
                 self.report.append('budget: no load put back; the images '
                                    'stay whole')

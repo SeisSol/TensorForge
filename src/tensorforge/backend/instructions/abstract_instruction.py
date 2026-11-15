@@ -390,10 +390,16 @@ def register_budget(context, lanes: Optional[int] = None):
   if options.register_spill == 'shared' and not _explicit_simd(context):
     shared = (int(options.register_shared) or shared_spill_bytes(context,
                                                                  lanes))
+  # Under SPMD on Intel the stop and the fallback were fitted with the
+  # interleave in the default (`budget.VALUES_CLOSED_MIN`); elsewhere they
+  # stay as they were fitted before it.
+  values = _intel_spmd(context)
   return Budget(capacity, margin=BUDGET_MARGIN,
                 spill_price=SPILL_PRICE.get(vendor, SPILL_PRICE['intel']),
                 left_over=float(options.register_left_over), shared=shared,
-                shared_volatile=bool(options.register_shared_volatile))
+                shared_volatile=bool(options.register_shared_volatile),
+                stop='values' if values else 'written',
+                fallback='values' if values else 'images')
 
 
 #: Hardware threads an Intel Xe-core keeps resident: eight an EU on eight
