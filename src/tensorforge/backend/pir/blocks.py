@@ -862,6 +862,20 @@ class RegisterBlocks:
                             folded_crosslane=self.folded_crosslane,
                             report=self.report, taken=taken,
                             as_written=written)
+        if (self.budget.shared and self.lanes is not None
+                and not self.explicit_simd):
+            # The next tier, over what the loads put back left: the values
+            # computed in the body, to shared memory.  Never the body as it
+            # came: the slots stand for registers the values free.
+            from .budget import spill_shared
+            threads, arena, _ = self.lanes
+            return spill_shared(out, self.scratch,
+                                capacity=self.budget.capacity,
+                                shared=self.budget.shared, threads=threads,
+                                arena=arena,
+                                folded_crosslane=self.folded_crosslane,
+                                volatile=self.budget.shared_volatile,
+                                report=self.report)
         if (self.whole is not None
                 and not (taken.get('load') or taken.get('guarded'))):
             if self.report is not None:

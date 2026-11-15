@@ -46,14 +46,23 @@ Where nothing but constants would go, the body is left as it came, its
 images whole (`RegisterBlocks.remat`): taking them apart is worth it only
 for what is put back then.
 
-Not here, and not yet: a value computed in the body (an accumulator, an
-intermediate) cannot be loaded again from anywhere; it would have to be
-spilled to shared memory and read back.
+A value computed in the body (an intermediate the next product reads, a
+sum) cannot be loaded again from anywhere.  Where the target has shared
+memory beside the registers a multiplication may take, `spill_shared` is the
+next tier: such a value is stored once, behind its definition, into a slot of
+its own lane, and loaded from there before a read the gap holds it from --
+again Belady's choice, over what `rematerialize` left, within the slots the
+tier holds (`Budget.shared`).  What it costs is what the compiler's own spill
+of the value costs, a store and a load where it is read again; what differs
+is where to: shared memory a multiplication has to itself, rather than the
+scratch or local memory every lane's spills share the caches with, and the
+values the furthest read decides rather than the compiler's.
 """
 
 from __future__ import annotations
 
 import bisect
+import heapq
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
@@ -128,6 +137,11 @@ class Budget:
     #: The share of the excess that may be left with all that pays put back
     #: for loads to go at all (`LEFT_OVER`).
     left_over: float = -1.0
+    #: Bytes of shared memory a multiplication may take for the values it
+    #: spills there (`spill_shared`); 0 for no such tier.
+    shared: int = 0
+    #: Whether those slots are accessed volatile (`spill_shared`).
+    shared_volatile: bool = True
 
     @property
     def trigger(self) -> int:
@@ -436,6 +450,9 @@ def rematerialize(body: Tuple[Stmt, ...], scratch, *,
     order = live.order
     written = _written(order)
 
+    # Where each list's statements end, once a list (`spill_shared`).
+    list_ends: Dict[int, List[int]] = {}
+
     def candidates() -> Dict[int, _Candidate]:
         cands: Dict[int, _Candidate] = {}
         for i, st in enumerate(order):
@@ -446,7 +463,9 @@ def rematerialize(body: Tuple[Stmt, ...], scratch, *,
             vid = st.target[0].id
             list_id, k = live.place[i]
             starts = live.lists[list_id]
-            ends = [live.span[p][1] for p in starts]
+            ends = list_ends.get(list_id)
+            if ends is None:
+                ends = list_ends[list_id] = [live.span[p][1] for p in starts]
             reads = sorted({_ancestor(starts, ends, u)
                             for u in live.uses.get(vid, ())} - {None})
             if not reads or reads[-1] <= k:
@@ -572,6 +591,249 @@ def _belady(live: Liveness, cands: Dict[int, _Candidate], capacity: int,
                 count += 1
         most = max(most, profile[p] + running)
     return count, most
+
+
+
+
+class _Spilled(_Candidate):
+    """A value computed in the body that may go to shared memory: as
+    `_Candidate`, with the slot it holds once it goes (`spill_shared`)."""
+
+    __slots__ = ('slot', 'span')
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.kind = 'shared'
+        self.slot: Optional[int] = None
+        #: The positions the slot is held over: the definition to the last
+        #: read.
+        self.span = (self.starts[self.at], self.last)
+
+
+def _spillable(s: Stmt, live: 'Liveness', mutated: Set[int]) -> bool:
+    """Whether `s` defines a value one store and a load per gap can stand
+    for: one number a lane, which nothing writes in place -- not an
+    accumulator a call adds into, nor a declaration -- and that no raw text
+    names."""
+    if (len(s.target) != 1 or s.target[0].id not in live.weight
+            or s.op in (Op.DECLARE, Op.ALLOC, Op.RAWSTMT)
+            or s.attr('extern') or s.attr('escapes')):
+        return False
+    t = s.target[0].type
+    return (isinstance(t, ScalarType) and getattr(t, 'length', None) is None
+            and s.target[0].id not in mutated)
+
+
+def spill_shared(body: Tuple[Stmt, ...], scratch, *, capacity: int,
+                 shared: int, threads: int, arena: Optional[str] = None,
+                 folded_crosslane: bool = False, volatile: bool = True,
+                 report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
+    """`body` with values computed in it spilled to shared memory where more
+    is live than `capacity` (see the module), under SPMD: at each statement
+    over it, of the values live there and not read there, the one read again
+    furthest ahead goes -- stored once behind its definition into a slot of
+    its own, one element a lane, and loaded from it before the statement of
+    its list that reads it next -- until the statement fits, or no slot is
+    free for the stretch from a value's definition to its last read.
+    `shared` is the bytes the multiplication may take for the slots, of
+    `threads` lanes.  `volatile`: the slots are accessed where the body
+    accesses them, as often as it does; else a compiler may take a load back
+    from the store or the load before, and keep the register after all.
+
+    The slots are one buffer of the multiplication's arena (`arena`), held
+    for the whole body and every lane's own (`barriers.own_buffers`): no
+    barrier between a lane's store and its load, nothing else on its
+    bytes."""
+    live = Liveness(body, False, folded_crosslane)
+    before = live.peak
+    if before <= capacity:
+        if report is not None:
+            report.append(f'shared: {before} B live at most, within '
+                          f'{capacity} B')
+        return body
+    order = live.order
+    mutated: Set[int] = set()
+    for st in order:
+        if st.op == Op.CALL:
+            for w in (st.attr('writes') or ()):
+                if isinstance(w, Value):
+                    mutated.add(w.id)
+    cands: Dict[int, _Spilled] = {}
+    # Where each list's statements end, once a list: a candidate's gaps are
+    # between the statements of its list, and the top list of a derivative
+    # holds tens of thousands.
+    list_ends: Dict[int, List[int]] = {}
+    for i, st in enumerate(order):
+        if not st.target or not _spillable(st, live, mutated):
+            continue
+        vid = st.target[0].id
+        list_id, k = live.place[i]
+        starts = live.lists[list_id]
+        ends = list_ends.get(list_id)
+        if ends is None:
+            ends = list_ends[list_id] = [live.span[p][1] for p in starts]
+        reads = sorted({_ancestor(starts, ends, u)
+                        for u in live.uses.get(vid, ())} - {None})
+        if not reads or reads[-1] <= k:
+            continue
+        cands[vid] = _Spilled(vid, st, list_id, starts, ends, k, reads,
+                              live.weight[vid], live.last.get(vid, i))
+    elem = {c.load.target[0].type.base for c in cands.values()}
+    if len(elem) != 1:
+        # One buffer of one type: the body's numbers, where they are all of
+        # one kind (the integers the model weighs go with the addresses).
+        fp = max(elem, key=lambda e: sum(1 for c in cands.values()
+                                         if c.load.target[0].type.base is e),
+                 default=None)
+        cands = {v: c for v, c in cands.items()
+                 if c.load.target[0].type.base is fp}
+    if not cands:
+        return body
+    size = next(iter(cands.values())).load.target[0].type.base.size()
+    slots = shared // max(1, size * threads)
+    if slots <= 0:
+        return body
+    busy: List[List[Tuple[int, int]]] = [[] for _ in range(slots)]
+
+    def take_slot(c: _Spilled) -> bool:
+        lo, hi = c.span
+        for k, spans in enumerate(busy):
+            if all(hi < a or b < lo for a, b in spans):
+                spans.append((lo, hi))
+                c.slot = k
+                return True
+        return False
+
+    profile = live.profile
+    n = len(profile)
+    restore = [0] * (n + 1)
+    running = 0
+    reloads: Dict[int, Dict[int, List[int]]] = {}
+    count = 0
+    most = 0
+    # Every gap of every candidate, between its definition or a read and its
+    # next read in its list, by where it opens: Belady's choice over the gaps
+    # open at a statement is the top of a heap of them, furthest next read
+    # and heaviest first -- not a sort of every candidate at every statement,
+    # which took a minute of the order-6 dense derivative.
+    gaps: List[Tuple[int, int, int, int, _Spilled]] = []
+    for c in cands.values():
+        previous = c.at
+        for r in c.reads:
+            if r <= previous:
+                continue
+            first, last = c.ends[previous] + 1, c.starts[r] - 1
+            if first <= last:
+                gaps.append((first, last, r, c.starts[r], c))
+            previous = r
+    gaps.sort(key=lambda g: g[0])
+    heap: List[Tuple[int, int, int, int, int, _Spilled]] = []
+    nxt = 0
+    for p in range(n):
+        running += restore[p]
+        while nxt < len(gaps) and gaps[nxt][0] <= p:
+            first, last, r, at, c = gaps[nxt]
+            heapq.heappush(heap, (-at, -c.weight, nxt, last, r, c))
+            nxt += 1
+        while profile[p] + running > capacity and heap:
+            _, _, _, last, r, c = heapq.heappop(heap)
+            if last < p:
+                continue
+            if c.slot is None and not take_slot(c):
+                # No slot frees up later for the same stretch.
+                continue
+            running -= c.weight
+            restore[last + 1] += c.weight
+            reloads.setdefault(c.list, {}).setdefault(r, []).append(c.vid)
+            count += 1
+        most = max(most, profile[p] + running)
+    spilled = {vid: c for vid, c in cands.items() if c.slot is not None}
+    if not spilled:
+        if report is not None:
+            report.append(f'shared: {before} B live at most against '
+                          f'{capacity} B; no value spilled ({slots} slot(s))')
+        return body
+    used = 1 + max(c.slot for c in spilled.values())
+    out = _spill(body, spilled, reloads, scratch, used, threads, arena,
+                 volatile)
+    if report is not None:
+        again = Liveness(out, False, folded_crosslane)
+        report.append(
+            f'shared: {before} B live at most against {capacity} B; '
+            f'{len(spilled)} value(s) spilled to {used} of {slots} slot(s) '
+            f'({used * threads * size} B), {count} reload(s); '
+            f'{again.peak} B now')
+    return out
+
+
+def _spill(body: Tuple[Stmt, ...], spilled: Dict[int, _Spilled],
+           reloads: Dict[int, Dict[int, List[int]]], scratch, slots: int,
+           threads: int, arena: Optional[str],
+           kept: bool = True) -> Tuple[Stmt, ...]:
+    """`body` with the slots allocated at its head, each spilled value
+    stored into its slot behind its definition, and loaded from it where
+    `reloads` says, what follows in the list reading the load."""
+    from .core import INDEX
+    b = scratch()
+    first = next(iter(spilled.values())).load.target[0].type.base
+    buf = b.alloc(first, (slots * threads,), MemSpace.SHARED, hint='spill',
+                  arena=arena, lifetime='body', own=True)
+    lane = b.thread_id('x')
+    head = list(b.finish())
+    by_def = {id(c.load): c for c in spilled.values()}
+
+    def slot_index(bb, c):
+        return bb.op('add', INDEX, lane, c.slot * threads, hint='slot')
+
+    def volatile(stmts, c):
+        # Which value an access to a slot is of (`spilled`), for what reads
+        # through the slots (`values._Guards`).  And made where they stand: a
+        # compiler that took the load back from the store, or from the load
+        # of the gap before, would keep the register the slot is for -- IGC
+        # 2.41.5 kept 1665 of the order-8 dense `volume`'s 5245 loads back
+        # and 1284 of its 1928 stores.
+        mark = (('spilled', c.vid),) + ((('volatile', True),) if kept else ())
+        return [replace(x, attrs=x.attrs + mark)
+                if x.op in (Op.LOAD, Op.STORE) and x.args and x.args[0] is buf
+                else x for x in stmts]
+
+    def sub(x, mapping):
+        return mapping.get(x.id, x) if isinstance(x, Value) else x
+
+    def rewrite(stmts: Tuple[Stmt, ...], mapping: Dict[int, Value]
+                ) -> Tuple[Stmt, ...]:
+        here = reloads.get(id(stmts), {})
+        out: List[Stmt] = []
+        for k, s in enumerate(stmts):
+            defined = by_def.get(id(s))
+            for vid in here.get(k, ()):
+                c = spilled.get(vid)
+                if c is None:
+                    continue
+                old = c.load.target[0]
+                bb = scratch()
+                fresh = bb.load(buf, slot_index(bb, c), type_=old.type,
+                                hint=old.hint, layout=old.layout)
+                out.extend(volatile(bb.finish(), c))
+                mapping[vid] = fresh
+            if mapping:
+                s = replace(
+                    s, args=tuple(sub(a, mapping) for a in s.args),
+                    predicate=(sub(s.predicate, mapping)
+                               if s.predicate is not None else None),
+                    attrs=tuple((key, sub(v, mapping)) for key, v in s.attrs))
+            if s.regions:
+                s = replace(s, regions=tuple(
+                    replace(r, body=rewrite(r.body, dict(mapping)))
+                    for r in s.regions))
+            out.append(s)
+            if defined is not None:
+                bb = scratch()
+                bb.store(buf, s.target[0], slot_index(bb, defined))
+                out.extend(volatile(bb.finish(), defined))
+        return tuple(out)
+
+    return tuple(head) + rewrite(body, {})
 
 
 def _put_back(body: Tuple[Stmt, ...], reloads: Dict[int, Dict[int, List[int]]],

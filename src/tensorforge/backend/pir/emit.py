@@ -968,7 +968,7 @@ class Emitter:
         return getattr(base, 'name', str(base))
 
     def elem_access(self, base: Operand, addr: str, t,
-                    relaxed: bool = False) -> str:
+                    relaxed: bool = False, volatile: bool = False) -> str:
         """``base[addr]``, reinterpreted when the value is wider than one element.
 
         A buffer is typed by its element, so a vector-typed access reads or
@@ -982,10 +982,19 @@ class Emitter:
         The cast is only defined when ``addr`` is aligned to the wider type.
         Nothing here checks that; the legality belongs with whoever chooses
         the width, not with the spelling.
+
+        ``volatile``: an access the compiler has to make where it stands, as
+        often as it stands there -- a register spilled to shared memory
+        (`budget.spill_shared`), whose load back a compiler would otherwise
+        take from the store or from the load before, and keep the register
+        the spill was for.
         """
         access = f'{self.base_name(base)}[{addr}]'
         if isinstance(t, ScalarType) and t.length is not None:
-            return f'*({self._vector_ctype(t, relaxed)}*)&{access}'
+            cv = 'volatile ' if volatile else ''
+            return f'*({cv}{self._vector_ctype(t, relaxed)}*)&{access}'
+        if volatile:
+            return f'*(volatile {self.ctype(t)}*)&{access}'
         return access
 
     def initializer(self, v: Value, name: str, expr: str) -> str:
@@ -1379,7 +1388,8 @@ class Emitter:
                 addr = f'{self.operand(s.predicate)} ? ({addr}) : (0)'
             nontemporal = s.attr('nontemporal')
             access = self.elem_access(s.args[0], addr, v.type,
-                                      s.attr('align') == 'relaxed')
+                                      s.attr('align') == 'relaxed',
+                                      bool(s.attr('volatile')))
             # `extern` is the name the macro layer already gave this value.
             # Emitting under it is what lets a named load take the structured
             # path: the consumer still spells `v58_data`, while the address is
@@ -1425,7 +1435,8 @@ class Emitter:
             val = s.args[1]
             vt = val.type if isinstance(val, Value) else None
             access = self.elem_access(s.args[0], addr, vt,
-                                      s.attr('align') == 'relaxed')
+                                      s.attr('align') == 'relaxed',
+                                      bool(s.attr('volatile')))
             # A store to global memory goes through the lexic, the same way
             # `Op.LOAD` above goes through `glb_load`: the nontemporal hint is
             # `__stcg` on NVIDIA and `__builtin_nontemporal_store` on AMD, and

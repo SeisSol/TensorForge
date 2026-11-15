@@ -247,9 +247,13 @@ class _Pass:
     `id` while the walks run.
     """
 
-    def __init__(self, extents, identity, handoff, make_barrier, arrival):
+    def __init__(self, extents, identity, handoff, make_barrier, arrival,
+                 own=frozenset()):
         self.extents = extents
         self.identity = identity
+        #: The buffers every lane reads only what it wrote itself, by value
+        #: id (`own_buffers`): no hand-over, nothing to meet for.
+        self.own = own
         self.handoff = handoff
         self.make_barrier = make_barrier
         self.arrival = arrival
@@ -291,6 +295,8 @@ class _Pass:
                 writes.append((_OPAQUE, _ANYWHERE, MULT))
                 continue
             if a.base is None:
+                continue
+            if isinstance(a.base, Value) and a.base.id in self.own:
                 continue
             key = self.key(a.base)
             if (a.space == MemSpace.GLOBAL and isinstance(a.base, AliasClass)
@@ -579,6 +585,20 @@ def _count(s: Stmt) -> int:
     return n
 
 
+def own_buffers(body: Sequence[Stmt]) -> FrozenSet[int]:
+    """The shared buffers, by value id, every lane of which reads only what
+    it wrote itself, and which share their bytes with no other buffer: the
+    allocation says so (`own`, with `lifetime` `'body'`) -- the slots a
+    register spills to (`budget.spill_shared`), one element a lane each.  A
+    lane reads its own store in program order, and no barrier is owed
+    between the two; a buffer that shared bytes with another would owe one
+    to what the other lanes did there."""
+    return frozenset(
+        s.target[0].id for s in walk_stmts(body)
+        if s.op == Op.ALLOC and s.target and s.attr('own')
+        and s.attr('lifetime') == 'body')
+
+
 def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
                    make_barrier: Callable[[bool, bool], Stmt],
                    arrival: Uniformity,
@@ -598,7 +618,8 @@ def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
         if s.op == Op.ALLOC and s.target and s.attr('identity') is not None:
             identity[s.target[0].id] = ('o', id(s.attr('identity')))
     work = _Pass(arena.extents(body), identity,
-                 {('o', id(h)) for h in handoff}, make_barrier, arrival)
+                 {('o', id(h)) for h in handoff}, make_barrier, arrival,
+                 own_buffers(body))
     out, _, unfenced = work.place(tuple(body), _State.empty(), Uniformity.GRID)
     if report is not None and unfenced:
         report.append(f'{len(unfenced)} access(es) to shared memory meet an '

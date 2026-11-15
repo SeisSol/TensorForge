@@ -1003,7 +1003,8 @@ class IRBuilder:
               stage: Optional[Operand] = None,
               place_align: Optional[int] = None,
               lifetime: Optional[str] = None,
-              permutable: Optional[int] = None) -> Value:
+              permutable: Optional[int] = None,
+              own: bool = False) -> Value:
         """Request a buffer *symbolically*.
 
         No offset and no address: for registers the compiler assigns those,
@@ -1025,7 +1026,9 @@ class IRBuilder:
         whatever its accesses say (`bulk_channel`).  `permutable` is the
         granule a permutation of this window would have to keep whole, where
         one may be applied at all -- what `banks.propose` decides from, once
-        the body exists.
+        the body exists.  `own`: every lane reads only what it wrote itself
+        there, which together with the `'body'` lifetime owes no barrier
+        (`barriers.own_buffers`).
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
@@ -1046,6 +1049,8 @@ class IRBuilder:
                 attrs = attrs + (('place_align', place_align),)
             if lifetime is not None:
                 attrs = attrs + (('lifetime', lifetime),)
+            if own:
+                attrs = attrs + (('own', True),)
         elif arena is not None:
             attrs = (('arena', arena), ('offset', offset))
         if extern is not None:

@@ -584,10 +584,21 @@ class _Guards:
     A value with no use, a yield out of anything but a lane-guarded `if`, a
     store or raw text outside a guard all count as every lane's.  And which
     values come of a cross-lane read (`crossed`), through register buffers
-    alike."""
+    alike.
+
+    The slots a register spills to in shared memory (`budget.spill_shared`)
+    count as register buffers: a lane stores there what it loads back, and
+    what came of a cross-lane read and enters a guard by way of a slot needs
+    the pin as much.  Not followed so, the order-6 dense `localFluxAll` with
+    a slot tier lost 27 of its 45 pins, and computed wrong on the Max 1550
+    by what `valselnone` did (job 561196)."""
 
     def __init__(self, body: Tuple[Stmt, ...]):
         self.guarded: Dict[int, bool] = {}
+        #: The shared buffers each lane keeps its own slots in, by value id.
+        self.own: Set[int] = {
+            s.target[0].id for s in walk_stmts(body)
+            if s.op == Op.ALLOC and s.target and s.attr('own')}
 
         def lane_dependent(x) -> bool:
             return isinstance(x, Value) and x.uniformity <= Uniformity.LANE
@@ -614,7 +625,7 @@ class _Guards:
                 self.uses.setdefault(st.predicate.id, []).append((st, -1))
             if self.register(st):
                 (self.loads if st.op == Op.LOAD else stores).setdefault(
-                    id(st.args[0]), []).append(st)
+                    self.buffer(st), []).append(st)
         self.kept: Set[int] = set()
         for st in reversed(self.order):
             for t in st.target:
@@ -628,18 +639,29 @@ class _Guards:
                 hit = bool(st.attr('crosslane')) or any(
                     v.id in self.crossed for v in st.operands())
                 if st.op == Op.LOAD and self.register(st):
-                    hit = hit or id(st.args[0]) in filled
+                    hit = hit or self.buffer(st) in filled
                 if st.op == Op.STORE and self.register(st) and len(
                         st.args) > 1 and isinstance(st.args[1], Value):
                     if st.args[1].id in self.crossed:
-                        filled.add(id(st.args[0]))
+                        filled.add(self.buffer(st))
                 if hit:
                     self.crossed.update(t.id for t in st.target)
 
+    def register(self, st: Stmt) -> bool:
+        if st.op not in (Op.LOAD, Op.STORE) or not st.accesses:
+            return False
+        a = st.accesses[0]
+        return (a.space is MemSpace.REGISTER
+                or (a.space is MemSpace.SHARED and isinstance(a.base, Value)
+                    and a.base.id in self.own))
+
     @staticmethod
-    def register(st: Stmt) -> bool:
-        return (st.op in (Op.LOAD, Op.STORE) and bool(st.accesses)
-                and st.accesses[0].space is MemSpace.REGISTER)
+    def buffer(st: Stmt):
+        """What a register access is to: its buffer -- or, in the slots a
+        register spills to, the value spilled there (`spilled`), which other
+        values hold the same slot before and after."""
+        spilled = st.attr('spilled')
+        return ('slot', spilled) if spilled is not None else id(st.args[0])
 
     def held_back(self, u: Stmt, k: int) -> bool:
         """Whether the use `u` (operand `k`) is one a guard keeps to some
@@ -652,7 +674,7 @@ class _Guards:
             return True
         return (u.op == Op.STORE and k == 1 and self.register(u)
                 and all(x.id in self.kept for ld in self.loads.get(
-                    id(u.args[0]), ()) for x in ld.target))
+                    self.buffer(u), ()) for x in ld.target))
 
     def keeps(self, u: Stmt, k: int) -> bool:
         if self.held_back(u, k):

@@ -343,3 +343,20 @@ def test_what_a_loop_clears_again_waits_for_its_last_iteration():
         b.mark('cleared', buf)
     ops = _ops(_place(b.finish()))
     assert [depth for depth, op in ops if op == Op.BARRIER] == [1], ops
+
+
+def test_a_lanes_own_slots_owe_no_barrier():
+    """`own_buffers`: where the allocation says every lane reads only what
+    it stored there, and the buffer shares its bytes with nothing (held for
+    the whole body), a load behind a store takes no barrier -- any other
+    shared buffer one (`budget.spill_shared`'s slots)."""
+    for own in (True, False):
+        b = _builder()
+        buf = b.alloc(Datatype.F32, (32,), MemSpace.SHARED, hint='s',
+                      lifetime='body', own=own)
+        out = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='out')
+        lane = b.thread_id('x')
+        x = b.load(out, lane)
+        b.store(buf, b.op('mul', x.type, x, 2.0), lane)
+        b.store(out, b.load(buf, lane), lane)
+        assert bool(_barriers(_place(b.finish()))) is not own, own

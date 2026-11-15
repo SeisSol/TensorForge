@@ -806,7 +806,8 @@ def standard_pipeline(debug: str = '',
             pm.add(Rewrite(name, fn, preserves=('flat',),
                            when=lambda pc: pc.register_values))
         pm.add(Rewrite('remat', blocks.remat, preserves=('flat',),
-                       when=lambda pc: pc.register_spill == 'remat'))
+                       when=lambda pc: pc.register_spill in ('remat',
+                                                             'shared')))
     if place is not None:
         pm.add(place)
     if barriers is not None:

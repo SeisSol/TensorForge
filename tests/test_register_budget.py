@@ -31,7 +31,7 @@ from tensorforge.backend.pir import (IRBuilder, MemSpace, Op, passes, pipeline,
 from tensorforge.backend.pir.blocks import RegisterBlocks
 from tensorforge.backend.pir.budget import (RELOAD_PRICE, Budget, Liveness,
                                             rematerialize)
-from tensorforge.backend.pir.core import (LaneAxis, RegisterLayout,
+from tensorforge.backend.pir.core import (INDEX, LaneAxis, RegisterLayout,
                                           ScalarType, walk_stmts)
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
@@ -392,3 +392,135 @@ def test_off_nothing_changes():
                        register_spill='off') == default
         assert _kernel('chain', backend, arch, register_spill='remat',
                        register_budget=64) != default
+
+
+# --------------------------------------------------------------------------
+# the next tier: shared memory
+# --------------------------------------------------------------------------
+
+def _computed_gap(b, held=4, between=12):
+    """`held` values computed early -- sums nothing can load again -- read
+    once more late, and a stretch in between that holds `between` values of
+    its own at once."""
+    src = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='src')
+    out = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='out')
+    lane = b.thread_id('x')
+    xs = [b.op('mul', F32, b.load(src, b.op('add', INDEX, lane, 16 * k)),
+               2.0, hint=f'c{k}') for k in range(held)]
+    mid = [b.load(out, b.op('add', INDEX, lane, 16 * k), hint=f'm{k}')
+           for k in range(between)]
+    m = mid[0]
+    for v in mid[1:]:
+        m = b.op('add', F32, m, v, hint='mid')
+    b.store(out, m, lane)
+    u = xs[-1]
+    for x in reversed(xs[:-1]):
+        u = b.op('add', F32, u, x, hint='late')
+    b.store(out, u, b.op('add', INDEX, lane, 16))
+    return xs
+
+
+def test_a_computed_value_goes_to_a_slot_of_its_own_lane_and_comes_back():
+    """`spill_shared`: what `rematerialize` cannot load again -- a sum -- is
+    stored behind its definition into its lane's slot of shared memory and
+    loaded before its next read; the slots are one buffer of the
+    multiplication's arena, its own lane's to every lane, for the whole
+    body; within the slots, and the body fits where enough of them are."""
+    from tensorforge.backend.pir.budget import spill_shared
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    xs = _computed_gap(b)
+    body = b.finish()
+    verify(body)
+    peak = Liveness(body, False).peak
+    report = []
+    out = spill_shared(body, b.scratch, capacity=peak - 8, shared=4 * 16 * 4,
+                       threads=16, arena='shrMem', report=report)
+    verify(out)
+    allocs = [s for s in walk_stmts(out) if s.op == Op.ALLOC
+              and s.target[0].type.space is MemSpace.SHARED]
+    assert len(allocs) == 1
+    assert allocs[0].attr('own') and allocs[0].attr('lifetime') == 'body'
+    buf = allocs[0].target[0]
+    stores = [s for s in walk_stmts(out) if s.op == Op.STORE
+              and s.args[0] is buf]
+    reloads = _loads(out, buf)
+    assert stores and len(reloads) == len(stores)
+    assert {s.args[1].id for s in stores} <= {x.id for x in xs}
+    # Made where they stand: no compiler takes a load back from the store.
+    assert all(s.attr('volatile') for s in stores + reloads)
+    assert Liveness(out, False).peak < peak
+    assert report and 'spilled' in report[-1], report
+    # No slot, no spill: within a budget, or without room.
+    assert spill_shared(body, b.scratch, capacity=peak, shared=4096,
+                        threads=16, arena='shrMem') is body
+    assert spill_shared(body, b.scratch, capacity=peak - 8, shared=32,
+                        threads=16, arena='shrMem') is body
+
+
+def test_a_volatile_access_is_spelled_through_a_volatile_pointer():
+    """`Emitter.elem_access`: what `spill_shared` marks `volatile` the
+    compiler has to make as often as it stands."""
+    from dataclasses import replace as _replace
+    from tensorforge.backend.pir import emit
+    from tensorforge.backend.writer import Writer
+    b = IRBuilder(fptype=Datatype.F32)
+    glb = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g')
+    b.store(glb, b.op('mul', F32, b.load(glb, 0), 2.0), 1)
+    body = tuple(_replace(s, attrs=s.attrs + (('volatile', True),))
+                 if s.op in (Op.LOAD, Op.STORE) else s for s in b.finish())
+    writer = Writer()
+    emit(body, writer, Context(arch='sm_90', backend='cuda',
+                               fp_type=Datatype.F32))
+    src = writer.get_src()
+    assert src.count('*(volatile float*)&') == 2, src
+
+
+def test_with_too_little_budget_computed_values_go_to_shared_memory():
+    """`register_spill=shared` on a kernel: under SPMD on Intel and on
+    NVIDIA, with a budget far too small, values go to their lanes' slots of
+    shared memory, accessed volatile; off it changes nothing, and the
+    explicit vector has no such tier."""
+    for backend, arch in (('oneapi', 'pvc'), ('cuda', 'sm_90')):
+        src = _kernel('chain', backend, arch, register_spill='shared',
+                      register_budget=64)
+        assert '*(volatile float*)&' in src and '_spill[' in src, backend
+        assert _kernel('chain', backend, arch, register_spill='shared',
+                       register_budget=64, register_shared=0) == src
+    assert '_spill[' not in _kernel('chain', 'esimd', 'pvc',
+                                    register_spill='shared',
+                                    register_budget=64)
+
+
+def test_what_came_of_a_broadcast_is_pinned_through_its_slot():
+    """`values._Guards` follows a value through its slot of shared memory
+    (`spilled`): what came of a cross-lane read, spilled and loaded back
+    into a lane guard, is pinned as it is without the slot -- IGC 2.41.5
+    computed the order-6 dense `localFluxAll` wrong with the slots and 27 of
+    its 45 pins gone."""
+    from tensorforge.backend.pir.budget import spill_shared
+    from tensorforge.backend.pir.core import BOOL
+    from tensorforge.backend.pir.values import pin_crosslane_sources
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    src = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='src')
+    out = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='out')
+    lane = b.thread_id('x')
+    inside = b.op('lt', BOOL, lane, 3, hint='inside')
+    v = b.op('mul', F32, b.rawexpr(
+        'sycl::group_broadcast(item.get_sub_group(), {0}, 1)',
+        b.load(src, lane), type_=F32, hint='bc', pure=True, crosslane=True),
+        2.0, hint='v')
+    mid = [b.load(out, b.op('add', INDEX, lane, 16 * k), hint=f'm{k}')
+           for k in range(12)]
+    m = mid[0]
+    for x in mid[1:]:
+        m = b.op('add', F32, m, x, hint='mid')
+    b.store(out, m, lane)
+    b.store(out, v, b.op('add', INDEX, lane, 16), predicate=inside)
+    body = b.finish()
+    spilled = spill_shared(body, b.scratch,
+                           capacity=Liveness(body, False).peak - 4,
+                           shared=4 * 16 * 4, threads=16, arena='shrMem')
+    assert spilled is not body
+    pins = [s for s in walk_stmts(pin_crosslane_sources(spilled))
+            if s.op == Op.RAWSTMT and 'asm' in (s.text or '')]
+    assert pins

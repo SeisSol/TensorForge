@@ -101,7 +101,7 @@ def parse_float(text: str) -> float:
 
 
 def parse_register_spill(text: str) -> str:
-  """`off` or `remat` (`Options.register_spill`)."""
+  """`off`, `remat` or `shared` (`Options.register_spill`)."""
   value = text.strip().lower()
   if value not in REGISTER_SPILL:
     raise ValueError(f'expected one of {REGISTER_SPILL}, got {text!r}')
@@ -109,7 +109,7 @@ def parse_register_spill(text: str) -> str:
 
 
 #: What `Options.register_spill` takes.
-REGISTER_SPILL = ('off', 'remat')
+REGISTER_SPILL = ('off', 'remat', 'shared')
 
 
 def parse_crosslane_pins(text: str) -> str:
@@ -764,7 +764,11 @@ declare('register_spill',
             '-- the compiler spills as it does; `remat`, a value that is a '
             'load of memory the kernel does not write, or a constant, is had '
             'again before its next read instead of kept across the gap, the '
-            'one read again furthest ahead first (`pir.budget`).  Implies '
+            'one read again furthest ahead first (`pir.budget`); `shared`, '
+            'that and then a value computed in the body is stored once into a '
+            'slot of shared memory of its own lane and loaded from there '
+            'before a read the gap holds it from (`pir.budget.spill_shared`, '
+            '`register_shared`).  Implies '
             '`register_values`: '
             'the values a column holds are what is decided over.  Named for '
             'what the body does in place of the compiler\'s spill, and a '
@@ -781,6 +785,29 @@ declare('register_budget',
             '(`abstract_instruction.register_budget`).  In the model\'s own '
             'bytes, not the compiler\'s registers, so that a calibration '
             'moves it without a change of code.')
+
+declare('register_shared',
+        default=0,
+        env='TF_REGISTER_SHARED',
+        parse=parse_int,
+        doc='Bytes of shared memory a multiplication may take for the values '
+            '`register_spill=shared` spills there, or 0 for the target\'s own: '
+            'what the multiplications the target keeps resident leave each '
+            'without lowering their number (`abstract_instruction.'
+            'shared_spill_bytes`).  More than that trades resident '
+            'multiplications for registers.'),
+
+declare('register_shared_volatile',
+        default=True,
+        env='TF_REGISTER_SHARED_VOLATILE',
+        parse=parse_bool,
+        doc='Access the slots `register_spill=shared` spills to as `volatile`: '
+            'where the body stores and loads them, as often as it does.  Off, '
+            'a compiler may take a load back from the store or from the load '
+            'before -- IGC 2.41.5 kept 1665 of the order-8 dense `volume`\'s '
+            '5245 loads back and 1284 of its 1928 stores -- and keep the '
+            'register after all; on, it spilled 22720 B besides, against '
+            '15232 off (8 KB of slots, listing).'),
 
 declare('register_left_over',
         default=-1.0,

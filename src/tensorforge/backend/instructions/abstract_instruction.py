@@ -386,9 +386,54 @@ def register_budget(context, lanes: Optional[int] = None):
     capacity = max(0, int((file / 4 - a) / b * 4))
   if options.register_budget:
     capacity = int(options.register_budget)
+  shared = 0
+  if options.register_spill == 'shared' and not _explicit_simd(context):
+    shared = (int(options.register_shared) or shared_spill_bytes(context,
+                                                                 lanes))
   return Budget(capacity, margin=BUDGET_MARGIN,
                 spill_price=SPILL_PRICE.get(vendor, SPILL_PRICE['intel']),
-                left_over=float(options.register_left_over))
+                left_over=float(options.register_left_over), shared=shared,
+                shared_volatile=bool(options.register_shared_volatile))
+
+
+#: Hardware threads an Intel Xe-core keeps resident: eight an EU on eight
+#: EUs with 128 registers a thread, half as many with 256 (`sycl_grf`).
+XE_THREADS = {128: 64, 256: 32}
+
+#: Warps an NVIDIA SM keeps resident where every thread takes the 255
+#: registers the budget is calibrated at (`PTXAS_NEED`): 65536 / (255 x 32).
+NVIDIA_WARPS_AT_255 = 8
+
+
+def shared_spill_bytes(context, lanes: Optional[int] = None) -> int:
+  """Bytes of shared memory a multiplication may spill values to
+  (`budget.spill_shared`) without lowering how many the target keeps
+  resident: the shared memory one core has over the multiplications that
+  share it at the register file the budget assumes.
+
+  * Intel under SPMD: a sub-group is one hardware thread, and an Xe-core
+    keeps 64 (128 registers) or 32 (256) of them in its 128 KB
+    (`XE_THREADS`): 2 KB a sub-group, 4 KB with 256 -- a multiplication
+    its lanes' share of it;
+  * NVIDIA: a multiplication's lanes' share of what the warps an SM keeps
+    at 255 registers a thread (`NVIDIA_WARPS_AT_255`) have of its shared
+    memory;
+  * elsewhere nothing yet: AMD's LDS against the accumulation registers is a
+    question of its own (`register_shared` sets it).
+  """
+  target = context.target
+  hw = target.hw
+  vendor = str(hw.vendor).lower()
+  total = getattr(hw, 'max_local_mem_size_per_block', 0) or 0
+  if vendor == 'intel':
+    grf = str(context.get_user_options().sycl_grf).strip()
+    registers = 256 if grf in ('256', 'auto') else 128
+    width = target.sub_group_width(lanes or 0) or hw.vec_unit_length
+    return total // XE_THREADS[registers] * int(lanes or width) // width
+  if vendor == 'nvidia':
+    warp = hw.vec_unit_length
+    return total * int(lanes or warp) // (warp * NVIDIA_WARPS_AT_255)
+  return 0
 
 
 def _pin_every(context, body, num_threads) -> int:
