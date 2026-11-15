@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
+from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context
 from tensorforge.backend.writer import Writer
 from tensorforge.common.exceptions import InternalError
@@ -58,6 +59,40 @@ def _explicit_simd(context) -> bool:
     return bool(context.target.explicit_simd)
   except AttributeError:
     return False
+
+
+def _predicated_values(context) -> bool:
+  """Whether a register block an access under a predicate reaches may be
+  taken to values (`Options.register_values`), the store a select between
+  what it stores and what the block held -- everywhere but SYCL's SPMD
+  lowering on Intel, where IGC computes what feeds a sub-group broadcast
+  only in the lanes such a select keeps.
+
+  Measured on the Max 1550 (IGC 2.41.5 and 2.40.13; 2.42.6 for some
+  kernels): the order-6 dense `derivative` as values wrote rows 32 to 34 of
+  dQ(1)'s first column -- the three valid lanes of its last block, kept by
+  `lane < 3` -- as the right value less exactly the products whose operand
+  is broadcast from lanes 3 to 15, for one of the three directions (to
+  1e-13 over 32 elements); with loads put back, dQ(3)'s first column less
+  exactly those from lanes 10 to 15 under `lane < 10` (1.5e-8).  The source
+  is defined, and right under the CPU emulator with every local poisoned and
+  the sanitizers on; as written, the block an array and its store a branch,
+  IGC has computed it right on every version.
+  """
+  target = context.target
+  return not (getattr(target, 'sycl', False) and not _explicit_simd(context)
+              and str(target.hw.vendor).lower() == 'intel')
+
+
+def _pin_crosslane(context) -> bool:
+  """Whether, with the blocks as values, a value another lane reads is
+  pinned where it is defined (`pir.values.pin_crosslane_sources`): DPC++'s
+  SPMD lowering on Intel, where IGC computes it only in the lanes a guard
+  downstream keeps -- the guard a select or a branch around a store alike
+  (`_predicated_values` takes away only the first)."""
+  target = context.target
+  return (not _predicated_values(context)
+          and getattr(target, 'backend', '') == 'oneapi')
 
 
 def _check_register_budget(body, simd: bool, context, where: str) -> None:
@@ -239,6 +274,109 @@ PIN_EVERY = 32
 #: 61 %.  The worst left is viscoelastic order-6 `fluxLocalAll` in double on
 #: A100, estimated at 373 and spilling 64 B, which ptxas copes with.
 PIN_MARGIN = 10
+
+
+#: General registers the explicit vector's compiler keeps for itself out of
+#: the file a work-item has: the thread's payload, the addresses of its
+#: messages, what it schedules into.  Assumed, not measured -- no listing has
+#: been read for it -- and what a PVC calibration has to set.
+GRF_RESERVE = 16
+
+#: The bytes of register file a lane takes under IGC's SPMD lowering for
+#: each byte the model counts.  Of 21 oneapi listings on PVC (elastic orders
+#: 6 and 8, viscoelastic 6; as written, blocks as values, values put back),
+#: IGC held the order-6 sparse `volume` and `localFluxAll` without a spill
+#: at 748 and 640 B as written and at 595 and 593 B as values, and spilled
+#: every build of values from 870 B on (the sparse `derivative`, 6.9 kB):
+#: a lane's 512 B of the small file over 0.8 is 640 B.
+IGC_NEED = 0.8
+
+#: hipcc's registers per four bytes the model counts, in double precision:
+#: the most any build took that kept within its file, over 22 builds on
+#: gfx942 and gfx1150 (elastic orders 6 and 8, viscoelastic 6; as written,
+#: as values, values put back) -- 0.95 for the order-6 sparse `derivative`
+#: on gfx1150 (204 VGPRs at 863 B), 0.93 for the dense one on gfx942 (434
+#: at 1859 B).  Single precision keeps the tuner's fit
+#: (`Preferences.register_fit`, 1.26), which was measured in it and
+#: overshoots double by up to 113 registers.
+HIPCC_NEED_F64 = 0.95
+
+#: How far over its capacity a body may peak before `register_spill` acts,
+#: for what the model does not see of the compiler: ptxas spilled 40 and
+#: 164 B for the order-6 dense `derivative` and `volume` with their blocks
+#: as values, 14 and 15 % over (1038 and 1045 B against 910); hipcc on
+#: gfx1150 nothing for that `volume`, 6 % over (1145 B against 1077).  A
+#: fifth, not a seventh, so that neither is decided by a byte.
+BUDGET_MARGIN = 0.2
+
+#: Instructions one value the compiler spills costs it, its store and one
+#: fill: on ptxas and hipcc an access to local or scratch memory each; on
+#: IGC and VC a scratch message each, with the header it is sent with -- an
+#: estimate, not a fit.  What a value put back may cost at most
+#: (`budget.Budget.spill_price`, `budget.RELOAD_PRICE`): a guarded reload on
+#: SASS took four.
+SPILL_PRICE = {'nvidia': 2, 'amd': 2, 'intel': 4}
+
+
+def register_budget(context, lanes: Optional[int] = None):
+  """What `Options.register_spill` holds a body to (`budget.Budget`), or
+  None where nothing is known: the bytes the register model (`pir.pressure`)
+  may count live in a lane -- a work-item under the explicit vector --
+  before the target's compiler was measured to spill, `BUDGET_MARGIN` and
+  `SPILL_PRICE`.  `Options.register_budget` sets the bytes where given.
+
+  The model counts values and not registers, so the capacity is the file
+  read back through what each compiler took for the model's bytes:
+
+  * NVIDIA: ptxas's need, `PTXAS_NEED` (66 + 0.83 a modeled register, sm_90,
+    48 SeisSol kernels), at the 255 registers a thread has: 910 B.  Its
+    spills follow the same fit past that, within a factor of two: 111 B
+    predicted at 1045 B (164 and 44 B on sm_90 and sm_120), 939 at 2042
+    (1460, 1516);
+  * AMD: hipcc's need, `HIPCC_NEED_F64` in double precision and the tuner's
+    fit in single, of the file -- 512 registers from gfx90a on and on
+    gfx1250, 256 elsewhere: 2155 B on gfx942, 1077 on gfx1150 in double;
+  * Intel under SPMD: a thread holds the sub-group, so a lane has the file
+    over the sub-group (`Target.lanes_share_register_file`) -- 128 general
+    registers of 64 B unless `sycl_grf` asks for 256 -- through IGC's
+    need, `IGC_NEED`: 640 B at 16 lanes;
+  * the explicit vector: the work-item is the thread, 256 registers unless
+    `sycl_grf` asks for 128 (`SyclLexic._grf_property`), less
+    `GRF_RESERVE`; nothing fitted against VC yet.
+  """
+  from tensorforge.backend.pir.budget import Budget
+  options = context.get_user_options()
+  target = context.target
+  hw = target.hw
+  vendor = str(hw.vendor).lower()
+  if vendor == 'intel':
+    grf = str(options.sycl_grf).strip()
+    large = (grf in ('256', 'auto')
+             or (grf == 'default' and _explicit_simd(context)))
+    registers = 256 if large else 128
+    if _explicit_simd(context):
+      capacity = (registers - GRF_RESERVE) * 64
+    else:
+      width = target.sub_group_width(lanes or 0) or hw.vec_unit_length
+      capacity = int(registers * 64 / width / IGC_NEED)
+  else:
+    file = getattr(hw, 'max_reg_per_thread', None)
+    if file is None:
+      return None
+    if vendor == 'nvidia':
+      a, b = PTXAS_NEED
+    elif context.fp_type == Datatype.F64:
+      a, b = 0.0, HIPCC_NEED_F64
+    elif target.prefs.register_fit is not None:
+      a, b = target.prefs.register_fit
+    else:
+      a, b = 0.0, 1 / FIT_FRACTION
+    capacity = max(0, int((file / 4 - a) / b * 4))
+  if options.register_budget:
+    capacity = int(options.register_budget)
+  return Budget(capacity, margin=BUDGET_MARGIN,
+                spill_price=SPILL_PRICE.get(vendor, SPILL_PRICE['intel']),
+                left_over=float(options.register_left_over))
 
 
 def _pin_every(context, body, num_threads) -> int:
@@ -716,6 +854,13 @@ class AbstractInstruction(ABC):
                         convert_guards=options.convert_lane_guards,
                         register_blocks=options.register_blocks,
                         register_values=options.register_values,
+                        register_spill=options.register_spill,
+                        register_budget=(register_budget(context, lanes)
+                                         if options.register_spill != 'off'
+                                         else None),
+                        folded_crosslane=context.target.folds_broadcast(),
+                        predicated_values=_predicated_values(context),
+                        pin_crosslane=_pin_crosslane(context),
                         scratch=builder.scratch,
                         unroll_fence=options.esimd_unroll_fence,
                         debug=options.ir_debug, move=move, wrap=wrap,
@@ -801,6 +946,12 @@ class AbstractInstruction(ABC):
             body, explicit_simd=simd, convert_guards=convert,
             register_blocks=options.register_blocks,
             register_values=options.register_values,
+            register_spill=options.register_spill,
+            register_budget=(register_budget(self._context)
+                             if options.register_spill != 'off' else None),
+            folded_crosslane=self._context.target.folds_broadcast(),
+            predicated_values=_predicated_values(self._context),
+            pin_crosslane=_pin_crosslane(self._context),
             scratch=builder.scratch,
             unroll_fence=options.esimd_unroll_fence, debug=debug,
             where=type(self).__name__))

@@ -756,18 +756,41 @@ class RegisterBlocks:
     with the builder of what they add, whether the body is under the explicit
     vector, the fence between written-out trips, and whether the blocks
     become values (`values.block_values`), which takes an access under a
-    predicate into a block too."""
+    predicate into a block too -- as a select -- unless `select_predicated`
+    is False."""
 
     def __init__(self, scratch, explicit_simd: bool = False, fence: int = 0,
-                 values: bool = False,
+                 values: bool = False, budget=None,
+                 folded_crosslane: bool = False,
+                 select_predicated: bool = True,
+                 pin_crosslane: bool = False,
                  report: Optional[List[str]] = None):
         self.scratch = scratch
         self.explicit_simd = explicit_simd
         self.fence = fence
         self.values = values
+        #: Whether an access under a predicate may take its block to values,
+        #: a store a select between what it stores and what the block held
+        #: (`abstract_instruction._predicated_values`).
+        self.select_predicated = select_predicated
+        #: Whether a value another lane reads is pinned where it is defined,
+        #: once the blocks are values (`values.pin_crosslane_sources`,
+        #: `abstract_instruction._pin_crosslane`).
+        self.pin_crosslane = pin_crosslane
+        #: Whether `remat` handed the body back as it came.
+        self.reverted = False
+        #: What `remat` holds the body to (`budget.Budget`,
+        #: `abstract_instruction.register_budget`), or None.
+        self.budget = budget
+        self.folded_crosslane = folded_crosslane
         self.report = report
+        #: The body as it came, before its images were taken apart: what
+        #: `remat` leaves where it would put no load back.
+        self.whole: Optional[Tuple[Stmt, ...]] = None
 
     def unroll(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        if self.budget is not None and self.whole is None:
+            self.whole = body
         return unroll_register_loops(body, self.scratch,
                                      explicit_simd=self.explicit_simd,
                                      fence=self.fence,
@@ -784,4 +807,51 @@ class RegisterBlocks:
         from .values import block_values
         return block_values(body, self.scratch,
                             explicit_simd=self.explicit_simd,
+                            predicated=self.select_predicated,
                             report=self.report)
+
+    def remat(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        """`body` held to the budget (`budget.rematerialize`) -- or, where
+        that would put back no load, the body as it came to `unroll`, its
+        images whole.
+
+        The images are taken apart for what the budget then does with the
+        values.  Where it does nothing but put constants back, the values
+        are all that is left of it, and on PVC those alone made every volume
+        kernel slower (`values`: order 6 dense +23 %, order 8 +111 % dense,
+        +170 % sparse); and the elastic `localFluxAll` and `volume` at order
+        6, sparse, which IGC holds without a spill, stay as they were."""
+        from .budget import rematerialize
+        if self.budget is None:
+            return body
+        from .budget import Liveness
+        # The body as written, against which the stop is calibrated -- under
+        # SPMD only: the explicit vector's model holds a whole image for the
+        # whole body, which no timing has related to anything yet.
+        written = None
+        if self.whole is not None and not self.explicit_simd:
+            written = Liveness(self.whole, False, self.folded_crosslane).peak
+        taken: dict = {}
+        out = rematerialize(body, self.scratch, budget=self.budget,
+                            explicit_simd=self.explicit_simd,
+                            folded_crosslane=self.folded_crosslane,
+                            report=self.report, taken=taken,
+                            as_written=written)
+        if (self.whole is not None
+                and not (taken.get('load') or taken.get('guarded'))):
+            if self.report is not None:
+                self.report.append('budget: no load put back; the images '
+                                   'stay whole')
+            self.reverted = True
+            return self.whole
+        return out
+
+    def pin(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        """`body` with what another lane reads pinned where it is defined
+        (`values.pin_crosslane_sources`), where the target asks for it and
+        the blocks are values -- not a body `remat` handed back whole, which
+        is the default's."""
+        from .values import pin_crosslane_sources
+        if not self.pin_crosslane or self.reverted:
+            return body
+        return pin_crosslane_sources(body)
