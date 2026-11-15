@@ -184,7 +184,8 @@ class RegmaxBlockPolicy(AbstractThreadBlockPolicy):
     # preferred block takes the 256-thread bound.
     lanes = self._num_threads * self._lane_factor
     threads = (self._context.target.prefs.unstaged_block_threads
-               if self._global_mem == 0 and not self._stages else 256)
+               if self._global_mem == 0 and not self._stages
+               else self._context.get_user_options().staged_block_threads)
     max_thread_mults = threads // lanes or 256 // lanes
     # Under the explicit-vector lowering one work-item *is* a thread and
     # holds the whole vector, so `threads // lanes` counts lanes where it
@@ -4498,6 +4499,11 @@ class Generator:
     min_blocks = self._context.get_user_options().min_blocks_per_sm
     if min_blocks and self._context.target.min_blocks_bound():
       launch_bounds += (min_blocks,)
+    # HIP's own reading of the second argument: waves a SIMD, which hipcc
+    # sizes the registers for (`amd_waves_per_eu`).
+    waves = self._context.get_user_options().amd_waves_per_eu
+    if waves and self._context.target.waves_per_eu_bound():
+      launch_bounds += (waves,)
 
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
                                          shr_total_size, global_symbols,

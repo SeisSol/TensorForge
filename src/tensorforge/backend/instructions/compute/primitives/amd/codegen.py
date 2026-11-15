@@ -225,6 +225,7 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                     ax = a
                     usebcst = False
 
+                written = []
                 for jj in range(repeat):
                     for bx in range(localstep):
                         if idx + jj < len(B[bx]):
@@ -236,10 +237,15 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                             bv = B[bx][idx + jj]
                             c = C[bx][idx + jj]
                             if bv is not None:
+                                written.append(c)
                                 if usebcst:
                                     fma(writer, c, ax[bx], bv, j)
                                 else:
                                     func(writer, c, ax[bx], bv, j)
+                if (form is BroadcastForm.MOVED and written
+                        and _moved_pins(ctx)):
+                    # The row order's pin (`_fused_rows`), here per moved row.
+                    _pin(writer, list(dict.fromkeys(written)))
 
 
 def _pad(writer, tile, ftype):
@@ -909,6 +915,36 @@ def _move_row(writer, src, vtype, threads, row):
                        movable=False, layout=MOVDPP16.produces(**mv))
 
 
+#: The rows the row order reads ahead where `Options.amd_row_lookahead` is left
+#: to the target (-1): two on CDNA at 32 lanes in double precision, none
+#: elsewhere.  MI300A, two rows ahead against none at 32 lanes: elastic order 8
+#: derivative -8 %, localFluxAll -11 %, volume -9 %; order 6 derivative -10 %,
+#: volume -3 %; viscoelastic order 6 -1 to -4 %; order 4 unchanged -- no kernel
+#: slower.  At 16 lanes it went both ways (order 8 localFluxAll and volume +6 to
+#: +11 %), so it stays off there.
+AUTO_LOOKAHEAD = 2
+
+
+def _row_lookahead(ctx, threads=None, dtype=None) -> int:
+    """How many rows ahead the row order reads its lead operand
+    (`Options.amd_row_lookahead`; -1 asks `AUTO_LOOKAHEAD`'s rule)."""
+    opts = ctx.get_user_options() if hasattr(ctx, 'get_user_options') else None
+    value = getattr(opts, 'amd_row_lookahead', 0)
+    value = -1 if value is None else int(value)
+    if value >= 0:
+        return value
+    if cdna2(ctx) and threads == 32 and dtype == Datatype.F64:
+        return AUTO_LOOKAHEAD
+    return 0
+
+
+def _moved_pins(ctx) -> bool:
+    """Whether the column order pins a moved row's accumulators
+    (`Options.amd_moved_pins`), on CDNA, where the moves are asked for."""
+    opts = ctx.get_user_options() if hasattr(ctx, 'get_user_options') else None
+    return bool(getattr(opts, 'amd_moved_pins', False)) and moved_on_cdna(ctx)
+
+
 def _pin(writer, accumulators):
     """End of a row: its FMAs have to precede the next row's moves.
 
@@ -1095,13 +1131,21 @@ def _fused_rows(writer, cols, C, A, B, M, K, kx, threads, dtype, ctx):
     acc = {(j, s): writer.declare(ftype, hint='acc')
            for j in cols for s in range(M)}
     a_of = _a_on_demand(writer, A, K, kx)
+    ahead = _row_lookahead(ctx, threads, dtype)
     for k0 in range(0, K + kx, threads):
         dk = min(threads, K + kx - k0)
         for i in range(0, dk, step):
             rows = {j: _row_source(writer, sources[(j, k0)], ftype, threads,
                                    step, i // step) for j in cols}
             for r in range(min(step, dk - i)):
-                avs = [(s, a_of(s, k0 + i + r)) for s in range(M)]
+                key = k0 + i + r
+                avs = [(s, a_of(s, key)) for s in range(M)]
+                # The next rows' reads ahead of this row's products, and so
+                # ahead of its pins, which order memory as well: read at its
+                # own row, an `A(i, k)` waits its whole latency every row.
+                for later in range(key + 1, min(key + 1 + ahead, K + kx)):
+                    for s in range(M):
+                        a_of(s, later)
                 avs = [(s, av) for s, av in avs if av is not None]
                 if not avs:
                     continue

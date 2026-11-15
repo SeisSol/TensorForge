@@ -57,3 +57,14 @@ def test_zero_leaves_the_thread_count_alone():
 def test_hip_keeps_its_own_reading_of_the_second_argument(arch):
     threads, found = _bounds(arch, 'hip')
     assert set(found) == {f'{threads}'}
+
+
+@pytest.mark.parametrize('arch', ['gfx942', 'gfx1150'])
+def test_hip_states_the_waves_a_simd_holds_when_asked(arch):
+    threads, found = _bounds(arch, 'hip', amd_waves_per_eu=2)
+    assert set(found) == {f'{threads}, 2'}
+
+
+def test_cuda_does_not_read_the_waves_of_amd():
+    threads, found = _bounds('sm_120', 'cuda', amd_waves_per_eu=2)
+    assert set(found) == {f'{threads}, 1'}
