@@ -692,6 +692,30 @@ def test_a_chain_reads_and_writes_the_output_once(name, issue, route):
     assert not re.search(r"atomic_fadd|atomicAdd", src)
 
 
+@pytest.mark.parametrize("name,want", [("stacked_volume_f64", [3]),
+                                       ("stacked_chain21_f64", [])])
+def test_a_product_on_its_own_keeps_its_epilogue(name, want, monkeypatch):
+    """`D_CHAIN_SINGLES`: the volume's three products into `Q` are one chain,
+    while the 21-row product, the only one into its output, is none -- its
+    D layout is the register image already, and its old value read before
+    the issues would be held across them, where the epilogue adds it
+    after."""
+    from tensorforge.backend.instructions.compute import dchain
+    made = []
+    real = dchain.link
+
+    def spy(context, instrs):
+        out = real(context, instrs)
+        chains = {id(x._dchain): x._dchain for x in instrs
+                  if getattr(x, "_dchain", None) is not None}
+        made.extend(len(c.members) for c in chains.values())
+        return out
+    monkeypatch.setattr(dchain, "link", spy)
+    _kernel(name, mma_d_layout=True)
+    assert sorted(made) == want
+    assert amd.D_CHAINS and not amd.D_CHAIN_SINGLES
+
+
 @pytest.mark.parametrize("name,size", [("stacked_volume_f64", 8),
                                        ("stacked_volume_f32", 4)])
 def test_the_shard_arenas_start_a_quarter_bank_row_apart(name, size):

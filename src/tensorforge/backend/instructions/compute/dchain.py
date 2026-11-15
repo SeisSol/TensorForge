@@ -179,7 +179,8 @@ def link(context, instrs: Sequence) -> list:
     the section is left as it is.  A chain ends at anything else that
     touches its output, and at a product that cannot join it; a product on
     its own is a chain of one, which still reads and writes its output in
-    the D layout rather than through the tile."""
+    the D layout rather than through the tile -- where the target keeps
+    those (`MatrixPaths.D_CHAIN_SINGLES`)."""
     from .multilinear import _vendor_module
     module = _vendor_module(context)
     instrs = list(instrs)
@@ -219,6 +220,10 @@ def link(context, instrs: Sequence) -> list:
 
     drop = set()
     for members in done:
+        if len(members) == 1 and not getattr(module, "D_CHAIN_SINGLES", True):
+            # A product on its own adds through its epilogue where the
+            # target says a chain of one is not worth it.
+            continue
         first = members[0]
         chain = DChain(members=members, dest=first.d_chain_dest(),
                        offset=tuple(first.companions.store._dest_offset),

@@ -123,6 +123,16 @@ ORDERS_EVERY_READER = False
 #: register image; no other path here keeps one.
 D_CHAINS = True
 
+#: But a product on its own keeps its epilogue (`MatrixPaths.
+#: D_CHAIN_SINGLES`): its D layout is the register image already, so a
+#: chain of one saves no move, and the old value read into the
+#: accumulators before the issues is what the first of them waits for,
+#: where the epilogue adds it after the last.  SeisSol's `neighboringFlux`,
+#: one product into `Q`, on MI300A at order 6 in double precision: 9 %
+#: slower chained, 242 VGPRs against 171 -- 9 to 30 % at orders 4 and 6 in
+#: either precision.
+D_CHAIN_SINGLES = False
+
 
 def strategies(shape, ctx):
     """What this target can emit for this shape.

@@ -225,6 +225,10 @@ class MatrixPaths(Protocol):
     #: the instruction's accumulators from the first to the last
     #: (`MatmulOperands.chain`, `compute.dchain`).
     D_CHAINS: bool
+    #: Whether a product that adds into its output on its own is a chain of
+    #: one too, read into the accumulators and written from them, rather
+    #: than added through its epilogue (`dchain.link`).
+    D_CHAIN_SINGLES: bool
 
     def strategies(self, shape: ComputeShape, ctx) -> FrozenSet[Strategy]:
         """The arrangements this target can emit for `shape`."""

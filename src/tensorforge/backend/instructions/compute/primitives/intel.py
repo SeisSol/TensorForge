@@ -631,8 +631,10 @@ class SlotMajorOrder(tuple):
 ORDERS_EVERY_READER = True
 
 #: No chain of products keeps its sum in the accumulators here
-#: (`MatrixPaths.D_CHAINS`).
+#: (`MatrixPaths.D_CHAINS`), and so no chain of one either
+#: (`MatrixPaths.D_CHAIN_SINGLES`).
 D_CHAINS = False
+D_CHAIN_SINGLES = False
 
 #: DPAS first where it is offered, then the register-only chain, which beats
 #: staging operands through shared memory here.  Whether DPAS beats the chain

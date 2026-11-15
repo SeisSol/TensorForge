@@ -1995,10 +1995,12 @@ declare('mma_d_layout',
             'one multiplication per warp; on AMD the stacked tiles of '
             '`amd_matrix_k4`, whose D layout is the register image, every '
             'column in them (`amd_matrix_k4_pad` is implied).  A product it '
-            'does not reach keeps its epilogue.  On MI300A at sixteen lanes, '
-            'against the stacked tiles padded and unchained: order 6 `volume` '
-            '-10 % in double precision and in single, `localFluxAll` -18 % in '
-            'single.')
+            'does not reach keeps its epilogue, and on AMD so does a product '
+            'on its own (`MatrixPaths.D_CHAIN_SINGLES`).  On MI300A at '
+            'sixteen lanes, against the stacked tiles padded and unchained: '
+            'order 6 `volume` -10 % in double precision and in single, '
+            '`localFluxAll` -18 % in single; `neighboringFlux`, one product '
+            'into `Q`, was 9 to 30 % slower as a chain of one.')
 
 declare('mma_stage_b_once',
         default=False,

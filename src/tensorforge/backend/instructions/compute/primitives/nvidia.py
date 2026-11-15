@@ -904,6 +904,11 @@ ORDERS_EVERY_READER = False
 #: its last (`MatmulOperands.chain`, `compute.dchain`).
 D_CHAINS = True
 
+#: A product on its own is a chain of one: its output read and written in
+#: the D layout, where its epilogue would hand the fragments through a tile
+#: to the lanes that own the rows (`MatrixPaths.D_CHAIN_SINGLES`).
+D_CHAIN_SINGLES = True
+
 #: Where a chain's output enters its sum: `'start'`, read by the first
 #: member into the accumulators, so that every product adds onto it;
 #: `'end'`, read by the last and added to the sum before it is written
