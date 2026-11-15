@@ -111,6 +111,18 @@ def parse_register_spill(text: str) -> str:
 #: What `Options.register_spill` takes.
 REGISTER_SPILL = ('off', 'remat')
 
+
+def parse_crosslane_pins(text: str) -> str:
+  """`use`, `definition` or `none` (`Options.crosslane_pins`)."""
+  value = text.strip().lower()
+  if value not in CROSSLANE_PINS:
+    raise ValueError(f'expected one of {CROSSLANE_PINS}, got {text!r}')
+  return value
+
+
+#: What `Options.crosslane_pins` takes.
+CROSSLANE_PINS = ('use', 'definition', 'none')
+
 _DEFAULT_PARSERS = {bool: parse_bool, int: parse_int, str: parse_str}
 
 
@@ -780,6 +792,47 @@ declare('register_left_over',
             '(`pir.budget.CLOSED_MIN`); negative for the default, 1 or more '
             'to put back wherever a load pays.  For calibrating the stop '
             'against timings.')
+
+declare('register_selects',
+        default='auto',
+        env='TF_REGISTER_SELECTS',
+        parse=parse_bool_or_auto,
+        doc='With `register_values`, whether a register block a store under a '
+            'predicate writes becomes a value all the same, the store a select '
+            'between what it stores and what the block held.  `auto`: '
+            'everywhere but DPC++\'s SPMD lowering on Intel, where the block '
+            'stays memory -- IGC 2.40.13 to 2.42.6 computed what feeds a '
+            'broadcast only in the lanes such a select keeps -- although what '
+            'feeds it is pinned there (`crosslane_pins`), select or branch '
+            'alike.')
+
+declare('register_unguard',
+        default=False,
+        env='TF_REGISTER_UNGUARD',
+        parse=parse_bool,
+        doc='With `register_values` under DPC++\'s SPMD lowering on Intel, let '
+            'a store into a register block whose lane guard keeps nothing any '
+            'read takes write every lane (`pir.values.unguard_register_'
+            'stores`): fewer selects, and fewer values entering a guard to '
+            'pin (`crosslane_pins`).  Off by default: on the Max 1550 (IGC '
+            '2.41.5, 262144 elements, job 561193) it cost every load that pays '
+            'put back with selects 3.6 % in geometric mean over SeisSol\'s '
+            'elastic orders 6 and 8 and viscoelastic order 6 -- the order-8 '
+            'dense `volume` +63 % against +2 % -- and the stop rule\'s order-6 '
+            'dense `volume` +9 % against -13 %, though it took the order-6 '
+            'sparse `derivative` as values from +23 to +12 %.'),
+
+declare('crosslane_pins',
+        default='use',
+        env='TF_CROSSLANE_PINS',
+        parse=parse_crosslane_pins,
+        doc='Where, with `register_values` under DPC++\'s SPMD lowering on '
+            'Intel, a value that comes of a cross-lane read and enters a lane '
+            'guard is pinned by an empty volatile asm: right ahead of the '
+            'first statement that reads it under the guard (`use`), right '
+            'behind its definition (`definition`), or nowhere (`none`, which '
+            'IGC 2.40.13 to 2.42.6 computes wrong: `pir.values.'
+            'pin_crosslane_sources`).  For measuring what the pins cost.')
 
 declare('preload_partial',
         default=False,

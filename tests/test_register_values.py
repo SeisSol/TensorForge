@@ -339,6 +339,91 @@ def test_what_another_lane_reads_is_pinned_where_it_enters_a_guard():
                 if st.op == Op.RAWSTMT and 'asm' in (st.text or '')]
 
 
+def test_a_pin_stands_ahead_of_the_guarded_read_or_behind_the_value():
+    """`where`: right ahead of the first statement that reads the value under
+    a guard (`use`), so that IGC may compute it as late as that, or right
+    behind its definition (`definition`)."""
+    from tensorforge.backend.pir.values import pin_crosslane_sources
+
+    def build(where):
+        b = _builder()
+        glb = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g')
+        lane = b.rawexpr('threadIdx.x', type_=INDEX, hint='tid',
+                         uniform=False)
+        inside = b.op('lt', BOOL, lane, 3, hint='inside')
+        y = b.op('mul', F32, b.load(glb, 0, hint='x'), 2.0, hint='y')
+        s = b.rawexpr('sycl::group_broadcast(item.get_sub_group(), {0}, 1)',
+                      y, type_=F32, hint='bc', pure=True, crosslane=True)
+        s = b.op('add', F32, s, 1.0, hint='s')
+        b.store(glb, b.op('mul', F32, y, 3.0, hint='other'), 2)
+        b.store(glb, s, 1, predicate=inside)
+        return s, list(walk_stmts(pin_crosslane_sources(b.finish(),
+                                                        where=where)))
+
+    for where, before, after in (('use', Op.STORE, Op.STORE),
+                                 ('definition', 'add', 'mul')):
+        s, order = build(where)
+        pins = [i for i, st in enumerate(order)
+                if st.op == Op.RAWSTMT and 'asm' in (st.text or '')]
+        assert len(pins) == 1 and order[pins[0]].args == (s,)
+        assert order[pins[0] - 1].op == before, where
+        assert order[pins[0] + 1].op == after, where
+        if where == 'use':
+            assert order[pins[0] + 1].predicate is not None
+
+
+def _windowed(read_lane, kept=False):
+    """A window of the lanes below 3 written into a register block under its
+    guard -- a value of every lane computed from a broadcast -- and read
+    back by a broadcast from lane `read_lane`, or, `kept`, by a store of
+    every lane to memory."""
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    glb = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g')
+    lane = b.op('rem', INDEX, b.thread_id('x'), 16, hint='lead')
+    inside = b.op('lt', BOOL, lane, 3, hint='inside')
+    x = b.load(glb, lane, hint='x')
+    v = b.op('mul', F32, b.rawexpr(
+        'sycl::group_broadcast(item.get_sub_group(), {0}, 7)', x, type_=F32,
+        hint='bc', pure=True, crosslane=True), x, hint='v')
+    r = b.alloc(Datatype.F32, (1,), MemSpace.REGISTER, hint='r0',
+                extern='r0', init='{}')
+    b.store(r, v, 0, predicate=inside)
+    back = b.load(r, 0, hint='back')
+    if kept:
+        b.store(glb, back, b.op('add', INDEX, lane, 16))
+    else:
+        b.store(glb, b.rawexpr(
+            f'sycl::group_broadcast(item.get_sub_group(), {{0}}, '
+            f'{read_lane})', back, type_=F32, hint='out', pure=True,
+            crosslane=True), b.op('add', INDEX, lane, 16))
+    return b.finish()
+
+
+def _guarded_register_stores(body):
+    return [st for st in walk_stmts(body) if st.op == Op.STORE
+            and st.predicate is not None
+            and st.accesses[0].space is MemSpace.REGISTER]
+
+
+def test_a_register_store_whose_guard_keeps_nothing_read_writes_every_lane():
+    """`unguard_register_stores`: lane 1 of the block is all that is read,
+    and the guard leaves lanes 3 to 15 out -- the store writes every lane.
+    Read in lane 5, or by a store of every lane to memory, the zero the
+    block holds there is what is read, and the guard stays."""
+    from tensorforge.backend.pir.values import unguard_register_stores
+    report = []
+    out = unguard_register_stores(_windowed(1), threads=16, arena='shrMem',
+                                  sub_group=16, report=report)
+    assert not _guarded_register_stores(out)
+    assert report and report[0].startswith('unguard: 1 of 1'), report
+    for body in (_windowed(5), _windowed(1, kept=True)):
+        assert len(_guarded_register_stores(unguard_register_stores(
+            body, threads=16, arena='shrMem', sub_group=16))) == 1
+    # Without the sub-group, a `group_broadcast` reads every lane.
+    assert len(_guarded_register_stores(unguard_register_stores(
+        _windowed(1), threads=16, arena='shrMem'))) == 1
+
+
 def test_on_intel_under_spmd_values_pin_what_another_lane_reads():
     oneapi = _kernel('add_true_f64', 'oneapi', register_values=True)
     assert '__asm__ volatile' in oneapi
@@ -410,7 +495,7 @@ def test_values_run_where_the_body_asks_and_take_the_blocks_along():
     steps = {p.name: p for p in pm.passes
              if p.name.startswith(('blocks-', 'values'))}
     assert list(steps) == ['blocks-unroll', 'blocks-split', 'blocks-dce',
-                           'values', 'values-dce']
+                           'values-unguard', 'values', 'values-dce']
     for values, blocks in ((False, False), (True, True)):
         pc = pipeline.BodyContext((), register_values=values)
         assert steps['values'].enabled(pc) is values

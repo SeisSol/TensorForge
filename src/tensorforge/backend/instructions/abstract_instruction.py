@@ -77,22 +77,34 @@ def _predicated_values(context) -> bool:
   exactly those from lanes 10 to 15 under `lane < 10` (1.5e-8).  The source
   is defined, and right under the CPU emulator with every local poisoned and
   the sanitizers on; as written, the block an array and its store a branch,
-  IGC has computed it right on every version.
+  IGC has computed it right on every version.  `Options.register_selects`
+  says otherwise: what feeds the broadcast is pinned there as well
+  (`_pin_crosslane`), which a select's arm needs as much as a branch.
   """
-  target = context.target
-  return not (getattr(target, 'sycl', False) and not _explicit_simd(context)
-              and str(target.hw.vendor).lower() == 'intel')
+  asked = context.get_user_options().register_selects
+  if asked != 'auto':
+    return bool(asked)
+  return not _intel_spmd(context)
 
 
-def _pin_crosslane(context) -> bool:
-  """Whether, with the blocks as values, a value another lane reads is
-  pinned where it is defined (`pir.values.pin_crosslane_sources`): DPC++'s
-  SPMD lowering on Intel, where IGC computes it only in the lanes a guard
-  downstream keeps -- the guard a select or a branch around a store alike
-  (`_predicated_values` takes away only the first)."""
+def _intel_spmd(context) -> bool:
+  """SYCL's SPMD lowering on an Intel device."""
   target = context.target
-  return (not _predicated_values(context)
-          and getattr(target, 'backend', '') == 'oneapi')
+  return (getattr(target, 'sycl', False) and not _explicit_simd(context)
+          and str(target.hw.vendor).lower() == 'intel')
+
+
+def _pin_crosslane(context) -> str:
+  """Where, with the blocks as values, a value another lane reads is pinned
+  (`pir.values.pin_crosslane_sources`, `Options.crosslane_pins`), or '' for
+  nowhere: DPC++'s SPMD lowering on Intel, where IGC computes it only in the
+  lanes a guard downstream keeps -- the guard a select or a branch around a
+  store alike (`_predicated_values` takes away only the first)."""
+  if (not _intel_spmd(context)
+          or getattr(context.target, 'backend', '') != 'oneapi'):
+    return ''
+  where = context.get_user_options().crosslane_pins
+  return '' if where == 'none' else where
 
 
 def _check_register_budget(body, simd: bool, context, where: str) -> None:
@@ -837,7 +849,8 @@ class AbstractInstruction(ABC):
                    if stated.pinned_sub_groups and not stated.explicit_simd
                    else None)
       forwarded = pir.Forward(builder.scratch, report=carries,
-                              exchange=exchange, sub_group=sub_group, **carry)
+                              exchange=exchange, sub_group=sub_group,
+                              unguard=options.register_unguard, **carry)
       # What the lanes store and load back -- a result handed to the
       # accumulation behind it, or to the next operation -- is read from its
       # registers before the carry asks what the trips hand each other, the

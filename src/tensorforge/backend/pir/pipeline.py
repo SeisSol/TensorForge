@@ -412,7 +412,8 @@ class Forward(Pass):
                  report: Optional[List[str]] = None, registers: bool = True,
                  exchange: Optional[int] = None,
                  fetches: Optional[bool] = None,
-                 sub_group: Optional[int] = None):
+                 sub_group: Optional[int] = None,
+                 unguard: bool = False):
         self._scratch = scratch
         self._threads = threads
         self._arena = arena
@@ -429,8 +430,18 @@ class Forward(Pass):
         #: The sub-group a SYCL kernel states, where a broadcast is known to
         #: read one lane of it (`demand.Demand`); None reads every lane.
         self._sub_group = sub_group
+        #: Whether the flow these lanes give is also asked which stores into
+        #: registers need no guard (`RegisterBlocks.unguard`,
+        #: `Options.register_unguard`).
+        self.unguard = unguard
         if not registers:
             self.name = 'forward-memory'
+
+    @property
+    def lanes(self) -> Tuple[int, Optional[str], Optional[int]]:
+        """`(threads, arena, sub_group)`: what a flow of the body is run
+        over, and what its broadcasts read (`RegisterBlocks.unguard`)."""
+        return self._threads, self._arena, self._sub_group
 
     def run(self, pc: BodyContext) -> None:
         pc.body = forward_memory(pc.body, self._scratch,
@@ -790,7 +801,8 @@ def standard_pipeline(debug: str = '',
                          ('blocks-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',),
                            when=lambda pc: pc.register_blocks))
-        for name, fn in (('values', blocks.as_values), ('values-dce', dce)):
+        for name, fn in (('values-unguard', blocks.unguard),
+                         ('values', blocks.as_values), ('values-dce', dce)):
             pm.add(Rewrite(name, fn, preserves=('flat',),
                            when=lambda pc: pc.register_values))
         pm.add(Rewrite('remat', blocks.remat, preserves=('flat',),
@@ -815,7 +827,7 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
              register_budget=None,
              folded_crosslane: bool = False,
              predicated_values: bool = True,
-             pin_crosslane: bool = False,
+             pin_crosslane: str = '',
              scratch=None, unroll_fence: int = 0,
              debug: str = '', diagnostics: Optional[List[str]] = None,
              move: Optional[MoveLoads] = None,
@@ -857,9 +869,12 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
     counted as `pressure` counts them, a cross-lane read an operand where
     ``folded_crosslane``; ``predicated_values`` False keeps a block an
     access under a predicate reaches as it is rather than a select
-    (`RegisterBlocks.select_predicated`); ``pin_crosslane`` pins what another
-    lane reads where it is defined once the blocks are values
-    (`RegisterBlocks.pin_crosslane`);
+    (`RegisterBlocks.select_predicated`); ``pin_crosslane`` says where what
+    another lane reads is pinned once the blocks are values -- ahead of its
+    guarded read, `use`, or behind its definition -- or '' for nowhere
+    (`RegisterBlocks.pin_crosslane`); the lanes of ``forward`` are what the
+    stores into registers no read needs guarded are found over
+    (`RegisterBlocks.unguard`);
     ``where`` names what built the body in the findings `debug` reports.
     """
     if register_spill != 'off' and register_budget is None:
@@ -879,7 +894,10 @@ def optimize(body: Tuple[Stmt, ...], *, explicit_simd: bool = False,
                              budget=register_budget,
                              folded_crosslane=folded_crosslane,
                              select_predicated=predicated_values,
-                             pin_crosslane=pin_crosslane)
+                             pin_crosslane=pin_crosslane,
+                             lanes=forward.lanes if forward is not None
+                             else None,
+                             unguard=forward is not None and forward.unguard)
               if scratch is not None else None)
     standard_pipeline(debug, wrap, place, barriers, move, prefetch,
                       shards, rows, carry, atomics, forward,

@@ -763,7 +763,10 @@ class RegisterBlocks:
                  values: bool = False, budget=None,
                  folded_crosslane: bool = False,
                  select_predicated: bool = True,
-                 pin_crosslane: bool = False,
+                 pin_crosslane: str = '',
+                 lanes: Optional[Tuple[int, Optional[str],
+                                       Optional[int]]] = None,
+                 unguard: bool = False,
                  report: Optional[List[str]] = None):
         self.scratch = scratch
         self.explicit_simd = explicit_simd
@@ -773,10 +776,16 @@ class RegisterBlocks:
         #: a store a select between what it stores and what the block held
         #: (`abstract_instruction._predicated_values`).
         self.select_predicated = select_predicated
-        #: Whether a value another lane reads is pinned where it is defined,
-        #: once the blocks are values (`values.pin_crosslane_sources`,
+        #: Where a value another lane reads is pinned once the blocks are
+        #: values -- `use` or `definition` -- or '' for nowhere
+        #: (`values.pin_crosslane_sources`,
         #: `abstract_instruction._pin_crosslane`).
         self.pin_crosslane = pin_crosslane
+        #: `(threads, arena, sub_group)` of the multiplication, which the
+        #: flow of the body is run over (`unguard`), or None.
+        self.lanes = lanes
+        #: Whether `unguard` runs at all (`Options.register_unguard`).
+        self.unguard_stores = unguard
         #: Whether `remat` handed the body back as it came.
         self.reverted = False
         #: What `remat` holds the body to (`budget.Budget`,
@@ -802,6 +811,22 @@ class RegisterBlocks:
                                      explicit_simd=self.explicit_simd,
                                      predicated=self.values,
                                      report=self.report)
+
+    def unguard(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        """`body` with the stores into registers whose guard keeps nothing
+        any read takes writing every lane (`values.unguard_register_stores`)
+        -- where a predicated store would keep its block memory
+        (`select_predicated`) or what it stores would be pinned
+        (`pin_crosslane`), which is under SPMD on Intel, and where the flow
+        knows the lanes (`lanes`)."""
+        from .values import unguard_register_stores
+        if (self.lanes is None or self.explicit_simd or not self.unguard_stores
+                or (self.select_predicated and not self.pin_crosslane)):
+            return body
+        threads, arena, sub_group = self.lanes
+        return unguard_register_stores(body, threads=threads, arena=arena,
+                                       sub_group=sub_group,
+                                       report=self.report)
 
     def as_values(self, body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
         from .values import block_values
@@ -854,4 +879,4 @@ class RegisterBlocks:
         from .values import pin_crosslane_sources
         if not self.pin_crosslane or self.reverted:
             return body
-        return pin_crosslane_sources(body)
+        return pin_crosslane_sources(body, where=self.pin_crosslane)

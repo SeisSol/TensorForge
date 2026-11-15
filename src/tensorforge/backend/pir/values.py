@@ -459,6 +459,116 @@ class _Values:
                        regions=(replace(arm, args=region.args + args),))
 
 
+def unguard_register_stores(body: Tuple[Stmt, ...], *, threads: int,
+                            arena: Optional[str] = None,
+                            sub_group: Optional[int] = None,
+                            report: Optional[List[str]] = None
+                            ) -> Tuple[Stmt, ...]:
+    """`body` with the lane predicate dropped from every store into a
+    register buffer where the lanes it leaves out are lanes no read takes
+    what the buffer held there before: the store then writes every lane.
+
+    The lanes a read takes are those anything reads of what it loads
+    (`demand.Demand`), and a read takes what the buffer held before the store
+    where the write it finds there is not one behind the store -- at any
+    execution of the read, before the store or after it, where a loop hands
+    one trip's registers to the next.  A predicated store keeps the block
+    whose image it writes from becoming a value under SPMD on Intel
+    (`block_values` without `predicated`): a window of an image written by
+    an operation, a sum its epilogue writes to the window's rows alone, a
+    copy of a window into the next operation's image.  Where what is stored
+    comes of a cross-lane read, the guard is also what IGC 2.40.13 to
+    2.42.6 moves the read into (`pin_crosslane_sources`); and the order-6
+    dense time derivative reads all but a few of those windows only by
+    broadcasts from the window's own rows.  A body too large for the flow
+    (`flow.TooLarge`) is left as it is."""
+    from .demand import Demand
+    from .flow import Flow, TooLarge
+
+    def lane_guard(s: Stmt) -> bool:
+        return (s.op == Op.STORE and isinstance(s.predicate, Value)
+                and len(s.accesses) == 1
+                and s.accesses[0].space is MemSpace.REGISTER
+                and s.predicate.uniformity <= Uniformity.LANE)
+    stores = [s for s in walk_stmts(body) if lane_guard(s)]
+    if not stores:
+        return body
+    # Only buffers every statement reaches by a load or store of one element
+    # the flow places: what else touches one may read any lane of it.
+    plain: Dict[int, bool] = {}
+    loads: Dict[int, List[Stmt]] = {}
+    for s in walk_stmts(body):
+        for a in s.accesses:
+            if a.space is not MemSpace.REGISTER or a.base is None:
+                continue
+            ok = (s.op in (Op.LOAD, Op.STORE) and len(s.accesses) == 1
+                  and (s.op == Op.STORE or len(s.target) == 1))
+            plain[id(a.base)] = plain.get(id(a.base), True) and ok
+            if ok and s.op == Op.LOAD:
+                loads.setdefault(id(a.base), []).append(s)
+    stores = [s for s in stores if plain.get(id(s.accesses[0].base))]
+    if not stores:
+        return body
+    try:
+        flow = Flow(body, threads, arena, masks=True, before=False)
+    except TooLarge as why:
+        if report is not None:
+            report.append(f'unguard: {why}; left as it is')
+        return body
+    demand = Demand(flow, sub_group)
+    dropped: Set[int] = set()
+    for s in stores:
+        execs = flow.executions(s)
+        if not execs or id(s) in flow.opaque:
+            continue
+        reads = [(r, ld) for ld in loads.get(id(s.accesses[0].base), ())
+                 for r in flow.executions(ld)]
+        if any(r not in flow.reach for r, _ in reads):
+            continue
+        if all(_unread_beside(flow, demand, n, reads) for n in execs):
+            dropped.add(id(s))
+    if not dropped:
+        return body
+    if report is not None:
+        report.append(f'unguard: {len(dropped)} of {len(stores)} stores into '
+                      f'registers write every lane; the lanes their guard '
+                      f'leaves out are read by nothing')
+
+    def rewrite(stmts: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        out = []
+        for s in stmts:
+            if s.regions:
+                s = replace(s, regions=tuple(replace(r, body=rewrite(r.body))
+                                             for r in s.regions))
+            if id(s) in dropped:
+                s = replace(s, predicate=None)
+            out.append(s)
+        return tuple(out)
+    return rewrite(body)
+
+
+def _unread_beside(flow, demand, n: int, reads) -> bool:
+    """Does no read in `reads`, `(execution, load)`, take in a lane the store
+    `n` leaves out what the element held before it?"""
+    beside = flow.full & ~flow.insts[n].mask
+    if not beside:
+        return True
+    cells = {cell for _, cell in flow.cells_of(n)}
+    for r, ld in reads:
+        for reach in flow.reach[r]:
+            lanes = reach.mask & beside
+            if not lanes or reach.cell not in cells:
+                continue
+            if reach.writer is not None and reach.writer > n and all(
+                    w > n for w in reach.maybe):
+                # A write behind the store: what the element holds there is
+                # not the store's to keep or replace.
+                continue
+            if demand.lanes(ld.target[0], flow.insts[r].env()) & lanes:
+                return False
+    return True
+
+
 #: An empty asm the value goes into: no instruction, but a use of the value
 #: right where it is defined (`pin_crosslane_sources`).
 _PIN = '__asm__ volatile("" :: "r"({0}));'
@@ -556,8 +666,8 @@ def _lane_kept(body: Tuple[Stmt, ...]) -> Set[int]:
     return _Guards(body).kept
 
 
-def pin_crosslane_sources(body: Tuple[Stmt, ...], at_risk: bool = True
-                          ) -> Tuple[Stmt, ...]:
+def pin_crosslane_sources(body: Tuple[Stmt, ...], at_risk: bool = True,
+                          where: str = 'use') -> Tuple[Stmt, ...]:
     """`body` with the result of every cross-lane read handed to an empty
     volatile asm right where it is read (`blocks.RegisterBlocks.
     pin_crosslane`): the read then stays where it stands, with every lane
@@ -581,6 +691,18 @@ def pin_crosslane_sources(body: Tuple[Stmt, ...], at_risk: bool = True
     a cross-lane read enters a guard: the last value outside it every use of
     which keeps to some lanes (`_Guards`), which holds all it is computed
     from outside too.
+
+    `where` the asm stands: right behind the value (`definition`), or right
+    ahead of the first statement of its list that reads it under a guard
+    (`use`), so that IGC may compute it as late as that -- behind the value
+    where nothing of its list reads it so.  The two were a line apart in
+    SeisSol's kernels, and their listings and times the same on the Max 1550
+    (order-6 dense `derivative` as values, -12.3 and -13.3 %, job 561193).
+    Nor do the pins cost what they first seemed to: without them IGC 2.41.5
+    spilled as much or more (the order-6 dense `localFluxAll`, every load
+    that pays put back, 14656 B against 4672); what the order-8 sparse
+    `derivative` lost with them came of its predicated blocks staying memory
+    (`Options.register_selects`).
     """
     sources = {}
     if at_risk:
@@ -613,16 +735,40 @@ def pin_crosslane_sources(body: Tuple[Stmt, ...], at_risk: bool = True
                     pure=False, movable=False, effect=Effect.UNKNOWN,
                     accesses=(), attrs=(('fmt', True),))
 
+    # The statements that read a source under a guard, with the sources each
+    # reads so.
+    held: Dict[int, List[int]] = {}
+    if at_risk and where == 'use':
+        for tid in sources:
+            for u, k in g.uses.get(tid, ()):
+                if g.held_back(u, k):
+                    held.setdefault(id(u), []).append(tid)
+
     def rewrite(stmts: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
+        # Per source, the first statement of the list that holds a read of
+        # it under a guard: the asm goes right ahead of it.
+        first: Dict[int, int] = {}
+        if held:
+            for j, s in enumerate(stmts):
+                for x in walk_stmts((s,)):
+                    for tid in held.get(id(x), ()):
+                        first.setdefault(tid, j)
+        ahead: Dict[int, List[Value]] = {}
         out: List[Stmt] = []
-        for s in stmts:
+        for j, s in enumerate(stmts):
+            for v in ahead.pop(j, ()):
+                out.append(pin(v))
             if s.regions:
                 s = replace(s, regions=tuple(replace(r, body=rewrite(r.body))
                                              for r in s.regions))
             out.append(s)
             for t in s.target:
                 if t.id in sources and t.id not in pinned:
-                    out.append(pin(t))
+                    at = first.get(t.id)
+                    if at is not None and at > j:
+                        ahead.setdefault(at, []).append(t)
+                    else:
+                        out.append(pin(t))
         return tuple(out)
 
     return rewrite(body)
