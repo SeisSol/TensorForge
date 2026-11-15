@@ -66,6 +66,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -128,6 +129,22 @@ class Step:
                 'command': ' '.join(self.command)}
 
 
+def _end_group(proc: subprocess.Popen, grace: float = 60.0):
+    """Kill the process group `proc` leads and collect what it wrote.
+
+    A process inside a GPU driver call can take a moment to go; output of
+    one that does not within `grace` seconds is given up."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        stdout, stderr = proc.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        return '', f'[still running {grace:.0f}s after the kill]'
+    return stdout or '', stderr or ''
+
+
 def run_step(name: str, command: List[str], log: Path,
              timeout: float) -> Step:
     """One subprocess, its output kept, its failure recorded and not raised.
@@ -135,27 +152,40 @@ def run_step(name: str, command: List[str], log: Path,
     A step that fails is a finding: the evaluation goes on and the manifest
     says which part of it is missing. Stopping would throw away every
     measurement after the first machine that lacks a profiler.
+
+    The step runs in a process group of its own, and a timeout ends the
+    group: ending the step alone leaves what it started running -- a
+    benchmark whose kernel hangs keeps the device busy for every later
+    measurement, and on PVC eleven of them did, the oldest for a day.  The
+    log is written either way, so a step that ran out of time still says how
+    far it got.
     """
     step = Step(name, command)
     started = time.monotonic()
     log.parent.mkdir(parents=True, exist_ok=True)
     try:
-        proc = subprocess.run(command, capture_output=True, text=True,
-                              timeout=timeout, check=False)
-    except subprocess.TimeoutExpired:
-        step.status, step.note = 'timeout', f'after {timeout:.0f}s'
-        step.seconds = time.monotonic() - started
-        return step
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
     except OSError as exc:
         step.status, step.note = 'failed', str(exc)
         step.seconds = time.monotonic() - started
         return step
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stdout, stderr = _end_group(proc)
+        step.status, step.note = 'timeout', f'after {timeout:.0f}s'
+        step.seconds = time.monotonic() - started
+        log.write_text(' '.join(command) + '\n\n' + stdout + '\n' + stderr
+                       + f'\n[timeout after {timeout:.0f}s: the step and '
+                       f'what it started ended]\n')
+        return step
     step.seconds = time.monotonic() - started
-    log.write_text(' '.join(command) + '\n\n' + proc.stdout + '\n' +
-                   proc.stderr)
+    log.write_text(' '.join(command) + '\n\n' + stdout + '\n' + stderr)
     if proc.returncode != 0:
         step.status = 'failed'
-        tail = [l for l in (proc.stderr or proc.stdout).splitlines() if l.strip()]
+        tail = [l for l in (stderr or stdout).splitlines() if l.strip()]
         step.note = (tail[-1][:160] if tail else f'exit {proc.returncode}') \
             + f' (see {log})'
     else:
