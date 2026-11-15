@@ -387,8 +387,21 @@ def test_the_stack_frame_is_the_scratch_size_on_nvidia_too():
     ("hip", "gfx942", "--offload-arch=gfx942"),
     ("acpp", "generic", "--acpp-targets=generic"),
 ])
-def test_each_compiler_names_the_target_its_own_way(backend, arch, flag):
+def test_each_compiler_names_the_target_its_own_way(backend, arch, flag,
+                                                   monkeypatch):
+    monkeypatch.delenv('TF_HIPCC_OPTIONS', raising=False)
     assert toolchain.COMPILERS[backend].target_flags(arch) == [flag]
+
+
+def test_hipcc_options_ride_along_with_the_target(monkeypatch):
+    """The AMDGPU backend's scheduler knobs are flags only, so they reach
+    every build through the target -- split as a shell splits them, since
+    `-mllvm` takes its value as the next argument."""
+    monkeypatch.setenv('TF_HIPCC_OPTIONS',
+                       "-mllvm -amdgpu-sched-strategy=max-ilp -Xarch_device '-g1'")
+    assert toolchain.COMPILERS['hip'].target_flags('gfx942') == [
+        '--offload-arch=gfx942', '-mllvm', '-amdgpu-sched-strategy=max-ilp',
+        '-Xarch_device', '-g1']
 
 
 def test_an_icpx_target_is_an_ahead_of_time_build(monkeypatch):

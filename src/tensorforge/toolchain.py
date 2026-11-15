@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import struct
 from dataclasses import dataclass
@@ -155,8 +156,20 @@ class Nvcc(Compiler):
 
 @dataclass(frozen=True)
 class Hipcc(Compiler):
+    """ROCm's `hipcc`.
+
+    `TF_HIPCC_OPTIONS` rides along with the target, split as a shell would,
+    e.g. `-mllvm -amdgpu-sched-strategy=max-ilp`: the AMDGPU backend's
+    scheduler and occupancy knobs exist only as compiler flags, clang has no
+    source spelling for them, and an experiment with them is otherwise a
+    patched toolchain.  With the target, every build of generated code takes
+    them -- the benchmark, the harness, the compiler's report -- and so does
+    every cache keyed on the flags.
+    """
+
     def target_flags(self, arch):
-        return [f'--offload-arch={arch}']
+        extra = shlex.split(os.environ.get('TF_HIPCC_OPTIONS', ''))
+        return [f'--offload-arch={arch}', *extra]
 
     def report_flags(self):
         return ['-Rpass-analysis=kernel-resource-usage']

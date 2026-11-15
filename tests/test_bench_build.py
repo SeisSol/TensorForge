@@ -108,6 +108,22 @@ def test_what_a_workload_cost_to_make_is_recorded(monkeypatch, tmp_path):
     assert again.object_bytes == 1234
 
 
+def test_hipcc_options_make_another_binary(monkeypatch):
+    """`TF_HIPCC_OPTIONS` reaches hipcc with the target (`toolchain.Hipcc`),
+    so the same source built under other options is another binary: the
+    cache has to tell the two apart, or a flag sweep times the first build
+    under every name."""
+    unit = BuildUnit(suite='t', target=TargetSpec('hip', 'gfx942'),
+                     datatype=Datatype.F32, config=Config('default'),
+                     workloads=(), batches=(4,))
+    sources = {'a': 'kernel text'}
+    monkeypatch.delenv('TF_HIPCC_OPTIONS', raising=False)
+    plain = bench_build._digest(unit, sources, 'driver')
+    monkeypatch.setenv('TF_HIPCC_OPTIONS',
+                       '-mllvm -amdgpu-sched-strategy=max-ilp')
+    assert bench_build._digest(unit, sources, 'driver') != plain
+
+
 def test_a_workload_that_does_not_generate_has_no_cost(monkeypatch):
     monkeypatch.setattr(bench_build, 'compiler_binary', lambda compiler: None)
     broken = Workload('broken', lambda: 1 / 0, Datatype.F32)
