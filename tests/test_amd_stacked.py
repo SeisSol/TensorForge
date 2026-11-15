@@ -26,6 +26,7 @@ import contextlib
 import dataclasses
 import importlib.util
 import io
+import json
 import re
 import warnings
 from pathlib import Path
@@ -266,7 +267,7 @@ class SimWriter:
 
 
 def _operands(op_rows, elements, kx, columns, zero_known=True, wave=True,
-              shard=False, writer=None, dtype=Datatype.F64):
+              shard=False, writer=None, chain=None, dtype=Datatype.F64):
     """`MatmulOperands` over NumPy data, read the way the nest's accessors
     read: `op_rows` is the operator counted from the first slot's row, one
     column a step of the contraction; `elements[e]` is the `e`-th
@@ -329,7 +330,7 @@ def _operands(op_rows, elements, kx, columns, zero_known=True, wave=True,
         b=dtype, accumulator=dtype, a_uniform=True,
         A_wave=A_wave if wave else None, lockstep=True,
         A_zero=A_zero if zero_known else None,
-        B_shard=B_shard if shard else None)
+        B_shard=B_shard if shard else None, chain=chain)
     return ops, out
 
 
@@ -399,6 +400,80 @@ def test_a_padded_last_tile_computes_the_ninth_column(route, dtype):
     # Narrower than a tile, the product stays on the chain.
     assert amd.plan(Strategy.MATRIX, _shape(shared=True), 3, ctx) == (
         Span(Strategy.DPP, 0, 3),)
+
+
+class _Output:
+    """An output in global memory, an element a multiplication of the wave,
+    read and written the way a chain reads and writes it
+    (`AccumulatorChain`): at a row of the walk and a column, every lane its
+    own multiplication's element."""
+
+    def __init__(self, values):
+        self.values = np.array(values, dtype=float)
+        self.reads = self.writes = 0
+
+    def load(self, writer, row, col, predicate=None):
+        self.reads += 1
+        lanes = np.arange(WAVE)
+        row = np.broadcast_to(np.asarray(row), (WAVE,))
+        rows = self.values.shape[1]
+        got = self.values[lanes // THREADS, np.clip(row, 0, rows - 1), col]
+        inside = (0 <= row) & (row < rows)
+        if predicate is not None:
+            inside = inside & np.asarray(predicate)
+        return np.where(inside, got, 0.0)
+
+    def store(self, writer, value, row, col):
+        self.writes += 1
+        lanes = np.arange(WAVE)
+        row = np.broadcast_to(np.asarray(row), (WAVE,))
+        mask = writer.mask & (0 <= row) & (row < self.values.shape[1])
+        self.values[lanes[mask] // THREADS, row[mask], col] = \
+            np.asarray(value)[mask]
+
+
+@pytest.mark.parametrize("dtype", TYPES)
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+def test_a_chain_adds_every_product_into_one_set_of_accumulators(route,
+                                                                 dtype):
+    """Three products into one output, SeisSol's volume: the old value read
+    into the accumulators by the first, every product issued into them, the
+    sum written by the last -- each row and column once, and nothing past
+    the chain's window.  The windows differ, rows 1 to 54, 55 and 56 of the
+    slots' walk, and a product adds zeros where its operator has no rows."""
+    from tensorforge.backend.instructions.compute.matmul import AccumulatorChain
+    rng = np.random.default_rng(41)
+    windows = ((1, 54), (1, 55), (1, 56))
+    rows, depth, columns = 64, 35, 9
+    q0 = rng.uniform(-1, 1, (MULTS, rows, columns))
+    out = _Output(q0)
+    state = {}
+    want = q0.copy()
+    writer = SimWriter()
+    ctx = _ctx(dtype=dtype, amd_matrix_k4=route, mma_d_layout=True)
+    for d, (r0, r1) in enumerate(windows):
+        op_rows = np.zeros((rows, depth))
+        op_rows[r0:r1] = rng.uniform(-1, 1, (r1 - r0, depth))
+        elements = rng.uniform(-1, 1, (MULTS, depth, columns))
+        chain = AccumulatorChain(opens=d == 0, closes=d == len(windows) - 1,
+                                 state=state, rows=(1, 56), load=out.load,
+                                 store=out.store)
+        ops, _ = _operands(op_rows, elements, 0, columns,
+                           shard=route == "shard", chain=chain, dtype=dtype)
+        ops = dataclasses.replace(ops, C=_no_write)
+        assert stacked.matmul_stacked(writer, ops, ctx,
+                                      Span(Strategy.MATRIX, 0, columns))
+        want[:, r0:r1] += np.einsum("rk,ekj->erj", op_rows[r0:r1], elements)
+    np.testing.assert_allclose(out.values, want, rtol=1e-12, atol=1e-12)
+    # Read once and written once: the window's 4 slots of 9 columns.
+    assert out.reads == out.writes == 4 * columns
+    # Every issue into the one set: three products, 3 tiles of columns.
+    assert writer.issues == 3 * 4 * 9 * 3
+
+
+def _no_write(writer, value, i, j):
+    raise AssertionError("a member of a chain writes the output only at its "
+                         "end, through the chain")
 
 
 def test_the_elements_are_not_interchangeable():
@@ -589,6 +664,32 @@ def test_the_f32_volume_issues_its_own_instruction():
     _, off = _kernel("stacked_volume_f32", amd_matrix_k4=False)
     assert not F32_MFMA.search(off)
     assert "__builtin_amdgcn_mfma_f32_4x4x1f32(" in off
+
+
+def _operand_name(src, alias):
+    """The kernel's name of the operand the description calls `alias`."""
+    meta = json.loads(re.search(r"tensorforge-meta: (\{.*\})", src).group(1))
+    return next(o["name"] for o in meta["operands"] if o["alias"] == alias)
+
+
+@pytest.mark.parametrize("name,issue", [("stacked_volume_f64", MFMA),
+                                        ("stacked_volume_f32", F32_MFMA)])
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+def test_a_chain_reads_and_writes_the_output_once(name, issue, route):
+    """`mma_d_layout`: the volume's three products add into one set of
+    accumulators, the ninth column in a padded tile -- three issues a
+    nonzero block -- `Q` read into them before the first and written after
+    the last, once for each of the 4 slots and 9 columns of its window, and
+    nothing added atomically."""
+    case, src = _kernel(name, amd_matrix_k4=route, mma_d_layout=True)
+    want = sum(3 * _nonzero_blocks(v, r0, r1, 0, 35)
+               for v, (r0, r1) in zip(case.OPERATORS, case.WINDOWS))
+    assert len(issue.findall(src)) == want
+    q = re.escape("glb_" + _operand_name(src, "Q"))
+    stores = len(re.findall(rf"^\s*{q}\[[^\]]*\] = ", src, re.MULTILINE))
+    loads = len(re.findall(rf"{q}\[[^\]]*\]", src)) - stores
+    assert loads == stores == 4 * 9
+    assert not re.search(r"atomic_fadd|atomicAdd", src)
 
 
 @pytest.mark.parametrize("name,size", [("stacked_volume_f64", 8),

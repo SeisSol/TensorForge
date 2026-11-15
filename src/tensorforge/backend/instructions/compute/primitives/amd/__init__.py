@@ -74,8 +74,8 @@ from .select import (BroadcastForm, MATERIALIZE_FROM, broadcast_form,
 from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
                      wmma3atom)
 from .stacked import instruction as stacked_instruction
-from .stacked import (matmul_stacked, serves, stacked_plan,
-                      stacked_reads_shared, stacks)
+from .stacked import (matmul_stacked, serves, stacked_chain_tile,
+                      stacked_plan, stacked_reads_shared, stacks)
 
 __all__ = [
     'amdarch', 'cdna2', 'gfx1250', 'gfx1251', 'rdna',
@@ -118,9 +118,10 @@ ORDER = (Strategy.MATRIX, Strategy.DPP, Strategy.BROADCAST, Strategy.GENERIC)
 #: other readers is not offered one.
 ORDERS_EVERY_READER = False
 
-#: No chain of products keeps its sum in the accumulators here
-#: (`MatrixPaths.D_CHAINS`).
-D_CHAINS = False
+#: A chain of products keeps its sum in the accumulators of the stacked
+#: tiles (`MatrixPaths.D_CHAINS`, `stacked_chain_tile`), whose D layout is the
+#: register image; no other path here keeps one.
+D_CHAINS = True
 
 
 def strategies(shape, ctx):
@@ -469,6 +470,13 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     return quad_order(shape, threads, width, window)
 
 
+def chain_tile(shape, extents, ctx):
+    """The tile a chain of products keeps its sum in here, or why there is
+    none (`MatrixPaths.chain_tile`): the stacked scheme's
+    (`stacked.stacked_chain_tile`)."""
+    return stacked_chain_tile(shape, extents, ctx)
+
+
 def reads_shared(shape, ctx) -> bool:
     """Whether the matrix path reads a second operand an earlier operation
     stored in shared memory there (`MatrixPaths.reads_shared`): the stacked
@@ -588,6 +596,10 @@ def _matmul(writer, ops, ctx, span, width, exchanged=False):
             ops, ctx):
         if matmul_stacked(writer, ops, ctx, span):
             return True
+        if ops.chain is not None:
+            # A member of a chain adds into accumulators only the stacked
+            # tiles hold; the DPP chain beside it would add nowhere.
+            return False
         # Operands the scheme does not read (`stacked.matmul_stacked`): the
         # span goes where it would have gone without the option -- the
         # lane-batched tile where one serves the type (F32), the DPP chain

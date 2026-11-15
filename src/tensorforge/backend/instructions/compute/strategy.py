@@ -125,6 +125,10 @@ class ComputeShape:
     #: reading other multiplications' elements of it reads them out of
     #: (`MatmulOperands.B_shard`).
     b_shared: bool = False
+    #: Whether the lead operand lies in memory in its own order along one
+    #: contraction axis, so that step `k + p` in the `p`-th multiplication's
+    #: lanes is one shift of step `k` (`MatmulOperands.A_wave`).
+    a_wave: bool = False
 
 
 def lead_layout(threads: int, width: int) -> Optional[BitLayout]:
@@ -244,6 +248,16 @@ class MatrixPaths(Protocol):
         """Whether an operand this target offers an order is better stored
         in it than packed (`MultilinearInstruction.settle_storage`), which
         otherwise goes first."""
+
+    def chain_tile(self, shape: ComputeShape, extents, ctx) -> Any:
+        """What `matmul` keeps the sum of a chain of products in on this
+        target (`MatmulOperands.chain`, `compute.dchain`): the tile it issues
+        for `shape` -- its rows `m`, its columns `n`, the type `d` it
+        accumulates in, a `mode` the members of one chain share -- and the
+        rows `block` its tiles are walked in; or a string saying why this
+        shape keeps no chain here.  `extents` is `(lead, columns, depth,
+        start)` as the matrix paths see the operation
+        (`MultilinearInstruction._matrix_extents`)."""
 
     def reads_shared(self, shape: ComputeShape, ctx) -> bool:
         """Whether `matmul` reads a second operand that an earlier operation

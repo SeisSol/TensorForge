@@ -54,13 +54,16 @@ The contraction runs in its own order, four steps an issue, and on MI300A
 both instructions add them as a chain of fused products in that order:
 SeisSol's kernels came out bit-equal over every element to the DPP chain's
 in double precision and to the lane-batched tile's in single, which is the
-check a build of this scheme can be held to.
+check a build of this scheme can be held to.  Not across a chain of
+products (`stacked_chain_tile`), which adds them in another order.
 
 Sixteen lanes only.  At thirty-two the halves of a multiplication hold
 different tiles of rows, and one issue feeds every lane quarter the same
 sixteen operator rows: half of each issue would compute rows nobody keeps.
 """
 
+import contextlib
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
 
@@ -241,11 +244,15 @@ def stacked_reads_shared(shape, ctx) -> bool:
 def padded(ctx) -> bool:
     """Whether the columns past the last whole tile go into one more tile,
     padded (`Options.amd_matrix_k4_pad`), rather than through the DPP
-    chain."""
+    chain -- always where products keep their sums in the accumulators
+    across a chain (`Options.mma_d_layout`), whose columns all have to be
+    there (`stacked_chain_tile`)."""
     options = getattr(ctx, 'get_user_options', None)
     if options is None:
         return False
-    return bool(getattr(options(), 'amd_matrix_k4_pad', False))
+    asked = options()
+    return bool(getattr(asked, 'amd_matrix_k4_pad', False)
+                or getattr(asked, 'mma_d_layout', False))
 
 
 def stacked_plan(shape, n: int, ctx):
@@ -266,6 +273,46 @@ def stacked_plan(shape, n: int, ctx):
     if edge >= n or padded(ctx):
         return whole(Strategy.MATRIX, n)
     return (Span(Strategy.MATRIX, 0, edge), Span(Strategy.DPP, edge, n))
+
+
+@dataclass(frozen=True)
+class ChainTile:
+    """What a chain of products keeps its sum in on this scheme
+    (`MatrixPaths.chain_tile`): `m` operator rows and `n` output columns an
+    issue, in `d`, walked a slot -- `block` rows -- at a time.  `mode` names
+    the instruction, which the members of one chain share."""
+    m: int
+    n: int
+    d: Datatype
+    mode: str
+    block: int
+
+
+def stacked_chain_tile(shape, extents, ctx):
+    """The tile a chain keeps its sum in, or why there is none.
+
+    The D layout is the register image (`stacking`), so the output's old
+    value is read into the accumulators where the image would hold it, every
+    product of the chain issues into them, and the last writes them where
+    they were read: one accumulator set for the chain where each product had
+    its own and an epilogue that added the old value.  Every column has to
+    be in the accumulators for that -- whole tiles, or the last one padded
+    (`padded`): a column the DPP chain computes is added nowhere else.  And
+    the operator has to be read by its own steps (`a_wave`), since a member
+    that declined the instruction would leave the chain's accumulators
+    without its products.
+    """
+    if not stacks(shape, ctx):
+        return 'not on the stacked matrix path'
+    if not shape.a_wave:
+        return 'the operator is not read by its own steps'
+    op = instruction(shape.threads, shape.accumulator, ctx)
+    width = tile_columns(op, shape.threads)
+    columns = extents[1]
+    if columns % width and not padded(ctx):
+        return 'the columns past the last whole tile go to the DPP chain'
+    return ChainTile(m=shape.threads, n=width, d=shape.accumulator,
+                     mode=op.builtin, block=shape.threads)
 
 
 def serves(ops, ctx) -> bool:
@@ -311,7 +358,7 @@ def matmul_stacked(writer, ops, ctx, span) -> bool:
 
 def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
     from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
-    C, A = ops.C, ops.A
+    C, A, chain = ops.C, ops.A, ops.chain
     threads, M, K, kx = ops.threads, ops.lead_slots, ops.k, ops.kx
     ftype = ScalarType(ops.accumulator)
     acctype = ScalarType(ops.accumulator, op.d.per_lane)
@@ -375,9 +422,23 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
             return got
         return by_step([zero if q in edge else got for q in range(mults)])
 
-    with writer.AnonymousScope():
-        acc = {(rt, c0): writer.declare(acctype, hint='acc')
-               for rt in range(M) for c0 in tiles}
+    # A chain's accumulators outlive the product: declared where every
+    # member reaches them, not in a scope of the first.
+    with (writer.AnonymousScope() if chain is None
+          else contextlib.nullcontext()):
+        if chain is None:
+            acc = {(rt, c0): writer.declare(acctype, hint='acc')
+                   for rt in range(M) for c0 in tiles}
+        elif chain.opens:
+            acc = _open_chain(writer, ops, chain, tiles, width, acctype,
+                              ftype, t)
+        else:
+            acc = dict(chain.state.get('accs', {}))
+            if any((rt, c0) not in acc for rt in range(M) for c0 in tiles):
+                from tensorforge.common.exceptions import InternalError
+                raise InternalError(
+                    'a member of a chain reaches past the accumulators its '
+                    'first member declared')
         # The contraction outermost and every accumulator inside: the
         # per-element fragments are built once for all tiles of rows, and an
         # accumulator is read again only behind seven others.
@@ -396,12 +457,77 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
                     acc[(rt, c0)] = writer.call(
                         op.callee, acctype, frags[c0], b, acc[(rt, c0)],
                         0, 0, 0, hint='acc', movable=False, materialize=True)
+        if chain is not None:
+            chain.state['accs'] = acc
+            if chain.closes:
+                _close_chain(writer, ops, chain, acc, width, ftype, t)
+            return True
         for rt in range(M):
             for c0 in tiles:
                 for jj in range(min(width, span.stop - c0)):
                     C(writer, writer.extract(acc[(rt, c0)], jj, ftype), rt,
                       c0 + jj)
     return True
+
+
+def _chain_rows(writer, chain, rt, threads, t):
+    """Row `threads rt + t` of the walk, the lane's in slot `rt`, and which
+    lanes hold a row of the chain's window: `(row, predicate)`, the
+    predicate None where all of them do, and `None` where none does."""
+    from tensorforge.backend.pir.core import BOOL, INDEX
+    lo, hi = chain.rows
+    first = threads * rt
+    if first + threads <= lo or first >= hi:
+        return None
+    row = writer.op('add', INDEX, t, first, hint='dr') if first else t
+    cond = None
+    if first < lo:
+        cond = writer.op('ge', BOOL, row, lo, hint='g')
+    if first + threads > hi:
+        upper = writer.op('lt', BOOL, row, hi, hint='g')
+        cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
+                                                    hint='g')
+    return row, cond
+
+
+def _open_chain(writer, ops, chain, tiles, width, acctype, ftype, t):
+    """The chain's accumulators, holding the output's old value: for every
+    slot of the chain's window and every tile of columns, the cells the D
+    layout gives the lane -- which are the register image's, row `16 rt + t`
+    and column `c0 + jj` in slot `jj`.  A row outside the window and a
+    padded column start at zero and are never written back."""
+    threads = ops.threads
+    zero = writer.const(0.0, ftype)
+    slots = max(ops.lead_slots, -(-chain.rows[1] // threads))
+    acc = {}
+    for rt in range(slots):
+        rows = _chain_rows(writer, chain, rt, threads, t)
+        for c0 in tiles:
+            if rows is None:
+                acc[(rt, c0)] = writer.declare(acctype, hint='acc')
+                continue
+            row, cond = rows
+            parts = [chain.load(writer, row, c0 + jj, cond)
+                     if c0 + jj < ops.n else zero for jj in range(width)]
+            acc[(rt, c0)] = writer.pack(acctype, *parts, hint='acc')
+    chain.state.clear()
+    chain.state['accs'] = acc
+    return dict(acc)
+
+
+def _close_chain(writer, ops, chain, acc, width, ftype, t):
+    """The chain's sums written where `_open_chain` read the old values."""
+    threads = ops.threads
+    for (rt, c0), value in sorted(acc.items()):
+        rows = _chain_rows(writer, chain, rt, threads, t)
+        if rows is None:
+            continue
+        row, cond = rows
+        for jj in range(min(width, ops.n - c0)):
+            part = writer.extract(value, jj, ftype)
+            with (writer.if_(cond) if cond is not None
+                  else contextlib.nullcontext()):
+                chain.store(writer, part, row, c0 + jj)
 
 
 def a_source(writer, ops, ctx, op, mults, width, t, p):

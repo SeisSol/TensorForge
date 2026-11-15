@@ -7,7 +7,7 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
 from tensorforge.common.operation import Operation
 from .. import ranking
-from ..bitlayout import Bit, BitLayout, Place
+from ..bitlayout import Bit, BitLayout, Place, packed
 from ..routes import lead_route as routes_lead_route
 from ..strategy import Strategy, whole
 from tensorforge.backend.pir.core import (BOOL, INDEX, MemSpace, Uniformity,
@@ -570,6 +570,33 @@ def reads_shared(shape, ctx):
     """False: the matrix path stages its second operand itself, into tiles
     of its own (`MatrixPaths.reads_shared`)."""
     return False
+
+
+class ChainTile:
+    """What a chain keeps its sum in here (`chain_tile`): the instruction's
+    tile and the warp its tiles are walked in."""
+
+    def __init__(self, atom):
+        self.m, self.n, self.d, self.mode = atom.m, atom.n, atom.d, atom.mode
+        self.block = WAVE
+
+
+def chain_tile(shape, extents, ctx):
+    """The tile a chain of products keeps its sum in (`MatrixPaths.
+    chain_tile`): the instruction `matmul` selects, over one multiplication a
+    warp and one row a lane, where it is one `matmul` emits -- or why not.
+    An accumulation that may be added atomically is not chained: its store
+    is not the one a chain replaces."""
+    if ctx.get_user_options().atomic_accumulation:
+        return 'an accumulation may be added atomically'
+    if shape.threads != WAVE or packed(shape.lead_layout):
+        return 'not one multiplication per warp, one row per lane'
+    lead, columns, depth, start = extents
+    atom = instr_for(shape.accumulator, columns=columns, lead=lead,
+                     depth=depth + start, sm=sm_of(ctx))
+    if atom is None or atom.mode not in EMITTED_MODES:
+        return 'no instruction'
+    return ChainTile(atom)
 
 
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,

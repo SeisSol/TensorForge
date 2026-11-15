@@ -659,6 +659,12 @@ def reads_shared(shape, ctx):
     return False
 
 
+def chain_tile(shape, extents, ctx):
+    """No chain keeps its sum in a matrix instruction's layout here
+    (`MatrixPaths.chain_tile`, `D_CHAINS`)."""
+    return 'the target keeps no chains'
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=EXECUTION_SIZE, corner=(0, 0), rows=None,
                    head=0):

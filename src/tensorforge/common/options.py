@@ -1252,13 +1252,18 @@ declare('amd_matrix_k4',
             'not.  Bit-equal on MI300A to the DPP chain in double precision '
             'and to the lane-batched tile in single.  There, at sixteen lanes '
             'in double precision against the chain: order 6 `volume` -8 % '
-            'with the gathers and the ninth column padded -- with the '
-            'operators preloaded, they and the shard copies leave room for '
-            'four multiplications a block, +68 % -- `localFluxAll` -8 % with '
-            '`true`, the time derivative -24 % padded; order 4 '
+            'with the gathers and the ninth column padded, -20 % with the '
+            'products chained besides (`mma_d_layout`) and the operators left '
+            'in global memory, which leaves room for two blocks a CU -- '
+            'preloaded, they and the shard copies leave room for four '
+            'multiplications a block, +61 % -- `localFluxAll` -7 to -10 % '
+            'with `true`, the time derivative -24 % padded; order 4 '
             '`localFluxAll` -11 %; order 8 behind the chain at 32 lanes '
-            'throughout.  In single precision within 5 % of the lane-batched '
-            'tile either way.  Off by default.')
+            'throughout.  In single precision against the lane-batched tile, '
+            'chained: `volume` -13 to -16 % at order 4, -4 % at order 6 and '
+            '-5 % at order 8 against 32 lanes, `localFluxAll` -10 % at order '
+            '6 with the gathers; unchained within 5 % of it either way.  Off '
+            'by default.')
 
 declare('amd_matrix_k4_pad',
         default=False,
@@ -1987,8 +1992,13 @@ declare('mma_d_layout',
             'first of them, and written once, after the last, each lane at '
             'the rows and columns its fragment holds -- with no epilogue tile '
             '(`ctile`) and no rows in between (`compute.dchain`).  NVIDIA, '
-            'one multiplication per warp; a product it does not reach keeps '
-            'its epilogue.')
+            'one multiplication per warp; on AMD the stacked tiles of '
+            '`amd_matrix_k4`, whose D layout is the register image, every '
+            'column in them (`amd_matrix_k4_pad` is implied).  A product it '
+            'does not reach keeps its epilogue.  On MI300A at sixteen lanes, '
+            'against the stacked tiles padded and unchained: order 6 `volume` '
+            '-10 % in double precision and in single, `localFluxAll` -18 % in '
+            'single.')
 
 declare('mma_stage_b_once',
         default=False,

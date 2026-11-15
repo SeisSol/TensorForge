@@ -1151,12 +1151,10 @@ class MultilinearInstruction(ComputeInstruction):
         return lead, columns, depth, start
 
     def _d_atom(self, module):
-        """The instruction the target's matrix path issues for this
-        operation, as it selects it (`instr_for`)."""
-        lead, columns, depth, start = self._matrix_extents()
-        return module.instr_for(self._idest.get_fptype(), columns=columns,
-                                lead=lead, depth=depth + start,
-                                sm=module.sm_of(self._context))
+        """The tile the target's matrix path keeps a chain's sum in for this
+        operation, or why it keeps none (`MatrixPaths.chain_tile`)."""
+        return module.chain_tile(self._shape(), self._matrix_extents(),
+                                 self._context)
 
     def d_chain_refusal(self, module):
         """Why this product cannot be a member of a chain (`dchain`), or
@@ -1166,19 +1164,17 @@ class MultilinearInstruction(ComputeInstruction):
         of the stream: the target keeps chains, the product takes its matrix
         path -- every condition `_nonleading_dim_test` asks on the way there,
         since a member that fell back to the nest would leave the chain's
-        accumulators nobody adds into -- one multiplication per warp, and the
-        result reaches its output through exactly the companions the builder
-        recorded: the old value loaded into an image of its own, added by an
-        epilogue without a factor, stored to global memory.
+        accumulators nobody adds into -- in a tile the target keeps a chain
+        in (`MatrixPaths.chain_tile`: on NVIDIA one multiplication per warp,
+        on AMD the stacked tiles), and the result reaches its output through
+        exactly the companions the builder recorded: the old value loaded
+        into an image of its own, added by an epilogue without a factor,
+        stored to global memory.
         """
         from tensorforge.backend.instructions.memory.load import GlbToRegLoader
         from tensorforge.backend.instructions.memory.store import StoreRegToGlb
         if module is None or not module.D_CHAINS:
             return 'the target keeps no chains'
-        if self._context.get_user_options().atomic_accumulation:
-            return 'an accumulation may be added atomically'
-        if self._num_threads != module.WAVE or self._lead_width != 1:
-            return 'not one multiplication per warp, one row per lane'
         if len(self._ns) != 2 or len(self._ks) != 1 or len(self._ops) != 2:
             return 'not a product of two matrices'
         if self._scalar or self._prev is None:
@@ -1200,8 +1196,8 @@ class MultilinearInstruction(ComputeInstruction):
                 or self._second_operand_is_sparse()):
             return 'the matrix path would decline it'
         atom = self._d_atom(module)
-        if atom is None or atom.mode not in module.EMITTED_MODES:
-            return 'no instruction'
+        if isinstance(atom, str):
+            return atom
         parts = self.companions
         store, epilogue = parts.store, parts.epilogue
         if (not isinstance(store, StoreRegToGlb) or store._zero_fill
@@ -1253,8 +1249,8 @@ class MultilinearInstruction(ComputeInstruction):
         base = (self._ns[0][0] // span) * span
         walk = self._ns[0][1] - base
         rows = []
-        for i in range(0, walk, module.WAVE):
-            for ii in range(0, min(module.WAVE, walk - i), atom.m):
+        for i in range(0, walk, atom.block):
+            for ii in range(0, min(atom.block, walk - i), atom.m):
                 rows.extend(base + i + ii + r for r in range(atom.m))
         return rows
 
@@ -3077,7 +3073,30 @@ class MultilinearInstruction(ComputeInstruction):
                             lead_layout=lead_layout(self._num_threads,
                                                     self._lead_width),
                             a_uniform=self._a_uniform(),
-                            b_shared=self._b_shard_readable())
+                            b_shared=self._b_shard_readable(),
+                            a_wave=self._a_wave_stride() is not None)
+
+    def _a_wave_stride(self):
+        """The stride of `A`'s contraction axis where step `k + p` is `p`
+        of them on from step `k` -- one contraction axis, one scalar an
+        element, dense and in memory in its own order -- and the same rows
+        for every multiplication; `None` elsewhere (`MatmulOperands.
+        A_wave`).  A register image has no address to add to, and a
+        prepared buffer is not strided."""
+        if not self._ops or self._ops[0].symbol is None:
+            return None
+        symbol = self._ops[0].symbol
+        a_obj, view = symbol.obj, symbol.data_view
+        if (self._a_uniform() and len(self._ks) == 1 and view is not None
+                and 'k0' in self._opdim_to_nks[0]
+                and getattr(a_obj, 'storage_parts', 1) == 1
+                and a_obj.is_dense()
+                and getattr(a_obj, 'storage_order', None) is None
+                and getattr(a_obj, 'simt_interleave', None) is None
+                and symbol.stype in (SymbolType.SharedMem, SymbolType.Batch,
+                                     SymbolType.Global)):
+            return view.get_dim_strides()[self._opdim_to_nks[0].index('k0')]
+        return None
 
     def _b_shard_readable(self) -> bool:
         """Whether `B` sits in shared memory as the frontend described it,
@@ -3641,22 +3660,8 @@ class MultilinearInstruction(ComputeInstruction):
             uniform = self._a_uniform()
             # One contraction axis, one scalar an element, dense and in
             # memory: then step `k + p` is `p` strides of that axis further,
-            # which is all `A_wave` adds to the address.  A register image
-            # has no address to add to.
-            k_stride = None
-            view = self._ops[0].symbol.data_view
-            if (uniform and len(self._ks) == 1 and view is not None
-                    and 'k0' in self._opdim_to_nks[0]
-                    and getattr(a_obj, 'storage_parts', 1) == 1
-                    and a_obj.is_dense()
-                    # in its logical order: a prepared buffer is not strided
-                    and getattr(a_obj, 'storage_order', None) is None
-                    and getattr(a_obj, 'simt_interleave', None) is None
-                    and self._ops[0].symbol.stype in (SymbolType.SharedMem,
-                                                      SymbolType.Batch,
-                                                      SymbolType.Global)):
-                k_stride = view.get_dim_strides()[
-                    self._opdim_to_nks[0].index('k0')]
+            # which is all `A_wave` adds to the address.
+            k_stride = self._a_wave_stride()
 
             def A_wave(writer, i, k, mults):
                 """`A(i, k + p)` in the lanes of the `p`-th of `mults`
