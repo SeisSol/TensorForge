@@ -104,6 +104,11 @@ __tfshim_v4d __builtin_amdgcn_mfma_f64_16x16x4f64(double, double, __tfshim_v4d,
                                                   int, int, int);
 __tfshim_v4f __builtin_amdgcn_mfma_f32_16x16x4f32(float, float, __tfshim_v4f,
                                                   int, int, int);
+typedef tfshim::Vec<short, 4>::type __tfshim_v4s;
+__tfshim_v4f __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(__tfshim_v4s,
+                                                       __tfshim_v4s,
+                                                       __tfshim_v4f, int, int,
+                                                       int);
 
 // The fence a handoff between the lanes of a wave stands behind
 // (`Lexic.handoff_fence`): an ordering, a memory scope by name.
@@ -116,6 +121,9 @@ inline int max(int a, int b) { return a < b ? b : a; }
 
 // The scheduling barrier a batch loop without a guard is fenced with.
 void __builtin_amdgcn_sched_barrier(int);
+// The scheduling groups the stacked tiles interleave their issues and the next
+// step's reads with (`Options.amd_matrix_k4_pipeline`): mask, size, sync id.
+void __builtin_amdgcn_sched_group_barrier(int, int, int);
 
 template <typename T> T __builtin_amdgcn_global_atomic_fadd_f32(T *, T);
 template <typename T> T __builtin_amdgcn_global_atomic_fadd_f64(T *, T);

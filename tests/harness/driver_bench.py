@@ -77,6 +77,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from tensorforge.common.basic_types import Datatype, FlagMode
+from tensorforge.common.matrix import prepare
 
 from . import layout
 from .driver_emit import collect_operands, launcher_call_expr
@@ -211,7 +212,7 @@ def host_values(op) -> Optional[List[float]]:
     if op.values is None or op.addressing != "none":
         return None
     dt = _DATATYPE_OF.get(op.ctype)
-    if dt is None or op.storage_parts not in (1, 2):
+    if dt is None or op.storage_parts not in (1, 2, prepare.BF16_PARTS):
         return None
     flat = np.asarray(op.values, dtype=layout.np_dtype(dt))
     if op.pack_index is not None:
@@ -220,6 +221,13 @@ def host_values(op) -> Optional[List[float]]:
         try:
             flat = layout.split_tf32(
                 flat, dt, planar=(op.storage_volume // 2
+                                  if op.storage_planar else 0))
+        except ValueError:
+            return None
+    elif op.storage_parts == prepare.BF16_PARTS:
+        try:
+            flat = layout.split_bf16(
+                flat, dt, planar=(op.storage_volume // prepare.BF16_PARTS
                                   if op.storage_planar else 0))
         except ValueError:
             return None

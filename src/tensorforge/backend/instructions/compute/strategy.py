@@ -229,6 +229,9 @@ class MatrixPaths(Protocol):
     #: one too, read into the accumulators and written from them, rather
     #: than added through its epilogue (`dchain.link`).
     D_CHAIN_SINGLES: bool
+    #: Whether a chain may span the trips of a merged run, the loop carrying
+    #: its accumulators (`dchain.DChain.loop`, `AccumulatorChain.phase`).
+    D_CHAIN_LOOPS: bool
 
     def strategies(self, shape: ComputeShape, ctx) -> FrozenSet[Strategy]:
         """The arrangements this target can emit for `shape`."""

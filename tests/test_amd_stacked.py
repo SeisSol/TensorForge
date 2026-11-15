@@ -54,8 +54,10 @@ WAVE, THREADS, MULTS, COLUMNS = 64, 16, 4, 4
 
 #: The instruction by the type it accumulates in, and its M order.
 OPS = {Datatype.F64: OP, Datatype.F32: F32_OP}
-ORDERS = {Datatype.F64: stacked.ELEMENT_MINOR,
-          Datatype.F32: stacked.ELEMENT_MAJOR}
+BF16_OP = next(o for o in catalog.MATRIX_OPS
+               if o.builtin == "mfma_f32_16x16x16bf16_1k")
+ORDERS = {Datatype.F64: stacked.QUARTER_MINOR,
+          Datatype.F32: stacked.QUARTER_MAJOR}
 TYPES = [Datatype.F64, Datatype.F32]
 
 CASES = Path(__file__).parent / "cases"
@@ -108,19 +110,20 @@ def test_a_and_b_are_the_lanes_own_step(dtype):
 
 
 def test_the_mapping_is_derived_and_declines_where_it_does_not_hold():
-    # The two instructions stack the other way round in M.
-    assert stacked.stacking(OP, 16) == stacked.ELEMENT_MINOR
-    assert stacked.stacking(F32_OP, 16) == stacked.ELEMENT_MAJOR
+    # The two instructions lay M out the other way round over the quarters.
+    assert stacked.stacking(OP) == stacked.QUARTER_MINOR
+    assert stacked.stacking(F32_OP) == stacked.QUARTER_MAJOR
     for op in (OP, F32_OP):
-        assert stacked.fits(op, 16)
-        # Thirty-two lanes: the halves of a multiplication hold other rows.
-        assert not stacked.fits(op, 32)
-        assert not stacked.fits(op, 64)
+        # A multiplication of whole quarters of the wave: one, two or four.
+        for threads in (16, 32, 64):
+            assert stacked.fits(op, threads)
+        for threads in (8, 48, 128):
+            assert not stacked.fits(op, threads)
     # Neither the lane-batched tile nor a 16x16x1 one: their K is not the
-    # wave's multiplications.
+    # wave's quarters.
     for name in ("mfma_f32_4x4x1f32", "mfma_f32_16x16x1f32"):
         other = next(o for o in catalog.MATRIX_OPS if o.builtin == name)
-        assert stacked.stacking(other, 16) is None
+        assert stacked.stacking(other) is None
 
 
 # -- the emitter in a wave simulator --------------------------------------- #
@@ -136,12 +139,13 @@ class _Spec:
 class SimWriter:
     """The writer the emitter is handed, evaluating instead of building: a
     value is what it holds in each of the 64 lanes of a wave, the
-    multiplication a lane belongs to its `lane // 16`.  The instruction is
-    evaluated from the fragment tables, the lane gather as `ds_bpermute` reads
-    -- any lane of the wave.  Enough of the builder for this emitter and no
-    more: a call the simulator does not know fails the test."""
+    multiplication a lane belongs to its `lane // threads`.  The instruction
+    is evaluated from the fragment tables, the lane gather as `ds_bpermute`
+    reads -- any lane of the wave.  Enough of the builder for this emitter
+    and no more: a call the simulator does not know fails the test."""
 
-    def __init__(self):
+    def __init__(self, threads=THREADS):
+        self.threads = threads
         self.lanes = np.arange(WAVE)
         self.issues = 0
         self.gathers = 0
@@ -149,6 +153,8 @@ class SimWriter:
         self.shard_reads = 0
         self.mask = np.ones(WAVE, dtype=bool)
         self.issued = None
+        self.raw = []
+        self.splits = 0
 
     # structure
     @contextlib.contextmanager
@@ -162,9 +168,9 @@ class SimWriter:
     # values
     def thread_id(self, axis="x", raw=False):
         if axis == "x":
-            return self.lanes % THREADS
+            return self.lanes % self.threads
         # A wave of a block 16 wide: rows `4w .. 4w + 3`; any `w` will do.
-        return 4 * 7 + self.lanes // THREADS
+        return 4 * 7 + self.lanes // self.threads
 
     def const(self, value, type_=None):
         return np.full(WAVE, value, dtype=float)
@@ -198,8 +204,12 @@ class SimWriter:
             return a[0] < a[1]
         if name == "ge":
             return a[0] >= a[1]
+        if name == "le":
+            return a[0] <= a[1]
         if name == "and":
             return a[0] & a[1]
+        if name == "bitxor":
+            return np.bitwise_xor(a[0], a[1])
         if name == "select":
             return np.where(a[0], a[1], a[2])
         raise AssertionError(f"the simulator has no {name!r}")
@@ -218,11 +228,18 @@ class SimWriter:
         finally:
             self.mask = outer
 
+    def __call__(self, text, *args, accesses=None, **kw):
+        # A raw statement: the scheduling groups of a pipelined product
+        # (`Options.amd_matrix_k4_pipeline`), which order nothing here.
+        assert text.startswith("__builtin_amdgcn_sched_group_barrier("), text
+        assert accesses == ()
+        self.raw.append(text)
+
     def barrier(self, participants="block", threads=None, handoff=False):
         # The rendezvous the shard route owes the wave: in the simulator the
         # lanes run in step anyway, so what is checked is that it is asked
         # for, of the wave, before any read (`shard_reads`).
-        assert participants == "wave" and threads == THREADS and handoff
+        assert participants == "wave" and threads == self.threads and handoff
         self.barriers += 1
 
     def rawexpr(self, text, *args, **kw):
@@ -234,8 +251,27 @@ class SimWriter:
         assert ((0 <= lane) & (lane < WAVE)).all()
         return value[lane]
 
+    def call_stmt(self, callee, *args, writes=(), **kw):
+        # The runtime split of four floats into three BF16 terms each,
+        # rounded to nearest even as `static_cast<__bf16>` does, the terms
+        # kept as the floats they stand for.
+        assert callee == "tensorforge::splitFloatx4BF16", callee
+        outs, values = args[:3], args[3:]
+        assert len(values) == 4 and len(writes) == 3
+        self.splits += 1
+        rest = np.stack([np.asarray(v, dtype=np.float32) for v in values],
+                        axis=1)
+        for out in outs:
+            term = _bf16(rest)
+            out[...] = term
+            rest = (rest - term).astype(np.float32)
+
     def call(self, callee, type_, *args, **kw):
-        op = next((o for o in OPS.values() if o.callee == callee), None)
+        if callee == "tensorforge::packBF16x4":
+            # Terms the host split, stored as the floats they stand for.
+            return np.asarray(args[0])
+        op = next((o for o in list(OPS.values()) + [BF16_OP]
+                   if o.callee == callee), None)
         assert op is not None, callee
         assert self.issued in (None, op), "two instructions in one product"
         self.issued = op
@@ -245,14 +281,15 @@ class SimWriter:
         amat = np.empty((op.m, op.k))
         bmat = np.empty((op.k, op.n))
         cmat = np.empty((op.m, op.n))
+        a, b = np.asarray(a), np.asarray(b)
         for m in range(op.m):
             for k in range(op.k):
                 slot, lane = layouts.position(op, "A", m, k)
-                amat[m, k] = a[lane]
+                amat[m, k] = a[lane, slot] if a.ndim == 2 else a[lane]
         for k in range(op.k):
             for n in range(op.n):
                 slot, lane = layouts.position(op, "B", k, n)
-                bmat[k, n] = b[lane]
+                bmat[k, n] = b[lane, slot] if b.ndim == 2 else b[lane]
         for m in range(op.m):
             for n in range(op.n):
                 slot, lane = layouts.position(op, "D", m, n)
@@ -266,20 +303,44 @@ class SimWriter:
         return out
 
 
+def _bf16(x):
+    """`x` rounded to BF16, to nearest even, as a float32."""
+    x = np.asarray(x, dtype=np.float32)
+    bits = x.view(np.uint32).astype(np.uint64)
+    bits = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000
+    return bits.astype(np.uint32).view(np.float32)
+
+
+def _split_bf16(values):
+    """Three BF16 terms of `values`, as `prepare.split_bf16` stores them."""
+    rest = np.asarray(values, dtype=np.float32)
+    terms = []
+    for _ in range(3):
+        term = _bf16(rest)
+        terms.append(term.astype(float))
+        rest = (rest - term).astype(np.float32)
+    return terms
+
+
 def _operands(op_rows, elements, kx, columns, zero_known=True, wave=True,
-              shard=False, writer=None, chain=None, dtype=Datatype.F64):
+              shard=False, writer=None, chain=None, dtype=Datatype.F64,
+              threads=THREADS, window=None, prepared=False):
     """`MatmulOperands` over NumPy data, read the way the nest's accessors
     read: `op_rows` is the operator counted from the first slot's row, one
     column a step of the contraction; `elements[e]` is the `e`-th
     multiplication's per-element operand, one row a step.  The image of a
     per-element operand holds position `s` (`kx` before the first step) in
-    lane `s % 16` of block `s // 16`; a position outside the contraction
-    holds NaN, which no product may read."""
+    lane `s % threads` of block `s // threads`; a position outside the
+    contraction holds NaN, which no product may read.  `window`, rows
+    `[r0, r1)` of the walk, is the operation's own, which a read by row
+    (`A_lanes`) has to stay in."""
     rows, depth = op_rows.shape
-    slots = -(-rows // THREADS)
+    first, end = window if window is not None else (0, rows)
+    T, mults = threads, WAVE // threads
+    slots = -(-rows // T)
     lanes = np.arange(WAVE)
-    t, mult = lanes % THREADS, lanes // THREADS
-    out = np.full((MULTS, slots * THREADS, columns), np.nan)
+    t, mult = lanes % T, lanes // T
+    out = np.full((mults, slots * T, columns), np.nan)
 
     def op_at(r, k):
         r = np.asarray(r)
@@ -288,23 +349,32 @@ def _operands(op_rows, elements, kx, columns, zero_known=True, wave=True,
 
     def A(writer, var, i, k, *rest):
         assert var is None and not rest
-        return op_at(THREADS * i + t, k)
+        return op_at(T * i + t, k)
 
-    def A_wave(writer, i, k, mults):
-        assert mults == MULTS and k + mults <= depth
-        return np.array([op_at(THREADS * i + t[l], k + mult[l])[()]
+    def A_wave(writer, i, k, count):
+        assert count == mults and k + count <= depth
+        return np.array([op_at(T * i + t[l], k + mult[l])[()]
                          for l in lanes])
+
+    def A_lanes(writer, k, rows_, steps_):
+        """The operator at a row and a step of every lane's own, which have
+        to stay inside it."""
+        r = np.broadcast_to(np.asarray(rows_), (WAVE,))
+        step = k + np.broadcast_to(np.asarray(steps_), (WAVE,))
+        assert ((first <= r) & (r < end)).all()
+        assert ((0 <= step) & (step < depth)).all()
+        return op_rows[r, step]
 
     def B(writer, var, j, kb):
         assert var is None
-        s = THREADS * kb + t - kx
+        s = T * kb + t - kx
         inside = (0 <= s) & (s < depth)
         values = np.array([elements[mult[l]][min(max(s[l], 0), depth - 1), j]
                            for l in lanes])
         return np.where(inside, values, np.nan)
 
     def C(writer, value, i, j):
-        out[mult, THREADS * i + t, j] = value
+        out[mult, T * i + t, j] = value
 
     def A_zero(e_lo, e_hi, k_lo, k_hi):
         return bool((op_rows[e_lo:min(e_hi, rows), k_lo:k_hi] == 0).all())
@@ -319,42 +389,67 @@ def _operands(op_rows, elements, kx, columns, zero_known=True, wave=True,
         e = mult + np.asarray(mults_)
         step = k + np.asarray(rows_)
         col = j + np.asarray(columns_)
-        assert ((0 <= e) & (e < MULTS)).all()
+        assert ((0 <= e) & (e < mults)).all()
         assert ((0 <= step) & (step < depth)).all()
         assert ((0 <= col) & (col < np.asarray(elements).shape[2])).all()
         return np.array([elements[e[l]][step[l], col[l]] for l in lanes])
 
+    def A_slot(writer, slot, parts=1, shift=None, width=1):
+        """An operator the host split into k-quads of its three terms
+        (`amd.prepared_order`): slot `(q slots + i) T width` holds quad `q`
+        of row slot `i`, `shift` more slots on in the lane."""
+        assert parts == 3 and width == 4
+        nonlead = slot // (T * width) + np.broadcast_to(
+            np.asarray(0 if shift is None else shift), (WAVE,))
+        quad, i = nonlead // slots, nonlead % slots
+        row = T * i + t
+        assert ((0 <= quad) & (quad * 4 < depth + 3)).all()
+        cells = np.zeros((WAVE, 4))
+        for c in range(4):
+            step = quad * 4 + c
+            ok = (row < rows) & (step < depth)
+            cells[:, c] = np.where(ok, op_rows[np.clip(row, 0, rows - 1),
+                                               np.clip(step, 0, depth - 1)],
+                                   0.0)
+        return _split_bf16(cells)
+
     ops = MatmulOperands(
-        A=A, B=B, C=C, sparse=None, lead_slots=slots, lead_elements=rows,
-        n=columns, k=depth, kx=kx, threads=THREADS, a=dtype,
+        A=A, B=B, C=C, sparse=None, lead_slots=slots,
+        lead_elements=end - first,
+        n=columns, k=depth, kx=kx, threads=T, a=dtype,
+        lead_first=first,
         b=dtype, accumulator=dtype, a_uniform=True,
         A_wave=A_wave if wave else None, lockstep=True,
+        A_lanes=A_lanes if wave else None,
         A_zero=A_zero if zero_known else None,
-        B_shard=B_shard if shard else None, chain=chain)
+        B_shard=B_shard if shard else None, chain=chain,
+        A_slot=A_slot if prepared else None, a_parts=3 if prepared else 1)
     return ops, out
 
 
 def _simulate(op_rows, elements, kx=0, columns=8, route="transpose",
-              options=None, dtype=Datatype.F64, **kw):
+              options=None, dtype=Datatype.F64, threads=THREADS, **kw):
     ops, out = _operands(op_rows, elements, kx, columns,
-                         shard=route == "shard", dtype=dtype, **kw)
-    writer = SimWriter()
+                         shard=route == "shard", dtype=dtype,
+                         threads=threads, **kw)
+    writer = SimWriter(threads)
     assert stacked.matmul_stacked(writer, ops,
                                   _ctx(dtype=dtype, amd_matrix_k4=route,
                                        **(options or {})),
                                   Span(Strategy.MATRIX, 0, columns))
-    assert writer.issued is OPS[dtype]
+    assert writer.issued is (BF16_OP if (options or {}).get(
+        "amd_matrix_k4_emulate") else OPS[dtype])
     want = np.einsum("rk,ekj->erj", op_rows, np.asarray(elements)[:, :, :columns])
     got = out[:, :op_rows.shape[0], :columns]
     return got, want, writer
 
 
-def _random(rows, depth, columns, seed, zero_blocks=()):
+def _random(rows, depth, columns, seed, zero_blocks=(), threads=THREADS):
     rng = np.random.default_rng(seed)
     op_rows = rng.uniform(-1, 1, (rows, depth))
     for (r0, r1), (k0, k1) in zero_blocks:
         op_rows[r0:r1, k0:k1] = 0.0
-    elements = rng.uniform(-1, 1, (MULTS, depth, columns))
+    elements = rng.uniform(-1, 1, (WAVE // threads, depth, columns))
     return op_rows, elements
 
 
@@ -408,17 +503,20 @@ class _Output:
     (`AccumulatorChain`): at a row of the walk and a column, every lane its
     own multiplication's element."""
 
-    def __init__(self, values):
+    def __init__(self, values, threads=THREADS):
         self.values = np.array(values, dtype=float)
+        self.threads = threads
         self.reads = self.writes = 0
 
     def load(self, writer, row, col, predicate=None):
         self.reads += 1
         lanes = np.arange(WAVE)
         row = np.broadcast_to(np.asarray(row), (WAVE,))
-        rows = self.values.shape[1]
-        got = self.values[lanes // THREADS, np.clip(row, 0, rows - 1), col]
-        inside = (0 <= row) & (row < rows)
+        col = np.broadcast_to(np.asarray(col), (WAVE,))
+        rows, cols = self.values.shape[1:]
+        got = self.values[lanes // self.threads, np.clip(row, 0, rows - 1),
+                          np.clip(col, 0, cols - 1)]
+        inside = (0 <= row) & (row < rows) & (0 <= col) & (col < cols)
         if predicate is not None:
             inside = inside & np.asarray(predicate)
         return np.where(inside, got, 0.0)
@@ -427,8 +525,11 @@ class _Output:
         self.writes += 1
         lanes = np.arange(WAVE)
         row = np.broadcast_to(np.asarray(row), (WAVE,))
+        col = np.broadcast_to(np.asarray(col), (WAVE,))
         mask = writer.mask & (0 <= row) & (row < self.values.shape[1])
-        self.values[lanes[mask] // THREADS, row[mask], col] = \
+        assert (col[mask] < self.values.shape[2]).all(), \
+            "a padded column written"
+        self.values[lanes[mask] // self.threads, row[mask], col[mask]] = \
             np.asarray(value)[mask]
 
 
@@ -469,6 +570,252 @@ def test_a_chain_adds_every_product_into_one_set_of_accumulators(route,
     assert out.reads == out.writes == 4 * columns
     # Every issue into the one set: three products, 3 tiles of columns.
     assert writer.issues == 3 * 4 * 9 * 3
+
+
+#: The wider multiplications: lanes, and a tile's columns (`4 H`).
+WIDE = [(32, 8), (64, 16)]
+
+
+@pytest.mark.parametrize("dtype", TYPES)
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+@pytest.mark.parametrize("threads,width", WIDE)
+@pytest.mark.parametrize("rows,depth,kx", [
+    (55, 35, 0),     # SeisSol's order-6 volume
+    (64, 36, 0),     # whole tiles
+    (21, 56, 0),     # a 21-row chain
+    (120, 84, 0),    # order 8
+    (55, 34, 1),     # a contraction from step 1, the derivative's
+    (40, 13, 3),     # from step 3, ending inside a tile
+])
+def test_a_wide_multiplication_computes_every_element(rows, depth, kx,
+                                                      threads, width, route,
+                                                      dtype):
+    """Thirty-two and sixty-four lanes a multiplication: the quarters of one
+    take more columns, the rows of an issue's tile land in every quarter,
+    and the quarters trade them back into the image before the epilogue
+    (`stacked._relayout`) -- one tile of columns, its every element where
+    the nest keeps it."""
+    op_rows, elements = _random(rows, depth, width, seed=rows + depth,
+                                threads=threads)
+    got, want, writer = _simulate(op_rows, elements, kx=kx, columns=width,
+                                  route=route, dtype=dtype, threads=threads)
+    np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-12)
+    H = threads // 16
+    slots = -(-rows // threads)
+    # `H - 1` gathers a slot of D, four slots a tile, a tile of rows each.
+    relayout = slots * 4 * (H - 1)
+    if route == "shard":
+        assert writer.barriers == 1
+        assert writer.gathers == relayout
+        assert writer.shard_reads == -(-(depth + kx) // 4)
+    else:
+        assert writer.gathers == relayout + width * -(-(depth + kx) // 4)
+
+
+@pytest.mark.parametrize("dtype", TYPES)
+@pytest.mark.parametrize("threads,width", WIDE)
+def test_a_wide_padded_tile_and_its_issues(threads, width, dtype):
+    """The ninth column in one more tile -- the second of eight columns, or
+    the only one of sixteen -- padded with zeros; and an issue a nonzero
+    block of sixteen rows and four steps for every tile, as at sixteen
+    lanes."""
+    blocks = [((0, 16), (4, 8)), ((16, 32), (0, 12)), ((48, 55), (28, 35))]
+    op_rows, elements = _random(55, 35, 9, seed=11, zero_blocks=blocks,
+                                threads=threads)
+    got, want, writer = _simulate(op_rows, elements, columns=9,
+                                  options={"amd_matrix_k4_pad": True},
+                                  dtype=dtype, threads=threads)
+    np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-12)
+    nonzero = sum(1 for rt in range(4) for kt in range(9)
+                  if (op_rows[16 * rt:16 * rt + 16, 4 * kt:4 * kt + 4] != 0)
+                  .any())
+    assert writer.issues == -(-9 // width) * nonzero
+
+
+@pytest.mark.parametrize("dtype", TYPES)
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+@pytest.mark.parametrize("threads,width", WIDE)
+def test_a_wide_chain_reads_and_writes_at_the_lanes_own_cells(threads, width,
+                                                              route, dtype):
+    """A chain at thirty-two and sixty-four lanes: D is not the image there,
+    and needs not be -- the first product reads the output's old value at
+    the row and column D gives every lane, the last writes it back there,
+    each cell once, and nothing is gathered after the issues."""
+    from tensorforge.backend.instructions.compute.matmul import AccumulatorChain
+    rng = np.random.default_rng(43)
+    mults = WAVE // threads
+    windows = ((1, 54), (1, 55), (1, 56))
+    rows, depth, columns = 64, 35, 9
+    q0 = rng.uniform(-1, 1, (mults, rows, columns))
+    out = _Output(q0, threads)
+    state = {}
+    want = q0.copy()
+    writer = SimWriter(threads)
+    ctx = _ctx(dtype=dtype, amd_matrix_k4=route, mma_d_layout=True)
+    for d, (r0, r1) in enumerate(windows):
+        # Outside a member's window the operator holds numbers that are not
+        # its product's: a read by row has to keep them out.
+        op_rows = rng.uniform(5, 9, (rows, depth))
+        op_rows[r0:r1] = rng.uniform(-1, 1, (r1 - r0, depth))
+        elements = rng.uniform(-1, 1, (mults, depth, columns))
+        chain = AccumulatorChain(opens=d == 0, closes=d == len(windows) - 1,
+                                 state=state, rows=(1, 56), load=out.load,
+                                 store=out.store)
+        ops, _ = _operands(op_rows, elements, 0, columns,
+                           shard=route == "shard", chain=chain, dtype=dtype,
+                           threads=threads, window=(r0, r1), zero_known=False)
+        ops = dataclasses.replace(ops, C=_no_write)
+        assert stacked.matmul_stacked(writer, ops, ctx,
+                                      Span(Strategy.MATRIX, 0, columns))
+        want[:, r0:r1] += np.einsum("rk,ekj->erj", op_rows[r0:r1], elements)
+    np.testing.assert_allclose(out.values, want, rtol=1e-12, atol=1e-12)
+    # Four tiles of sixteen rows, and every slot of D some lane keeps: a
+    # slot's column is `c0 + 4 h + s`, and it reads at all where `c0 + s`
+    # is one of the output's.
+    kept = sum(1 for c0 in range(0, columns, width) for s in range(4)
+               if c0 + s < columns)
+    assert out.reads == out.writes == 4 * kept
+    if route == "shard":
+        assert writer.gathers == 0
+
+
+@pytest.mark.parametrize("dtype", TYPES)
+@pytest.mark.parametrize("threads", [16, 32])
+def test_a_chain_over_a_merged_runs_trips(threads, dtype):
+    """`localFluxAll`'s four faces as one merged loop (`dchain.DChain.loop`):
+    the member opens the chain ahead of the loop, issues into the
+    accumulators the loop carries on every trip -- with that trip's operator
+    and element -- and closes it behind; the output is read and written once,
+    and every trip's product is in it."""
+    from tensorforge.backend.instructions.compute.matmul import AccumulatorChain
+    rng = np.random.default_rng(47)
+    mults = WAVE // threads
+    rows, depth, columns, trips = 56, 21, 9, 4
+    q0 = rng.uniform(-1, 1, (mults, rows, columns))
+    out = _Output(q0, threads)
+    state = {}
+    want = q0.copy()
+    writer = SimWriter(threads)
+    ctx = _ctx(dtype=dtype, mma_d_layout=True)
+    data = [(rng.uniform(-1, 1, (rows, depth)),
+             rng.uniform(-1, 1, (mults, depth, columns)))
+            for _ in range(trips)]
+    phases = ["open"] + ["body"] * trips + ["close"]
+    for n, phase in enumerate(phases):
+        op_rows, elements = data[min(max(n - 1, 0), trips - 1)]
+        chain = AccumulatorChain(opens=True, closes=True, state=state,
+                                 rows=(0, rows), load=out.load,
+                                 store=out.store, phase=phase)
+        ops, _ = _operands(op_rows, elements, 0, columns, chain=chain,
+                           dtype=dtype, threads=threads)
+        ops = dataclasses.replace(ops, C=_no_write)
+        issued = writer.issues
+        assert stacked.matmul_stacked(writer, ops, ctx,
+                                      Span(Strategy.MATRIX, 0, columns))
+        assert (writer.issues > issued) == (phase == "body")
+        if phase == "body":
+            want += np.einsum("rk,ekj->erj", op_rows, elements)
+    np.testing.assert_allclose(out.values, want, rtol=1e-12, atol=1e-12)
+    width = 16 // (WAVE // threads)
+    kept = sum(1 for c0 in range(0, columns, width) for s in range(4)
+               if c0 + s < columns)
+    assert out.reads == out.writes == -(-rows // 16) * kept
+
+
+@pytest.mark.parametrize("dtype", TYPES)
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+@pytest.mark.parametrize("threads", [16, 32])
+@pytest.mark.parametrize("level", [1, 2])
+def test_a_pipelined_product_computes_every_element(level, threads, route,
+                                                    dtype):
+    """`Options.amd_matrix_k4_pipeline`: the fragments of the next step read
+    ahead of this step's issues, and at level 2 every issue but the last
+    step's followed by a scheduling group of reads -- the same numbers."""
+    width = 16 // (WAVE // threads)
+    op_rows, elements = _random(55, 35, width, seed=59, threads=threads)
+    got, want, writer = _simulate(op_rows, elements, columns=width,
+                                  route=route, dtype=dtype, threads=threads,
+                                  options={"amd_matrix_k4_pipeline": level})
+    np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-12)
+    last = sum(1 for rt in range(4) if (op_rows[16 * rt:16 * rt + 16,
+                                                32:35] != 0).any())
+    assert len(writer.raw) == (2 * (writer.issues - last) if level == 2
+                               else 0)
+
+
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+@pytest.mark.parametrize("rows,depth,kx", [
+    (55, 35, 0),     # SeisSol's order-6 volume
+    (21, 56, 0),     # a 21-row chain
+    (20, 10, 0),     # order 4, one issue of sixteen steps
+    (55, 34, 1),     # from step 1, the derivative's
+    (40, 13, 3),     # from step 3, ending inside an issue
+])
+@pytest.mark.parametrize("prepared", [False, True])
+def test_an_emulated_product_holds_single_precision(rows, depth, kx, route,
+                                                   prepared):
+    """`Options.amd_matrix_k4_emulate`: the F32 product as six BF16 term
+    products on `mfma_f32_16x16x16bf16_1k`, sixteen steps an issue and four a
+    lane, into the F32 tile's accumulator -- every element at the precision
+    of an F32 product (1e-6 normwise), where one BF16 product would hold 1e-2."""
+    op_rows, elements = _random(rows, depth, 8, seed=rows * 7 + depth)
+    op_rows = op_rows.astype(np.float32).astype(float)
+    elements = np.asarray(elements, dtype=np.float32).astype(float)
+    if prepared and kx % 4:
+        pytest.skip("the operator is offered split where it starts on a quad")
+    got, want, writer = _simulate(op_rows, elements, kx=kx, route=route,
+                                  dtype=Datatype.F32,
+                                  options={"amd_matrix_k4_emulate": True},
+                                  prepared=prepared)
+    assert writer.issued is BF16_OP
+    # The operator split by the host is read, not split again: only the
+    # elements' fragments are, one a tile of columns and issue.
+    if prepared:
+        assert writer.splits == 2 * -(-(depth + kx) // 16)
+    scale = np.abs(want).max()
+    assert np.abs(got - want).max() / scale < 1e-6
+    # Six products a nonzero block of sixteen rows and sixteen steps, every
+    # tile of columns.
+    blocks = -(-rows // 16) * -(-(depth + kx) // 16)
+    assert writer.issues <= 6 * 2 * blocks
+
+
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+@pytest.mark.parametrize("prepared", [False, True])
+def test_an_emulated_chain_carries_every_cell_of_the_tile(route, prepared):
+    """The BF16 tile in a chain: its D holds four cells a lane, as the F32
+    tile's does, though its sixteen steps an issue made `m / k` one -- read
+    so, the chain opened and closed one column of every four."""
+    from tensorforge.backend.instructions.compute.matmul import AccumulatorChain
+    rng = np.random.default_rng(43)
+    windows = ((1, 54), (1, 55), (1, 56))
+    rows, depth, columns = 64, 35, 9
+    q0 = rng.uniform(-1, 1, (MULTS, rows, columns))
+    out = _Output(q0)
+    state = {}
+    want = q0.copy()
+    writer = SimWriter()
+    ctx = _ctx(dtype=Datatype.F32, amd_matrix_k4=route, mma_d_layout=True,
+               amd_matrix_k4_emulate=True)
+    for d, (r0, r1) in enumerate(windows):
+        op_rows = np.zeros((rows, depth))
+        op_rows[r0:r1] = rng.uniform(-1, 1, (r1 - r0, depth))
+        op_rows = op_rows.astype(np.float32).astype(float)
+        elements = rng.uniform(-1, 1, (MULTS, depth, columns)).astype(
+            np.float32).astype(float)
+        chain = AccumulatorChain(opens=d == 0, closes=d == len(windows) - 1,
+                                 state=state, rows=(1, 56), load=out.load,
+                                 store=out.store)
+        ops, _ = _operands(op_rows, elements, 0, columns,
+                           shard=route == "shard", chain=chain,
+                           dtype=Datatype.F32, prepared=prepared)
+        ops = dataclasses.replace(ops, C=_no_write)
+        assert stacked.matmul_stacked(writer, ops, ctx,
+                                      Span(Strategy.MATRIX, 0, columns))
+        want[:, r0:r1] += np.einsum("rk,ekj->erj", op_rows[r0:r1], elements)
+    assert writer.issued is BF16_OP
+    assert np.abs(out.values - want).max() / np.abs(want).max() < 1e-6
+    assert out.reads == out.writes == 4 * columns
 
 
 def _no_write(writer, value, i, j):
@@ -570,20 +917,29 @@ def test_the_scheme_is_offered_only_where_it_holds():
     off = Context(arch="gfx942", backend="hip", fp_type=Datatype.F64)
     assert not stacked.stacks(_shape(), off)
     assert Strategy.MATRIX not in amd.strategies(_shape(), off)
-    # Thirty-two lanes, an operator per element, a packed lead operand, a
-    # sparse second operand: declined, and the DPP chain keeps them.
-    for shape in (_shape(threads=32), _shape(uniform=False), _shape(width=2),
+    # Eight lanes, an operator per element, a packed lead operand, a sparse
+    # second operand: declined, and the DPP chain keeps them.
+    for shape in (_shape(threads=8), _shape(uniform=False), _shape(width=2),
                   _shape(sparse=True)):
         assert not stacked.stacks(shape, ctx)
-    # F32 at sixteen lanes takes its own instruction, planned alike; at
-    # thirty-two, and with the option off, the lane-batched tile.
+    # Thirty-two and sixty-four lanes: tiles of eight and sixteen columns.
+    assert amd.plan(Strategy.MATRIX, _shape(threads=32), 9, ctx) == (
+        Span(Strategy.MATRIX, 0, 8), Span(Strategy.DPP, 8, 9))
+    assert amd.plan(Strategy.MATRIX, _shape(threads=64), 9, ctx) == (
+        Span(Strategy.DPP, 0, 9),)
+    padded = _ctx(amd_matrix_k4_pad=True)
+    assert amd.plan(Strategy.MATRIX, _shape(threads=64), 9, padded) == (
+        Span(Strategy.MATRIX, 0, 9),)
+    assert amd.plan(Strategy.MATRIX, _shape(threads=64), 7, padded) == (
+        Span(Strategy.DPP, 0, 7),)
+    # F32 takes its own instruction, planned alike; with the option off the
+    # lane-batched tile.
     f32 = _ctx(dtype=Datatype.F32)
     single = _shape(accumulator=Datatype.F32)
     assert stacked.stacks(single, f32)
     assert amd.plan(Strategy.MATRIX, single, 9, f32) == (
         Span(Strategy.MATRIX, 0, 8), Span(Strategy.DPP, 8, 9))
-    assert not stacked.stacks(_shape(threads=32, accumulator=Datatype.F32),
-                              f32)
+    assert stacked.stacks(_shape(threads=32, accumulator=Datatype.F32), f32)
     assert not stacked.stacks(single, _ctx(dtype=Datatype.F32,
                                            amd_matrix_k4=False))
     # No F64 matrix core on RDNA; CDNA 2 has the instruction.
@@ -592,20 +948,37 @@ def test_the_scheme_is_offered_only_where_it_holds():
 
 
 def test_a_stacked_operator_is_not_prepared_in_k_quads():
-    """`prepared_order` under the option at sixteen lanes: the scheme reads
-    the operator by its own steps (`A_wave`), so no k-quad order is offered
-    for it -- one would hand the product back to the lane-batched tile --
-    while without the option, or at thirty-two lanes, the tile's quads
-    are."""
+    """`prepared_order` under the option: the scheme reads the operator in
+    its own order (`A_wave`, `A_lanes`), so no k-quad order is offered for
+    it -- one would hand the product back to the lane-batched tile --
+    while without the option, or at a lane count the scheme does not take,
+    the tile's quads are."""
     asked = dict(columns=9, lead=56, depth=35)
     on, off = (_ctx(dtype=Datatype.F32),
                _ctx(dtype=Datatype.F32, amd_matrix_k4=False))
-    assert amd.prepared_order((56, 56), Datatype.F32, on, threads=16,
-                              **asked) is None
-    assert amd.prepared_order((56, 56), Datatype.F32, off, threads=16,
+    for threads in (16, 32):
+        assert amd.prepared_order((56, 56), Datatype.F32, on, threads=threads,
+                                  **asked) is None
+        assert amd.prepared_order((56, 56), Datatype.F32, off,
+                                  threads=threads, **asked) is not None
+    assert amd.prepared_order((56, 56), Datatype.F32, on, threads=8,
                               **asked) is not None
-    assert amd.prepared_order((56, 56), Datatype.F32, on, threads=32,
-                              **asked) is not None
+
+
+def test_the_emulated_tile_takes_the_operator_split_only_unpadded():
+    """The emulated tile's operator is split on the host -- three BF16 terms
+    in k-quads -- only where the ninth column cannot go into a padded tile:
+    under `mma_d_layout` or `amd_matrix_k4_pad` it is split in the kernel, the
+    form that was never wrong (`amd.prepared_order`)."""
+    asked = dict(columns=9, lead=56, depth=36)
+    emulated = dict(dtype=Datatype.F32, amd_matrix_k4_emulate=True)
+    split = amd.prepared_order((56, 56), Datatype.F32, _ctx(**emulated),
+                               threads=16, **asked)
+    assert split is not None and split.parts == 3
+    for padding in ({"mma_d_layout": True}, {"amd_matrix_k4_pad": True}):
+        assert amd.prepared_order((56, 56), Datatype.F32,
+                                  _ctx(**emulated, **padding), threads=16,
+                                  **asked) is None
 
 
 def test_the_multiplications_of_a_wave_run_in_step():
@@ -692,6 +1065,29 @@ def test_a_chain_reads_and_writes_the_output_once(name, issue, route):
     assert not re.search(r"atomic_fadd|atomicAdd", src)
 
 
+def test_a_chain_spans_a_merged_runs_trips():
+    """Four products into `Q` merged into one loop (`stacked_merged_chain_f64`):
+    the chain spans the loop's trips -- the body issues the product once,
+    `Q` is read ahead of the loop and written behind it, a cell each, and
+    nothing is added atomically -- where unchained every trip adds its tile
+    into `Q` through the epilogue."""
+    loop = re.compile(r"for \(int32_t (\w+) = 0; \1 < 4; \+\+\1\)")
+    case, src = _kernel("stacked_merged_chain_f64")
+    assert len(loop.findall(src)) == 1
+    # 20 rows: two tiles; nine columns: three tiles, the last padded;
+    # ten steps: three.
+    assert len(MFMA.findall(src)) == 2 * 3 * 3
+    assert not re.search(r"atomic_fadd|atomicAdd", src)
+    q = re.escape("glb_" + _operand_name(src, "Q"))
+    stores = len(re.findall(rf"^\s*{q}\[[^\]]*\] = ", src, re.MULTILINE))
+    loads = len(re.findall(rf"{q}\[[^\]]*\]", src)) - stores
+    # Two tiles of sixteen rows, nine columns in slots of four.
+    assert loads == stores == 2 * 9
+    _, alone = _kernel("stacked_merged_chain_f64", mma_d_layout=False)
+    assert len(loop.findall(alone)) == 1
+    assert re.search(r"atomic_fadd", alone)
+
+
 @pytest.mark.parametrize("name,want", [("stacked_volume_f64", [3]),
                                        ("stacked_chain21_f64", [])])
 def test_a_product_on_its_own_keeps_its_epilogue(name, want, monkeypatch):
@@ -763,7 +1159,7 @@ def test_the_shard_reads_the_temporary_where_its_producer_stored_it():
 
 @pytest.mark.parametrize("arch,threads,options", [
     ("gfx942", 16, {"amd_matrix_k4": False}),
-    ("gfx942", 32, {}),
+    ("gfx942", 8, {}),
     ("gfx1150", 16, {}),
 ])
 def test_where_it_declines_the_kernel_is_todays(arch, threads, options):

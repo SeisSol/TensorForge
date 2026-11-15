@@ -1262,8 +1262,16 @@ declare('amd_matrix_k4',
             'throughout.  In single precision against the lane-batched tile, '
             'chained: `volume` -13 to -16 % at order 4, -4 % at order 6 and '
             '-5 % at order 8 against 32 lanes, `localFluxAll` -10 % at order '
-            '6 with the gathers; unchained within 5 % of it either way.  Off '
-            'by default.')
+            '6 with the gathers; unchained within 5 % of it either way.\n'
+            'At 32 and 64 lanes a multiplication spans two or four of the '
+            'instruction\'s quarters, each taking four more columns of an '
+            'issue, and the rows of an issue\'s tile go back to their lanes by '
+            'lane gathers (`stacked._relayout`) -- or stay in D, where the '
+            'products are chained.  There, chained, on the shard and against '
+            'the chain at the same lanes: order 8 `volume` -10 % at 32 lanes '
+            'in single precision, +15 % at 32 and -12 % at 64 in double, where '
+            '32 lanes of the chain stay the fastest build; order 6 `volume` in '
+            'double -22 % at 32 lanes, still behind 16.  Off by default.')
 
 declare('amd_matrix_k4_pad',
         default=False,
@@ -1277,6 +1285,40 @@ declare('amd_matrix_k4_pad',
             'an element (no spill left), `volume` -7 %; at order 4 '
             '`localFluxAll` and the derivative give back what the unpadded '
             'tiles gained.  Off.')
+
+declare('amd_matrix_k4_emulate',
+        default=False,
+        parse=parse_bool,
+        doc='Under `amd_matrix_k4`, emulate a single-precision product in BF16 '
+            'terms: both operands split into three, six term products on '
+            '`v_mfma_f32_16x16x16bf16_1k` -- the F32 tile\'s M, N and D, sixteen '
+            'steps an issue -- into the F32 accumulator (`primitives.amd.'
+            'stacked._emit_emulated`).  Sixteen lanes a multiplication.  With '
+            '`prepare_operands` the operator is split on the host, k-quads of '
+            'its three terms (`amd.prepared_order`), and every reader that '
+            'multiplies its floats adds them back.  As accurate as the F32 '
+            'paths in SeisSol (1e-7 in norm) and slower than both on MI300A: '
+            'the `volume` +13 % at order 4, +45 % at order 6 and +74 % at '
+            'order 8 against the fastest F32 build -- the BF16 instruction '
+            'does six times the F32 one\'s work an issue, and six products '
+            'and the splits take that back.')
+
+declare('amd_matrix_k4_pipeline',
+        default=0,
+        env='TF_AMD_MATRIX_K4_PIPELINE',
+        doc='Under `amd_matrix_k4`, read the fragments of the next step of the '
+            'contraction before the issues of this one (1), and interleave '
+            'those reads with the issues by scheduling groups (2, '
+            '`__builtin_amdgcn_sched_group_barrier`, as CK does); 0 reads a '
+            'step\'s fragments in front of its own issues.  The order-6 '
+            '`volume` in double precision on MI300A waited on dependencies '
+            '49 % of its cycles and on issue 30 %, its matrix core busy 23 %; '
+            'at 1 the dependency waits fall from 8.7e9 to 3.7e9 cycles and '
+            'the issue waits from 5.3e9 to 3.1e9, but the second set of '
+            'fragments halves the waves in flight.  Order 6 at sixteen '
+            'lanes: `volume` -7 % on the shard at 1 and +5 % with the '
+            'gathers, `neighboringFlux` -2 to -7 % at 2, the time derivative '
+            '+1 % at 1 and +28 % at 2.')
 
 declare('amd_moved_broadcast',
         default=False,
@@ -2001,6 +2043,23 @@ declare('mma_d_layout',
             'order 6 `volume` -10 % in double precision and in single, '
             '`localFluxAll` -18 % in single; `neighboringFlux`, one product '
             'into `Q`, was 9 to 30 % slower as a chain of one.')
+
+declare('mma_d_layout_loops',
+        default=False,
+        env='TF_MMA_D_LAYOUT_LOOPS',
+        parse=parse_bool,
+        doc='Under `mma_d_layout`, let a chain span the trips of a merged run: '
+            'the output read ahead of the loop, every trip issuing into the '
+            'accumulators the loop carries, the output written behind it '
+            '(`dchain.DChain.loop`; AMD\'s stacked tiles).  SeisSol\'s '
+            '`localFluxAll`, its four faces one loop from order 6 on, on MI300A '
+            'against the same builds with trips that add through their '
+            'epilogues: double precision +6 to +11 % at order 6 and +12 to '
+            '+14 % at order 8 (sixteen lanes, +57 % on the shard route), '
+            'single precision -9 to +3 % and -3 to -6 % -- and nowhere better '
+            'than the best build without it.  The chain reads `Q` ahead of '
+            'the loop and waits for it, where the epilogues\' atomic adds '
+            'wait for nothing.  Off.')
 
 declare('mma_stage_b_once',
         default=False,

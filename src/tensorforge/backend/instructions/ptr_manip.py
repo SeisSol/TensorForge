@@ -1412,22 +1412,51 @@ class VariantLoop(AbstractInstruction):
     self._declare_windows_early(writer, self._region, cleared)
 
     if hasattr(writer, 'for_'):
-      # `extern` because the counter's name is the macro layer's: a table
-      # built where the counter is no value (`For`, below) spells it as text.
-      with writer.for_(0, self._count, 1, extern=self._counter,
-                       unroll=self._unroll, rolled=True) as loop:
-        # The counter as a value, which the select chains and the array
-        # accesses read as an operand: an edge back to the loop, so nothing
-        # takes them ahead of the header, and something to substitute for a
-        # pass that builds a trip's statements for another one.  Named in the
-        # text alone it would read as invariant, and `licm` would move the
-        # access ahead of the header.
-        with self.counter_bound(writer, self._counter, loop.induction):
-          self._emit_region(writer, per_iteration)
+      chains = list(getattr(self, 'chains', ()))
+      try:
+        self._gen_loop(writer, per_iteration, chains)
+      finally:
+        for chain in chains:
+          chain.phase = 'all'
       return
 
     with writer.For(self.header(), unroll=self._unroll):
       self._emit_region(writer, per_iteration)
+
+  def _gen_loop(self, writer, per_iteration, chains) -> None:
+    """The loop as PIR, carrying the accumulators of the chains that span
+    its trips (`dchain.DChain.loop`): each opened by its member ahead of the
+    header, issued into on every trip, closed by its member behind."""
+    for chain in chains:
+      chain.phase = 'open'
+      chain.members[0].gen_code(writer)
+    keys = [(c, key) for c, chain in enumerate(chains)
+            for key in sorted(chain.state.get('accs', {}))]
+    inits = [chains[c].state['accs'][key] for c, key in keys]
+    # `extern` because the counter's name is the macro layer's: a table
+    # built where the counter is no value (`For`, below) spells it as text.
+    with writer.for_(0, self._count, 1, extern=self._counter,
+                     unroll=self._unroll, rolled=True, inits=inits,
+                     types=[v.type for v in inits]) as loop:
+      for (c, key), arg in zip(keys, loop.iter_args):
+        chains[c].state['accs'][key] = arg
+      for chain in chains:
+        chain.phase = 'body'
+      # The counter as a value, which the select chains and the array
+      # accesses read as an operand: an edge back to the loop, so nothing
+      # takes them ahead of the header, and something to substitute for a
+      # pass that builds a trip's statements for another one.  Named in the
+      # text alone it would read as invariant, and `licm` would move the
+      # access ahead of the header.
+      with self.counter_bound(writer, self._counter, loop.induction):
+        self._emit_region(writer, per_iteration)
+      if keys:
+        loop.yield_(*[chains[c].state['accs'][key] for c, key in keys])
+    for (c, key), result in zip(keys, loop.results):
+      chains[c].state['accs'][key] = result
+    for chain in chains:
+      chain.phase = 'close'
+      chain.members[0].gen_code(writer)
 
   def __str__(self):
     return (f'for {self._counter} in [0,{self._count}): '

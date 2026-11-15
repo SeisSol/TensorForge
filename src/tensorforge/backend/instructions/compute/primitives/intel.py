@@ -635,6 +635,7 @@ ORDERS_EVERY_READER = True
 #: (`MatrixPaths.D_CHAIN_SINGLES`).
 D_CHAINS = False
 D_CHAIN_SINGLES = False
+D_CHAIN_LOOPS = False
 
 #: DPAS first where it is offered, then the register-only chain, which beats
 #: staging operands through shared memory here.  Whether DPAS beats the chain

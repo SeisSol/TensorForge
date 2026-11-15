@@ -1334,7 +1334,8 @@ class MultilinearInstruction(ComputeInstruction):
             opens=chain.opens(self), closes=chain.closes(self),
             state=chain.state,
             rows=(chain.rows[0] - base, chain.rows[1] - base),
-            load=load, store=store)
+            load=load, store=store,
+            phase=chain.phase if chain.loop is not None else 'all')
 
     def gen_code_inner(self, writer: Writer):
         # A comment touches nothing.  Left conservative it would be read as
@@ -3098,6 +3099,15 @@ class MultilinearInstruction(ComputeInstruction):
             return view.get_dim_strides()[self._opdim_to_nks[0].index('k0')]
         return None
 
+    def _a_row_stride(self):
+        """The stride of `A`'s lead axis, beside `_a_wave_stride`'s steps
+        (`MatmulOperands.A_lanes`), or `None` where it has no such axis."""
+        view = self._ops[0].symbol.data_view
+        dims = self._opdim_to_nks[0]
+        if view is None or 'n0' not in dims:
+            return None
+        return view.get_dim_strides()[dims.index('n0')]
+
     def _b_shard_readable(self) -> bool:
         """Whether `B` sits in shared memory as the frontend described it,
         one contraction axis and then one output axis, dense: then an element
@@ -3687,12 +3697,44 @@ class MultilinearInstruction(ComputeInstruction):
                     if not res:
                         spec.discard()
                 return res
+
+            # The rows' stride beside the steps': the address of any cell is
+            # the walk's first row's at a step, shifted.
+            row_stride = (self._a_row_stride() if k_stride is not None
+                          else None)
+
+            def A_lanes(writer, k, rows, steps):
+                """`A` at row `rows` of the walk and step `k + steps`, both
+                values of the lane (`MatmulOperands.A_lanes`): the address of
+                the walk's first row at step `k` and one shift -- no lane's
+                own row, and so no lane's guard.  The caller keeps both
+                inside the operand."""
+                size = self._ks[0][1] - self._ks[0][0]
+                if not 0 <= k < size:
+                    return None
+                idx = unwindOp(0, 0, k, 0, True)
+                lead = self._opdim_to_nks[0].index('n0')
+                idx[lead] = add_offset((self._ns[0][0] // span) * span,
+                                       self._eff_offset(0, lead))
+                shift = None
+                for value, step in ((rows, row_stride), (steps, k_stride)):
+                    term = (value if step == 1 else
+                            writer.op('mul', INDEX, value, step, hint='r'))
+                    shift = (term if shift is None else
+                             writer.op('add', INDEX, shift, term, hint='r'))
+                with writer.speculative() as spec:
+                    res = self._ops[0].symbol.load(writer, self._context, None,
+                                                   idx, False, shift=shift)
+                    if not res:
+                        spec.discard()
+                return res
             ops = MatmulOperands(
                 A=A, B=B, C=C, sparse=sparse,
                 a_parts=getattr(a_obj, 'storage_parts', 1) if a_obj else 1,
                 B_frag=B_frag, B_direct=B_direct,
                 a_uniform=uniform,
                 A_wave=A_wave if k_stride is not None else None,
+                A_lanes=A_lanes if row_stride is not None else None,
                 lockstep=self.convergence_scope() is not None,
                 # in shared memory, or headed there a trip at a time
                 a_shared=(self._ops[0].symbol.stype is SymbolType.SharedMem

@@ -78,13 +78,21 @@ class DChain:
     `state` is what the emitter keeps between the members of one build of
     the body: the accumulators, which the first member declares.  A body is
     built more than once (`Generator._place_section`, `_fused_if_over_budget`),
-    and every build starts at the first member, which starts it over."""
+    and every build starts at the first member, which starts it over.
+
+    `loop` is the merged run (`VariantLoop`) whose every trip runs the one
+    member, where the chain spans its trips: the loop opens the chain ahead
+    of its header and closes it behind, and carries the accumulators from
+    trip to trip; `phase` is which of those the member is emitted for
+    (`MatmulOperands.chain`)."""
     members: List
     dest: object
     offset: Tuple[int, ...]
     rows: Tuple[int, int]
     columns: Tuple[int, int]
     state: Dict = field(default_factory=dict)
+    loop: object = None
+    phase: str = 'all'
 
     def opens(self, member) -> bool:
         return member is self.members[0]
@@ -138,8 +146,10 @@ def _candidate(instr, module, everything) -> Optional[str]:
         return why
     own = (instr,) + parts.instructions()
     symbols = instr.d_chain_symbols()
+    # A loop's reads are its body's, which are asked themselves: a merged
+    # run would otherwise read every member's result in its own name.
     if any(_reads_or_writes(x, symbols) for x in everything
-           if not any(x is o for o in own)):
+           if not any(x is o for o in own) and not any(x.regions())):
         return 'its result or its old value is read elsewhere'
     return None
 
@@ -217,6 +227,11 @@ def link(context, instrs: Sequence) -> list:
                 close(key)
     for key in list(open_chains):
         close(key)
+    if (getattr(module, 'D_CHAIN_LOOPS', False)
+            and context.get_user_options().mma_d_layout_loops):
+        for instr in instrs:
+            if hasattr(instr, 'counter') and hasattr(instr, 'replace_region'):
+                _link_loop(instr, module, everything)
 
     drop = set()
     for members in done:
@@ -235,9 +250,56 @@ def link(context, instrs: Sequence) -> list:
     return [x for x in instrs if id(x) not in drop]
 
 
+def _link_loop(loop, module, everything) -> None:
+    """A chain over the trips of a merged run: where its body holds one
+    product into an output in global memory that every trip adds into --
+    not a member its counter selects -- and nothing else of the body
+    touches that output, the trips add into one set of accumulators
+    (`DChain.loop`).  SeisSol's `localFluxAll`, its four faces merged into
+    one loop, is the case.  The member's companions leave the body."""
+    region = list(loop.region)
+    if loop.count < 2:
+        return
+    found = []
+    for instr in region:
+        if _candidate(instr, module, everything) is not None:
+            continue
+        dest = instr.d_chain_dest()
+        if getattr(dest, 'is_variant', False) or getattr(
+                getattr(dest, 'obj', None), 'is_variant', False):
+            continue
+        found.append(instr)
+    chains = []
+    drop = set()
+    for member in found:
+        dest = member.d_chain_dest()
+        if sum(1 for x in found if x.d_chain_dest() is dest) != 1:
+            continue
+        own = {id(member)} | {id(x) for x in
+                              member.companions.instructions()}
+        if any(_reads_or_writes(x, (dest,), dest.obj)
+               for x in _flat(region) if id(x) not in own):
+            continue
+        chain = DChain(members=[member], dest=dest,
+                       offset=tuple(member.companions.store._dest_offset),
+                       rows=member.d_chain_rows(),
+                       columns=member.d_chain_columns(), loop=loop)
+        member.join_d_chain(chain)
+        drop.update(id(x) for x in member.companions.instructions())
+        chains.append(chain)
+    if chains:
+        loop.replace_region(0, [x for x in region if id(x) not in drop])
+        loop.chains = list(getattr(loop, 'chains', ())) + chains
+
+
 def check(chain: DChain, member) -> None:
     """Raise where `member` is emitted out of its chain's order: the first
     member declares what the others add into."""
+    if chain.loop is not None:
+        if chain.phase != 'open' and not chain.state:
+            raise InternalError(
+                f'{chain}: a trip emitted before the loop opened the chain')
+        return
     if not chain.opens(member) and not chain.state:
         raise InternalError(
             f'{chain}: a member emitted before the first, which declares the '
