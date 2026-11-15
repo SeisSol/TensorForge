@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import re
 import warnings
 from pathlib import Path
 
@@ -239,7 +240,9 @@ def test_where_what_cannot_go_holds_the_excess_only_constants_go():
     out = rematerialize(body, b.scratch,
                         budget=Budget(peak // 2, margin=0.1), taken=taken)
     assert len(_loads(out, op)) == 4
-    assert taken == {'const': 1, 'load': 0, 'guarded': 0}
+    assert {k: taken[k] for k in ('const', 'load', 'guarded')} == {
+        'const': 1, 'load': 0, 'guarded': 0}
+    assert 0 < taken['closed'] < 1
     consts = [s for s in walk_stmts(out) if s.op == Op.CONST]
     assert len(consts) > len([s for s in walk_stmts(body)
                               if s.op == Op.CONST])
@@ -293,6 +296,82 @@ def test_judged_against_the_body_as_written():
     # What cannot go holds most of it: the share closed stays under the bar.
     assert not run(40, lambda p: p // 2, lambda c: 2 * c)
     assert 0 < CLOSED_MIN < 1
+
+
+def test_judged_against_the_values_own_excess():
+    """`Budget.stop` `values`: loads go where what pays closes at least
+    `VALUES_CLOSED_MIN` of the values' own excess, whatever the body as
+    written was -- an excess as written too small for the images' stop is no
+    bar."""
+    from tensorforge.backend.pir.budget import EXCESS_MIN, VALUES_CLOSED_MIN
+
+    def run(between, capacity_of, written_of):
+        b = IRBuilder(fptype=Datatype.F32)
+        op = _crowded(b, between=between)
+        body = b.finish()
+        capacity = capacity_of(Liveness(body, False).peak)
+        taken: dict = {}
+        out = rematerialize(body, b.scratch,
+                            budget=Budget(capacity, margin=0.0,
+                                          stop='values'),
+                            as_written=written_of(capacity), taken=taken)
+        return len(_loads(out, op)) > 4, taken['closed']
+
+    small = lambda c: int(c * (1 + EXCESS_MIN / 2))
+    goes, closed = run(12, lambda p: p - 12, small)
+    assert goes and closed >= VALUES_CLOSED_MIN
+    goes, closed = run(40, lambda p: p // 2, lambda c: 2 * c)
+    assert not goes and closed < VALUES_CLOSED_MIN
+
+
+def test_where_no_load_goes_the_values_stay_unless_nothing_closes():
+    """`Budget.fallback` `values`: a body within the budget, or one the
+    stop leaves only constants, goes out as values -- unless what pays would
+    close less than `IMAGES_BELOW` of their excess, where the images stay
+    whole as before."""
+    from tensorforge.backend.pir.budget import IMAGES_BELOW
+
+    def remat(between, capacity_of):
+        b = IRBuilder(fptype=Datatype.F32)
+        _crowded(b, between=between, constant=True)
+        body = b.finish()
+        budget = Budget(capacity_of(Liveness(body, False).peak), margin=0.1,
+                        stop='values', fallback='values')
+        blocks = RegisterBlocks(b.scratch, values=True, budget=budget,
+                                report=[])
+        blocks.remat(blocks.as_values(blocks.split(blocks.unroll(body))))
+        return blocks.reverted, blocks.report[-1]
+
+    # Within the budget; the stop leaving only constants; and next to
+    # nothing closable: the stretch holds the excess.
+    assert remat(12, lambda p: 2 * p) == (
+        False, 'budget: no load put back; the blocks stay values')
+    reverted, last = remat(40, lambda p: p // 2)
+    assert not reverted and 'blocks stay values' in last
+    reverted, last = remat(120, lambda p: p // 8)
+    assert reverted and 'images stay whole' in last
+    assert 0 < IMAGES_BELOW < 0.5
+
+
+def test_within_the_budget_igc_keeps_the_values():
+    """The budget SYCL's SPMD lowering gives on Intel keeps the values where
+    the body is within it (`Budget.fallback`): the kernel is the one
+    `register_values` builds.  Elsewhere the images stay whole, and it is
+    the default's."""
+    def body(src):
+        # The kernel's name and the options it states are the options'.
+        src = re.sub(r'kernel_kernel_[0-9a-f]+', 'kernel', src)
+        return re.sub(r'// options: .*', '', src)
+
+    for backend, arch, same in (('oneapi', 'pvc', {'register_values': True}),
+                                ('cuda', 'sm_90', {})):
+        within = _kernel('chain', backend, arch, register_spill='remat',
+                         register_budget=10 ** 5)
+        assert body(within) == body(_kernel('chain', backend, arch, **same))
+    assert _budget('pvc', 'oneapi').fallback == 'values'
+    assert _budget('pvc', 'oneapi').stop == 'values'
+    assert _budget('sm_90', 'cuda').fallback == 'images'
+    assert _budget('sm_90', 'cuda').stop == 'written'
 
 
 def test_a_register_buffer_nothing_touches_is_not_counted():

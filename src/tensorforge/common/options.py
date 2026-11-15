@@ -829,11 +829,12 @@ declare('register_left_over',
         env='TF_REGISTER_LEFT_OVER',
         parse=parse_float,
         doc='The share of the excess over the register budget of a body as '
-            'written that may be left once its blocks are values and every '
-            'load that pays is put back, for `register_spill` to put any back '
-            '(`pir.budget.CLOSED_MIN`); negative for the default, 1 or more '
-            'to put back wherever a load pays.  For calibrating the stop '
-            'against timings.')
+            'written -- under SPMD on Intel, of its values -- that may be left '
+            'once its blocks are values and every load that pays is put back, '
+            'for `register_spill` to put any back (`pir.budget.CLOSED_MIN`, '
+            '`VALUES_CLOSED_MIN`); negative for the default, 1 or more to put '
+            'back wherever a load pays.  For calibrating the stop against '
+            'timings.')
 
 declare('register_selects',
         default='auto',
