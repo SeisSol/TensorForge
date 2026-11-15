@@ -190,6 +190,10 @@ def _cache_hash(b: BuildInputs) -> str:
     # binary, and a cache keyed on the text alone would return the first
     if b.target.backend in ("oneapi", "esimd"):
         h.update(" ".join(_sycl_aot_flags(b.target.arch)).encode())
+    elif b.target.backend == "hip":
+        # `TF_HIPCC_OPTIONS` rides along with the target (`toolchain.Hipcc`)
+        h.update(" ".join(toolchain.COMPILERS["hip"].target_flags(
+            b.target.arch)).encode())
     for part in (b.includes_src, b.kernel_src, b.header_src, b.launcher_src, b.driver_src):
         h.update(part.encode())
     # and the runtime those sources include, which they name and do not hold
