@@ -2,9 +2,10 @@
 #
 # SPDX-License-Identifier: MIT
 """The matrix path as a twin of the default in the lanes rule
-(`tuning._matrix_candidates`): offered where the part's matrix units outrun
-its vector units in the kernel's precision (`tuning.MATRIX_TWIN`), and taken
-where the rule's count says it is faster, as every other twin is."""
+(`tuning._matrix_candidates`): offered where the path measured faster than
+the SIMT nest on the part in the kernel's precision (`tuning.MATRIX_TWIN`),
+and taken where the rule's count says it is faster, as every other twin
+is."""
 from __future__ import annotations
 
 import pytest
@@ -41,8 +42,8 @@ def _offered(arch, dtype, **opts):
 @pytest.mark.parametrize('arch, dtype, wide', [
     ('sm_80', Datatype.F64, True),
     ('sm_90', Datatype.F64, True), ('sm_90', Datatype.F32, None),
-    ('sm_100', Datatype.F32, None)])
-def test_offered_where_the_matrix_units_are_faster(arch, dtype, wide):
+    ('sm_100', Datatype.F64, True), ('sm_100', Datatype.F32, None)])
+def test_offered_where_the_path_is_faster(arch, dtype, wide):
   twins = _offered(arch, dtype)
   assert twins and all(t.get('tensor_cores') is True for t in twins)
   assert all(t.get('mma_operator_copies') is True for t in twins)
@@ -73,7 +74,7 @@ def test_an_unroll_the_caller_asked_for_stands():
 
 @pytest.mark.parametrize('arch, dtype', [
     ('sm_80', Datatype.F32),
-    ('sm_100', Datatype.F64), ('sm_120', Datatype.F32), ('sm_120', Datatype.F64),
+    ('sm_120', Datatype.F32), ('sm_120', Datatype.F64),
     ('sm_86', Datatype.F64), ('sm_89', Datatype.F32)])
 def test_not_offered_where_they_are_not(arch, dtype):
   assert _offered(arch, dtype) == []

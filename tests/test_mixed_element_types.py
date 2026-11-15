@@ -204,19 +204,27 @@ def test_a_double_product_takes_the_double_matrix_instruction():
     assert 'tf32' not in src
 
 
-def test_the_tuner_weighs_the_matrix_path_for_the_product_s_type():
-    """The twin on the matrix path is offered where the part's matrix units
-    are faster in the type the products are computed in: in single precision
-    on sm_100, which a double product is not, and in double on sm_90."""
+def test_the_tuner_weighs_the_matrix_path_for_the_product_s_type(monkeypatch):
+    """The twin on the matrix path is offered where the path is faster in the
+    type the products are computed in, and not by the kernel's: the double
+    product of a single-precision kernel is offered it on sm_80, whose twin is
+    in double only, and not on a part whose twin would be in single only --
+    asked of the kernel's type, the twin took that product onto the TF32 path,
+    split into halves of eleven bits."""
     from tensorforge.generators import tuning
     first = SimpleNamespace(ok=True)
-    for arch, offered in (('sm_100', False), ('sm_90', True)):
+
+    def offered(arch):
         context = Context(arch=arch, backend='cuda', fp_type=Datatype.F32)
         descrs = _to_canonical()
         assert tuning._product_types(descrs, context) == {Datatype.F64}
-        twins = tuning._matrix_candidates(
-            descrs, first, context, tuning.start(descrs, context), None)
-        assert bool(twins) == offered, (arch, twins)
+        return bool(tuning._matrix_candidates(
+            descrs, first, context, tuning.start(descrs, context), None))
+    for arch, expected in (('sm_80', True), ('sm_90', True), ('sm_100', True),
+                           ('sm_120', False)):
+        assert offered(arch) == expected, arch
+    monkeypatch.setitem(tuning.MATRIX_TWIN, 100, (Datatype.F32,))
+    assert not offered('sm_100')
 
 
 def test_the_work_type_is_the_widest_floating_one():
