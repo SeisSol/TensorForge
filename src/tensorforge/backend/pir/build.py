@@ -1260,7 +1260,8 @@ class IRBuilder:
              extern: str = None,
              shift: Optional[Operand] = None,
              valid: Optional[int] = None,
-             head: Optional[int] = None) -> Value:
+             head: Optional[int] = None,
+             unstored: bool = False) -> Value:
         """``layout`` is how the loaded value ends up spread over the lanes.
 
         ``shift`` is added to the index after the swizzle -- see `_shifted`.
@@ -1321,6 +1322,12 @@ class IRBuilder:
             # Lanes before a window's start (`LeadIndex.first`), the other
             # end of the same statement.
             attrs += [('head', head)]
+        if unstored and predicate is not None:
+            # The lanes the predicate holds off read rows the buffer keeps no
+            # slot for, so the zero they take is the operand's number rather
+            # than padding (`LeadIndex.unstored`), and `load_cse` may not let
+            # an unguarded read of the same place stand in for this one.
+            attrs += [('unstored', True)]
         if (self._operation is not None
                 and space not in (MemSpace.REGISTER, MemSpace.NONE)
                 and getattr(type_, 'base', None) in _NUMBERS):

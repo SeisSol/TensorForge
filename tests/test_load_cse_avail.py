@@ -145,8 +145,10 @@ def test_every_branch_is_actually_reached():
 # whether an earlier read may stand in for a later one
 # --------------------------------------------------------------------------
 
-def _traced(predicates):
-    """`load; load; ...` of one location, each under the given predicate."""
+def _traced(predicates, unstored=()):
+    """`load; load; ...` of one location, each under the given predicate;
+    the reads at the positions in `unstored` held off rows their buffer does
+    not store (`LeadIndex.unstored`)."""
     from tensorforge.backend.pir import BOOL, IRBuilder, MemSpace as MS
     from tensorforge.backend.pir.core import ScalarType, Op, walk
     from tensorforge.backend.pir.passes import load_cse
@@ -170,12 +172,14 @@ def _traced(predicates):
         body.append((v, name))
     stmts = builder.finish()
     out = []
-    reads = iter(body)
+    reads = iter(enumerate(body))
     for st in stmts:
         if st.op == Op.LOAD:
-            _, name = next(reads)
+            at, (_, name) = next(reads)
             if name is not None:
                 st = replace(st, predicate=guards[name])
+            if at in unstored:
+                st = st.with_attr('unstored', True)
         out.append(st)
     lowered = load_cse(tuple(out))
     return sum(1 for st, _ in walk(lowered) if st.op == Op.LOAD)
@@ -212,6 +216,24 @@ def test_the_unguarded_read_becomes_the_one_that_is_offered():
     """`p`, then unguarded, then `p` again: the middle read replaces the entry,
     so the third takes it instead of standing alone."""
     assert _traced(['p', None, 'p']) == 2
+
+
+def test_a_read_held_off_unstored_rows_does_not_take_an_unguarded_one():
+    """A packed operand's guard is what makes the rows a column keeps no slot
+    for zero, and the place those lanes address is another column's -- the
+    one the unguarded read was of.  Its value there is not this read's."""
+    assert _traced([None, 'p'], unstored={1}) == 2
+
+
+def test_reads_held_off_unstored_rows_by_one_guard_are_one():
+    assert _traced(['p', 'p'], unstored={0, 1}) == 1
+
+
+def test_one_guard_is_one_read_whether_or_not_its_rows_are_unstored():
+    """Under one predicate the lanes it holds off read zero either way, so the
+    mark is no part of what makes two reads one."""
+    assert _traced(['p', 'p'], unstored={1}) == 1
+    assert _traced(['p', 'p'], unstored={0}) == 1
 
 
 def test_a_guard_that_widens_its_value_blocks_the_reuse():

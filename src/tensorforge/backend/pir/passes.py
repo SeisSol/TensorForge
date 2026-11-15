@@ -817,13 +817,18 @@ def _cse_key(s: Stmt, with_predicate: bool = True):
     # answer; the same merge on an infinity would not.
     #
     # The transfer a statement was written for is not: the lane index every
-    # transfer computes is the same value in each of them.
+    # transfer computes is the same value in each of them.  Nor is a read's
+    # `unstored`, which says what the lanes its predicate holds off mean and
+    # nothing about the value where it holds: two reads of one place under
+    # one predicate are one read, and whether a read under another predicate
+    # may stand in is `_may_stand_in`'s question.
     own = s._cse
     if own is None:
         # What of the key is the statement's and so fixed, kept on it: a
         # sweep to the fixed point keys every statement once a sweep.  The
         # result's layout is read anew -- a builder may still set it.
-        attrs = tuple(a for a in s.attrs if a[0] != 'transfer')
+        attrs = tuple(a for a in s.attrs
+                      if a[0] not in ('transfer', 'unstored'))
         own = (s.op, tuple(k(a) for a in s.args), s.text, attrs)
         object.__setattr__(s, '_cse', own)
     return own + (tuple((t.layout, t.type) for t in s.target),) + (
@@ -976,11 +981,21 @@ def _may_stand_in(stored, s: Stmt) -> bool:
     Where the mask is lane-varying and the value is not, the mask is what
     spreads the value over the lanes, so the read under it is wider than its
     own layout records and an unpredicated read is not the same declaration.
+
+    And a read whose masked-out lanes are rows the buffer does not store
+    (`unstored`, a packed operand: `Symbol._packed_index`).  Their zero is
+    the operand's number there, the lanes' results are stored, and the place
+    they address is the slot of another column -- the one an unguarded read
+    of that column made.  Taken for an empty column of SeisSol's `kDivMT`,
+    whose reads address the slots of the full column after it, it added that
+    column's numbers into the time derivative on PVC once `skip_known_zeros`
+    was off -- which otherwise leaves such a step out before anything is
+    read.
     """
     pred = _predicate_of(s)
     if stored == pred:
         return True
-    if stored is not None:
+    if stored is not None or s.attr('unstored'):
         return False
     return not _predicate_widens(s)
 

@@ -385,7 +385,7 @@ class LeadIndex:
   # TODO: make nonlead a variable
   def __init__(self, nonlead, block, stride, value=None, width=1,
                offset=0, valid=None, pad=False, first=0, vaddr=None,
-               present=None):
+               present=None, unstored=False):
     self._nonlead = nonlead
     #: A boolean value saying, per lane, whether this element is there at
     #: all, or None when every lane's is.
@@ -396,6 +396,19 @@ class LeadIndex:
     #: *inside* its range.  `_valid_access` ands all three into the one
     #: predicate the read carries.
     self._present = present
+    #: Whether `valid`, `first` and `present` hold the access off lanes
+    #: whose rows the buffer does not store (`Symbol._packed_index`), rather
+    #: than only off lanes past the data.
+    #:
+    #: The difference is what the zero those lanes read means.  Past a
+    #: full-lane tail or before a window's head it is padding: the lane's
+    #: result is never stored, and any finite number would do.  For a packed
+    #: operand it is the operand's own number at a row it keeps no slot for,
+    #: and the lane's result is stored -- while the address the lane forms is
+    #: the slot of a neighboring column, which holds something else.  So a
+    #: read that is unconditional elsewhere may not stand in for this one
+    #: (`pir.passes._may_stand_in`).
+    self._unstored = bool(unstored)
     #: This axis's element address outright, as a value, or None where it is
     #: `lane + nonlead * block` as usual.
     #:
@@ -502,6 +515,10 @@ class LeadIndex:
     return self._present
 
   @property
+  def unstored(self) -> bool:
+    return self._unstored
+
+  @property
   def pad(self) -> bool:
     return self._pad
 
@@ -537,6 +554,7 @@ class LeadIndex:
     ok += f', first={self._first}' if self._first else ''
     ok += f', vaddr={self._vaddr!r}' if self._vaddr is not None else ''
     ok += ', present' if self._present is not None else ''
+    ok += ', unstored' if self._unstored else ''
     return (f'LeadIndex({self._nonlead!r}, block={self._block}, '
             f'stride={self._stride}{tail}{wide}{off}{ok})')
 
@@ -573,7 +591,7 @@ class LeadIndex:
   def with_offset(self, offset):
     return LeadIndex(self._nonlead, self._block, self._stride, self._value,
                      self._width, offset, self._valid, self._pad, self._first,
-                     self._vaddr, self._present)
+                     self._vaddr, self._present, self._unstored)
 
   def nonlead(self):
     return self._nonlead
@@ -830,6 +848,21 @@ def vec_width_of(index) -> int:
     if isinstance(inner, VecIndex):
       return inner.width
   return 1
+
+
+def _cuts_kept_lanes(head, tail, first, valid, block) -> bool:
+  """Does a packed column's run, lanes `[head, tail)` of a slot, leave out a
+  lane the read's own window keeps -- `[first, valid)`, all `block` where
+  neither is set?
+
+  Then the predicate the run adds holds the access off a row the window
+  computes, and the zero that lane reads is the operand's number
+  (`LeadIndex.unstored`).  Off a lane the window does not keep, it is
+  padding like the window's own, and an unguarded read may still serve it.
+  """
+  kept_from = first or 0
+  kept_to = block if valid is None else valid
+  return kept_from < kept_to and (head > kept_from or tail < kept_to)
 
 
 def lead_width_of(index) -> int:
@@ -1881,6 +1914,7 @@ class Symbol:
           f'inside a lane\'s own run of rows')
     head = min(max(-(-(start - origin) // wide), 0), block)
     tail = min(max(-(-(start + length - origin) // wide), 0), block)
+    unstored = _cuts_kept_lanes(head, tail, li.first, li.valid, block)
     if li.first:
       head = max(head, li.first)
     if li.valid is not None:
@@ -1898,7 +1932,8 @@ class Symbol:
                                 lower)
     lead_index = LeadIndex(base, block, li._stride, width=wide,
                            offset=shift + packing.offsets[column] - start,
-                           valid=valid, pad=False, first=first)
+                           valid=valid, pad=False, first=first,
+                           unstored=unstored)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
 
   def _packed_row(self, index, packing, column, computed, row, lower):
@@ -1963,6 +1998,7 @@ class Symbol:
           f'inside a lane\'s own run of rows')
     head = min(max(-(-(start - origin) // wide), 0), block)
     tail = min(max(-(-(start + span - origin) // wide), 0), block)
+    unstored = _cuts_kept_lanes(head, tail, li.first, li.valid, block)
     if li.first:
       head = max(head, li.first)
     if li.valid is not None:
@@ -1980,7 +2016,8 @@ class Symbol:
     lead_index = LeadIndex(0, block, li._stride, width=wide, vaddr=addr,
                            offset=shift - start,
                            valid=None if tail >= block else tail,
-                           pad=False, first=0 if head <= 0 else head)
+                           pad=False, first=0 if head <= 0 else head,
+                           unstored=unstored)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
 
   def _tabled_packed_index(self, writer, index, packing, computed, column,
@@ -2098,9 +2135,12 @@ class Symbol:
                        writer.op('add', INDEX, slot_row, off, hint='slot'),
                        start, hint='slot')
       shift_back = shift
+    # The run or the bit comes from the table, so which lanes it holds off
+    # is not known here; every one of them may be a row with no slot.
     lead_index = LeadIndex(0, block, li._stride, width=wide, vaddr=addr,
                            offset=shift_back, valid=li.valid, pad=False,
-                           first=int(li.first or 0), present=held)
+                           first=int(li.first or 0), present=held,
+                           unstored=True)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
 
   def _bitset_index(self, writer, index, packing, column, block, stride,
@@ -2161,10 +2201,13 @@ class Symbol:
     # address instead and lets the subtraction stand, which is the same
     # arithmetic from the other side; here there is no term to keep it out
     # of.
+    # `present` holds the access off the rows the word leaves out, rows the
+    # window may well keep: their zero is the operand's number (`unstored`).
     lead_index = LeadIndex(0, block, stride,
                            offset=int(packing.offsets[column]) + lower[0],
                            vaddr=rank, valid=valid, pad=False,
-                           first=int(first or 0), present=held)
+                           first=int(first or 0), present=held,
+                           unstored=True)
     return [lead_index] + [lower[d] for d in range(1, len(index))]
 
   def _wide_claim(self, index, width: int, part=0):
@@ -3445,7 +3488,8 @@ class Symbol:
       total += (pos - lower) * stride
     return total
 
-  def _valid_access(self, writer, index, valid, ltype=None, first=0):
+  def _valid_access(self, writer, index, valid, ltype=None, first=0,
+                    read=False):
     """How an access holds itself to a full-lane tail's `valid` lanes, and
     off a window head's `first` ones.
 
@@ -3457,6 +3501,12 @@ class Symbol:
     The head is `lane >= first` in the same predicate, and the `head`
     attribute where the lowering spells a narrower transfer: a read of the
     lanes from `first` on into a zeroed vector.
+
+    A `read` held off rows its packed buffer does not store says so as well
+    (`unstored`): there the zero is the operand's number and not padding,
+    which `load_cse` has to know before it lets an unguarded read of the
+    same place stand in.  The attributes of the narrower transfer already
+    keep the two apart.
     """
     present = self._memory_present(index)
     if valid is None and not first and present is None:
@@ -3491,6 +3541,8 @@ class Symbol:
     if present is not None:
       held = present if held is None else writer.op('and', BOOL, held,
                                                     present, hint='g')
+    if read and lead.unstored:
+      return {'predicate': held, 'unstored': True}
     return {'predicate': held}
 
   def _memory_pad(self, index):
@@ -3889,7 +3941,7 @@ class Symbol:
                                type_=one, hint='data', layout=layout,
                                nontemporal=nontemp,
                                **self._valid_access(writer, read_index, valid,
-                                                    one, first))
+                                                    one, first, read=True))
                    for c in range(w)]
           value = writer.pack(ltype, *comps, hint='data')
         else:
@@ -3902,7 +3954,7 @@ class Symbol:
                               layout=layout_of(read_index, self.num_threads),
                               nontemporal=nontemp,
                               **self._valid_access(writer, read_index, valid, ltype,
-                                                   first))
+                                                   first, read=True))
         if bc_lane is None or not broadcast:
           # `broadcast=False` keeps the register index and drops the
           # cross-lane read of it.  The caller is then saying it will use the

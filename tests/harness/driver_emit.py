@@ -466,6 +466,15 @@ def emit(generator, backend: str, default_batch: int) -> str:
             f"    void* h_{op.kernel_name} = std::malloc({total_expr});\n"
             f"    if (!h_{op.kernel_name}) die(\"host alloc\");"
         )
+        if op.is_sink and not op.is_source:
+            # Zero, which is what `runner.py` hands the reference as `dest_in`.
+            # A destination added to (`add=True`) is read by the kernel and
+            # still only a sink by its direction, so no file fills it, and an
+            # allocation the heap recycles from the runtime's start-up holds
+            # whatever was there: a case read 1e305 and NaN on one machine and
+            # passed on another, where the buffer was mapped fresh.
+            allocs_host.append(
+                f"    std::memset(h_{op.kernel_name}, 0, {total_expr});")
         if op.is_source:
             reads.append(
                 f"    std::snprintf(path, sizeof(path), \"%s/in_{op.kernel_name}.bin\", in_dir);\n"
