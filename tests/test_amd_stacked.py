@@ -591,6 +591,22 @@ def test_the_f32_volume_issues_its_own_instruction():
     assert "__builtin_amdgcn_mfma_f32_4x4x1f32(" in off
 
 
+@pytest.mark.parametrize("name,size", [("stacked_volume_f64", 8),
+                                       ("stacked_volume_f32", 4)])
+def test_the_shard_arenas_start_a_quarter_bank_row_apart(name, size):
+    """Under `shard` a fragment reads the four copies of a wave at once
+    (`neighbor_arenas`): the arenas are staggered by a quarter of the 32
+    banks' row, so that four copies by four columns of the volume's odd
+    leading dimension (35) fall on distinct banks -- the stride the shard
+    read steps between copies and the one the arenas are laid out at."""
+    _, src = _kernel(name, amd_matrix_k4="shard")
+    stride = int(re.search(r"\(\(threadIdx\.x [%/] 4\) - v\d+_m\) \* (\d+);",
+                           src).group(1))
+    row = 32 * 4 // size
+    assert stride % row == row // 4
+    assert f"[{stride} * threadIdx.y + " in src
+
+
 @pytest.mark.parametrize("name", ["stacked_from_step_one_f64",
                                   "stacked_chain21_f64",
                                   "stacked_ragged_f64"])

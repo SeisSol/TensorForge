@@ -2236,11 +2236,45 @@ class Generator:
   def _size_per_mult(self, end: int) -> int:
     """What one multiplication's arena takes, for buffers that end at `end`:
     padded by the threads' share of a bank row, so that the multiplications of
-    a block start on different banks, and aligned."""
+    a block start on different banks, and aligned.
+
+    And staggered where a read of the body spans the arenas of several
+    multiplications at once (`neighbor_arenas`): their copies then start
+    `row / group` elements of a bank row apart, `row` the elements a row of
+    banks holds.  The threads' share above is a whole row in double precision
+    at sixteen lanes -- 16 doubles are the 32 banks -- so the four copies a
+    wave of the stacked scheme reads (`MatmulOperands.B_shard`) sat on the
+    same banks, a 4-way conflict on MI300A; a quarter row apart, a fragment's
+    sixteen lanes, four copies by four columns of an odd leading dimension,
+    land on sixteen distinct pairs of banks."""
     alignment = self._shared_align()
     banks = self._context.target.hw.shmem_banks
     overhead = (self._num_threads % banks) // alignment * alignment
-    return -(-(end + overhead) // alignment) * alignment
+    size = -(-(end + overhead) // alignment) * alignment
+    group = self._neighbor_arenas()
+    row = banks * 4 // max(1, self._context.fp_type.size())
+    if group > 1 and row % group == 0 and (row // group) % alignment == 0:
+      size += (row // group - size) % row
+    return size
+
+  def _neighbor_arenas(self) -> int:
+    """The most multiplications' arenas one read of the section's body spans
+    (`MultilinearInstruction.neighbor_arenas`), 0 where none does."""
+    section = getattr(self, '_section', None)
+    if section is None or getattr(section, 'stream', None) is None:
+      return 0
+    out = 0
+
+    def walk(instrs):
+      nonlocal out
+      for instr in instrs:
+        ask = getattr(instr, 'neighbor_arenas', None)
+        if ask is not None:
+          out = max(out, ask())
+        for region in instr.regions():
+          walk(region)
+    walk(section.stream)
+    return out
 
   @staticmethod
   def _depends_on_mults(section) -> bool:

@@ -3116,10 +3116,18 @@ class MultilinearInstruction(ComputeInstruction):
         """
         self._mult_stride = stride
         self._mult_stride_asked = False
+        self._neighbor_arenas = 0
 
     def asked_mult_stride(self) -> bool:
         """Whether the body built since `set_mult_stride` read the stride."""
         return self._mult_stride_asked
+
+    def neighbor_arenas(self) -> int:
+        """How many multiplications' arenas one read of the body built since
+        `set_mult_stride` spans -- a wave's, where `B` is read out of other
+        multiplications' copies (`MatmulOperands.B_shard`) -- or 0.  The
+        generator staggers the arenas for it (`Generator._size_per_mult`)."""
+        return getattr(self, '_neighbor_arenas', 0)
 
     def _ask_mult_stride(self) -> int:
         self._mult_stride_asked = True
@@ -3603,6 +3611,12 @@ class MultilinearInstruction(ComputeInstruction):
                 stride = self._ask_mult_stride()
                 if stride is None:
                     return None
+                # The multiplications of a wave read each other's copies at
+                # once: the arenas are staggered for it.
+                wave = self._context.target.hw.vec_unit_length
+                self._neighbor_arenas = max(
+                    self.neighbor_arenas(),
+                    wave // self._num_threads if self._num_threads else 0)
                 strides = self._ops[1].symbol.data_view.get_dim_strides()
                 shift = None
                 for value, step in ((rows, strides[0]), (columns, strides[1]),
