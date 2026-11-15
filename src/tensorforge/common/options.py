@@ -1334,6 +1334,31 @@ declare('amd_moved_broadcast',
             'an element fused in double precision and 28.1 with the moves (one '
             'per product and row), 26.3 against 21.3 in single.')
 
+declare('amd_row_lookahead',
+        default=-1,
+        env='TF_AMD_ROW_LOOKAHEAD',
+        parse=parse_int,
+        doc='How many rows ahead the fused DPP chain in the row order '
+            '(`codegen._fused_rows`) reads its lead operand.  0 reads each '
+            '`A(i, k)` at its own row, behind the pins that end the row before '
+            '(`tensorforge::pin`, volatile assembly, which orders memory as '
+            'well), so an LDS read waits its whole latency every row.  Each row '
+            'ahead costs the slots\' registers once.  -1 leaves it to the target '
+            '(`codegen.AUTO_LOOKAHEAD`): two rows on CDNA at 32 lanes in double '
+            'precision, where MI300A measured -8 to -11 % at order 8 and no '
+            'kernel slower, none elsewhere.')
+
+declare('amd_moved_pins',
+        default=False,
+        parse=parse_bool,
+        doc='With `amd_moved_broadcast`, pin the accumulators of the column '
+            'order\'s chain (`hfma`) after every row of products, as the row '
+            'order does (`_fused_rows`): a row\'s FMAs ahead of the next row\'s '
+            'moves, and each accumulator in a VGPR at its pin.  Moved, SeisSol\'s '
+            'order-6 `localFluxAll` in double precision at 16 lanes spilled '
+            '812 B on gfx942 and ran four times as long: LLVM had the moves '
+            'ahead and the accumulators in AGPRs.')
+
 declare('reread_over_budget',
         default=True,
         parse=parse_bool,
@@ -1754,6 +1779,32 @@ declare('min_blocks_per_sm',
             '7.3 us an element on sm_120; told one block, it took 255 and ran '
             'at 1.3 us.  HIP reads the second argument as warps per execution '
             'unit, so it is not passed there.')
+
+declare('staged_block_threads',
+        default=256,
+        env='TF_STAGED_BLOCK_THREADS',
+        parse=parse_int,
+        doc='Threads in a block that holds a copy of operator data in shared '
+            'memory -- preloaded operators or shards (`RegmaxBlockPolicy`); '
+            'its multiplications share that one copy, and the shards may take '
+            'what the blocks a compute unit keeps leave each '
+            '(`Generator._shard_budget`).  On AMD the count also bounds the '
+            'registers hipcc gives a lane: 512 threads are two waves a SIMD '
+            'at the least, so 256 VGPRs and AGPRs on CDNA2 and 3, and 1024 are '
+            'four, so 128.')
+
+declare('amd_waves_per_eu',
+        default=0,
+        env='TF_AMD_WAVES_PER_EU',
+        parse=parse_int,
+        doc='AMD only: the second argument of HIP\'s `__launch_bounds__`, the '
+            'waves a SIMD must be able to hold at once (`amdgpu_waves_per_eu`), '
+            'which hipcc sizes the registers for -- on CDNA2 and 3 the file of '
+            '512 VGPRs and AGPRs a lane, split in two at two waves and in four '
+            'at four.  0 leaves it out: with the 256-thread blocks this '
+            'generator launches, hipcc may then take the whole file at one '
+            'wave a SIMD, where a dependent FMA issues at 64 to 73 % of its '
+            'rate on MI300A.')
 
 declare('identity_reduction',
         default=True,

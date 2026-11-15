@@ -920,6 +920,12 @@ class Target:
         registers for."""
         return self.hw.vendor == 'nvidia'
 
+    def waves_per_eu_bound(self) -> bool:
+        """Whether a kernel's launch bounds may name a minimum of waves a SIMD
+        holds at once (`Options.amd_waves_per_eu`): HIP's reading of the
+        second argument, which hipcc sizes the registers for."""
+        return self.hw.vendor == 'amd' and self.backend == 'hip'
+
     def grid_barrier(self) -> bool:
         """Whether a barrier across the whole grid can be spelled: not under
         SYCL, whose lexic has no `sync_grid`."""
