@@ -491,6 +491,18 @@ def test_with_too_little_budget_computed_values_go_to_shared_memory():
                                     register_budget=64)
 
 
+def test_a_shared_temporary_read_by_broadcast_is_read_where_it_is():
+    """`shared_operands_in_place`: the product that reads a temporary of
+    shared memory by broadcast -- none of the destination's lead index --
+    loads every element for all lanes from the buffer instead of staging an
+    image to broadcast from; off nothing changes."""
+    default = _kernel('chain', 'oneapi', 'pvc')
+    assert _kernel('chain', 'oneapi', 'pvc',
+                   shared_operands_in_place=False) == default
+    src = _kernel('chain', 'oneapi', 'pvc', shared_operands_in_place=True)
+    assert src.count('group_broadcast') < default.count('group_broadcast')
+
+
 def test_what_came_of_a_broadcast_is_pinned_through_its_slot():
     """`values._Guards` follows a value through its slot of shared memory
     (`spilled`): what came of a cross-lane read, spilled and loaded back

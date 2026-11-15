@@ -234,13 +234,26 @@ class MultilinearBuilder(OperationBuilder):
     if (policy is not self._context.target.prefs.placement
             and not self._stages_alone(i)):
       policy = self._context.target.prefs.placement
+    legal = legal_operand_placements(addressable=addressable,
+                                     transposed=transpose,
+                                     carries_lead_dim=has_lead_dim,
+                                     policy=policy,
+                                     single_element=window == 1)
     placement = choose_operand_placement(
-        legal_operand_placements(addressable=addressable,
-                                 transposed=transpose,
-                                 carries_lead_dim=has_lead_dim,
-                                 policy=policy,
-                                 single_element=window == 1),
-        policy, image_bytes=image_bytes, register_budget=budget)
+        legal, policy, image_bytes=image_bytes, register_budget=budget)
+    # A temporary a shared buffer holds that this operation reads by
+    # broadcast -- it carries none of the destination's lead index, so all
+    # lanes take the same element of it at a time -- is read there, where
+    # `Options.shared_operands_in_place` asks: one load hands every lane the
+    # element, and no register image of it is held to broadcast from.
+    # SeisSol's `volume` holds `I x star(d)` so, ahead of the product with
+    # `kDivM(d)`.
+    if (getattr(self._context.get_user_options(),
+                'shared_operands_in_place', False)
+            and self._ops[i].symbol.stype == SymbolType.SharedMem
+            and not has_lead_dim and not transpose
+            and Placement.IN_PLACE in legal):
+      placement = Placement.IN_PLACE
 
     name = self._ops[i].symbol.name
 

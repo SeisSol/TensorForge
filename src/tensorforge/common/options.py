@@ -809,6 +809,21 @@ declare('register_shared_volatile',
             'register after all; on, it spilled 22720 B besides, against '
             '15232 off (8 KB of slots, listing).'),
 
+declare('shared_operands_in_place',
+        default=False,
+        env='TF_SHARED_OPERANDS_IN_PLACE',
+        parse=parse_bool,
+        doc='Read a temporary that a shared buffer holds, where its '
+            'multiplication reads it by broadcast -- it carries none of the '
+            'destination\'s lead index -- from the buffer: one load hands '
+            'every lane the element, and no register image of it is held to '
+            'broadcast from (`MultilinearBuilder._make_load_op`).  SeisSol\'s '
+            '`volume` holds `I x star(d)` there for the product with '
+            '`kDivM(d)`.  Trades a load per element read for the registers of '
+            'the image: on the Max 1550 a read of shared memory took 2.89 to '
+            '2.99 ms against 2.60 for the split register broadcast at eight '
+            'FMAs a broadcast (microbenchmark).'),
+
 declare('register_left_over',
         default=-1.0,
         env='TF_REGISTER_LEFT_OVER',
