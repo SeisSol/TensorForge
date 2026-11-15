@@ -909,6 +909,10 @@ D_CHAINS = True
 #: to the lanes that own the rows (`MatrixPaths.D_CHAIN_SINGLES`).
 D_CHAIN_SINGLES = True
 
+#: A chain stays inside one list of the stream: the emitter has no part of
+#: it to run around a merged run's loop (`MatrixPaths.D_CHAIN_LOOPS`).
+D_CHAIN_LOOPS = False
+
 #: Where a chain's output enters its sum: `'start'`, read by the first
 #: member into the accumulators, so that every product adds onto it;
 #: `'end'`, read by the last and added to the sum before it is written

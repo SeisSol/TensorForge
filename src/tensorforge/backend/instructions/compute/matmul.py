@@ -65,13 +65,21 @@ class AccumulatorChain:
     flattened output: ``load(writer, row, col, predicate=None) -> value``,
     zero where the predicate is false, and ``store(writer, value, row,
     col)``.  Both indices are values, the lane's row and column in the
-    accumulator layout; which lane holds which is the emitter's to say."""
+    accumulator layout; which lane holds which is the emitter's to say.
+
+    `phase` is `'all'` for a member of a chain in straight-line code, which
+    `opens` and `closes` describe; a chain that spans the trips of a merged
+    run (`dchain.DChain.loop`) is emitted in three parts, around the loop and
+    in it: `'open'` declares the accumulators and reads the output, `'body'`
+    issues into the accumulators the loop carries in `state`, and `'close'`
+    writes them back -- each, and nothing else, by the one member."""
     opens: bool
     closes: bool
     state: Dict
     rows: Tuple[int, int]
     load: Callable
     store: Callable
+    phase: str = 'all'
 
 
 @dataclass(frozen=True)
@@ -243,6 +251,17 @@ class MatmulOperands:
     #: where they run in step (`lockstep`) and behind a rendezvous of the
     #: wave, which the caller places.
     B_shard: Optional[Callable] = None
+    #: ``A_lanes(writer, k, rows, steps) -> value``, or ``None``: `A` at row
+    #: `rows` of the walk -- counted from the first slot's start, as
+    #: `A_zero` counts -- and at step ``k + steps``, `rows` and `steps`
+    #: values of the lane, where `A` lies in memory in its own order along
+    #: one contraction axis (`A_wave`'s condition): one address and a shift
+    #: (`Symbol.load`), with no lane's own row in it and so no lane's
+    #: guard.  The caller keeps both inside the operand.  What a fragment
+    #: reads that holds in every lane quarter the same rows of a tile,
+    #: where the lanes' own rows differ between the quarters (the stacked
+    #: tiles at more than sixteen lanes, `primitives.amd.stacked`).
+    A_lanes: Optional[Callable] = None
     #: ``A_zero(e_lo, e_hi, k_lo, k_hi) -> bool``, or ``None``: whether `A` is
     #: known to be zero over lead elements ``[e_lo, e_hi)`` -- counted from
     #: the first slot the accessors read, in elements, not slots -- and

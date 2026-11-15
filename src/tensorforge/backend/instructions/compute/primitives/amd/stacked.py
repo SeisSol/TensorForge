@@ -57,9 +57,20 @@ in double precision and to the lane-batched tile's in single, which is the
 check a build of this scheme can be held to.  Not across a chain of
 products (`stacked_chain_tile`), which adds them in another order.
 
-Sixteen lanes only.  At thirty-two the halves of a multiplication hold
-different tiles of rows, and one issue feeds every lane quarter the same
-sixteen operator rows: half of each issue would compute rows nobody keeps.
+At thirty-two and sixty-four lanes a multiplication spans `H` = 2 or 4
+quarters of the wave, and one issue feeds every quarter the same sixteen
+operator rows -- where the image holds sixteen other rows in each quarter of
+a multiplication.  So the quarters take more columns instead: M is the
+multiplication `p`, its quarter `h` and the slot `s` (the D layout's quarter
+`q = H p + h`), the tile `4 H` columns wide, column `4 h + s` of it in slot
+`s` of quarter `h`, and an issue still uses all four of its steps.  What
+lands in quarter `h` are the rows of the issue's tile of sixteen, which the
+image keeps in quarter `rt % H`: unchained, the quarters of a multiplication
+trade blocks of four slots before the epilogue (`_relayout`, `H - 1` lane
+gathers a slot); in a chain every lane reads and writes the output at its
+own row and column (`_open_chain`), and nothing moves.  B is the operator
+at row `16 rt + n` and step `k + q` in lane `n` of quarter `q`, one shifted
+read (`MatmulOperands.A_lanes`).
 """
 
 import contextlib
@@ -82,15 +93,25 @@ from .layouts import element_at, position
 INSTRUCTIONS = {Datatype.F64: 'mfma_f64_16x16x4f64',
                 Datatype.F32: 'mfma_f32_16x16x4f32'}
 
-#: The two orders of a wave's elements and columns along an instruction's M
-#: (`stacking`): the element minor, ``m = e + mults jj``, or major, ``m = jj +
-#: columns e``.
-ELEMENT_MINOR = 'element minor'
-ELEMENT_MAJOR = 'element major'
+#: The instruction an emulated product issues, by the type it accumulates in
+#: (`Options.amd_matrix_k4_emulate`): BF16 terms of both operands into the F32
+#: accumulator, sixteen steps an issue, four a lane, and D the F32 tile's
+#: (`stacking`).
+EMULATED = {Datatype.F32: 'mfma_f32_16x16x16bf16_1k'}
 
-#: Lanes a multiplication may span.  See the module: at thirty-two one issue
-#: serves only half of its lanes.
-LANES = (16,)
+#: The BF16 terms an F32 operand is split into, which cover its significand.
+BF16_TERMS = 3
+
+#: The two orders in which an instruction lays M out over the quarters of the
+#: wave and the slots of a lane in D (`stacking`): the quarter minor, ``m = q
+#: + 4 s`` -- `mfma_f64_16x16x4f64` --, or major, ``m = 4 q + s`` --
+#: `mfma_f32_16x16x4f32`.
+QUARTER_MINOR = 'quarter minor'
+QUARTER_MAJOR = 'quarter major'
+
+#: Lanes a multiplication may span: a quarter of the wave, two or all four
+#: (see the module).
+LANES = (16, 32, 64)
 
 #: The routes to the per-element fragment (`Options.amd_matrix_k4`).
 #: `transpose` gathers it out of the registers the operand is held in, a lane
@@ -120,86 +141,121 @@ def requested(ctx) -> Optional[str]:
 
 
 @lru_cache(maxsize=None)
-def stacking(op, threads: int) -> Optional[str]:
-    """How `op` stacks a wave's multiplications at `threads` lanes -- the M
-    order of their elements and columns, `ELEMENT_MINOR` or `ELEMENT_MAJOR`
-    -- or `None` where its fragments are not the stacked assignment.
+def stacking(op) -> Optional[str]:
+    """How `op` lays a wave out in quarters -- the M order of its D,
+    `QUARTER_MINOR` or `QUARTER_MAJOR` -- or `None` where its fragments are
+    not the stacked assignment.
 
     Three statements, each read off the fragment tables (`layouts`), for
-    `mults` multiplications a wave of `columns` output columns a tile, `t` a
-    multiplication's lane and `p` its place in the wave -- wave lane ``t +
-    threads * p``:
+    quarters of `n` lanes, `L` a lane of the wave:
 
-    * A: lane ``t + threads p`` holds ``A[t][p]``, so the element and column
-      a lane's A carries are those its `t` names as an `m`, and its step is
-      its `p`;
-    * B: lane ``t + threads p`` holds ``B[p][t]``, the operator's row `t`
-      at step `p` -- `A_wave`'s distribution;
-    * D: ``D[m(e, jj)][n]`` sits in slot `jj` of lane ``n + threads e`` --
-      the register image's register for column `jj` of the `e`-th
-      multiplication's lane `n` -- for one of the two orders `m`.
+    * A: lane `L` holds ``A[L % n][L // n]``: its step of the contraction is
+      its quarter, its M row its lane in the quarter;
+    * B: lane `L` holds ``B[L // n][L % n]``: the operator's row `L % n` at
+      the step of its quarter;
+    * D: ``D[m][n']`` sits in slot `s` of lane ``n' + n q``, for ``m = q + 4
+      s`` or ``m = 4 q + s``.
 
-    `mfma_f64_16x16x4f64` has all three at sixteen lanes with the element
-    minor, `mfma_f32_16x16x4f32` with it major.  Asked of the table rather
-    than assumed, because the D layouts of one shape disagree between
+    `mfma_f64_16x16x4f64` has all three with the quarter minor,
+    `mfma_f32_16x16x4f32` with it major.  Asked of the table rather than
+    assumed, because the D layouts of one shape disagree between
     instructions (`layouts`), and a wrong order here is a correctly typed
     operand holding another lane's numbers.
     """
-    wave = op.wave
-    if threads <= 0 or wave % threads or op.blocks != 1:
+    quarter = op.n
+    count = op.wave // quarter
+    if (op.blocks != 1 or op.m != quarter or op.wave % quarter
+            or op.k % count or op.m % count):
         return None
-    mults = wave // threads
-    if op.m != threads or op.n != threads or op.k != mults or op.m % mults:
-        return None
-    columns = op.m // mults
-    for p in range(mults):
-        for t in range(threads):
-            lane = t + threads * p
-            if element_at(op, 'A', 0, lane) != (0, t, p):
+    # The steps a lane carries: one, or a k-vector of them (the BF16 tile).
+    vector = op.k // count
+    slots = op.m // count
+    for lane in range(op.wave):
+        for s in range(vector):
+            step = vector * (lane // quarter) + s
+            if element_at(op, 'A', s, lane) != (0, lane % quarter, step):
                 return None
-            if element_at(op, 'B', 0, lane) != (0, p, t):
+            if element_at(op, 'B', s, lane) != (0, step, lane % quarter):
                 return None
-    for order in (ELEMENT_MINOR, ELEMENT_MAJOR):
-        if all(position(op, 'D', stacked_row(order, e, jj, mults, columns), n)
-               == (jj, n + threads * e)
-               for e in range(mults) for jj in range(columns)
-               for n in range(threads)):
+    for order in (QUARTER_MINOR, QUARTER_MAJOR):
+        if all(position(op, 'D', stacked_row(order, q, s, count, slots), n)
+               == (s, n + quarter * q)
+               for q in range(count) for s in range(slots)
+               for n in range(quarter)):
             return order
     return None
 
 
 def fits(op, threads: int) -> bool:
-    """Whether `op`'s fragments are the stacked assignment at `threads`
-    lanes, in either M order (`stacking`)."""
-    return stacking(op, threads) is not None
+    """Whether `op` stacks (`stacking`) multiplications of `threads` lanes:
+    whole quarters of the wave."""
+    return (stacking(op) is not None and threads > 0
+            and threads % op.n == 0 and op.wave % threads == 0)
 
 
-def stacked_row(order, e, jj, mults, columns) -> int:
-    """The M row of the `e`-th multiplication's column `jj` (`stacking`)."""
-    return e + mults * jj if order == ELEMENT_MINOR else jj + columns * e
+def stacked_row(order, q, s, count=4, slots=4) -> int:
+    """The M row D holds in slot `s` of quarter `q` of `count`
+    (`stacking`)."""
+    return q + count * s if order == QUARTER_MINOR else slots * q + s
+
+
+def quarters(op, threads: int) -> int:
+    """The quarters of the wave a multiplication of `threads` lanes spans:
+    `H` in the module."""
+    return threads // op.n
 
 
 def lane_cell(writer, op, threads, t):
     """`(element, column)`: which multiplication's element and which column
-    of the tile the lane's `t` names as an M row of `op`'s A -- the inverse
-    of `stacked_row` -- as index expressions."""
+    of the tile the lane's `t` names as an M row of `op`'s A -- quarter `q`
+    and slot `s` of D (`stacked_row`), the element ``q // H``, the column
+    ``4 (q % H) + s`` -- as index expressions."""
     from tensorforge.backend.pir.core import INDEX
-    mults = op.wave // threads
-    columns = op.m // mults
-    if stacking(op, threads) == ELEMENT_MINOR:
-        return (writer.op('rem', INDEX, t, mults, hint='e'),
-                writer.op('div', INDEX, t, mults, hint='c'))
-    return (writer.op('div', INDEX, t, columns, hint='e'),
-            writer.op('rem', INDEX, t, columns, hint='c'))
+    H = quarters(op, threads)
+    count = op.wave // op.n
+    slots = op.m // count
+    minor = stacking(op) == QUARTER_MINOR
+    if H == 1:
+        if minor:
+            return (writer.op('rem', INDEX, t, count, hint='e'),
+                    writer.op('div', INDEX, t, count, hint='c'))
+        return (writer.op('div', INDEX, t, slots, hint='e'),
+                writer.op('rem', INDEX, t, slots, hint='c'))
+    m = writer.op('rem', INDEX, t, op.n, hint='m')
+    if minor:
+        q = writer.op('rem', INDEX, m, count, hint='q')
+        s = writer.op('div', INDEX, m, count, hint='s')
+    else:
+        q = writer.op('div', INDEX, m, slots, hint='q')
+        s = writer.op('rem', INDEX, m, slots, hint='s')
+    element = writer.op('div', INDEX, q, H, hint='e')
+    column = writer.op('add', INDEX,
+                       writer.op('mul', INDEX,
+                                 writer.op('rem', INDEX, q, H, hint='h'),
+                                 slots, hint='c'), s, hint='c')
+    return element, column
+
+
+def emulated(ctx) -> bool:
+    """Whether an F32 product is emulated in BF16 terms on the stacked tiles
+    (`Options.amd_matrix_k4_emulate`)."""
+    options = getattr(ctx, 'get_user_options', None)
+    return bool(options) and getattr(options(), 'amd_matrix_k4_emulate',
+                                     False) in (True, 'bf16x6')
 
 
 def instruction(threads: int, accumulator, ctx):
     """The instruction the scheme issues here, or `None`: asked for, defined
     for the accumulator, available on the target, and stacking at this lane
-    count (`stacking`)."""
+    count (`stacking`).  F32 emulated in BF16 terms takes `EMULATED`'s, at
+    sixteen lanes."""
     if requested(ctx) is None or threads not in LANES:
         return None
     name = INSTRUCTIONS.get(accumulator)
+    if emulated(ctx) and accumulator in EMULATED:
+        if threads != LANES[0]:
+            return None
+        name = EMULATED[accumulator]
     op = next((o for o in MATRIX_OPS if o.builtin == name), None)
     if op is None or not op.available_for(accumulator, ctx):
         return None
@@ -215,13 +271,15 @@ def stacks(shape, ctx) -> bool:
     """Whether the scheme serves `shape`.
 
     The operator has to be the same for every multiplication of the wave
-    (`a_uniform`): one issue multiplies all four elements by one B.  Not
+    (`a_uniform`): one issue multiplies all its elements by one B.  Not
     sparse, which no fragment reads; one scalar a lane at lead width one, which
     is the image D lands in; SPMD, where a wave is lanes; and, for the `shard`
     route, a per-element operand in shared memory (`b_shared`).
     """
     if (shape.sparse or shape.explicit_simd or not shape.a_uniform
-            or shape.a_parts != 1 or bitlayout.packed(shape.lead_layout)):
+            or shape.a_parts not in ((1, BF16_TERMS) if emulated(ctx) else
+                                     (1,))
+            or bitlayout.packed(shape.lead_layout)):
         return False
     if instruction(shape.threads, shape.accumulator, ctx) is None:
         return False
@@ -255,6 +313,44 @@ def padded(ctx) -> bool:
                 or getattr(asked, 'mma_d_layout', False))
 
 
+def pipeline_depth(ctx) -> int:
+    """Steps of the contraction whose fragments are read ahead of a step's
+    issues (`Options.amd_matrix_k4_pipeline`): 0, or 1 and 2 -- the levels
+    that read one step ahead."""
+    options = getattr(ctx, 'get_user_options', None)
+    level = getattr(options(), 'amd_matrix_k4_pipeline', 0) if options else 0
+    return 1 if level else 0
+
+
+def interleaved(ctx) -> bool:
+    """Whether a step's issues and the reads of the next are interleaved by
+    scheduling groups (`Options.amd_matrix_k4_pipeline` at 2)."""
+    options = getattr(ctx, 'get_user_options', None)
+    return bool(options) and getattr(options(), 'amd_matrix_k4_pipeline',
+                                     0) >= 2
+
+
+#: `sched_group_barrier` masks (LLVM's AMDGPU backend): the matrix
+#: instructions, and the reads from memory and from the data share -- a
+#: fragment's loads, its gathers and its shard reads alike.
+SCHED_MFMA = 0x0008
+SCHED_READS = 0x0020 | 0x0100
+
+
+def _interleave(writer, count: int) -> None:
+    """A step's `count` issues each followed by a group of reads: the
+    scheduler lays the next step's fragment reads between this step's matrix
+    instructions rather than ahead of all or behind all of them, which is
+    how CK hides them (`__builtin_amdgcn_sched_group_barrier`).  The groups
+    are a pattern, not a count the scheduler has to meet: a group it cannot
+    fill stays short."""
+    for _ in range(count):
+        writer(f'__builtin_amdgcn_sched_group_barrier({SCHED_MFMA}, 1, 0);',
+               accesses=())
+        writer(f'__builtin_amdgcn_sched_group_barrier({SCHED_READS}, 2, 0);',
+               accesses=())
+
+
 def stacked_plan(shape, n: int, ctx):
     """Whole tiles of columns on the instruction, the rest on the DPP chain.
 
@@ -262,13 +358,18 @@ def stacked_plan(shape, n: int, ctx):
     spend three quarters of its issues on zeros, where the chain spends a
     product a row and step -- and reads the operator once more, a row and a
     step at a time.  Which costs more is a measurement, so the padded tile is
-    an option (`padded`); a product narrower than a tile stays on the chain
-    either way.
+    an option (`padded`).  A product narrower than a tile stays on the chain
+    either way at sixteen lanes; wider, where a tile is eight or sixteen
+    columns, a padded one takes it if it fills half of it -- SeisSol's nine
+    columns at sixty-four lanes.
     """
     op = instruction(shape.threads, shape.accumulator, ctx)
     width = tile_columns(op, shape.threads)
     edge = (n // width) * width
     if edge <= 0:
+        if (padded(ctx) and quarters(op, shape.threads) > 1
+                and 2 * n >= width):
+            return whole(Strategy.MATRIX, n)
         return whole(Strategy.DPP, n)
     if edge >= n or padded(ctx):
         return whole(Strategy.MATRIX, n)
@@ -311,7 +412,7 @@ def stacked_chain_tile(shape, extents, ctx):
     columns = extents[1]
     if columns % width and not padded(ctx):
         return 'the columns past the last whole tile go to the DPP chain'
-    return ChainTile(m=shape.threads, n=width, d=shape.accumulator,
+    return ChainTile(m=op.n, n=width, d=shape.accumulator,
                      mode=op.builtin, block=shape.threads)
 
 
@@ -321,7 +422,7 @@ def serves(ops, ctx) -> bool:
     made from.  The two agree; a span `stacked_plan` gave the instruction
     reaches here only through it."""
     return (ops.sparse is None and ops.a_uniform and ops.lead_width == 1
-            and ops.a_parts == 1
+            and ops.a_parts in ((1, BF16_TERMS) if emulated(ctx) else (1,))
             and instruction(ops.threads, ops.accumulator, ctx) is not None)
 
 
@@ -329,13 +430,13 @@ def matmul_stacked(writer, ops, ctx, span) -> bool:
     """`C[:, span] += A B` through the stacked instruction.
 
     False, with nothing emitted, where the operands are not what the scheme
-    reads: no `A_wave` (an operator not in memory in its own order), a wave
-    whose multiplications do not run in step, operands of another type, a
-    span that is not whole tiles -- but for the last one where it is padded
-    (`padded`) -- or a per-element operand whose fragment a route cannot
-    reach.  The caller then takes the span through the DPP chain, which reads
-    all of these -- rather than handing the whole product to the nest, which
-    a decline would.
+    reads: no `A_wave` or `A_lanes` (an operator not in memory in its own
+    order), a wave whose multiplications do not run in step, operands of
+    another type, a span that is not whole tiles -- but for the last one
+    where it is padded (`padded`) -- or a per-element operand whose fragment
+    a route cannot reach.  The caller then takes the span through the DPP
+    chain, which reads all of these -- rather than handing the whole product
+    to the nest, which a decline would.
     """
     threads = ops.threads
     op = instruction(threads, ops.accumulator, ctx)
@@ -343,7 +444,14 @@ def matmul_stacked(writer, ops, ctx, span) -> bool:
         return False
     mults = op.wave // threads
     width = tile_columns(op, threads)
-    if (ops.A_wave is None or not ops.lockstep
+    # The operator's fragment: `A_wave` where a multiplication is a quarter,
+    # a read of its own at the rows of a tile of sixteen where it is more.
+    operator = ops.A_wave if quarters(op, threads) == 1 else ops.A_lanes
+    if op.k > op.wave // op.n:
+        # The emulated tile reads the operator by row and step, or split.
+        operator = ops.A_slot if ops.a_parts == BF16_TERMS else ops.A_lanes
+    # The wave's multiplications in step, where it holds more than one.
+    if (operator is None or (mults > 1 and not ops.lockstep)
             or (ops.a, ops.b) != (ops.accumulator, ops.accumulator)
             or span.start % width
             or (len(span) % width and not (padded(ctx)
@@ -356,18 +464,52 @@ def matmul_stacked(writer, ops, ctx, span) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class _Lanes:
+    """Where the lane sits (the module's names), as index values: `t` its
+    lane in the multiplication, `p` the multiplication in the wave, `n` its
+    lane in its quarter, `h` the quarter in the multiplication, `q` the
+    quarter in the wave -- the step of the contraction its A and B carry --,
+    of `H` quarters of `quarter` lanes a multiplication."""
+    t: object
+    p: object
+    n: object
+    h: object
+    q: object
+    H: int
+    quarter: int
+
+
+def _lanes(writer, t, p, H, quarter):
+    from tensorforge.backend.pir.core import INDEX
+    if H == 1:
+        return _Lanes(t=t, p=p, n=t, h=0, q=p, H=1, quarter=quarter)
+    h = writer.op('div', INDEX, t, quarter, hint='h')
+    n = writer.op('rem', INDEX, t, quarter, hint='n')
+    q = writer.op('add', INDEX, writer.op('mul', INDEX, p, H, hint='q'), h,
+                  hint='q')
+    return _Lanes(t=t, p=p, n=n, h=h, q=q, H=H, quarter=quarter)
+
+
 def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
     from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
+    if op.k > op.wave // op.n:
+        return _emit_emulated(writer, ops, ctx, span, op, mults, width)
     C, A, chain = ops.C, ops.A, ops.chain
     threads, M, K, kx = ops.threads, ops.lead_slots, ops.k, ops.kx
+    H, Q = quarters(op, threads), op.n
     ftype = ScalarType(ops.accumulator)
     acctype = ScalarType(ops.accumulator, op.d.per_lane)
     zero = writer.const(0.0, ftype)
     # The lane's place in the wave's fragments (`stacking`): its `t` names the
-    # element and the column its A carries, its `p` the step of both.
+    # element and the column its A carries, its quarter `q` the step of both.
     t = writer.thread_id('x')
     p = writer.op('rem', INDEX, writer.thread_id('y'), mults, hint='m')
+    lanes = _lanes(writer, t, p, H, Q)
+    q = lanes.q
     tiles = list(range(span.start, span.stop, width))
+    # Tiles of sixteen rows: a multiplication's slot is `H` of them.
+    row_tiles = H * M
 
     def steps(s0):
         """The operator's own steps a tile at position `s0` covers: the
@@ -378,49 +520,62 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
     def known_zero(rt, s0):
         lo, hi = steps(s0)
         return (lo >= hi or (ops.A_zero is not None and ops.A_zero(
-            threads * rt, threads * (rt + 1), lo, hi)))
+            Q * rt, Q * (rt + 1), lo, hi)))
 
     def by_step(values):
-        """The value of the lane's own step out of one per step, `p` picking:
+        """The value of the lane's own step out of one per step, `q` picking:
         a tile at the edge of the contraction, where a step past it reads a
         zero rather than a neighbor's number."""
         out = values[-1]
-        for q in range(len(values) - 2, -1, -1):
-            out = writer.op('select', ftype, writer.op('eq', BOOL, p, q,
+        for i in range(len(values) - 2, -1, -1):
+            out = writer.op('select', ftype, writer.op('eq', BOOL, q, i,
                                                        hint='g'),
-                            values[q], out, hint='ks')
+                            values[i], out, hint='ks')
         return out
 
     def operator_fragment(rt, s0):
-        """B: the lane's operator row at step `s0 - kx + p`."""
+        """B: the operator row `16 rt + n` at step `s0 - kx + q`."""
         r0 = s0 - kx
+        if H > 1:
+            return _operator_lanes(writer, ops, lanes, rt, r0)
         if r0 >= 0 and r0 + mults <= K:
             got = ops.A_wave(writer, rt, r0, mults)
             if got is not None and got is not False:
                 return got
         values = []
-        for q in range(mults):
-            got = (A(writer, None, rt, r0 + q) if 0 <= r0 + q < K else None)
+        for i in range(mults):
+            got = (A(writer, None, rt, r0 + i) if 0 <= r0 + i < K else None)
             values.append(got if got is not None and got is not False
                           else zero)
         return by_step(values)
 
-    source = a_source(writer, ops, ctx, op, mults, width, t, p)
+    if chain is not None and chain.phase in ('open', 'close'):
+        # Ahead of a merged run's loop, or behind it: the chain's
+        # accumulators read in or written back, and nothing issued -- the
+        # loop carries them through its trips (`AccumulatorChain.phase`).
+        if chain.phase == 'open':
+            _open_chain(writer, ops, op, chain, tiles, acctype, ftype, lanes)
+        else:
+            _close_chain(writer, ops, op, chain, chain.state['accs'], ftype,
+                         lanes)
+        return True
+
+    source = a_source(writer, ops, ctx, op, width, lanes)
     if source is None:
         return False
 
     def element_fragment(c0, s0):
-        """A: the column `c0 + jj` of element `e` the lane's `t` names
-        (`lane_cell`), at position `s0 + p`, zero for a position outside the
+        """A: the column `c0 + c` of element `e` the lane's `t` names
+        (`lane_cell`), at position `s0 + q`, zero for a position outside the
         contraction -- and for a column past the span, in a padded last
         tile."""
         got = source(c0, s0, min(width, span.stop - c0))
         if got is None:
             return None
-        edge = [q for q in range(mults) if not kx <= s0 + q < K + kx]
+        edge = [i for i in range(op.k) if not kx <= s0 + i < K + kx]
         if not edge:
             return got
-        return by_step([zero if q in edge else got for q in range(mults)])
+        return by_step([zero if i in edge else got for i in range(op.k)])
 
     # A chain's accumulators outlive the product: declared where every
     # member reaches them, not in a scope of the first.
@@ -428,13 +583,14 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
           else contextlib.nullcontext()):
         if chain is None:
             acc = {(rt, c0): writer.declare(acctype, hint='acc')
-                   for rt in range(M) for c0 in tiles}
-        elif chain.opens:
-            acc = _open_chain(writer, ops, chain, tiles, width, acctype,
-                              ftype, t)
+                   for rt in range(row_tiles) for c0 in tiles}
+        elif chain.opens and chain.phase == 'all':
+            acc = _open_chain(writer, ops, op, chain, tiles, acctype, ftype,
+                              lanes)
         else:
             acc = dict(chain.state.get('accs', {}))
-            if any((rt, c0) not in acc for rt in range(M) for c0 in tiles):
+            if any((rt, c0) not in acc
+                   for rt in range(row_tiles) for c0 in tiles):
                 from tensorforge.common.exceptions import InternalError
                 raise InternalError(
                     'a member of a chain reaches past the accumulators its '
@@ -442,25 +598,72 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
         # The contraction outermost and every accumulator inside: the
         # per-element fragments are built once for all tiles of rows, and an
         # accumulator is read again only behind seven others.
-        for s0 in range(0, K + kx, op.k):
-            live = [rt for rt in range(M) if not known_zero(rt, s0)]
-            if not live:
-                continue
+        steps_ = [(s0, [rt for rt in range(row_tiles)
+                        if not known_zero(rt, s0)])
+                  for s0 in range(0, K + kx, op.k)]
+        steps_ = [(s0, live) for s0, live in steps_ if live]
+
+        def fetch(s0, live):
+            """A step's fragments: the elements' for every tile of columns,
+            the operator's for every tile of rows it issues; `None` where a
+            route or a read declines."""
             frags = {}
             for c0 in tiles:
                 frags[c0] = element_fragment(c0, s0)
                 if frags[c0] is None:
-                    return False
+                    return None
+            ops_ = {}
             for rt in live:
-                b = operator_fragment(rt, s0)
+                ops_[rt] = operator_fragment(rt, s0)
+                if ops_[rt] is None:
+                    return None
+            return frags, ops_
+
+        depth = pipeline_depth(ctx)
+        ahead = [fetch(s0, live) for s0, live in steps_[:depth]]
+        for i, (s0, live) in enumerate(steps_):
+            if not depth:
+                # A step's element fragments, then each tile of rows' operator
+                # fragment ahead of its issues.
+                frags = {}
+                for c0 in tiles:
+                    frags[c0] = element_fragment(c0, s0)
+                    if frags[c0] is None:
+                        return False
+                for rt in live:
+                    b = operator_fragment(rt, s0)
+                    if b is None:
+                        return False
+                    for c0 in tiles:
+                        acc[(rt, c0)] = writer.call(
+                            op.callee, acctype, frags[c0], b, acc[(rt, c0)],
+                            0, 0, 0, hint='acc', movable=False,
+                            materialize=True)
+                continue
+            # The fragments of the step `depth` on, read before this step's
+            # issues: their loads have the issues to land behind
+            # (`Options.amd_matrix_k4_pipeline`).
+            if i + depth < len(steps_):
+                ahead.append(fetch(*steps_[i + depth]))
+            got = ahead.pop(0)
+            if got is None:
+                return False
+            frags, operators = got
+            for rt in live:
                 for c0 in tiles:
                     acc[(rt, c0)] = writer.call(
-                        op.callee, acctype, frags[c0], b, acc[(rt, c0)],
-                        0, 0, 0, hint='acc', movable=False, materialize=True)
+                        op.callee, acctype, frags[c0], operators[rt],
+                        acc[(rt, c0)], 0, 0, 0, hint='acc', movable=False,
+                        materialize=True)
+            if interleaved(ctx) and i + depth < len(steps_):
+                _interleave(writer, len(live) * len(tiles))
         if chain is not None:
             chain.state['accs'] = acc
-            if chain.closes:
-                _close_chain(writer, ops, chain, acc, width, ftype, t)
+            if chain.closes and chain.phase == 'all':
+                _close_chain(writer, ops, op, chain, acc, ftype, lanes)
+            return True
+        if H > 1:
+            _relayout(writer, ops, op, acc, tiles, span, ftype, lanes)
             return True
         for rt in range(M):
             for c0 in tiles:
@@ -470,67 +673,362 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
     return True
 
 
-def _chain_rows(writer, chain, rt, threads, t):
-    """Row `threads rt + t` of the walk, the lane's in slot `rt`, and which
+def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
+    """`C[:, span] += A B` in BF16 terms (`Options.amd_matrix_k4_emulate`).
+
+    The tile is the F32 one's -- the same M, N and D (`stacking`) -- but an
+    issue covers sixteen steps, four in each lane: lane `n` of quarter `q`
+    carries steps ``4 q .. 4 q + 3`` of the operator's row and of its
+    element's column.  Both are split into three BF16 terms each
+    (`tensorforge::splitFloatx4BF16`), and six term products -- the pairs
+    whose order of magnitude reaches F32's, smallest first
+    (`split.products`) -- add into the F32 accumulator.  The operator's
+    steps are one read each at the tile's rows (`MatmulOperands.A_lanes`).
+    Sixteen lanes a multiplication."""
+    from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
+    from ...split import products
+    from .codegen import SPLIT_BF16
+    C, chain = ops.C, ops.chain
+    threads, M, K, kx = ops.threads, ops.lead_slots, ops.k, ops.kx
+    count = op.wave // op.n
+    vector = op.k // count
+    # The operator as the host split it (`amd.prepared_order`): k-quads of
+    # its three terms; else split here, read by row and step.
+    prepared = ops.A_slot is not None and ops.a_parts == BF16_TERMS
+    if (not prepared and ops.A_lanes is None) or quarters(op, threads) != 1:
+        return False
+    ftype = ScalarType(ops.accumulator)
+    acctype = ScalarType(ops.accumulator, op.d.per_lane)
+    termtype = ScalarType(Datatype.I16, vector)
+    zero = writer.const(0.0, ftype)
+    t = writer.thread_id('x')
+    p = writer.op('rem', INDEX, writer.thread_id('y'), mults, hint='m')
+    lanes = _lanes(writer, t, p, 1, op.n)
+    q = lanes.q
+    tiles = list(range(span.start, span.stop, width))
+    pairs = products(BF16_TERMS)
+    # The lane's steps of an issue: `4 q + i`.
+    offsets = [writer.op('add', INDEX,
+                         writer.op('mul', INDEX, q, vector, hint='ko'), i,
+                         hint='ko') for i in range(vector)]
+
+    def known_zero(rt, s0):
+        lo, hi = max(0, s0 - kx), min(K, s0 + op.k - kx)
+        return (lo >= hi or (ops.A_zero is not None and ops.A_zero(
+            op.n * rt, op.n * (rt + 1), lo, hi)))
+
+    def split(values, hint):
+        out = [writer.declare(termtype, hint=hint)
+               for _ in range(BF16_TERMS)]
+        writer.call_stmt(SPLIT_BF16, *out, *values, writes=tuple(out))
+        return out
+
+    if chain is not None and chain.phase in ('open', 'close'):
+        if chain.phase == 'open':
+            _open_chain(writer, ops, op, chain, tiles, acctype, ftype, lanes)
+        else:
+            _close_chain(writer, ops, op, chain, chain.state['accs'], ftype,
+                         lanes)
+        return True
+    source = a_source(writer, ops, ctx, op, width, lanes)
+    if source is None:
+        return False
+
+    def element_terms(c0, s0):
+        """The lane's four steps of its element's column, zero outside the
+        contraction, as terms."""
+        values = []
+        for i, offset in enumerate(offsets):
+            got = source(c0, s0, min(width, span.stop - c0), offset=offset)
+            if got is None:
+                return None
+            # Quarters whose step `4 q + i` falls outside take a zero.
+            outside = [r for r in range(count)
+                       if not kx <= s0 + vector * r + i < K + kx]
+            for r in outside:
+                got = writer.op('select', ftype,
+                                writer.op('eq', BOOL, q, r, hint='g'),
+                                zero, got, hint='ks')
+            values.append(got)
+        return split(values, 'at')
+
+    def operator_terms(rt, s0):
+        if prepared:
+            return _prepared_terms(writer, ops, lanes, rt, s0 - kx, vector,
+                                   count)
+        values = []
+        for offset in offsets:
+            got = _operator_lanes(writer, ops, lanes, rt, s0 - kx,
+                                  offset=offset, span=op.k)
+            if got is None:
+                return None
+            values.append(got)
+        return split(values, 'bt')
+
+    with (writer.AnonymousScope() if chain is None
+          else contextlib.nullcontext()):
+        if chain is None:
+            acc = {(rt, c0): writer.declare(acctype, hint='acc')
+                   for rt in range(M) for c0 in tiles}
+        elif chain.opens and chain.phase == 'all':
+            acc = _open_chain(writer, ops, op, chain, tiles, acctype, ftype,
+                              lanes)
+        else:
+            acc = dict(chain.state.get('accs', {}))
+        for s0 in range(0, K + kx, op.k):
+            live = [rt for rt in range(M) if not known_zero(rt, s0)]
+            if not live:
+                continue
+            frags = {}
+            for c0 in tiles:
+                frags[c0] = element_terms(c0, s0)
+                if frags[c0] is None:
+                    return False
+            for rt in live:
+                b = operator_terms(rt, s0)
+                if b is None:
+                    return False
+                for c0 in tiles:
+                    for i, j in pairs:
+                        acc[(rt, c0)] = writer.call(
+                            op.callee, acctype, frags[c0][i], b[j],
+                            acc[(rt, c0)], 0, 0, 0, hint='acc',
+                            movable=False, materialize=True)
+        if chain is not None:
+            chain.state['accs'] = acc
+            if chain.closes and chain.phase == 'all':
+                _close_chain(writer, ops, op, chain, acc, ftype, lanes)
+            return True
+        for rt in range(M):
+            for c0 in tiles:
+                for jj in range(min(width, span.stop - c0)):
+                    C(writer, writer.extract(acc[(rt, c0)], jj, ftype), rt,
+                      c0 + jj)
+    return True
+
+
+def _prepared_terms(writer, ops, lanes, rt, r0, vector, count):
+    """The emulated tile's B out of the operator the host split
+    (`amd.prepared_order`): the quad of the lane's quarter -- ``r0 / 4 + q``
+    of tile `rt` -- in each of the three terms' planes, one read a term,
+    packed to BF16 (`tensorforge::packBF16x4`).  A quad past either end of the
+    contraction reads the nearest one: the element's fragment is zero
+    there."""
+    from tensorforge.backend.pir.core import INDEX, ScalarType
+    from .codegen import PACK_BF16
+    threads, slots = ops.threads, ops.lead_slots
+    quads = -(-ops.k // vector)
+    first = r0 // vector
+    shift = writer.op('mul', INDEX, lanes.q, slots, hint='r')
+    if first < 0 or first + count > quads:
+        # The quarters' quads clamped into the operand: `first + q` in
+        # `[0, quads)`.
+        quad = writer.op('min', INDEX,
+                         writer.op('max', INDEX,
+                                   writer.op('add', INDEX, lanes.q, first,
+                                             hint='r'), 0, hint='r'),
+                         quads - 1, hint='r')
+        shift = writer.op('mul', INDEX, quad, slots, hint='r')
+        first = 0
+    got = ops.A_slot(writer, (first * slots + rt) * threads * vector,
+                     parts=BF16_TERMS, shift=shift, width=vector)
+    if not got:
+        return None
+    termtype = ScalarType(Datatype.I16, vector)
+    return [writer.call(PACK_BF16, termtype, part, hint='bt') for part in got]
+
+
+def _operator_lanes(writer, ops, lanes, rt, r0, offset=None, span=4):
+    """B where a multiplication spans `H > 1` quarters: lane `n` of quarter
+    `q` reads the operator at row ``16 rt + n`` and step ``r0 + q`` -- the
+    tile's rows in every quarter, where the lane's own rows are those of
+    its slot (`MatmulOperands.A_lanes`).  A row outside the operation's
+    window reads its nearest row and takes a zero: no lane's guard keeps it
+    out here, and in a chain the row is another member's, which this one has
+    to add nothing to.  A step past the contraction reads its last step,
+    which the element's fragment then multiplies by zero (`_emit`).  `None`
+    where the read declines."""
+    from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
+    first = ops.lead_first
+    last = first + ops.lead_elements - 1
+    own = lanes.q if offset is None else offset
+    lo, hi = lanes.quarter * rt, lanes.quarter * (rt + 1) - 1
+    row = writer.op('add', INDEX, lanes.n, lo, hint='br') if lo else lanes.n
+    inside = None
+    if lo < first or hi > last:
+        inside = writer.op('and', BOOL,
+                           writer.op('ge', BOOL, row, first, hint='g'),
+                           writer.op('le', BOOL, row, last, hint='g'),
+                           hint='g')
+        row = writer.op('min', INDEX, writer.op('max', INDEX, row, first,
+                                                hint='br'), last, hint='br')
+    step = writer.op('add', INDEX, own, r0, hint='bk') if r0 else own
+    if r0 < 0 or r0 + span > ops.k:
+        step = writer.op('min', INDEX, writer.op('max', INDEX, step, 0,
+                                                 hint='bk'),
+                         ops.k - 1, hint='bk')
+    got = ops.A_lanes(writer, 0, row, step)
+    if got is None or got is False:
+        return None
+    if inside is None:
+        return got
+    ftype = ScalarType(ops.a)
+    return writer.op('select', ftype, inside, got, writer.const(0.0, ftype),
+                     hint='bz')
+
+
+def _chain_rows(writer, chain, rt, lanes):
+    """Row `16 rt + n` of the walk -- the lane's in tile `rt` -- and which
     lanes hold a row of the chain's window: `(row, predicate)`, the
-    predicate None where all of them do, and `None` where none does."""
+    predicate None where all of them do, and `None` where none does.  At
+    sixteen lanes a multiplication the tile is the lane's slot and `n` its
+    lane."""
     from tensorforge.backend.pir.core import BOOL, INDEX
     lo, hi = chain.rows
-    first = threads * rt
-    if first + threads <= lo or first >= hi:
+    size = lanes.quarter
+    first = size * rt
+    if first + size <= lo or first >= hi:
         return None
-    row = writer.op('add', INDEX, t, first, hint='dr') if first else t
+    row = (writer.op('add', INDEX, lanes.n, first, hint='dr') if first
+           else lanes.n)
     cond = None
     if first < lo:
         cond = writer.op('ge', BOOL, row, lo, hint='g')
-    if first + threads > hi:
+    if first + size > hi:
         upper = writer.op('lt', BOOL, row, hi, hint='g')
         cond = upper if cond is None else writer.op('and', BOOL, cond, upper,
                                                     hint='g')
     return row, cond
 
 
-def _open_chain(writer, ops, chain, tiles, width, acctype, ftype, t):
+def _chain_cells(writer, ops, op, c0, cond, lanes):
+    """`[(column, predicate)]` for the slots of a tile at `c0`: the column D
+    gives the slot in the lane -- `c0 + s`, or `c0 + 4 h + s` where a
+    multiplication spans `H` quarters -- and the lanes where it is one of the
+    output's (`cond` and the column inside it); `None` for a slot no lane
+    keeps."""
+    from tensorforge.backend.pir.core import BOOL, INDEX
+    # The D cells a lane holds, not `m / k`: the two agree for the
+    # four-step tiles, and the BF16 tile's sixteen steps made it one -- a
+    # chain read and wrote one column of four (`amd_matrix_k4_emulate`).
+    slots = op.d.per_lane
+    out = []
+    for s in range(slots):
+        if lanes.H == 1:
+            out.append((c0 + s, cond) if c0 + s < ops.n else None)
+            continue
+        if c0 + s >= ops.n:
+            out.append(None)
+            continue
+        column = writer.op('add', INDEX,
+                           writer.op('mul', INDEX, lanes.h, slots, hint='c'),
+                           c0 + s, hint='c')
+        if c0 + slots * (lanes.H - 1) + s < ops.n:
+            out.append((column, cond))
+            continue
+        inside = writer.op('lt', BOOL, column, ops.n, hint='g')
+        out.append((column, inside if cond is None else writer.op(
+            'and', BOOL, cond, inside, hint='g')))
+    return out
+
+
+def _open_chain(writer, ops, op, chain, tiles, acctype, ftype, lanes):
     """The chain's accumulators, holding the output's old value: for every
-    slot of the chain's window and every tile of columns, the cells the D
-    layout gives the lane -- which are the register image's, row `16 rt + t`
-    and column `c0 + jj` in slot `jj`.  A row outside the window and a
+    tile of the chain's window and every tile of columns, the cells the D
+    layout gives the lane -- at sixteen lanes the register image's, row
+    `16 rt + t` and column `c0 + s` in slot `s`; wider, row `16 rt + n` and
+    column `c0 + 4 h + s` (the module).  A row outside the window and a
     padded column start at zero and are never written back."""
-    threads = ops.threads
     zero = writer.const(0.0, ftype)
-    slots = max(ops.lead_slots, -(-chain.rows[1] // threads))
+    count = max(lanes.H * ops.lead_slots,
+                -(-chain.rows[1] // lanes.quarter))
     acc = {}
-    for rt in range(slots):
-        rows = _chain_rows(writer, chain, rt, threads, t)
+    for rt in range(count):
+        rows = _chain_rows(writer, chain, rt, lanes)
         for c0 in tiles:
             if rows is None:
                 acc[(rt, c0)] = writer.declare(acctype, hint='acc')
                 continue
             row, cond = rows
-            parts = [chain.load(writer, row, c0 + jj, cond)
-                     if c0 + jj < ops.n else zero for jj in range(width)]
+            parts = [chain.load(writer, row, cell[0], cell[1])
+                     if cell is not None else zero
+                     for cell in _chain_cells(writer, ops, op, c0, cond,
+                                              lanes)]
             acc[(rt, c0)] = writer.pack(acctype, *parts, hint='acc')
     chain.state.clear()
     chain.state['accs'] = acc
     return dict(acc)
 
 
-def _close_chain(writer, ops, chain, acc, width, ftype, t):
+def _close_chain(writer, ops, op, chain, acc, ftype, lanes):
     """The chain's sums written where `_open_chain` read the old values."""
-    threads = ops.threads
     for (rt, c0), value in sorted(acc.items()):
-        rows = _chain_rows(writer, chain, rt, threads, t)
+        rows = _chain_rows(writer, chain, rt, lanes)
         if rows is None:
             continue
         row, cond = rows
-        for jj in range(min(width, ops.n - c0)):
-            part = writer.extract(value, jj, ftype)
-            with (writer.if_(cond) if cond is not None
+        for s, cell in enumerate(_chain_cells(writer, ops, op, c0, cond,
+                                              lanes)):
+            if cell is None:
+                continue
+            part = writer.extract(value, s, ftype)
+            with (writer.if_(cell[1]) if cell[1] is not None
                   else contextlib.nullcontext()):
-                chain.store(writer, part, row, c0 + jj)
+                chain.store(writer, part, row, cell[0])
 
 
-def a_source(writer, ops, ctx, op, mults, width, t, p):
+def _relayout(writer, ops, op, acc, tiles, span, ftype, lanes):
+    """The image's cells out of the tiles', where a multiplication spans
+    `H > 1` quarters and the product keeps no chain.
+
+    Tile `H sigma + r` holds in quarter `h` the rows of quarter `r` of slot
+    `sigma` -- its sixteen rows -- for the columns ``c0 + 4 h + s``; the
+    image wants in quarter `h` its own rows for every column.  So quarter `h`
+    keeps tile `H sigma + h`, and for every `d < H` reads its rows of the
+    columns of quarter `h ^ d` out of that quarter, which put them in the
+    register it hands on: one lane gather a slot and `d`, and selects by
+    the lane's quarter.  The cells then go out through the epilogue
+    (`MatmulOperands.C`) at the lane's own row."""
+    from tensorforge.backend.pir.core import BOOL, INDEX
+    H, size, slots = lanes.H, lanes.quarter, op.d.per_lane
+    text = f'tensorforge::gather<{op.wave}>({{0}}, {{1}})'
+    lane = writer.op('add', INDEX, lanes.t,
+                     writer.op('mul', INDEX, lanes.p, ops.threads, hint='l'),
+                     hint='l')
+    sources = {d: writer.op('bitxor', INDEX, lane, size * d, hint='src')
+               for d in range(1, H)}
+    mine = {r: writer.op('eq', BOOL, lanes.h, r, hint='g') for r in range(H)}
+
+    def pick(values):
+        """`values[h]` in the lanes of quarter `h`."""
+        out = values[-1]
+        for r in range(H - 2, -1, -1):
+            out = writer.op('select', ftype, mine[r], values[r], out,
+                            hint='rl')
+        return out
+
+    for sigma in range(ops.lead_slots):
+        for c0 in tiles:
+            blocks = [acc[(H * sigma + r, c0)] for r in range(H)]
+            for s in range(slots):
+                parts = [writer.extract(b, s, ftype) for b in blocks]
+                own = pick(parts)
+                got = {}
+                for d in range(1, H):
+                    send = pick([parts[r ^ d] for r in range(H)])
+                    got[d] = writer.rawexpr(text, send, sources[d],
+                                            type_=ftype, hint='ga',
+                                            pure=True, movable=True,
+                                            crosslane=True)
+                for g in range(H):
+                    column = c0 + slots * g + s
+                    if column >= span.stop:
+                        continue
+                    ops.C(writer, pick([own if r == g else got[r ^ g]
+                                        for r in range(H)]), sigma, column)
+
+
+def a_source(writer, ops, ctx, op, width, lanes):
     """`fragment(c0, s0, columns)`: the lane's A for the tile of columns from
     `c0` at positions from `s0`, before the edge of the contraction is cut
     off, zero past the first `columns` of the tile -- or `None` where no
@@ -543,20 +1041,20 @@ def a_source(writer, ops, ctx, op, mults, width, t, p):
     """
     route = requested(ctx)
     if route in ('shard', 'auto') and ops.B_shard is not None:
-        return _sharded(writer, ops, op, mults, width, t, p)
+        return _sharded(writer, ops, op, width, lanes)
     if route == 'shard':
         return None
-    return _gathered(writer, ops, op, mults, width, t, p)
+    return _gathered(writer, ops, op, width, lanes)
 
 
-def _sharded(writer, ops, op, mults, width, t, p):
+def _sharded(writer, ops, op, width, lanes):
     """The `shard` route: A out of the shared memory the operand sits in.
 
     An earlier operation of the section stored the per-element operand there,
     every multiplication its own copy in its own arena, `mult_stride`
     elements after its predecessor's, and the operation reads it in place
-    (`MatrixPaths.reads_shared`).  The lane's A is position ``s0 + p`` of the
-    element `e` and column ``c0 + jj`` its `t` names (`lane_cell`): one read
+    (`MatrixPaths.reads_shared`).  The lane's A is position ``s0 + q`` of the
+    element `e` and column ``c0 + c`` its `t` names (`lane_cell`): one read
     of that multiplication's copy, ``e - p`` arenas from the lane's own, at
     the lane's own row and column (`MatmulOperands.B_shard`) -- where the
     transpose route gathers `width` registers and selects among them.
@@ -573,20 +1071,24 @@ def _sharded(writer, ops, op, mults, width, t, p):
     from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
     threads, K, kx = ops.threads, ops.k, ops.kx
     ftype = ScalarType(ops.accumulator)
-    element, column = lane_cell(writer, op, threads, t)
-    mult = writer.op('sub', INDEX, element, p, hint='mo')
+    q = lanes.q
+    element, column = lane_cell(writer, op, threads, lanes.t)
+    mult = writer.op('sub', INDEX, element, lanes.p, hint='mo')
     fenced = []
 
-    def fragment(c0, s0, columns):
+    def fragment(c0, s0, columns, offset=None):
+        """`offset`, the lane's step from `s0`, is its quarter `q` but where
+        a lane carries several steps of an issue (`_emit_emulated`)."""
         if not fenced:
             writer.barrier('wave', threads=threads, handoff=True)
             fenced.append(True)
+        own = q if offset is None else offset
         r0 = s0 - kx
         base = min(max(r0, 0), K - 1)
-        if 0 <= r0 and r0 + mults <= K:
-            rows = p
+        if 0 <= r0 and r0 + op.k <= K:
+            rows = own
         else:
-            step = writer.op('add', INDEX, p, r0, hint='ks')
+            step = writer.op('add', INDEX, own, r0, hint='ks')
             step = writer.op('min', INDEX,
                              writer.op('max', INDEX, step, 0, hint='ks'),
                              K - 1, hint='ks')
@@ -607,14 +1109,14 @@ def _sharded(writer, ops, op, mults, width, t, p):
     return fragment
 
 
-def _gathered(writer, ops, op, mults, width, t, p):
+def _gathered(writer, ops, op, width, lanes):
     """The `transpose` route: A out of the registers the operand is held in.
 
     The nest's image of the per-element operand holds position `s` of
     column `j` in lane `s % threads` of block `s // threads`
-    (`MatmulOperands.B`).  The lane's A is position ``s0 + p`` of the
-    element `e` and column ``c0 + jj`` its `t` names (`lane_cell`): wave lane
-    ``threads e + (s0 + p) % threads``, register ``B(c0 + jj, ...)``.  A lane
+    (`MatmulOperands.B`).  The lane's A is position ``s0 + q`` of the
+    element `e` and column ``c0 + c`` its `t` names (`lane_cell`): wave lane
+    ``threads e + (s0 + q) % threads``, register ``B(c0 + c, ...)``.  A lane
     gather (`ds_bpermute`) reads the same register out of every lane it
     names, and the column differs between the lanes of one fragment, so each
     column of the tile is gathered on its own and the lane takes its own:
@@ -623,14 +1125,22 @@ def _gathered(writer, ops, op, mults, width, t, p):
     from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
     threads = ops.threads
     ftype = ScalarType(ops.accumulator)
-    element, column = lane_cell(writer, op, threads, t)
+    element, column = lane_cell(writer, op, threads, lanes.t)
     base = writer.op('add', INDEX,
-                     writer.op('mul', INDEX, element, threads, hint='e'), p,
-                     hint='src')
+                     writer.op('mul', INDEX, element, threads, hint='e'),
+                     lanes.q, hint='src')
     text = f'tensorforge::gather<{op.wave}>({{0}}, {{1}})'
 
-    def fragment(c0, s0, columns):
-        lane = writer.op('add', INDEX, base, s0 % threads, hint='src')
+    def fragment(c0, s0, columns, offset=None):
+        """`offset` as in `_sharded`."""
+        if offset is None:
+            lane = writer.op('add', INDEX, base, s0 % threads, hint='src')
+        else:
+            lane = writer.op('add', INDEX,
+                             writer.op('mul', INDEX, element, threads,
+                                       hint='e'),
+                             writer.op('add', INDEX, offset, s0 % threads,
+                                       hint='src'), hint='src')
         gathered = []
         for jj in range(width):
             if jj >= columns:

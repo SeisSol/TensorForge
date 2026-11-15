@@ -16,6 +16,7 @@ import numpy as np
 
 from tensorforge.common.basic_types import Addressing
 from tensorforge.common.context import Context
+from tensorforge.common.matrix import prepare
 from tensorforge.common.options import Options
 from tensorforge.generators.generator import Generator
 from tensorforge.reference.descriptors import multilinear_reference
@@ -230,6 +231,12 @@ def run_case(case, target: Target, cache_root: Path,
             flat = layout.split_tf32(
                 flat, odt, planar=(op.storage_volume // 2
                                   if op.storage_planar else 0))
+        elif op.storage_parts == prepare.BF16_PARTS:
+            # Three: the BF16 terms an emulated F32 product reads prepared
+            # (`amd.prepared_order`), planar as the fragment order stores them.
+            flat = layout.split_bf16(
+                flat, odt, planar=(op.storage_volume // prepare.BF16_PARTS
+                                   if op.storage_planar else 0))
         elif op.storage_parts != 1:
             raise NotImplementedError(
                 f"{op.kernel_name}: no host-side preparation for "

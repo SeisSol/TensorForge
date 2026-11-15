@@ -73,6 +73,7 @@ from .select import (BroadcastForm, MATERIALIZE_FROM, broadcast_form,
                      wanted_fmadpp_step)
 from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
                      wmma3atom)
+from .stacked import emulated as stacked_emulated
 from .stacked import instruction as stacked_instruction
 from .stacked import (matmul_stacked, serves, stacked_chain_tile,
                       stacked_plan, stacked_reads_shared, stacks)
@@ -132,6 +133,15 @@ D_CHAINS = True
 #: slower chained, 242 VGPRs against 171 -- 9 to 30 % at orders 4 and 6 in
 #: either precision.
 D_CHAIN_SINGLES = False
+
+#: And a chain can span the trips of a merged run: the stacked tiles open it
+#: ahead of the loop, issue into the accumulators the loop carries, and close
+#: it behind (`MatrixPaths.D_CHAIN_LOOPS`, `stacked._emit`) -- where asked
+#: (`Options.mma_d_layout_loops`), since the trips' epilogues add through
+#: atomics that wait for nothing, and the chain's read ahead of the loop is
+#: waited for: SeisSol's `localFluxAll` on MI300A +6 to +14 % chained in
+#: double precision, within -9 to +3 % in single.
+D_CHAIN_LOOPS = True
 
 
 def strategies(shape, ctx):
@@ -280,11 +290,13 @@ def convergence(strategy, shape, n, ctx):
     if strategy is not Strategy.MATRIX:
         return None
     if stacks(shape, ctx):
-        # Every issue multiplies all four multiplications' elements by one
-        # operator fragment, which each of them read a step of, and the
+        # Every issue multiplies all the wave's multiplications' elements by
+        # one operator fragment, which each of them read steps of, and the
         # elements' fragments are read out of each other's lanes or shared
-        # memory.
-        return Uniformity.MULTGROUP
+        # memory -- where a wave holds more than one.
+        if shape.threads < _MFMA_WAVE:
+            return Uniformity.MULTGROUP
+        return None
     width = (1 << bitlayout.unpacked(shape.lead_layout)[1]
              if bitlayout.packed(shape.lead_layout) else 1)
     if wave_mults(shape.threads, shape.a_uniform, width,
@@ -450,10 +462,34 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     None where the stacked scheme is asked for and stacks at this lane count
     (`stacked.instruction`): it reads the operator by its own steps
     (`A_wave`), which a prepared buffer is not, and an operand stored in
-    k-quads would hand the product back to the lane-batched tile.
+    k-quads would hand the product back to the lane-batched tile -- but for
+    the scheme's emulated F32 tile (`stacked.emulated`), which reads the
+    operator split: k-quads of its three BF16 terms, planar, quad `q + p`
+    in the lanes of quarter `p` (`stacked._emit_emulated`), where the
+    contraction starts on a quad (`head`).
+
+    Not split where the ninth column can go into a padded tile of its own
+    (`mma_d_layout`, `amd_matrix_k4_pad`): there the operator is split in the
+    kernel.  SeisSol's order-6 `localFluxAll` in single precision on the
+    transpose route with the products chained read column 8 of `Q` wrong,
+    0.099 in norm, with the operator split on the host, and right with it
+    split in the kernel and on the shard route (MI300A) -- a cause not found,
+    so the form that was never wrong is the one taken.
     """
-    if len(shape) != 2 or stacked_instruction(threads, dtype, ctx):
+    if len(shape) != 2:
         return None
+    if stacked_instruction(threads, dtype, ctx):
+        if (not stacked_emulated(ctx) or dtype != Datatype.F32 or head % 4
+                or not lead or not depth):
+            return None
+        options = ctx.get_user_options()
+        if (getattr(options, 'mma_d_layout', False)
+                or getattr(options, 'amd_matrix_k4_pad', False)):
+            return None
+        r0, c0 = (int(x) for x in corner)
+        window = ((r0, int(rows) if rows else lead), (c0, depth))
+        return QuadOrder(quad_order(shape, threads, quad_width(dtype),
+                                    window), parts=BF16_PARTS)
     r0, c0 = (int(x) for x in corner)
     if (r0 < 0 or c0 < 0 or not lead or not depth or r0 >= int(shape[0])
             or c0 + depth > int(shape[1])):
@@ -507,8 +543,21 @@ def order_before_packing(shape, ctx) -> bool:
 def _quad_reader(ops, width):
     """`read(writer, i, q, mults)`: the quad of steps `width * q ..` of slot
     `i`, or -- `mults > 1` -- quad `q + p` in the lanes of the `p`-th
-    multiplication of the wave, as `blgp` hands them on (`matmul32`)."""
+    multiplication of the wave, as `blgp` hands them on (`matmul32`).
+
+    The values: an operand stored split (`QuadOrder.parts`) is its parts
+    added back, smallest first, which is exact -- three BF16 terms are the
+    value's 24 significant bits, and the first alone is the value to BF16's
+    8.  Every reader that multiplies the floats reads through here: the
+    lane-batched tile where the emulated stacked one declines a product (the
+    shard route without the element in shared memory), the DPP chain beside
+    the stacked tiles (`_quad_element`).  Read as one part, SeisSol's
+    `neighboringFlux` and `localFluxAll` came out 2e-3 off in norm and the
+    volume's ninth column 1.5e-3 (MI300A)."""
+    from tensorforge.backend.pir.core import ScalarType
     threads, slots = ops.threads, ops.lead_slots
+    stored = max(1, int(ops.a_parts or 1))
+    ftype = ScalarType(ops.a)
 
     def read(writer, i, q, mults=1):
         shift = None
@@ -516,8 +565,21 @@ def _quad_reader(ops, width):
             from tensorforge.backend.pir.core import INDEX
             p = writer.op('rem', INDEX, writer.thread_id('y'), mults, hint='m')
             shift = writer.op('mul', INDEX, p, slots, hint='r')
-        return ops.A_slot(writer, (q * slots + i) * threads * width,
-                          shift=shift, width=width)
+        if stored == 1:
+            return ops.A_slot(writer, (q * slots + i) * threads * width,
+                              shift=shift, width=width)
+        got = ops.A_slot(writer, (q * slots + i) * threads * width,
+                         parts=stored, shift=shift, width=width)
+        if not got:
+            return got
+        values = []
+        for c in range(width):
+            terms = [writer.extract(part, c, ftype) for part in got]
+            value = terms[-1]
+            for term in reversed(terms[:-1]):
+                value = writer.op('add', ftype, term, value, hint='aw')
+            values.append(value)
+        return writer.pack(ScalarType(ops.a, width), *values, hint='aq')
     return read
 
 
@@ -544,7 +606,8 @@ def _quad_element(ops, width):
 
     Every path that reads `A` by coordinate reads it through this -- the DPP
     chain beside the MFMAs, the broadcast chain -- because the buffer is
-    permuted and a coordinate address would read the wrong cell.
+    permuted and a coordinate address would read the wrong cell.  The value,
+    where the operand is stored split (`_quad_reader`).
     """
     from tensorforge.backend.pir.core import ScalarType
     read = _quad_reader(ops, width)
@@ -602,8 +665,8 @@ def _matmul(writer, ops, ctx, span, width, exchanged=False):
 
     if span.strategy is Strategy.BROADCAST:
         return broadcast.matmul(writer, ops, ctx, span)
-    if span.strategy is Strategy.MATRIX and not width and serves(
-            ops, ctx):
+    if span.strategy is Strategy.MATRIX and (
+            not width or stacked_emulated(ctx)) and serves(ops, ctx):
         if matmul_stacked(writer, ops, ctx, span):
             return True
         if ops.chain is not None:

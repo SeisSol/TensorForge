@@ -183,6 +183,16 @@ def split_tf32(flat: np.ndarray, dt: Datatype, planar: int = 0) -> np.ndarray:
     return prepare.split_tf32(flat, planar=planar)
 
 
+def split_bf16(flat: np.ndarray, dt: Datatype, planar: int = 0) -> np.ndarray:
+    """Store each scalar as the three BF16 terms an emulated F32 product
+    multiplies (`prepare.split_bf16`), the library's own routine as
+    `split_tf32` is."""
+    if np_dtype(dt) != np.float32:
+        raise ValueError(
+            f"the BF16 split is defined for F32 operands; got {dt}")
+    return prepare.split_bf16(flat, planar=planar)
+
+
 def unpack(flat: np.ndarray, pack_index: np.ndarray,
            shape: Tuple[int, ...], batch: int) -> np.ndarray:
     """Expand the kernel's buffer back into a dense ``(batch, *shape)`` array.
