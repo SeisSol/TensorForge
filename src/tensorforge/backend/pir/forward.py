@@ -91,6 +91,7 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
                    rounds: int = ROUNDS, registers: bool = True,
                    fetches: Optional[bool] = None,
                    exchange: Optional[int] = None, simd: bool = False,
+                   sub_group: Optional[int] = None,
                    report: Optional[List[str]] = None) -> Tuple[Stmt, ...]:
     """`body` with its loads taken from what their own lane stored, and its
     stores nothing reads dropped (see the module); `scratch` makes the
@@ -116,7 +117,9 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
     from a register it holds still reads that register of that lane
     (`_Forward._across`), where the multiplication's lanes are within one
     exchange.  With `simd`, the body puts the lane in the type: a load takes
-    only the same vector (see the module), and reads no other lane."""
+    only the same vector (see the module), and reads no other lane.
+    `sub_group`, the sub-group a SYCL kernel states, is what a broadcast
+    reads a lane of (`demand.Demand`)."""
     for _ in range(rounds):
         # Let the last round's flow go first: two at once would hold twice
         # what the body takes.
@@ -135,7 +138,7 @@ def forward_memory(body: Tuple[Stmt, ...], scratch, *, threads: int,
                 report.append(f'forward: {why}; left as it is')
             break
         out = _Forward(flow, scratch, report, registers=registers,
-                       exchange=exchange).run()
+                       exchange=exchange, sub_group=sub_group).run()
         if out is body:
             break
         body = out
@@ -265,7 +268,8 @@ class _Forward:
     """One round over the loads of a body."""
 
     def __init__(self, flow: Flow, scratch, report: Optional[List[str]],
-                 registers: bool = True, exchange: Optional[int] = None):
+                 registers: bool = True, exchange: Optional[int] = None,
+                 sub_group: Optional[int] = None):
         self.flow = flow
         self.scratch = scratch
         self.report = report
@@ -286,7 +290,7 @@ class _Forward:
         self.kept: Set[int] = set()
         #: Which lanes of a load's value anything reads; under the explicit
         #: vector, every one (`_read`).
-        self.demand = None if flow.simd else Demand(flow)
+        self.demand = None if flow.simd else Demand(flow, sub_group)
 
     def run(self) -> Tuple[Stmt, ...]:
         for s in walk_stmts(self.flow.body):

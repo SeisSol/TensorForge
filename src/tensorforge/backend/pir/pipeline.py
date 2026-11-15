@@ -411,7 +411,8 @@ class Forward(Pass):
     def __init__(self, scratch, threads: int, arena: Optional[str] = None,
                  report: Optional[List[str]] = None, registers: bool = True,
                  exchange: Optional[int] = None,
-                 fetches: Optional[bool] = None):
+                 fetches: Optional[bool] = None,
+                 sub_group: Optional[int] = None):
         self._scratch = scratch
         self._threads = threads
         self._arena = arena
@@ -425,6 +426,9 @@ class Forward(Pass):
         #: How many lanes one exchange reaches, where a load of what another
         #: lane stored is read across the lanes (`forward_memory`).
         self._exchange = exchange
+        #: The sub-group a SYCL kernel states, where a broadcast is known to
+        #: read one lane of it (`demand.Demand`); None reads every lane.
+        self._sub_group = sub_group
         if not registers:
             self.name = 'forward-memory'
 
@@ -435,6 +439,7 @@ class Forward(Pass):
                                  fetches=self._fetches,
                                  exchange=self._exchange,
                                  simd=pc.explicit_simd,
+                                 sub_group=self._sub_group,
                                  report=self._report)
 
 

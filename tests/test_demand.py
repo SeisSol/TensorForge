@@ -19,7 +19,7 @@ from harness import wavesim
 from test_forward import F32, LANES, REAL, Body, _loads
 
 from tensorforge.backend.pir.core import (BOOL, Access, Effect, MemSpace,
-                                          walk_stmts)
+                                          Op, walk_stmts)
 from tensorforge.backend.pir.demand import Demand, lane_map
 from tensorforge.backend.pir.flow import Flow
 
@@ -228,6 +228,82 @@ def test_what_it_does_not_know_reads_every_lane(use):
     assert t.lanes() == (1 << LANES) - 1
 
 
+# -- SYCL's broadcasts, stores to memory and selects ---------------------------
+
+def _sycl_lanes(text, sub_group=None):
+    """The lanes of `x` the broadcast spelled `text` reads, its result
+    stored where the body keeps it."""
+    t = _Use()
+    bc = t.b.rawexpr(text, t.x, crosslane=True, pure=True)
+    t.b.store(t.p, bc, t.lane)
+    flow = Flow(t.b.finish(), LANES, 'shrMem', values=True, before=False)
+    return Demand(flow, sub_group).lanes(t.x, {})
+
+
+def _sycl_spelling(lane, block, backend='oneapi'):
+    """`SyclLexic.broadcast` as the PIR takes it, on the Max 1550 (sub-groups
+    of 16 and 32 stated) or under AdaptiveCpp (the device picks)."""
+    from tensorforge.common.context import Context
+    from tensorforge.common.basic_types import Datatype
+    lexic = Context(arch='pvc', backend=backend,
+                    fp_type=Datatype.F32).target.lexic
+    return lexic.broadcast('{0}', lane, block)
+
+
+def test_a_sycl_broadcast_reads_the_lane_of_its_sub_group():
+    """`group_broadcast` from lane 3 of a sub-group of 16 (lanes 3 and 19 of
+    the 32) or of 32 (lane 3) -- and of a sub-group the analysis is not told,
+    every lane."""
+    text = _sycl_spelling(3, 16)
+    assert text.startswith('sycl::group_broadcast('), text
+    assert _sycl_lanes(text, 16) == _rows(3)
+    assert _sycl_lanes(text, 32) == 1 << 3
+    assert _sycl_lanes(text) == (1 << LANES) - 1
+
+
+def test_a_split_or_indexed_sycl_broadcast_reads_the_lane_of_its_block():
+    for text in (_sycl_spelling(5, 8), _sycl_spelling(5, 8, 'acpp')):
+        assert not text.startswith('sycl::group_broadcast('), text
+        assert _sycl_lanes(text) == _rows(5, width=8), text
+    assert _sycl_lanes(_sycl_spelling(2, 4)) == _rows(2, width=4)
+
+
+def test_a_store_to_memory_reads_the_lanes_it_runs_for():
+    """Under a guard of the lanes or a predicate, the lanes it holds for;
+    every lane, unguarded."""
+    for how in ('guard', 'predicate', None):
+        t = _Use()
+        b = t.b
+        low = b.op('lt', BOOL, t.lane, 5, hint='low')
+        if how == 'guard':
+            with b.if_(low):
+                b.store(t.p, t.x, t.lane)
+        else:
+            b.store(t.p, t.x, t.lane,
+                    predicate=low if how == 'predicate' else None)
+        flow = Flow(b.finish(), LANES, 'shrMem', values=True, before=False)
+        assert Demand(flow).lanes(t.x, {}) == (
+            (1 << 5) - 1 if how else (1 << LANES) - 1), how
+
+
+def test_an_arm_of_a_select_reads_the_lanes_its_condition_picks_it_in():
+    """`lane < 5 ? x : y`, stored by every lane: `x` in lanes 0 to 4, `y` in
+    the rest -- and both in every lane where the condition is no function of
+    the lane."""
+    for lanes in (True, False):
+        t = _Use()
+        b = t.b
+        cond = (b.op('lt', BOOL, t.lane, 5, hint='low') if lanes
+                else b.op('lt', BOOL, b.load(t.p, t.lane), 1.0, hint='c'))
+        b.store(t.p, b.op('select', REAL, cond, t.x, t.y), t.lane)
+        flow = Flow(b.finish(), LANES, 'shrMem', values=True, before=False)
+        demand = Demand(flow)
+        full = (1 << LANES) - 1
+        low = (1 << 5) - 1 if lanes else full
+        assert demand.lanes(t.x, {}) == low
+        assert demand.lanes(t.y, {}) == (full & ~low if lanes else full)
+
+
 # -- what the forward pass takes ----------------------------------------------
 
 def _handed_to_an_fma(row, predicated=False):
@@ -280,3 +356,42 @@ def test_a_lane_read_past_the_rows_keeps_the_zero(predicated):
     assert _selects(out) or [x for x in walk_stmts(out)
                              if x.predicate is not None and x.accesses
                              and x.accesses[0].space is MemSpace.REGISTER]
+
+
+def _handed_to_a_sycl_broadcast(lane):
+    """`_handed_to_an_fma`'s window, read back by `group_broadcast` from lane
+    `lane` of a sub-group of 16, which the forward pass is told."""
+    t = _Use()
+    b = t.b
+    s = b.alloc(F32, (LANES,), MemSpace.SHARED, hint='s', extern='s0',
+                arena='shrMem')
+    r = t.registers('r0', 1)
+    b.store(r, b.op('mul', REAL, 2.0, b.load(t.p, t.lane)), 0)
+    rows = b.op('lt', BOOL, t.lane, 20, hint='g')
+    with b.if_(rows):
+        b.store(s, b.load(r, 0), t.lane)
+    back = t.registers('r1', 1)
+    with b.if_(rows):
+        b.store(back, b.load(s, t.lane), 0)
+    bc = b.rawexpr(f'sycl::group_broadcast(item.get_sub_group(), {{0}}, '
+                   f'{lane})', b.load(back, 0), crosslane=True, pure=True)
+    b.store(t.p, bc, t.lane)
+    body = b.finish()
+    from tensorforge.backend.pir.forward import forward_memory
+    return forward_memory(body, b.scratch, threads=LANES, arena='shrMem',
+                          sub_group=16)
+
+
+def test_a_sycl_broadcast_from_the_rows_takes_the_register_as_the_rest():
+    """Lanes 3 and 19 of the two sub-groups, both rows `r` stored: the load
+    back is `r` on every lane.  Lane 5 of each reads lane 21, past the rows,
+    and there the zero stays."""
+    def guarded(body):
+        # What the stores it took leave of a guard is empty, for a dce.
+        return [x for x in walk_stmts(body)
+                if (x.op == Op.IF and any(r.body for r in x.regions))
+                or x.predicate is not None or x.op == 'select']
+    out = _handed_to_a_sycl_broadcast(3)
+    assert not _loads(out, MemSpace.SHARED)
+    assert not guarded(out)
+    assert guarded(_handed_to_a_sycl_broadcast(5))

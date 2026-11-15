@@ -16,9 +16,11 @@ what a register holds there instead.
 `Demand.lanes` follows the uses of a value (`flow.Flow`): through
 arithmetic, which reads the lanes its result is read in; through a store
 into registers, to the loads that read what it wrote (`Flow.readers`), lane
-by lane; through the primitives of `_READS`, to the lane each takes.
-Anything else -- a store to memory, an address, a condition, a call or a text
-it does not know, a value text may name -- reads every lane.
+by lane; through the primitives of `_READS`, to the lane each takes, and
+through SYCL's broadcasts under SPMD (`_sycl`), which read one lane of the
+work-item's block, or of its sub-group.  Anything else -- a store to memory,
+an address, a condition, a call or a text it does not know, a value text may
+name -- reads every lane.
 """
 
 from __future__ import annotations
@@ -54,6 +56,21 @@ _READS: Tuple[Tuple[re.Pattern, int, bool,
 #: A primitive of `_READS` as the text of an expression of its one operand.
 _SPELLED = re.compile(r'(tensorforge::\w+<[^<>]*>)\(\{0\}\)$')
 
+#: SYCL's broadcasts under SPMD, as `SyclLexic.broadcast` spells them: lane
+#: `lane` of the work-item's block of `Block` -- one `group_broadcast` per
+#: block and a select (`split_broadcast<Block, Size>`), or `select_from_group`
+#: at the block's base -- and `group_broadcast` from a lane of the sub-group,
+#: whose size the text does not name (`Demand.sub_group`).
+_SYCL_BLOCK = (
+    re.compile(r'tensorforge::split_broadcast<\s*(\d+)\s*,\s*\d+\s*>'
+               r'\(item\.get_sub_group\(\), \{0\}, (\d+)\)$'),
+    re.compile(r'sycl::select_from_group\(item\.get_sub_group\(\), \{0\}, '
+               r'\(item\.get_sub_group\(\)\.get_local_linear_id\(\) / (\d+)\)'
+               r' \* \1 \+ \((\d+)\)\)$'),
+)
+_SYCL_GROUP = re.compile(
+    r'sycl::group_broadcast\(item\.get_sub_group\(\), \{0\}, (\d+)\)$')
+
 #: Arithmetic every lane does on its own: what reads a lane of the result
 #: reads that lane of every operand.
 _LOCAL = Op.ARITH | {Op.MATH}
@@ -82,8 +99,12 @@ class Demand:
     """The lanes of the values of a flow's body that anything reads (see
     the module).  Asked of a value at an execution of what computes it."""
 
-    def __init__(self, flow: Flow):
+    def __init__(self, flow: Flow, sub_group: Optional[int] = None):
         self.flow = flow
+        #: The lanes of the sub-group a SYCL kernel states, where it states
+        #: one (`Target.sub_group_width`): what a `group_broadcast` reads a
+        #: lane of.  None elsewhere, and there such a read reads every lane.
+        self.sub_group = sub_group
         self._memo: Dict[Tuple, int] = {}
         self._open: Set[Tuple] = set()
         #: The executions of a statement grouped by their hops (`_by_hops`).
@@ -119,7 +140,9 @@ class Demand:
             return full
         out = 0
         for u in flow.uses.get(v.id, ()):
-            if u.op in _LOCAL and len(u.target) == 1:
+            if u.op == 'select' and len(u.args) == 3 and len(u.target) == 1:
+                out |= self._selected(u, v, env, depth)
+            elif u.op in _LOCAL and len(u.target) == 1:
                 out |= self.lanes(u.target[0], env, depth + 1)
             elif u.op == Op.STORE:
                 out |= self._stored(u, v, env, depth)
@@ -130,21 +153,55 @@ class Demand:
             elif u.op == Op.CALL:
                 out |= self._called(u, v, env, depth, u.attr('callee'))
             elif u.op == Op.RAWEXPR and u.attr('crosslane'):
-                # The same primitives, spelled as text around the operand.
+                # The same primitives, spelled as text around the operand,
+                # and SYCL's broadcasts.
                 m = _SPELLED.match(u.text or '')
-                if m is None:
-                    return full
-                out |= self._called(u, v, env, depth, m.group(1))
+                if m is not None:
+                    out |= self._called(u, v, env, depth, m.group(1))
+                else:
+                    known = self._sycl(u.text or '')
+                    if known is None:
+                        return full
+                    out |= self._mapped(u, v, env, depth, known)
             else:
                 return full
             if out == full:
                 return full
         return out
 
+    def _selected(self, u: Stmt, v: Value, env, depth: int) -> int:
+        """What reads lanes of `v` through `u`, a select: an arm in the
+        lanes the condition picks it in, where the condition is a function
+        of the lane (`Flow._static`); the condition, and an arm under any
+        other condition, in every lane the result is read in."""
+        flow = self.flow
+        wanted = self.lanes(u.target[0], env, depth + 1)
+        cond, yes, no = u.args
+        if not wanted or cond is v or not flow._static(cond, env):
+            return wanted
+        where = flow._lanes_where(cond, env, flow.full)
+        return ((wanted & where if yes is v else 0)
+                | (wanted & ~where if no is v else 0))
+
     def _stored(self, u: Stmt, v: Value, env, depth: int) -> int:
-        """What reads lanes of `v` through `u`, a store of it."""
+        """What reads lanes of `v` through `u`, a store of it: into
+        registers, the loads that read what it wrote, lane by lane; into
+        memory, the lanes the store runs for -- under a guard of the lanes,
+        or a predicate, those it holds for (`Inst.mask`)."""
         flow = self.flow
         full = flow.full
+        if (len(u.accesses) == 1
+                and u.accesses[0].space is not MemSpace.REGISTER
+                and len(u.args) >= 2 and u.args[1] is v
+                and not any(a is v for a in u.args[2:]) and u.args[0] is not v
+                and u.predicate is not v
+                and getattr(v.type, 'length', None) is None):
+            out = 0
+            found = False
+            for n in self._executions(u, env):
+                found = True
+                out |= flow.insts[n].mask
+            return out if found else full
         if (len(u.accesses) != 1
                 or u.accesses[0].space is not MemSpace.REGISTER
                 or len(u.args) < 2 or u.args[1] is not v
@@ -173,11 +230,34 @@ class Demand:
                 callee: Optional[str]) -> int:
         """What reads lanes of `v` through `u`, a call of `callee` it is an
         operand of."""
-        flow = self.flow
-        full = flow.full
         known = lane_map(callee)
         if known is None:
-            return full
+            return self.flow.full
+        return self._mapped(u, v, env, depth, known)
+
+    def _sycl(self, text: str):
+        """The lane map (`lane_map`) of a SYCL broadcast spelled `text`, or
+        None: lane `p` of a block reads lane `lane` of it, and a plain
+        `group_broadcast`'s block is the sub-group (`sub_group`)."""
+        for pattern in _SYCL_BLOCK:
+            m = pattern.match(text)
+            if m:
+                block, lane = int(m.group(1)), int(m.group(2))
+                break
+        else:
+            m = _SYCL_GROUP.match(text)
+            if m is None or self.sub_group is None:
+                return None
+            block, lane = self.sub_group, int(m.group(1))
+        if not 0 <= lane < block:
+            return None
+        return 0, True, block, lambda p, lane=lane: lane
+
+    def _mapped(self, u: Stmt, v: Value, env, depth: int, known) -> int:
+        """What reads lanes of `v` through `u`, a primitive of the lane map
+        `known` (`lane_map`) it is an operand of."""
+        flow = self.flow
+        full = flow.full
         operand, of_result, block, lane = known
         if (sum(1 for a in u.args if a is v) != 1 or u.predicate is v
                 or flow.threads % block):

@@ -829,8 +829,15 @@ class AbstractInstruction(ABC):
     if carry is not None and options.forward_memory:
       exchange = (context.target.exchange_reach(carry['threads'])
                   if options.forward_across else None)
+      # The sub-group a SYCL kernel states, which `group_broadcast` reads a
+      # lane of: knowing which, a load whose value only such reads take is
+      # taken where the lanes they read agree (`demand.Demand`).
+      stated = context.target
+      sub_group = (stated.sub_group_width(carry['threads'])
+                   if stated.pinned_sub_groups and not stated.explicit_simd
+                   else None)
       forwarded = pir.Forward(builder.scratch, report=carries,
-                              exchange=exchange, **carry)
+                              exchange=exchange, sub_group=sub_group, **carry)
       # What the lanes store and load back -- a result handed to the
       # accumulation behind it, or to the next operation -- is read from its
       # registers before the carry asks what the trips hand each other, the
@@ -841,7 +848,8 @@ class AbstractInstruction(ABC):
       # `volume` at order 6 on MI300A loaded the element's numbers once a
       # product, 9 % slower in single precision.
       early = pir.Forward(builder.scratch, report=carries,
-                          registers=False, fetches=True, **carry)
+                          registers=False, fetches=True,
+                          sub_group=sub_group, **carry)
     own = None
     if carry is not None and options.keep_own:
       own = pir.KeepOwn(builder.scratch, report=carries, **carry)
