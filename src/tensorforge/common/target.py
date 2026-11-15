@@ -538,12 +538,18 @@ class Target:
         and the rendezvous has already happened -- the reason `sync_simd` is
         None there.  Across waves it needs a barrier object of its own: GFX12
         splits `s_barrier` into signal and wait but leaves only the workgroup
-        barrier visible to the shader, and the objects a shader may assign,
-        1 through 16, arrive at GFX12.5.  Even there the answer is False: the
-        objects would need a prologue -- `s_barrier_init` with the expected
-        count, a workgroup barrier so that nobody joins before the init lands,
-        and one `s_barrier_join` per wave, all before the first use -- and the
-        generator emits none.
+        barrier visible to the shader, and the objects a block may assign to a
+        subset of its waves, 1 through 16, arrive with gfx12.5
+        (`HwDecription.named_barriers`).  There a multiplication of whole
+        waves meets on an object of its own.  The objects need a prologue,
+        which the kernel then opens with (`HipLexic.named_barrier_prologue`):
+        every wave sets its multiplication's count in waves (`s_barrier_init`),
+        the block meets once at its own barrier so that no wave signals an
+        object whose count has not landed, and every wave joins its
+        multiplication's object -- a wave waits on the one it joined and on
+        no other.  The rendezvous is then a signal of the object and a wait
+        (`HipLexic.sync_mult`).  A width that leaves a partial wave has no
+        count of waves to give and falls back to the group, as on CUDA.
 
         SYCL under ESIMD: one work-item *is* the vector, so a multiplication
         of any width is held by a single work-item, executed in order, with no
@@ -574,7 +580,7 @@ class Target:
         if self.backend == 'hip':
             if num_threads <= wave:
                 return wave % num_threads == 0
-            return False
+            return bool(self.hw.named_barriers) and num_threads % wave == 0
         if self.sycl:
             if self.explicit_simd:
                 return True
@@ -594,10 +600,24 @@ class Target:
         A sixteenth multiplication would ask for barrier 16, which does not
         exist.  Below a wave each multiplication is a mask of the warp's lanes
         and nothing runs out.
+
+        HIP on gfx12.5 above a wave: an object a multiplication, the object
+        at `threadIdx.y` of an array the kernel declares, and sixteen of
+        them.  All sixteen are the multiplications', unlike CUDA's: the
+        block's own barrier is not one of them (ID -1 against 1 to 16).
+        What the count leaves out is occupancy.  A block is given its objects
+        in fours out of 64 a WGP, so blocks of sixteen objects are four to a
+        WGP and blocks of four sixteen -- which binds only where blocks are
+        small, since four blocks of sixteen two-wave multiplications are 128
+        waves already.
         """
-        if (self.backend == 'cuda' and num_threads > self.hw.vec_unit_length
-                and self.sync_mult(num_threads)):
+        if (num_threads <= self.hw.vec_unit_length
+                or not self.sync_mult(num_threads)):
+            return None
+        if self.backend == 'cuda':
             return self.lexic.NAMED_BARRIERS - 1
+        if self.backend == 'hip':
+            return self.hw.named_barriers
         return None
 
     def exchange_reach(self, num_threads: int) -> int:

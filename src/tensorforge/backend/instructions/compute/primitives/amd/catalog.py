@@ -385,7 +385,9 @@ _WMMA_N16 = _ops('wmma-n16-insts', Call.WMMA_MODS, 32, (
 #: The two rows that make the emulation unnecessary where they exist: gfx1250
 #: has a native F32 matrix instruction, and gfx1251 adds F64.  The latter is
 #: the only builtin gated on `gfx1251-gemm-insts`, which is what that feature
-#: is for.
+#: is for -- in LLVM main and clang 23.  ROCm 7.2's clang 22 declares the
+#: gfx1250 WMMAs, on `gfx1250-insts`, and not this one, and its assembler
+#: does not know `v_wmma_f64_16x16x4_f64` for gfx1251 either.
 _GFX1250 = _ops('gfx1250-insts', Call.WMMA_MODS, 32, (
     ('wmma_f32_16x16x4_f32', 16, 16, 4, 1, F32, 2, F32, 8),
 ))

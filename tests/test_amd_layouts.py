@@ -72,7 +72,10 @@ def test_the_table_covers_exactly_what_the_calculator_knows():
     assert uncovered, "the calculator does not reach every catalog entry"
 
 
-MEASURED = [o for o in catalog.MATRIX_OPS if layouts.established(o)]
+MEASURED = [o for o in catalog.MATRIX_OPS
+            if layouts.provenance(o) is layouts.Provenance.MEASURED]
+DOCUMENTED = [o for o in catalog.MATRIX_OPS
+              if layouts.provenance(o) is layouts.Provenance.DOCUMENTED]
 DERIVED = [o for o in catalog.MATRIX_OPS if not layouts.established(o)]
 
 
@@ -311,15 +314,16 @@ def test_gfx950_gets_a_full_row_from_the_cdna_precedent():
                     == layouts.position(narrow, "D", i, j))
 
 
-def test_gfx125x_gets_no_accumulator_because_there_is_no_precedent():
+def test_gfx1251s_fp64_wmma_gets_no_accumulator_because_nothing_says_where():
     """The absence is the finding, not a gap left over.
 
     RDNA 3 and RDNA 4 place their accumulators differently at the same shape,
-    so "gfx125x resembles RDNA 4" does not reach D: the previous generation
-    boundary already moved it. A and B are derived because the rule crossed
-    that same boundary and came out right.
+    so "gfx1251 resembles gfx1250" does not reach D: the previous generation
+    boundary already moved it. The CDNA 5 guide lays out gfx1250's WMMAs and
+    does not list the FP64 one; A and B are derived, by a rule the guide's
+    16-bit operands have since contradicted.
 
-    `covers(op)` without an operand is therefore False for these, and an
+    `covers(op)` without an operand is therefore False for it, and an
     emitter that asks it declines rather than placing an accumulator on the
     strength of a resemblance.
     """
@@ -327,19 +331,159 @@ def test_gfx125x_gets_no_accumulator_because_there_is_no_precedent():
                if o.feature in ("wmma-n16-insts", "gfx1250-insts",
                                 "gfx1251-gemm-insts")]
     assert len(gfx125x) == 4
-    for op in gfx125x:
-        assert layouts.covers(op, "A") and layouts.covers(op, "B")
-        assert not layouts.covers(op, "D")
-        assert not layouts.covers(op)
-        assert layouts.position(op, "D", 0, 0) is None
+    documented = {o.builtin for o in gfx125x
+                  if layouts.provenance(o) is layouts.Provenance.DOCUMENTED}
+    assert documented == {"wmma_f32_16x16x4_f32", "wmma_f32_16x16x32_bf16",
+                          "wmma_f32_16x16x32_f16"}
+    f64, = (o for o in gfx125x if o.builtin not in documented)
+    assert f64.builtin == "wmma_f64_16x16x4_f64"
+    for which in "AB":
+        assert layouts.provenance(f64, which) is layouts.Provenance.DERIVED
+    assert not layouts.covers(f64, "D")
+    assert not layouts.covers(f64)
+    assert layouts.position(f64, "D", 0, 0) is None
+
+
+# --------------------------------------------------------------------------- #
+# what the CDNA 5 guide documents
+# --------------------------------------------------------------------------- #
+
+def _documented():
+    return _table()["documented"]
+
+
+def _llvm_op(builtin):
+    """A catalog row for an instruction the catalog leaves out, from the
+    vendored LLVM table: the guide's 8-bit layout, under `wmma_i32_...`."""
+    entry = next(e for e in json.loads(
+        (Path(__file__).parent / "data" / "amd_matrix_builtins.json")
+        .read_text())["builtins"] if e["builtin"] == builtin)
+    widths = {"i32": 4, "iu8": 1}
+    din, dout = catalog.Datatype.I8, catalog.Datatype.I32
+    # LLVM states the operands in i32 words; the table counts elements.
+    per_word = 4 // widths[entry["in"]]
+    return catalog.MatrixOp(
+        builtin=builtin, m=entry["m"], n=entry["n"], k=entry["k"], blocks=1,
+        wave=entry["wave"],
+        a=catalog.Fragment(din, entry["a"][0] * per_word),
+        b=catalog.Fragment(din, entry["b"][0] * per_word),
+        d=catalog.Fragment(dout, entry["d"][0]),
+        feature=entry["feature"], call=catalog.Call.WMMA)
+
+
+def _documented_ops():
+    ops = {o.builtin: o for o in DOCUMENTED}
+    for builtin in layouts.DOCUMENTED_BITS:
+        if builtin not in ops:
+            ops[builtin] = _llvm_op(builtin)
+    return [ops[b] for b in sorted(ops)]
+
+
+def test_the_documented_rows_are_the_transcription_of_the_guide():
+    """Equality of the two sets, and the source the vendored section names."""
+    assert set(layouts.DOCUMENTED_BITS) == set(_documented()["layouts"])
+    assert not set(layouts.DOCUMENTED_BITS) & set(layouts.FRAGMENT_BITS)
+    source = _documented()["source"]
+    assert source["section"].startswith("7.12.2")
+    assert source["url"].startswith("https://www.amd.com/")
+
+
+@pytest.mark.parametrize("op", _documented_ops(), ids=lambda op: op.builtin)
+def test_every_element_lands_where_the_guide_puts_it(op):
+    """Exhaustive, as against the calculator: every element of A, B and D
+    where the vendored transcription says, and once."""
+    entry = _documented()["layouts"][op.builtin]
+    extents = {"A": (op.m, op.k), "B": (op.k, op.n), "D": (op.m, op.n)}
+    frags = {"A": op.a, "B": op.b, "D": op.d}
+    for which, (e1, e2) in extents.items():
+        seen = set()
+        for first in range(e1):
+            for second in range(e2):
+                got = layouts.position(op, which, first, second)
+                assert got == _expected(entry, which, first, second, 0), (
+                    f"{op.builtin} {which}[{first}][{second}]")
+                slot, lane = got
+                assert 0 <= slot < frags[which].per_lane
+                assert 0 <= lane < op.wave
+                seen.add(got)
+        assert len(seen) == frags[which].per_lane * op.wave, (
+            f"{op.builtin} {which} does not fill its registers once")
+        assert entry[which]["replication"] == 1
+
+
+def test_a_documented_row_is_established():
+    """AMD's statement as a measured one is, and taken before a derivation
+    of the same instruction would be."""
+    for op in DOCUMENTED:
+        assert layouts.established(op), op.builtin
+        assert layouts.covers(op), op.builtin
+        for which in "ABD":
+            assert layouts.provenance(op, which) is (
+                layouts.Provenance.DOCUMENTED)
+
+
+def test_the_guide_contradicts_the_derivation_on_16_bit_operands():
+    """Why a derived row is a guess.  The rule keeps eight bytes of `k` in a
+    lane; the guide keeps eight 16-bit elements, sixteen bytes, so bit 3 of
+    `k` and not bit 2 is the lane's -- on A and on B.  At F32 the two agree,
+    two elements being eight bytes."""
+    for name in ("wmma_f32_16x16x32_bf16", "wmma_f32_16x16x32_f16"):
+        op = next(o for o in DOCUMENTED if o.builtin == name)
+        row = layouts.DOCUMENTED_BITS[name]
+        assert layouts._contraction_bits(op, "A") == (-1, -2, 16, -4, -8)
+        assert row[2] == (-1, -2, -4, 16, -8)
+        assert row[3:6] == ((), row[2], row[1]), "B is A with N for M"
+    f32 = next(o for o in DOCUMENTED if o.builtin == "wmma_f32_16x16x4_f32")
+    assert layouts._contraction_bits(f32, "A") == (
+        layouts.DOCUMENTED_BITS["wmma_f32_16x16x4_f32"][2])
+
+
+def test_runs_of_eight_in_k_per_lane_half_on_16_and_8_bits():
+    """What a lane holds of the 16x16x32 operand: two runs of eight
+    consecutive `k`, the second sixteen on -- lanes 0-15 hold 0-7 and 16-23,
+    lanes 16-31 hold 8-15 and 24-31 -- the arrangement the 8-bit table
+    repeats over 64.  An address for it is two terms per run, which is what
+    the shift-and-mask form reports."""
+    op = next(o for o in DOCUMENTED if o.builtin == "wmma_f32_16x16x32_bf16")
+    for lane in range(op.wave):
+        ks = [layouts.element_at(op, "A", slot, lane)[2]
+              for slot in range(op.a.per_lane)]
+        base = 8 * (lane // 16)
+        assert ks == list(range(base, base + 8)) + list(
+            range(base + 16, base + 24)), lane
+    iu8 = _llvm_op("wmma_i32_16x16x64_iu8")
+    for lane in (0, 16):
+        ks = [layouts.element_at(iu8, "A", slot, lane)[2]
+              for slot in range(iu8.a.per_lane)]
+        base = 8 * (lane // 16)
+        assert ks == [base + 16 * run + i for run in range(4)
+                      for i in range(8)]
+
+
+def test_the_gfx1250_accumulator_is_rdna4s_and_not_cdna3s():
+    """A 16x16 F32 accumulator over 32 lanes: row `m` in VGPR `m % 8`, the
+    upper eight rows in the upper half of the wave, the column the lane --
+    RDNA 4's wave32 layout bit for bit, and not the one CDNA 3 gives its
+    16x16x4 MFMA.  Read off two sources, which is what makes it more than a
+    resemblance."""
+    rdna4 = layouts.FRAGMENT_BITS["wmma_f32_16x16x16_bf16_w32_gfx12"][6:9]
+    cdna3 = layouts.FRAGMENT_BITS["mfma_f32_16x16x4f32"][6:9]
+    for name, row in layouts.DOCUMENTED_BITS.items():
+        assert row[6:9] == rdna4, name
+        assert row[6:9] != cdna3, name
+    op = next(o for o in DOCUMENTED if o.builtin == "wmma_f32_16x16x4_f32")
+    for m in range(16):
+        for n in range(16):
+            assert layouts.position(op, "D", m, n) == (m % 8, n + 16 * (m // 8))
 
 
 def test_the_native_f32_and_f64_wmmas_place_k_in_the_lane():
-    """What the derivation says about the two rows that matter for SeisSol.
+    """What the guide says of gfx1250's F32 WMMA and the derivation of
+    gfx1251's F64 one, the two rows that matter for SeisSol.
 
-    gfx1250's F32 and gfx1251's F64 WMMA are 16x16x4 with two elements per
-    lane, so the eight-byte granule is one element and `k` splits one bit to
-    the slot and one to the lane. Which puts them in the same position as the
+    Both are 16x16x4 with two elements per lane, and `k` splits one bit to
+    the slot and one to the lane -- for the F32 one bit 0 to the slot, as
+    the guide's table has it. Which puts them in the same position as the
     FP64 MFMAs: part of the lane index is the contraction, so they are not
     lane-batched either and want the same staging.
     """
