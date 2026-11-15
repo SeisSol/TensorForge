@@ -2768,11 +2768,19 @@ class Generator:
       for line in self._barrier_prologue():
         writer(line)
 
-      for section in self._sections:
-        with writer.AnonymousScope():
-          AbstractInstruction._emit_shared_body(
-              self._context, writer, section.body, self._metrics,
-              self._num_threads)
+      # Every body of the kernel, for what a body's emitter asks of the kernel
+      # as a whole: whether it issues a matrix instruction anywhere, which a
+      # fused DPP block on CDNA waits behind itself for (`amd.dpp_block`) --
+      # the compiler may bring an MFMA of one section behind a block of another.
+      self._context.kernel_bodies = tuple(s.body for s in self._sections)
+      try:
+        for section in self._sections:
+          with writer.AnonymousScope():
+            AbstractInstruction._emit_shared_body(
+                self._context, writer, section.body, self._metrics,
+                self._num_threads)
+      finally:
+        self._context.kernel_bodies = None
 
     self._kernel = self._name_module_operands(writer.get_src())
     self._warn_icache()

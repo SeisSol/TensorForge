@@ -325,6 +325,12 @@ class Emitter:
         #: (`Options.pin_shared`).
         self._pin_shared = True
         self._converged = True
+        #: How the fused DPP blocks wait (`Options.amd_dpp_waits`), whether
+        #: they wait behind themselves, and how many operands a run may take
+        #: on past 32 products (`_decide_dpp_waits`).
+        self._dpp_waits = 'always'
+        self._dpp_after = True
+        self._dpp_operands = 0
 
     def _record_work(self, op: Optional[str] = None, value=None,
                      work: bool = True) -> None:
@@ -1093,6 +1099,7 @@ class Emitter:
                             else bool(getattr(options(), 'pin_shared', True)
                                       if options else True))
         self._converged = True
+        self._decide_dpp_waits()
         self._inline = self._plan_inlining(body)
         self._decide_async(body)
         if self._async_lex is None and self._async_note:
@@ -1112,7 +1119,8 @@ class Emitter:
         while at < len(body):
             s = body[at]
             if blocks is not None:
-                end = blocks.runs(body, at)
+                end = blocks.runs(body, at, self._dpp_waits,
+                                  self._dpp_operands)
                 if end > at:
                     self._emit_dpp_block(body[at:end], blocks)
                     at = end
@@ -1193,14 +1201,37 @@ class Emitter:
             dpp_block)
         return dpp_block if dpp_block.blocks_for(model) else None
 
+    def _decide_dpp_waits(self) -> None:
+        """How this body's fused DPP blocks wait (`amd.dpp_block`):
+        `Options.amd_dpp_waits` and `amd_dpp_block_operands`, and under
+        `needed` whether a block waits behind itself, which is a question about
+        the whole kernel -- an MFMA of another section may come to stand behind
+        a block of this one.  The generator hands over the kernel's bodies
+        while it writes them (`Generator._generate_kernel`); a body written
+        without them waits behind every block, as does a context without
+        options."""
+        self._dpp_waits, self._dpp_after, self._dpp_operands = 'always', True, 0
+        blocks = self._dpp_blocks()
+        options = getattr(self.context, 'get_user_options', None)
+        if blocks is None or options is None:
+            return
+        self._dpp_waits = getattr(options(), 'amd_dpp_waits', 'always')
+        self._dpp_operands = int(getattr(options(), 'amd_dpp_block_operands',
+                                         0) or 0)
+        bodies = getattr(self.context, 'kernel_bodies', None)
+        if self._dpp_waits == 'needed' and bodies is not None:
+            self._dpp_after = blocks.waits_behind(bodies)
+
     def _emit_dpp_block(self, run: Tuple[Stmt, ...], blocks) -> None:
         """A run of fused DPP FMAs as one block (`amd.dpp_block`), counted as
-        the calls it is made of -- and the wait in front of it, one unit."""
+        the calls it is made of -- and each wait in front of a product, one
+        unit.  The wait behind is not counted, as it was not when it came in:
+        under `always` the figures stay what they were."""
         for s in run:
             self._record_code(s.op)
             self._record_mix(s)
-        self._record_code_units(1)
-        self.writer(blocks.render(run, self.operand))
+        self._record_code_units(blocks.waits_in(run))
+        self.writer(blocks.render(run, self.operand, after=self._dpp_after))
 
     def _record_slack(self, body: Tuple[Stmt, ...]) -> None:
         """How far each load stands from the statement that reads it.
