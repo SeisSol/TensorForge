@@ -232,6 +232,17 @@ class MatmulOperands:
     #: because a path that staged some fragments and read the rest would need
     #: the tile it was removing.
     B_direct: Optional[Callable] = None
+    #: ``B_shard(writer, j, k, rows, columns, mults) -> value``, or ``None``
+    #: where `B` is not in shared memory: `B` at step ``k + rows`` of the
+    #: contraction and column ``j + columns`` -- `rows`, `columns` and `mults`
+    #: values of the lane -- in the copy of the multiplication `mults` places
+    #: on in the block from the lane's own, read where an earlier operation
+    #: stored it.  Every multiplication owns its copy at the same place of its
+    #: own arena, `mult_stride` elements after its predecessor's, so another
+    #: multiplication's element is a shift away; reading it is only defined
+    #: where they run in step (`lockstep`) and behind a rendezvous of the
+    #: wave, which the caller places.
+    B_shard: Optional[Callable] = None
     #: ``A_zero(e_lo, e_hi, k_lo, k_hi) -> bool``, or ``None``: whether `A` is
     #: known to be zero over lead elements ``[e_lo, e_hi)`` -- counted from
     #: the first slot the accessors read, in elements, not slots -- and

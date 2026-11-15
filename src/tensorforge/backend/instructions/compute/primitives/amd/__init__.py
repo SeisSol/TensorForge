@@ -18,6 +18,7 @@ below are layered in dependency order:
 * `select`   -- which instruction width to use
 * `emitters` -- how to write one instruction down
 * `codegen`  -- the kernel
+* `stacked`  -- a wave's multiplications stacked along a `k = 4` M
 * `unused`   -- matrix paths kept for repair, with no call site
 
 The split between `arch` and `caps` is the load-bearing one: a family
@@ -72,6 +73,9 @@ from .select import (BroadcastForm, MATERIALIZE_FROM, broadcast_form,
                      wanted_fmadpp_step)
 from .unused import (mfma_emu_bf16_f32, mfma_emu_f16_f32, mfma_emu_int8,
                      wmma3atom)
+from .stacked import instruction as stacked_instruction
+from .stacked import (matmul_stacked, serves, stacked_plan,
+                      stacked_reads_shared, stacks)
 
 __all__ = [
     'amdarch', 'cdna2', 'gfx1250', 'gfx1251', 'rdna',
@@ -154,6 +158,12 @@ def strategies(shape, ctx):
     and not yet emitted.  The lane-batched scheme does not want that order
     (`componentwise`), so it takes the packed operand as it is, one component
     at a time.
+
+    F64 reaches a matrix core where `Options.amd_matrix_k4` stacks the
+    multiplications of a wave along `mfma_f64_16x16x4f64`'s M (`stacked`),
+    which asks the shape for a batch-constant operator; F32 at sixteen lanes
+    then takes `mfma_f32_16x16x4f32` the same way rather than the
+    lane-batched tile.
     """
     if bitlayout.packed(shape.lead_layout):
         offered = set()
@@ -170,7 +180,8 @@ def strategies(shape, ctx):
         # through `readlane`.  It cannot read a sparse operand, which is the
         # one thing the DPP branch does that this does not.
         offered.add(Strategy.BROADCAST)
-        if offers(shape.threads, shape.accumulator, ctx):
+        if (offers(shape.threads, shape.accumulator, ctx)
+                or stacks(shape, ctx)):
             offered.add(Strategy.MATRIX)
     return frozenset(offered)
 
@@ -257,6 +268,12 @@ def convergence(strategy, shape, n, ctx):
     from tensorforge.backend.pir.core import Uniformity
     if strategy is not Strategy.MATRIX:
         return None
+    if stacks(shape, ctx):
+        # Every issue multiplies all four multiplications' elements by one
+        # operator fragment, which each of them read a step of, and the
+        # elements' fragments are read out of each other's lanes or shared
+        # memory.
+        return Uniformity.MULTGROUP
     width = (1 << bitlayout.unpacked(shape.lead_layout)[1]
              if bitlayout.packed(shape.lead_layout) else 1)
     if wave_mults(shape.threads, shape.a_uniform, width,
@@ -311,6 +328,8 @@ def plan(strategy, shape, n, ctx):
     """
     if strategy is not Strategy.MATRIX:
         return whole(strategy, n)
+    if stacks(shape, ctx):
+        return stacked_plan(shape, n, ctx)
     fit = choose(shape.threads, shape.accumulator, ctx,
                  columns=n, lead=shape.lead, depth=shape.depth)
     # Asked of the scheme that will run rather than of one of them.  Only the
@@ -416,8 +435,13 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     where the plan swaps and merges (`exchange_order`), whatever the type the
     scheme serves; `head` is where the contraction starts in the shared
     operand's first block, which decides the step a fragment lane holds.
+
+    None where the stacked scheme is asked for and stacks at this lane count
+    (`stacked.instruction`): it reads the operator by its own steps
+    (`A_wave`), which a prepared buffer is not, and an operand stored in
+    k-quads would hand the product back to the lane-batched tile.
     """
-    if len(shape) != 2:
+    if len(shape) != 2 or stacked_instruction(threads, dtype, ctx):
         return None
     r0, c0 = (int(x) for x in corner)
     if (r0 < 0 or c0 < 0 or not lead or not depth or r0 >= int(shape[0])
@@ -443,6 +467,14 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     if fit.scheme is not Scheme.LANE_BATCHED:
         return None
     return quad_order(shape, threads, width, window)
+
+
+def reads_shared(shape, ctx) -> bool:
+    """Whether the matrix path reads a second operand an earlier operation
+    stored in shared memory there (`MatrixPaths.reads_shared`): the stacked
+    scheme's `shard` route, whose fragments are other multiplications'
+    elements (`stacked.stacked_reads_shared`)."""
+    return stacked_reads_shared(shape, ctx)
 
 
 def order_before_packing(shape, ctx) -> bool:
@@ -552,6 +584,17 @@ def _matmul(writer, ops, ctx, span, width, exchanged=False):
 
     if span.strategy is Strategy.BROADCAST:
         return broadcast.matmul(writer, ops, ctx, span)
+    if span.strategy is Strategy.MATRIX and not width and serves(
+            ops, ctx):
+        if matmul_stacked(writer, ops, ctx, span):
+            return True
+        # Operands the scheme does not read (`stacked.matmul_stacked`): the
+        # span goes where it would have gone without the option -- the
+        # lane-batched tile where one serves the type (F32), the DPP chain
+        # where none does (F64) -- where declining would send the whole
+        # product to the nest.
+        if not offers(threads, dtype, ctx):
+            span = Span(Strategy.DPP, span.start, span.stop)
     if span.strategy is Strategy.MATRIX:
         fit = choose(threads, dtype, ctx, columns=N,
                      lead=ops.lead_slots * threads * ops.lead_width,

@@ -35,7 +35,7 @@ AMD = (Path(__file__).parent.parent / "src" / "tensorforge" / "backend" /
 #: to launder dead code past this check.
 MODULES = ["__init__", "arch", "caps", "features", "catalog", "layouts",
            "reorder", "relayout", "select", "emitters", "codegen",
-           "exchange_codegen", "tiling", "unused"]
+           "exchange_codegen", "tiling", "stacked", "unused"]
 
 #: What the dispatch reads off this package: the members of
 #: `strategy.MatrixPaths`, every one an entry point in the same sense.
@@ -65,8 +65,6 @@ KEPT_UNREACHABLE = {
     # general query and the split arithmetic have no call site yet. They lose
     # their entry here when the emitter that consumes them lands -- which is
     # what `test_allow_list_does_not_outlive_its_entries` enforces.
-    "_place":
-        "the table's decoder; reached only from `position`",
     "established":
         "the strict query an emitter uses to decline a derived layout",
     "AXES":
@@ -82,9 +80,6 @@ KEPT_UNREACHABLE = {
         "one shift-and-mask contribution to a fragment address",
     "index_terms":
         "fragment addressing for a staging emitter, which is not written",
-    "position":
-        "fragment placement; the emitter that stages an operand into one is "
-        "not written",
     "lane_batched_ops":
         "the same precondition asked of the whole catalog; the F32 policy "
         "reaches it through MFMA_TILES instead",

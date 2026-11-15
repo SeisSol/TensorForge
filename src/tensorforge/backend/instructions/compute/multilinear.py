@@ -3076,7 +3076,27 @@ class MultilinearInstruction(ComputeInstruction):
                             if self._ops and self._ops[0].symbol.obj else 1,
                             lead_layout=lead_layout(self._num_threads,
                                                     self._lead_width),
-                            a_uniform=self._a_uniform())
+                            a_uniform=self._a_uniform(),
+                            b_shared=self._b_shard_readable())
+
+    def _b_shard_readable(self) -> bool:
+        """Whether `B` sits in shared memory as the frontend described it,
+        one contraction axis and then one output axis, dense: then an element
+        of another multiplication's copy is one shift away
+        (`MatmulOperands.B_shard`).  Asked by the plan (`ComputeShape.
+        b_shared`) and by the emission, which have to agree."""
+        if len(self._ops) != 2 or self._ops[1].symbol is None:
+            return False
+        sym = self._ops[1].symbol
+        obj = sym.obj
+        return (sym.stype is SymbolType.SharedMem
+                and sym.data_view is not None
+                and not self._second_operand_is_sparse()
+                and len(self._ks) == 1 and len(self._ns) == 2
+                and self._opdim_to_nks[1] == ['k0', 'n1']
+                and obj is not None and obj.is_dense()
+                and getattr(obj, 'storage_parts', 1) == 1
+                and getattr(obj, 'storage_order', None) is None)
 
     def _a_uniform(self) -> bool:
         """Whether the lead operand is the same for every multiplication."""
@@ -3567,6 +3587,40 @@ class MultilinearInstruction(ComputeInstruction):
                 (`MatmulOperands.A_zero`, `_zero_block`)."""
                 return self._zero_block(e_lo, e_hi, k_lo, k_hi, span)
 
+            def B_shard(writer, j, k, rows, columns, mults):
+                """`B` at step `k + rows` and column `j + columns` of the
+                multiplication `mults` places on from the lane's own, out of
+                the shared memory an earlier operation stored it in
+                (`MatmulOperands.B_shard`).
+
+                The distance between two multiplications' copies is
+                `mult_stride`, which the arena is laid out to after the body:
+                asking for it is what has the body built again with the
+                answer.  The rows and the columns are the operand's own
+                strides on top, the whole addend one run-time shift on the
+                address of `(k, j)` (`Symbol.load`).
+                """
+                stride = self._ask_mult_stride()
+                if stride is None:
+                    return None
+                strides = self._ops[1].symbol.data_view.get_dim_strides()
+                shift = None
+                for value, step in ((rows, strides[0]), (columns, strides[1]),
+                                    (mults, stride)):
+                    term = (value if step == 1 else
+                            writer.op('mul', INDEX, value, step, hint='sh'))
+                    shift = (term if shift is None else
+                             writer.op('add', INDEX, shift, term, hint='sh'))
+                with writer.speculative() as spec:
+                    res = self._ops[1].symbol.load(
+                        writer, self._context, None,
+                        unwindOp(0, j, k, 1, True), False, shift=shift)
+                    if not res:
+                        spec.discard()
+                return res
+
+            b_shared = self._b_shard_readable()
+
             a_obj = self._ops[0].symbol.obj
             self._offer_order(_vendor_module(self._context),
                               a_obj, Mx, K)
@@ -3643,6 +3697,7 @@ class MultilinearInstruction(ComputeInstruction):
                         and getattr(a_obj, 'packing', None) is None
                         else None),
                 A_zero=A_zero if width == 1 else None,
+                B_shard=B_shard if b_shared and width == 1 else None,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,
                 threads=self._num_threads, lead_width=width,
                 lead_first=self._ns[0][0] % span,

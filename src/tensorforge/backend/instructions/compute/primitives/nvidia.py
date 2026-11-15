@@ -566,6 +566,12 @@ def order_before_packing(shape, ctx):
     return True
 
 
+def reads_shared(shape, ctx):
+    """False: the matrix path stages its second operand itself, into tiles
+    of its own (`MatrixPaths.reads_shared`)."""
+    return False
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=32, corner=(0, 0), rows=None, head=0):
     """The order this target would read a two-dimensional A operand in.

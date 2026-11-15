@@ -92,12 +92,27 @@ template <typename T, std::size_t N> struct Vec {
 
 typedef tfshim::Vec<float, 4>::type __tfshim_v4f;
 typedef tfshim::Vec<float, 16>::type __tfshim_v16f;
+typedef tfshim::Vec<double, 4>::type __tfshim_v4d;
 
 // (a, b, acc, cbsz, abid, blgp) -> acc
 __tfshim_v4f __builtin_amdgcn_mfma_f32_4x4x1f32(float, float, __tfshim_v4f, int,
                                                 int, int);
 __tfshim_v16f __builtin_amdgcn_mfma_f32_16x16x1f32(float, float, __tfshim_v16f,
                                                    int, int, int);
+// The stacked tiles (`primitives.amd.stacked`).
+__tfshim_v4d __builtin_amdgcn_mfma_f64_16x16x4f64(double, double, __tfshim_v4d,
+                                                  int, int, int);
+__tfshim_v4f __builtin_amdgcn_mfma_f32_16x16x4f32(float, float, __tfshim_v4f,
+                                                  int, int, int);
+
+// The fence a handoff between the lanes of a wave stands behind
+// (`Lexic.handoff_fence`): an ordering, a memory scope by name.
+void __builtin_amdgcn_fence(int, const char *);
+
+// The device library's integer `min` and `max`, which index arithmetic is
+// spelled with on CUDA and HIP (`Operation.MIN`, `pir.emit._LEXIC_BINOP`).
+inline int min(int a, int b) { return a < b ? a : b; }
+inline int max(int a, int b) { return a < b ? b : a; }
 
 // The scheduling barrier a batch loop without a guard is fenced with.
 void __builtin_amdgcn_sched_barrier(int);

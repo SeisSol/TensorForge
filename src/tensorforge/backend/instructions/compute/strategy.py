@@ -120,6 +120,11 @@ class ComputeShape:
     #: a wave read the same rows of it.  What an arrangement needs before it
     #: may hand one multiplication's read to its neighbors (AMD's `blgp`).
     a_uniform: bool = False
+    #: Whether the second operand sits in shared memory where an earlier
+    #: operation stored it, as the frontend described it: what an arrangement
+    #: reading other multiplications' elements of it reads them out of
+    #: (`MatmulOperands.B_shard`).
+    b_shared: bool = False
 
 
 def lead_layout(threads: int, width: int) -> Optional[BitLayout]:
@@ -239,6 +244,13 @@ class MatrixPaths(Protocol):
         """Whether an operand this target offers an order is better stored
         in it than packed (`MultilinearInstruction.settle_storage`), which
         otherwise goes first."""
+
+    def reads_shared(self, shape: ComputeShape, ctx) -> bool:
+        """Whether `matmul` reads a second operand that an earlier operation
+        stored in shared memory there, rather than out of a register image
+        the operation stages it into (`MultilinearBuilder._make_load_op`):
+        a path that reads it across the lanes of several multiplications
+        reads it where they all can."""
 
     def prepared_order(self, shape, dtype, ctx, columns=0, lead=0, depth=0,
                        threads=32, corner=(0, 0), rows=None,

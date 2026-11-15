@@ -653,6 +653,12 @@ def order_before_packing(shape, ctx):
     return False
 
 
+def reads_shared(shape, ctx):
+    """False: every path here reads its second operand out of the image the
+    operation stages (`MatrixPaths.reads_shared`)."""
+    return False
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=EXECUTION_SIZE, corner=(0, 0), rows=None,
                    head=0):

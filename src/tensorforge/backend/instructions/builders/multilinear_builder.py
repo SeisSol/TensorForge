@@ -88,6 +88,40 @@ class MultilinearBuilder(OperationBuilder):
             and self._plan.dest_union(tensor) is None
             and self._plan.readers(tensor) <= 1)
 
+  def _reads_shared(self, i) -> bool:
+    """Whether the target's matrix path reads operand `i` where an earlier
+    operation stored it in shared memory (`MatrixPaths.reads_shared`).
+
+    Asked of the shape the operation will be planned from, as far as the
+    builder knows it before the operation exists: the second operand of a
+    two-operand product, the lanes and the lead width, the type it is
+    computed in, whether the first operand is the same for every element.
+    A path the plan then does not take reads the operand in place as well,
+    as the DPP chain and the nest can.
+    """
+    # A product of a matrix whose rows are the destination's and one whose
+    # rows are the contraction (`MultilinearInstruction._b_shard_readable`).
+    if (i != 1 or len(self._ops) != 2
+            or [list(t) for t in self._descr.target] != [[0, -1], [-1, 1]]):
+      return False
+    from tensorforge.backend.instructions.compute.paths import matrix_paths
+    from tensorforge.backend.instructions.compute.strategy import (
+        ComputeShape, lead_layout)
+    module = matrix_paths(self._context.target)
+    if module is None or not self._num_threads:
+      return False
+    a = getattr(self._ops[0].symbol, 'obj', None)
+    b = getattr(self._ops[1].symbol, 'obj', None)
+    shape = ComputeShape(
+        threads=self._num_threads, accumulator=self._work_type(),
+        sparse=b is not None and not b.is_dense(),
+        explicit_simd=_explicit_simd(self._context),
+        lead_layout=lead_layout(self._num_threads,
+                                getattr(self, '_lead_width', 1)),
+        a_uniform=getattr(a, 'addressing', None) is Addressing.NONE,
+        b_shared=True)
+    return module.reads_shared(shape, self._context)
+
   def _k_width(self, descr) -> int:
     """How many reduction steps one body should cover for this operator.
 
@@ -253,6 +287,15 @@ class MultilinearBuilder(OperationBuilder):
             and self._ops[i].symbol.stype == SymbolType.SharedMem
             and not has_lead_dim and not transpose
             and Placement.IN_PLACE in legal):
+      placement = Placement.IN_PLACE
+
+    # An operand an earlier operation of the section stored in shared memory,
+    # where the matrix path reads it across the multiplications sharing a
+    # wave: read where it is, since a register image is one multiplication's
+    # (`MatrixPaths.reads_shared`).
+    if (placement is Placement.REGISTER
+            and self._ops[i].symbol.stype == SymbolType.SharedMem
+            and self._reads_shared(i)):
       placement = Placement.IN_PLACE
 
     name = self._ops[i].symbol.name

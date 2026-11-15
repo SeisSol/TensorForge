@@ -100,6 +100,18 @@ def parse_float(text: str) -> float:
   return float(text.strip())
 
 
+#: The routes `Options.amd_matrix_k4` names besides on and off.
+MATRIX_K4_ROUTES = ('shard', 'transpose')
+
+
+def parse_matrix_k4(text: str):
+  """A route of `Options.amd_matrix_k4` (`MATRIX_K4_ROUTES`), or a boolean."""
+  low = text.strip().lower()
+  if low in MATRIX_K4_ROUTES:
+    return low
+  return parse_bool(text)
+
+
 def parse_register_spill(text: str) -> str:
   """`off`, `remat` or `shared` (`Options.register_spill`)."""
   value = text.strip().lower()
@@ -1221,6 +1233,45 @@ declare('amd_fused_transpose',
             '-3 to -16 %, localFluxAll -4 to -15 % over 16 to 64 lanes.  On '
             'by default on AMD (`Preferences.amd_fused_transpose`); off gfx9 '
             'nothing reads it.')
+
+declare('amd_matrix_k4',
+        default=False,
+        parse=parse_matrix_k4,
+        doc='On CDNA 2 and 3, compute a product of a batch-constant operator '
+            'and a per-element operand at 16 lanes a multiplication through a '
+            '16x16x4 instruction -- `v_mfma_f64_16x16x4f64` in double '
+            'precision, `v_mfma_f32_16x16x4f32` in single in place of the '
+            'lane-batched `4x4x1` tile -- the four multiplications of a wave '
+            'stacked along the instruction\'s M (`primitives.amd.stacked`): '
+            'its D lands in the lanes and slots the register image already '
+            'has, and the columns past the last four go through the DPP '
+            'chain.  `transpose` builds the per-element fragment out of the '
+            'image\'s registers with lane gathers, `shard` reads it out of the '
+            'shared memory the operand already sits in, and `true` takes the '
+            'shard where the operand is there and the gathers where it is '
+            'not.  Bit-equal on MI300A to the DPP chain in double precision '
+            'and to the lane-batched tile in single.  There, at sixteen lanes '
+            'in double precision against the chain: order 6 `volume` -8 % '
+            'with the gathers and the ninth column padded -- with the '
+            'operators preloaded, they and the shard copies leave room for '
+            'four multiplications a block, +68 % -- `localFluxAll` -8 % with '
+            '`true`, the time derivative -24 % padded; order 4 '
+            '`localFluxAll` -11 %; order 8 behind the chain at 32 lanes '
+            'throughout.  In single precision within 5 % of the lane-batched '
+            'tile either way.  Off by default.')
+
+declare('amd_matrix_k4_pad',
+        default=False,
+        parse=parse_bool,
+        doc='Under `amd_matrix_k4`, take the columns past the last whole tile '
+            'of four into one more tile of the instruction, padded with zeros, '
+            'instead of through the DPP chain: SeisSol\'s ninth column then '
+            'costs half again the issues and no chain beside them, which reads '
+            'the operator a second time, a row and a step at a time.  MI300A, '
+            'order 6 in double precision: the time derivative 15.2 -> 11.1 ns '
+            'an element (no spill left), `volume` -7 %; at order 4 '
+            '`localFluxAll` and the derivative give back what the unpadded '
+            'tiles gained.  Off.')
 
 declare('amd_moved_broadcast',
         default=False,
