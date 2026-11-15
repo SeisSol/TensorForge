@@ -37,19 +37,29 @@ regeneration input, not a dependency: it is an argparse script rather than a
 library, it covers CDNA 1--3 and RDNA 3--4 and not gfx950 or gfx125x, and code
 generation must not need it to run.
 
-An instruction the tool does not reach --- gfx950 and gfx125x --- gets what
-can be *derived* and nothing more, and `provenance` says which is which.  Two
-derivations, both checked against the 32 rows the tool does give:
+For gfx1250 AMD publishes the layouts in its CDNA 5 ISA reference guide
+instead, as tables of which element each VGPR of each lane holds (7.12.2).
+Those rows are `DOCUMENTED_BITS`, transcribed in the same tool and vendored in
+the same file: the same kind of claim as a measured row -- AMD's own account
+of its instruction -- read out of a document instead of a program.
+
+An instruction neither reaches --- gfx950, and gfx1251's FP64 WMMA, which
+the guide does not list --- gets what can be *derived* and nothing more, and
+`provenance` says which is which.  Two derivations, both checked against the
+32 rows the calculator does give:
 
 * **A and B** follow one rule, below, that reproduces all 32 measured rows.
-  It survives the RDNA 3 to RDNA 4 change, which is the strongest evidence
-  available that it survives the next one.
+  It survives the RDNA 3 to RDNA 4 change -- and fails the next one: the
+  guide's 16-bit gfx1250 operands keep eight elements of `k` together in a
+  lane, sixteen bytes where the rule says eight, so bit 3 of `k` and not bit
+  2 is the lane's.  What it derives for the FP64 WMMA is therefore a guess
+  with a precedent of being wrong, not a fact.
 * **D** follows no rule.  Three families disagree at the same shape, and one
-  of the disagreements is between RDNA 3 and RDNA 4 --- so for gfx125x there
-  is no precedent to extrapolate from and those instructions have no D row at
-  all.  For gfx950 there is: every CDNA MFMA with an F32 accumulator of that
-  shape agrees, across three subtarget features, and gfx950's additions are
-  CDNA MFMAs with F32 accumulators.
+  of the disagreements is between RDNA 3 and RDNA 4 --- so where nothing
+  documents a gfx125x accumulator there is no precedent to extrapolate from
+  and it has no D row at all.  For gfx950 there is: every CDNA MFMA with an
+  F32 accumulator of that shape agrees, across three subtarget features, and
+  gfx950's additions are CDNA MFMAs with F32 accumulators.
 
 `established()` is the strict query and `covers()` the permissive one.  An
 emitter that would rather decline than act on a derivation asks the first.
@@ -247,12 +257,55 @@ FRAGMENT_BITS: Dict[str, Tuple[Tuple[int, ...], ...]] = {
     ),
 }
 
+#: The same, for instructions the calculator does not reach and AMD's CDNA 5
+#: ISA reference guide lays out (27 July 2026, 7.12.2, "Matrix Element
+#: Storage in VGPRs").  A slot counts elements of the operand's type in the
+#: order the builtin's vector holds them: a 16-bit element is half `slot % 2`
+#: of VGPR `slot // 2`, an 8-bit one byte `slot % 4` of VGPR `slot // 4`.
+#:
+#: Transcribed in `tools/amd_matrix_layouts.py` (`ISA_GUIDE_LAYOUTS`) and
+#: vendored as `documented` in `tests/data/amd_matrix_layouts.json`; edit the
+#: transcription and rerun (`--isa-only`) rather than this.  Not the FP64
+#: WMMA of gfx1251: the guide does not list it.  The integer one is here
+#: although the catalog, which models no integer accumulator, has no row for
+#: it: the guide's 8-bit table repeats the 16-bit one's arrangement -- `k` in
+#: runs of eight a lane, the next run in the other half of the wave -- and
+#: the two are worth reading side by side.
+DOCUMENTED_BITS: Dict[str, Tuple[Tuple[int, ...], ...]] = {
+
+    # gfx1250-insts  (CDNA5)
+    'wmma_f32_16x16x4_f32': (
+        (),                    (1, 2, 4, 8),                  (-1, 16),
+        (),                    (-1, 16),                      (1, 2, 4, 8),
+        (),                    (-1, -2, -4, 16),              (1, 2, 4, 8),
+    ),
+    'wmma_f32_16x16x32_bf16': (
+        (),                    (1, 2, 4, 8),                  (-1, -2, -4, 16, -8),
+        (),                    (-1, -2, -4, 16, -8),          (1, 2, 4, 8),
+        (),                    (-1, -2, -4, 16),              (1, 2, 4, 8),
+    ),
+    'wmma_f32_16x16x32_f16': (
+        (),                    (1, 2, 4, 8),                  (-1, -2, -4, 16, -8),
+        (),                    (-1, -2, -4, 16, -8),          (1, 2, 4, 8),
+        (),                    (-1, -2, -4, 16),              (1, 2, 4, 8),
+    ),
+    'wmma_i32_16x16x64_iu8': (
+        (),                    (1, 2, 4, 8),          (-1, -2, -4, 16, -8, -16),
+        (),                    (-1, -2, -4, 16, -8, -16),     (1, 2, 4, 8),
+        (),                    (-1, -2, -4, 16),              (1, 2, 4, 8),
+    ),
+}
+
 
 class Provenance(Enum):
     """Where a row came from."""
 
     #: Read out of AMD's calculator and checked against the vendored extract.
     MEASURED = 'amd_matrix_instruction_calculator'
+    #: Read out of AMD's ISA reference guide where the calculator does not
+    #: reach, and checked against the vendored transcription.  AMD's account
+    #: of its instruction like a measured row, and like one never run here.
+    DOCUMENTED = 'CDNA 5 ISA reference guide, 7.12.2'
     #: Produced by the rules below from the measured rows.  Internally
     #: consistent --- it is a bijection onto the operand's registers with the
     #: replication LLVM's widths imply --- and not confirmed against hardware.
@@ -318,8 +371,9 @@ def _accumulator_precedent(op) -> Optional[Tuple[Tuple[int, ...], ...]]:
     So this does not extrapolate --- it looks for a precedent that is
     unanimous, and returns nothing when there is not one.  For gfx950 there
     is: every CDNA MFMA at that shape with an F32 accumulator agrees, across
-    `mai-insts`, `gfx90a-insts` and `xf32-insts`.  For gfx125x there is not,
-    and those instructions get no `D`.
+    `mai-insts`, `gfx90a-insts` and `xf32-insts`.  For a WMMA there is not,
+    and a gfx125x accumulator is the guide's (`DOCUMENTED_BITS`) or none:
+    gfx1251's FP64 one gets no `D`.
     """
     from .catalog import MATRIX_OPS, Call
     found = set()
@@ -340,7 +394,8 @@ def _accumulator_precedent(op) -> Optional[Tuple[Tuple[int, ...], ...]]:
 
 
 def _derived(op):
-    """A whole row for an instruction the calculator does not reach."""
+    """A whole row for an instruction neither the calculator nor the guide
+    reaches."""
     if op.blocks != 1:
         # Every uncovered instruction is single-block, so the block bits are
         # empty. A multi-block one would need its block placement derived too,
@@ -353,8 +408,10 @@ def _derived(op):
 
 
 def _row(op):
-    measured = FRAGMENT_BITS.get(op.builtin)
-    return measured if measured is not None else _derived(op)
+    published = FRAGMENT_BITS.get(op.builtin)
+    if published is None:
+        published = DOCUMENTED_BITS.get(op.builtin)
+    return published if published is not None else _derived(op)
 
 
 def _place(bits: Tuple[int, ...], value: int) -> Tuple[int, int]:
@@ -423,6 +480,8 @@ def provenance(op, which: str = 'A') -> Optional[Provenance]:
     """Where this operand's layout came from, or `None` if it has none."""
     if op.builtin in FRAGMENT_BITS:
         return Provenance.MEASURED
+    if op.builtin in DOCUMENTED_BITS:
+        return Provenance.DOCUMENTED
     row = _derived(op)
     if row is None or row[{'A': 0, 'B': 3, 'D': 6}[which.upper()]] is None:
         return None
@@ -430,10 +489,10 @@ def provenance(op, which: str = 'A') -> Optional[Provenance]:
 
 
 def covers(op, which: Optional[str] = None) -> bool:
-    """Is there a layout at all -- measured or derived?
+    """Is there a layout at all -- measured, documented or derived?
 
-    Per operand, because the answer differs between them: the gfx125x WMMAs
-    have A and B and no D.
+    Per operand, because the answer differs between them: gfx1251's FP64
+    WMMA has A and B and no D.
     """
     if which is not None:
         return provenance(op, which) is not None
@@ -441,12 +500,16 @@ def covers(op, which: Optional[str] = None) -> bool:
 
 
 def established(op) -> bool:
-    """Is every operand's layout measured rather than derived?
+    """Is every operand's layout AMD's -- measured or documented -- rather
+    than derived?
 
     The query for an emitter that would rather decline than place an operand
-    on a rule that has never met the hardware it is being applied to.
+    on a rule that has never met the hardware it is being applied to.  A
+    documented row is AMD's statement as a measured one is; neither has met
+    a gfx1250 here.
     """
-    return all(provenance(op, w) is Provenance.MEASURED for w in 'ABD')
+    return all(provenance(op, w) in (Provenance.MEASURED,
+                                     Provenance.DOCUMENTED) for w in 'ABD')
 
 
 # --------------------------------------------------------------------------- #

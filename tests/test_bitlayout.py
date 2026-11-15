@@ -521,12 +521,14 @@ def test_a_packed_operand_is_not_reached_by_a_transpose():
 def test_the_gathers_are_the_solver_s_answer():
     """`accumulator_gathers` reads the solver rather than walking lanes.
 
-    Every entry and every column: 756 answers, 692 of them plans.
+    Every entry and every column: 756 answers, 740 of them plans -- 48 of
+    them the sixteen columns of each of gfx1250's three accumulators the
+    CDNA 5 guide documents.
     """
     from tensorforge.backend.instructions.compute.primitives.amd import reorder
     planned = sum(1 for op in MATRIX_OPS for column in range(op.m)
                   if reorder.accumulator_gathers(op, column) is not None)
-    assert planned == 692
+    assert planned == 740
 
 
 def test_a_base_on_each_side():

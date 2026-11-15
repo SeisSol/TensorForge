@@ -169,7 +169,8 @@ def check_barrier_budget(body: Tuple[Stmt, ...], mults_per_block: int,
     a finished body.
 
     Where the target meets one multiplication on a rendezvous of its own --
-    a named barrier on CUDA, numbered by the multiplication -- a block holds
+    a named barrier on CUDA, numbered by the multiplication, a barrier
+    object on gfx12.5, one a multiplication of the block -- a block holds
     as many multiplications as it has rendezvous (`separable`,
     `Target.separable_mults`, None for no limit), and one more waits at a
     barrier that does not exist.  The thread-block policy sizes the block to

@@ -125,6 +125,11 @@ void __builtin_amdgcn_sched_barrier(int);
 // step's reads with (`Options.amd_matrix_k4_pipeline`): mask, size, sync id.
 void __builtin_amdgcn_sched_group_barrier(int, int, int);
 
+// A barrier object of gfx1250 and gfx1251, which a kernel holding a barrier
+// of one multiplication across waves declares
+// (`HipLexic.named_barrier_prologue`): a type clang builds in, opaque here.
+struct __amdgpu_named_workgroup_barrier_t {};
+
 template <typename T> T __builtin_amdgcn_global_atomic_fadd_f32(T *, T);
 template <typename T> T __builtin_amdgcn_global_atomic_fadd_f64(T *, T);
 template <typename T> T __builtin_nontemporal_load(const T *);
@@ -282,6 +287,12 @@ template <int Row, typename T> T movdpp16(T a);
 // An ordering point on a register: an empty `asm volatile` on the device.
 template <typename T> void pin(T &v);
 template <int Row, typename T> T movdpp16Kept(T a);
+
+// The barrier objects of gfx1250 and gfx1251 (`HipLexic.sync_mult`): the
+// prologue that counts and joins a multiplication's object, and its
+// rendezvous.  Over the barrier's type, as in the header.
+template <unsigned Waves, typename Barrier> void joinNamedBarrier(Barrier *);
+template <typename Barrier> void syncNamedBarrier(Barrier *);
 
 // cuda.h
 //

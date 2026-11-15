@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Dict, List, Optional, Union, Type
+from typing import Dict, List, Optional, Tuple, Union, Type
 import copy
 import dataclasses
 import functools
@@ -2061,6 +2061,7 @@ class Generator:
     body, _ = placed
     self._check_layout(body, index)
     self._check_barriers(body, index)
+    body = self._single_mult_barriers(body)
     self._section.body = self._with_arena(self._section, body)
     return True
 
@@ -2200,6 +2201,70 @@ class Generator:
     if found:
       raise GenerationError(f'section {index} cannot be emitted: '
                             + '; '.join(found))
+
+  def _single_mult_barriers(self, body):
+    """`body` with its barriers of one multiplication met at the block's
+    barrier, where the block holds that one multiplication and the target
+    meets one only on an object set up ahead (`Lexic.named_barrier_prologue`).
+
+    The block barrier then meets exactly the same waves -- the spelling every
+    AMD target had for them before gfx12.5 -- and asks for no prologue and no
+    object out of the WGP's pool.  Legal for the same reason it was then: at
+    one multiplication a block the traversal and its guards are alike for the
+    whole block (`BatchLoop.uniform_scope`).
+    """
+    target = self._context.target
+    if (self._section.shr_mem_obj.get_mults_per_block() != 1
+            or not target.lexic.named_barrier_prologue(
+                self._num_threads, 1, target.hw)):
+      return body
+    from tensorforge.backend.pir.build import barrier_stmt
+    from tensorforge.backend.pir.core import Op, Participants
+    wave = target.hw.vec_unit_length
+
+    def spell(stmts):
+      out, changed = [], False
+      for s in stmts:
+        if (s.op == Op.BARRIER
+                and s.attr('participants') == Participants.MULT):
+          s = barrier_stmt(Participants.BLOCK, wave,
+                           handoff=bool(s.attr('handoff')))
+          changed = True
+        elif s.regions:
+          regions = tuple(dataclasses.replace(r, body=spell(r.body))
+                          for r in s.regions)
+          if any(a.body is not b.body for a, b in zip(regions, s.regions)):
+            s = dataclasses.replace(s, regions=regions)
+            changed = True
+        out.append(s)
+      return tuple(out) if changed else stmts
+    return spell(body)
+
+  def _barrier_prologue(self) -> Tuple[str, ...]:
+    """What the kernel opens with where a barrier of one multiplication
+    needs state ahead of its first use (`Lexic.named_barrier_prologue`): on
+    gfx12.5, the barrier objects, one a multiplication of the block, their
+    counts and every wave's membership.
+
+    Asked of the finished bodies, as `_check_barriers` asks them, and not
+    of the prediction the block was sized from: the objects come out of a
+    pool of 64 a WGP, so a kernel whose multiplications never meet apart
+    asks the dispatch for none.  And ahead of every section, since the
+    prologue holds the block's own barrier: there every wave of the block
+    arrives, before the first guard of the first traversal.
+    """
+    target = self._context.target
+    if (self._num_threads <= target.hw.vec_unit_length
+            or not target.sync_mult(self._num_threads)):
+      return ()
+    from tensorforge.backend.pir.core import Op, Participants, walk_stmts
+    if not any(s.op == Op.BARRIER
+               and s.attr('participants') == Participants.MULT
+               for section in self._sections
+               for s in walk_stmts(section.body)):
+      return ()
+    return tuple(target.lexic.named_barrier_prologue(
+        self._num_threads, self._launch.mults_per_block, target.hw))
 
   def _launch_read(self, section) -> tuple:
     """What the body built for `section` read of the launch, as far as the
@@ -2677,6 +2742,8 @@ class Generator:
       # `tensorforge::literals` rather than in the global namespace.
       writer('using namespace tensorforge::literals;')
       self._write_kernel_meta_data(writer)
+      for line in self._barrier_prologue():
+        writer(line)
 
       for section in self._sections:
         with writer.AnonymousScope():

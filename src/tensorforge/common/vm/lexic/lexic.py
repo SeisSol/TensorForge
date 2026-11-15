@@ -289,8 +289,9 @@ class Lexic(ABC):
 
     * NVIDIA, `bar.sync id, count` -- meets exactly `count` threads at named
       barrier `id`.
-    * AMD from gfx12.5, `s_barrier_init` / `s_barrier_join` on barrier objects
-      1..16, whose expected count is in waves.
+    * AMD from gfx12.5, `s_barrier_signal` / `s_barrier_wait` on barrier
+      objects 1..16, whose expected count is in waves and which a wave has to
+      have joined (`named_barrier_prologue`).
     * Intel under ESIMD, `named_barrier_signal` / `named_barrier_wait`, whose
       counts are in sub-groups.
 
@@ -301,6 +302,18 @@ class Lexic(ABC):
     the body a different number of times.
     """
     return self.sync_block()
+
+  def named_barrier_prologue(self, num_threads: int, mults: int, hw):
+    """What a kernel has to open with before `sync_mult` may meet one of
+    its `mults` multiplications of `num_threads` -- statements, or none.
+
+    None by default, and on CUDA too: `bar.sync` names its barrier by
+    number and counts its threads at the instruction, so nothing has to be
+    set up ahead of the first use.  The AMD objects keep their count and
+    their members as state, and a wave can wait on an object only once it
+    has joined it (`HipLexic.named_barrier_prologue`).
+    """
+    return ()
 
   def exchange_xor(self, variable, mask):
     """`variable` as held by the lane whose index differs from this one's in

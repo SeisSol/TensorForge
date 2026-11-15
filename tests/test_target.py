@@ -87,10 +87,28 @@ def test_cuda_meets_a_run_of_lanes_or_whole_warps(threads, expected):
 
 @pytest.mark.parametrize('arch,threads,expected', [
     ('gfx942', 16, True), ('gfx942', 64, True), ('gfx942', 128, False),
-    ('gfx1250', 32, True), ('gfx1250', 64, False)])
-def test_hip_meets_nothing_wider_than_a_wave(arch, threads, expected):
-    """The barrier objects of gfx12.5 would need a prologue nothing emits."""
+    ('gfx1150', 64, False), ('gfx1200', 64, False),
+    ('gfx1250', 32, True), ('gfx1250', 64, True), ('gfx1251', 128, True),
+    ('gfx1250', 48, False)])
+def test_hip_meets_whole_waves_only_where_there_are_barrier_objects(
+        arch, threads, expected):
+    """Across waves a multiplication needs a barrier object of its own, which
+    gfx1250 and gfx1251 have and RDNA 4 does not -- though clang emits the
+    instructions for gfx1200 all the same.  The count is in waves, so a width
+    that leaves a partial wave has none."""
     assert Target(arch, 'hip').sync_mult(threads) is expected
+
+
+@pytest.mark.parametrize('arch,threads,expected', [
+    ('gfx1250', 64, 16), ('gfx1251', 256, 16), ('gfx1250', 32, None),
+    ('gfx1250', 48, None), ('gfx942', 128, None), ('sm_86', 64, 15)])
+def test_the_objects_bound_the_multiplications_a_block_holds_apart(
+        arch, threads, expected):
+    """Sixteen objects on gfx12.5, every one the multiplications' -- the
+    block's own barrier is not among them, unlike `__syncthreads()`'s on
+    CUDA; nothing to run out of within a wave or where nothing is met."""
+    backend = 'cuda' if arch.startswith('sm_') else 'hip'
+    assert Target(arch, backend).separable_mults(threads) == expected
 
 
 def test_sycl_meets_a_multiplication_where_the_kernel_states_it():

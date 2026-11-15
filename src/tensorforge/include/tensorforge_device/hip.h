@@ -1484,5 +1484,58 @@ __device__
           VectorT<_Float16, 4>{i1p1, i2p1, i3p1, i4p1}};
 }
 
+// -- named barriers (gfx1250, gfx1251) ---------------------------------------
+//
+// The barrier objects a work-group may assign to a subset of its waves, 1 to
+// 16 beside its own barrier (CDNA 5 ISA, 5.6), one for each multiplication of
+// the block that is wider than a wave (`HipLexic.sync_mult`).  The kernel
+// declares them, an array of `__amdgpu_named_workgroup_barrier_t` in shared
+// memory: LLVM numbers the elements from 1, takes no LDS for them, and asks
+// the dispatch for as many as the array holds, in fours.
+//
+// Templates over the barrier's type, so that this header names no AMDGPU
+// type where nothing calls them.  Called on another target, they stop the
+// compile: clang accepts the builtins from gfx12 on and emits them for
+// gfx1200, where the dispatch allocates no object and each is a no-op -- a
+// rendezvous that lets everyone through, which is worse than none.
+
+/// What a kernel opens with, every wave of the block alike: the count of the
+/// object of the wave's multiplication, in waves; the block's own barrier, so
+/// that no wave signals an object whose count has not landed; and the wave's
+/// membership, which is what a wait listens to -- a wave waits on the object
+/// it joined last, and on no other.  Every wave of a multiplication sets the
+/// same count, before anyone may signal, which makes the repetition harmless
+/// and spares a branch to pick one.
+template <unsigned Waves, typename Barrier>
+__device__ __forceinline__ void joinNamedBarrier(Barrier *barrier) {
+#if defined(__gfx1250__) || defined(__gfx1251__)
+  __builtin_amdgcn_s_barrier_init(barrier, Waves);
+  __syncthreads();
+  __builtin_amdgcn_s_barrier_join(barrier);
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static_assert(sizeof(Barrier) == 0,
+                "named barriers exist on gfx1250 and gfx1251 only");
+#endif
+}
+
+/// The rendezvous of one multiplication: a signal of its object and a wait
+/// on the joined one.  The fences are `__syncthreads()`'s, at the work-group
+/// scope: the barrier intrinsics order no memory themselves, and the stores
+/// ahead of the signal are what another wave of the multiplication reads
+/// behind the wait.  Without a count: the prologue set it, and a signal that
+/// set it again would only repeat it.
+template <typename Barrier>
+__device__ __forceinline__ void syncNamedBarrier(Barrier *barrier) {
+#if defined(__gfx1250__) || defined(__gfx1251__)
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup");
+  __builtin_amdgcn_s_barrier_signal_var(barrier, 0);
+  __builtin_amdgcn_s_barrier_wait(1);
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup");
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static_assert(sizeof(Barrier) == 0,
+                "named barriers exist on gfx1250 and gfx1251 only");
+#endif
+}
+
 } // namespace tensorforge
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_HIP_H_

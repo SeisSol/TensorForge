@@ -192,6 +192,12 @@
   # kernel here can actually have, inherited by gfx1251.
   max_reg_per_thread: 2kB
   max_local_mem_size_per_block: 384kB # WGP(?) mode. With L1 together: 448 kiB
+  # CDNA 5 ISA, 5.6.2 and 5.6.5: a work-group may allocate up to 16 named
+  # barriers (IDs 1-16, besides its own barrier at -1), in groups of four out
+  # of a pool of 64 per WGP; their member counts are in waves.  The kernel
+  # descriptor asks for them (`.amdhsa_named_barrier_count`, in fours), so a
+  # block of 16 holds a WGP to four such blocks.  Inherited by gfx1251.
+  named_barriers: 16
 - arch: gfx1251
   base: gfx1250
 

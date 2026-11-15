@@ -144,15 +144,52 @@ class HipLexic(CudaLexic):
   def sync_simd(self):
     return None
 
+  #: The barrier objects a kernel declares where its multiplications meet on
+  #: objects of their own (`named_barrier_prologue`), one a multiplication of
+  #: the block.
+  NAMED_BARRIERS = 'tfBarriers'
+
   def sync_mult(self, num_threads: int, hw):
     if num_threads <= hw.vec_unit_length:
       return None
-    # Reached above a wave only through a barrier that asks for the
-    # multiplication on its own, which the target refuses here: the objects
-    # would need a prologue.  The expected count would be in *waves* and not threads:
-    # `s_barrier` synchronizes at wavefront granularity, so what the object
-    # counts is how many waves have to arrive.
-    return self.sync_block()
+    if not getattr(hw, 'named_barriers', 0):
+      # Reached above a wave only through a barrier that asks for the
+      # multiplication on its own, which the target refuses where the device
+      # has no barrier objects (`Target.sync_mult`).
+      return self.sync_block()
+    # The multiplication's object, which the prologue gave its count and
+    # every wave of the multiplication joined.  The row is the
+    # multiplication: one of whole waves is a row of the block
+    # (`Generator._make_launch_config`), the row a wave holds alike.
+    return (f'tensorforge::syncNamedBarrier('
+            f'&{self.NAMED_BARRIERS}[{self.thread_idx_y}]);')
+
+  def named_barrier_prologue(self, num_threads: int, mults: int, hw):
+    """The statements a kernel opens with where a multiplication of
+    `num_threads`, `mults` of them a block, meets on a barrier object of its
+    own (`sync_mult`): the objects, one a multiplication, and the prologue
+    that gives each its count of waves and has every wave join its own
+    (`tensorforge::joinNamedBarrier`).
+
+    The count is in waves, because that is what the hardware counts: a
+    wave signals once for all of its lanes.  The prologue holds the block's
+    own barrier, so it stands where every wave of the block arrives -- at
+    the head of the kernel, ahead of every guard and loop.  Its row is the
+    hardware's, `threadIdx.y`: the multiplication's own spelling is bound
+    within a section and not ahead of the sections.
+    """
+    wave = hw.vec_unit_length
+    available = getattr(hw, 'named_barriers', 0)
+    if (not available or num_threads <= wave or num_threads % wave
+            or self._underlying_hardware != 'amd'):
+      return ()
+    if mults > available:
+      raise ValueError(f'{mults} multiplications a block, and {available} '
+                       f'barrier objects to tell them apart')
+    return (f'__shared__ __amdgpu_named_workgroup_barrier_t '
+            f'{self.NAMED_BARRIERS}[{mults}];',
+            f'tensorforge::joinNamedBarrier<{num_threads // wave}>('
+            f'&{self.NAMED_BARRIERS}[threadIdx.y]);')
 
   def first_lane(self, value, lanes, ctype=None):
     if self._underlying_hardware != 'amd':

@@ -75,6 +75,16 @@ class HwDecription:
     self.icache_miss_factor = (float(param_table['icache_miss_factor'])
                                if param_table.get('icache_miss_factor')
                                is not None else None)
+    #: Barrier objects a block may assign to a subset of its waves, besides
+    #: the block's own barrier: what lets several multiplications wider than
+    #: a wave share a block and still meet apart (`Target.sync_mult`).  0
+    #: where the shader sees the block barrier alone.  Stated per device
+    #: because the instructions are not the objects: clang accepts the AMD
+    #: named-barrier builtins from gfx12 on and emits them for gfx1200, where
+    #: no object is allocated and the hardware treats each as a no-op.
+    #: NVIDIA's sixteen are numbered by PTX, one of them `__syncthreads()`'s,
+    #: and counted by the lexic (`CudaLexic.NAMED_BARRIERS`).
+    self.named_barriers = int(param_table.get('named_barriers') or 0)
     self.model = arch
     #: The device's backend: `oneapi` for both Intel lowerings.  Which one a
     #: kernel is written in is `Target.backend`.

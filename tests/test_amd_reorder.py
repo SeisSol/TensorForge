@@ -164,8 +164,10 @@ def test_every_operand_in_the_catalog_has_a_layout_to_plan_from():
 
     `fragment_moves` returns `None` for an operand without a layout, and no
     operand is without one: A and B are covered for all forty entries, by
-    measurement for thirty-two and by the granule rule for the rest. Only the
-    accumulators have gaps, and those are refused a step earlier.
+    measurement for thirty-two, by the CDNA 5 guide for three of gfx1250's and
+    by the granule rule for the rest. Only an accumulator has a gap -- the
+    FP64 WMMA's, which the guide does not list -- and it is refused a step
+    earlier.
 
     So a reader looking for the uncovered case will not find one, and this is
     where that is recorded rather than a missing branch in the test above.
@@ -174,8 +176,7 @@ def test_every_operand_in_the_catalog_has_a_layout_to_plan_from():
                for op in catalog.MATRIX_OPS for which in "AB")
     missing = {op.builtin for op in catalog.MATRIX_OPS
                if not layouts.covers(op, "D")}
-    assert missing == {"wmma_f32_16x16x32_bf16", "wmma_f32_16x16x32_f16",
-                       "wmma_f32_16x16x4_f32", "wmma_f64_16x16x4_f64"}
+    assert missing == {"wmma_f64_16x16x4_f64"}
 
 
 @pytest.mark.parametrize("op,which", SCALAR,

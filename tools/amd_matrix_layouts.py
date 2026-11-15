@@ -19,9 +19,18 @@ The tool covers CDNA1--3 and RDNA3--4.  It does not know gfx950, gfx1250 or
 gfx1251, so it cannot be the only source and the generated table records the
 gap instead of hiding it.
 
+For gfx1250 AMD publishes the layouts in a document instead: the CDNA 5 ISA
+reference guide tabulates where each element of a WMMA operand is stored
+(`ISA_GUIDE`).  Those tables are transcribed below as what they say for one
+element -- its slot and lane -- and expanded here into the same form, in a
+section of their own (`documented`), so that a reviewer compares the
+transcription with the guide rather than with a bit table.  The guide does
+not list gfx1251's FP64 WMMA, which stays out.
+
 Usage::
 
     python tools/amd_matrix_layouts.py --calculator ../amd_matrix_instruction_calculator
+    python tools/amd_matrix_layouts.py --isa-only    # the guide's section alone
 
 Every layout it reports is *linear in the index bits*: flipping one bit of a
 matrix index moves the element by a fixed amount in (slot, lane), independent
@@ -52,6 +61,94 @@ CALCULATOR_ARCH = {
 
 #: `A[3][1].B2` -- matrix, first index, second index, block.
 _CELL = re.compile(r'([ABD])\[(\d+)\](?:\[(\d+)\])?(?:\.B(\d+))?')
+
+
+# --------------------------------------------------------------------------- #
+# The CDNA 5 ISA reference guide
+# --------------------------------------------------------------------------- #
+
+#: Where the transcribed layouts come from.
+ISA_GUIDE = {
+    'document': '"CDNA5" Instruction Set Architecture: Reference Guide, '
+                '27 July 2026',
+    'url': 'https://www.amd.com/content/dam/amd/en/documents/'
+           'instinct-tech-docs/instruction-set-architectures/'
+           'amd-instinct-cdna5-instruction-set-architecture.pdf',
+    'section': '7.12.2 Matrix Element Storage in VGPRs',
+    'slots': 'an element of the operand type, in the order the builtin\'s '
+             'vector holds them: a 16-bit element is half `slot % 2` of VGPR '
+             '`slot // 2`, an 8-bit one byte `slot % 4` of VGPR `slot // 4`',
+}
+
+
+def _isa_a_32bit_16x4(row, k):
+    """"32-bit A-Matrix 16x4": lanes 0-15 are rows 0-15 and hold K=0 in the
+    first VGPR, K=1 in the second; lanes 16-31 hold K=2 and K=3 the same
+    way."""
+    return k % 2, row + 16 * (k // 2)
+
+
+def _isa_a_16bit_16x32(row, k):
+    """"16-bit A-Matrix 16x32": two elements a VGPR, the lower in [15:0];
+    VGPRs 0-3 hold K=0-7 in lanes 0-15 and K=8-15 in lanes 16-31, VGPRs 4-7
+    the same for K=16-31."""
+    return k % 8 + 8 * (k // 16), row + 16 * (k // 8 % 2)
+
+
+def _isa_a_8bit_16x64(row, k):
+    """"8-bit A-Matrix 16x64": four elements a VGPR, the lowest in [7:0];
+    VGPRs 0-1 hold K=0-7 in lanes 0-15 and K=8-15 in lanes 16-31, VGPRs 2-3
+    K=16-23 and K=24-31, VGPRs 4-7 the same 32 higher."""
+    return k % 8 + 8 * (k // 16), row + 16 * (k // 8 % 2)
+
+
+def _isa_cd_32bit_16x16(m, n):
+    """"32-bit C/D-Matrix 16x16": lanes 0-15 are columns 0-15 and hold rows
+    0-7, one a VGPR; lanes 16-31 the same columns, rows 8-15."""
+    return m % 8, n + 16 * (m // 8)
+
+
+#: builtin -> (opcode, M, N, K, the guide's A table, its C/D table).  The
+#: guide's A tables describe B as well, with N for M: the same positions with
+#: the two indices swapped (`isa_positions`).
+ISA_GUIDE_LAYOUTS = {
+    'wmma_f32_16x16x4_f32': ('v_wmma_f32_16x16x4_f32', 16, 16, 4,
+                             _isa_a_32bit_16x4, _isa_cd_32bit_16x16),
+    'wmma_f32_16x16x32_bf16': ('v_wmma_f32_16x16x32_bf16', 16, 16, 32,
+                               _isa_a_16bit_16x32, _isa_cd_32bit_16x16),
+    'wmma_f32_16x16x32_f16': ('v_wmma_f32_16x16x32_f16', 16, 16, 32,
+                              _isa_a_16bit_16x32, _isa_cd_32bit_16x16),
+    'wmma_i32_16x16x64_iu8': ('v_wmma_i32_16x16x64_iu8', 16, 16, 64,
+                              _isa_a_8bit_16x64, _isa_cd_32bit_16x16),
+}
+
+
+def isa_positions(builtin):
+    """`{'A': {(0, m, k): [(slot, lane)]}, 'B': ..., 'D': ...}` for one
+    transcribed instruction, in the form `read_layout` returns."""
+    _, m, n, k, a_table, d_table = ISA_GUIDE_LAYOUTS[builtin]
+    return {
+        'A': {(0, i, kk): [a_table(i, kk)]
+              for i in range(m) for kk in range(k)},
+        'B': {(0, kk, j): [a_table(j, kk)]
+              for kk in range(k) for j in range(n)},
+        'D': {(0, i, j): [d_table(i, j)]
+              for i in range(m) for j in range(n)},
+    }
+
+
+def isa_section():
+    """The `documented` section of the table: every transcribed layout,
+    compressed and checked as the calculator's are."""
+    layouts = {}
+    for builtin, (opcode, *_) in ISA_GUIDE_LAYOUTS.items():
+        entry = {'arch': 'CDNA5', 'wave': 32, 'opcode': opcode}
+        for which, positions in isa_positions(builtin).items():
+            base, deltas = bit_deltas(positions, 2)
+            entry[which] = {'base': base, 'bits': deltas,
+                            'replication': replication_of(positions)}
+        layouts[builtin] = entry
+    return {'source': ISA_GUIDE, 'layouts': layouts}
 
 
 def mnemonic(builtin: str) -> str:
@@ -155,11 +252,27 @@ def bit_deltas(positions, ndims):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--calculator', required=True,
+    ap.add_argument('--calculator',
                     help='path to an amd_matrix_instruction_calculator checkout '
                          'or to matrix_calculator.py itself')
+    ap.add_argument('--isa-only', action='store_true',
+                    help='rewrite the `documented` section from the ISA '
+                         'guide\'s transcription alone, keeping the rest')
     ap.add_argument('-o', '--out', default='tests/data/amd_matrix_layouts.json')
     args = ap.parse_args()
+
+    if args.isa_only:
+        # The calculator's part is left as it was generated: the guide's
+        # transcription is what changes here, and nothing else has to run.
+        out = Path(args.out)
+        table = json.loads(out.read_text())
+        table['documented'] = isa_section()
+        out.write_text(json.dumps(table, indent=2) + '\n')
+        print(f'{out}: {len(table["documented"]["layouts"])} documented '
+              f'layouts')
+        return
+    if args.calculator is None:
+        ap.error('--calculator is required unless --isa-only')
 
     calc = Path(args.calculator)
     if calc.is_dir():
@@ -196,10 +309,11 @@ def main():
                 'dimension order is (block, first index, second index)',
         'not_covered': {k: sorted(v) for k, v in sorted(uncovered.items())},
         'layouts': covered,
+        'documented': isa_section(),
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(table, indent=1) + '\n')
+    out.write_text(json.dumps(table, indent=2) + '\n')
     print(f'{out}: {len(covered)} layouts, '
           f'{sum(len(v) for v in uncovered.values())} instructions not covered')
 

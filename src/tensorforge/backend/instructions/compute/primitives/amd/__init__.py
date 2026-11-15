@@ -48,8 +48,8 @@ from .catalog import (DEFINED_SPLITS, DEFINED_TRANSPOSES, MANTISSA,
                       MfmaTile, lane_batched_ops, mfma_tile_for, ops_for,
                       usable_mfma_tiles)
 from .features import FEATURE_TARGETS, has_feature, wave_size
-from .layouts import (FRAGMENT_BITS, Provenance, covers, established,
-                      position, provenance)
+from .layouts import (DOCUMENTED_BITS, FRAGMENT_BITS, Provenance, covers,
+                      established, position, provenance)
 from .reorder import (BANK, FED_BY, IDENTITY_DPP, ROW, Gather, Move,
                       Select, Exchange, a_exchange, accumulator_cost,
                       accumulator_gathers, broadcast_feeds_a,
@@ -90,7 +90,7 @@ __all__ = [
     'NOT_MODELED', 'ops_for',
     'MfmaTile', 'DEFINED_TRANSPOSES', 'MFMA_TILES', 'usable_mfma_tiles',
     'lane_batched_ops', 'mfma_tile_for',
-    'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
+    'DOCUMENTED_BITS', 'FRAGMENT_BITS', 'Provenance', 'covers', 'established',
     'position', 'provenance',
     'BANK', 'FED_BY', 'IDENTITY_DPP', 'ROW', 'Gather', 'Move', 'Select',
     'broadcast_feeds_a', 'Exchange', 'a_exchange',
