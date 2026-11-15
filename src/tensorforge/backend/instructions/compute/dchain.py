@@ -176,6 +176,29 @@ def _compatible(chain: List, instr, module) -> bool:
     return _rows_ok(chain + [instr], rows, module)
 
 
+def _read_after(instrs: Sequence, members: List) -> bool:
+    """Whether anything after the chain's last member reads its output.
+
+    Without the chain that read takes the last member's register image,
+    which its store leaves holding the output (`GlbToRegLoader`); with it
+    there is no such image, and the read goes to memory.  Where the
+    accumulator is that image anyway (`MatrixPaths.D_CHAIN_READ_AFTER`),
+    such a chain buys less than it costs: SeisSol's time derivative reads
+    every order's sum for the next."""
+    last = max(i for i, x in enumerate(instrs)
+               if any(x is m for m in members))
+    dest = members[0].d_chain_dest()
+    own = {id(x) for m in members for x in m.companions.instructions()}
+    for instr in _flat(instrs[last + 1:]):
+        if id(instr) in own:
+            continue
+        if any(sym is not None and (sym is dest or getattr(sym, 'obj', None)
+                                    is dest.obj)
+               for sym in instr.uses()):
+            return True
+    return False
+
+
 def _union(windows: Sequence[Tuple[int, int]]) -> Tuple[int, int]:
     return (min(lo for lo, _ in windows), max(hi for _, hi in windows))
 
@@ -227,6 +250,9 @@ def link(context, instrs: Sequence) -> list:
                 close(key)
     for key in list(open_chains):
         close(key)
+    if not getattr(module, 'D_CHAIN_READ_AFTER', True):
+        done = [members for members in done
+                if not _read_after(instrs, members)]
     if (getattr(module, 'D_CHAIN_LOOPS', False)
             and context.get_user_options().mma_d_layout_loops):
         for instr in instrs:

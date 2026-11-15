@@ -24,10 +24,11 @@ contractions are too short -- keep the operator as it is passed, and share
 its cache lines as before.
 
 Which readers are the matrix path's is decided here from the descriptions,
-by what the path asks of a product (`nvidia.min_depth`): an A operand on the
-lead axis and a contraction, at least that deep.  A copy for a reader that
-then does not take the path is a copy nobody needed, read the way the
-original would have been -- costing its bytes, never a wrong number.
+by what the path asks of a product (`nvidia.min_depth`, and for the SPMD
+lowering's DPAS on Intel `intel_spmd.min_depth`): an A operand on the lead
+axis and a contraction, at least that deep.  A copy for a reader that then
+does not take the path is a copy nobody needed, read the way the original
+would have been -- costing its bytes, never a wrong number.
 """
 
 from __future__ import annotations

@@ -223,7 +223,11 @@ class MatrixPaths(Protocol):
     ORDERS_EVERY_READER: bool
     #: Whether `matmul` keeps the sum of products that add into one output in
     #: the instruction's accumulators from the first to the last
-    #: (`MatmulOperands.chain`, `compute.dchain`).
+    #: (`MatmulOperands.chain`, `compute.dchain`).  A module that answers per
+    #: build says so in `d_chains(ctx)` instead (`multilinear._keeps_chains`),
+    #: and one where no chain should end in an output the kernel reads again
+    #: states `D_CHAIN_READ_AFTER = False` (`dchain._read_after`); both
+    #: optional.  What a chain keeps its sum in is `chain_tile`'s answer.
     D_CHAINS: bool
     #: Whether a product that adds into its output on its own is a chain of
     #: one too, read into the accumulators and written from them, rather

@@ -2038,6 +2038,69 @@ def _matrix_candidates(descrs, first: Build, context: Context,
     return twins
 
 
+#: How much more than the default IGC may spill a DPAS twin
+#: (`_dpas_candidates`) before `lanes_rule` leaves it, and the spilling it is
+#: allowed whatever the default spills.  Judged apart from the walk: the
+#: twin executes a third to a half fewer instructions than the default and
+#: spills where the default does not, which the walk's price of a spilled
+#: byte (`SPILL_WEIGHT`) and its guard (`SPILL_GROWTH`) both read as a loss.
+#: Fitted to SeisSol's elastic and viscoelastic kernels of orders 6 and 8 in
+#: single precision on the Max 1550 (IGC 2.41.5, batch 262144, ns an
+#: element, the default against DPAS, IGC's spill in bytes): the twin won
+#: every kernel in which it spilled at most 17 280 bytes where the default
+#: spilled nothing -- viscoelastic order-6 `fluxLocalAll` 90.2 / 59.1 at 0 /
+#: 17 280 -- or at most 1.8 times what the default spilled -- viscoelastic
+#: order-8 `neighborFluxExt[0]` 38.4 / 31.0 at 5 056 / 9 024 -- and lost
+#: the time derivatives, which it spilled 2.2 and 2.9 times more: order 6
+#: 340.5 / 556.3 at 29 888 / 66 816.  It also lost viscoelastic order-6
+#: `neighborFluxExt[0]`, 11.0 / 12.3 at 0 / 6 784, which nothing it reports
+#: tells apart.
+DPAS_SPILL_GROWTH = 2.0
+DPAS_SPILL_FLOOR = 18 * 1024
+
+
+def _dpas_candidates(descrs, first: Build, context: Context,
+                     origin: Candidate,
+                     fixed: Optional[Mapping[str, Any]]) -> List[Candidate]:
+    """`origin` on Intel's SPMD DPAS path (`Options.sycl_dpas`), where the
+    caller asked for it as `auto`, as it is and with the fence
+    (`Options.sycl_dpas_fence`, where the caller left it unstated) -- judged
+    after the walk, by IGC's spilling (`lanes_rule`'s `dpas_or`).  None
+    where the kernel contracts nothing in single precision, the target is
+    not DPC++'s SPMD lowering of a part the path serves, or the `ocloc` on
+    PATH has an IGC that does not resolve the builtin
+    (`intel_spmd.resolved`), which every twin's build would stop at.
+
+    The fence changes no instruction, so the count cannot choose it; the
+    twin IGC spills less can.  Over the fourteen kernels the path won of the
+    sixteen above (the time derivatives of the viscoelastic system are the
+    other two), it is the faster of the two in ten; against never fencing,
+    0.3 % in geometric mean at 262144 elements and 2.2 % at 1024.  Not the
+    D chains (`Options.mma_d_layout`): their count is lower, and they run
+    slower in every kernel but the elastic order-6 volume (12.8 / 12.4 ns an
+    element) -- order-8 `localFluxAll` 72.0 / 106.1."""
+    from tensorforge.backend.instructions.compute.primitives import (
+        intel_spmd)
+    from tensorforge.toolchain import intel_dpas_tf32
+    asked = dict(context.get_asked_options().asked())
+    if asked.get('sycl_dpas') != 'auto' or (fixed and 'sycl_dpas' in fixed):
+        return []
+    target = context.target
+    model = str(getattr(target.hw, 'model', ''))
+    if (not first.ok or target.explicit_simd or target.backend != 'oneapi'
+            or model not in intel_spmd.MODELS):
+        return []
+    if (Datatype.F32 not in _product_types(descrs, context)
+            or not contraction_lengths(_flat(descrs))):
+        return []
+    if intel_dpas_tf32(model) is False:
+        return []
+    twin = origin.set('sycl_dpas', True)
+    if 'sycl_dpas_fence' in asked or (fixed and 'sycl_dpas_fence' in fixed):
+        return [twin]
+    return [twin, twin.set('sycl_dpas_fence', True)]
+
+
 #: Spilled bytes past which the default's spilling lets the rule take a
 #: wider candidate than the default; at or below it no wider one is taken.
 #: Over paper-1106 (88 SeisSol kernels a GPU, the rule's picks against the
@@ -2813,6 +2876,37 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             return alt, other
         return cand, seen
 
+    def dpas_or(pick: Candidate) -> Candidate:
+        """Of the DPAS twins (`_dpas_candidates`) that IGC spills no more
+        than `DPAS_SPILL_GROWTH` times the default, or `DPAS_SPILL_FLOOR`,
+        and whose count is `DEVIATION_MARGIN` below the pick's, the one it
+        spills least -- the first where they tie; `pick` where there is
+        none."""
+        taken: Optional[Tuple[Candidate, int]] = None
+        allowed = max(DPAS_SPILL_GROWTH * unpinned.spill_bytes,
+                      DPAS_SPILL_FLOOR)
+        for twin in _dpas_candidates(descr_factory(), first, context,
+                                     origin, fixed):
+            if pick not in counts:
+                break
+            result = builds.get(twin) or build(descr_factory, context, twin,
+                                               generate)
+            builds[twin] = result
+            count = figure(result) if result.ok else None
+            if (count is None
+                    or count >= (1.0 - DEVIATION_MARGIN) * counts[pick]):
+                continue
+            try:
+                seen = scorer.resources(result)
+            except Exception:                 # noqa: BLE001
+                seen = None
+            if seen is None or seen.spill_bytes > allowed:
+                continue
+            counts[twin] = count
+            if taken is None or seen.spill_bytes < taken[1]:
+                taken = (twin, seen.spill_bytes)
+        return pick if taken is None else taken[0]
+
     def cost(cand: Candidate, seen: Resources) -> float:
         lanes = builds[cand].generator.lanes.num_threads
         # A cut kernel runs its pieces one after another, each over its own
@@ -2939,7 +3033,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
                 clean = (cand, price)
     if clean is not None:
         return clean[0]
-    return best if least < (1.0 - DEVIATION_MARGIN) * default else whole
+    pick = best if least < (1.0 - DEVIATION_MARGIN) * default else whole
+    return dpas_or(pick)
 
 
 def _grf_twin(context: Context, fixed: Optional[Mapping[str, Any]]) -> bool:
@@ -3114,6 +3209,10 @@ def _lanes_mode(descr_factory, context: Context, cache: Optional[str],
         if value:
             # Picks of a walk with another guard are not this one's.
             mode += f'+{tag}{value}'
+    if dict(context.get_asked_options().asked()).get('sycl_dpas') == 'auto':
+        # Nor of one without the DPAS twins (`_dpas_candidates`), whose
+        # default builds the same source.
+        mode += '+dpas'
     key = _key(first, mode)
     # The small batches' candidate apart, so that the picks of a walk without
     # it are still this one's.

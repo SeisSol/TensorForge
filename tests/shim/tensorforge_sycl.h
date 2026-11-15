@@ -295,6 +295,20 @@ inline T split_broadcast(const sycl::sub_group &group, T value, int lane) {
   return out;
 }
 
+// `tensorforge_device/sycl_spmd.h`: DPAS from the SPMD lowering
+// (`Options.sycl_dpas`).  The signatures, which is what parsing can check:
+// the A fragment four floats a work-item, B and the accumulator eight, the
+// sub-group the instruction runs over.  The vectors are OpenCL's under clang
+// and `sycl::vec` elsewhere, as here.  The arithmetic is the header's, and
+// `tests/test_sycl_dpas.py` models it.
+typedef sycl::vec<float, 4> NativeFloat4;
+typedef sycl::vec<float, 8> NativeFloat8;
+inline float roundTF32(float x) { return x; }
+inline NativeFloat8 dpasTF32(const sycl::sub_group &, NativeFloat4,
+                             NativeFloat8, NativeFloat8 acc) {
+  return acc;
+}
+
 namespace intel_esimd {
 
 template <typename T, int N> class simd;

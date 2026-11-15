@@ -48,6 +48,8 @@ from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import InternalError
 from .. import broadcast, ranking, split
+from . import intel_spmd
+from ..bitlayout import packed
 from ..routes import lead_route
 from ..strategy import Strategy, whole
 
@@ -630,12 +632,43 @@ class SlotMajorOrder(tuple):
 #: what lets the derivative's reads of one operator, one per order, share it.
 ORDERS_EVERY_READER = True
 
-#: No chain of products keeps its sum in the accumulators here
-#: (`MatrixPaths.D_CHAINS`), and so no chain of one either
-#: (`MatrixPaths.D_CHAIN_SINGLES`).
+#: No chain of products keeps its sum in the accumulators under the explicit
+#: vector (`MatrixPaths.D_CHAINS`); the SPMD lowering's DPAS does, which is
+#: `d_chains`' answer per build -- but no chain of one
+#: (`MatrixPaths.D_CHAIN_SINGLES`) and none across a merged loop
+#: (`MatrixPaths.D_CHAIN_LOOPS`).
 D_CHAINS = False
 D_CHAIN_SINGLES = False
 D_CHAIN_LOOPS = False
+
+
+def d_chains(ctx) -> bool:
+    """Whether this build keeps chains of products in the accumulators
+    (`multilinear._keeps_chains`): the SPMD lowering's DPAS does
+    (`intel_spmd`, its accumulator the register image), the explicit
+    vector's does not."""
+    return ctx is not None and not _simd_mode(ctx) and intel_spmd.usable(ctx)
+
+
+#: The lanes a member of a chain is spread over: DPAS's sub-group.
+D_CHAIN_WAVE = intel_spmd.SUB_GROUP
+
+#: No chain ends in an output the kernel reads again (`dchain._read_after`).
+#: Without the chain that read takes the last product's register image,
+#: which is the DPAS accumulator's layout anyway; with it the read goes to
+#: memory.  SeisSol's time derivative reads every order's sum for the next:
+#: chained, 26.3 against 19.9 ns an element at order 6 and 166.4 against
+#: 125.6 at order 8 (Max 1550, single precision, batch 262144).
+D_CHAIN_READ_AFTER = False
+
+#: The instructions a chain's members issue (`d_chain_atom`, `chain_tile`).
+EMITTED_MODES = (intel_spmd.CHAIN_MODE,)
+
+
+def d_chain_atom(ctx, dtype, columns=0, lead=0, depth=0):
+    """The accumulator shape a chain's members share (`chain_tile`)."""
+    return intel_spmd.chain_atom(ctx, dtype, columns=columns, lead=lead,
+                                 depth=depth)
 
 #: DPAS first where it is offered, then the register-only chain, which beats
 #: staging operands through shared memory here.  Whether DPAS beats the chain
@@ -652,8 +685,13 @@ def convergence(strategy, shape, n, ctx):
 
 
 def order_before_packing(shape, ctx):
-    """False: the packing goes first here (`MatrixPaths.order_before_packing`)."""
-    return False
+    """False under the explicit vector: the packing goes first there
+    (`MatrixPaths.order_before_packing`).  True where the SPMD lowering's
+    DPAS reads the operator (`intel_spmd`), which reads it in its tiles,
+    split, or by coordinate and splits every tile in every element: a
+    packing is a layout for the nest.  Asked only of a product the plan puts
+    on the matrix path."""
+    return not _simd_mode(ctx) and intel_spmd.offered(shape, ctx)
 
 
 def reads_shared(shape, ctx):
@@ -662,10 +700,35 @@ def reads_shared(shape, ctx):
     return False
 
 
+class ChainTile:
+    """What a chain keeps its sum in under the SPMD lowering's DPAS
+    (`chain_tile`): the accumulator tile and the sub-group its tiles are
+    walked in."""
+
+    def __init__(self, atom):
+        self.m, self.n, self.d, self.mode = atom.m, atom.n, atom.d, atom.mode
+        self.block = D_CHAIN_WAVE
+
+
 def chain_tile(shape, extents, ctx):
-    """No chain keeps its sum in a matrix instruction's layout here
-    (`MatrixPaths.chain_tile`, `D_CHAINS`)."""
-    return 'the target keeps no chains'
+    """The tile a chain of products keeps its sum in (`MatrixPaths.
+    chain_tile`): DPAS's accumulator under the SPMD lowering, which is the
+    register image, over one multiplication a sub-group and one row a lane --
+    or why not.  None under the explicit vector (`d_chains`).  An
+    accumulation that may be added atomically is not chained: its store is
+    not the one a chain replaces."""
+    if not d_chains(ctx):
+        return 'the target keeps no chains in this build'
+    if ctx.get_user_options().atomic_accumulation:
+        return 'an accumulation may be added atomically'
+    if shape.threads != D_CHAIN_WAVE or packed(shape.lead_layout):
+        return 'not one multiplication per sub-group, one row per lane'
+    lead, columns, depth, start = extents
+    atom = d_chain_atom(ctx, shape.accumulator, columns=columns, lead=lead,
+                        depth=depth + start)
+    if atom is None or atom.mode not in EMITTED_MODES:
+        return 'no instruction'
+    return ChainTile(atom)
 
 
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
@@ -690,11 +753,17 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     `splitFloatTF32`.  Whether the halves are taken is the caller's to say --
     only the matrix path reads them.
 
-    `None` where neither arrangement reads it: not under the explicitly
-    vectorized lowering, not sixteen lanes, not F32, not a matrix.
+    `None` where neither arrangement reads it: not sixteen lanes, not F32,
+    not a matrix.  Under the SPMD lowering the order is DPAS's tiles, where
+    that path is asked for (`intel_spmd.prepared_order`), and none otherwise.
     """
-    if len(shape) != 2 or ctx is None or not _simd_mode(ctx):
+    if len(shape) != 2 or ctx is None:
         return None
+    if not _simd_mode(ctx):
+        return intel_spmd.prepared_order(shape, dtype, ctx, columns=columns,
+                                         lead=lead, depth=depth,
+                                         threads=threads, corner=corner,
+                                         rows=rows, head=head)
     if not supports(threads, dtype, False):
         return None
     rows, cols = (int(x) for x in shape)
@@ -744,11 +813,13 @@ def strategies(shape, ctx):
     index and a register index, which is what a rung is.  So the answer is
     the trip, and `takes` is `route == 0` because nothing here writes one.
 
-    DPAS, too, only under the explicitly vectorized lowering.  `dpas_matmul`
+    `dpas_matmul`, too, only under the explicitly vectorized lowering: it
     emits `esimd::xmx::dpas` over `simd` fragments, which an SPMD kernel
-    cannot call; the SPMD lowering reaches this with a 16-wide
-    multiplication just as well, and there the path has to stay out.
-    Neither for a packed `B`.  The broadcast chain asks `B(j, k0 // threads)`
+    cannot call.  The SPMD lowering reaches the instruction another way, the
+    OpenCL builtin over a sub-group of sixteen, whose fragments are spread
+    over the work-items as the lowering spreads its rows (`intel_spmd`,
+    `Options.sycl_dpas`); that path answers for SPMD alone, and only where
+    it is asked for.  Neither for a packed `B`.  The broadcast chain asks `B(j, k0 // threads)`
     -- the lane vector of depths `k0..` of column `j` -- and a packed operand
     answers by storage slot, the same slots for every column: a wrong product,
     and under ESIMD not even that, since the read has no distribution to
@@ -756,6 +827,12 @@ def strategies(shape, ctx):
     """
     if lead_route(shape) != 0:
         return frozenset()
+    if not shape.explicit_simd:
+        # The SPMD lowering's own DPAS, where it is asked for: the fragments
+        # spread over a sub-group of sixteen rather than held by one
+        # work-item (`intel_spmd`).
+        return (frozenset({Strategy.MATRIX})
+                if intel_spmd.offered(shape, ctx) else frozenset())
     if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()
     offered = set()
@@ -773,7 +850,12 @@ def plan(strategy, shape, n, ctx):
     fragment whose spare rows are zero, and the broadcast chain simply has
     fewer accumulators.  Neither gets cheaper by handing the remainder to the
     other.
+
+    The SPMD lowering's DPAS carries its tail on FMAs, and leaves a product
+    of too few columns to the nest (`intel_spmd.plan`).
     """
+    if not shape.explicit_simd:
+        return intel_spmd.plan(strategy, shape, n, ctx)
     return whole(strategy, n)
 
 
@@ -794,6 +876,9 @@ def matmul(writer, ops, ctx, span):
     M, N, K, kx = ops.lead_slots, ops.n, ops.k, ops.kx
     threads, dtype = ops.threads, ops.accumulator
 
+    if ctx is not None and not _simd_mode(ctx):
+        # Only DPAS is offered under SPMD (`strategies`).
+        return intel_spmd.matmul(writer, ops, ctx, span)
     if span.strategy is Strategy.BROADCAST:
         if ops.a_parts != 1:
             raise InternalError(

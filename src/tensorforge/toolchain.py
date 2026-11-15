@@ -672,3 +672,106 @@ def intel_neo_revision(ocloc: Optional[str] = None) -> Optional[str]:
             answer = None
         _NEO_REVISION[path] = answer
     return _NEO_REVISION[path]
+
+
+def elf_undefined_symbols(path: str) -> Optional[List[str]]:
+    """The names a 64-bit little-endian ELF file's symbol tables leave
+    undefined -- what its loader has to find elsewhere -- or None for
+    anything that is not such a file."""
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return None
+    if len(data) < 64 or data[:4] != b'\x7fELF' or data[4:6] != b'\x02\x01':
+        return None
+    shoff, = struct.unpack_from('<Q', data, 0x28)
+    shentsize, shnum = struct.unpack_from('<HH', data, 0x3A)
+    if shoff + shnum * shentsize > len(data):
+        return None
+
+    def header(index):
+        # sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link,
+        # sh_info, sh_addralign, sh_entsize
+        return struct.unpack_from('<IIQQQQIIQQ', data, shoff + index * shentsize)
+
+    names = []
+    for index in range(shnum):
+        _, kind, _, _, offset, size, link, _, _, entsize = header(index)
+        if kind not in (2, 11) or entsize < 24 or link >= shnum:
+            continue                   # neither SHT_SYMTAB nor SHT_DYNSYM
+        strings = header(link)[4]
+        for at in range(offset, min(offset + size, len(data)) - 23, entsize):
+            # st_name, st_info, st_other, st_shndx
+            name, _, _, shndx = struct.unpack_from('<IBBH', data, at)
+            if shndx or not name:
+                continue               # defined, or the null symbol
+            start = strings + name
+            end = data.find(b'\0', start)
+            if end > start:
+                names.append(data[start:end].decode('ascii', 'replace'))
+    return names
+
+
+#: The builtin `Options.sycl_dpas` calls, and a kernel that calls it the way
+#: `tensorforge_device/sycl_spmd.h` declares it: by name, for IGC to resolve.
+DPAS_TF32_BUILTIN = 'intel_sub_group_tf32_tf32_matrix_mad_k8'
+
+_DPAS_TF32_PROBE = f'''\
+float8 __attribute__((overloadable)) {DPAS_TF32_BUILTIN}(float4 a, float8 b,
+                                                        float8 acc);
+__attribute__((intel_reqd_sub_group_size(16)))
+kernel void probe(global float8 *out, global const float4 *a,
+                  global const float8 *b) {{
+  size_t i = get_global_id(0);
+  out[i] = {DPAS_TF32_BUILTIN}(a[i], b[i], out[i]);
+}}
+'''
+
+_DPAS_TF32: Dict[Tuple[str, str], Optional[bool]] = {}
+
+
+def intel_dpas_tf32(device: str = 'pvc',
+                    ocloc: Optional[str] = None) -> Optional[bool]:
+    """Whether the IGC behind `ocloc` -- the one on PATH, which an
+    ahead-of-time DPC++ build runs -- resolves the TF32 DPAS builtin for
+    `device`; None where there is no `ocloc` to ask.
+
+    Asked by building a kernel that calls it, since nothing else says so:
+    IGC 2.41.5 (runtime 26.35) turns the call into `dpas.8x8`, while IGC
+    1.0.15468 (runtime 23.43, SNG2's own) reports "Build succeeded" and leaves
+    it an undefined symbol of the binary, which the runtime's link of the
+    module stops at, at the first launch.  So the answer is the binary's
+    symbol table, not ocloc's word; a build that fails is a no as well.
+    Asked once per `ocloc` and device, in a directory of its own.
+    """
+    import subprocess
+    import tempfile
+    path = ocloc or shutil.which('ocloc')
+    if path is None:
+        return None
+    key = (path, device)
+    if key not in _DPAS_TF32:
+        answer: Optional[bool] = None
+        try:
+            with tempfile.TemporaryDirectory() as cwd:
+                with open(os.path.join(cwd, 'probe.cl'), 'w') as f:
+                    f.write(_DPAS_TF32_PROBE)
+                out = os.path.join(cwd, 'out')
+                p = subprocess.run([path, 'compile', '-file', 'probe.cl',
+                                    '-device', device, '-out_dir', out,
+                                    '-output', 'probe', '-q'], cwd=cwd,
+                                   capture_output=True, text=True,
+                                   timeout=300)
+                answer = False
+                if p.returncode == 0 and os.path.isdir(out):
+                    tables = [elf_undefined_symbols(os.path.join(out, name))
+                              for name in sorted(os.listdir(out))]
+                    tables = [t for t in tables if t is not None]
+                    answer = bool(tables) and not any(
+                        DPAS_TF32_BUILTIN in name
+                        for table in tables for name in table)
+        except (OSError, subprocess.SubprocessError):
+            answer = None
+        _DPAS_TF32[key] = answer
+    return _DPAS_TF32[key]

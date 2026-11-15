@@ -29,6 +29,16 @@ def _vendor_module(context):
     """The target's matrix module (`paths.matrix_paths`), or None."""
     return matrix_paths(context.target)
 
+
+def _keeps_chains(module, context) -> bool:
+    """Whether `module` keeps chains of products in its accumulators for this
+    build (`MatrixPaths.D_CHAINS`): its `d_chains(context)` where it answers
+    per build -- Intel, whose SPMD DPAS keeps them and whose explicit vector
+    does not -- and the constant otherwise."""
+    keeps = getattr(module, 'd_chains', None)
+    return bool(keeps(context)) if keeps is not None else bool(module.D_CHAINS)
+
+
 import dataclasses
 import hashlib
 import itertools
@@ -1173,7 +1183,7 @@ class MultilinearInstruction(ComputeInstruction):
         """
         from tensorforge.backend.instructions.memory.load import GlbToRegLoader
         from tensorforge.backend.instructions.memory.store import StoreRegToGlb
-        if module is None or not module.D_CHAINS:
+        if module is None or not _keeps_chains(module, self._context):
             return 'the target keeps no chains'
         if len(self._ns) != 2 or len(self._ks) != 1 or len(self._ops) != 2:
             return 'not a product of two matrices'
@@ -3267,6 +3277,13 @@ class MultilinearInstruction(ComputeInstruction):
         # says so here, before `settle_storage` stores `A` in an order only
         # the matrix paths read.
         if self._window_declines():
+            return whole(Strategy.GENERIC, n)
+        # Nor a two-level lead (`Options.lead_split`), which the emission
+        # leaves to the nest (`_nonleading_dim_test`) -- said here for the
+        # same reason: the SPMD lowering's DPAS stores its operator split in
+        # tiles (`intel_spmd`), and the nest would read the upper half of a
+        # tile for the value.
+        if self._split_lead() is not None:
             return whole(Strategy.GENERIC, n)
         # Nor a first operand that carries an output column.  The vendor
         # paths are `C[m,n] += A[m,k] B[k,n]`: they read `A` by its row and

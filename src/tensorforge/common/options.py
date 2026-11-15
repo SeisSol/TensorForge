@@ -1028,6 +1028,74 @@ declare('sycl_split_broadcast',
             'sub-group split lost to the default almost everywhere, at four '
             'broadcasts and three selects a read.')
 
+declare('sycl_dpas',
+        default=False,
+        env='TF_SYCL_DPAS',
+        parse=parse_bool_or_auto,
+        doc='Compute single-precision products of a batch-constant operator '
+            'with DPAS under DPC++\'s SPMD lowering on the Max 1550 (pvc), '
+            'sixteen lanes a multiplication (`primitives/intel_spmd.py`): the '
+            'operator as the instruction\'s B, its rows over the lanes, the '
+            'element\'s operand as A, eight output columns an instruction, '
+            'each product three TF32 ones (3xTF32, about F32\'s accuracy).  '
+            'The accumulator is the lowering\'s own register image -- lane '
+            'a row, the columns in registers -- so a product handed on to '
+            'the next is not laid out again; the element\'s operand is, by '
+            'one exchange of the sub-group per pair of columns and lane slot.  '
+            'Needs IGC 2.x: the call is the OpenCL builtin '
+            '`intel_sub_group_tf32_tf32_matrix_mad_k8`, which IGC 1.0.15468 '
+            'builds without a word and leaves undefined, so that the kernel '
+            'stops at its first launch; the generator asks the `ocloc` on '
+            'PATH and stops with the reason instead '
+            '(`intel_spmd.resolved`).  A probe on SNG2 (icpx 2025.2.1, IGC '
+            '2.41.5) put a chain of four dense 56 x 56 products on '
+            'register-resident data 30 to 38 % ahead of the FMA path, and a '
+            'single product, which is bound by memory, even.  On SeisSol\'s '
+            'kernels in single precision (Max 1550, batch 262144, ns an '
+            'element, the FMA path against DPAS, with operator copies, the '
+            'default under it): elastic order 6 derivative 27.2 / 19.9, '
+            '`localFluxAll` 25.5 / 17.6, `neighboringFlux[0]` 11.2 / 7.3, '
+            '`volume` 16.5 / 12.8; order 8 150.0 / 125.6, 81.3 / 72.0, 20.3 '
+            '/ 15.4, 62.1 / 32.9; viscoelastic order 6 derivative 340.5 / '
+            '556.3, `fluxLocalAll` 90.2 / 59.1, `neighborFluxExt[0]` 11.0 / '
+            '12.3, `volumeExt` 23.2 / 13.2; order 8 1843 / 3896, 335.8 / '
+            '174.0, 38.4 / 31.0, 87.9 / 79.2.  Off by default.  `auto` lets '
+            '`autotune=lanes` decide per kernel, with the fence '
+            '(`tuning._dpas_candidates`); without that rule it builds the '
+            'FMA path.')
+
+declare('sycl_dpas_min_depth',
+        default=16,
+        env='TF_SYCL_DPAS_MIN_DEPTH',
+        parse=parse_int,
+        doc='Contraction steps below which a product stays off the SPMD DPAS '
+            'path (`sycl_dpas`).  The instruction contracts eight steps, and '
+            'the element\'s operand is laid out for it whatever the '
+            'operator holds, so a short contraction pays the layout for '
+            'little arithmetic: SeisSol\'s 9 x 9 star products would be '
+            'seven sixteenths padding.')
+
+declare('sycl_dpas_fence',
+        default=False,
+        env='TF_SYCL_DPAS_FENCE',
+        parse=parse_bool,
+        doc='Under `sycl_dpas`, read each operator tile one ahead of its '
+            'products and put a fence of the sub-group between one tile\'s '
+            'products and the next (`Lexic.pin_fence`, which IGC moves no load '
+            'across).  IGC otherwise reads a product\'s tiles as early as it '
+            'can, which costs registers -- and while the fragments were '
+            '`sycl::vec`, spills: the fence took SeisSol\'s order-6 kernels in '
+            'single precision from 1 746 - 8 554 spill references to 750 - '
+            '5 531.  In OpenCL\'s vectors it is a question per kernel (Max '
+            '1550, IGC 2.41.5, batch 262144, ns an element without and with '
+            'it): elastic order 6 derivative 19.9 / 28.9, `localFluxAll` '
+            '17.6 / 16.5, `neighboringFlux[0]` 7.3 / 7.4, `volume` 12.8 / '
+            '13.5; order 8 125.6 / 118.6, 72.0 / 77.2, 15.4 / 16.9, 32.9 / '
+            '44.1; viscoelastic order 6 `fluxLocalAll` 59.1 / 54.1, '
+            '`volumeExt` 13.2 / 13.4; order 8 174.0 / 246.6, 79.2 / 76.5 -- '
+            'off, which `sycl_dpas=auto` under `autotune=lanes` answers per '
+            'kernel.')
+
 declare('lead_split',
         rule=lambda target: (2 if (target.hw.vendor == 'intel'
                                    and target.backend == 'oneapi'
@@ -2088,13 +2156,24 @@ declare('mma_d_layout',
             '(`ctile`) and no rows in between (`compute.dchain`).  NVIDIA, '
             'one multiplication per warp; on AMD the stacked tiles of '
             '`amd_matrix_k4`, whose D layout is the register image, every '
-            'column in them (`amd_matrix_k4_pad` is implied).  A product it '
-            'does not reach keeps its epilogue, and on AMD so does a product '
-            'on its own (`MatrixPaths.D_CHAIN_SINGLES`).  On MI300A at '
-            'sixteen lanes, against the stacked tiles padded and unchained: '
-            'order 6 `volume` -10 % in double precision and in single, '
+            'column in them (`amd_matrix_k4_pad` is implied); on Intel under '
+            '`sycl_dpas` the DPAS accumulator, the register image too '
+            '(`intel_spmd`), but not where the kernel reads the output '
+            'again.  A product it does not reach keeps its epilogue, and on '
+            'AMD and Intel so does a product on its own '
+            '(`MatrixPaths.D_CHAIN_SINGLES`).  On MI300A at sixteen lanes, '
+            'against the stacked tiles padded and unchained: order 6 '
+            '`volume` -10 % in double precision and in single, '
             '`localFluxAll` -18 % in single; `neighboringFlux`, one product '
-            'into `Q`, was 9 to 30 % slower as a chain of one.')
+            'into `Q`, was 9 to 30 % slower as a chain of one.  On PVC the '
+            'chains were slower but in the order-6 volume (Max 1550, '
+            'single precision, batch 262144, ns an element without and with '
+            'the chains): order 6 volume 12.8 / 12.4, `localFluxAll` 17.6 / '
+            '23.8; order 8 volume 32.9 / 68.2, `localFluxAll` 72.0 / 106.1.  '
+            'IGC spills the chained builds more (order-8 `localFluxAll` '
+            '31 424 bytes against 8 576), and their products add into one '
+            'accumulator one after another where on their own they do not '
+            'wait for each other.')
 
 declare('mma_d_layout_loops',
         default=False,
@@ -2162,9 +2241,9 @@ declare('mma_fragment_ld',
             'accesses.')
 
 declare('mma_operator_copies',
-        default=False,
+        default=None,
         env='TF_MMA_OPERATOR_COPIES',
-        parse=parse_bool,
+        parse=parse_optional_bool,
         doc='Give each multiplication the matrix path may take that reads a '
             'batch-constant operator other operations read too a copy of it, '
             'laid out in its own fragment order and defined in the generated '
@@ -2173,7 +2252,13 @@ declare('mma_operator_copies',
             'so an operator with several readers is offered none and the '
             'matrix path stages it element by element (`_offer_order`): '
             'SeisSol\'s derivative reads each `kDivMT` five times.  The other '
-            'readers keep the operator as it is passed.')
+            'readers keep the operator as it is passed.  On Intel the same for '
+            'the SPMD lowering\'s DPAS (`sycl_dpas`), whose reader of an '
+            'unordered operator splits every tile it reads and holds what it '
+            'read for the next reader: None, the default, makes the copies '
+            'there and nowhere else -- SeisSol\'s order-6 derivative in single '
+            'precision ran 49.2 ns an element without them on the Max 1550 '
+            'and 34.7 with them (IGC 2.41.5).')
 
 declare('mma_presplit',
         default=False,

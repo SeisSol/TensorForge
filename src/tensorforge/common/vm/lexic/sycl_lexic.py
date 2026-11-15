@@ -56,6 +56,11 @@ class SyclLexic(Lexic):
     #: the context sets it, 0 here: a lexic no context made writes the
     #: spelling that needs no header).
     self.split_broadcast = 0
+    #: Whether a kernel may call DPAS from the SPMD lowering
+    #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
+    #: as it sets the split above: the call is declared in the header that
+    #: holds the split broadcast, so either one needs it included.
+    self.dpas = False
 
   @staticmethod
   def kernel_name_class(func_name: str) -> str:
@@ -352,8 +357,9 @@ class SyclLexic(Lexic):
       # extension; AdaptiveCpp has neither the header nor the property.
       headers = ['sycl/sycl.hpp',
                  'sycl/ext/intel/experimental/grf_size_properties.hpp']
-      if self.split_broadcast and self._sub_groups is not None:
-        # `tensorforge::split_broadcast`, which `broadcast` writes.
+      if (self.split_broadcast or self.dpas) and self._sub_groups is not None:
+        # `tensorforge::split_broadcast`, which `broadcast` writes, and
+        # `tensorforge::dpasTF32`, which the matrix path does.
         headers.append('tensorforge_device/sycl_spmd.h')
       return headers
     return ['sycl/sycl.hpp']
@@ -415,12 +421,29 @@ class SyclLexic(Lexic):
             f'global_space, sycl::access::decorated::no>({address})'
             f'.prefetch({elems});')
 
+  def module_constant(self, elem: str, name: str, values, align=None) -> str:
+    """`Lexic.module_constant`, aligned where asked: an operator copy is
+    read in vectors of eight floats a work-item (`intel_spmd`), and a
+    `constexpr` array of floats is only as aligned as a float."""
+    out = super().module_constant(elem, name, values)
+    return f'alignas({int(align)}) {out}' if align else out
+
   def get_fptype(self, fptype, length=1, relaxed=False):
     # `sycl::vec` carries its own alignment and there is no relaxed spelling
     # for it, so the flag is accepted and ignored rather than silently
     # changing the type.  A relaxed access on this backend is therefore only
     # as legal as `sycl::vec` makes it, which is why `widths_for` has to keep
     # answering from a base that proves what it needs.
+    #
+    # The floats of four and eight a kernel with DPAS holds -- the A fragment,
+    # the operator's tiles, the accumulators -- in OpenCL's own vectors
+    # (`tensorforge::NativeFloat4/8`, `sycl_spmd.h`), which IGC keeps in one
+    # block of registers; a `sycl::vec` is taken apart into scalars and put
+    # back together for every instruction.  Only where the path is on, so
+    # that no other kernel's text changes.
+    if (self.dpas and not self._explicit_simd and fptype == 'float'
+        and length in (4, 8)):
+      return f'tensorforge::NativeFloat{length}'
     return f'sycl::vec<{fptype}, {length}>'
 
   def pointer_type(self, elem, space=None, readonly=False, restrict=False,

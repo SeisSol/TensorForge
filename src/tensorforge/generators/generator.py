@@ -501,11 +501,28 @@ def _of_the_build(method):
 
 def _copies_apply(context) -> bool:
   """Whether operator copies can pay here (`Options.mma_operator_copies`):
-  the matrix path on, on NVIDIA."""
-  if str(getattr(context.target.hw, 'vendor', '')).lower() != 'nvidia':
+  the matrix path on, on NVIDIA, or the SPMD lowering's DPAS on Intel
+  (`Options.sycl_dpas`), which reads an operator in tiles split into its
+  TF32 halves only where it is one reader's, and otherwise splits every
+  tile it reads in every element."""
+  vendor = str(getattr(context.target.hw, 'vendor', '')).lower()
+  if vendor == 'intel':
+    from tensorforge.backend.instructions.compute.primitives import intel_spmd
+    return intel_spmd.usable(context)
+  if vendor != 'nvidia':
     return False
   from tensorforge.backend.instructions.compute.primitives import nvidia
   return nvidia.enabled(context)
+
+
+def _copies_depth(context) -> int:
+  """The shortest contraction the target's matrix path takes, and so the
+  shortest a reader is copied for (`operator_copies`)."""
+  if str(getattr(context.target.hw, 'vendor', '')).lower() == 'intel':
+    from tensorforge.backend.instructions.compute.primitives import intel_spmd
+    return intel_spmd.min_depth(context)
+  from tensorforge.backend.instructions.compute.primitives import nvidia
+  return nvidia.min_depth(context)
 
 
 class Generator:
@@ -678,11 +695,16 @@ class Generator:
     self._module_operands: List = []
     self._module_tables: Dict[str, tuple] = {}
     self._module_names: Dict[str, str] = {}
-    if options.mma_operator_copies and _copies_apply(context):
+    copies = options.mma_operator_copies
+    if copies is None:
+      # Unset: where the SPMD lowering's DPAS reads operators, and nowhere
+      # else (`Options.mma_operator_copies`).
+      from tensorforge.backend.instructions.compute.primitives import intel_spmd
+      copies = intel_spmd.usable(context)
+    if copies and _copies_apply(context):
       from .operator_copies import copy_operators
-      from tensorforge.backend.instructions.compute.primitives import nvidia
       self._descr_list, self._module_operands = copy_operators(
-          self._descr_list, nvidia.min_depth(context),
+          self._descr_list, _copies_depth(context),
           prepared=bool(options.prepare_operands))
     if options.merge_variants is True or merge_within is not None:
       # Before the operands are named, which is the first thing that reads the

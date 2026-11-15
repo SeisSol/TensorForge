@@ -33,6 +33,9 @@ class Context:
     # how a narrow multiplication's broadcast reads (`SyclLexic.broadcast`).
     if hasattr(self.target.lexic, 'split_broadcast'):
       self.target.lexic.split_broadcast = self._options.sycl_split_broadcast
+    if hasattr(self.target.lexic, 'dpas'):
+      from tensorforge.backend.instructions.compute.primitives import intel_spmd
+      self.target.lexic.dpas = intel_spmd.asked(self._options.sycl_dpas)
     #: The permutation each staged window is built with, by the window's
     #: symbol, where `pir.banks.propose` chose one from a body built without
     #: (`Options.swizzle` `decide`; `AbstractShrMemWrite._swizzle`).  Kept
