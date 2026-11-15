@@ -314,6 +314,83 @@ def test_a_read_outside_the_run_is_held_off_its_lanes():
     assert "_lead >= 5" in src.replace("(", "").replace(")", "")
 
 
+@pytest.mark.parametrize("skip", [True, False])
+def test_an_empty_column_reads_zero_behind_a_full_one_read_whole(skip):
+    """`C1 = A B1; C2 = A B2` over sixteen lanes, `A`'s middle column empty.
+
+    Packed as `runs`, the empty column keeps no slot, so its reads address
+    the slots of the full column after it and hold every lane off.  With
+    `skip_known_zeros` off that step is read rather than left out, and the
+    second product's read of the empty column took the first product's
+    unguarded read of the full one (`load_cse`): the full column's numbers
+    where `A` is zero.  SeisSol's time derivative came out 4e-2 off on PVC
+    so, where `kDivMT`'s empty columns sit ahead of full ones.
+    """
+    import contextlib
+    import io
+
+    from tensorforge.generators.descriptions import MultilinearDescr
+    from tensorforge.reference import kernel_eval
+
+    rows, cols, n = 16, 3, 4
+    a_values = np.zeros((rows, cols))
+    a_values[:, 0] = np.arange(1, rows + 1) / 4.0
+    a_values[:, 2] = np.arange(rows, 0, -1) / 8.0
+    b1_values = np.arange(1, cols * n + 1, dtype=float).reshape(
+        (cols, n), order="F") / 4.0
+    b_values = (b1_values, 1.0 - b1_values)
+
+    def strided(shape, alias):
+        return SubTensor(Tensor(list(shape), Addressing.STRIDED,
+                                BoundingBox([0, 0], list(shape)), alias=alias,
+                                datatype=Datatype.F32))
+
+    a = SubTensor(_tensor(a_values, "A"))
+    bs = [SubTensor(_tensor(v, f"B{i}")) for i, v in enumerate(b_values)]
+    cs = [strided((rows, n), f"C{i}") for i in range(2)]
+    descrs = [MultilinearDescr(c, [a, b], [[0, -1], [-1, 1]],
+                               [[0, 1], [0, 1]]) for b, c in zip(bs, cs)]
+    gen = Generator(descrs, Context(
+        arch="sm_90", backend="cuda", fp_type=Datatype.F32,
+        options=Options(pack_operands="runs", skip_known_zeros=skip,
+                        lanes_per_mult=16, inline_constants=0,
+                        argument_constants=False)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    assert a.tensor.packing is not None and a.tensor.packing.kind == "runs"
+    assert a.tensor.packing.lengths[1] == 0
+
+    lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
+    preset = {t.tensor.name: [float(v) for v in t.tensor.storage_values()]
+              for t in [a] + bs}
+    mem = kernel_eval.evaluate_wave(gen.get_kernel(), lanes, seed=7,
+                                    globals_only=True, mults=mults,
+                                    block=True, preset=preset)
+    for b, c in zip(b_values, cs):
+        got = np.array([[mem.get((c.tensor.name, i + j * rows), np.nan)
+                         for j in range(n)] for i in range(rows)])
+        assert np.allclose(got, a_values @ b, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("head, tail, first, valid, unstored", [
+    (0, 16, 0, None, False),   # the run covers the slot: no predicate at all
+    (0, 0, 0, None, True),     # an empty column: every lane is a row with no slot
+    (4, 16, 0, None, True),    # the run starts inside the slot
+    (0, 9, 0, 12, True),       # it ends before the window does
+    (0, 12, 0, 9, False),      # it ends past the window: the window holds lanes off
+    (2, 16, 3, None, False),   # it starts before the window's head
+    (0, 16, 5, 5, False),      # the window keeps no lane, so nothing it reads matters
+])
+def test_a_packed_read_is_unstored_where_the_run_cuts_lanes_the_window_keeps(
+        head, tail, first, valid, unstored):
+    """Only where the run holds a lane off that the window computes is the
+    zero there the operand's: the lanes the window holds off itself are
+    padding, which an unguarded read may still serve (`load_cse`)."""
+    from tensorforge.backend.symbol import _cuts_kept_lanes
+
+    assert _cuts_kept_lanes(head, tail, first, valid, 16) is unstored
+
+
 def test_a_bitset_read_is_a_population_count():
     values = np.zeros((24, 5))
     for c in range(5):
