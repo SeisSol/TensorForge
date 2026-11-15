@@ -1930,18 +1930,6 @@ def _roll_candidates(first: Build, context: Context, origin: Candidate,
             if value != own]
 
 
-#: Where the lanes rule offers the matrix path (`Options.tensor_cores`) as a
-#: twin of the default (`_matrix_candidates`): by compute capability, the
-#: precisions whose matrix units outrun the vector units of the part.  A100 and
-#: H100/GH200 in double (DMMA at twice the FP64 FMA rate) and in single (three
-#: TF32 products at several times the FP32 rate); B200/GB200 in single only, its
-#: FP64 matrix rate being its vector rate (`mma.sync` f64 is eight DMMA.8x8x4
-#: there).  The consumer parts are not in it: sm_120's HMMA runs at the FFMA
-#: rate, and none of them has a fast FP64 matrix unit.  Which kernels take the
-#: twin is the rule's count, as for every other twin: over SeisSol's elastic
-#: order-6 kernels on GH200 the count ranks the faster of the two in five of six
-#: (the double-precision derivative, 3 % to the matrix path, is the miss), and
-#: declines the single-precision derivative, 22 % slower on the matrix path.
 #: The shortest contraction the matrix twin puts on the matrix path
 #: (`Options.mma_min_depth`), where the path's own default takes 16.  On GH200
 #: the products of 16 to 23 steps -- `localFluxAll`'s 21, the derivative's
@@ -1961,22 +1949,44 @@ MATRIX_TWIN_DEPTH = 24
 #: 24 and 4 %.
 MATRIX_ROLLS = (16, 0)
 
+#: Where the lanes rule offers the matrix path (`Options.tensor_cores`) as a
+#: twin of the default (`_matrix_candidates`): by compute capability, the
+#: precisions in which the path measured faster than the SIMT nest on SeisSol's
+#: kernels.  H100/GH200 in double (DMMA at twice the FP64 FMA rate) and in
+#: single (three TF32 products at several times the FP32 rate).  A100 in double
+#: only: in single the twin never beat the rule's best SIMT build over the
+#: elastic and viscoelastic kernels of orders 4, 6 and 8 -- `localFluxAll` of
+#: order 6 13 % under the default on the path, 24 % at sixteen lanes beside it
+#: -- and the order-6 `volume` it was taken for ran 28 % slower than without it
+#: (3xTF32's chains, `wait`).
 #:
-#: Not A100 in single precision any more: over SeisSol's elastic and
-#: viscoelastic kernels (orders 4, 6 and 8) the twin never beat the rule's
-#: best SIMT build there -- `localFluxAll` of order 6 13 % under the default on
-#: the path, 24 % at sixteen lanes beside it -- and the order-6 `volume` it was
-#: taken for ran 28 % slower than without it (3xTF32's chains, `wait`).
+#: B200/GB200 in both, though its FP64 matrix rate is only its vector rate:
+#: every f64 `mma.sync` is eight `DMMA.8x8x4` there, and the emitter counts it
+#: as eight (`Emitter._issues`), in the issue mix the rule ranks by and in the
+#: code.  What the path saves in double is instructions and code, not
+#: arithmetic -- the order-6 derivative 8032 SASS instructions against 19352
+#: -- and that was enough on GB200: with the operator copies the order-6
+#: derivative ran 23 % under the default, `localFluxAll` 14 % and `volume`
+#: 17 %; at order 8 `localFluxAll` 28 %, `volume` 15 % and the derivative cut
+#: in three 16 %.
+#:
+#: The consumer parts are not in it: sm_120's HMMA runs at the FFMA rate, and
+#: none of them has a fast FP64 matrix unit.  Which kernels take the twin is
+#: the rule's count, as for every other twin, with the code past the
+#: instruction cache priced in: over SeisSol's elastic order-6 kernels on
+#: GH200 the count ranks the faster of the two in five of six (the
+#: double-precision derivative, 3 % to the matrix path, is the miss), and
+#: declines the single-precision derivative, 22 % slower on the path.
 MATRIX_TWIN = {80: (Datatype.F64,),
                90: (Datatype.F64, Datatype.F32),
-               100: (Datatype.F32,)}
+               100: (Datatype.F64, Datatype.F32)}
 
 
 def _matrix_candidates(descrs, first: Build, context: Context,
                        origin: Candidate,
                        fixed: Optional[Mapping[str, Any]]) -> List[Candidate]:
-    """`origin` on the matrix path, where the part's matrix units are faster
-    than its vector units in this precision (`MATRIX_TWIN`) and the kernel
+    """`origin` on the matrix path, where the path measured faster than the
+    SIMT nest on the part in this precision (`MATRIX_TWIN`) and the kernel
     contracts -- with each reader of an operator that others read too given
     a copy in its own fragment order (`Options.mma_operator_copies`), and in
     double precision with the operator laid out in 16-byte chunks
@@ -1997,8 +2007,8 @@ def _matrix_candidates(descrs, first: Build, context: Context,
         return []
     from tensorforge.backend.instructions.compute.primitives.nvidia import (
         sm_of)
-    # Every product in a type the part's matrix units are faster in, which
-    # is what each one is computed in and not the kernel's type.
+    # Every product in a type the path is faster in on the part, which is
+    # what each one is computed in and not the kernel's type.
     works = _product_types(descrs, context)
     if not works or not works <= set(MATRIX_TWIN.get(sm_of(context), ())):
         return []
