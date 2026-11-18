@@ -282,33 +282,25 @@ class HipLexic(CudaLexic):
   def wait_async(self, prior):
     if self._underlying_hardware != 'amd':
       return super().wait_async(prior)
-    # Nothing.  `SIInsertWaitcnts` places this wait itself, and places it
-    # better than we can.
+    # Nothing here: the wait for an LDS-DMA copy is written on its counter,
+    # as a statement of its own where TF places it (`engines.WAIT_COUNTER`,
+    # `vmcnt(N)` through `__builtin_amdgcn_s_waitcnt`), and a full drain in a
+    # body of such copies is that counter at zero (`Emitter._copy_counter`).
     #
-    # `copy_async` lowers to `llvm.amdgcn.global.load.lds`, which the pass
-    # recognizes as an LDS DMA: it tracks which LDS buffer each one writes
-    # and emits the smallest count before the `ds_read` that needs it --
-    # `vmcnt(2)` then `vmcnt(0)` for two distinct arrays, not `vmcnt(0)`
-    # twice.  Its alias tracking has a fixed number of slots and falls back
-    # to `vmcnt(0)` once they run out, so on a body with many buffers this is
-    # conservative; the lever for that is `sched_group_barrier`, not a wait
-    # written by hand.
+    # It is not the compiler's to place.  `SIInsertWaitcnts` puts no wait at
+    # all between a `global_load_lds` and a `ds_read` of what it wrote --
+    # clang 22 and 23 on gfx942, checked 2026-10-29 and 2026-11-17 -- since
+    # the copy's write to the LDS is no dependency it tracks.  Only a block
+    # barrier waits for it, because the fence of `__syncthreads` drains
+    # vmcnt; a copy read behind the barrier of one wave, which is spelled as
+    # nothing, would be read in flight.
     #
-    # Writing one by hand would be worse than redundant.  Inline asm with a
-    # `"memory"` clobber is opaque to the very pass that would compute the
-    # count, and to the scheduler that decides the issue order the count is
-    # derived from -- so it would degrade the result it is meant to control.
-    #
-    # And it would be wrong ahead of gfx12.  `vmcnt` is deprecated there: the
-    # counter is split into loadcnt, storecnt, dscnt, kmcnt, samplecnt,
-    # bvhcnt and expcnt, and gfx1250 adds asynccnt and tensorcnt for exactly
-    # this class of transfer, reachable through `s_wait_asynccnt` rather than
-    # through an encoded `s_waitcnt` immediate.  An instruction spelled here
-    # would have to be respelled per target; a count left in the IR does not.
-    #
-    # The IR derives `prior` all the same: it is what a future emitter needs to
-    # pick `s_wait_asynccnt` on gfx125x, and what `verify` checks the token
-    # pairing against.  It is information, not an instruction.
+    # The builtin, not inline assembly: an asm statement with a "memory"
+    # clobber is opaque to the pass that computes the counts of every other
+    # wait around it, and to the scheduler.  And spelled per model by the
+    # registry rather than here: gfx12 splits the counter (loadcnt,
+    # storecnt, ... and gfx1250's asynccnt and tensorcnt for this class of
+    # transfer), which an instruction written here would have to follow.
     return ''
 
   def wait_async_regs(self, prior):
@@ -318,7 +310,7 @@ class HipLexic(CudaLexic):
     # the destination register and not one instruction earlier.
     if self._underlying_hardware != 'amd':
       return super().wait_async_regs(prior)
-    return self.wait_async(prior)
+    return ''
 
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """`__builtin_prefetch`, which has no cache level to be given.

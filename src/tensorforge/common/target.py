@@ -804,14 +804,29 @@ class Target:
         copies in groups of its own."""
         return self.hw.vendor == 'amd'
 
-    def async_staging(self) -> bool:
+    def async_staging(self, options=None, threads: Optional[int] = None,
+                      elem_bytes: Optional[int] = None) -> bool:
         """Whether the staging transfers into shared memory are issued as
         asynchronous copies where they can be.
 
-        NVIDIA only.  HIP spells one for CDNA2/3 (`copy_async_sizes`), which
-        the emitter would lower; no staging transfer asks for it there.
+        NVIDIA always.  AMD's LDS-DMA (`copy_async_sizes`) where
+        `Options.amd_async_copies` asks for it, on a device that has one, for
+        elements of four bytes, and for a multiplication of `threads` lanes
+        that is a whole number of waves: the instruction writes lane t's
+        bytes t places past one base the whole wave shares (`engines.
+        lane_linear`), and a wave holding parts of two multiplications holds
+        two windows.  Four bytes because that is the lane's own dword the
+        instruction writes; what a narrower copy writes where is not
+        something TF has measured.
         """
-        return self.hw.vendor == 'nvidia'
+        if self.hw.vendor == 'nvidia':
+            return True
+        if (self.hw.vendor != 'amd' or self.backend != 'hip'
+                or not getattr(options, 'amd_async_copies', False)
+                or not self.async_copy_path()):
+            return False
+        return (elem_bytes == 4 and threads is not None
+                and threads % self.hw.vec_unit_length == 0)
 
     def prefetch(self) -> bool:
         """Whether a data prefetch reaches an instruction here.

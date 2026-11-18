@@ -99,6 +99,16 @@ _ASYNC_COPY = re.compile(
     r'^__pipeline_memcpy_async\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
     r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
 
+#: AMD's LDS-DMA as `HipLexic.copy_async` writes it, `global_load_lds` from
+#: `&src[i]` in global memory to `&dst[j]` in the LDS, `N` bytes a lane.
+_LDS_DMA = re.compile(
+    r'^__builtin_amdgcn_global_load_lds\s*\(\s*'
+    r'\(\s*__attribute__\s*\(\(\s*address_space\s*\(\s*1\s*\)\s*\)\)\s*\w+'
+    r'\s*\*\s*\)\s*\(\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*\)\s*,\s*'
+    r'\(\s*__attribute__\s*\(\(\s*address_space\s*\(\s*3\s*\)\s*\)\)\s*\w+'
+    r'\s*\*\s*\)\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*\)\s*,\s*'
+    r'(?P<bytes>\d+)\s*,\s*0\s*,\s*0\s*\)$')
+
 #: A bulk copy's cursor, armed by the thread the condition names
 #: (`tensorforge::bulk_arm`); the copy through it, which that thread issues for
 #: the whole multiplication; and the wait on it, after which the bytes are
@@ -354,6 +364,11 @@ class Races:
     youngest.  Until then the slots are in flight, and touching them is a race
     for every lane.
 
+    AMD's LDS-DMA (`global_load_lds`) is counted per wave instead, one copy a
+    statement, in `vmcnt`: `__builtin_amdgcn_s_waitcnt` completes all but the
+    wave's `n` youngest, and so does a `__syncthreads`, whose fence drains the
+    counter -- the only barrier that does.
+
     Only the lanes the run drives are seen -- one multiplication, on one
     block -- so what is checked is the multiplication's own synchronization,
     which is all a barrier this generator places has to provide.
@@ -390,6 +405,13 @@ class Races:
         r'|^tensorforge::arriveNamedBarrier\b')
     _COMMIT = re.compile(r'^__pipeline_commit\s*\(\s*\)$')
     _WAIT = re.compile(r'^__pipeline_wait_prior\s*\(\s*(\d+)\s*\)$')
+    #: A wait on gfx9's counters, the immediate `s_waitcnt` takes.
+    _WAITCNT = re.compile(r'^__builtin_amdgcn_s_waitcnt\s*\(\s*(\d+)\s*\)$')
+    #: The barrier whose fence drains `vmcnt` on AMD: HIP's `__syncthreads`
+    #: is a release fence of the work-group, a barrier and an acquire.
+    _DRAINS = re.compile(r'^__syncthreads\s*\(')
+    #: Lanes per wave on the devices that have the LDS-DMA (CDNA2/3).
+    DMA_WAVE = 64
     #: The two barriers narrower than the block: a warp's, with its mask,
     #: and a counted one, with its operands -- `%n` naming the n-th input.
     _WARP_BARRIER = re.compile(r'^__syncwarp\s*\((?P<mask>.*)\)$')
@@ -475,9 +497,21 @@ class Races:
         self._landed: Dict[Tuple[str, int], int] = {}
         #: named barrier -> lane -> when it arrived without waiting.
         self._arrived: Dict[int, Dict[int, int]] = {}
+        #: Set while an LDS-DMA copy writes: the wave it counts in.
+        self.dma: Optional[int] = None
+        #: wave -> its LDS-DMA copies in flight, oldest first, each the time
+        #: it was issued and the slots it writes; slot -> (wave, time, lane)
+        #: of the copy landing in it.
+        self._dma: Dict[int, List[Tuple[int, set]]] = {}
+        self._dma_flight: Dict[int, Tuple[int, int, int]] = {}
+        #: slot -> the wave whose wait landed the copy last written to it:
+        #: what every lane of that wave reads behind the wait, which is the
+        #: wave's and not a lane's.
+        self._dma_wave: Dict[int, int] = {}
 
     def statement_kind(self, stmt: str) -> Optional[str]:
-        """`'barrier'`, `'arrive'`, `'commit'`, `'wait'` or None."""
+        """`'barrier'`, `'arrive'`, `'commit'`, `'wait'`, `'vmcnt'` or
+        None."""
         if self._ARRIVE.match(stmt):
             return 'arrive'
         if self._BARRIER.match(stmt):
@@ -486,7 +520,47 @@ class Races:
             return 'commit'
         if self._WAIT.match(stmt):
             return 'wait'
+        if self._WAITCNT.match(stmt):
+            return 'vmcnt'
         return None
+
+    @classmethod
+    def vmcnt_of(cls, stmt: str) -> int:
+        """The `vmcnt` a gfx9 `s_waitcnt` immediate waits down to: its low
+        four bits and bits 14 and 15 above them; 63 waits for nothing."""
+        imm = int(cls._WAITCNT.match(stmt).group(1))
+        return (imm & 0xF) | ((imm >> 14) & 0x3) << 4
+
+    def vmcnt(self, wave: int, keep: int) -> int:
+        """The wave's LDS-DMA copies land but its `keep` youngest: now, each
+        as a write of the lane whose bytes it moved.  How many slots
+        landed."""
+        copies = self._dma.get(wave, [])
+        cut = max(0, len(copies) - keep)
+        done, self._dma[wave] = copies[:cut], copies[cut:]
+        landed = 0
+        for when, slots in done:
+            for slot in slots:
+                found = self._dma_flight.get(slot)
+                if found is None or found[:2] != (wave, when):
+                    continue
+                del self._dma_flight[slot]
+                self._writes[slot] = (found[2], self.time)
+                self._dma_wave[slot] = wave
+                self._reads.pop(slot, None)
+                landed += 1
+        return landed
+
+    def _own_wave(self, slot: int) -> bool:
+        """Whether the last write of `slot` is a copy the reading lane's own
+        wave waited for: the wait is the wave's, and its lanes go on in
+        lockstep behind it."""
+        return self._dma_wave.get(slot) == self.lane // self.DMA_WAVE
+
+    def drains(self, stmt: str) -> bool:
+        """Whether the barrier `stmt` waits for every LDS-DMA copy of the
+        waves that reach it (`_DRAINS`)."""
+        return bool(self._DRAINS.match(stmt))
 
     def tick(self, stmt: str) -> None:
         self.time += 1
@@ -563,8 +637,11 @@ class Races:
             return
         if slot in self._flight:
             self._report('FLIGHT', slot, self._flight[slot])
+        if slot in self._dma_flight:
+            self._report('FLIGHT', slot, self._dma_flight[slot][2])
         last = self._writes.get(slot)
-        if last is not None and not self._ordered(self.lane, last[0], last[1]):
+        if (last is not None and not self._ordered(self.lane, last[0], last[1])
+                and not self._own_wave(slot)):
             self._report('RAW', slot, last[0])
         self._reads.setdefault(slot, {})[self.lane] = self.time
 
@@ -576,8 +653,12 @@ class Races:
         if slot in self._flight and (not self.issuing
                                      or self._flight[slot] != self.lane):
             self._report('FLIGHT', slot, self._flight[slot])
+        if slot in self._dma_flight:
+            # A write over a copy still landing: which lands last is not said.
+            self._report('FLIGHT', slot, self._dma_flight[slot][2])
         last = self._writes.get(slot)
-        if last is not None and not self._ordered(self.lane, last[0], last[1]):
+        if (last is not None and not self._ordered(self.lane, last[0], last[1])
+                and not self._own_wave(slot)):
             self._report('WAW', slot, last[0])
         for other, when in self._reads.get(slot, {}).items():
             if not self._ordered(self.lane, other, when):
@@ -585,6 +666,15 @@ class Races:
         if self.issuing:
             self._flight[slot] = self.lane
             self._open.setdefault(self.lane, set()).add(slot)
+            return
+        self._dma_wave.pop(slot, None)
+        if self.dma is not None:
+            # In flight until a wait of the wave's retires the copy.
+            copies = self._dma.setdefault(self.dma, [])
+            if not copies or copies[-1][0] != self.time:
+                copies.append((self.time, set()))
+            copies[-1][1].add(slot)
+            self._dma_flight[slot] = (self.dma, self.time, self.lane)
             return
         if self.bulk is not None:
             # In flight until each lane waits on the cursor for itself.
@@ -1385,6 +1475,46 @@ class Interp:
             if tracker is not None:
                 tracker.issuing = False
 
+    def _lds_dma(self, dm, stmt: str) -> None:
+        """AMD's LDS-DMA: what the instruction writes, not what its operands
+        name.
+
+        The destination is one address a wave -- the address of the first of
+        its lanes executing the copy, which the compiler reads into M0 -- and
+        lane t of the wave writes t elements past it.  A lane whose own address is
+        another is written where the hardware puts it, and what it was meant
+        to read there is not: the copy is checked by the values it leaves.
+        In flight until a wait of the wave's retires it (`Races.vmcnt`).
+        """
+        src = self.env.get(dm.group('src'))
+        dst = self.env.get(dm.group('dst'))
+        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+            raise Abort(f'LDS-DMA between unknown buffers: {stmt!r}')
+        width = self.widths.get(dm.group('dst'))
+        nbytes = int(dm.group('bytes'))
+        if width is None or nbytes != width:
+            raise Abort(f'LDS-DMA of {nbytes} B into {dm.group("dst")!r}, '
+                        f'whose element size is {width!r}: {stmt!r}')
+        wave = self.lane // Races.DMA_WAVE
+        first = self
+        if self.lockstep is not None:
+            first = min((it for it in self.lockstep.current
+                         if it.lane // Races.DMA_WAVE == wave),
+                        key=lambda it: it.lane, default=self)
+        base = first.env.get(dm.group('dst'))
+        if not isinstance(base, Ptr):
+            raise Abort(f'LDS-DMA into an unknown buffer: {stmt!r}')
+        base = base + int(first.ev(dm.group('di')))
+        value = src[int(self.ev(dm.group('si')))]
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.dma = wave
+        try:
+            base[self.lane % Races.DMA_WAVE] = value
+        finally:
+            if tracker is not None:
+                tracker.dma = None
+
     def _bulk_copy(self, bc, stmt: str) -> None:
         """The copy through a bulk cursor: the leader moves the bytes for the
         whole multiplication, every other lane only notes it."""
@@ -1501,6 +1631,12 @@ class Interp:
             # rather than skipped: a skipped store leaves its destination at
             # zero, and a kernel evaluated that way still agrees with itself.
             raise Abort(f'vector assignment not modeled: {stmt!r}')
+        dm = _LDS_DMA.match(stmt)
+        if dm:
+            self._lds_dma(dm, stmt)
+            return
+        if 'global_load_lds' in stmt:
+            raise Abort(f'LDS-DMA not modeled: {stmt!r}')
         cp = _ASYNC_COPY.match(stmt)
         if cp:
             # The transfer half of the pipeline primitives.  It moves data, so
@@ -1826,6 +1962,16 @@ class Lockstep:
             _, ident, _ = tracker.reach(stmt)
             for it in lanes:
                 tracker.arrive(int(it.ev(ident)), it.lane)
+        if kind == 'barrier' and tracker.drains(stmt):
+            # The fence ahead of the barrier: the copies of every wave that
+            # reaches it land first, and the barrier orders them.
+            waves = sorted({it.lane // Races.DMA_WAVE for it in lanes})
+            if sum(tracker.vmcnt(w, 0) for w in waves):
+                tracker.time += 1
+        if kind == 'vmcnt':
+            keep = tracker.vmcnt_of(stmt)
+            for wave in sorted({it.lane // Races.DMA_WAVE for it in lanes}):
+                tracker.vmcnt(wave, keep)
         if kind == 'barrier':
             for present, waited, arrived in self._meetings(stmt, lanes):
                 tracker.barrier([it.lane for it in present], arrived)

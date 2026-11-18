@@ -2463,7 +2463,10 @@ class Generator:
     if not self._context.get_user_options().trip_shards:
       return None
     target = self._context.target
-    if not target.async_staging() or not target.async_copy_path():
+    if not (target.async_staging(self._context.get_user_options(),
+                                 self._num_threads,
+                                 self._context.fp_type.size())
+            and target.async_copy_path()):
       return None
     if self._context.fp_type.size() not in target.copy_async_sizes():
       return None

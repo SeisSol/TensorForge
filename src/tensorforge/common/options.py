@@ -541,6 +541,23 @@ declare('bulk_copies',
             'in flight on a barrier, so a bulk copy keeps one stage under '
             '`enable_multibuffer`.  Off until measured against `cp.async`.')
 
+declare('amd_async_copies',
+        default=False,
+        parse=parse_bool,
+        doc='Stage into the LDS on AMD as NVIDIA stages into shared memory with '
+            '`cp.async`: through the LDS-DMA (`global_load_lds`, gfx90a, gfx94x '
+            'and gfx950), which moves a lane\'s four bytes from global memory '
+            'into the LDS without a register.  Each wait for one is written '
+            'out, `s_waitcnt vmcnt(N)` with N the copies issued behind it: the '
+            'compiler places none in front of a read of what a copy wrote, '
+            'and a read behind no block barrier reads the LDS before the copy '
+            'lands.  Only where a multiplication is a whole number of waves '
+            'and each lane moves one element of four bytes to its own place '
+            'past a base the wave shares, which is the one destination the '
+            'instruction writes; any other copy keeps the body to loads and '
+            'stores.  Off until measured: on gfx942 a copy a trip ahead did '
+            'not beat an unrolled synchronous one.')
+
 declare('enable_prefetch',
         default=False,
         parse=parse_bool,

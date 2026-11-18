@@ -16,6 +16,7 @@ instruction a device compiler makes of it where one is installed.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import subprocess
 
@@ -23,13 +24,13 @@ import pytest
 
 from tensorforge.backend.pir import engines
 from tensorforge.backend.pir.build import IRBuilder, barrier_stmt
-from tensorforge.backend.pir.core import (Effect, IRError, MemSpace, Op,
-                                          Participants, Stmt, TokenType,
-                                          Uniformity)
+from tensorforge.backend.pir.core import (BOOL, INDEX, Effect, IRError,
+                                          MemSpace, Op, Participants, Stmt,
+                                          TokenType, Uniformity)
 from tensorforge.backend.pir.engines import (Completion, FenceKind, SyncKind,
                                              SyncObjectType, SyncScope)
 from tensorforge.common.basic_types import Datatype
-from tensorforge.common.context import Context
+from tensorforge.common.context import Context, Options
 
 TARGETS = [('cuda', 'sm_86'), ('cuda', 'sm_90'), ('hip', 'gfx90a'),
            ('hip', 'gfx942'), ('hip', 'gfx1150'), ('hip', 'gfx1250'),
@@ -867,26 +868,409 @@ def test_the_interpreter_reads_an_arrive_as_half_a_rendezvous():
     assert run(False) == ['RAW']
 
 
-def test_an_lds_dma_copy_is_counted_one_at_a_time_and_written_as_before():
-    """AMD's LDS-DMA completes on `vmcnt`, an operation at a time: no group
-    closes it, and its wait is counted with the register loads -- which on
-    AMD is written as nothing, the compiler's to place, as before."""
+# -- AMD's LDS-DMA, waited for on vmcnt ------------------------------------- #
+
+def _dma_body(copies=2, threads=64, dst=None, guard=None, extra=None):
+    """`copies` LDS-DMA copies of one wave each, the lane past 64 elements a
+    copy, then each waited for and read back reversed -- every lane reading
+    another's element, within the copy's own 64.  `dst` replaces the
+    destination of the first, `guard` puts it under an `if`, and `extra` is
+    called between the copies and the waits -- a token it returns is waited
+    for behind them."""
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, context=ctx)
+    s0 = b.alloc(Datatype.F32, (64 * copies,), MemSpace.SHARED, hint='s0',
+                 extern='s0', arena='blk', offset=0)
+    g = b.alloc(Datatype.F32, (64 * copies,), MemSpace.GLOBAL, hint='g',
+                extern='m1')
+    out = b.alloc(Datatype.F32, (64 * copies,), MemSpace.GLOBAL, hint='o',
+                  extern='m0')
+    lane = b.thread_id('x')
+    ats = [lane] + [b.op('add', INDEX, lane, 64 * k, hint='at')
+                    for k in range(1, copies)]
+    toks = []
+    for k, at in enumerate(ats):
+        to = dst(b, lane) if k == 0 and dst is not None else at
+        if k == 0 and guard is not None:
+            with b.if_(guard(b, lane)):
+                toks.append(b.copy_async(s0, g, dst_index=(to,),
+                                         src_index=(at,), threads=threads))
+        else:
+            toks.append(b.copy_async(s0, g, dst_index=(to,),
+                                     src_index=(at,), threads=threads))
+    later = extra(b, g, lane) if extra is not None else None
+    for k, (tok, at) in enumerate(zip(toks, ats)):
+        b.wait(tok)
+        back = b.op('sub', INDEX, 64 * k + 63, lane, hint='bk')
+        b.store(out, b.load(s0, back, hint='u'), at)
+    if later is not None:
+        b.store(out, b.wait(later), lane)
+    return ctx, b.finish()
+
+
+class _Commented(_Sink):
+    """A sink that keeps the comments and the blocks too."""
+
+    def Comment(self, text):
+        self.lines.append(f'// {text}')
+
+    @contextlib.contextmanager
+    def _block(self, head):
+        self.lines.append(f'{head} {{')
+        yield
+        self.lines.append('}')
+
+    def If(self, cond):
+        return self._block(f'if ({cond})')
+
+    def Else(self):
+        return self._block('else')
+
+    def Block(self, head=''):
+        return self._block(head)
+
+
+def _dma_emit(ctx, body, quiet=True):
+    """Schedule and write `body`; `quiet`, with no diagnostic on the way --
+    a copy under an `if` or a drain leaves the waits behind it counting
+    nothing, and says so."""
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.emit import Emitter
+    out, diag = pir.schedule_async(body)
+    assert not (quiet and diag), diag
+    sink = _Commented()
+    Emitter(sink, ctx).run(out)
+    return out, sink.lines
+
+
+def _dma_kernel(lines):
+    """The lines as a kernel the interpreter runs: the arena the shared
+    buffer is a window of, the globals by their own names."""
+    keep = [l for l in lines if not re.match(r'^float m\d+\[', l)]
+    return ('void k() {\n'
+            '  auto* blk = reinterpret_cast<float*>(totalShrMemPtr);\n'
+            + ''.join(f'  {l}\n' for l in keep) + '}')
+
+
+def test_an_lds_dma_wait_is_the_counter_s_and_names_its_copies():
+    """The wait for an LDS-DMA copy is `vmcnt`'s, written by TF: it names
+    the copies it retires, moves as a `wait` does, and is counted one
+    operation at a time -- no group closes the copies."""
+    ctx, body = _dma_body()
+    waits = [s for s in body if s.op == Op.WAIT_COUNTER]
+    assert len(waits) == 2 and not any(s.op == Op.WAIT for s in body)
+    for w in waits:
+        assert (w.attr('counter'), w.attr('engine')) == ('vmcnt', 'lds_dma')
+        assert len(w.args) == 1 and w.movable
+        assert w.effect == Effect.READ | Effect.WRITE | Effect.ASYNC
+        assert engines.verify_engine(w) == []
+        assert not engines.completes_on_barrier(w)
+    copies = [s for s in body if s.op == Op.COPY_ASYNC]
+    assert all(c.attr('threads') == 64 for c in copies)
+    out, lines = _dma_emit(ctx, body)
+    assert not any(s.op == Op.COMMIT_ASYNC for s in out)
+    assert [s.attr('count') for s in out if s.op == Op.WAIT_COUNTER] == [1, 0]
+    dma = [i for i, l in enumerate(lines) if 'global_load_lds' in l]
+    waited = [i for i, l in enumerate(lines)
+              if l.startswith('__builtin_amdgcn_s_waitcnt(')]
+    assert len(dma) == 2 and dma[-1] < waited[0]
+    assert [lines[i] for i in waited] == [
+        '__builtin_amdgcn_s_waitcnt(3953);', '__builtin_amdgcn_s_waitcnt(3952);']
+
+
+def test_the_count_is_the_copies_issued_behind_it_and_nothing_else():
+    """vmcnt counts the loads into registers too, but the compiler moves
+    those across a copy, merges two into one and drops a dead one: a count
+    that includes them can come out larger than what is in flight.  So the
+    wait counts the copies behind the one it waits for, which the compiler
+    issues as written -- `prior_unified` still counts the loads."""
+    def load(b, g, lane):
+        return b.load_async(g, lane)
+    ctx, body = _dma_body(copies=3, extra=load)
+    out, _ = _dma_emit(ctx, body)
+    first = next(s for s in out if s.op == Op.WAIT_COUNTER)
+    assert first.attr('count') == 2
+    assert first.attr('prior_unified') == 3
+
+
+def test_a_predicated_copy_is_not_counted_behind_a_wait():
+    """A wave none of whose lanes take a predicated copy branches around it,
+    and issues one copy fewer than a count that includes it."""
+    from tensorforge.backend import pir
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, context=ctx)
+    s0 = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s0',
+                 extern='s0', arena='blk', offset=0)
+    g = b.alloc(Datatype.F32, (128,), MemSpace.GLOBAL, hint='g', extern='m1')
+    lane = b.thread_id('x')
+    first = b.copy_async(s0, g, dst_index=(lane,), src_index=(lane,),
+                         threads=64)
+    at = b.op('add', INDEX, lane, 64, hint='at')
+    some = b.op('lt', BOOL, lane, 40, hint='g')
+    second = b.copy_async(s0, g, dst_index=(at,), src_index=(at,),
+                          threads=64, predicate=some)
+    b.wait(first)
+    b.wait(second)
+    out, diag = pir.schedule_async(b.finish())
+    assert not diag
+    assert [s.attr('count') for s in out
+            if s.op == Op.WAIT_COUNTER] == [0, 0]
+
+
+@pytest.mark.parametrize('change,why', [
+    (dict(threads=32), 'no whole number of waves'),
+    (dict(dst=lambda b, lane: b.op('mul', INDEX, lane, 2)),
+     'not the lane past a base'),
+    (dict(dst=lambda b, lane: 0), 'not the lane past a base'),
+    (dict(guard=lambda b, lane: b.op('lt', BOOL, 40, lane)),
+     'first lane of a wave'),
+], ids=['half-wave', 'strided', 'one-place', 'suffix-guard'])
+def test_a_copy_the_dma_cannot_write_keeps_the_body_to_loads(change, why):
+    """The instruction writes lane t's four bytes t places past one base a
+    wave -- the first active lane's address -- and nothing else: a body with
+    one copy it cannot write moves all of them as loads and stores, and
+    waits for none."""
+    ctx, body = _dma_body(**change)
+    _, lines = _dma_emit(ctx, body, quiet=False)
+    assert any('LDS-DMA cannot write it' in l and why in l for l in lines)
+    assert not any('global_load_lds' in l or 's_waitcnt' in l
+                   for l in lines)
+
+
+def test_a_prefix_guard_keeps_the_first_lane_and_the_copy():
+    """`lane < k` leaves every wave whole or a prefix of its lanes, whose
+    first is the one the base is taken from."""
+    ctx, body = _dma_body(
+        guard=lambda b, lane: b.op('lt', BOOL, lane, 40))
+    _, lines = _dma_emit(ctx, body, quiet=False)
+    assert sum('global_load_lds' in l for l in lines) == 2
+
+
+def test_a_drain_in_a_body_of_dma_copies_is_the_counter_at_zero():
+    """A wait for everything is written too where the copies are the DMA's:
+    nothing else would wait for them in front of the reads."""
     from tensorforge.backend import pir
     from tensorforge.backend.pir.emit import Emitter
     ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
     b = IRBuilder(fptype=Datatype.F32, context=ctx)
-    s0 = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+    s0 = b.alloc(Datatype.F32, (128,), MemSpace.SHARED, hint='s0',
                  extern='s0', arena='blk', offset=0)
-    g = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g', extern='g')
-    tok = b.copy_async(s0, g, dst_index=(0,), src_index=(0,))
-    b.wait(tok)
-    out, diag = pir.schedule_async(b.finish())
-    assert not diag
-    assert not any(s.op == Op.COMMIT_ASYNC for s in out)
-    wait = next(s for s in out if s.op == Op.WAIT)
-    assert wait.attr('counter') == 'load'
-    sink = _Sink()
-    Emitter(sink, ctx).run(out)
-    copies = [l for l in sink.lines if 'global_load_lds' in l]
-    assert len(copies) == 1 and copies[0].endswith('4, 0, 0);')
-    assert not any('wait' in l or 'commit' in l for l in sink.lines)
+    g = b.alloc(Datatype.F32, (128,), MemSpace.GLOBAL, hint='g', extern='m1')
+    out = b.alloc(Datatype.F32, (128,), MemSpace.GLOBAL, hint='o',
+                  extern='m0')
+    lane = b.thread_id('x')
+    at = b.op('add', INDEX, lane, 64, hint='at')
+    for where in (lane, at):
+        b.copy_async(s0, g, dst_index=(where,), src_index=(where,),
+                     threads=64)
+    b.wait()
+    for where in (lane, at):
+        b.store(out, b.load(s0, where, hint='u'), where)
+    body, _ = pir.schedule_async(b.finish())
+    sink = _Commented()
+    Emitter(sink, ctx).run(body)
+    lines = sink.lines
+    last = max(i for i, l in enumerate(lines) if 'global_load_lds' in l)
+    read = next(i for i, l in enumerate(lines) if '= s0[' in l)
+    assert [l for l in lines[last:read] if 's_waitcnt' in l] == [
+        '__builtin_amdgcn_s_waitcnt(3952);']
+
+
+def test_the_interpreter_finds_what_each_wait_is_for():
+    """Run on the host: every lane reads another's element of each copy
+    behind its wait, which is the copy's value and no race.  A wait one
+    copy laxer reads the first copy in flight, and so does no wait."""
+    from tensorforge.reference import kernel_eval
+    ctx, body = _dma_body()
+    _, lines = _dma_emit(ctx, body)
+    src = _dma_kernel(lines)
+
+    def run(text):
+        races = []
+        mem = kernel_eval.evaluate_wave(text, 64, seed=5, globals_only=True,
+                                        races=races)
+        return mem, sorted({r.kind for r in races})
+    mem, races = run(src)
+    seed = kernel_eval.Slot(5)
+    assert races == []
+    assert all(mem[('m0', t)] == seed.read('m1', 63 - t) and
+               mem[('m0', 64 + t)] == seed.read('m1', 127 - t)
+               for t in range(64))
+    lax = src.replace('s_waitcnt(3953)', 's_waitcnt(3954)', 1)
+    assert run(lax)[1] == ['FLIGHT']
+    none = src.replace('__builtin_amdgcn_s_waitcnt(3953);', '', 1)
+    assert run(none)[1] == ['FLIGHT']
+
+
+def test_the_interpreter_writes_a_dma_where_the_hardware_does():
+    """One base a wave, the address of its first lane, and lane t's bytes t
+    places past it: a lane whose own address is another finds the value
+    somewhere else; a block barrier lands every copy of the waves that
+    reach it, and its lanes read them in order."""
+    from tensorforge.reference import kernel_eval
+    dma = ('__builtin_amdgcn_global_load_lds((__attribute__((address_space(1)))'
+           ' uint32_t*)(&m1[threadIdx.x]), (__attribute__((address_space(3)))'
+           ' uint32_t*)(&s0[{}]), 4, 0, 0);')
+
+    def run(*stmts, lanes=64):
+        src = ('void k() {\n'
+               '  auto* blk = reinterpret_cast<float*>(totalShrMemPtr);\n'
+               '  float * __restrict__ s0 = &blk[0];\n'
+               + ''.join(f'  {s}\n' for s in stmts) + '}')
+        races = []
+        mem = kernel_eval.evaluate_wave(src, lanes, seed=7, globals_only=True,
+                                        races=races)
+        return mem, sorted({r.kind for r in races})
+    seed = kernel_eval.Slot(7)
+    mem, races = run(dma.format('2 * threadIdx.x'),
+                     '__builtin_amdgcn_s_waitcnt(3952);',
+                     'm0[threadIdx.x] = s0[threadIdx.x];')
+    assert all(mem[('m0', t)] == seed.read('m1', t) for t in range(64))
+    mem, races = run(dma.format('threadIdx.x'), '__syncthreads();',
+                     'm0[threadIdx.x] = s0[(threadIdx.x + 64) % 128];',
+                     lanes=128)
+    assert races == []
+    assert all(mem[('m0', t)] == seed.read('m1', (t + 64) % 128)
+               for t in range(128))
+    assert run(dma.format('threadIdx.x'),
+               'm0[threadIdx.x] = s0[threadIdx.x];')[1] == ['FLIGHT']
+
+
+def test_the_lane_past_a_shared_base_is_what_the_dma_writes():
+    """`threadIdx.x` once, everything else what the multiplication shares:
+    the lane plus a constant or a row's offset is, twice the lane or a
+    lane-dependent offset is not."""
+    from tensorforge.backend.pir.core import walk_stmts
+    b = IRBuilder(fptype=Datatype.F32)
+    lane = b.thread_id('x')
+    row = b.thread_id('y')
+    good = [lane, b.op('add', INDEX, lane, 64),
+            b.op('add', INDEX, b.op('mul', INDEX, row, 64), lane)]
+    bad = [b.op('mul', INDEX, lane, 2), b.op('add', INDEX, lane, lane), 0,
+           row]
+    defs = {v.id: s for s in walk_stmts(b.finish()) for v in s.target}
+    assert all(engines.lane_linear(v, defs) for v in good)
+    assert not any(engines.lane_linear(v, defs) for v in bad)
+
+
+def test_amd_stages_through_the_dma_only_where_asked_and_whole_waves():
+    """Off by default; asked for, on a device that has the copy, for four
+    bytes an element and a multiplication of whole waves."""
+    from tensorforge.common.options import registry
+    assert registry()['amd_async_copies'].default is False
+
+    def staging(arch, threads, elem=4, on=True):
+        ctx = Context(arch=arch, backend='hip', fp_type=Datatype.F32,
+                      options=Options(amd_async_copies=on))
+        return ctx.target.async_staging(ctx.get_user_options(), threads,
+                                        elem)
+    assert staging('gfx942', 64) and staging('gfx90a', 128)
+    assert not staging('gfx942', 64, on=False)
+    assert not staging('gfx942', 32) and not staging('gfx942', 64, elem=8)
+    assert not staging('gfx1150', 64) and not staging('gfx1250', 64)
+    assert Context(arch='sm_86', backend='cuda',
+                   fp_type=Datatype.F32).target.async_staging()
+
+
+def test_a_counter_wait_s_effect_depends_on_what_it_names():
+    """Without copies it orders any shared memory a counter tracks, stays
+    where it is and retires no token; naming copies it is their `wait`:
+    what they touched, movable, and the tokens consumed."""
+    from tensorforge.backend.pir.core import Access, retires
+    plain = engines.wait_counter('vmcnt', 0)
+    assert not plain.movable and plain.args == () and not retires(plain)
+    assert [(a.space, a.base) for a in plain.accesses] == [
+        (MemSpace.SHARED, None)]
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem')
+    s0 = b.alloc(Datatype.F32, (4,), MemSpace.SHARED, hint='s0', offset=0)
+    tok = b.value(TokenType(Completion.COUNTER), hint='t')
+    touched = (Access(Effect.WRITE, MemSpace.SHARED, s0),)
+    named = engines.wait_counter('vmcnt', 0, (tok,), touched,
+                                 engine='lds_dma')
+    assert named.movable and named.args == (tok,) and retires(named)
+    assert named.accesses == touched
+    assert engines.verify_engine(plain) == engines.verify_engine(named) == []
+
+
+def _generated(name, arch='gfx942', **options):
+    """The kernel of the corpus case `name` for HIP on `arch`."""
+    import contextlib
+    import importlib.util
+    import io
+    from pathlib import Path
+    from tensorforge.generators.generator import Generator
+    path = next((Path(__file__).resolve().parent / 'cases').rglob(f'{name}.py'))
+    spec = importlib.util.spec_from_file_location('tf_dma__' + name, path)
+    mod = importlib.util.module_from_spec(spec)
+    with contextlib.redirect_stdout(io.StringIO()):
+        spec.loader.exec_module(mod)
+    opts = {**getattr(mod, 'OPTIONS', {}), **options}
+    gen = Generator(mod.descr_list(), Context(arch=arch, backend='hip',
+                                              fp_type=mod.DTYPE,
+                                              options=Options(**opts)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen.get_kernel()
+
+
+@pytest.mark.parametrize('name', ['trip_prepared', 'k_unroll_tail'])
+def test_a_preloaded_operator_goes_through_the_dma_where_asked(name):
+    """At 64 lanes a multiplication is a wave, and the operator the block
+    preloads into the LDS moves by DMA, every copy waited for on vmcnt in
+    front of the block barrier -- a transfer short enough to be written out
+    by hand as well (`trip_prepared`'s four hops), since the destination has
+    to be values to be checked.  Off, or at the default lanes, where a wave
+    holds several multiplications, it moves as before."""
+    src = _generated(name, amd_async_copies=True, lanes_per_mult=64)
+    lines = src.splitlines()
+    dma = [i for i, l in enumerate(lines) if 'global_load_lds(' in l]
+    wait = next(i for i, l in enumerate(lines)
+                if '__builtin_amdgcn_s_waitcnt(3952);' in l)
+    barrier = next(i for i in range(wait, len(lines))
+                   if '__syncthreads();' in lines[i])
+    assert dma and max(dma) < wait < barrier
+    assert 'cuda_pipeline' not in src
+    for plain in (_generated(name, lanes_per_mult=64),
+                  _generated(name, amd_async_copies=True)):
+        assert 'global_load_lds' not in plain and 's_waitcnt' not in plain
+
+
+@pytest.mark.parametrize('arch', ['gfx90a', 'gfx942', 'gfx950'])
+def test_the_preload_compiles_to_the_dma_and_its_wait(arch, tmp_path):
+    """Read off the instructions: the copies are the DMA's, and the wait
+    in front of the barrier drains vmcnt."""
+    src = _generated('trip_prepared', arch, amd_async_copies=True,
+                     lanes_per_mult=64)
+    asm = _assemble('#include "tensorforge_device/hip.h"\n' + src, arch,
+                    tmp_path)
+    dma = [i for i, ins in enumerate(asm)
+           if re.match(r'global_load_(lds_)?dword\b.*', ins)
+           and (ins.startswith('global_load_lds') or ins.endswith(' lds'))]
+    barrier = asm.index('s_barrier')
+    assert len(dma) == 4 and max(dma) < barrier
+    assert any(re.match(r's_waitcnt vmcnt\(0\)', ins)
+               for ins in asm[max(dma):barrier])
+
+
+def test_the_compiler_keeps_the_copies_and_the_count(tmp_path):
+    """The body of three copies and a load into registers, compiled: the
+    copies stay three, and the first wait is no laxer than written.  (Where
+    the load goes is the compiler's: ROCm 7.2 issues it in front of the
+    last copy, behind which it was written -- why a count may not include
+    it.)"""
+    ctx, body = _dma_body(copies=3, extra=lambda b, g, lane:
+                          b.load_async(g, lane))
+    _, lines = _dma_emit(ctx, body)
+    keep = [l for l in lines if not re.match(r'^float m\d+\[', l)]
+    src = ('#include "tensorforge_device/hip.h"\n'
+           '__global__ void __launch_bounds__(64) k(float *__restrict__ m0, '
+           'float *__restrict__ m1) {\n  extern __shared__ float blk[];\n'
+           + ''.join(f'  {l}\n' for l in keep) + '}\n')
+    asm = _assemble(src, 'gfx942', tmp_path)
+    vmem = [ins for ins in asm if re.match(r'global_', ins)]
+    kinds = ['dma' if ins.startswith('global_load_lds') else
+             'load' if ins.startswith('global_load') else 'store'
+             for ins in vmem]
+    assert kinds.count('dma') == 3 and kinds.count('load') == 1
+    first = next(ins for ins in asm if ins.startswith('s_waitcnt vmcnt'))
+    assert int(re.search(r'vmcnt\((\d+)\)', first).group(1)) <= 2

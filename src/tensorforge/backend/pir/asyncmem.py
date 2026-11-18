@@ -26,6 +26,13 @@ The class a transfer is counted in is its engine's (`engines.counter_of`):
 what closes into groups (`cp.async`), what a counter counts one operation at
 a time (a register load, AMD's LDS-DMA), and what completes on a barrier.
 
+A wait TF writes on a counter itself (`wait.counter`, AMD's LDS-DMA) gets a
+third count, its `count`: the units issued behind the one it names that are
+certainly instructions of their own when it runs (`engines.one_to_one`) --
+not the loads into registers `prior_unified` counts as well, which the
+compiler moves across a copy, merges and drops, so that a count including
+them can exceed what is in flight (`_counted`).
+
 On the copy class the counted unit is not the copy but the *group*, and a
 group is closed by a `commit.async`.  That is why the commit is a statement
 here rather than a line the emitter appends to each copy: `cp.async.commit_group`
@@ -94,6 +101,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from . import engines
 from .core import Effect, Op, Stmt, TokenType, Value, retires, walk, walk_stmts
 
 
@@ -109,6 +117,11 @@ class _Unit(NamedTuple):
     tokens: frozenset
     cls: str
     exact: bool = True
+    #: Whether every wave issues it as one instruction a counter certainly
+    #: counts (`engines.one_to_one`, and no predicate): what a wait written
+    #: on that counter may count among the operations behind the one it
+    #: waits for.
+    pinned: bool = False
 
     @property
     def ops(self) -> int:
@@ -411,7 +424,8 @@ def _sched(body: Tuple[Stmt, ...], state: _State,
             # committed; a register load has no group and is one on its own.
             if s.counter != 'copy':
                 state.outstanding.append(
-                    _Unit(frozenset({s.target[0].id}), s.counter))
+                    _Unit(frozenset({s.target[0].id}), s.counter,
+                          pinned=_pinned(s)))
             out.append(s)
             continue
 
@@ -484,6 +498,35 @@ def _alters_flight(regions) -> bool:
     return False
 
 
+def _pinned(s: Stmt) -> bool:
+    """Whether a wait may count the transfer `s` behind the one it waits
+    for: one instruction the compiler issues as written (`engines.
+    one_to_one`), issued by every lane's wave -- a predicated one is
+    branched around by a wave none of whose lanes take it, and a count that
+    includes it is one too many there."""
+    return s.predicate is None and engines.one_to_one(s.attr('engine'))
+
+
+def _counted(s: Stmt, prior: int, unified: int, pinned: int,
+             cls: str) -> Stmt:
+    """`s` with the counts `schedule_async` derived for it.
+
+    A wait written on its counter (`engines.wait_counter`) waits down to
+    `pinned`: the transfers behind the one it names that the counter
+    certainly counts.  Not `unified`, which counts the loads into registers
+    as well -- the compiler moves those across a copy, merges two into one
+    and drops a dead one, and a count larger than what is in flight lets
+    the wait return before the copy has landed.  Fewer is only slower: the
+    counter retires in issue order, so waiting for more of what was issued
+    behind the copy waits for the copy all the same.  It keeps its counter,
+    which is the hardware's and not the class.
+    """
+    s = s.with_attr('prior', prior).with_attr('prior_unified', unified)
+    if s.op == Op.WAIT_COUNTER:
+        return s.with_attr('count', pinned)
+    return s.with_attr('counter', cls)
+
+
 def _sched_wait(s: Stmt, state: _State, diag: List[str]) -> Stmt:
     # A wait may name several tokens: the hops of one macro copy are retired
     # together, and naming them is how `check_tokens` sees that.  The count is
@@ -503,21 +546,20 @@ def _sched_wait(s: Stmt, state: _State, diag: List[str]) -> Stmt:
 
     if tok is None:                         # explicit full drain
         state.drain()
-        return (s.with_attr('prior', 0).with_attr('prior_unified', 0)
-                 .with_attr('counter', 'all'))
+        return _counted(s, 0, 0, 0, 'all')
 
     idx = state.index_of(tok.id) if state.known else -1
     if idx < 0:
         if state.known:
             diag.append(f'wait: %{tok} is not in flight at this point')
         state.drain()
-        return (s.with_attr('prior', 0).with_attr('prior_unified', 0)
-                 .with_attr('counter', 'all'))
+        return _counted(s, 0, 0, 0, 'all')
 
     cls = state.outstanding[idx].cls
     after = state.outstanding[idx + 1:]
     prior = sum(1 for u in after if u.cls == cls)
     unified = sum(u.ops for u in after)
+    pinned = sum(1 for u in after if u.pinned)
 
     # Retire the unit and everything issued before it *in its own class*.  A
     # unified counter also retires the other class, but leaving those entries
@@ -526,9 +568,7 @@ def _sched_wait(s: Stmt, state: _State, diag: List[str]) -> Stmt:
     state.outstanding = ([u for u in state.outstanding[:idx] if u.cls != cls]
                          + after)
 
-    return (s.with_attr('prior', prior)
-             .with_attr('prior_unified', unified)
-             .with_attr('counter', cls))
+    return _counted(s, prior, unified, pinned, cls)
 
 
 def _sched_for(s: Stmt, state: _State, diag: List[str]) -> Stmt:

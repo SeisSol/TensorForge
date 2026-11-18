@@ -429,7 +429,7 @@ def _staged(loop: Stmt, scratch, report: Optional[List[str]], threads: int,
             source = copy.op('add', INDEX, start, within, hint='hop')
             tokens.append(copy.copy_async(window, operand, dst_index=(at,),
                                           src_index=(source,), elems=1,
-                                          hint='shard'))
+                                          threads=threads, hint='shard'))
         copy.wait(*tokens)
         # Read through the operand as its loads were: against the buffer
         # they named, which this body knows the binding to stand for.

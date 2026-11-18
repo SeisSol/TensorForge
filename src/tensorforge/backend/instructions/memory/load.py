@@ -170,7 +170,10 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     #: Whether the transfer is a `copy.async` where it can be one.  Where it
     #: cannot -- a source that is not a value of the body it is issued in --
     #: it moves its bytes with ordinary loads.
-    self._use_cuda_memcpy = (self._context.target.async_staging()
+    self._use_cuda_memcpy = (self._context.target.async_staging(
+                                 self._context.get_user_options(),
+                                 self._num_threads,
+                                 self._dest.get_fptype().size())
                              and not self._no_memcpy)
     #: tokens issued by this transfer, for the `LoadWait` that retires them
     self._tokens = []
@@ -228,6 +231,14 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     proven = (self._use_cuda_memcpy
               or not self._context.target.relaxed_vectors)
     limit = min(16, self._src.linear_align_bytes()) if proven else 16
+    sizes = self._context.target.copy_async_sizes()
+    if self._use_cuda_memcpy and sizes:
+      # And by the widest copy the target moves a lane at once: sixteen
+      # bytes of `cp.async`, four of AMD's LDS-DMA as TF issues it
+      # (`Target.copy_async_sizes`) -- a wider hop would take every copy of
+      # the body back to loads and stores (`Emitter._decide_async`).  A
+      # device without the copy has none, and lowers them all that way.
+      limit = min(limit, max(sizes))
     return [m for m in [4, 2, 1] if m * elem <= limit]
 
   def _swizzle_cap(self, writer) -> int:
@@ -852,7 +863,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
                        _z=zfill):
           self._tokens.append(writer.copy_async(
               _d, _s, dst_index=(lhs,), src_index=(rhs,), elems=_n,
-              zfill=_z))
+              zfill=_z, threads=self._lanes))
       elif structured:
         # No async engine, so the transfer is a load and a store, spelled in
         # a way every pass can read.
@@ -916,7 +927,13 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
       else:
         indexwrapper = lambda x: f'((({x}) / {linscale[0]}) * {linscale[1]} + (({x}) % {linscale[0]}))'
 
-      if (end - start) / increment > self._manual_unroll_threshold:
+      # AMD's LDS-DMA writes one destination only, the lane past a base its
+      # wave shares, and the emitter checks every copy for it -- which takes
+      # an address of values (`engines.lane_linear`), so a short transfer
+      # takes the counted loop there too rather than a line of text.
+      dma = (self._use_cuda_memcpy
+             and self._context.target.hw.vendor == 'amd')
+      if (end - start) / increment > self._manual_unroll_threshold or dma:
         # A counted loop rather than a line of text, where every term of
         # both addresses is a value.  The text form is an `Op.RAWBLOCK`:
         # unmovable by construction, so `schedule.touches` answers `None`
@@ -1054,8 +1071,10 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
 
   def get_headers(self) -> List[str]:
     # The structured route lowers to the `__pipeline_*` primitives, whose
-    # header carries no architecture floor.
-    return ['cuda_pipeline.h'] if self._use_cuda_memcpy else []
+    # header carries no architecture floor -- on NVIDIA.  AMD's copy is a
+    # builtin of the compiler's (`HipLexic.copy_async`).
+    nvidia = self._context.target.hw.vendor == 'nvidia'
+    return ['cuda_pipeline.h'] if self._use_cuda_memcpy and nvidia else []
 
   def __str__(self):
     return f'{self._dest.name} = load{{g>s}}({self._src.name}[{", ".join(str(p) for p in self._permute)}])'

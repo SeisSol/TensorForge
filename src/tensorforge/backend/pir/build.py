@@ -260,6 +260,9 @@ class IRBuilder:
         #: token id -> the mbarrier the bulk copy that issued it completes on
         #: (`copy_bulk`), which its wait waits on
         self._token_bulk: Dict[int, Value] = {}
+        #: token id -> the engine the copy that issued it goes through
+        #: (`copy_async`), whose counter its wait may be written on
+        self._token_engine: Dict[int, str] = {}
         #: What goes ahead of everything else in the body (`bulk_channel`).
         self._prologue: List[Stmt] = []
         #: window name -> the mbarrier its bulk copies complete on in this
@@ -1496,6 +1499,7 @@ class IRBuilder:
                    dst_space: Optional[MemSpace] = None,
                    src_space: Optional[MemSpace] = None,
                    predicate: Optional[Value] = None,
+                   threads: Optional[int] = None,
                    hint: str = 'cp') -> Value:
         """Issue an asynchronous copy ``src -> dst``; returns its token.
 
@@ -1532,6 +1536,9 @@ class IRBuilder:
         copy_engine`: `cp.async`, or AMD's LDS-DMA), the kind of completion
         its token reports, the bytes a lane moves and the cache policy that
         width gives it -- where `cp.async` moves sixteen bytes past L1.
+        `threads` are the lanes of the multiplication issuing it, which an
+        engine whose destination is one base a wave has to know of
+        (`engines.lds_dma_refusal`).
         """
         dst_space = dst_space if dst_space is not None else self._space_of(dst)
         src_space = src_space if src_space is not None else self._space_of(src)
@@ -1568,6 +1575,8 @@ class IRBuilder:
         cache = engines.copy_cache(engine, width)
         if cache is not None:
             attrs += (('cache', cache),)
+        if threads is not None and engines.waited_on(engine) is not None:
+            attrs += (('threads', int(threads)),)
         self._emit_op(Op.COPY_ASYNC, (tok,),
                       (dst, src) + tuple(dst_index) + tuple(src_index),
                       pure=False, movable=True, predicate=predicate,
@@ -1576,6 +1585,7 @@ class IRBuilder:
                       attrs=attrs + ((('zfill', zfill),) if zfill else ()))
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
+        self._token_engine[tok.id] = engine
         return tok
 
     def bulk_channel(self, window: str, leader: str,
@@ -1604,6 +1614,7 @@ class IRBuilder:
             return found
         if self._arena is None:
             return None
+        start = len(self._prologue)
         b = self.scratch()
         slots = max(1, 8 // self._fptype.size())
         barrier = b.alloc(self._fptype, (slots,), MemSpace.SHARED,
@@ -1617,6 +1628,16 @@ class IRBuilder:
                                        extern=f'{window}_bulk'))
         b.barrier(participants, threads=threads)
         self._prologue += list(b.finish())
+
+        def undo():
+            # Set up by an attempt that is discarded (`speculative`): its
+            # storage's number and the object's go back to be handed out
+            # again (`_rollback`), so the setup goes with them -- left
+            # behind, it would set up storage the next attempt numbers as
+            # something else, and hand that attempt a channel it never made.
+            self._bulk_cursors.pop(window, None)
+            del self._prologue[start:]
+        self.on_rollback(undo)
         return obj
 
     def copy_bulk(self, dst: Any, src: Any, *, barrier: Value,
@@ -1767,7 +1788,10 @@ class IRBuilder:
         (`engines.wait_phase`): the copy completes on the barrier, and every
         thread that waits on it sees the bytes.  It carries what the copy
         touches as this one would, and every pass that pairs issues with
-        their waits takes it for one (`core.retires`).
+        their waits takes it for one (`core.retires`).  So are the tokens of
+        a copy whose engine TF waits for on a counter itself, AMD's LDS-DMA:
+        by the counter's wait (`engines.wait_counter`), whose count
+        `schedule_async` derives as it derives ``prior``.
         """
         tokens = ((token,) + also) if token is not None else ()
         if not tokens:
@@ -1789,6 +1813,13 @@ class IRBuilder:
         barrier = self._token_bulk.get(tokens[0].id) if tokens else None
         if barrier is not None:
             return self.emit(engines.wait_phase(barrier, tokens, accesses))
+        # A copy whose waits are written on its counter: the counter's wait,
+        # which consumes the tokens as this one would.
+        engine = self._token_engine.get(tokens[0].id) if tokens else None
+        counter = engines.waited_on(engine)
+        if counter is not None:
+            return self.emit(engines.wait_counter(counter, 0, tokens,
+                                                  accesses, engine=engine))
         stmt = self._emit_op(Op.WAIT, results, tokens,
                              pure=False, movable=True,
                              effect=Effect.READ | Effect.WRITE | Effect.ASYNC,

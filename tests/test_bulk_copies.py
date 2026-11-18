@@ -273,6 +273,30 @@ def test_objects_are_numbered_apart_from_values():
     assert first.next_object_index() == -3
 
 
+def test_a_discarded_attempt_takes_its_channel_with_it():
+    """A channel set up inside an attempt that is discarded goes with it:
+    the numbers of its storage and its object are handed out again
+    (`speculative`), so a setup left behind would be the setup of storage
+    numbered as something else -- and the next attempt would find a channel
+    it never made.  It sets up its own, once, ahead of everything."""
+    from tensorforge.backend.writer import VarAlloc
+    names = VarAlloc()
+    b = IRBuilder(fptype=F32, arena='shrMem', alloc=names)
+    with b.speculative() as spec:
+        lost = b.bulk_channel('s0', 'threadIdx.x == 0', threads=32)
+        spec.discard()
+    assert lost is not None
+    # The number the lost storage had, handed out again.
+    b.alloc(F32, (4,), MemSpace.SHARED, hint='other', extern='other')
+    kept = b.bulk_channel('s0', 'threadIdx.x == 0', threads=32)
+    body = b.finish()
+    defined = [v.id for s in body for v in s.target]
+    assert len(defined) == len(set(defined)), defined
+    assert [s.op for s in body[:3]] == [Op.ALLOC, Op.SYNC_INIT, Op.BARRIER]
+    assert body[1].target == (kept,) and kept.id == lost.id
+    assert b.bulk_channel('s0', 'threadIdx.x == 0', threads=32) is kept
+
+
 def test_a_body_without_an_arena_has_no_channel():
     assert IRBuilder(fptype=F32).bulk_channel('s0', 'true') is None
 
