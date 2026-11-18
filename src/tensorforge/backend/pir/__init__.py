@@ -36,6 +36,7 @@ from .passes import (check_barrier_budget, cluster_loads, flatten_scopes,
                      substitute, verify)
 from .barriers import Arena
 from .blocks import RegisterBlocks
+from .priority import set_priority
 from .pipeline import (Atomics, BodyContext, CarryTrips, Forward, GroupRows,
                        KeepOwn, MoveLoads, PlaceBarriers, PlaceBuffers,
                        Prefetch, ShardLoads, WrapLoads, optimize,

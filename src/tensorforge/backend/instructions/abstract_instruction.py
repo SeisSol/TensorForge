@@ -940,6 +940,10 @@ class AbstractInstruction(ABC):
                         shards=held, rows=rows, carry=carried,
                         atomics=added, forward=forwarded,
                         early_forward=early, own=own, where='shared body')
+    setprio = getattr(options, 'amd_setprio', '') or ''
+    if setprio and context.target.backend == 'hip':
+      # Behind every pass that moves a statement (`pir.priority`).
+      body = pir.set_priority(body, setprio)
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)

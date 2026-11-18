@@ -1262,6 +1262,14 @@ declare('forward_memory',
             '(`pir.forward`); an element\'s mask is taken to hold where the '
             'body keeps its contract (`elementmask`).')
 
+declare('amd_setprio',
+        default='',
+        env='TF_AMD_SETPRIO',
+        doc='On AMD, wave priorities (`s_setprio`) in the kernel body '
+            '(`pir.priority`): `loads` raises a wave while it issues a '
+            'transfer, `compute` while it does not, `alternate` every other '
+            'wave for the whole kernel; empty for none.')
+
 declare('pin_loads',
         rule=lambda target: target.prefs.pin_loads,
         parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
