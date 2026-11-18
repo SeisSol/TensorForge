@@ -25,6 +25,7 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    collect_effect, deep_uses, def_use, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens
 from . import engines
+from .buffers import verify_buffer
 from .transfers import tagged
 
 
@@ -531,6 +532,11 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         elif s.op in (Op.LOAD, Op.STORE):
             if not s.accesses:
                 diag.append(f'{s.op}: must declare at least one access')
+            if s.attr('engine') == 'buffer':
+                diag.extend(verify_buffer(s))
+
+        elif s.op == Op.RESOURCE:
+            diag.extend(verify_buffer(s))
 
         elif s.op in _INTEGER_ONLY:
             for x in list(s.args) + list(s.target):

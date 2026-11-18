@@ -1309,96 +1309,122 @@ __device__ __forceinline__ void transpose4x4b32Fused(T &w1, T &w2, T &w3, T &w4,
 #endif
 }
 
-/*
-// forward declares for structured buffer accessors
-// (for "canonical" float4 loads)
+// Buffer resources (`pir.buffers`, `Options.buffer_transfers`).
+//
+// A buffer instruction addresses global memory through a resource -- a base,
+// a size in bytes and a word of flags, in four scalar registers -- and a
+// 32-bit offset a lane.  An access at or past the size reads zero and writes
+// nothing, which is what a guard becomes here: the offset of a lane the
+// predicate holds off is moved 2^31 further, past every size a resource is
+// given.  Added rather than selected, so that the constant part of an offset
+// still folds into the instruction (`offset:`) and the accesses under one
+// guard share one `v_cndmask`.
+//
+// Raw resources (stride 0): the size counts bytes, and nothing is swizzled.
+// The flags are composable_kernel's (`CK_BUFFER_RESOURCE_3RD_DWORD`): a
+// 32-bit data format, and from gfx10 on the raw range check (`OOB_SELECT`
+// 3).  Run on gfx1150 and compiled for gfx90a, gfx942, gfx950 and gfx1250;
+// the gfx12 word is CK's and has not run on a device.
+//
+// Behind the platform: the resource type is AMDGPU's, and the host pass of
+// an AMD compile knows it as well.
+#if defined(__HIP_PLATFORM_AMD__)
 
-using OldBufferRsrc = VectorT<std::int32_t, 4>;
+using BufferResource = __amdgpu_buffer_rsrc_t;
 
-extern "C" {
+/// What a guard adds to the offset of a lane it holds off: past every size a
+/// resource is given, which is less than 2 GiB.
+constexpr std::uint32_t BufferOutOfRange = 0x80000000u;
 
-__device__ int
-llvm_struct_buffer_load_i32(OldBufferRsrc, int, int, int,
-                            int) __asm("llvm.amdgcn.struct.buffer.load.i32");
-__device__ VectorT<int, 2> llvm_struct_buffer_load_v2i32(
-    OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.load.v2i32");
-__device__ VectorT<int, 3> llvm_struct_buffer_load_v3i32(
-    OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.load.v3i32");
-__device__ VectorT<int, 4> llvm_struct_buffer_load_v4i32(
-    OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.load.v4i32");
+/// The resource over the `bytes` bytes from `base`.  The base is the wave's:
+/// one that differs between the lanes is read a lane at a time, in a loop
+/// the compiler builds around every access through the resource.  A
+/// template over the pointer, which is in the global space or in the
+/// constant one.
+template <typename Pointer>
+__device__ __forceinline__ BufferResource bufferResource(Pointer base,
+                                                         std::int32_t bytes) {
+#if defined(__GFX9__)
+  constexpr std::int32_t Flags = 0x00020000;
+#elif defined(__GFX10__)
+  constexpr std::int32_t Flags = 0x31014000;
+#elif defined(__GFX11__)
+  constexpr std::int32_t Flags = 0x31004000;
+#elif defined(__GFX12__)
+  // composable_kernel's word for gfx12, unverified on a device.
+  constexpr std::int32_t Flags = 0x31004000;
+#else
+  // The host pass parses this and runs none of it; a device compile for an
+  // architecture without a word stops here.
+#if defined(__HIP_DEVICE_COMPILE__)
+  static_assert(sizeof(Pointer) == 0,
+                "no buffer resource flags for this architecture");
+#endif
+  constexpr std::int32_t Flags = 0;
+#endif
+  return __builtin_amdgcn_make_buffer_rsrc((void *)base, 0, bytes, Flags);
+}
 
-__device__ float
-llvm_struct_buffer_load_f32(OldBufferRsrc, int, int, int,
-                            int) __asm("llvm.amdgcn.struct.buffer.load.f32");
-__device__ VectorT<float, 2> llvm_struct_buffer_load_v2f32(
-    OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.load.v2f32");
-__device__ VectorT<float, 3> llvm_struct_buffer_load_v3f32(
-    OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.load.v3f32");
-__device__ VectorT<float, 4> llvm_struct_buffer_load_v4f32(
-    OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.load.v4f32");
+/// What `N` elements of `T` are as a value: the element, or a vector of them.
+template <typename T, std::size_t N>
+using BufferValue = std::conditional_t<N == 1, T, VectorT<T, N>>;
 
-__device__ int
-llvm_struct_buffer_load_u8(OldBufferRsrc, int, int, int,
-                           int) __asm("llvm.amdgcn.struct.buffer.load.i8");
-__device__ int
-llvm_struct_buffer_load_u16(OldBufferRsrc, int, int, int,
-                            int) __asm("llvm.amdgcn.struct.buffer.load.i16");
+/// The byte offset of element `index`, past the resource where `keep` is
+/// false.
+template <typename T>
+__device__ __forceinline__ std::uint32_t bufferOffset(std::int32_t index,
+                                                      bool keep) {
+  return static_cast<std::uint32_t>(index) *
+             static_cast<std::uint32_t>(sizeof(T)) +
+         (keep ? 0u : BufferOutOfRange);
+}
 
-__device__ void
-llvm_struct_buffer_store_i32(int, OldBufferRsrc, int, int, int,
-                             int) __asm("llvm.amdgcn.struct.buffer.store.i32");
-__device__ void llvm_struct_buffer_store_v4i32(
-    VectorT<int, 4>, OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.store.v4i32");
-__device__ void
-llvm_struct_buffer_store_f32(float, OldBufferRsrc, int, int, int,
-                             int) __asm("llvm.amdgcn.struct.buffer.store.f32");
-__device__ void llvm_struct_buffer_store_v4f32(
-    VectorT<float, 4>, OldBufferRsrc, int, int, int,
-    int) __asm("llvm.amdgcn.struct.buffer.store.v4f32");
+/// `N` elements of `T` from element `index` of `resource`, or zero where
+/// `keep` is false.  The words come back as integers, and are reinterpreted:
+/// assigned, they would be converted.
+template <typename T, std::size_t N = 1>
+__device__ __forceinline__ BufferValue<T, N>
+bufferLoad(BufferResource resource, std::int32_t index, bool keep = true) {
+  using V = BufferValue<T, N>;
+  const std::uint32_t offset = bufferOffset<T>(index, keep);
+  if constexpr (sizeof(V) == 4) {
+    return __builtin_bit_cast(
+        V, __builtin_amdgcn_raw_buffer_load_b32(resource, offset, 0, 0));
+  } else if constexpr (sizeof(V) == 8) {
+    return __builtin_bit_cast(
+        V, __builtin_amdgcn_raw_buffer_load_b64(resource, offset, 0, 0));
+  } else {
+    static_assert(sizeof(V) == 16, "a buffer access moves 4, 8 or 16 bytes");
+    return __builtin_bit_cast(
+        V, __builtin_amdgcn_raw_buffer_load_b128(resource, offset, 0, 0));
+  }
+}
 
-} // extern "C"
-*/
-/*
+/// `value` into `N` elements of `T` from element `index` of `resource`, or
+/// nowhere where `keep` is false.  A number of another type converts to `T`
+/// first, as an assignment converts it.
+template <typename T, std::size_t N = 1>
+__device__ __forceinline__ void
+bufferStore(BufferResource resource, std::int32_t index,
+            BufferValue<T, N> value, bool keep = true) {
+  using V = BufferValue<T, N>;
+  const std::uint32_t offset = bufferOffset<T>(index, keep);
+  if constexpr (sizeof(V) == 4) {
+    __builtin_amdgcn_raw_buffer_store_b32(
+        __builtin_bit_cast(std::uint32_t, value), resource, offset, 0, 0);
+  } else if constexpr (sizeof(V) == 8) {
+    using Words = std::uint32_t __attribute__((ext_vector_type(2)));
+    __builtin_amdgcn_raw_buffer_store_b64(__builtin_bit_cast(Words, value),
+                                          resource, offset, 0, 0);
+  } else {
+    static_assert(sizeof(V) == 16, "a buffer access moves 4, 8 or 16 bytes");
+    using Words = std::uint32_t __attribute__((ext_vector_type(4)));
+    __builtin_amdgcn_raw_buffer_store_b128(__builtin_bit_cast(Words, value),
+                                           resource, offset, 0, 0);
+  }
+}
 
-enum BufferHints {
-
-  Swizzled = 1 << 3
-};
-
-template<typename T>
-class Buffer {
-public:
-    Buffer() {
-        descriptor = __builtin_amdgcn_make_buffer_rsrc();
-    }
-
-    template<typename T, BufferHints Hints>
-    T load(std::size_t offset) {
-        if constexpr (sizeof(T) == 16) {
-            __builtin_amdgcn_raw_buffer_store_b128
-        }
-    }
-
-    template<typename T>
-    store(std::size_t offset, const T& value) {
-
-    }
-
-    template<typename T>
-    T atomic() {
-
-    }
-private:
-    __amdgpu_buffer_rsrc_t descriptor;
-};
-*/
+#endif // __HIP_PLATFORM_AMD__
 
 __device__ __forceinline__ std::tuple<short, short, short>
 splitFloatBF16(float input) {

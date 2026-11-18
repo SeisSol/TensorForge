@@ -363,6 +363,35 @@ class HipLexic(CudaLexic):
     else:
       return f'{rhs}'
 
+  # The helpers of `hip.h` (`tensorforge::bufferLoad`): the element type and
+  # the count are template arguments, since the instruction is chosen by the
+  # bytes and the words it returns are reinterpreted as the element.
+
+  def buffer_resource_type(self):
+    if self._underlying_hardware != 'amd':
+      return super().buffer_resource_type()
+    return 'tensorforge::BufferResource'
+
+  def buffer_resource(self, base, nbytes):
+    if self._underlying_hardware != 'amd':
+      return super().buffer_resource(base, nbytes)
+    return f'tensorforge::bufferResource({base}, {nbytes})'
+
+  def buffer_load(self, resource, index, *, datatype, length=1, keep=None):
+    if self._underlying_hardware != 'amd':
+      return super().buffer_load(resource, index, datatype=datatype,
+                                 length=length, keep=keep)
+    return (f'tensorforge::bufferLoad<{_buffer_args(datatype, length)}>('
+            f'{resource}, {index}{_kept(keep)})')
+
+  def buffer_store(self, resource, index, value, *, datatype, length=1,
+                   keep=None):
+    if self._underlying_hardware != 'amd':
+      return super().buffer_store(resource, index, value, datatype=datatype,
+                                  length=length, keep=keep)
+    return (f'tensorforge::bufferStore<{_buffer_args(datatype, length)}>('
+            f'{resource}, {index}, {value}{_kept(keep)});')
+
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """The intrinsic where this target has one, `__hip_atomic_fetch_add` else.
 
@@ -420,3 +449,14 @@ def _async_to_lds(dst, src, nbytes):
   return (f'__builtin_amdgcn_global_load_async_to_lds_b{8 * nbytes}('
           f'(__attribute__((address_space(1))) {elem}*)({src}), '
           f'(__attribute__((address_space(3))) {elem}*)({dst}), 0, 0);')
+
+def _buffer_args(datatype, length):
+  """`T` or `T, N`: the element of the buffer and how many an access moves."""
+  elem = datatype.ctype()
+  return elem if length == 1 else f'{elem}, {length}'
+
+
+def _kept(keep):
+  """The guard of a buffer access, as its last argument -- none for one
+  every lane makes."""
+  return '' if keep is None else f', {keep}'

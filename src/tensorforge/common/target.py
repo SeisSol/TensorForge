@@ -739,6 +739,13 @@ class Target:
             return self.hw.vendor == 'amd'
         return False
 
+    def buffer_resources(self) -> bool:
+        """Whether global memory can be read and written through a buffer
+        resource (`pir.buffers`, `Options.buffer_transfers`): HIP on AMD,
+        which spells the resource and the accesses through `hip.h`.  HIP
+        compiles for NVIDIA as well, where neither exists."""
+        return self.backend == 'hip' and self.hw.vendor == 'amd'
+
     def native_atomic(self, op, datatype: Datatype, length: int = 1) -> bool:
         """Whether an atomic update of `length` x `datatype` is one
         instruction.

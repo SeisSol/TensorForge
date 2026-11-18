@@ -687,8 +687,7 @@ def test_every_transfer_engine_completes_one_way_and_is_counted_by_it():
     """The class a wait counts a transfer in follows from how its engine
     completes: commit groups, a counter, a barrier."""
     assert set(engines.TRANSFER_ENGINES) == {
-        'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load',
-        'async_lds'}
+        'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load', 'buffer', 'async_lds'}
     assert engines.counter_of('cp_async') == 'copy'
     assert engines.counter_of('lds_dma') == 'load'
     assert engines.counter_of('load') == 'load'

@@ -1319,6 +1319,21 @@ declare('amd_setprio',
             'transfer, `compute` while it does not, `alternate` every other '
             'wave for the whole kernel; empty for none.')
 
+declare('buffer_transfers',
+        default=False,
+        parse=parse_bool,
+        doc='On AMD, read and write global memory through buffer instructions '
+            'where the base is the same on every lane of the wave -- a '
+            'batch-constant operator, an element\'s binding where a '
+            'multiplication is a whole number of waves -- and the access 4, '
+            '8 or 16 bytes of 32- or 64-bit numbers with no cache hint '
+            '(`pir.buffers`).  A buffer access past its resource reads zero '
+            'and writes nothing, so a guard is an offset past it: no select, '
+            'no clamped address and no branch around a store.  Off until '
+            'measured: the guarded loads of 48 kernels patched to this form '
+            'ran 1.6 % faster on MI300A at 64 lanes in the geometric mean, '
+            'from 12.6 % faster to 23.3 % slower (2026-11-06).')
+
 declare('pin_loads',
         rule=lambda target: target.prefs.pin_loads,
         parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
