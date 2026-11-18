@@ -20,10 +20,11 @@ from tensorforge.common.basic_types import Datatype
 
 from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
-                   Participants, Region, ScalarType, Stmt, TokenType, Value,
+                   Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, base_elem, collect_accesses,
                    collect_effect, deep_uses, def_use, walk_stmts, Uniformity)
 from .asyncmem import check_commits, check_tokens
+from . import engines
 from .transfers import tagged
 
 
@@ -175,17 +176,17 @@ def check_barrier_budget(body: Tuple[Stmt, ...], mults_per_block: int,
     `Target.separable_mults`, None for no limit), and one more waits at a
     barrier that does not exist.  The thread-block policy sizes the block to
     that count from a prediction, whether the section will hold a barrier at
-    all; this weighs the count against the barriers the body holds.
+    all; this weighs the count against the objects the body's barriers take
+    (`engines.object_demand`).
     """
     if separable is None or mults_per_block <= separable:
         return []
-    for s in walk_stmts(body):
-        if s.op == Op.BARRIER and s.attr('participants') == Participants.MULT:
-            return [f'a barrier of one multiplication in a block of '
-                    f'{mults_per_block} multiplications, where the target '
-                    f'meets {separable} apart (`Target.separable_mults`): '
-                    f'the multiplications past them wait at a barrier that '
-                    f'does not exist']
+    if engines.object_demand(body, mults_per_block) > separable:
+        return [f'a barrier of one multiplication in a block of '
+                f'{mults_per_block} multiplications, where the target '
+                f'meets {separable} apart (`Target.separable_mults`): '
+                f'the multiplications past them wait at a barrier that '
+                f'does not exist']
     return []
 
 
@@ -352,8 +353,7 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # rendezvous of exactly the threads that agree on the trip count, and
         # therefore fine.
         if s.effect & Effect.BARRIER:
-            scope = s.attr('scope')
-            scope = scope if isinstance(scope, Uniformity) else Uniformity.BLOCK
+            scope = engines.arrival_of(s)
             if reachable_at < scope:
                 diag.append(
                     f'{s.op}: {scope.name.lower()}-wide barrier in a region '
@@ -461,6 +461,9 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         elif s.op == Op.RAWBLOCK:
             if len(s.regions) != 1 or s.text is None:
                 diag.append('rawblock: needs text and exactly one region')
+
+        elif s.op in engines.REGISTRY:
+            diag.extend(engines.verify_engine(s))
 
         elif s.op == Op.DECLARE:
             if len(s.target) != 1 or s.args or s.regions or s.text is not None:
@@ -703,7 +706,7 @@ def _dce_protected(s: Stmt) -> bool:
         # terminate, so whether its body is observable says nothing about
         # whether the loop is.
         return True
-    if s.op == Op.PREFETCH:
+    if s.op in (Op.PREFETCH, Op.SET_PRIORITY):
         # A hint has no result and no side effect, which is precisely the
         # shape the last rule below deletes.  Deleting it is always
         # *correct* -- and always wrong, since a statement whose entire

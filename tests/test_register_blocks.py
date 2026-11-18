@@ -205,15 +205,19 @@ def test_no_access_is_written_out_more_than_unroll_max_times():
 def test_a_fence_stands_between_trips_under_the_explicit_vector_only():
     """vISA's software fence between the copies, where `Options.
     esimd_unroll_fence` asks for one: three for four trips, pinned, and
-    touching no memory a pass models.  SPMD has no such fence to write."""
+    touching no memory a pass models -- a fence of the schedule with the
+    mask it was given (`engines.FenceKind`).  SPMD has no such fence to
+    write."""
+    from tensorforge.backend.pir.engines import FenceKind
     for simd, fences in ((True, 3), (False, 0)):
         b = _builder()
         _columns(b)
         body = unroll_register_loops(b.finish(), b.scratch,
                                      explicit_simd=simd, fence=128)
-        found = [s for s in _ops(body, Op.RAWSTMT) if 'fence' in s.text]
+        found = _ops(body, Op.FENCE)
         assert len(found) == fences
-        assert all(s.text == 'tensorforge::intel_esimd::fence<128>();'
+        assert all(s.attr('kind') is FenceKind.SCHEDULE
+                   and s.attr('mask') == 128
                    and not s.accesses and not s.movable for s in found)
 
 

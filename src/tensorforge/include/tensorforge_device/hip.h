@@ -1537,5 +1537,21 @@ __device__ __forceinline__ void syncNamedBarrier(Barrier *barrier) {
 #endif
 }
 
+/// The first half of `syncNamedBarrier`: the release fence and the signal,
+/// without the wait (`pir.engines`, `ARRIVE`).  A wave that only produces
+/// what the others read arrives here and goes on; the waves that wait meet
+/// at `syncNamedBarrier`, whose signal is their own arrival -- the object
+/// counts every wave of the multiplication either way.
+template <typename Barrier>
+__device__ __forceinline__ void arriveNamedBarrier(Barrier *barrier) {
+#if defined(__gfx1250__) || defined(__gfx1251__)
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup");
+  __builtin_amdgcn_s_barrier_signal_var(barrier, 0);
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static_assert(sizeof(Barrier) == 0,
+                "named barriers exist on gfx1250 and gfx1251 only");
+#endif
+}
+
 } // namespace tensorforge
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_HIP_H_

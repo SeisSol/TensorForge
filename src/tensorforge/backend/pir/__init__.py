@@ -42,12 +42,13 @@ from .pipeline import (Atomics, BodyContext, CarryTrips, Forward, GroupRows,
                        Prefetch, ShardLoads, WrapLoads, optimize,
                        standard_pipeline)
 from .emit import Emitter, emit
+from . import engines
 
 __all__ = [
     'ANY_EFFECT', 'BOOL', 'INDEX', 'SIZE', 'TOKEN', 'Access', 'AliasClass',
     'Arena', 'Atomics', 'BodyContext', 'BufferType', 'CarryTrips', 'Effect',
     'Emitter', 'Forward', 'IRBuilder', 'IRError', 'MemSpace', 'Op', 'Operand',
-    'Region',
+    'Region', 'engines',
     'ScalarType', 'Stmt', 'TokenType', 'Value', 'access_of',
     'accesses_conflict', 'check_barrier_budget', 'check_tokens',
     'collect_accesses', 'collect_effect',

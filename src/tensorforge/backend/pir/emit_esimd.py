@@ -1104,10 +1104,16 @@ class EsimdEmitter(Emitter):
         def ends(x, space) -> bool:
             if self._comment(x):
                 return False
-            if x.op in Op.RAW or x.op in (Op.CALL, Op.COPY_ASYNC, Op.ACCUM):
+            # A fence ends a run as the raw text it replaces did: a run read
+            # as one message would carry the loads behind it across it.
+            if x.op in Op.RAW or x.op in (Op.CALL, Op.COPY_ASYNC, Op.ACCUM,
+                                          Op.FENCE, Op.WAIT_COUNTER,
+                                          Op.SET_PRIORITY):
                 return True
             if space is MemSpace.SHARED and x.op in (Op.BARRIER, Op.WAIT,
-                                                      Op.COMMIT_ASYNC):
+                                                      Op.COMMIT_ASYNC,
+                                                      Op.SYNC_INIT, Op.ARRIVE,
+                                                      Op.WAIT_PHASE):
                 return True
             return False
 

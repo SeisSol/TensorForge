@@ -74,6 +74,7 @@ from typing import (Any, Callable, Dict, FrozenSet, List, Mapping, Optional,
 
 from .core import (AliasClass, BufferType, Effect, MemSpace, Op, Stmt,
                    Uniformity, Value, walk_stmts)
+from .engines import settles
 
 #: The two kinds of shared memory a window is part of: one copy per
 #: multiplication, and one for the whole block.
@@ -93,7 +94,6 @@ _OPAQUE = ('opaque',)
 # `Effect` is an `IntFlag`, and a test on one goes through `enum.Flag` --
 # two orders of magnitude slower than on an int (`core._M_WRITES`).  The
 # walks below test a statement once for every state they carry to it.
-_M_BARRIER = int(Effect.BARRIER)
 _M_READ = int(Effect.READ)
 _M_WRITES = int(Effect.WRITE | Effect.ATOMIC)
 
@@ -189,11 +189,6 @@ class _State:
         return _State({k: v for k, v in self.writes.items() if v[1] == BLOCK},
                       {k: v for k, v in self.cleared.items() if v == BLOCK},
                       {k: v for k, v in self.reads.items() if v[0] == BLOCK})
-
-
-def _scope_of(s: Stmt) -> Uniformity:
-    scope = s.attr('scope')
-    return scope if isinstance(scope, Uniformity) else Uniformity.BLOCK
 
 
 def _overlap(a: Tuple, b: Tuple) -> bool:
@@ -366,8 +361,9 @@ class _Pass:
 
     def transfer(self, s: Stmt, state: _State) -> _State:
         """`state` past a statement without regions."""
-        if int(s.effect) & _M_BARRIER:
-            return state.fence(_scope_of(s))
+        level = settles(s)
+        if level is not None:
+            return state.fence(level)
         if s.op == Op.MARK:
             if s.attr('mark') != 'cleared':
                 return state
@@ -427,8 +423,9 @@ class _Pass:
                     for o in outs[1:]:
                         st = st.merge(o)
                     continue
-                if int(inner.effect) & _M_BARRIER:
-                    st = st.fence(_scope_of(inner))
+                level = settles(inner)
+                if level is not None:
+                    st = st.fence(level)
                     if st.is_empty():
                         return None
                     continue
@@ -470,7 +467,7 @@ class _Pass:
                         merged = merged.merge(o)
                     st = merged.merge(st) if _may_skip(inner) else merged
                     continue
-                if not int(inner.effect) & _M_BARRIER:
+                if settles(inner) is None:
                     if self.conflict(inner, st)[0]:
                         unfenced.add(id(inner))
                 st = self.transfer(inner, st)
@@ -492,7 +489,7 @@ class _Pass:
                 out.append(s)
                 continue
             if not s.regions:
-                if not int(s.effect) & _M_BARRIER:
+                if settles(s) is None:
                     needed, handoff, block = self.conflict(s, state)
                     if needed:
                         stmt, state = self.barrier(handoff, block, state)
@@ -578,7 +575,7 @@ def _count(s: Stmt) -> int:
     n = 0
     for r in s.regions:
         for inner in r.body:
-            if int(inner.effect) & _M_BARRIER:
+            if settles(inner) is not None:
                 n += 1
             if inner.regions:
                 n += _count(inner)

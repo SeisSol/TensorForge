@@ -34,6 +34,19 @@ from tensorforge.generators import stacking
 from .abstract_instruction import AbstractInstruction
 
 
+def _loop_body_fence(writer, text: str) -> None:
+    """The fence at the head of a loop body that the compiler hoists no load
+    across (`Lexic.loop_body_fence`, which says whether the target needs one
+    and what it was spelled as).  A fence of the schedule to the IR
+    (`engines.FenceKind`), which the target writes as the same scheduling
+    barrier; the text, to a writer of text."""
+    if hasattr(writer, 'fence'):
+        from tensorforge.backend.pir.engines import FenceKind
+        writer.fence(FenceKind.SCHEDULE)
+    else:
+        writer(text)
+
+
 class LoopMode(Enum):
     """How the next element is obtained."""
 
@@ -589,11 +602,7 @@ class BatchLoop(AbstractInstruction):
             # out of.
             fence = self._context.target.lexic.loop_body_fence()
             if fence and self._mode is not LoopMode.SINGLE:
-                if hasattr(writer, 'decl_expr'):
-                    # It touches nothing the IR models; it only has to stay.
-                    writer(fence, accesses=())
-                else:
-                    writer(fence)
+                _loop_body_fence(writer, fence)
             self._emit_guarded(writer, list(self._region))
             return
         cond = self._flag_guard(writer)
@@ -1266,7 +1275,7 @@ class BatchLoop(AbstractInstruction):
                     # 76 AGPRs against 232 and 40 for the per-row loop.
                     fence = lexic.loop_body_fence()
                     if fence:
-                        writer(fence, accesses=())
+                        _loop_body_fence(writer, fence)
                     with elementmask.element_mask(active, self._active()), \
                             self._stacked(writer, batch, bound, actives), \
                             self._rows_per_mult(wave > 0):

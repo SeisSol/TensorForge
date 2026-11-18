@@ -2225,10 +2225,23 @@ class Generator:
       raise GenerationError(f'section {index} cannot be emitted: '
                             + '; '.join(found))
 
+  def _mult_object_init(self, objects: int):
+    """The setup of the objects a multiplication of this kernel meets on, one
+    a multiplication of `objects` (`engines.sync_init`), where the target
+    sets them up ahead -- or None where it needs none, which every target
+    but gfx12.5 answers (`Lexic.named_barrier_prologue`)."""
+    from tensorforge.backend.pir import engines
+    from tensorforge.backend.pir.core import Participants
+    target = self._context.target
+    obj = engines.sync_object(Participants.MULT, target.hw.vec_unit_length,
+                              self._num_threads)
+    init = engines.sync_init(obj, objects=objects)
+    return init if engines.lower(init, target).lines else None
+
   def _single_mult_barriers(self, body):
     """`body` with its barriers of one multiplication met at the block's
     barrier, where the block holds that one multiplication and the target
-    meets one only on an object set up ahead (`Lexic.named_barrier_prologue`).
+    meets one only on an object set up ahead (`_mult_object_init`).
 
     The block barrier then meets exactly the same waves -- the spelling every
     AMD target had for them before gfx12.5 -- and asks for no prologue and no
@@ -2238,9 +2251,9 @@ class Generator:
     """
     target = self._context.target
     if (self._section.shr_mem_obj.get_mults_per_block() != 1
-            or not target.lexic.named_barrier_prologue(
-                self._num_threads, 1, target.hw)):
+            or self._mult_object_init(1) is None):
       return body
+    from tensorforge.backend.pir import engines
     from tensorforge.backend.pir.build import barrier_stmt
     from tensorforge.backend.pir.core import Op, Participants
     wave = target.hw.vec_unit_length
@@ -2248,8 +2261,8 @@ class Generator:
     def spell(stmts):
       out, changed = [], False
       for s in stmts:
-        if (s.op == Op.BARRIER
-                and s.attr('participants') == Participants.MULT):
+        obj = engines.object_of(s) if s.op == Op.BARRIER else None
+        if obj is not None and obj.participants == Participants.MULT:
           s = barrier_stmt(Participants.BLOCK, wave,
                            handoff=bool(s.attr('handoff')))
           changed = True
@@ -2263,11 +2276,11 @@ class Generator:
       return tuple(out) if changed else stmts
     return spell(body)
 
-  def _barrier_prologue(self) -> Tuple[str, ...]:
+  def _barrier_prologue(self) -> Tuple['pir.Stmt', ...]:
     """What the kernel opens with where a barrier of one multiplication
-    needs state ahead of its first use (`Lexic.named_barrier_prologue`): on
-    gfx12.5, the barrier objects, one a multiplication of the block, their
-    counts and every wave's membership.
+    needs its object set up ahead of its first use, as a body of its own:
+    on gfx12.5, the setup of the barrier objects, one a multiplication of
+    the block, their counts and every wave's membership (`_mult_object_init`).
 
     Asked of the finished bodies, as `_check_barriers` asks them, and not
     of the prediction the block was sized from: the objects come out of a
@@ -2280,14 +2293,12 @@ class Generator:
     if (self._num_threads <= target.hw.vec_unit_length
             or not target.sync_mult(self._num_threads)):
       return ()
-    from tensorforge.backend.pir.core import Op, Participants, walk_stmts
-    if not any(s.op == Op.BARRIER
-               and s.attr('participants') == Participants.MULT
-               for section in self._sections
-               for s in walk_stmts(section.body)):
+    from tensorforge.backend.pir import engines
+    if not any(obj.per_mult for section in self._sections
+               for obj in engines.objects(section.body)):
       return ()
-    return tuple(target.lexic.named_barrier_prologue(
-        self._num_threads, self._launch.mults_per_block, target.hw))
+    init = self._mult_object_init(self._launch.mults_per_block)
+    return () if init is None else (init,)
 
   def _launch_read(self, section) -> tuple:
     """What the body built for `section` read of the launch, as far as the
@@ -2765,8 +2776,9 @@ class Generator:
       # `tensorforge::literals` rather than in the global namespace.
       writer('using namespace tensorforge::literals;')
       self._write_kernel_meta_data(writer)
-      for line in self._barrier_prologue():
-        writer(line)
+      prologue = self._barrier_prologue()
+      if prologue:
+        pir.emit(prologue, writer, self._context)
 
       for section in self._sections:
         with writer.AnonymousScope():

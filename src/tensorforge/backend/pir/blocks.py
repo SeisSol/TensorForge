@@ -50,6 +50,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 from tensorforge.common.basic_types import Datatype
 
 from .ahead import Clone
+from .engines import FenceKind, fence_stmt
 from .core import (Access, BufferType, MemSpace, Op, ScalarType, Stmt,
                    TokenType, Value, walk_stmts)
 from .passes import substitute
@@ -69,11 +70,20 @@ _IDENTIFIER = re.compile(r'\b[A-Za-z_]\w*\b')
 #: of its body.
 _JUMPS = re.compile(r'\b(?:break|continue|return|goto)\b')
 
-#: vISA's software fence, with the mask `Options.esimd_unroll_fence` gives:
-#: 128, bit 7, is `FENCE_SW` -- no instruction, a barrier to the scheduler
-#: only, so that the loads of the next trip are not hoisted over this one's
-#: uses.
-_FENCE = 'tensorforge::intel_esimd::fence<{}>();'
+#: vISA's software fence, bit 7 of the mask `Options.esimd_unroll_fence`
+#: gives: `FENCE_SW` -- no instruction, a barrier to the scheduler only, so
+#: that the loads of the next trip are not hoisted over this one's uses.  The
+#: other bits order memory.
+_FENCE_SW = 128
+
+
+def _unroll_fence(mask: int) -> Stmt:
+    """The fence between written-out trips: of the schedule where the mask
+    is the software fence alone, of memory as well where it asks for more
+    (`engines.FenceKind`), written with the mask as it was given."""
+    kind = (FenceKind.SCHEDULE if not mask & ~_FENCE_SW
+            else FenceKind.BOTH if mask & _FENCE_SW else FenceKind.MEMORY)
+    return fence_stmt(kind, mask=mask)
 
 
 def _comment(s: Stmt) -> bool:
@@ -526,7 +536,7 @@ def unroll_register_loops(body: Tuple[Stmt, ...], scratch, *,
                        layout=v.layout, quals=v.quals)
 
     taken = {str(s.attr('extern')) for s in seen.walked if s.attr('extern')}
-    text = _FENCE.format(int(fence)) if explicit_simd and fence else None
+    mask = int(fence) if explicit_simd and fence else None
     known = dict(seen.consts)
 
     def holds(s: Stmt) -> bool:
@@ -549,7 +559,7 @@ def unroll_register_loops(body: Tuple[Stmt, ...], scratch, *,
             s = replace(s, regions=tuple(replace(r, body=rewrite(r.body))
                                          for r in s.regions))
             if s.op == Op.FOR and s.induction.id in plan:
-                copies, last = _write_out(s, fresh, taken, scratch, text,
+                copies, last = _write_out(s, fresh, taken, scratch, mask,
                                           known)
                 out.extend(copies)
                 results.update(last)
@@ -561,7 +571,7 @@ def unroll_register_loops(body: Tuple[Stmt, ...], scratch, *,
 
 
 def _write_out(loop: Stmt, fresh: Callable[[Value], Value], taken: set,
-               scratch, fence: Optional[str], known: Dict[int, int]
+               scratch, fence: Optional[int], known: Dict[int, int]
                ) -> Tuple[List[Stmt], Dict[int, Value]]:
     """The copies `loop` is written out as, and its results by what the last
     copy yields -- what it starts from where it has no trip.  `known` is
@@ -577,9 +587,8 @@ def _write_out(loop: Stmt, fresh: Callable[[Value], Value], taken: set,
     for n, k in enumerate(range(lo, hi, step)):
         if n and fence is not None:
             f = scratch()
-            # Touches no memory a pass models: it orders nothing but the
-            # scheduler, and is pinned where it stands.
-            f(fence, accesses=())
+            # Touches no memory a pass models, and is pinned where it stands.
+            f.emit(_unroll_fence(fence))
             out.extend(f.finish())
         c = scratch()
         # A name of its own for each declaration of the trip that has one,

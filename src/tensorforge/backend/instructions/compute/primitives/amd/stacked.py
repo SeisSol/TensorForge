@@ -343,12 +343,12 @@ def _interleave(writer, count: int) -> None:
     instructions rather than ahead of all or behind all of them, which is
     how CK hides them (`__builtin_amdgcn_sched_group_barrier`).  The groups
     are a pattern, not a count the scheduler has to meet: a group it cannot
-    fill stays short."""
+    fill stays short.  Fences of the schedule with a group each
+    (`engines.fence_stmt`), which the target writes as the builtin."""
+    from tensorforge.backend.pir.engines import FenceKind
     for _ in range(count):
-        writer(f'__builtin_amdgcn_sched_group_barrier({SCHED_MFMA}, 1, 0);',
-               accesses=())
-        writer(f'__builtin_amdgcn_sched_group_barrier({SCHED_READS}, 2, 0);',
-               accesses=())
+        writer.fence(FenceKind.SCHEDULE, group=(SCHED_MFMA, 1, 0))
+        writer.fence(FenceKind.SCHEDULE, group=(SCHED_READS, 2, 0))
 
 
 def stacked_plan(shape, n: int, ctx):

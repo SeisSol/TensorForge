@@ -253,16 +253,25 @@ class TokenType:
     def-use edge rather than a side channel.  Carrying a token through a
     ``for`` loop's iter_args is exactly how a double-buffered pipeline is
     expressed: the copy issued in iteration k is waited in iteration k+1.
+
+    ``completes`` is how the operation's completion is observed
+    (`engines.Completion`): a commit group, an mbarrier phase, a hardware
+    counter, or on issue.  None where the issuing statement does not say --
+    every token today; the transfer engines state it.
     """
 
+    completes: Optional[Any] = None
+
     def __repr__(self):
-        return 'token'
+        if self.completes is None:
+            return 'token'
+        return f'token<{self.completes.value}>'
 
 
 TOKEN = TokenType()
 
 
-IRType = Union[ScalarType, BufferType, TokenType]
+IRType = Union[ScalarType, BufferType, TokenType, 'SyncObjectType']
 
 BOOL = ScalarType(Datatype.BOOL)
 INDEX = ScalarType(Datatype.I32)
@@ -965,7 +974,17 @@ class Op:
     LOAD_ASYNC = 'load.async'   # global -> register, ditto
     COMMIT_ASYNC = 'commit.async'   # closes issued copies into one counted group
     WAIT = 'wait'
+    # Synchronization and ordering, each an entry of `engines.REGISTRY`,
+    # which says what the passes may assume of it and how it is written.
+    # `barrier` is the combined form: every participant of its object
+    # arrives and waits.
     BARRIER = 'barrier'
+    SYNC_INIT = 'sync.init'         # set an object up ahead of its first use
+    ARRIVE = 'arrive'               # arrive at an object without waiting
+    WAIT_PHASE = 'wait.phase'       # wait for an object's current phase
+    FENCE = 'fence'                 # order the schedule, memory, or both
+    WAIT_COUNTER = 'wait.counter'   # wait on a hardware completion counter
+    SET_PRIORITY = 'set.priority'   # the wave's issue priority from here on
     CALL = 'call'
     DECLARE = 'declare'     # `Ty name{};` -- a definition with no initializer
     ACCUM = 'accum'         # `target += value;` -- in-place, no result

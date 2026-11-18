@@ -523,7 +523,7 @@ def _matmul(writer, ops, ctx) -> bool:
     IGC keeps the products before and after it, and their loads, out of it."""
     product = _Product(writer, ops, ctx)
     if product.fence is not None:
-        writer(product.fence, accesses=())
+        product.fence_here()
     chain = ops.chain
     if chain is not None and chain.opens:
         product.open_chain()
@@ -532,7 +532,7 @@ def _matmul(writer, ops, ctx) -> bool:
     if chain is not None and chain.closes:
         product.close_chain()
     if product.fence is not None:
-        writer(product.fence, accesses=())
+        product.fence_here()
     return True
 
 
@@ -574,12 +574,21 @@ class _Product:
                        if any(self.live[s, c] for s in range(self.nslots))]
         self.take, self.send = exchange_plan()
         self._anchor_value = None
+        # Where the sub-group has a fence of the schedule the compiler holds
+        # to (`Lexic.pin_fence`): what `fence_here` writes.
         fence = (ctx.target.lexic.pin_fence()
                  if ctx.get_user_options().sycl_dpas_fence else None)
         self.fence = fence[0] if fence is not None else None
         self._b = {}
         self._swapped = {}
         self._lanes = None
+
+    def fence_here(self) -> None:
+        """A fence of the schedule (`engines.FenceKind`): IGC keeps what
+        stands on either side of it there, and the sub-group writes it as its
+        barrier, the one `self.fence` names."""
+        from tensorforge.backend.pir.engines import FenceKind
+        self.writer.fence(FenceKind.SCHEDULE)
 
     # -- what the operator's numbers say ------------------------------------ #
 
@@ -928,7 +937,7 @@ class _Product:
         chunk, aterms, shared = None, None, {}
         for i, (c, s) in enumerate(order):
             if self.fence is not None:
-                w(self.fence, accesses=())
+                self.fence_here()
                 if i + 1 < len(order):
                     read[i + 1] = self.operator(order[i + 1][1],
                                                 order[i + 1][0])

@@ -53,6 +53,7 @@ EQUIV = Path('tools/access_equiv.py')
 ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
 LAYOUT = Path('src/tensorforge/backend/pir/layout_check.py')
 BARRIERS = Path('src/tensorforge/backend/pir/barriers.py')
+ENGINES = Path('src/tensorforge/backend/pir/engines.py')
 WRAP = Path('src/tensorforge/backend/pir/wrap.py')
 AHEAD = Path('src/tensorforge/backend/pir/ahead.py')
 PREFETCH = Path('src/tensorforge/backend/pir/prefetch.py')
@@ -1768,8 +1769,8 @@ GROUPS = {
                    '                                 self._num_threads).participants(),\n',
              '', 1)),
         ('a barrier of one multiplication spelled where it has none',
-         sub(EMIT, '            if sync_mult is not None and not sync_mult(threads):',
-             '            if False:', 1)),
+         sub(ENGINES, '        if sync_mult is not None and not sync_mult(obj.threads):',
+             '        if False:', 1)),
         ('the finished body not weighed against the block',
          sub(GEN, '    self._check_barriers(body, index)\n', '', 1)),
         ('a block of any size taken for one the target meets apart',
@@ -1777,13 +1778,13 @@ GROUPS = {
                      '        return []\n',
              '    return []\n', 1)),
         ("a block barrier taken for a multiplication's",
-         sub(PASSES, "        if s.op == Op.BARRIER and s.attr('participants') == Participants.MULT:",
-             '        if s.op == Op.BARRIER:', 1)),
+         sub(ENGINES, '    if any(obj.per_mult for obj in objects(body)):',
+             '    if any(True for obj in objects(body)):', 1)),
         ('a barrier inside a loop not seen',
-         sub(PASSES, '    for s in walk_stmts(body):\n'
-                     "        if s.op == Op.BARRIER and s.attr('participants')",
-             '    for s in body:\n'
-             "        if s.op == Op.BARRIER and s.attr('participants')", 1)),
+         sub(ENGINES, '    for s in walk_stmts(tuple(body)):\n'
+                      '        if s.op in REGISTRY:',
+             '    for s in tuple(body):\n'
+             '        if s.op in REGISTRY:', 1)),
         ('a fold over every lane taken for one over some',
          sub(CROSSLANE, '        if width >= self._num_threads and not writer._explicit_simd():',
              '        if False:', 1)),
@@ -2649,8 +2650,8 @@ GROUPS = {
         ('the back edge not followed',
          sub(BARRIERS, '            for _ in range(8):', '            for _ in range(1):', 1)),
         ('a barrier already there not counted',
-         sub(BARRIERS, '        if int(s.effect) & _M_BARRIER:\n            return state.fence(_scope_of(s))',
-             '        if int(s.effect) & _M_BARRIER:\n            return state', 1)),
+         sub(BARRIERS, '        if level is not None:\n            return state.fence(level)',
+             '        if level is not None:\n            return state', 1)),
         ('a barrier put inside a block some lanes skip',
          sub(BARRIERS, '            if inner < self.arrival:\n                if needed:',
              '            if False:\n                if needed:', 1)),

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from tensorforge.backend.pir.barriers import BLOCK, MULT, Arena, place_barriers
 from tensorforge.backend.pir.build import IRBuilder, barrier_stmt
+from tensorforge.backend.pir.engines import object_of
 from tensorforge.backend.pir.core import (BOOL, INDEX, MemSpace, Op,
                                           Participants, Uniformity)
 from tensorforge.common.basic_types import Datatype
@@ -190,7 +191,7 @@ def test_the_block_s_memory_is_met_by_a_block_barrier():
     b.load(buf, lane, hint='d')
     found = [s for s in _flatten(_place(b.finish())) if s.op == Op.BARRIER]
     assert len(found) == 1
-    assert found[0].attr('participants') == Participants.BLOCK
+    assert object_of(found[0]).participants == Participants.BLOCK
 
 
 def test_a_statement_that_says_nothing_is_taken_to_touch_everything():

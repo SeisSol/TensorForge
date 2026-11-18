@@ -31,6 +31,7 @@ from .core import (INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
                    Operand, Region, RegisterLayout, ScalarType, Stmt,
                    TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
                    base_elem, base_space, Uniformity, SIZE, StackedAddress)
+from . import engines
 from .transfers import tagged
 
 
@@ -38,16 +39,12 @@ def barrier_stmt(participants: Union[str, Participants], wave: int,
                  threads: Optional[int] = None,
                  handoff: bool = False) -> Stmt:
     """The statement `IRBuilder.barrier` emits, for a pass that inserts one
-    into a body it did not build."""
-    who = _as_participants(participants)
-    level = who.arrival(threads if threads is not None else wave, wave)
-    attrs = (('scope', level), ('participants', who), ('wave', wave))
-    if threads is not None:
-        attrs += (('threads', int(threads)),)
-    if handoff:
-        attrs += (('handoff', True),)
-    return Stmt(op=Op.BARRIER, pure=False, movable=False,
-                effect=Effect.BARRIER, attrs=attrs)
+    into a body it did not build: every participant arrives at the object
+    the participant set and the geometry give (`engines.sync_object`) and
+    waits there."""
+    obj = engines.sync_object(_as_participants(participants), wave,
+                              None if threads is None else int(threads))
+    return engines.barrier(obj, handoff=handoff)
 
 
 def access_of(symbol: Any, kind: Effect) -> Access:
@@ -1727,12 +1724,13 @@ class IRBuilder:
                 handoff: bool = False) -> Stmt:
         """A rendezvous of the threads ``participants`` names.
 
-        Two things travel with the statement, and they answer different
-        questions.  ``participants`` says what the barrier covers in hardware,
-        which is what the emitter turns into an instruction.  ``scope`` -- the
-        attribute this derives -- says who therefore has to arrive, which is
-        what ``verify`` weighs against the region: a barrier at level S inside
-        a construct whose entry is only U-uniform deadlocks unless ``U >= S``,
+        Two things travel with the statement's object (`engines.
+        SyncObjectType`), and they answer different questions.
+        ``participants`` says what the barrier covers in hardware, which is
+        what the emitter turns into an instruction.  Its arrival level --
+        derived from it -- says who therefore has to arrive, which is what
+        ``verify`` weighs against the region: a barrier at level S inside a
+        construct whose entry is only U-uniform deadlocks unless ``U >= S``,
         because the threads that took the other branch, or ran fewer
         iterations, never arrive.
 
@@ -1751,11 +1749,58 @@ class IRBuilder:
         nothing, the emitter then still owes the compiler a fence
         (`Lexic.handoff_fence`).
         """
-        wave = 1
+        return self.emit(barrier_stmt(participants, self._wave(), threads,
+                                      handoff))
+
+    def _wave(self) -> int:
+        """The target's wave, or 1 for a body built without one."""
         target = getattr(self.context, 'target', None)
-        if target is not None:
-            wave = target.hw.vec_unit_length
-        return self.emit(barrier_stmt(participants, wave, threads, handoff))
+        return 1 if target is None else target.hw.vec_unit_length
+
+    def sync_object(self, participants: Union[str, Participants],
+                    threads: Optional[int] = None) -> 'engines.SyncObjectType':
+        """The object a barrier of ``participants`` meets on, at this
+        target's wave (`engines.sync_object`): for the split ops below."""
+        return engines.sync_object(_as_participants(participants),
+                                   self._wave(), threads)
+
+    def sync_init(self, obj: 'engines.SyncObjectType', objects: int = 1,
+                  count: Optional[int] = None) -> Stmt:
+        """Set ``objects`` objects like ``obj`` up ahead of their first use
+        (`engines.sync_init`)."""
+        return self.emit(engines.sync_init(obj, objects, count))
+
+    def arrive(self, obj: 'engines.SyncObjectType', count: int = 1,
+               tx: int = 0) -> Stmt:
+        """Arrive at ``obj`` without waiting (`engines.arrive`)."""
+        return self.emit(engines.arrive(obj, count, tx))
+
+    def wait_phase(self, obj: 'engines.SyncObjectType') -> Stmt:
+        """Wait for the current phase of ``obj`` (`engines.wait_phase`)."""
+        return self.emit(engines.wait_phase(obj))
+
+    def fence(self, kind: Union[str, 'engines.FenceKind'], *,
+              scope: Optional['engines.SyncScope'] = None,
+              mask: Optional[int] = None,
+              group: Optional[Tuple[int, int, int]] = None) -> Stmt:
+        """A fence of the schedule, of memory, or of both
+        (`engines.fence_stmt`).
+
+        Where raw text stood for one -- a scheduling barrier, a sub-group
+        barrier that holds the compiler, vISA's software fence -- this says
+        what it is, and the target says how it is written.
+        """
+        return self.emit(engines.fence_stmt(kind, scope=scope, mask=mask,
+                                            group=group))
+
+    def wait_counter(self, counter: str, count: int) -> Stmt:
+        """Wait until at most ``count`` operations are outstanding on the
+        hardware counter ``counter`` (`engines.wait_counter`)."""
+        return self.emit(engines.wait_counter(counter, count))
+
+    def set_priority(self, level: int) -> Stmt:
+        """The wave's issue priority from here on (`engines.set_priority`)."""
+        return self.emit(engines.set_priority(level))
 
     def yield_(self, *values: Operand) -> Stmt:
         return self._emit_op(Op.YIELD, (), values, pure=False, movable=False)

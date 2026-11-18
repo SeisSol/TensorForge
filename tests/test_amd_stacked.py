@@ -228,12 +228,12 @@ class SimWriter:
         finally:
             self.mask = outer
 
-    def __call__(self, text, *args, accesses=None, **kw):
-        # A raw statement: the scheduling groups of a pipelined product
+    def fence(self, kind, group=None, **kw):
+        # The scheduling groups of a pipelined product
         # (`Options.amd_matrix_k4_pipeline`), which order nothing here.
-        assert text.startswith("__builtin_amdgcn_sched_group_barrier("), text
-        assert accesses == ()
-        self.raw.append(text)
+        from tensorforge.backend.pir.engines import FenceKind
+        assert kind is FenceKind.SCHEDULE and group is not None, (kind, group)
+        self.raw.append(group)
 
     def barrier(self, participants="block", threads=None, handoff=False):
         # The rendezvous the shard route owes the wave: in the simulator the

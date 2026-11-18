@@ -24,9 +24,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tensorforge.common.basic_types import Addressing, Datatype
 
 from tensorforge.common.operation import Operation
-from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand, Qual,
-                   ScalarType, Stmt, TokenType, Uniformity, Value, def_use,
-                   walk_stmts)
+from . import engines
+from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand,
+                   Participants, Qual, ScalarType, Stmt, TokenType, Uniformity,
+                   Value, def_use, walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
@@ -275,6 +276,11 @@ def _code_copies(unroll, trips: Optional[int]) -> int:
 #: The shape an `mma.sync` names (`Emitter._issues`).
 _MMA_SHAPE = re.compile(r'mma\.sync\.aligned\.m(\d+)n(\d+)k(\d+)\.')
 
+#: The fence `Emitter._pin_load` writes in front of every so many loads: one
+#: of the schedule, which the target writes as the statement its compiler
+#: moves no load across (`engines.FenceKind`).
+_PIN_FENCE = engines.fence_stmt(engines.FenceKind.SCHEDULE)
+
 
 class Emitter:
     def __init__(self, writer, context: Any = None, metrics: Any = None):
@@ -358,6 +364,11 @@ class Emitter:
         instructions: `analysis.icache` converts, with a factor fitted against
         the compilers (`tools/calibrate_icache.py`)."""
         if op in _NO_CODE or op == Op.FOR:
+            return
+        spec = engines.spec_of(op)
+        if spec is not None:
+            if spec.units:
+                self._record_code_units(spec.units)
             return
         self._record_code_units(2 if op == Op.IF
                                 else _LOOP_OVERHEAD if op == Op.WHILE else 1)
@@ -510,8 +521,9 @@ class Emitter:
             return _text_category(text, 'other'), []
         if op == Op.RAWBLOCK:
             return 'branch', []
-        if op == Op.BARRIER:
-            return 'barrier', []
+        spec = engines.spec_of(op)
+        if spec is not None:
+            return spec.pipe, []
         if op in (Op.WAIT, Op.COMMIT_ASYNC):
             return 'sync', []
         if op in (Op.IF, Op.WHILE, Op.EXIT):
@@ -717,41 +729,19 @@ class Emitter:
         return f'{args[0]} * {args[1]} + {args[2]}'
 
     def _sync(self, participants=None, threads=None, wave=None) -> str:
-        """The instruction for what the barrier says it covers.
-
-        Read off `participants` alone, never off the arrival level: the two
-        are different questions and a wave barrier answers them differently.
-        `Lexic.sync_mult` is asked only for `MULT`, and only after
-        `Target.sync_mult` agreed at the same width -- so a target with no
-        sub-block rendezvous is never handed a request it has to approximate.
-
-        Falls back to the bare call when there is no lexic: the IR-level tests
-        build bodies without a context, and an emitter that raised there would
-        make them require one for an op that is not what they test.
-        """
-        lex = self._lexic()
-        if lex is None:
-            return '__syncthreads();'
-        who = getattr(participants, 'value', 'block')
-        if who == 'wave':
-            return lex.sync_simd()
-        if who == 'grid':
-            return lex.sync_grid()
-        if who == 'mult' and threads is not None and self._hw() is not None:
-            target = self._target()
-            sync_mult = getattr(target, 'sync_mult', None)
-            if sync_mult is not None and not sync_mult(threads):
-                # Spelled anyway, it would be a rendezvous of the wrong
-                # threads: a count of 48 that no warp boundary falls on, an
-                # id that two interleaved multiplications share.
-                raise IRError(f'a barrier of one multiplication of {threads} '
-                              f'threads, which this target cannot meet on '
-                              f'its own (`Target.sync_mult`)')
-            return lex.sync_mult(threads, self._hw())
-        # `multgroup` and `block` alike: the block is sized to hold one group
-        # wherever a group is what has to meet, so the block barrier is the
-        # group's own and there is nothing narrower to reach for.
-        return lex.sync_block()
+        """The instruction for what a barrier of ``participants`` covers: the
+        combined form on its object (`engines.sync_object`), as the registry
+        writes it -- one line, or None where the rendezvous is spelled as
+        nothing.  Kept for the callers that ask about a barrier they have not
+        built."""
+        who = (participants if isinstance(participants, Participants)
+               else Participants.BLOCK)
+        if wave is None:
+            hw = self._hw()
+            wave = getattr(hw, 'vec_unit_length', None) or 1
+        stmt = engines.barrier(engines.sync_object(who, wave, threads))
+        lines = engines.lower(stmt, self._target()).lines
+        return lines[0] if lines else None
 
     def _thread_idx(self, axis: str, raw: bool = False) -> str:
         """The target's spelling of this axis.
@@ -1174,13 +1164,10 @@ class Emitter:
         if self._pin_count < self._pin_every:
             return
         self._pin_count = 0
-        lex = self._lexic()
-        fence = lex.pin_fence() if lex is not None else None
-        if fence is None:
-            return
-        text, converged = fence
-        if self._converged or not converged:
-            self.writer(text)
+        fence = engines.lower(_PIN_FENCE, self._target())
+        if self._converged or not fence.converged:
+            for text in fence.lines:
+                self.writer(text)
 
     def _dpp_blocks(self):
         """`amd.dpp_block` where this target writes runs of fused DPP FMAs as
@@ -1305,13 +1292,11 @@ class Emitter:
                 self._emit_body(s.regions[0].body, yield_to)
             return
 
-        if op == Op.BARRIER:
-            sync_instr = self._sync(s.attr('participants'), s.attr('threads'),
-                                    s.attr('wave'))
-            if not sync_instr and s.attr('handoff') and self._lexic() is not None:
-                sync_instr = self._lexic().handoff_fence()
-            if sync_instr is not None:
-                w(sync_instr)
+        if engines.spec_of(op) is not None:
+            # A barrier, a fence, a counter wait, a priority: what the
+            # registry writes it as on this target.
+            for text in engines.lower(s, self._target()).lines:
+                w(text)
             return
 
         if op == Op.ALLOC:
