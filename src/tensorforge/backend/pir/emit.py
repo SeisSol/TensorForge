@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tensorforge.common.basic_types import Addressing, Datatype
 
 from tensorforge.common.operation import Operation
-from . import engines
+from . import block_reads, engines
 from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants, Qual, ScalarType, Stmt, TokenType, Uniformity,
                    Value, def_use, walk_stmts)
@@ -324,6 +324,9 @@ class Emitter:
         #: The engine the body's copies go through, where it is one
         #: (`Target.one_wait_counter`).
         self._copy_engine: Optional[str] = None
+        #: The vectors the block reads of the body define (`block_reads`),
+        #: by value id: the name each is spelled by.
+        self._blocks: Dict[int, str] = {}
         self._prefetch_lex = None
         self._prefetch_note = ''
         self._inline: set = set()
@@ -1166,6 +1169,10 @@ class Emitter:
                                       if options else True))
         self._converged = True
         self._decide_dpp_waits()
+        lanes = self._spmd_run_lanes()
+        if lanes is not None:
+            body = block_reads.block_reads(body, windows=False, runs=False,
+                                           spmd_lanes=lanes)
         self._inline = self._plan_inlining(body)
         self._bind_objects(body)
         self._decide_async(body)
@@ -1330,17 +1337,80 @@ class Emitter:
         # in the body, and SeisSol's damage step emits bodies of thousands.
         first_read: Dict[int, int] = {}
         loaded: Dict[int, int] = {}
-        for index, s in enumerate(body):
+        index = -1
+        for s in body:
+            if self._slack_skips(s):
+                continue
+            index += 1
             for value in s.args:
                 key = getattr(value, 'id', None)
                 if key is not None and key not in first_read:
                     first_read[key] = index
-            if s.op in (Op.LOAD, Op.LOAD_ASYNC) and s.target:
+            if self._slack_loads(s) and s.target:
                 loaded.setdefault(s.target[0].id, index)
         for key, index in loaded.items():
             reader = first_read.get(key)
             if reader is not None and reader > index:
                 record(reader - index)
+
+    def _slack_skips(self, s: Stmt) -> bool:
+        """A statement `_record_slack` does not count as standing anywhere:
+        the read of a window or a run, which is no statement of the body the
+        distances are counted in -- the reads it serves are."""
+        return block_reads.is_block(s)
+
+    def _slack_loads(self, s: Stmt) -> bool:
+        """A statement whose value `_record_slack` counts as loaded: a load,
+        and a read a window or a run serves."""
+        return s.op in (Op.LOAD, Op.LOAD_ASYNC) or block_reads.is_part(s)
+
+    def _spmd_run_lanes(self) -> Optional[int]:
+        """The lanes of the multiplication whose runs are read by sub-group
+        block reads (`Options.spmd_block_runs`, `block_reads.
+        plan_spmd_runs`), or None where they are not.
+
+        Under SPMD on an Intel device, which states the sub-group a kernel is
+        laid out against (`Target.pinned_sub_groups`), and only where that
+        sub-group is the multiplication: the block read hands the lanes of
+        the sub-group the elements in order, and the lane in the address is
+        the multiplication's (`mult_lanes`, which the body's builder sets).
+        """
+        options = getattr(self.context, 'get_user_options', None)
+        if options is None or not getattr(options(), 'spmd_block_runs', False):
+            return None
+        target = self._target()
+        lanes = getattr(self.context, 'mult_lanes', None)
+        if (target is None or target.explicit_simd or not lanes
+                or target.pinned_sub_groups is None
+                or target.sub_group_width(lanes) != lanes):
+            return None
+        return lanes
+
+    def _emit_block(self, s: Stmt) -> None:
+        """A run under SPMD (`block_reads.plan_spmd_runs`): one sub-group
+        block read from the run's first element, every work-item's vector the
+        elements of the reads it serves, in order."""
+        vec, buf = s.target[0], s.args[0]
+        name = s.attr('extern')
+        self._blocks[vec.id] = name
+        self.bind(vec, name)
+        lex = self._lexic()
+        ptr = f'&{self.base_name(buf)}[{self.address(buf, s.args[1:])}]'
+        spelled = (lex.sub_group_run(vec.type.base.ctype(), vec.type.length,
+                                     ptr) if lex is not None else None)
+        if spelled is None:
+            raise IRError(f'{name}: a sub-group block read, which this '
+                          f'target does not spell')
+        self.writer(f'{spelled[0]} {name} = {spelled[1]};')
+
+    def _emit_block_part(self, s: Stmt) -> None:
+        """A read a run serves under SPMD: its element of the vector."""
+        v, vec = s.target[0], s.args[0]
+        named = s.attr('extern')
+        self.declare(v, f'{self._blocks[vec.id]}[{s.attr("lane")}]', s,
+                     name=named)
+        if named:
+            self.bind(v, named)
 
     def _emit_stmt(self, s: Stmt, yield_to: Tuple[Optional[str], ...]) -> None:
         w = self.writer
@@ -1353,6 +1423,13 @@ class Emitter:
         if op == Op.CALL and s.attr('asm') is not None:
             self._record_code_units(self._issues(s) - 1)
         self._record_mix(s)
+
+        if block_reads.is_block(s):
+            self._emit_block(s)
+            return
+        if block_reads.is_part(s):
+            self._emit_block_part(s)
+            return
 
         if op == Op.CONST:
             v = s.target[0]

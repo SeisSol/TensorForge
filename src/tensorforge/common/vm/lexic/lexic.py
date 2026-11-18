@@ -182,6 +182,14 @@ class Lexic(ABC):
     the caller passed."""
     return name
 
+  def sub_group_run(self, elem: str, count: int, address: str):
+    """`count` reads of a sub-group's lanes at consecutive offsets of global
+    memory from `address` as one block read, as `(type, expression)`: the
+    vector each work-item gets, element `j` the one read `j` hands it
+    (`pir.block_reads.plan_spmd_runs`).  None where there is no such read.
+    """
+    return None
+
   def get_slm_load(self, elem: str, width: int, address: str) -> str:
     """A vector read of shared memory, where that is its own instruction.
 

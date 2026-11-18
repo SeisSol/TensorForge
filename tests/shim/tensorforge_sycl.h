@@ -295,6 +295,14 @@ inline T split_broadcast(const sycl::sub_group &group, T value, int lane) {
   return out;
 }
 
+// `tensorforge_device/sycl_spmd.h`: a run's sub-group block read
+// (`Options.spmd_block_runs`).  Its signature; which lane gets what is the
+// device's.
+template <int N, typename T>
+inline sycl::vec<T, N> subGroupRun(const sycl::sub_group &, const T *) {
+  return {};
+}
+
 // `tensorforge_device/sycl_spmd.h`: DPAS from the SPMD lowering
 // (`Options.sycl_dpas`).  The signatures, which is what parsing can check:
 // the A fragment four floats a work-item, B and the accumulator eight, the
