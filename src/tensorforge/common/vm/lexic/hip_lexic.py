@@ -256,14 +256,19 @@ class HipLexic(CudaLexic):
     return '__builtin_amdgcn_sched_barrier(0);'
 
   # CDNA has no __pipeline_*; the equivalent is a direct global->LDS load
-  # plus an explicit vmcnt wait (`Target.copy_async_sizes`).
-  def copy_async(self, dst, src, nbytes, zfill: int = 0):
+  # plus an explicit vmcnt wait (`Target.copy_async_sizes`), and on gfx1250
+  # and gfx1251 their copy into the LDS plus an explicit asynccnt wait
+  # (`engine` 'async_lds').
+  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None):
     if self._underlying_hardware != 'amd':
-      return super().copy_async(dst, src, nbytes, zfill)
+      return super().copy_async(dst, src, nbytes, zfill, engine)
     if zfill:
       # `global_load_lds` has no src-size operand: it moves `nbytes` and reads
       # them.  Refused rather than approximated, so the caller narrows.
+      # Nor has gfx1250's copy.
       return None
+    if engine == 'async_lds':
+      return _async_to_lds(dst, src, nbytes)
 
     # The source is cast to a pointer to non-const: ROCm 7.14's clang (23)
     # declares the parameter `void __global *`, and a pointer to const does
@@ -282,33 +287,25 @@ class HipLexic(CudaLexic):
   def wait_async(self, prior):
     if self._underlying_hardware != 'amd':
       return super().wait_async(prior)
-    # Nothing.  `SIInsertWaitcnts` places this wait itself, and places it
-    # better than we can.
+    # Nothing here: the wait for an LDS-DMA copy is written on its counter,
+    # as a statement of its own where TF places it (`engines.WAIT_COUNTER`,
+    # `vmcnt(N)` through `__builtin_amdgcn_s_waitcnt`), and a full drain in a
+    # body of such copies is that counter at zero (`Emitter._copy_counter`).
     #
-    # `copy_async` lowers to `llvm.amdgcn.global.load.lds`, which the pass
-    # recognizes as an LDS DMA: it tracks which LDS buffer each one writes
-    # and emits the smallest count before the `ds_read` that needs it --
-    # `vmcnt(2)` then `vmcnt(0)` for two distinct arrays, not `vmcnt(0)`
-    # twice.  Its alias tracking has a fixed number of slots and falls back
-    # to `vmcnt(0)` once they run out, so on a body with many buffers this is
-    # conservative; the lever for that is `sched_group_barrier`, not a wait
-    # written by hand.
+    # It is not the compiler's to place.  `SIInsertWaitcnts` puts no wait at
+    # all between a `global_load_lds` and a `ds_read` of what it wrote --
+    # clang 22 and 23 on gfx942, checked 2026-10-29 and 2026-11-17 -- since
+    # the copy's write to the LDS is no dependency it tracks.  Only a block
+    # barrier waits for it, because the fence of `__syncthreads` drains
+    # vmcnt; a copy read behind the barrier of one wave, which is spelled as
+    # nothing, would be read in flight.
     #
-    # Writing one by hand would be worse than redundant.  Inline asm with a
-    # `"memory"` clobber is opaque to the very pass that would compute the
-    # count, and to the scheduler that decides the issue order the count is
-    # derived from -- so it would degrade the result it is meant to control.
-    #
-    # And it would be wrong ahead of gfx12.  `vmcnt` is deprecated there: the
-    # counter is split into loadcnt, storecnt, dscnt, kmcnt, samplecnt,
-    # bvhcnt and expcnt, and gfx1250 adds asynccnt and tensorcnt for exactly
-    # this class of transfer, reachable through `s_wait_asynccnt` rather than
-    # through an encoded `s_waitcnt` immediate.  An instruction spelled here
-    # would have to be respelled per target; a count left in the IR does not.
-    #
-    # The IR derives `prior` all the same: it is what a future emitter needs to
-    # pick `s_wait_asynccnt` on gfx125x, and what `verify` checks the token
-    # pairing against.  It is information, not an instruction.
+    # The builtin, not inline assembly: an asm statement with a "memory"
+    # clobber is opaque to the pass that computes the counts of every other
+    # wait around it, and to the scheduler.  And spelled per model by the
+    # registry rather than here: gfx12 splits the counter (loadcnt,
+    # storecnt, ... and gfx1250's asynccnt and tensorcnt for this class of
+    # transfer), which an instruction written here would have to follow.
     return ''
 
   def wait_async_regs(self, prior):
@@ -318,7 +315,7 @@ class HipLexic(CudaLexic):
     # the destination register and not one instruction earlier.
     if self._underlying_hardware != 'amd':
       return super().wait_async_regs(prior)
-    return self.wait_async(prior)
+    return ''
 
   def prefetch(self, address, *, datatype, elems=1, level='l2'):
     """`__builtin_prefetch`, which has no cache level to be given.
@@ -403,3 +400,23 @@ class HipLexic(CudaLexic):
       return f'{builtin}(&{access}, {variable});'
     return (f'__hip_atomic_fetch_add(&{access}, {variable}, '
             f'__ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);')
+
+
+#: The element gfx1250's copy into the LDS is declared over, by the bytes a
+#: lane moves: `__builtin_amdgcn_global_load_async_to_lds_b8` to `_b128`
+#: (clang 22) take a `char`, an `int` and two and four of them as a vector.
+_ASYNC_LDS_ELEMENT = {1: 'char', 4: 'int', 8: 'tensorforge::VectorT<int, 2>',
+                      16: 'tensorforge::VectorT<int, 4>'}
+
+
+def _async_to_lds(dst, src, nbytes):
+  """gfx1250's copy of `nbytes` bytes a lane from `src` into the LDS at
+  `dst`: each lane's own address, unlike the LDS-DMA's one a wave, and no
+  offset or cache policy of its own (the two trailing immediates).  None
+  for a size it does not take (`Target.copy_async_sizes`)."""
+  elem = _ASYNC_LDS_ELEMENT.get(nbytes)
+  if elem is None:
+    return None
+  return (f'__builtin_amdgcn_global_load_async_to_lds_b{8 * nbytes}('
+          f'(__attribute__((address_space(1))) {elem}*)({src}), '
+          f'(__attribute__((address_space(3))) {elem}*)({dst}), 0, 0);')

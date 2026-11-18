@@ -89,6 +89,10 @@ ESIMD_PREFETCH_ARCHS = frozenset({'pvc', 'dg2'})
 AMD_GLOBAL_LOAD_LDS = frozenset({'gfx90a', 'gfx940', 'gfx941', 'gfx942',
                                  'gfx950'})
 
+#: AMD parts with `global_load_async_to_lds`, gfx12.5's asynchronous copy into
+#: the LDS: each lane to an address of its own, counted in `asynccnt`.
+AMD_ASYNC_LDS = frozenset({'gfx1250', 'gfx1251'})
+
 
 @dataclass(frozen=True)
 class Preferences:
@@ -761,13 +765,23 @@ class Target:
 
     def async_copy_path(self) -> bool:
         """Whether the device has an asynchronous global -> shared path:
-        `cp.async` from sm_80 on, and `global_load_lds` on CDNA2 and CDNA3."""
+        `cp.async` from sm_80 on, `global_load_lds` on CDNA2 and CDNA3, and
+        `global_load_async_to_lds` on gfx1250 and gfx1251 (`async_lds`)."""
         if self.hw.vendor == 'nvidia':
             level = self.hw.sm_level()
             return level is not None and level >= 80
         if self.hw.vendor == 'amd':
-            return str(self.hw.model) in AMD_GLOBAL_LOAD_LDS
+            return (str(self.hw.model) in AMD_GLOBAL_LOAD_LDS
+                    or self.async_lds())
         return False
+
+    def async_lds(self) -> bool:
+        """Whether the asynchronous copy into the LDS is gfx12.5's
+        (`global_load_async_to_lds`): each lane names an address of its own
+        in the LDS, which CDNA's LDS-DMA takes once a wave, and the copies
+        count on `asynccnt`, which counts nothing else and which neither the
+        compiler nor a block barrier waits for."""
+        return self.hw.vendor == 'amd' and str(self.hw.model) in AMD_ASYNC_LDS
 
     def copy_async_sizes(self) -> Tuple[int, ...]:
         """Bytes per thread an asynchronous copy moves at once, or () where
@@ -775,8 +789,10 @@ class Target:
 
         CUDA's `__pipeline_memcpy_async` takes 4, 8 and 16.  HIP on AMD
         lowers to `global_load_lds`, which takes 1, 2 and 4 on gfx90a and
-        gfx94x (gfx950 adds 12 and 16); on NVIDIA HIP spells the CUDA one.
-        Every copy of a body has to be one of these, or the whole body goes
+        gfx94x (gfx950 adds 12 and 16), and on gfx1250 and gfx1251 to
+        `global_load_async_to_lds`, which takes 1, 4, 8 and 16 (`_b8`,
+        `_b32`, `_b64`, `_b128`); on NVIDIA HIP spells the CUDA one.  Every
+        copy of a body has to be one of these, or the whole body goes
         synchronous (`pir.emit`).
         """
         if not self.async_copy_path():
@@ -784,6 +800,8 @@ class Target:
         if self.backend == 'cuda':
             return (4, 8, 16)
         if self.backend == 'hip':
+            if self.async_lds():
+                return (1, 4, 8, 16)
             return (1, 2, 4) if self.hw.vendor == 'amd' else (4, 8, 16)
         return ()
 
@@ -797,21 +815,44 @@ class Target:
         level = self.hw.sm_level()
         return level is not None and level >= 90
 
-    def one_wait_counter(self) -> bool:
-        """Whether loads into registers and asynchronous copies retire
-        through one counter, so that a wait for either counts both: AMD's
-        `vmcnt`.  NVIDIA scoreboards register loads in hardware and counts
-        copies in groups of its own."""
-        return self.hw.vendor == 'amd'
+    def one_wait_counter(self, engine: Optional[str] = None) -> bool:
+        """Whether loads into registers and asynchronous copies through
+        `engine` retire through one counter, so that a wait for either counts
+        both: AMD's `vmcnt`.  Not gfx12.5's copy into the LDS (`async_lds`),
+        which counts on `asynccnt` alone -- a load into a register between
+        two copies goes to `loadcnt`.  NVIDIA scoreboards register loads in
+        hardware and counts copies in groups of its own."""
+        return self.hw.vendor == 'amd' and engine != 'async_lds'
 
-    def async_staging(self) -> bool:
+    def async_staging(self, options=None, threads: Optional[int] = None,
+                      elem_bytes: Optional[int] = None) -> bool:
         """Whether the staging transfers into shared memory are issued as
         asynchronous copies where they can be.
 
-        NVIDIA only.  HIP spells one for CDNA2/3 (`copy_async_sizes`), which
-        the emitter would lower; no staging transfer asks for it there.
+        NVIDIA always.  AMD's LDS-DMA (`copy_async_sizes`) where
+        `Options.amd_async_copies` asks for it, on a device that has one, for
+        elements of four bytes, and for a multiplication of `threads` lanes
+        that is a whole number of waves: the instruction writes lane t's
+        bytes t places past one base the whole wave shares (`engines.
+        lane_linear`), and a wave holding parts of two multiplications holds
+        two windows.  Four bytes because that is the lane's own dword the
+        instruction writes; what a narrower copy writes where is not
+        something TF has measured.
+
+        gfx1250's copy into the LDS (`async_lds`) asks neither: each lane
+        writes where its own address says.  Elements of four or eight
+        bytes, whose copies a lane moves in one of the sizes it takes.
         """
-        return self.hw.vendor == 'nvidia'
+        if self.hw.vendor == 'nvidia':
+            return True
+        if (self.hw.vendor != 'amd' or self.backend != 'hip'
+                or not getattr(options, 'amd_async_copies', False)
+                or not self.async_copy_path()):
+            return False
+        if self.async_lds():
+            return elem_bytes in (4, 8)
+        return (elem_bytes == 4 and threads is not None
+                and threads % self.hw.vec_unit_length == 0)
 
     def prefetch(self) -> bool:
         """Whether a data prefetch reaches an instruction here.

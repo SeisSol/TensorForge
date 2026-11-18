@@ -45,7 +45,11 @@ asynchronous transfer names its engine and the kind it completes by
 (`engine`, `completes`), and the class `asyncmem` counts it in derives from
 that (`counter_of`).  Every transfer says how many bytes a lane moves
 (`width`), the cache policy where one is set (`cache`), and a block its
-`shape`.
+`shape`.  The LDS-DMA's waits are TF's to write, on the counter
+(`waited_on`): the compiler places none in front of a read of what a copy
+wrote, and the instruction's one destination -- a base a wave, lane t's
+bytes t places past it -- is checked where the copy is written
+(`lds_dma_refusal`).
 
 What this increment keeps, on purpose:
 
@@ -328,6 +332,17 @@ class TransferEngine:
     ops: Tuple[str, ...]
     completes: Completion
     doc: str = ''
+    #: The hardware counter a wait for it is written on, where TF writes
+    #: that wait itself (`WAIT_COUNTER`) rather than the compiler or a
+    #: group's own primitive.
+    waited_on: Optional[str] = None
+    #: Whether each transfer is one instruction the compiler issues as
+    #: written -- an intrinsic it neither merges with another nor drops --
+    #: so that a wait may count it among those issued behind the one it
+    #: waits for (`asyncmem`).  An ordinary load is not: the compiler moves
+    #: it across the copy, merges two into one and drops a dead one, and a
+    #: count that includes it can come out larger than what is in flight.
+    one_to_one: bool = False
 
 
 TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
@@ -341,14 +356,23 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    'commit groups'),
     TransferEngine('lds_dma', (Op.COPY_ASYNC,), Completion.COUNTER,
                    "AMD's global_load_lds into the LDS (CDNA2/3), counted "
-                   'in vmcnt one operation at a time; its waits are the '
-                   "compiler's to place"),
+                   'in vmcnt one operation at a time; its waits are written '
+                   'out, since the compiler places none in front of a read '
+                   'of what it wrote',
+                   waited_on='vmcnt', one_to_one=True),
     TransferEngine('bulk', (Op.COPY_ASYNC,), Completion.BARRIER,
                    'cp.async.bulk of a whole window by one thread, '
                    'completing on an mbarrier, sm_90 and newer'),
     TransferEngine('load', (Op.LOAD_ASYNC,), Completion.COUNTER,
                    'a load into registers issued ahead of its use: vmcnt on '
                    "AMD, NVIDIA's scoreboard"),
+    TransferEngine('async_lds', (Op.COPY_ASYNC,), Completion.COUNTER,
+                   "gfx1250's global_load_async_to_lds into the LDS, each "
+                   'lane to its own address, counted in asynccnt one '
+                   'operation at a time -- which counts nothing else; its '
+                   'waits are written out, since neither the compiler nor a '
+                   'block barrier waits for it',
+                   waited_on='asynccnt', one_to_one=True),
 )}
 
 #: The class `asyncmem` counts a transfer in, by the kind of completion its
@@ -369,22 +393,136 @@ def completes_of(engine: str) -> Completion:
     return TRANSFER_ENGINES[engine].completes
 
 
+def waited_on(engine: Optional[str]) -> Optional[str]:
+    """The counter a wait for a transfer through `engine` is written on
+    (`IRBuilder.wait`), or None where the wait is not a counter's."""
+    found = TRANSFER_ENGINES.get(engine) if engine is not None else None
+    return None if found is None else found.waited_on
+
+
+def one_to_one(engine: Optional[str]) -> bool:
+    """Whether a transfer through `engine` is one instruction a later wait
+    may count (`TransferEngine.one_to_one`)."""
+    found = TRANSFER_ENGINES.get(engine) if engine is not None else None
+    return found is not None and found.one_to_one
+
+
 def copy_engine(target: Any) -> str:
     """The engine `IRBuilder.copy_async` issues through on `target`.
 
     AMD's LDS-DMA where HIP spells one for the device (`Target.
-    async_copy_path`); `cp.async` everywhere else and where the target is
-    not known.  Whether the body's copies then go through it at all is the
-    emitter's decision, once for the whole body (`Emitter._decide_async`):
-    a size or a device without the path lowers every copy as a load and a
-    store.
+    async_copy_path`), and on gfx1250 and gfx1251 their copy into the LDS
+    (`Target.async_lds`); `cp.async` everywhere else and where the target
+    is not known.  Whether the body's copies then go through it at all is
+    the emitter's decision, once for the whole body (`Emitter.
+    _decide_async`): a size or a device without the path lowers every copy
+    as a load and a store.
     """
     hw = getattr(target, 'hw', None)
     if (getattr(target, 'backend', None) == 'hip'
             and getattr(hw, 'vendor', None) == 'amd'
             and target.async_copy_path()):
-        return 'lds_dma'
+        return 'async_lds' if target.async_lds() else 'lds_dma'
     return 'cp_async'
+
+
+#: The calls that read the lane along `x` (`IRBuilder.thread_id`).
+_LANE_CALLEES = ('thread_idx_x', 'raw_thread_idx_x')
+
+
+def _lane_terms(v: Any, defs: Mapping[int, Stmt], depth: int = 0
+                ) -> Optional[int]:
+    """How often `v` counts the lane, where it is a sum of the lane and of
+    terms its multiplication agrees on; None where it is anything else."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return 0
+    if not isinstance(v, Value) or depth > 32:
+        return None
+    if v.uniformity >= Uniformity.MULT:
+        return 0
+    d = defs.get(v.id)
+    if d is None or d.predicate is not None:
+        return None
+    if d.op == Op.CALL and d.attr('callee') in _LANE_CALLEES:
+        return 1
+    if d.op == 'add' and len(d.args) == 2:
+        a = _lane_terms(d.args[0], defs, depth + 1)
+        b = _lane_terms(d.args[1], defs, depth + 1)
+        return None if a is None or b is None else a + b
+    return None
+
+
+def lane_linear(index: Any, defs: Mapping[int, Stmt]) -> bool:
+    """Whether `index` is the lane plus terms its multiplication agrees on:
+    `threadIdx.x` once, with a coefficient of one, and everything else a
+    constant or a value of `Uniformity.MULT` or wider.  `defs` maps a
+    value's id to the statement that defines it.
+
+    Where a multiplication is a whole number of waves that is one base the
+    wave shares plus the lane in it -- the wave holds lanes of that one
+    multiplication, and `threadIdx.x` is its lane plus a multiple of the
+    wave -- which is the destination AMD's LDS-DMA writes: one base a wave
+    (M0, the address of its first active lane), and lane t's bytes t places
+    past it.  Any other index is cut to the first lane's and lands
+    elsewhere, without a word from the compiler.
+    """
+    return _lane_terms(index, defs) == 1
+
+
+def lane_prefix(cond: Any, defs: Mapping[int, Stmt]) -> bool:
+    """Whether a guard `cond` leaves every wave either whole or a prefix of
+    its lanes: a value the multiplication agrees on, or `x < bound` with `x`
+    the lane past a shared base (`lane_linear`) and `bound` shared -- under
+    which a wave's first active lane is its first, whose address the
+    LDS-DMA takes for the wave's."""
+    if isinstance(cond, Value) and cond.uniformity >= Uniformity.MULT:
+        return True
+    d = defs.get(cond.id) if isinstance(cond, Value) else None
+    return (d is not None and d.op == 'lt' and len(d.args) == 2
+            and d.predicate is None
+            and _lane_terms(d.args[0], defs) == 1
+            and _lane_terms(d.args[1], defs) == 0)
+
+
+def lds_dma_refusal(copy: Stmt, defs: Mapping[int, Stmt],
+                    guards: Sequence[Any], wave: int) -> Optional[str]:
+    """Why AMD's LDS-DMA cannot write `copy`, or None where it can.
+
+    `guards` are the conditions of the regions it stands in, a `('not',
+    cond)` for an else arm and None for a region whose condition is not a
+    value (a raw block, a loop whose bounds the lanes do not share).  The
+    instruction takes one base a wave and writes each lane's four bytes in
+    the lane's own place past it (`lane_linear`): so the multiplication has
+    to be a whole number of waves (`threads`, which the issuing transfer
+    states), the copy one element of four bytes a lane, its destination the
+    lane past a base the wave shares, and every guard around it one that
+    keeps the wave's first lane in where any lane is (`lane_prefix`).
+    """
+    threads = copy.attr('threads')
+    if not threads:
+        return 'the copy does not say how many lanes its multiplication has'
+    if threads % wave:
+        return (f'a multiplication of {threads} lanes is no whole number of '
+                f'waves of {wave}')
+    if copy.attr('elems', 1) != 1 or copy.attr('width') != 4:
+        return (f'a lane moves {copy.attr("width")} bytes, where the copy '
+                f'moves one element of four')
+    dst = copy.copy_dst_index
+    if len(dst) != 1 or not lane_linear(dst[0], defs):
+        return 'the destination is not the lane past a base the wave shares'
+    conds = tuple(guards)
+    if copy.predicate is not None:
+        conds += (copy.predicate,)
+    for cond in conds:
+        if cond is None or isinstance(cond, tuple) and not (
+                isinstance(cond[1], Value)
+                and cond[1].uniformity >= Uniformity.MULT):
+            return 'a guard around it is not one the lanes share'
+        if not isinstance(cond, tuple) and not lane_prefix(cond, defs):
+            return 'a guard around it can leave out the first lane of a wave'
+    return None
 
 
 def element_of(type_: Any, base: Any) -> Any:
@@ -1005,7 +1143,8 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_fence}),
     OpSpec(Op.WAIT_COUNTER, operands=(Slot('counter', (str,)),
-                                      Slot('count', _INT)),
+                                      Slot('count', _INT),
+                                      Slot('engine', (str,), False)),
            results=(), effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
            movable=False, completes=Completion.SYNC,
            retires=Completion.COUNTER, settles=False, units=1, pipe='sync',
@@ -1061,7 +1200,7 @@ def verify_engine(s: Stmt) -> List[str]:
     return diag
 
 
-def _retires_copies(op: str, attrs: Tuple) -> bool:
+def _waits_on_mbarrier(op: str, attrs: Tuple) -> bool:
     """A wait on an mbarrier: the wait for the copies that complete on it,
     which is what a `wait` was before it was spelled as the object's."""
     if op != Op.WAIT_PHASE:
@@ -1071,11 +1210,21 @@ def _retires_copies(op: str, attrs: Tuple) -> bool:
             and obj.type.kind is SyncKind.MBARRIER)
 
 
+def _retires_copies(op: str, attrs: Tuple) -> bool:
+    """A wait that stands for a `wait` on transfers: the one on an mbarrier,
+    and a counter's that names the engine whose transfers it retires
+    (`wait_counter`)."""
+    if _waits_on_mbarrier(op, attrs):
+        return True
+    return op == Op.WAIT_COUNTER and dict(attrs).get('engine') is not None
+
+
 def effect_of(op: str, attrs: Tuple = ()) -> Effect:
     """The effect a statement of `op` with `attrs` declares: the registry's,
     but none for a fence that is no wall (`fence_stmt`), and for the wait on
-    an mbarrier the `wait`'s -- it makes what the copies wrote visible, the
-    accesses they declared, and orders nobody else's (`wait_phase`)."""
+    an mbarrier or a counter's for transfers it names the `wait`'s -- it
+    makes what the copies wrote visible, the accesses they declared, and
+    orders nobody else's (`wait_phase`, `wait_counter`)."""
     if op == Op.FENCE and dict(attrs).get('wall') is False:
         return Effect.NONE
     if _retires_copies(op, attrs):
@@ -1087,13 +1236,15 @@ def completes_on_barrier(s: Stmt) -> bool:
     """A bulk copy, or the wait for one: what every thread waits for on the
     barrier the copy completes on, which makes the bytes visible to each --
     so no lane hands them to another (`barriers`)."""
-    return s.attr('engine') == 'bulk' or _retires_copies(s.op, s.attrs)
+    return (s.attr('engine') == 'bulk'
+            or _waits_on_mbarrier(s.op, s.attrs))
 
 
 def movable_of(op: str, attrs: Tuple = ()) -> bool:
     """Whether a statement of `op` with `attrs` may move: the registry's
-    answer, but a wait on an mbarrier moves as the `wait` it was moved,
-    subject to the accesses of the copies it retires."""
+    answer, but a wait on an mbarrier, or a counter's for the transfers it
+    names, moves as the `wait` it was moved, subject to the accesses of the
+    copies it retires."""
     if _retires_copies(op, attrs):
         return True
     return REGISTRY[op].movable
@@ -1249,20 +1400,33 @@ def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
     return _stmt(Op.FENCE, attrs)
 
 
-def wait_counter(counter: str, count: int) -> Stmt:
+def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
+                 accesses: Optional[Tuple[Access, ...]] = None,
+                 engine: Optional[str] = None) -> Stmt:
     """Wait until at most `count` operations are outstanding on `counter`
     (`group`, `vmcnt`, `lgkmcnt`, `asynccnt`, `tensorcnt`).
 
-    It writes what the transfers it retires wrote, and which those are is
-    the counter's to know, not the statement's: so any buffer of shared
-    memory, where the transfers a counter tracks land -- one into a register
-    is ordered by its own def-use edge.  Which tokens a wait retires comes
-    with the transfer engines that count on these.
+    Without `tokens` it writes what the transfers it retires wrote, and
+    which those are is the counter's to know, not the statement's: so any
+    buffer of shared memory, where the transfers a counter tracks land --
+    one into a register is ordered by its own def-use edge.
+
+    With them, the wait for the transfers through `engine` they name
+    (`IRBuilder.wait`): it consumes them as a `wait` would (`check_tokens`,
+    `core.retires`), makes visible what they declared, `accesses`, and
+    moves as a `wait` does.  Its count is then not the caller's but
+    `schedule_async`'s, once the schedule is final: the transfers issued
+    behind the latest one it names that the counter certainly counts
+    (`TransferEngine.one_to_one`) -- zero, the full drain, until then.
     """
-    accesses = (Access(Effect.READ | Effect.WRITE, MemSpace.SHARED, None),)
-    return _stmt(Op.WAIT_COUNTER,
-                 (('counter', str(counter)), ('count', int(count))),
-                 accesses=accesses)
+    attrs = (('counter', str(counter)), ('count', int(count)))
+    if engine is not None:
+        attrs += (('engine', engine),)
+    if accesses is None:
+        accesses = (Access(Effect.READ | Effect.WRITE, MemSpace.SHARED,
+                           None),)
+    return _stmt(Op.WAIT_COUNTER, attrs, args=tuple(tokens),
+                 accesses=tuple(accesses))
 
 
 def set_priority(level: int, waves: Optional[str] = None) -> Stmt:
@@ -1285,8 +1449,9 @@ __all__ = [
     'OpSpec', 'TRANSFER_ENGINES', 'TransferEngine', 'UNRESOLVED',
     'cache_policy', 'completes_of', 'completes_on_barrier',
     'copy_cache', 'copy_engine',
-    'counter_of', 'element_of', 'engine_of', 'mbarrier', 'movable_of',
-    'object_value', 'sync_init_value', 'width_of',
+    'counter_of', 'element_of', 'engine_of', 'lane_linear', 'lane_prefix',
+    'lds_dma_refusal', 'mbarrier', 'movable_of', 'object_value',
+    'one_to_one', 'sync_init_value', 'waited_on', 'width_of',
     'PRIORITY_WAVES', 'REGISTRY', 'Slot', 'Spelling', 'SyncKind',
     'SyncObjectType', 'SyncScope', 'arrival_of', 'arrive', 'barrier',
     'effect_of', 'family', 'fence_stmt', 'lower', 'object_demand',

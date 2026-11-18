@@ -317,6 +317,13 @@ class Emitter:
         #: The cursors of the body's bulk copies, which a full drain waits on
         #: as well (`_decide_async`).
         self._bulk_cursors: Tuple[str, ...] = ()
+        #: The counter the body's copies are waited for on where TF writes
+        #: those waits itself (`engines.TransferEngine.waited_on`), which a
+        #: full drain then writes too; None elsewhere.
+        self._copy_counter: Optional[str] = None
+        #: The engine the body's copies go through, where it is one
+        #: (`Target.one_wait_counter`).
+        self._copy_engine: Optional[str] = None
         self._prefetch_lex = None
         self._prefetch_note = ''
         self._inline: set = set()
@@ -830,6 +837,8 @@ class Emitter:
         silently wrong rather than merely slow.
         """
         self._async_lex = None
+        self._copy_counter = None
+        self._copy_engine = None
         copies = [s for s in walk_stmts(body) if s.op == Op.COPY_ASYNC]
         # A bulk copy is none of these: it is the tensor memory accelerator's,
         # whose size is the window's, and it completes on its own barrier,
@@ -857,7 +866,55 @@ class Emitter:
                 self._async_note = (f'{nbytes} B per thread is not one of '
                                     f'{sizes} on {hw.model}')
                 return
+        if any(c.attr('engine') == 'lds_dma' for c in copies):
+            why = self._lds_dma_refusal(body, hw)
+            if why is not None:
+                self._async_note = f'the LDS-DMA cannot write it: {why}'
+                return
         self._async_lex = target.lexic
+        counters = {engines.waited_on(c.attr('engine')) for c in copies}
+        if len(counters) == 1:
+            self._copy_counter = next(iter(counters))
+        kinds = {c.attr('engine') for c in copies}
+        if len(kinds) == 1:
+            self._copy_engine = next(iter(kinds))
+
+    def _lds_dma_refusal(self, body: Tuple[Stmt, ...], hw: Any
+                         ) -> Optional[str]:
+        """Why one of the body's LDS-DMA copies cannot be one, or None
+        (`engines.lds_dma_refusal`): asked of each with the conditions of
+        the regions it stands in -- an `if`'s, negated in its else arm; a
+        loop's own where its bounds are not shared, and of a raw block,
+        none that could be read."""
+        defs = {v.id: s for s in walk_stmts(body) for v in s.target}
+        wave = int(getattr(hw, 'vec_unit_length', 64) or 64)
+
+        def shared(v) -> bool:
+            return (not isinstance(v, Value)
+                    or v.uniformity >= Uniformity.MULT)
+
+        def visit(stmts, guards) -> Optional[str]:
+            for s in stmts:
+                if s.op == Op.COPY_ASYNC and s.attr('engine') == 'lds_dma':
+                    why = engines.lds_dma_refusal(s, defs, guards, wave)
+                    if why is not None:
+                        return why
+                for k, r in enumerate(s.regions):
+                    if s.op == Op.IF:
+                        cond = s.args[0]
+                        inner = guards + ((cond,) if k == 0
+                                          else (('not', cond),))
+                    elif s.op == Op.FOR:
+                        inner = guards + (() if all(
+                            shared(b) for b in s.loop_bounds) else (None,))
+                    else:
+                        inner = guards + (None,)
+                    why = visit(r.body, inner)
+                    if why is not None:
+                        return why
+            return None
+
+        return visit(body, ())
 
     def _copy_bytes(self, s: Stmt) -> int:
         """Bytes a lane's copy moves: the statement's `width`, which the
@@ -1325,6 +1382,11 @@ class Emitter:
                 self._emit_body(s.regions[0].body, yield_to)
             return
 
+        if op == Op.WAIT_COUNTER and s.args and self._async_lex is None:
+            # The wait for copies the body writes as loads and stores
+            # (`_decide_async`): nothing of theirs is in flight.
+            return
+
         if engines.spec_of(op) is not None:
             # A barrier, a fence, a counter wait, a priority: what the
             # registry writes it as on this target.
@@ -1514,7 +1576,8 @@ class Emitter:
                 elem = self.elem_size(s.copy_dst)
                 text = self._async_lex.copy_async(
                     f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]',
-                    self._copy_bytes(s), zfill * elem)
+                    self._copy_bytes(s), zfill * elem,
+                    engine=s.attr('engine'))
             if text is not None:
                 w(text)
             elif zfill:
@@ -1558,13 +1621,20 @@ class Emitter:
             # fell back to plain assignments they are not in flight and must
             # not be counted.
             unified = (self._async_lex is not None
-                       and self._target().one_wait_counter())
+                       and self._target().one_wait_counter(self._copy_engine))
             n = s.attr('prior_unified' if unified else 'prior', 0)
             texts = []
             if cls in ('load', 'all'):
                 texts.append(lex.wait_async_regs(n))
             if cls in ('copy', 'all') and self._async_lex is not None:
                 texts.append(lex.wait_async(n))
+            if cls == 'all' and self._copy_counter is not None:
+                # Where the body's copies are waited for on a counter TF
+                # writes, a drain is that counter at zero: the compiler
+                # places no wait in front of a read of what they wrote.
+                texts += list(engines.lower(
+                    engines.wait_counter(self._copy_counter, 0),
+                    self._target()).lines)
             # A full drain waits on every cursor of the body as well: one
             # with nothing in flight returns at once.  The wait for a bulk
             # copy is the wait for its barrier's phase (`WAIT_PHASE`).
