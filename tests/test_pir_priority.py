@@ -6,11 +6,14 @@ markers stand in a kernel, and that nothing else changes."""
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
+import pathlib
 import re
 
 import pytest
 
+from tensorforge.backend.pir.core import Op
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.context import Context, Options
 from tensorforge.generators.generator import Generator
@@ -18,6 +21,7 @@ from tensorforge.generators.generator import Generator
 from test_rolling import gemm, make
 
 SETPRIO = re.compile(r'__builtin_amdgcn_s_setprio\((\d)\);')
+CASES = pathlib.Path(__file__).parent / 'cases'
 
 
 def _kernel(backend='hip', arch='gfx942', **opts):
@@ -92,3 +96,62 @@ def test_the_controls_stand_where_loads_stands(mode, text):
     control = _kernel(amd_setprio=mode).splitlines()
     where = [n for n, ln in enumerate(marked) if 's_setprio' in ln]
     assert where == [n for n, ln in enumerate(control) if text in ln]
+
+
+@pytest.mark.parametrize('mode, ops', [
+    ('loads', [(Op.SET_PRIORITY, 2), (Op.SET_PRIORITY, 0)]),
+    ('compute', [(Op.SET_PRIORITY, 2), (Op.SET_PRIORITY, 0),
+                 (Op.SET_PRIORITY, 2)]),
+    ('alternate', [(Op.SET_PRIORITY, 2)]),
+    ('flat', [(Op.SET_PRIORITY, 0), (Op.SET_PRIORITY, 0)]),
+    ('sched', [(Op.FENCE, None), (Op.FENCE, None)])])
+def test_the_markers_are_engine_ops(mode, ops):
+    """What the target writes (`pir.engines`), not text: a priority, or for
+    `sched` a fence of the schedule -- around the transfer of a body that
+    has one, and the body verifies."""
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import MemSpace
+    b = IRBuilder(fptype=Datatype.F32)
+    g = b.alloc(Datatype.F32, (8,), MemSpace.GLOBAL, hint='g', offset=0)
+    r = b.alloc(Datatype.F32, (8,), MemSpace.REGISTER, hint='r')
+    for i in range(2):
+        b.store(r, b.load(g, i, hint='x'), i)
+    b.store(r, b.load(r, 0, hint='y'), 1)
+    body = pir.set_priority(b.finish(), mode)
+    pir.verify(body)
+    marks = [s for s in body if s.op in (Op.SET_PRIORITY, Op.FENCE)]
+    assert [(s.op, s.attr('level')) for s in marks] == ops
+    assert all(s.text is None and not s.has_side_effects for s in marks)
+    assert (marks[0].attr('waves') == 'odd') == (mode == 'alternate')
+
+
+def _case_kernel(case, **opts):
+    spec = importlib.util.spec_from_file_location(case, CASES / f'{case}.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    options = dict(getattr(module, 'OPTIONS', {}), **opts)
+    gen = Generator(module.descr_list(),
+                    Context(arch='gfx942', backend='hip', fp_type=module.DTYPE,
+                            options=Options(**options)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen.get_kernel()
+
+
+def _markers_as_one(src):
+    src = re.sub(r'__builtin_amdgcn_(s_setprio\(\d\)|sched_barrier\(0\));',
+                 'MARK;', src)
+    return [re.sub(r'kernel_\w+', 'kernel', ln) for ln in src.splitlines()
+            if 'tensorforge-meta' not in ln and '// options:' not in ln]
+
+
+def test_the_sched_control_differs_from_loads_in_the_marker_alone():
+    """A guard the emitter writes into its `if` behind a priority it writes
+    there behind the control's fence too -- the transfer guarded after a
+    run of stores, here: the fence orders the device compiler, and the
+    passes are done (`wall=False`)."""
+    loads = _case_kernel('mma_operator_copies_run', amd_setprio='loads')
+    control = _case_kernel('mma_operator_copies_run', amd_setprio='sched')
+    assert 'sched_barrier' in control
+    assert _markers_as_one(loads) == _markers_as_one(control)

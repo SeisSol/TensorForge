@@ -1782,7 +1782,8 @@ class IRBuilder:
     def fence(self, kind: Union[str, 'engines.FenceKind'], *,
               scope: Optional['engines.SyncScope'] = None,
               mask: Optional[int] = None,
-              group: Optional[Tuple[int, int, int]] = None) -> Stmt:
+              group: Optional[Tuple[int, int, int]] = None,
+              wall: bool = True) -> Stmt:
         """A fence of the schedule, of memory, or of both
         (`engines.fence_stmt`).
 
@@ -1791,16 +1792,17 @@ class IRBuilder:
         what it is, and the target says how it is written.
         """
         return self.emit(engines.fence_stmt(kind, scope=scope, mask=mask,
-                                            group=group))
+                                            group=group, wall=wall))
 
     def wait_counter(self, counter: str, count: int) -> Stmt:
         """Wait until at most ``count`` operations are outstanding on the
         hardware counter ``counter`` (`engines.wait_counter`)."""
         return self.emit(engines.wait_counter(counter, count))
 
-    def set_priority(self, level: int) -> Stmt:
-        """The wave's issue priority from here on (`engines.set_priority`)."""
-        return self.emit(engines.set_priority(level))
+    def set_priority(self, level: int, waves: Optional[str] = None) -> Stmt:
+        """The wave's issue priority from here on, for the waves `waves`
+        names (`engines.set_priority`)."""
+        return self.emit(engines.set_priority(level, waves))
 
     def yield_(self, *values: Operand) -> Stmt:
         return self._emit_op(Op.YIELD, (), values, pure=False, movable=False)

@@ -24,16 +24,23 @@ The modes, for measuring which order pays here:
   telling what the priorities do from what an instruction the compiler
   will not move across does.
 
-Placed behind every pass that moves a statement, so the markers stand where
-the transfers ended up; pinned, with no effect of their own.
+The markers are the engines' ops (`engines.set_priority`, and a fence of
+the schedule for ``sched``), which the target writes.  Placed behind every
+pass that moves a statement, so they stand where the transfers ended up;
+pinned, with no effect of their own -- the fence too, which orders the
+device compiler alone (`wall=False`): a value the emitter writes into its
+one use behind a priority it writes behind the fence as well, so that the
+controls differ from ``loads`` in the marker and nothing else.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import List, Sequence, Tuple
+from typing import Callable, List, Sequence, Tuple
 
-from .core import Effect, Op, Stmt
+from . import engines
+from .core import Op, Stmt
+from .engines import FenceKind
 from .transfers import glue, neutral, transfers
 
 HIGH = 2
@@ -41,29 +48,20 @@ LOW = 0
 
 MODES = ('loads', 'compute', 'alternate', 'flat', 'sched')
 
-#: What the controls put where `loads` puts a priority: the same
-#: instruction at priority 0 throughout (`flat`), and a scheduling barrier
-#: alone (`sched`) -- `s_setprio` is an instruction with side effects, which
-#: the compiler does not move anything across.
-_FLAT = '__builtin_amdgcn_s_setprio(0);'
-_SCHED = '__builtin_amdgcn_sched_barrier(0);'
+#: A marker, made anew for every place it stands.
+Marker = Callable[[], Stmt]
 
 
-def _prio(level) -> Stmt:
-    text = level if isinstance(level, str) else (
-        f'__builtin_amdgcn_s_setprio({level});')
-    return Stmt(op=Op.RAWSTMT, target=(), args=(), pure=False, movable=False,
-                effect=Effect.NONE, text=text)
+def _level(level: int) -> Marker:
+    return lambda: engines.set_priority(level)
 
 
-def _alternate() -> Stmt:
-    # The wave's index in the block, read from the first lane so that the
-    # branch is uniform, and every odd one raised.
-    return Stmt(op=Op.RAWSTMT, target=(), args=(), pure=False, movable=False,
-                effect=Effect.NONE,
-                text=('if (__builtin_amdgcn_readfirstlane((threadIdx.x + '
-                      'blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) '
-                      f'/ warpSize) & 1) {{ __builtin_amdgcn_s_setprio({HIGH}); }}'))
+def _schedule() -> Stmt:
+    # What the controls put where `loads` puts a priority, besides the same
+    # instruction at priority 0 throughout (`flat`): a scheduling barrier
+    # alone -- `s_setprio` is an instruction with side effects, which the
+    # compiler does not move anything across.
+    return engines.fence_stmt(FenceKind.SCHEDULE, wall=False)
 
 
 def _quiet(s: Stmt) -> bool:
@@ -73,8 +71,9 @@ def _quiet(s: Stmt) -> bool:
     return neutral(s) or glue(s) or s.op in (Op.MARK, Op.ALLOC)
 
 
-def _mark(body: Sequence[Stmt], during: int, between: int) -> Tuple[Stmt, ...]:
-    """`body` with the priority `during` ahead of every run of transfer
+def _mark(body: Sequence[Stmt], during: Marker,
+          between: Marker) -> Tuple[Stmt, ...]:
+    """`body` with the marker `during` ahead of every run of transfer
     statements and `between` behind it, in this list and every one nested."""
     members = set()
     for t in transfers(body):
@@ -84,7 +83,7 @@ def _mark(body: Sequence[Stmt], during: int, between: int) -> Tuple[Stmt, ...]:
     for n, s in enumerate(body):
         if id(s) in members:
             if not inside:
-                out.append(_prio(during))
+                out.append(during())
                 inside = True
             out.append(s)
             continue
@@ -96,7 +95,7 @@ def _mark(body: Sequence[Stmt], during: int, between: int) -> Tuple[Stmt, ...]:
                 out.append(s)
                 continue
         if inside:
-            out.append(_prio(between))
+            out.append(between())
             inside = False
         if s.regions:
             s = replace(s, regions=tuple(
@@ -104,20 +103,22 @@ def _mark(body: Sequence[Stmt], during: int, between: int) -> Tuple[Stmt, ...]:
                 for r in s.regions))
         out.append(s)
     if inside:
-        out.append(_prio(between))
+        out.append(between())
     return tuple(out)
 
 
 def set_priority(body: Tuple[Stmt, ...], mode: str) -> Tuple[Stmt, ...]:
     """`body` with the wave priorities `mode` asks for (see the module)."""
     if mode == 'alternate':
-        return (_alternate(),) + tuple(body)
+        # Every wave of an odd index in the block, raised once at the head.
+        return (engines.set_priority(HIGH, waves='odd'),) + tuple(body)
     if mode == 'loads':
-        return _mark(body, HIGH, LOW)
+        return _mark(body, _level(HIGH), _level(LOW))
     if mode == 'flat':
-        return _mark(body, _FLAT, _FLAT)
+        return _mark(body, _level(LOW), _level(LOW))
     if mode == 'sched':
-        return _mark(body, _SCHED, _SCHED)
+        return _mark(body, _schedule, _schedule)
     if mode == 'compute':
-        return (_prio(HIGH),) + _mark(body, LOW, HIGH)
+        return (engines.set_priority(HIGH),) + _mark(body, _level(LOW),
+                                                     _level(HIGH))
     raise ValueError(f'amd_setprio: {mode!r} is none of {", ".join(MODES)}')

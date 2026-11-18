@@ -397,6 +397,34 @@ def test_a_wave_priority_is_amd_s_and_nothing_elsewhere():
         engines.set_priority(4)
 
 
+def test_a_wave_priority_for_the_odd_waves_only():
+    """`amd_setprio=alternate`'s: behind the wave's index in the block, read
+    from the first lane, so that the branch is uniform."""
+    odd = engines.set_priority(2, waves='odd')
+    assert engines.verify_engine(odd) == []
+    (line,) = _lines(odd, _target('hip', 'gfx942'))
+    assert line.startswith('if (__builtin_amdgcn_readfirstlane(')
+    assert line.endswith(') & 1) { __builtin_amdgcn_s_setprio(2); }')
+    assert _lines(odd, _target('cuda', 'sm_90')) == ()
+    with pytest.raises(IRError):
+        engines.set_priority(2, waves='even')
+
+
+def test_a_fence_of_the_schedule_need_not_be_a_wall():
+    """Placed behind the passes for the device compiler alone: no effect,
+    still pinned, written as a wall of the schedule is.  A memory fence is a
+    wall by what it does."""
+    gfx942 = _target('hip', 'gfx942')
+    soft = engines.fence_stmt(FenceKind.SCHEDULE, wall=False)
+    hard = engines.fence_stmt(FenceKind.SCHEDULE)
+    assert soft.effect == Effect.NONE and hard.effect == Effect.UNKNOWN
+    assert not soft.movable and engines.verify_engine(soft) == []
+    assert _lines(soft, gfx942) == _lines(hard, gfx942) == (
+        '__builtin_amdgcn_sched_barrier(0);',)
+    with pytest.raises(IRError):
+        engines.fence_stmt(FenceKind.MEMORY, wall=False)
+
+
 # -- the emitter and the passes ---------------------------------------------- #
 
 class _Sink:

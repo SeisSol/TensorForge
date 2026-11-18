@@ -697,13 +697,26 @@ def _lower_wait_counter_other(s: Stmt, env: Spelling) -> Lowered:
                   f'transfers there')
 
 
+#: The waves a priority may be set for (`set_priority`): every wave where
+#: None, or those of an odd index in the block.
+PRIORITY_WAVES = (None, 'odd')
+
+
 def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
     """The wave's issue priority, 0 to 3 (`s_setprio`), on AMD; nothing
     elsewhere -- a priority is a hint, and a target without one schedules
-    the same work."""
-    if env.family == 'hip' and env.amd:
-        return Lowered((f'__builtin_amdgcn_s_setprio({s.attr("level")});',))
-    return Lowered()
+    the same work.
+
+    For the odd waves only, behind the wave's index in the block, read from
+    the first lane so that the branch is uniform."""
+    if not (env.family == 'hip' and env.amd):
+        return Lowered()
+    text = f'__builtin_amdgcn_s_setprio({s.attr("level")});'
+    if s.attr('waves') == 'odd':
+        text = ('if (__builtin_amdgcn_readfirstlane((threadIdx.x + '
+                'blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) '
+                f'/ warpSize) & 1) {{ {text} }}')
+    return Lowered((text,))
 
 
 # --------------------------------------------------------------------------- #
@@ -742,11 +755,14 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            settles=True, units=1, pipe='barrier',
            lower={'*': _lower_wait_phase}),
     # A wall wherever the raw text it replaces was one: opaque to every
-    # pass, though what it orders is known (see the module).
+    # pass, though what it orders is known (see the module).  A fence of the
+    # schedule placed behind the passes (`wall=False`) orders the device
+    # compiler alone and has no effect here (`effect_of`).
     OpSpec(Op.FENCE, operands=(Slot('kind', (FenceKind,)),
                                Slot('scope', (SyncScope,), False),
                                Slot('mask', _INT, False),
-                               Slot('group', (tuple,), False)),
+                               Slot('group', (tuple,), False),
+                               Slot('wall', (bool,), False)),
            results=(), effect=Effect.UNKNOWN, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_fence}),
@@ -760,7 +776,8 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
                   '*': _lower_wait_counter_other}),
     # No memory effect, and pinned: what it changes is which wave issues
     # first from where it stands, and nothing moves it.
-    OpSpec(Op.SET_PRIORITY, operands=(Slot('level', _INT),),
+    OpSpec(Op.SET_PRIORITY, operands=(Slot('level', _INT),
+                                      Slot('waves', (str,), False)),
            results=(), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_set_priority}),
@@ -795,12 +812,21 @@ def verify_engine(s: Stmt) -> List[str]:
         if not isinstance(value, slot.kinds):
             diag.append(f'{s.op}: {slot.name} {value!r} is not a '
                         f'{" or ".join(k.__name__ for k in slot.kinds)}')
-    if s.effect != spec.effect or s.movable != spec.movable:
+    effect = effect_of(s.op, s.attrs)
+    if s.effect != effect or s.movable != spec.movable:
         diag.append(f'{s.op}: declares {s.effect!r}, '
                     f'{"movable" if s.movable else "pinned"}, where the '
-                    f'registry says {spec.effect!r}, '
+                    f'registry says {effect!r}, '
                     f'{"movable" if spec.movable else "pinned"}')
     return diag
+
+
+def effect_of(op: str, attrs: Tuple = ()) -> Effect:
+    """The effect a statement of `op` with `attrs` declares: the registry's,
+    but none for a fence that is no wall (`fence_stmt`)."""
+    if op == Op.FENCE and dict(attrs).get('wall') is False:
+        return Effect.NONE
+    return REGISTRY[op].effect
 
 
 def arrival_of(s: Stmt) -> Uniformity:
@@ -848,8 +874,8 @@ def _stmt(op: str, attrs: Tuple = (), args: Tuple = (), target: Tuple = (),
     """A statement of `op`, with what the registry says it does."""
     spec = REGISTRY[op]
     return Stmt(op=op, target=target, args=args, pure=False,
-                movable=spec.movable, effect=spec.effect, accesses=accesses,
-                attrs=attrs)
+                movable=spec.movable, effect=effect_of(op, attrs),
+                accesses=accesses, attrs=attrs)
 
 
 def barrier(obj: SyncObjectType, handoff: bool = False) -> Stmt:
@@ -890,13 +916,21 @@ def wait_phase(obj: SyncObjectType) -> Stmt:
 
 def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
                mask: Optional[int] = None,
-               group: Optional[Tuple[int, int, int]] = None) -> Stmt:
+               group: Optional[Tuple[int, int, int]] = None,
+               wall: bool = True) -> Stmt:
     """A fence of `kind`.  `scope` is whose memory a memory fence orders
     (the block's where None), `mask` the backend's own scheduling mask (AMD
     `sched_barrier`, vISA's fence bits), and `group` an AMD scheduling group
-    -- mask, size, id -- rather than a wall."""
+    -- mask, size, id -- rather than a wall.
+
+    Not a `wall`: a fence of the schedule placed where the passes are done,
+    for the device compiler alone -- pinned, and no effect the emitter keeps
+    a value in front of (`pir.priority`'s control, which stands where its
+    raw text, declared without one, stood).  A memory fence is always one."""
     if not isinstance(kind, FenceKind):
         kind = FenceKind(kind)
+    if not wall and kind is not FenceKind.SCHEDULE:
+        raise IRError(f'a {kind.value} fence is a wall: it orders memory')
     attrs = (('kind', kind),)
     if scope is not None:
         attrs += (('scope', scope),)
@@ -904,6 +938,8 @@ def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
         attrs += (('mask', int(mask)),)
     if group is not None:
         attrs += (('group', tuple(int(x) for x in group)),)
+    if not wall:
+        attrs += (('wall', False),)
     return _stmt(Op.FENCE, attrs)
 
 
@@ -923,18 +959,26 @@ def wait_counter(counter: str, count: int) -> Stmt:
                  accesses=accesses)
 
 
-def set_priority(level: int) -> Stmt:
-    """The wave's issue priority from here on, 0 (lowest) to 3."""
+def set_priority(level: int, waves: Optional[str] = None) -> Stmt:
+    """The wave's issue priority from here on, 0 (lowest) to 3, for the
+    waves `waves` names (`PRIORITY_WAVES`): all where None."""
     if not 0 <= int(level) <= 3:
         raise IRError(f'a wave priority of {level}; the hardware has 0 to 3')
-    return _stmt(Op.SET_PRIORITY, (('level', int(level)),))
+    if waves not in PRIORITY_WAVES:
+        raise IRError(f'a wave priority for the waves {waves!r}; there are '
+                      f'{", ".join(str(w) for w in PRIORITY_WAVES)}')
+    attrs = (('level', int(level)),)
+    if waves is not None:
+        attrs += (('waves', waves),)
+    return _stmt(Op.SET_PRIORITY, attrs)
 
 
 __all__ = [
-    'Completion', 'FenceKind', 'Hazard', 'Lowered', 'OpSpec', 'REGISTRY',
-    'Slot', 'Spelling', 'SyncKind', 'SyncObjectType', 'SyncScope',
-    'arrival_of', 'arrive', 'barrier', 'family', 'fence_stmt', 'lower',
-    'object_demand', 'object_of', 'objects', 'set_priority', 'settles',
-    'spec_of', 'sync_init', 'sync_object', 'verify_engine', 'wait_counter',
+    'Completion', 'FenceKind', 'Hazard', 'Lowered', 'OpSpec',
+    'PRIORITY_WAVES', 'REGISTRY', 'Slot', 'Spelling', 'SyncKind',
+    'SyncObjectType', 'SyncScope', 'arrival_of', 'arrive', 'barrier',
+    'effect_of', 'family', 'fence_stmt', 'lower', 'object_demand',
+    'object_of', 'objects', 'set_priority', 'settles', 'spec_of',
+    'sync_init', 'sync_object', 'verify_engine', 'wait_counter',
     'wait_phase',
 ]
