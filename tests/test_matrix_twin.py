@@ -108,6 +108,37 @@ def test_taken_where_the_count_says_it_is_faster(monkeypatch, matrix_count,
   assert bool(pick.get('tensor_cores')) is taken
 
 
+class _TwinSpills:
+  """A compiler under which the matrix twins spill `spill` bytes and every
+  other build nothing."""
+  def __init__(self, spill):
+    self.spill = spill
+
+  def resources(self, result):
+    twin = bool(result.candidate.get('tensor_cores'))
+    return Resources(registers=128, spill_bytes=self.spill if twin else 0)
+
+
+@pytest.mark.parametrize('spill, taken', [(40, True), (2048, False)])
+def test_a_twin_may_spill_a_little_where_the_default_does_not(
+    monkeypatch, spill, taken):
+  """`MATRIX_SPILL_FLOOR`: the guard every other candidate meets would leave a
+  twin spilling anything where the default spills nothing; within the floor
+  the price decides, past it the twin stays out."""
+  assert 40 < tuning.MATRIX_SPILL_FLOOR < 2048
+  monkeypatch.setattr(tuning, '_settled', lambda result: None)
+  monkeypatch.setattr(tuning, 'executed_instructions', lambda result: (
+      1000.0 if result.candidate.get('tensor_cores') else 2000.0))
+  descr_factory = _local_flux()
+  context = Context(arch='sm_90', backend='cuda', fp_type=Datatype.F64,
+                    options=Options())
+  origin = tuning.start(descr_factory(), context)
+  first = tuning.build(descr_factory, context, origin, Generator.trial)
+  pick = tuning.lanes_rule(descr_factory, context, _TwinSpills(spill), origin,
+                           first, generate=Generator.trial)
+  assert bool(pick.get('tensor_cores')) is taken
+
+
 def _matrix_issues(arch):
   from tensorforge.common.basic_types import Addressing
   from tensorforge.common.matrix.boundingbox import BoundingBox
