@@ -41,3 +41,15 @@ def generate_tmp_matrix(op1: Tensor, op2: Tensor, trans_a: bool = False, trans_b
 
 def get_extra_offset_name(symbol: Symbol):
   return f'{symbol.name}{GeneralLexicon.EXTRA_OFFSET}'
+
+
+def get_stride_name(symbol: Symbol):
+  """The launcher's and the kernel's parameter for an operand's stride, where
+  the stride is bound at run time (`ElementAddressing.stride` is `RUNTIME`)."""
+  return f'{symbol.name}{GeneralLexicon.STRIDE}'
+
+
+def get_slot_name(symbol: Symbol):
+  """The parameter for an operand's slot, where it is bound at run time
+  (`ElementAddressing.slot` is `RUNTIME`)."""
+  return f'{symbol.name}{GeneralLexicon.SLOT}'

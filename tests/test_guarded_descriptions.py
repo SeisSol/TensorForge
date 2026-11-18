@@ -265,6 +265,11 @@ def test_a_kernel_description_survives_being_written_out_and_read_back():
 
     description = _matmul_description()
     description["version"] = YatetoFrontend.INTERFACE_VERSION
+    # Version 8 states a binding for every tensor: the defaults for the
+    # ones that reach an element, none for the scalar.
+    for tensor in description["tensors"]:
+        tensor["binding"] = (dict(stride=None, offset=0, slots=1, slot=0)
+                             if tensor["addressing"] else None)
     replayed = json.loads(json.dumps(description))
     assert replayed == description
 
@@ -273,11 +278,15 @@ def test_a_kernel_description_survives_being_written_out_and_read_back():
     assert {name for name in cache} == {"A", "B", "C", "_scalar0"}
 
 
-def test_a_description_from_another_interface_version_is_refused():
+@pytest.mark.parametrize("offset", [-2, +1])
+def test_a_description_from_another_interface_version_is_refused(offset):
+    """One older than the oldest this reads, or newer than the newest: the
+    reader speaks 7 and 8 (`YatetoFrontend.READABLE_VERSIONS`)."""
     from tensorforge.frontend.yateto import DescriptionReader, YatetoFrontend
 
     description = _matmul_description()
-    description["version"] = YatetoFrontend.INTERFACE_VERSION - 1
+    description["version"] = YatetoFrontend.INTERFACE_VERSION + offset
+    assert description["version"] not in YatetoFrontend.READABLE_VERSIONS
     with pytest.raises(NotImplementedError, match="interface version"):
         DescriptionReader(_ARCH, {}).read(description)
 

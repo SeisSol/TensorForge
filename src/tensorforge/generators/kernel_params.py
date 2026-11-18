@@ -218,6 +218,18 @@ class KernelParam:
         return cls(name, Datatype.SIZE, MemSpace.NONE, depth=0)
 
     @classmethod
+    def indices(cls, name: str) -> 'KernelParam':
+        """The launch's index list (`Addressing.INDEXED`).
+
+        `unsigned`, spelled as the flags are: a cell index fits 32 bits on
+        every target, and the list is one read per element and operand
+        kind.  What it is multiplied into is widened first
+        (`GetElementPtr._index_entry`).  Read-only: the kernel never writes
+        it.
+        """
+        return cls(name, 'unsigned', MemSpace.GLOBAL, readonly=True, depth=1)
+
+    @classmethod
     def flags(cls, name: str, default: str = '') -> 'KernelParam':
         """The per-element mask.
 

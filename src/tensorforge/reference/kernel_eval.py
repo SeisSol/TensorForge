@@ -590,6 +590,17 @@ class PtrTable:
         return Ptr(self.mem, f'{self.base}@{int(e)}')
 
 
+class Indices:
+    """The launch's index list (`Addressing.INDEXED`) where a run is given
+    none: element `n` is cell `n`, which reads what a strided operand would.
+    A preset `elementIndices` replaces it (`evaluate_wave`)."""
+
+    __slots__ = ()
+
+    def __getitem__(self, n):
+        return int(n)
+
+
 class Vec(tuple):
     """A short vector value: `VectorT<T, N>`, `floatN`, or a `{a, b}` list.
 
@@ -1727,6 +1738,15 @@ def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
         env.setdefault(name, Ptr(mem, name))
     for name in re.findall(r'\b(\w*_extraOffset)\b', src):
         env.setdefault(name, 0)
+    # The address parameters bound at run time (`ElementAddressing`): a slot
+    # of 0, and a stride that keeps the elements of every operand a test
+    # declares apart, as the preset's width does.  `scalars` sets others.
+    for name in re.findall(r'\b(m\d+_stride)\b', src):
+        env.setdefault(name, _PRESET_SLOTS)
+    for name in re.findall(r'\b(m\d+_slot)\b', src):
+        env.setdefault(name, 0)
+    if re.search(r'\belementIndices\b', src):
+        env.setdefault('elementIndices', Indices())
     for name in re.findall(r'\b(numElements\d+)\b', src):
         env.setdefault(name, 1)
     for name in re.findall(r'\b(flags\d+)\b', src):
@@ -1926,7 +1946,8 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   mults: int = 1,
                   races: Optional[List[Race]] = None,
                   elements: int = 1, block: bool = False,
-                  launches: Sequence[int] = (), grid: int = 1) -> Dict:
+                  launches: Sequence[int] = (), grid: int = 1,
+                  scalars: Optional[Dict[str, object]] = None) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
     The difference from calling `evaluate` per lane is that the lanes share
@@ -1950,6 +1971,11 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     other on the one memory: a block's traversal of the batch is then its
     share of it, as the launch hands it out.  Blocks take no part in each
     other's work, so in turn is as good an order as any.
+
+    `scalars` are kernel parameters passed by value, by name -- an operand's
+    stride or slot bound at run time (`m3_stride`), its extra offset.  A
+    preset `elementIndices` is the launch's index list, read as memory; the
+    identity without one (`Indices`).
 
     The lanes run are those of the block's first multiplication, unless
     `block` asks for all `mults` of them.  What the block does together
@@ -1977,8 +2003,10 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                 # A mask the preset gives is one the kernel is handed; without
                 # one, the pointer is null and every element counts.
                 for name in preset or ():
-                    if re.fullmatch(r'flags\d+', name):
+                    if (re.fullmatch(r'flags\d+', name)
+                            or name == 'elementIndices'):
                         env[name] = Ptr(mem, name)
+                env.update(scalars or {})
                 interp = Interp(mem, env)
                 interp.lane = tid + mult * lanes
                 interp.launches = tuple(launches)
@@ -1996,7 +2024,8 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
 
 def evaluate(src: str, tid: int = 0, seed: int = 0,
              globals_only: bool = False,
-             preset: Optional[Dict[str, object]] = None) -> Dict:
+             preset: Optional[Dict[str, object]] = None,
+             scalars: Optional[Dict[str, object]] = None) -> Dict:
     """Run one kernel body for one thread; return the resulting memory.
 
     ``preset`` maps a global array name to a value every one of its slots is
@@ -2013,6 +2042,9 @@ def evaluate(src: str, tid: int = 0, seed: int = 0,
     if preset:
         _fill(mem, preset)
     env = _base_env(src, mem, tid)
+    if preset and 'elementIndices' in preset:
+        env['elementIndices'] = Ptr(mem, 'elementIndices')
+    env.update(scalars or {})
     interp = Interp(mem, env)
     interp.run(parse(body))
     if globals_only:

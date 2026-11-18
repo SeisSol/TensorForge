@@ -61,12 +61,13 @@ STACKS = (1, 2)
 
 
 def per_element(tensor) -> bool:
-  """Whether every element of the batch has its own `tensor`: strided or
-  through a pointer of its own, the two addressings that take the element
-  index.  The batch-constant ones (`NONE`) and a scalar passed by value
-  (`SCALAR`) are the batch's."""
-  return getattr(tensor, 'addressing', None) in (Addressing.STRIDED,
-                                                 Addressing.PTR_BASED)
+  """Whether every element of the batch has its own `tensor`: strided,
+  through a pointer of its own or through the index list, the addressings
+  that take the element index (`Addressing.per_element`), with parameters of
+  their own or without.  The batch-constant ones (`NONE`) and a scalar passed
+  by value (`SCALAR`) are the batch's."""
+  addressing = getattr(tensor, 'addressing', None)
+  return addressing is not None and addressing.per_element()
 
 
 def factor(tensor) -> int:

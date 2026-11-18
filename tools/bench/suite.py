@@ -667,7 +667,7 @@ def from_dump(path: Path, pattern: str = '*',
 
     # "old" method, interface yateto python
     kernels = blob['all'] if 'all' in blob else blob
-    addressing = {str(a): a for a in Addressing}
+    from tensorforge.common.basic_types import parse_addressing
 
     for symbol, rows in sorted(kernels.items()):
         if not fnmatch.fnmatch(symbol, pattern):
@@ -682,7 +682,7 @@ def from_dump(path: Path, pattern: str = '*',
                 if x['name'] not in tensors:
                     data = x['data']
                     tensors[x['name']] = Tensor(
-                        x['shape'], addressing[x['addressing']],
+                        x['shape'], parse_addressing(x['addressing']),
                         BoundingBox(list(x['tbbox'][0]), list(x['tbbox'][1])),
                         alias=x['name'], is_tmp=x['is_tmp'],
                         data=None if data is None else np.array(data),

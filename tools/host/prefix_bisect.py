@@ -25,7 +25,7 @@ from tensorforge.generators.generator import Generator
 from tensorforge.reference import descriptors as ref
 
 DT = Datatype.F32
-ADDR = {str(a): a for a in Addressing}
+from tensorforge.common.basic_types import parse_addressing  # noqa: E402
 
 
 def build(descrs, upto=None):
@@ -35,7 +35,7 @@ def build(descrs, upto=None):
     def tensor(x):
         if x["name"] not in tensors:
             tensors[x["name"]] = Tensor(
-                x["shape"], ADDR[x["addressing"]],
+                x["shape"], parse_addressing(x["addressing"]),
                 BoundingBox(list(x["tbbox"][0]), list(x["tbbox"][1])),
                 alias=x["name"], is_tmp=x["is_tmp"],
                 data=x["data"], datatype=DT)

@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 
-from tensorforge.common.basic_types import Addressing, Datatype
+from tensorforge.common.basic_types import Addressing, Datatype, parse_addressing
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import MultilinearDescr
@@ -91,7 +91,7 @@ def _meta_view(row, pool, tensors):
         tbox = BoundingBox(lower, upper)
     key = (name, tuple(shape))
     if key not in pool:
-        pool[key] = Tensor(shape, ADDRESSING[row['addressing']], tbox,
+        pool[key] = Tensor(shape, parse_addressing(row['addressing']), tbox,
                            alias=name, is_tmp=bool(row.get('is_tmp')),
                            datatype=Datatype.F32)
     return SubTensor(pool[key], BoundingBox(*row['bbox']))

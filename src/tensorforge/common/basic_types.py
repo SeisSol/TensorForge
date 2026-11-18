@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
+import dataclasses
 import enum
 import math
 
@@ -45,25 +46,48 @@ class Residence(enum.Enum):
 
 
 class Addressing(enum.Enum):
+  """How an element of the batch reaches an operand's data.
+
+  A kind, with the parameters of its address at their defaults.  Where they
+  are not -- a stride of its own, an offset, a slot -- the operand's
+  addressing is an `ElementAddressing` of the kind instead (`strided`,
+  `indexed`, `indexed_pointer`, `pointer_based`), which never compares equal
+  to a bare member: see there for why.
+
+  `INDEXED` reaches element `n` of the launch at `base + index[n] * stride +
+  offset`, and `INDEXED_POINTER` at `vars[index[n] * slots + slot] + offset`:
+  both through the launch's one index list (`GeneralLexicon.ELEMENT_INDICES`),
+  shared by every operand addressed through it and as long as the launch has
+  elements.  An input may name a cell twice and in any order.  An output
+  written through two entries that name one cell is undefined -- two elements
+  write the same memory at once, and an accumulation adds up neither sum
+  completely -- which the generator cannot see and does not check.
+  """
   NONE = 0
   STRIDED = 1
   PTR_BASED = 2
   SCALAR = 3
+  INDEXED = 4
+  INDEXED_POINTER = 5
 
   @classmethod
   def addr2ptr_type(cls, addr_type):
     map = {Addressing.NONE: '*',
            Addressing.STRIDED: '*',
            Addressing.PTR_BASED: '**',
-           Addressing.SCALAR: ''}
-    return map[addr_type]
+           Addressing.SCALAR: '',
+           Addressing.INDEXED: '*',
+           Addressing.INDEXED_POINTER: '**'}
+    return map[addr_type.kind]
 
   @classmethod
   def addr2str(cls, addr):
     map = {Addressing.NONE: 'none',
            Addressing.STRIDED: 'strided',
            Addressing.PTR_BASED: 'pointer_based',
-           Addressing.SCALAR: 'scalar'}
+           Addressing.SCALAR: 'scalar',
+           Addressing.INDEXED: 'indexed',
+           Addressing.INDEXED_POINTER: 'indexed_pointer'}
     return map[addr]
 
   def __str__(self):
@@ -72,16 +96,234 @@ class Addressing(enum.Enum):
   def to_pointer(self):
     return self.addr2ptr_type(self)
 
-class StridedAddressing:
-  def __init__(self, offset, stride=None):
-    self.offset = offset
-    self.stride = stride
+  @property
+  def kind(self) -> 'Addressing':
+    """The member itself: what an `ElementAddressing` is a kind of.  One
+    question to ask of either form, where comparing a parameterized one with
+    a bare member would answer no."""
+    return self
+
+  def per_element(self) -> bool:
+    """Whether every element of the batch has data of its own: the kinds
+    that take the element index.  `NONE` is the batch's, `SCALAR` a value."""
+    return self in (Addressing.STRIDED, Addressing.PTR_BASED,
+                    Addressing.INDEXED, Addressing.INDEXED_POINTER)
+
+  def indexed(self) -> bool:
+    """Whether an element is reached through the launch's index list."""
+    return self in (Addressing.INDEXED, Addressing.INDEXED_POINTER)
+
+  def follows_pointer(self) -> bool:
+    """Whether computing an element's address reads memory the element
+    names: its pointer (`PTR_BASED`), its entry of the index list
+    (`INDEXED`), or both (`INDEXED_POINTER`)."""
+    return self in (Addressing.PTR_BASED, Addressing.INDEXED,
+                    Addressing.INDEXED_POINTER)
+
+
+class _Runtime(enum.Enum):
+  """The value of an address parameter the kernel is handed when it runs.
+
+  An enum member and not a string or a bare object, so that it stays itself
+  through `copy.deepcopy` -- the tuner copies a description and then asks
+  `is RUNTIME` of the copy -- and so that a misspelling is an error rather
+  than another value.
+  """
+  RUNTIME = 'runtime'
+
+  def __str__(self):
+    return self.value
+
+  def __repr__(self):
+    return 'RUNTIME'
+
+
+#: An address parameter that is a kernel argument rather than a number: the
+#: launcher takes it beside the operand (`<operand>_stride`, `<operand>_slot`),
+#: as it takes `<operand>_extraOffset`.
+RUNTIME = _Runtime.RUNTIME
+
+
+def _address_number(value, what: str, minimum: int, runtime: bool):
+  """`value` as a plain int of at least `minimum`, or `RUNTIME` where that is
+  admitted."""
+  if value is RUNTIME:
+    if not runtime:
+      raise ValueError(f'{what} has to be a number; it is not bound at run '
+                       f'time')
+    return value
+  if isinstance(value, bool) or not hasattr(value, '__index__'):
+    raise ValueError(f'{what} has to be an integer'
+                     f'{" or RUNTIME" if runtime else ""}, got {value!r}')
+  value = int(value)
+  if value < minimum:
+    raise ValueError(f'{what} has to be at least {minimum}, got {value}')
+  return value
+
+
+@dataclasses.dataclass(frozen=True)
+class ElementAddressing:
+  """An addressing kind with the parameters its address takes.
+
+  * `stride` (`STRIDED`, `INDEXED`): elements from one element's data to the
+    next one's.  `None` is the stored size of one element
+    (`Tensor.storage_volume`), which is what the bare kind means; a number is
+    anything else -- a member of a struct is a struct apart.  `RUNTIME` makes
+    it a kernel argument.
+  * `offset` (every kind that reaches an element): elements from where the
+    address points to the data, known when the kernel is generated -- a
+    member's place in its struct.  What is only known at run time is the
+    `extraOffset` every such operand already takes, and it adds to this.
+  * `slots`, `slot` (`INDEXED_POINTER`): how many pointers an entry of the
+    index list holds -- one per face of a cell, say -- and which of them the
+    operand is.  `slot` may be `RUNTIME`.
+
+  Equal to another with the same kind and parameters, and never to a bare
+  `Addressing` member.  That is deliberate.  A site comparing an operand's
+  addressing with `Addressing.STRIDED` does so to assume the default stride,
+  and a strided operand with a stride of its own is exactly the one it must
+  not match: falling through to what it does with a kind it does not know
+  refuses, where matching would address another element's data.  A site that
+  understands the parameters asks `kind` and reads them.
+
+  Made by `strided`, `indexed`, `indexed_pointer` and `pointer_based`, which
+  hand back the bare kind where every parameter is its default -- so that a
+  description stating the defaults is the one that states nothing, down to
+  the byte.
+
+  The alignment a tensor promises (`Tensor.alignment`) is a promise about
+  every element's address; a stride or an offset has to keep it, and where
+  they are numbers `Symbol.linear_align_bytes` holds them to it.
+  """
+
+  kind: Addressing
+  stride: object = None
+  offset: int = 0
+  slots: int = 1
+  slot: object = 0
+
+  def __post_init__(self):
+    kind = self.kind
+    if not isinstance(kind, Addressing) or not kind.per_element():
+      raise ValueError(
+          f'{kind} takes no address parameters: only the kinds that reach an '
+          f'element of the batch do (strided, pointer_based, indexed, '
+          f'indexed_pointer)')
+    stride = self.stride
+    if stride is not None:
+      if kind not in (Addressing.STRIDED, Addressing.INDEXED):
+        raise ValueError(
+            f'a stride means nothing to {kind}: an element is reached through '
+            f'a pointer of its own, not at a distance from the last one')
+      stride = _address_number(stride, 'the stride', 1, runtime=True)
+    offset = _address_number(self.offset, 'the offset', 0, runtime=False)
+    slots = _address_number(self.slots, 'the number of slots', 1,
+                            runtime=False)
+    slot = _address_number(self.slot, 'the slot', 0, runtime=True)
+    if kind is not Addressing.INDEXED_POINTER and (slots != 1 or slot != 0):
+      raise ValueError(
+          f'slots mean nothing to {kind}: only indexed_pointer reaches an '
+          f'element through one of several pointers')
+    if slot is not RUNTIME and slot >= slots:
+      raise ValueError(f'slot {slot} of {slots}: an entry holds {slots} '
+                       f'pointer{"s" if slots != 1 else ""}, numbered from 0')
+    for name, value in (('stride', stride), ('offset', offset),
+                        ('slots', slots), ('slot', slot)):
+      object.__setattr__(self, name, value)
+
+  def __str__(self):
+    parts = []
+    if self.stride is not None:
+      parts.append(f'stride={self.stride}')
+    if self.offset:
+      parts.append(f'offset={self.offset}')
+    if self.slots != 1:
+      parts.append(f'slots={self.slots}')
+    if self.slot != 0:
+      parts.append(f'slot={self.slot}')
+    return f'{self.kind}({", ".join(parts)})' if parts else str(self.kind)
+
+  def is_default(self) -> bool:
+    """Whether every parameter is what the bare kind means."""
+    return (self.stride is None and self.offset == 0 and self.slots == 1
+            and self.slot == 0)
+
+  def normalized(self):
+    """The bare kind where the parameters are its defaults, else this."""
+    return self.kind if self.is_default() else self
+
+  def runtime(self, parameter: str) -> bool:
+    """Whether `parameter` (`'stride'` or `'slot'`) is a kernel argument."""
+    return getattr(self, parameter) is RUNTIME
 
   def to_pointer(self):
-    return Addressing.STRIDED.to_pointer()
+    return self.kind.to_pointer()
 
-  def __req__(self, other):
-    return other == Addressing.STRIDED
+  def per_element(self) -> bool:
+    return True
+
+  def indexed(self) -> bool:
+    return self.kind.indexed()
+
+  def follows_pointer(self) -> bool:
+    return self.kind.follows_pointer()
+
+
+def strided(stride=None, offset=0):
+  """`STRIDED` with a stride and an offset of its own; the bare kind where
+  both are the defaults."""
+  return ElementAddressing(Addressing.STRIDED, stride=stride,
+                           offset=offset).normalized()
+
+
+def indexed(stride=None, offset=0):
+  """`INDEXED` with a stride and an offset of its own; the bare kind where
+  both are the defaults."""
+  return ElementAddressing(Addressing.INDEXED, stride=stride,
+                           offset=offset).normalized()
+
+
+def indexed_pointer(slots=1, slot=0, offset=0):
+  """`INDEXED_POINTER` over `slots` pointers an entry, the `slot`-th of them;
+  the bare kind where every parameter is the default."""
+  return ElementAddressing(Addressing.INDEXED_POINTER, slots=slots, slot=slot,
+                           offset=offset).normalized()
+
+
+def pointer_based(offset=0):
+  """`PTR_BASED` with an offset into what each pointer points at; the bare
+  kind where it is 0."""
+  return ElementAddressing(Addressing.PTR_BASED, offset=offset).normalized()
+
+
+def parse_addressing(text: str):
+  """The addressing `str()` spells as `text`: a kind's name (`strided`), or a
+  kind with its parameters (`indexed(stride=runtime, offset=4)`) -- what the
+  kernel's metadata line and a descriptor dump carry, read back."""
+  import re
+  found = re.fullmatch(r'\s*(\w+)\s*(?:\((.*)\))?\s*', text)
+  kinds = {str(kind): kind for kind in Addressing}
+  if found is None or found.group(1) not in kinds:
+    raise ValueError(f'no addressing is spelled {text!r}')
+  kind = kinds[found.group(1)]
+  if not found.group(2):
+    return kind
+  params = {}
+  for part in found.group(2).split(','):
+    key, _, value = part.partition('=')
+    value = value.strip()
+    params[key.strip()] = RUNTIME if value == str(RUNTIME) else int(value)
+  return ElementAddressing(kind, **params).normalized()
+
+
+def element_addressing(addressing) -> 'ElementAddressing':
+  """The parameters of `addressing`, defaults filled in, for either form; None
+  for a kind that reaches no element of the batch (`NONE`, `SCALAR`)."""
+  if isinstance(addressing, ElementAddressing):
+    return addressing
+  if isinstance(addressing, Addressing) and addressing.per_element():
+    return ElementAddressing(addressing)
+  return None
 
 def _nonfinite(value: float):
   """C++ spelling for the values Python prints without a numeric literal.
@@ -308,6 +550,13 @@ class GeneralLexicon:
   BATCH_ID_NAME = 'batchId'
   NUM_ELEMENTS = 'numElements'
   EXTRA_OFFSET = '_extraOffset'
+  #: The launch's index list (`Addressing.INDEXED`): one per launch, as long
+  #: as `numElements0`, and the same name in yateto's kernel struct.
+  ELEMENT_INDICES = 'elementIndices'
+  #: Suffixes of an operand's address parameters bound at run time
+  #: (`ElementAddressing`, `RUNTIME`), beside its `EXTRA_OFFSET`.
+  STRIDE = '_stride'
+  SLOT = '_slot'
   STREAM_PTR_STR = 'streamPtr'
   FLAGS_NAME = 'flags'
   GLOBAL_MEM_PREFIX = 'glb_'
