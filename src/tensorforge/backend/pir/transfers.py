@@ -38,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence
 
-from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts
+from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts, retires
 
 
 
@@ -108,7 +108,7 @@ def fill_target(s: Stmt, fetched=frozenset()) -> Optional[Value]:
     distance is a number of.  `fetched` are values loaded from global memory
     by statements of their own, ahead of this one.
     """
-    if s.op in (Op.WAIT, Op.COMMIT_ASYNC, Op.MARK, Op.ALLOC, Op.YIELD):
+    if retires(s) or s.op in (Op.COMMIT_ASYNC, Op.MARK, Op.ALLOC, Op.YIELD):
         return None
     if not s.regions and not any(a.space is MemSpace.GLOBAL and not writes(a)
                                  for a in s.accesses) and not (
@@ -124,7 +124,7 @@ def fill_target(s: Stmt, fetched=frozenset()) -> Optional[Value]:
     if fetched and s.op is Op.STORE:
         fetches = isinstance(s.args[1], Value) and s.args[1].id in fetched
     for x in walk_stmts((s,)):
-        if (x.op in (Op.LOAD_ASYNC, Op.WAIT, Op.COMMIT_ASYNC, Op.MARK,
+        if (retires(x) or x.op in (Op.LOAD_ASYNC, Op.COMMIT_ASYNC, Op.MARK,
                      Op.ALLOC) or x.effect & Effect.BARRIER):
             return None
         for a in x.accesses:

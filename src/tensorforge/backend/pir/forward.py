@@ -455,7 +455,7 @@ class _Forward:
         # Under the explicit vector a full-lane tail's lanes past `valid`
         # are zeros, and the register read gives them zeros as well.
         attrs = tuple((k, v) for k, v in s.attrs
-                      if k in ('other', 'extern')
+                      if k in ('other', 'extern', 'width')
                       or (k == 'valid' and self.flow.simd))
         predicate = s.predicate
         if predicate is not None and self._idle(s, taken):

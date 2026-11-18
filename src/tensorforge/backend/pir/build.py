@@ -26,7 +26,7 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 
 from tensorforge.common.basic_types import GeneralLexicon
-from .core import (INDEX, SCALAR_LAYOUT, TOKEN, Access, BufferType,
+from .core import (INDEX, SCALAR_LAYOUT, Access, BufferType,
                    Participants, Effect, IRError, LaneAxis, MemSpace, Op,
                    Operand, Region, RegisterLayout, ScalarType, Stmt,
                    TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
@@ -240,6 +240,8 @@ class IRBuilder:
         # values -- there are thousands of both.
         self._by_name: Dict[str, Value] = {}
         self._counter = -1
+        #: The objects' numbers (`next_object_index`), apart from the values'.
+        self._objects = 0
         self._stack: List[_Scope] = [_Scope(kind='root')]
         self._fptype = fptype
         self.context = context
@@ -255,12 +257,14 @@ class IRBuilder:
         self._undo: List[Any] = []
         #: Whether a `transfer` is being built.
         self._in_transfer = False
-        #: token id -> the cursor of the bulk copy that issued it (`copy_bulk`)
-        self._token_bulk: Dict[int, str] = {}
+        #: token id -> the mbarrier the bulk copy that issued it completes on
+        #: (`copy_bulk`), which its wait waits on
+        self._token_bulk: Dict[int, Value] = {}
         #: What goes ahead of everything else in the body (`bulk_channel`).
         self._prologue: List[Stmt] = []
-        #: window name -> the cursor of its bulk copies in this body
-        self._bulk_cursors: Dict[str, str] = {}
+        #: window name -> the mbarrier its bulk copies complete on in this
+        #: body, spelled as the window's cursor
+        self._bulk_cursors: Dict[str, Value] = {}
         #: The operation of a shared body being built, where its operands are
         #: to be taken over only within it (`begin_operation`); None otherwise.
         self._operation: Optional[int] = None
@@ -308,6 +312,28 @@ class IRBuilder:
             return self._alloc.next_index()
         self._counter += 1
         return self._counter
+
+    def new_object(self, type_: 'engines.SyncObjectType',
+                   hint: str = '') -> Value:
+        """A `Value` for an object this body creates -- an mbarrier, set up
+        by its `SYNC_INIT` -- numbered in the objects' own space.
+
+        Apart from the values' numbers because an object is spelled by the
+        name its setup binds (`SYNC_INIT`'s `extern`) and never by its
+        number: drawn from the values' counter, the number would move the
+        name of every value numbered after it, and the source with them."""
+        return Value(id=self.next_object_index(), type=type_, hint=hint)
+
+    def next_object_index(self) -> int:
+        """The next object number of this body: negative, counting down from
+        -1, so that no object shares a number with a value (which count up
+        from 0).  Shared through the allocator as the values' numbers are, so
+        that the bodies of one kernel hand out distinct ones."""
+        shared = getattr(self._alloc, 'next_object_index', None)
+        if shared is not None:
+            return shared()
+        self._objects -= 1
+        return self._objects
 
     def scratch(self) -> 'IRBuilder':
         """A builder for statements a pass splices into this body once it is
@@ -1330,7 +1356,7 @@ class IRBuilder:
                 and getattr(type_, 'base', None) in _NUMBERS):
             # Taken over within this operation only (`begin_operation`).
             attrs += [('operation', self._operation)]
-        attrs = tuple(attrs)
+        attrs = tuple(attrs) + self._transfer(type_, base, nontemporal)
 
         self._emit_op(Op.LOAD, (v,), (base,) + tuple(indices),
                       predicate=predicate, pure=False, movable=True,
@@ -1380,13 +1406,40 @@ class IRBuilder:
             attrs += [('align', align)]
         if valid is not None:
             attrs += [('valid', valid)]
-        attrs = tuple(attrs)
+        attrs = tuple(attrs) + self._transfer(
+            value.type if isinstance(value, Value) else None, base,
+            nontemporal)
 
         return self._emit_op(Op.STORE, (), (base, value) + tuple(indices),
                              predicate=predicate, pure=False, movable=True,
                              effect=kind, attrs=attrs,
                              accesses=(Access(kind, space,
                                               self.alias_root(base)),))
+
+    def _transfer(self, type_, base: Any, nontemporal) -> Tuple:
+        """What a `load` or `store` of a value of `type_` through `base`
+        moves: the bytes a lane moves (`width`), and where it asks for a
+        cache hint the policy the target gives an access of that type and
+        width (`cache`, `engines.cache_policy`) -- None where the target has
+        no hint for it, which the emitter then spells plainly.  Without a
+        target the policy is left for the emitter to resolve against the
+        one it lowers for.
+
+        Here and not in the emitter, so that what a lane moves and what the
+        caches are told about it are facts of the statement, which a pass
+        can read and the emitter writes as they stand."""
+        out: Tuple = ()
+        width = engines.width_of(type_, base)
+        if width is not None:
+            out += (('width', width),)
+        if nontemporal:
+            elem = engines.element_of(type_, base)
+            cache = engines.cache_policy(
+                nontemporal, getattr(self.context, 'target', None), elem,
+                getattr(type_, 'length', None) or 1)
+            if cache is not engines.UNRESOLVED:
+                out += (('cache', cache),)
+        return out
 
     def _converting_store(self, base: Any, value: Operand,
                           indices: Tuple[Operand, ...], **kw
@@ -1474,6 +1527,11 @@ class IRBuilder:
         every copy up to and including the one it names, so a wait on the last
         token of a group retires the group --- one token per macro copy falls
         out of that rather than needing a group object to express it.
+
+        The copy names the engine the target moves it with (`engines.
+        copy_engine`: `cp.async`, or AMD's LDS-DMA), the kind of completion
+        its token reports, the bytes a lane moves and the cache policy that
+        width gives it -- where `cp.async` moves sixteen bytes past L1.
         """
         dst_space = dst_space if dst_space is not None else self._space_of(dst)
         src_space = src_space if src_space is not None else self._space_of(src)
@@ -1496,71 +1554,87 @@ class IRBuilder:
         dst_index = tuple(self._swizzled(dst, i) for i in dst_index)
         src_index = tuple(self._swizzled(src, i) for i in src_index)
 
-        tok = self.value(TOKEN, hint=hint)
+        # The engine the target moves it with (`engines.copy_engine`): the
+        # kind of completion its token reports and the class a wait counts
+        # it in follow from it, and so does the cache policy of its width.
+        engine = engines.copy_engine(getattr(self.context, 'target', None))
+        width = engines.width_of(None, dst)
+        width = None if width is None else width * elems
+        tok = self.value(TokenType(engines.completes_of(engine)), hint=hint)
+        attrs = (('ndst', len(tuple(dst_index))), ('elems', elems),
+                 ('engine', engine), ('completes', engines.completes_of(engine)))
+        if width is not None:
+            attrs += (('width', width),)
+        cache = engines.copy_cache(engine, width)
+        if cache is not None:
+            attrs += (('cache', cache),)
         self._emit_op(Op.COPY_ASYNC, (tok,),
                       (dst, src) + tuple(dst_index) + tuple(src_index),
                       pure=False, movable=True, predicate=predicate,
                       effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                       accesses=accesses,
-                      attrs=(('ndst', len(tuple(dst_index))), ('elems', elems),
-                             ('counter', 'copy'))
-                            + ((('zfill', zfill),) if zfill else ()))
+                      attrs=attrs + ((('zfill', zfill),) if zfill else ()))
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
         return tok
 
     def bulk_channel(self, window: str, leader: str,
                      participants: Union[str, Participants] = Participants.MULT,
-                     threads: Optional[int] = None) -> Optional[str]:
-        """The cursor the bulk copies into the window `window` names go
-        through in this body (`copy_bulk`), set up the first time it is asked
-        for -- or None in a body without an arena, which has nowhere to keep
-        the barrier and no allocator to place it.
+                     threads: Optional[int] = None) -> Optional[Value]:
+        """The mbarrier the bulk copies into the window `window` names
+        complete on in this body (`copy_bulk`), set up the first time it is
+        asked for -- or None in a body without an arena, which has nowhere to
+        keep it and no allocator to place it.
 
-        Set up ahead of everything else in the body (`finish`): the barrier a
-        copy completes on, eight bytes in the multiplication's arena that stay
-        occupied for the whole body, since the barrier is armed once and
-        counts phases from then on (`alloc`, `lifetime`); the cursor, a local
-        of every thread, which `leader` arms; and a barrier of `participants`
-        behind both, so that no thread waits on the copy's barrier before the
-        leader armed it.  The cursor is text the copies and their waits
-        spell, the way the launch queue's is -- per thread, and changed by
-        both, which no value of the IR is.
+        Set up ahead of everything else in the body (`finish`): its storage,
+        eight bytes in the multiplication's arena that stay occupied for the
+        whole body, since the barrier is armed once and counts phases from
+        then on (`alloc`, `lifetime`); the object, a `Value` of its type
+        (`engines.mbarrier`), set up by `leader` for one arrival a phase
+        (`SYNC_INIT`); and a barrier of `participants` behind both, so that
+        no thread waits on the copy's barrier before the leader armed it.
+
+        The object is spelled as the cursor every thread keeps
+        (`tensorforge::BulkCursor`, which holds the phase bit as well), under
+        the name `{window}_bulk`, and numbered in the objects' own space
+        (`new_object`).
         """
         found = self._bulk_cursors.get(window)
         if found is not None:
             return found
         if self._arena is None:
             return None
-        cursor = self._bulk_cursors[window] = f'{window}_bulk'
         b = self.scratch()
         slots = max(1, 8 // self._fptype.size())
         barrier = b.alloc(self._fptype, (slots,), MemSpace.SHARED,
                           hint=f'{window}Barrier', extern=f'{window}_barrier',
                           place_align=slots, lifetime='body')
-        b(f'tensorforge::BulkCursor {cursor} = '
-          f'tensorforge::bulk_arm({{0}}, {leader});', barrier,
-          accesses=(Access(Effect.WRITE, MemSpace.SHARED, barrier),),
-          fmt=True)
+        who = _as_participants(participants)
+        obj = self._bulk_cursors[window] = self.new_object(
+            engines.mbarrier(who, self._wave(), threads),
+            hint=f'{window}_bulk')
+        b.emit(engines.sync_init_value(obj, barrier, leader=leader,
+                                       extern=f'{window}_bulk'))
         b.barrier(participants, threads=threads)
         self._prologue += list(b.finish())
-        return cursor
+        return obj
 
-    def copy_bulk(self, dst: Any, src: Any, *, cursor: str,
+    def copy_bulk(self, dst: Any, src: Any, *, barrier: Value,
                   dst_index: Sequence[Operand] = (),
                   src_index: Sequence[Operand] = (),
                   elems: int = 1,
                   predicate: Optional[Value] = None,
                   hint: str = 'bk') -> Value:
-        """Issue one bulk copy of `elems` elements ``src -> dst`` through
-        `cursor` (`bulk_channel`); returns its token.
+        """Issue one bulk copy of `elems` elements ``src -> dst``, completing
+        on the mbarrier `barrier` (`bulk_channel`); returns its token.
 
         A `copy.async` like any other to every pass -- the same accesses on
         the copy and its wait, a token one wait consumes -- but of the whole
-        window, by one thread, and counted in no group: its counter is
-        `'bulk'`, which `place_commits` leaves alone and the emitter waits
-        for on the cursor instead (`wait`).  A permuted window cannot take
-        it: the copy writes the bytes in their order.
+        window, by one thread, and counted in no group: its engine completes
+        on the barrier (`bulk`), which `place_commits` leaves alone, and its
+        wait is the wait for the barrier's phase (`wait`).  The window is
+        one block of `elems` elements (`shape`).  A permuted window cannot
+        take it: the copy writes the bytes in their order.
         """
         swizzle = getattr(getattr(dst, 'type', None), 'swizzle', None)
         if swizzle is not None and swizzle.width > 1:
@@ -1570,17 +1644,22 @@ class IRBuilder:
         src_space = self._space_of(src)
         accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
                     Access(Effect.WRITE, dst_space, self.alias_root(dst)))
-        tok = self.value(TOKEN, hint=hint)
+        tok = self.value(TokenType(engines.completes_of('bulk')), hint=hint)
+        width = engines.width_of(None, dst)
+        attrs = (('ndst', len(tuple(dst_index))), ('elems', elems),
+                 ('engine', 'bulk'), ('completes', engines.completes_of('bulk')),
+                 ('object', barrier))
+        if width is not None:
+            attrs += (('width', width * elems),)
+        attrs += (('shape', (elems,)),)
         self._emit_op(Op.COPY_ASYNC, (tok,),
                       (dst, src) + tuple(dst_index) + tuple(src_index),
                       pure=False, movable=True, predicate=predicate,
                       effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
-                      accesses=accesses,
-                      attrs=(('ndst', len(tuple(dst_index))), ('elems', elems),
-                             ('counter', 'bulk'), ('bulk', cursor)))
+                      accesses=accesses, attrs=attrs)
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
-        self._token_bulk[tok.id] = cursor
+        self._token_bulk[tok.id] = barrier
         return tok
 
     def load_async(self, base: Any, *indices: Operand, type_=None,
@@ -1607,10 +1686,13 @@ class IRBuilder:
             uniform = _join(indices)
 
         accesses = (Access(Effect.READ, space, self.alias_root(base)),)
-        tok = self.value(TOKEN, hint=hint)
+        tok = self.value(TokenType(engines.completes_of('load')), hint=hint)
         attrs: Tuple[Tuple[str, Any], ...] = (
-            ('counter', 'load'), ('types', (type_,)), ('uniform', uniform),
-            ('hint', hint))
+            ('engine', 'load'), ('completes', engines.completes_of('load')))
+        width = engines.width_of(type_, base)
+        if width is not None:
+            attrs += (('width', width),)
+        attrs += (('types', (type_,)), ('uniform', uniform), ('hint', hint))
         if other is not None:
             attrs += (('other', other),)
         self._emit_op(Op.LOAD_ASYNC, (tok,), (base,) + tuple(indices),
@@ -1680,6 +1762,12 @@ class IRBuilder:
         The concrete counter value (``vmcnt(N)`` / ``wait_prior(N)``) is not
         decided here --- ``schedule_async`` derives it from the outstanding set
         once the schedule is final.
+
+        A bulk copy's tokens are retired by the wait for its barrier's phase
+        (`engines.wait_phase`): the copy completes on the barrier, and every
+        thread that waits on it sees the bytes.  It carries what the copy
+        touches as this one would, and every pass that pairs issues with
+        their waits takes it for one (`core.retires`).
         """
         tokens = ((token,) + also) if token is not None else ()
         if not tokens:
@@ -1696,13 +1784,15 @@ class IRBuilder:
             results = tuple(self.value(t, hint=tokens[0].hint or 'ld',
                                        uniform=self._token_uniform.get(tokens[0].id, True))
                             for t in types)
-        # A bulk copy is waited for on its cursor.
-        cursor = self._token_bulk.get(tokens[0].id) if tokens else None
+        # A bulk copy is waited for on its barrier: the wait for its phase,
+        # which consumes the tokens that complete on it.
+        barrier = self._token_bulk.get(tokens[0].id) if tokens else None
+        if barrier is not None:
+            return self.emit(engines.wait_phase(barrier, tokens, accesses))
         stmt = self._emit_op(Op.WAIT, results, tokens,
                              pure=False, movable=True,
                              effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
-                             accesses=accesses,
-                             attrs=(('bulk', cursor),) if cursor else ())
+                             accesses=accesses)
         if len(results) == 1:
             return results[0]
         if results:
@@ -1942,20 +2032,24 @@ class IRBuilder:
         mark = len(scope.body)
         counter = self._counter
         names = getattr(self._alloc, 'counter', None)
+        objects = (self._objects, getattr(self._alloc, 'objects', None))
         depth = len(self._stack)
         undo_mark = len(self._undo)
         spec = _Speculation()
         try:
             yield spec
         except Exception:
-            self._rollback(scope, mark, counter, names, depth, undo_mark)
+            self._rollback(scope, mark, counter, names, depth, undo_mark,
+                           objects)
             raise
         if spec.discarded:
-            self._rollback(scope, mark, counter, names, depth, undo_mark)
+            self._rollback(scope, mark, counter, names, depth, undo_mark,
+                           objects)
         elif len(self._stack) != depth:
             raise IRError('speculative block left the scope stack unbalanced')
 
-    def _rollback(self, scope, mark, counter, names, depth, undo_mark=0):
+    def _rollback(self, scope, mark, counter, names, depth, undo_mark=0,
+                  objects=(0, None)):
         del scope.body[mark:]
         # Whatever the attempt shared points into the part of the body that
         # just went away, so it may not be handed to the next caller.
@@ -1964,6 +2058,10 @@ class IRBuilder:
         if names is not None:
             # a discarded probe must not burn names either
             self._alloc.counter = names
+        # ... nor object numbers (`next_object_index`).
+        self._objects = objects[0]
+        if objects[1] is not None:
+            self._alloc.objects = objects[1]
         del self._stack[depth:]
         # State the attempt wrote *outside* the body, newest first.
         #

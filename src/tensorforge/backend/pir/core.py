@@ -256,11 +256,14 @@ class TokenType:
 
     ``completes`` is how the operation's completion is observed
     (`engines.Completion`): a commit group, an mbarrier phase, a hardware
-    counter, or on issue.  None where the issuing statement does not say --
-    every token today; the transfer engines state it.
+    counter, or on issue -- the issuing engine's, None where nothing issued
+    the token through one.  A fact about the token and not a part of its
+    type's identity: the loops that carry tokens declare their iteration
+    arguments as `TOKEN`, and a token of any kind goes through them alike
+    (what counts it is the issue's engine, `asyncmem`).
     """
 
-    completes: Optional[Any] = None
+    completes: Optional[Any] = field(default=None, compare=False)
 
     def __repr__(self):
         if self.completes is None:
@@ -1017,6 +1020,9 @@ class Op:
 
     RAW = frozenset({RAWEXPR, RAWSTMT, RAWBLOCK})
     ASYNC = frozenset({COPY_ASYNC, LOAD_ASYNC})
+    # The waits: `wait` retires the tokens it names, and the engines' waits
+    # on an object or a counter do where they name them (`retires`).
+    WAITS = frozenset({WAIT, WAIT_PHASE, WAIT_COUNTER})
     # statements that lower to a C++ declaration and therefore handle a
     # predicate themselves (as a select) rather than through a guard block
     DECLARING = frozenset({RAWEXPR, LOAD, LOAD_ASYNC, CALL, PACK, EXTRACT})
@@ -1276,14 +1282,43 @@ class Stmt:
         AMD tracks global->LDS and global->VGPR in the same `vmcnt`; NVIDIA
         has a group counter for `cp.async` and hardware scoreboarding for
         register loads.  Keeping the classes apart lets the emitter decide.
+
+        Derived from the engine an issue goes through (`engines.
+        counter_of`): `copy` for what is counted in commit groups, `load`
+        for what is counted one operation at a time, `bulk` for what
+        completes on a barrier of its own.  On a wait, the class
+        `schedule_async` found it retiring.
         """
+        engine = self.attr('engine')
+        if engine is not None and self.op in Op.ASYNC:
+            from .engines import counter_of
+            return counter_of(engine)
         return self.attr('counter', 'copy')
 
     @property
     def waited(self) -> Optional[Value]:
-        """The token this `wait` consumes; None means "drain everything"."""
-        assert self.op == Op.WAIT
+        """The token this wait consumes; None means "drain everything"."""
+        assert self.op in Op.WAITS
         return self.args[0] if self.args else None
+
+
+def retires(s: Stmt) -> bool:
+    """Does `s` retire completion tokens: a `wait`, or a wait of the engines
+    on an object or a counter that names the tokens it retires?
+
+    One predicate for the passes that pair issues with their waits
+    (`asyncmem`, `wrap`, `move`, `barriers`), so that a wait spelled as the
+    engine's -- the bulk copy's, on its mbarrier -- is the wait it was to
+    every one of them.  A wait of the engines that names no token is a
+    rendezvous and not this.
+    """
+    op = s.op
+    if op == Op.WAIT:
+        return True
+    if op not in Op.WAITS:
+        return False
+    return any(isinstance(a, Value) and isinstance(a.type, TokenType)
+               for a in s.args)
 
 
 # --------------------------------------------------------------------------- #

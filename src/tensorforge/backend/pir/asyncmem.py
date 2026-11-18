@@ -18,8 +18,13 @@ knows the target, picks one.
 
 A bulk copy (`IRBuilder.copy_bulk`, the tensor memory accelerator's) is a
 third class, which nothing counts: it completes on a barrier of its own, and
-its wait is a wait on that barrier.  It joins no group, and a wait for it
-closes none.
+its wait is a wait on that barrier -- `wait.phase`, which retires its tokens
+as `wait` retires the others' (`core.retires`).  It joins no group, and a
+wait for it closes none.
+
+The class a transfer is counted in is its engine's (`engines.counter_of`):
+what closes into groups (`cp.async`), what a counter counts one operation at
+a time (a register load, AMD's LDS-DMA), and what completes on a barrier.
 
 On the copy class the counted unit is not the copy but the *group*, and a
 group is closed by a `commit.async`.  That is why the commit is a statement
@@ -89,7 +94,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from .core import Effect, Op, Stmt, TokenType, Value, walk, walk_stmts
+from .core import Effect, Op, Stmt, TokenType, Value, retires, walk, walk_stmts
 
 
 class _Unit(NamedTuple):
@@ -255,14 +260,14 @@ def _insert(body: Tuple[Stmt, ...], toks, exact: bool) -> Tuple[Stmt, ...]:
 
 def _waits_inside(body: Tuple[Stmt, ...]) -> bool:
     """Does anything in this body, at any depth, wait?"""
-    return any(s.op == Op.WAIT for s in walk_stmts(body))
+    return any(retires(s) for s in walk_stmts(body))
 
 
 def _wait_index(body: Tuple[Stmt, ...]) -> Dict[int, int]:
     """Token id -> position of the wait that retires it, in walk order."""
     out: Dict[int, int] = {}
     for i, (s, _) in enumerate(walk(body)):
-        if s.op != Op.WAIT:
+        if not retires(s):
             continue
         for a in s.args:
             if isinstance(a, Value):
@@ -352,8 +357,9 @@ def _place(body: Tuple[Stmt, ...], waits: Dict[int, int]):
         groups = _by_wait(issued, waits)
         # Both closures happen *before* the statement is appended, so that
         # `_insert` still finds the previous run's last issue behind it.  A
-        # wait for a bulk copy retires no group.
-        if s.op == Op.WAIT and s.attr('bulk') is None:
+        # wait for a bulk copy -- the wait for its barrier's phase -- retires
+        # no group.
+        if s.op == Op.WAIT:
             flush()
         elif s.op == Op.FOR and run and _waits_inside(s.regions[0].body):
             # The same rule on the way in: a run still open ahead of a loop
@@ -415,7 +421,7 @@ def _sched(body: Tuple[Stmt, ...], state: _State,
             out.append(s)
             continue
 
-        if s.op == Op.WAIT:
+        if retires(s):
             out.append(_sched_wait(s, state, diag))
             continue
 
@@ -469,7 +475,7 @@ def _alters_flight(regions) -> bool:
     """
     for r in regions:
         for s in r.body:
-            if s.op in (Op.COMMIT_ASYNC, Op.WAIT):
+            if s.op == Op.COMMIT_ASYNC or retires(s):
                 return True
             if s.op in Op.ASYNC and s.counter != 'copy':
                 return True
@@ -701,7 +707,7 @@ def check_commits(body: Tuple[Stmt, ...]) -> List[str]:
     for s, parents in walk(body):
         if s.op == Op.COMMIT_ASYNC:
             commits.append((s, parents))
-        elif s.op == Op.WAIT:
+        elif retires(s):
             waits.append((s, parents))
 
     for commit, cparents in commits:
@@ -747,7 +753,7 @@ def check_tokens(body: Tuple[Stmt, ...], defs, uses) -> List[str]:
                         'two, or use copy.async through shared memory.')
             continue
 
-        if s.op != Op.WAIT or s.waited is None:
+        if not retires(s) or s.waited is None:
             continue
         producer = defs.get(s.waited.id)
         if producer is None or producer.op == Op.FOR:

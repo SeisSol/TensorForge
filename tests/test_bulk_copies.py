@@ -225,8 +225,8 @@ def _channel_body():
         extern='glb_m0')
     s0 = b.alloc(F32, (64,), MemSpace.SHARED, hint='s0', extern='s0')
     cursor = b.bulk_channel('s0', 'threadIdx.x == 0', threads=32)
-    tok = b.copy_bulk(s0, src, cursor=cursor, dst_index=(0,), src_index=(0,),
-                      elems=64)
+    tok = b.copy_bulk(s0, src, barrier=cursor, dst_index=(0,),
+                      src_index=(0,), elems=64)
     b.wait(tok)
     out = b.decl_expr(
         'float *const __restrict__ glb_m9', '&m9[{0} * 64]',
@@ -238,12 +238,39 @@ def _channel_body():
 
 
 def test_a_channel_is_set_up_once_ahead_of_everything():
+    """The storage, the object set up in it -- spelled as the cursor of the
+    window (`engines.sync_init_value`) -- and the barrier behind both."""
+    from tensorforge.backend.pir.engines import SyncKind
     b, cursor, body = _channel_body()
-    assert b.bulk_channel('s0', 'threadIdx.x == 0') == cursor
+    assert b.bulk_channel('s0', 'threadIdx.x == 0') is cursor
     alloc, arm, barrier = body[:3]
     assert alloc.op == Op.ALLOC and alloc.attr('lifetime') == 'body'
-    assert arm.op == Op.RAWSTMT and 'bulk_arm' in arm.text
+    assert arm.op == Op.SYNC_INIT and arm.target == (cursor,)
+    assert arm.args == (alloc.target[0],) and arm.attr('extern') == 's0_bulk'
+    assert cursor.type.kind is SyncKind.MBARRIER
     assert barrier.op == Op.BARRIER
+
+
+def test_objects_are_numbered_apart_from_values():
+    """An object is numbered in its own space (`IRBuilder.new_object`),
+    shared by the bodies of one kernel as the values' numbers are: negative,
+    so that no value has its number, and drawn from no value's counter, so
+    that the values behind it keep their numbers -- and their names.  A
+    discarded attempt burns none (`speculative`)."""
+    from tensorforge.backend.writer import VarAlloc
+    names = VarAlloc()
+    first = IRBuilder(fptype=F32, arena='shrMem', alloc=names)
+    second = IRBuilder(fptype=F32, arena='shrMem', alloc=names)
+    one = first.bulk_channel('s0', 'threadIdx.x == 0', threads=32)
+    values = names.counter
+    two = second.bulk_channel('s0', 'threadIdx.x == 0', threads=32)
+    assert (one.id, two.id) == (-1, -2)
+    # The second channel numbered one value, its storage, and no more.
+    assert names.counter == values + 1
+    with first.speculative() as spec:
+        first.next_object_index()
+        spec.discard()
+    assert first.next_object_index() == -3
 
 
 def test_a_body_without_an_arena_has_no_channel():
@@ -255,7 +282,7 @@ def test_a_permuted_window_takes_no_bulk_copy():
     s0 = b.alloc(F32, (64,), MemSpace.SHARED, hint='s0', extern='s0',
                  swizzle=XorSwizzle(8))
     with pytest.raises(IRError, match='permuted'):
-        b.copy_bulk(s0, 'm0', cursor='c', dst_index=(0,), src_index=(0,),
+        b.copy_bulk(s0, 'm0', barrier=None, dst_index=(0,), src_index=(0,),
                     elems=64)
 
 
@@ -271,13 +298,19 @@ def test_the_barrier_shares_bytes_with_nothing():
 
 
 def test_a_bulk_copy_joins_no_group():
-    _, _, body = _channel_body()
+    """Its engine completes on the barrier, so no group closes it, and its
+    wait is the wait for the barrier's phase, naming the object."""
+    _, cursor, body = _channel_body()
     out, diag = schedule_async(body)
     assert not diag
     assert not any(s.op == Op.COMMIT_ASYNC for s, _ in walk(out))
-    wait = next(s for s, _ in walk(out) if s.op == Op.WAIT)
+    copy = next(s for s, _ in walk(out) if s.op == Op.COPY_ASYNC)
+    assert copy.attr('engine') == 'bulk' and copy.attr('object') is cursor
+    assert copy.counter == 'bulk' and copy.attr('shape') == (64,)
+    assert copy.attr('width') == 256
+    wait = next(s for s, _ in walk(out) if s.op == Op.WAIT_PHASE)
     assert wait.attr('counter') == 'bulk'
-    assert wait.attr('bulk') == 's0_bulk'
+    assert wait.attr('object') is cursor and wait.args == copy.target
 
 
 def test_a_bulk_copy_is_a_pipeline_of_its_own():

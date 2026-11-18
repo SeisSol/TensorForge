@@ -62,6 +62,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .ahead import counted
 from .core import (INDEX, Access, Effect, MemSpace, ScalarType, Stmt,
                    Uniformity, Value, walk_stmts)
+from .engines import GLOBAL_POLICY
 from .shards import _Indices, _NotStatic
 from .transfers import fetch, glue, opaque, transfers, writes
 
@@ -445,7 +446,7 @@ def _staged(loop: Stmt, scratch, report: Optional[List[str]], threads: int,
                 x, args=(window, local),
                 accesses=(Access(Effect.READ, MemSpace.SHARED, window),),
                 attrs=tuple((k, v) for k, v in x.attrs
-                            if k != 'nontemporal')))
+                            if k not in GLOBAL_POLICY)))
         if report is not None:
             report.append(f'+ trip shards: {len(loads)} into {window}, '
                           f'{count} a trip')

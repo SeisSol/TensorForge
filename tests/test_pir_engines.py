@@ -101,12 +101,14 @@ def test_the_verifier_holds_an_engine_statement_to_its_operands():
 def test_the_completion_kinds_and_the_token_that_carries_one():
     """Four ways an operation's completion is observed; a token says which
     where its issue does, and says nothing -- and prints as it did -- where
-    it does not."""
+    it does not.  Not part of the type's identity: a loop that carries a
+    token declares its argument as `TOKEN`, whatever the kind."""
     assert {c.value for c in Completion} == {'group', 'barrier', 'counter',
                                              'sync'}
     assert repr(TokenType()) == 'token'
     assert repr(TokenType(Completion.GROUP)) == 'token<group>'
-    assert TokenType() == TokenType(None) != TokenType(Completion.COUNTER)
+    assert TokenType() == TokenType(None) == TokenType(Completion.COUNTER)
+    assert hash(TokenType()) == hash(TokenType(Completion.BARRIER))
     spec = engines.REGISTRY
     assert spec[Op.WAIT_PHASE].retires is Completion.BARRIER
     assert spec[Op.WAIT_COUNTER].retires is Completion.COUNTER
@@ -275,13 +277,16 @@ def test_an_arrive_is_the_first_half_of_the_named_rendezvous():
         _lines(engines.arrive(block), sm86)
 
 
-def test_an_object_of_the_transfer_engines_is_not_lowered_yet():
+def test_an_mbarrier_is_spelled_as_its_cursor_and_nothing_else():
+    """A described mbarrier has no storage and no cursor to name, and an
+    arrive at one is the bulk copy's own: refused.  The rendezvous of all
+    participants is no use of one either."""
     mbarrier = SyncObjectType(SyncScope.BLOCK, SyncKind.MBARRIER,
                               Participants.BLOCK)
     sm90 = _target('cuda', 'sm_90')
     for stmt in (engines.barrier(mbarrier), engines.arrive(mbarrier, tx=128),
                  engines.wait_phase(mbarrier), engines.sync_init(mbarrier)):
-        with pytest.raises(IRError, match='transfers'):
+        with pytest.raises(IRError):
             _lines(stmt, sm90)
 
 
@@ -650,3 +655,238 @@ def test_the_split_named_barrier_is_bar_arrive_and_bar_sync(tmp_path):
     assert re.search(r'barrier\.arrive\s+%r\d+, %r\d+;', run.stdout)
     assert re.search(r'barrier\.sync\s+%r\d+, %r\d+;', run.stdout)
     assert re.search(r'cp\.async\.wait_group\s+1;', run.stdout)
+
+
+# -- transfer engines (phase 1a) --------------------------------------------- #
+
+def _bulk_body():
+    """A window, its bulk copy through the channel's mbarrier, and the wait
+    for it -- on sm_90, where the target spells one."""
+    from tensorforge.backend.pir.core import SIZE, BufferType
+    ctx = Context(arch='sm_90', backend='cuda', fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem', context=ctx)
+    k = b.extern_value('element', SIZE, uniform=Uniformity.MULT, hint='k')
+    src = b.decl_expr(
+        'const float *const __restrict__ glb_m0', '&m0[{0} * 64]',
+        BufferType(Datatype.F32, (64,), MemSpace.GLOBAL, readonly=True),
+        'm0', args=(k,), kind=Effect.READ, space=MemSpace.GLOBAL,
+        hint='glb_m0', extern='glb_m0')
+    s0 = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                 extern='s0', offset=0)
+    barrier = b.bulk_channel('s0', 'threadIdx.x == 0', threads=32)
+    tok = b.copy_bulk(s0, src, barrier=barrier, dst_index=(0,),
+                      src_index=(0,), elems=64)
+    b.wait(tok)
+    from tensorforge.backend.pir.allocate import MULT, allocate
+    body, _ = allocate(b.finish(), arenas={'shrMem': MULT})
+    return ctx, b, barrier, body
+
+
+def test_every_transfer_engine_completes_one_way_and_is_counted_by_it():
+    """The class a wait counts a transfer in follows from how its engine
+    completes: commit groups, a counter, a barrier."""
+    assert set(engines.TRANSFER_ENGINES) == {
+        'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load'}
+    assert engines.counter_of('cp_async') == 'copy'
+    assert engines.counter_of('lds_dma') == 'load'
+    assert engines.counter_of('load') == 'load'
+    assert engines.counter_of('bulk') == 'bulk'
+    for name, engine in engines.TRANSFER_ENGINES.items():
+        assert all(op in Op.KNOWN for op in engine.ops), name
+
+
+@pytest.mark.parametrize('arch,backend,engine', [
+    ('sm_86', 'cuda', 'cp_async'), ('sm_86', 'hip', 'cp_async'),
+    ('gfx942', 'hip', 'lds_dma'), ('gfx90a', 'hip', 'lds_dma'),
+    ('gfx1150', 'hip', 'cp_async'), ('pvc', 'oneapi', 'cp_async')])
+def test_a_copy_goes_through_the_engine_its_target_has(arch, backend,
+                                                       engine):
+    """AMD's LDS-DMA where HIP spells one for the device, `cp.async`
+    elsewhere -- which a target without the path lowers synchronously."""
+    target = _target(backend, arch)
+    assert engines.copy_engine(target) == engine
+    assert engines.copy_engine(None) == 'cp_async'
+
+
+def test_a_copy_says_its_engine_width_and_cache_policy():
+    """Sixteen bytes of `cp.async` go past L1 (`cg`), four and eight through
+    it (`ca`); a token reports the engine's kind of completion."""
+    ctx = Context(arch='sm_86', backend='cuda', fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem', context=ctx)
+    s0 = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0', offset=0)
+    g = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g', extern='g')
+    wide = b.copy_async(s0, g, dst_index=(0,), src_index=(0,), elems=4)
+    narrow = b.copy_async(s0, g, dst_index=(4,), src_index=(4,), elems=2)
+    copies = [s for s in b.finish() if s.op == Op.COPY_ASYNC]
+    assert [(c.attr('engine'), c.attr('width'), c.attr('cache'))
+            for c in copies] == [('cp_async', 16, 'cg'), ('cp_async', 8, 'ca')]
+    assert all(c.counter == 'copy' for c in copies)
+    assert wide.type.completes is Completion.GROUP
+    assert narrow.type == TokenType()
+    amd = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem', context=amd)
+    s0 = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0', offset=0)
+    g = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g', extern='g')
+    tok = b.copy_async(s0, g, dst_index=(0,), src_index=(0,))
+    copy = next(s for s in b.finish() if s.op == Op.COPY_ASYNC)
+    assert copy.attr('engine') == 'lds_dma' and copy.attr('cache') is None
+    assert copy.counter == 'load' and tok.type.completes is Completion.COUNTER
+
+
+def test_a_load_and_a_store_say_what_a_lane_moves():
+    """`width` in bytes, a wide access one of the vector engine: what the
+    emitter spells as the value's type, and the verifier holds the two to
+    each other."""
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.core import ScalarType
+    b = IRBuilder(fptype=Datatype.F32)
+    g = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g', extern='g')
+    one = b.load(g, 0, hint='x')
+    four = b.load(g, 4, type_=ScalarType(Datatype.F32, 4), hint='q', align=16)
+    b.store(g, four, 8, align=16)
+    b.store(g, 1.0, 12)
+    body = b.finish()
+    widths = [(s.op, s.attr('width'), engines.engine_of(s)) for s in body
+              if s.op in (Op.LOAD, Op.STORE)]
+    assert widths == [(Op.LOAD, 4, 'scalar'), (Op.LOAD, 16, 'vector'),
+                      (Op.STORE, 16, 'vector'), (Op.STORE, 4, 'scalar')]
+    pir.verify(body)
+    stale = tuple(s.with_attr('width', 8) if s.op == Op.LOAD and
+                  s.target[0] is one else s for s in body)
+    with pytest.raises(IRError, match='width'):
+        pir.verify(stale)
+
+
+@pytest.mark.parametrize('arch,backend,width,cache', [
+    ('sm_86', 'cuda', 1, 'cg'), ('sm_86', 'cuda', 4, None),
+    ('gfx942', 'hip', 4, 'cg'), ('pvc', 'oneapi', 1, None)])
+def test_a_cache_hint_is_the_one_the_target_has(arch, backend, width, cache):
+    """The request (`nontemporal`) stays for the passes that read it; the
+    policy is what the target spells for the access's type and width --
+    CUDA's `__ldcg` for one element, AMD's builtin for any, SYCL none."""
+    from tensorforge.backend.pir.core import ScalarType
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, context=ctx)
+    g = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g', extern='g')
+    type_ = None if width == 1 else ScalarType(Datatype.F32, width)
+    b.load(g, 0, type_=type_, nontemporal='cg', align=16)
+    load = next(s for s in b.finish() if s.op == Op.LOAD)
+    assert load.attr('nontemporal') == 'cg' and load.attr('cache') == cache
+    bare = IRBuilder(fptype=Datatype.F32)
+    g = bare.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g', extern='g')
+    bare.load(g, 0, nontemporal='cg')
+    load = next(s for s in bare.finish() if s.op == Op.LOAD)
+    assert load.attr('cache', engines.UNRESOLVED) is engines.UNRESOLVED
+
+
+def test_the_bulk_path_is_an_mbarrier_its_copy_and_the_wait_on_it():
+    """The channel sets the object up in its storage, the copy names it,
+    and the wait is the wait for its phase, consuming the copy's token as a
+    `wait` would -- every one spelled as the cursor's calls, as before."""
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.emit import Emitter
+    ctx, b, barrier, body = _bulk_body()
+    assert barrier.type.kind is SyncKind.MBARRIER and barrier.id < 0
+    pir.verify(body)
+    out, diag = pir.schedule_async(body)
+    assert not diag
+    wait = next(s for s in out if s.op == Op.WAIT_PHASE)
+    assert wait.movable and wait.effect & Effect.ASYNC
+    assert not wait.effect & Effect.BARRIER
+    assert engines.settles(wait) is None
+    sink = _Sink()
+    Emitter(sink, ctx).run(out)
+    text = '\n'.join(sink.lines)
+    assert ('tensorforge::BulkCursor s0_bulk = tensorforge::bulk_arm('
+            's0_barrier, threadIdx.x == 0);' in text)
+    assert 'tensorforge::bulk_copy(s0_bulk, &s0[0], &glb_m0[0], 256);' in text
+    assert text.rstrip().endswith('tensorforge::bulk_wait(s0_bulk);')
+
+
+def test_a_drain_waits_on_every_cursor_by_its_object():
+    """A full drain names no token, and waits on every cursor of the body,
+    by the name the objects' setups give them."""
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.emit import Emitter
+    ctx, b, barrier, body = _bulk_body()
+    drain = IRBuilder(fptype=Datatype.F32, context=ctx)
+    drain.wait()
+    out, _ = pir.schedule_async(body + drain.finish())
+    sink = _Sink()
+    Emitter(sink, ctx).run(out)
+    assert sink.lines[-1] == 'tensorforge::bulk_wait(s0_bulk);'
+    assert sink.lines.count('tensorforge::bulk_wait(s0_bulk);') == 2
+
+
+def test_a_wait_of_the_engines_retires_only_where_it_names_tokens():
+    """`core.retires`: a `wait`, and a wait on an object or a counter that
+    names the tokens it retires -- not the rendezvous of a named barrier."""
+    from tensorforge.backend.pir.core import retires
+    _, _, _, body = _bulk_body()
+    wait = next(s for s in body if s.op == Op.WAIT_PHASE)
+    assert retires(wait)
+    named = engines.wait_phase(engines.sync_object(Participants.MULT, 32, 64))
+    assert not retires(named)
+    assert not retires(engines.wait_counter('vmcnt', 0))
+
+
+# -- the reference interpreter ------------------------------------------------ #
+
+def test_the_interpreter_reads_an_arrive_as_half_a_rendezvous():
+    """`bar.arrive` and gfx1250's signal (`arriveNamedBarrier`) are arrivals
+    that wait for nobody: the lanes that wait at the same barrier next are
+    ordered behind what the arriving lanes did ahead of their arrival, and
+    a lane that arrived is no lane the barrier missed."""
+    from tensorforge.reference import kernel_eval
+    races = kernel_eval.Races()
+    for text in ('asm volatile("barrier.arrive %0, %1;" :: '
+                 '"r"(threadIdx.y + 1), "r"(64) : "memory")',
+                 'tensorforge::arriveNamedBarrier(&tfBarriers[tfMult])'):
+        assert races.statement_kind(text) == 'arrive'
+        assert races.reach(text)[0] == 'named'
+    assert races.reach('tensorforge::syncNamedBarrier(&tfBarriers[tfMult])'
+                       ) == ('named', 'tfMult', None)
+    assert races.statement_kind(
+        'tensorforge::syncNamedBarrier(&tfBarriers[tfMult])') == 'barrier'
+
+    def run(arrive: bool):
+        r = kernel_eval.Races()
+        r.tick('store')
+        r.lane = 0
+        r.write(5)
+        if arrive:
+            r.tick('arrive')
+            r.arrive(1, 0)
+        r.tick('sync')
+        r.barrier([32, 33], r.arrivals(1))
+        r.tick('load')
+        r.lane = 32
+        r.read(5)
+        return [x.kind for x in r.found]
+    assert run(True) == []
+    assert run(False) == ['RAW']
+
+
+def test_an_lds_dma_copy_is_counted_one_at_a_time_and_written_as_before():
+    """AMD's LDS-DMA completes on `vmcnt`, an operation at a time: no group
+    closes it, and its wait is counted with the register loads -- which on
+    AMD is written as nothing, the compiler's to place, as before."""
+    from tensorforge.backend import pir
+    from tensorforge.backend.pir.emit import Emitter
+    ctx = Context(arch='gfx942', backend='hip', fp_type=Datatype.F32)
+    b = IRBuilder(fptype=Datatype.F32, context=ctx)
+    s0 = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s0',
+                 extern='s0', arena='blk', offset=0)
+    g = b.alloc(Datatype.F32, (64,), MemSpace.GLOBAL, hint='g', extern='g')
+    tok = b.copy_async(s0, g, dst_index=(0,), src_index=(0,))
+    b.wait(tok)
+    out, diag = pir.schedule_async(b.finish())
+    assert not diag
+    assert not any(s.op == Op.COMMIT_ASYNC for s in out)
+    wait = next(s for s in out if s.op == Op.WAIT)
+    assert wait.attr('counter') == 'load'
+    sink = _Sink()
+    Emitter(sink, ctx).run(out)
+    copies = [l for l in sink.lines if 'global_load_lds' in l]
+    assert len(copies) == 1 and copies[0].endswith('4, 0, 0);')
+    assert not any('wait' in l or 'commit' in l for l in sink.lines)

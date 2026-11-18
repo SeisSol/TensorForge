@@ -31,8 +31,21 @@ budget check counts (`object_demand`), and what the kernel prologue sets up.
 
 **Completion kinds** (`Completion`).  How the completion of an operation is
 observed: a commit group, an mbarrier phase, a hardware counter, or on issue.
-Tokens carry one (`TokenType.completes`); the transfers that set it come with
-the transfer engines.
+Tokens carry one (`TokenType.completes`), the kind of the engine that issued
+them.
+
+**Transfer engines** (`TRANSFER_ENGINES`).  What moves the bytes of a
+transfer: one element a lane (`scalar`) or several (`vector`, 8 or 16 bytes:
+float4, a planar quad, a wide staging hop) for a `load` or `store`, which
+completes on issue; `cp.async` into shared memory, counted in commit groups;
+AMD's LDS-DMA (`global_load_lds`), counted one operation at a time in
+`vmcnt`; the bulk copy of the tensor memory accelerator, completing on an
+mbarrier; and a load into registers ahead of its use (`load.async`).  An
+asynchronous transfer names its engine and the kind it completes by
+(`engine`, `completes`), and the class `asyncmem` counts it in derives from
+that (`counter_of`).  Every transfer says how many bytes a lane moves
+(`width`), the cache policy where one is set (`cache`), and a block its
+`shape`.
 
 What this increment keeps, on purpose:
 
@@ -48,12 +61,16 @@ What this increment keeps, on purpose:
   `FENCE(schedule)` orders the compiler and no memory, which is what the
   passes may exploit once they know the op; until then nothing moves across
   one that did not before.
-* **Objects are static.**  The objects in use today are named by the
-  hardware -- object 0, a warp's mask, the multiplication's id -- and exist
-  for the whole kernel, so an op names its object in the attribute `object`
-  rather than as an operand.  An object a body creates (an mbarrier) will be
-  a `Value` of type `SyncObjectType`, its op's first operand; `object_of`
-  reads either.
+* **Objects named by the hardware are static.**  Object 0, a warp's mask,
+  the multiplication's id exist for the whole kernel, so an op names one in
+  the attribute `object` rather than as an operand.  An object a body
+  creates -- the mbarrier a bulk copy completes on -- is a `Value` of type
+  `SyncObjectType`, numbered in the objects' own space (negative, apart
+  from the values', `IRBuilder.new_object`), defined by its `SYNC_INIT` in
+  the body's prologue and named, again in `object`, by the copies and the
+  waits on it: defined once ahead of everything and cloned by no pass, it
+  needs no def-use edge, and an operand would sit where the copy's
+  positional convention has none.  `object_of` reads every form.
 """
 
 from __future__ import annotations
@@ -242,15 +259,30 @@ def sync_object(participants: Participants, wave: int,
 def object_of(s: Stmt) -> Optional[SyncObjectType]:
     """The object `s` arrives at, waits on or sets up, or None.
 
-    The attribute for an object the hardware names, the first operand for
-    one a body created -- a `Value` whose type is the object's.
+    The attribute for an object the hardware names; for one a body created
+    -- a `Value` whose type is the object's -- the value its users name in
+    the same attribute, its setup's target, or an operand.
     """
     obj = s.attr('object')
     if isinstance(obj, SyncObjectType):
         return obj
+    value = object_value(s)
+    return None if value is None else value.type
+
+
+def object_value(s: Stmt) -> Optional[Value]:
+    """The object a body created that `s` names or sets up, as the `Value`
+    it is -- which is what is spelled, where the object is the cursor of a
+    bulk copy -- or None for an object the hardware names."""
+    obj = s.attr('object')
+    if isinstance(obj, Value) and isinstance(obj.type, SyncObjectType):
+        return obj
+    for v in s.target[:1]:
+        if isinstance(v.type, SyncObjectType):
+            return v
     if s.args and isinstance(s.args[0], Value) and isinstance(
             s.args[0].type, SyncObjectType):
-        return s.args[0].type
+        return s.args[0]
     return None
 
 
@@ -280,6 +312,168 @@ def object_demand(body: Sequence[Stmt], mults_per_block: int) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Transfer engines
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class TransferEngine:
+    """What moves the bytes of a transfer, and how its completion is seen.
+
+    ``ops`` are the statements that go through it; ``completes`` the kind of
+    completion it reports (`Completion`), which decides how a wait counts
+    it (`counter_of`).
+    """
+
+    name: str
+    ops: Tuple[str, ...]
+    completes: Completion
+    doc: str = ''
+
+
+TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
+    TransferEngine('scalar', (Op.LOAD, Op.STORE), Completion.SYNC,
+                   'one element a lane'),
+    TransferEngine('vector', (Op.LOAD, Op.STORE), Completion.SYNC,
+                   'several elements a lane in one access, 8 or 16 bytes: '
+                   'float4, a planar quad, a wide staging hop'),
+    TransferEngine('cp_async', (Op.COPY_ASYNC,), Completion.GROUP,
+                   'cp.async into shared memory, sm_80 and newer, counted in '
+                   'commit groups'),
+    TransferEngine('lds_dma', (Op.COPY_ASYNC,), Completion.COUNTER,
+                   "AMD's global_load_lds into the LDS (CDNA2/3), counted "
+                   'in vmcnt one operation at a time; its waits are the '
+                   "compiler's to place"),
+    TransferEngine('bulk', (Op.COPY_ASYNC,), Completion.BARRIER,
+                   'cp.async.bulk of a whole window by one thread, '
+                   'completing on an mbarrier, sm_90 and newer'),
+    TransferEngine('load', (Op.LOAD_ASYNC,), Completion.COUNTER,
+                   'a load into registers issued ahead of its use: vmcnt on '
+                   "AMD, NVIDIA's scoreboard"),
+)}
+
+#: The class `asyncmem` counts a transfer in, by the kind of completion its
+#: engine reports: what closes into groups, what is counted one operation
+#: at a time, and what completes on a barrier of its own.
+_COUNTER_OF = {Completion.GROUP: 'copy', Completion.COUNTER: 'load',
+               Completion.BARRIER: 'bulk'}
+
+
+def counter_of(engine: str) -> str:
+    """The class an asynchronous transfer through `engine` is counted in
+    (`Stmt.counter`): derived from how the engine completes, which is the
+    one fact a wait has to know about it."""
+    return _COUNTER_OF[TRANSFER_ENGINES[engine].completes]
+
+
+def completes_of(engine: str) -> Completion:
+    return TRANSFER_ENGINES[engine].completes
+
+
+def copy_engine(target: Any) -> str:
+    """The engine `IRBuilder.copy_async` issues through on `target`.
+
+    AMD's LDS-DMA where HIP spells one for the device (`Target.
+    async_copy_path`); `cp.async` everywhere else and where the target is
+    not known.  Whether the body's copies then go through it at all is the
+    emitter's decision, once for the whole body (`Emitter._decide_async`):
+    a size or a device without the path lowers every copy as a load and a
+    store.
+    """
+    hw = getattr(target, 'hw', None)
+    if (getattr(target, 'backend', None) == 'hip'
+            and getattr(hw, 'vendor', None) == 'amd'
+            and target.async_copy_path()):
+        return 'lds_dma'
+    return 'cp_async'
+
+
+def element_of(type_: Any, base: Any) -> Any:
+    """The element a transfer moves a lane of: the value's, or where the
+    value has no type of its own -- a literal stored -- the buffer's."""
+    elem = getattr(type_, 'base', None)
+    if elem is not None:
+        return elem
+    if isinstance(base, Value) and hasattr(base.type, 'elem'):
+        return base.type.elem
+    return getattr(base, 'datatype', None)
+
+
+def width_of(type_: Any, base: Any) -> Optional[int]:
+    """Bytes a lane moves at once: the element times the value's slots, or
+    None where the element is not known (a raw base)."""
+    elem = element_of(type_, base)
+    try:
+        size = elem.size()
+    except (AttributeError, TypeError):
+        return None
+    return size * (getattr(type_, 'length', None) or 1)
+
+
+def engine_of(s: Stmt) -> Optional[str]:
+    """The engine a transfer goes through: the one an asynchronous one
+    names, and for a `load` or `store` the scalar or the vector one its
+    width makes it -- a wide access is one instruction of 8 or 16 bytes,
+    however it is spelled."""
+    engine = s.attr('engine')
+    if engine is not None:
+        return engine
+    if s.op not in (Op.LOAD, Op.STORE):
+        return None
+    value = s.target[0] if s.op == Op.LOAD else (
+        s.args[1] if len(s.args) > 1 else None)
+    length = getattr(getattr(value, 'type', None), 'length', None)
+    return 'scalar' if length is None else 'vector'
+
+
+def copy_cache(engine: str, width: Optional[int]) -> Optional[str]:
+    """The cache policy a copy's width gives it: sixteen bytes of `cp.async`
+    lower to `cp.async.cg` and go past L1, four and eight to `cp.async.ca`
+    and fill it on the way (`CudaLexic.copy_async`) -- which is why a
+    staging transfer takes sixteen where it can (`_bypass_covering`)."""
+    if engine != 'cp_async' or width is None:
+        return None
+    return 'cg' if width == 16 else 'ca'
+
+
+#: What `cache_policy` answers where the builder did not know the target:
+#: the access's request is resolved where it is lowered.
+UNRESOLVED = object()
+
+
+def cache_policy(request: Any, target: Any, datatype: Any,
+                 length: int = 1) -> Any:
+    """The cache hint an access that asks for `request` (`hints.cache_hint`:
+    `'cg'`, `'cs'`, or False) gets on `target`, for an access of `length` x
+    `datatype`: the request where the target spells it for that type
+    (`Target.nontemporal`), None where it does not -- and `UNRESOLVED`
+    without a target, for the emitter to ask the one it lowers for."""
+    if not request:
+        return None
+    if target is None:
+        return UNRESOLVED
+    if datatype is None or not target.nontemporal(datatype, length):
+        return None
+    return request
+
+
+#: The attributes of an access that are global memory's alone, which a pass
+#: that points an access at shared memory drops (`trips`, `shards`).
+GLOBAL_POLICY = ('nontemporal', 'cache')
+
+#: What a transfer's statement says that its other facts already decide --
+#: the width its value's type, the policy its request and type -- which is
+#: therefore no part of what makes two accesses one (`passes._cse_key`).
+DERIVED = ('width', 'cache')
+
+
+def kept_facts(s: Stmt) -> Tuple:
+    """The attributes an access keeps where a pass points it elsewhere and
+    drops the rest -- at a register, which takes no hint and no alignment:
+    what a lane moves, which is still its value's."""
+    return tuple((k, v) for k, v in s.attrs if k == 'width')
+
+
+# --------------------------------------------------------------------------- #
 # The registry
 # --------------------------------------------------------------------------- #
 
@@ -295,19 +489,21 @@ class Lowered(NamedTuple):
 
 class Spelling:
     """What a lowering reads of the target: the target itself (`sync_mult`),
-    its lexic and its device, and which family of backends it is.
+    its lexic and its device, which family of backends it is -- and how the
+    emitter names a value, for an op whose object or storage is one.
 
     Built from whatever the emitter was given, which may be no target at all
     -- the IR-level tests build bodies without one -- and then answers None.
     """
 
-    __slots__ = ('target', 'lexic', 'hw', 'family')
+    __slots__ = ('target', 'lexic', 'hw', 'family', 'name')
 
-    def __init__(self, target: Any):
+    def __init__(self, target: Any, name: Optional[Callable] = None):
         self.target = target
         self.lexic = getattr(target, 'lexic', None)
         self.hw = getattr(target, 'hw', None)
         self.family = family(target)
+        self.name = name if name is not None else str
 
     @property
     def amd(self) -> bool:
@@ -410,8 +606,9 @@ def _no_split(op: str, obj: SyncObjectType, env: Spelling) -> IRError:
 
 
 def _phase1(op: str, obj: SyncObjectType) -> IRError:
-    return IRError(f'{op} on a {obj.kind.value} object is lowered with the '
-                   f'transfers that complete on one, which are not here yet')
+    return IRError(f'{op} on a {obj.kind.value} object has no spelling of '
+                   f'its own yet: the transfer that completes on it arrives '
+                   f'there (`tensorforge::bulk_copy`)')
 
 
 def _combined(obj: SyncObjectType, env: Spelling) -> Optional[str]:
@@ -474,9 +671,32 @@ def _lower_wait_phase(s: Stmt, env: Spelling) -> Lowered:
     threads, and gfx1250's rendezvous is a signal and a wait -- so one count
     serves both and a producer that only arrives (`ARRIVE`) is the split:
     the combined form, written by every participant, is this.
+
+    On an mbarrier it is the wait for what completes on it, the bulk copies
+    whose tokens it names: the cursor's (`tensorforge::bulk_wait`), which
+    holds the phase the wait is for.
     """
-    text = _combined(object_of(s), env)
+    obj = object_of(s)
+    if obj.kind is SyncKind.MBARRIER:
+        return _wait_mbarrier(s, env)
+    text = _combined(obj, env)
     return Lowered(() if text is None else (text,))
+
+
+def _wait_mbarrier(s: Stmt, env: Spelling) -> Lowered:
+    _spelled_mbarrier(s, env, object_value(s))
+    return Lowered((f'tensorforge::bulk_wait({env.name(object_value(s))});',))
+
+
+def _spelled_mbarrier(s: Stmt, env: Spelling, value) -> None:
+    """Refuse an mbarrier the target cannot spell, or one that is no value:
+    a description has no storage, and no cursor to name."""
+    if value is None:
+        raise IRError(f'{s.op} on an mbarrier that no body set up: it is '
+                      f'spelled by the cursor its setup declares')
+    if env.family != 'cuda':
+        raise IRError(f'an mbarrier has no spelling on '
+                      f'{env.family or "no target"}')
 
 
 def _lower_arrive_cuda(s: Stmt, env: Spelling) -> Lowered:
@@ -526,13 +746,26 @@ def _lower_sync_init(s: Stmt, env: Spelling) -> Lowered:
     which the base lexic answers with nothing.
     """
     obj = object_of(s)
-    if obj.kind in (SyncKind.MBARRIER, SyncKind.LDS_ARRIVE):
+    if obj.kind is SyncKind.MBARRIER:
+        return _init_mbarrier(s, env)
+    if obj.kind is SyncKind.LDS_ARRIVE:
         raise _phase1(Op.SYNC_INIT, obj)
     if not obj.per_mult or env.lexic is None or env.hw is None:
         return Lowered()
     count = s.attr('count', obj.threads)
     return Lowered(tuple(env.lexic.named_barrier_prologue(
         count, s.attr('objects', 1), env.hw)))
+
+
+def _init_mbarrier(s: Stmt, env: Spelling) -> Lowered:
+    """An mbarrier in the eight bytes of shared memory its setup names,
+    armed by the thread `leader` names for one arrival a phase: the cursor
+    the bulk copies through it and their waits name (`cuda.h`,
+    `tensorforge::bulk_arm`), which holds the phase bit as well."""
+    _spelled_mbarrier(s, env, s.target[0] if s.target else None)
+    return Lowered((f'tensorforge::BulkCursor {env.name(s.target[0])} = '
+                    f'tensorforge::bulk_arm({env.name(s.args[0])}, '
+                    f'{s.attr("leader")});',))
 
 
 #: vISA's software fence: a barrier to the scheduler that emits nothing
@@ -723,7 +956,7 @@ def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
 # The entries
 # --------------------------------------------------------------------------- #
 
-_OBJECT = Slot('object', (SyncObjectType,))
+_OBJECT = Slot('object', (SyncObjectType, Value))
 _SYNC = Effect.BARRIER
 _INT = (int,)
 
@@ -737,7 +970,9 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     # Set an object up ahead of its first use: at the kernel's head, by the
     # whole block -- gfx1250's join holds the block barrier.
     OpSpec(Op.SYNC_INIT, operands=(_OBJECT, Slot('count', _INT, False),
-                                   Slot('objects', _INT, False)),
+                                   Slot('objects', _INT, False),
+                                   Slot('leader', (str,), False),
+                                   Slot('extern', (str,), False)),
            results=(), effect=_SYNC, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_sync_init},
@@ -749,10 +984,13 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            units=1, pipe='barrier',
            lower={'cuda': _lower_arrive_cuda, 'hip': _lower_arrive_hip,
                   '*': _lower_arrive_other}),
+    # A wait, counted as the waits are (`sync`); on an mbarrier the wait for
+    # the copies whose tokens it names, an access of what they wrote as
+    # their `wait` is (`effect_of`).
     OpSpec(Op.WAIT_PHASE, operands=(_OBJECT,),
            results=(), effect=_SYNC, movable=False,
            completes=Completion.SYNC, retires=Completion.BARRIER,
-           settles=True, units=1, pipe='barrier',
+           settles=True, units=1, pipe='sync',
            lower={'*': _lower_wait_phase}),
     # A wall wherever the raw text it replaces was one: opaque to every
     # pass, though what it orders is known (see the module).  A fence of the
@@ -788,10 +1026,11 @@ def spec_of(op: str) -> Optional[OpSpec]:
     return REGISTRY.get(op)
 
 
-def lower(s: Stmt, target: Any) -> Lowered:
-    """`s` as written for `target` (a `Target`, or None)."""
+def lower(s: Stmt, target: Any, name: Optional[Callable] = None) -> Lowered:
+    """`s` as written for `target` (a `Target`, or None); `name` spells a
+    value the op names (`Emitter.operand`)."""
     spec = REGISTRY[s.op]
-    env = target if isinstance(target, Spelling) else Spelling(target)
+    env = target if isinstance(target, Spelling) else Spelling(target, name)
     return spec.lowering(env.family)(s, env)
 
 
@@ -813,20 +1052,51 @@ def verify_engine(s: Stmt) -> List[str]:
             diag.append(f'{s.op}: {slot.name} {value!r} is not a '
                         f'{" or ".join(k.__name__ for k in slot.kinds)}')
     effect = effect_of(s.op, s.attrs)
-    if s.effect != effect or s.movable != spec.movable:
+    movable = movable_of(s.op, s.attrs)
+    if s.effect != effect or s.movable != movable:
         diag.append(f'{s.op}: declares {s.effect!r}, '
                     f'{"movable" if s.movable else "pinned"}, where the '
                     f'registry says {effect!r}, '
-                    f'{"movable" if spec.movable else "pinned"}')
+                    f'{"movable" if movable else "pinned"}')
     return diag
+
+
+def _retires_copies(op: str, attrs: Tuple) -> bool:
+    """A wait on an mbarrier: the wait for the copies that complete on it,
+    which is what a `wait` was before it was spelled as the object's."""
+    if op != Op.WAIT_PHASE:
+        return False
+    obj = dict(attrs).get('object')
+    return (isinstance(obj, Value) and isinstance(obj.type, SyncObjectType)
+            and obj.type.kind is SyncKind.MBARRIER)
 
 
 def effect_of(op: str, attrs: Tuple = ()) -> Effect:
     """The effect a statement of `op` with `attrs` declares: the registry's,
-    but none for a fence that is no wall (`fence_stmt`)."""
+    but none for a fence that is no wall (`fence_stmt`), and for the wait on
+    an mbarrier the `wait`'s -- it makes what the copies wrote visible, the
+    accesses they declared, and orders nobody else's (`wait_phase`)."""
     if op == Op.FENCE and dict(attrs).get('wall') is False:
         return Effect.NONE
+    if _retires_copies(op, attrs):
+        return Effect.READ | Effect.WRITE | Effect.ASYNC
     return REGISTRY[op].effect
+
+
+def completes_on_barrier(s: Stmt) -> bool:
+    """A bulk copy, or the wait for one: what every thread waits for on the
+    barrier the copy completes on, which makes the bytes visible to each --
+    so no lane hands them to another (`barriers`)."""
+    return s.attr('engine') == 'bulk' or _retires_copies(s.op, s.attrs)
+
+
+def movable_of(op: str, attrs: Tuple = ()) -> bool:
+    """Whether a statement of `op` with `attrs` may move: the registry's
+    answer, but a wait on an mbarrier moves as the `wait` it was moved,
+    subject to the accesses of the copies it retires."""
+    if _retires_copies(op, attrs):
+        return True
+    return REGISTRY[op].movable
 
 
 def arrival_of(s: Stmt) -> Uniformity:
@@ -872,9 +1142,8 @@ def settles(s: Stmt) -> Optional[Uniformity]:
 def _stmt(op: str, attrs: Tuple = (), args: Tuple = (), target: Tuple = (),
           accesses: Tuple[Access, ...] = ()) -> Stmt:
     """A statement of `op`, with what the registry says it does."""
-    spec = REGISTRY[op]
     return Stmt(op=op, target=target, args=args, pure=False,
-                movable=spec.movable, effect=effect_of(op, attrs),
+                movable=movable_of(op, attrs), effect=effect_of(op, attrs),
                 accesses=accesses, attrs=attrs)
 
 
@@ -908,10 +1177,47 @@ def arrive(obj: SyncObjectType, count: int = 1, tx: int = 0) -> Stmt:
     return _stmt(Op.ARRIVE, attrs)
 
 
-def wait_phase(obj: SyncObjectType) -> Stmt:
+def wait_phase(obj, tokens: Sequence[Value] = (),
+               accesses: Tuple[Access, ...] = ()) -> Stmt:
     """Wait for the current phase of `obj` (see `_lower_wait_phase` for the
-    arrival a named object's wait is)."""
-    return _stmt(Op.WAIT_PHASE, (('object', obj),))
+    arrival a named object's wait is).
+
+    On an mbarrier -- `obj` the `Value` its setup defined -- the wait for
+    the copies that complete on it: `tokens` are theirs, which it consumes
+    as a `wait` would (`check_tokens`, `asyncmem`), and `accesses` what they
+    wrote and read, which it makes visible."""
+    return _stmt(Op.WAIT_PHASE, (('object', obj),), args=tuple(tokens),
+                 accesses=tuple(accesses))
+
+
+def mbarrier(participants: Participants, wave: int,
+             threads: Optional[int] = None) -> SyncObjectType:
+    """The object a bulk copy completes on, waited on by `participants`:
+    eight bytes of shared memory with a phase bit, one arrival a phase --
+    the issuing thread's, with the bytes it expects (`tensorforge::
+    bulk_copy`)."""
+    scope = {Participants.WAVE: SyncScope.WARP,
+             Participants.MULT: (SyncScope.WARP
+                                 if threads is not None and threads < wave
+                                 else SyncScope.MULT),
+             Participants.GRID: SyncScope.GRID}.get(participants,
+                                                    SyncScope.BLOCK)
+    return SyncObjectType(scope, SyncKind.MBARRIER, participants, threads,
+                          wave)
+
+
+def sync_init_value(obj: Value, storage: Value, *, leader: str,
+                    extern: Optional[str] = None,
+                    count: int = 1) -> Stmt:
+    """Set up the object `obj` a body creates, in `storage`, armed by the
+    thread `leader` (text, the condition that picks it) for `count`
+    arrivals a phase: the statement defines `obj`, which `extern` names in
+    the source where something else spells it."""
+    attrs = (('count', int(count)), ('leader', leader))
+    if extern is not None:
+        attrs += (('extern', extern),)
+    return _stmt(Op.SYNC_INIT, attrs, args=(storage,), target=(obj,),
+                 accesses=(Access(Effect.WRITE, MemSpace.SHARED, storage),))
 
 
 def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
@@ -974,7 +1280,13 @@ def set_priority(level: int, waves: Optional[str] = None) -> Stmt:
 
 
 __all__ = [
-    'Completion', 'FenceKind', 'Hazard', 'Lowered', 'OpSpec',
+    'Completion', 'DERIVED', 'FenceKind', 'GLOBAL_POLICY', 'Hazard',
+    'Lowered', 'kept_facts',
+    'OpSpec', 'TRANSFER_ENGINES', 'TransferEngine', 'UNRESOLVED',
+    'cache_policy', 'completes_of', 'completes_on_barrier',
+    'copy_cache', 'copy_engine',
+    'counter_of', 'element_of', 'engine_of', 'mbarrier', 'movable_of',
+    'object_value', 'sync_init_value', 'width_of',
     'PRIORITY_WAVES', 'REGISTRY', 'Slot', 'Spelling', 'SyncKind',
     'SyncObjectType', 'SyncScope', 'arrival_of', 'arrive', 'barrier',
     'effect_of', 'family', 'fence_stmt', 'lower', 'object_demand',

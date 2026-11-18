@@ -63,7 +63,7 @@ from typing import Dict, List, Sequence, Tuple
 
 from .ahead import counted
 from .core import (BufferType, Effect, MemSpace, Op, Stmt, accesses_conflict,
-                   walk_stmts)
+                   walk_stmts, retires)
 from .schedule import Footprint, crosses
 from .transfers import (Transfer, executed, glue, memory_path, neutral,
                         transfers, writes)
@@ -213,7 +213,7 @@ def _out_of_loop(loop: Stmt) -> Tuple[List[Stmt], Stmt]:
         if t.shared and barrier:
             continue
         tokens = {v.id for v in t.tokens()}
-        waits = [x for x in body if x.op is Op.WAIT and x.waited is not None
+        waits = [x for x in body if retires(x) and x.waited is not None
                  and x.waited.id in tokens]
         # And the comments leading each, which say what it waits for.
         for i in sorted(order[id(x)] for x in waits):
@@ -382,7 +382,7 @@ def _consumes(s: Stmt, t: Transfer, copied: bool) -> bool:
     """Whether `s` is where `t`'s buffer is first wanted: the wait for its
     copies, or a read of what it filled."""
     for x in walk_stmts((s,)):
-        if copied and x.op is not Op.WAIT:
+        if copied and not retires(x):
             continue
         if any(a.base is not None and getattr(a.base, 'id', None) == t.dest.id
                and (copied or not writes(a)) for a in x.accesses):

@@ -174,7 +174,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from .ahead import Clone, ElementLoop, Refusal, behind_defs, counted
 from .asyncmem import strip_commits
 from .core import (BOOL, INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
-                   walk_stmts)
+                   walk_stmts, retires)
 from .transfers import (Transfer, executed, memory_path, neutral, opaque,
                         same, transfers, writes)
 
@@ -588,7 +588,7 @@ class _Loop(ElementLoop):
         if tokens:
             ids = {v.id for v in tokens}
             waits = [w for w in walk_stmts(self.region.body)
-                     if w.op is Op.WAIT and any(isinstance(a, Value)
+                     if retires(w) and any(isinstance(a, Value)
                                                 and a.id in ids for a in w.args)]
             named = ({a.id for a in waits[0].args if isinstance(a, Value)}
                      if len(waits) == 1 else set())
@@ -1016,8 +1016,9 @@ class _Rewrite:
                 accesses = tuple(replace(a, base=peel_win)
                                  if same(a.base, p.transfer.dest) else a
                                  for a in accesses)
-            # With the wait's attributes: a bulk copy's names its cursor.
-            after.append(Stmt(op=Op.WAIT, args=tuple(
+            # The wait it was, with its attributes: a bulk copy's is the
+            # wait on its barrier, which it names.
+            after.append(Stmt(op=p.wait.op, args=tuple(
                 past.get(a.id, a) if isinstance(a, Value) else a
                 for a in p.wait.args), pure=False, movable=True,
                 effect=p.wait.effect, accesses=accesses,

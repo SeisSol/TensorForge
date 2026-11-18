@@ -11,6 +11,9 @@ from io import StringIO
 class VarAlloc:
     def __init__(self):
         self.counter = -1
+        #: The numbers of the objects the bodies create, apart from the
+        #: values' (`IRBuilder.next_object_index`).
+        self.objects = 0
 
     def alloc(self, prefix='v'):
         self.counter += 1
@@ -20,6 +23,11 @@ class VarAlloc:
         """Hand out a raw index, so an IRBuilder can share this counter."""
         self.counter += 1
         return self.counter
+
+    def next_object_index(self):
+        """Hand out an object's number: negative, counting down from -1."""
+        self.objects -= 1
+        return self.objects
 
 class Block:
   def __init__(self, writer, argument, foot=''):

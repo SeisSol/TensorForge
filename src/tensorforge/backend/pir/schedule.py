@@ -61,7 +61,7 @@ from functools import cached_property
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from .core import (Effect, MemSpace, Op, Stmt, accesses_conflict, walk,
-                   walk_stmts)
+                   walk_stmts, retires)
 
 #: Effects that no access analysis can reason across.
 _WALL = Effect.BARRIER | Effect.UNKNOWN
@@ -258,7 +258,7 @@ def sink_waits(body: Tuple[Stmt, ...]) -> Tuple[Stmt, ...]:
     while changed:
         changed = False
         for i, s in enumerate(out):
-            if s.op is not Op.WAIT and s.op != 'wait':
+            if not retires(s):
                 continue
             j = i
             while j + 1 < len(out) and can_reorder(out[j], out[j + 1]):
@@ -313,7 +313,7 @@ def overlap(body: Tuple[Stmt, ...]) -> Dict[int, int]:
         if s.op in (Op.COPY_ASYNC, Op.LOAD_ASYNC):
             for t in s.target:
                 issued[t.id] = pos
-        elif s.op is Op.WAIT:
+        elif retires(s):
             for v in s.operands():
                 if v.id in issued:
                     spans[v.id] = pos - issued[v.id] - 1

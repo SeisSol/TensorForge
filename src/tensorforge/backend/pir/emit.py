@@ -812,6 +812,15 @@ class Emitter:
             return t.base, (t.length or 1)
         return self.elem_type(base), 1
 
+    def _bind_objects(self, body: Tuple[Stmt, ...]) -> None:
+        """Name every object the body sets up (`SYNC_INIT`) as its setup
+        says (`extern`), ahead of the statements that name it: the copies
+        through a bulk cursor and the waits on it come behind the setup, but
+        a full drain waits on every cursor of the body (`_decide_async`)."""
+        for s in walk_stmts(body):
+            if s.op == Op.SYNC_INIT and s.target and s.attr('extern'):
+                self.bind(s.target[0], s.attr('extern'))
+
     def _decide_async(self, body: Tuple[Stmt, ...]) -> None:
         """One decision per kernel body, not per copy.
 
@@ -825,7 +834,8 @@ class Emitter:
         # A bulk copy is none of these: it is the tensor memory accelerator's,
         # whose size is the window's, and it completes on its own barrier,
         # which every full drain waits on as well.
-        self._bulk_cursors = tuple(sorted({c.attr('bulk') for c in copies
+        self._bulk_cursors = tuple(sorted({self.name(c.attr('object'))
+                                           for c in copies
                                            if c.counter == 'bulk'}))
         copies = [c for c in copies if c.counter != 'bulk']
         if not copies:
@@ -842,12 +852,21 @@ class Emitter:
 
         sizes = target.copy_async_sizes()
         for c in copies:
-            nbytes = c.attr('elems', 1) * self.elem_size(c.copy_dst)
+            nbytes = self._copy_bytes(c)
             if nbytes not in sizes:
                 self._async_note = (f'{nbytes} B per thread is not one of '
                                     f'{sizes} on {hw.model}')
                 return
         self._async_lex = target.lexic
+
+    def _copy_bytes(self, s: Stmt) -> int:
+        """Bytes a lane's copy moves: the statement's `width`, which the
+        builder recorded from the elements and their type -- or, for a copy
+        built without one, its elements at the size of what it writes."""
+        width = s.attr('width')
+        if width is not None:
+            return width
+        return s.attr('elems', 1) * self.elem_size(s.copy_dst)
 
     def _decide_prefetch(self, body: Tuple[Stmt, ...]) -> None:
         """One decision per body, and a lighter one than the copies above.
@@ -1084,6 +1103,7 @@ class Emitter:
                                       if options else True))
         self._converged = True
         self._inline = self._plan_inlining(body)
+        self._bind_objects(body)
         self._decide_async(body)
         if self._async_lex is None and self._async_note:
             self.writer.Comment(f'async copies lowered synchronously: '
@@ -1115,6 +1135,19 @@ class Emitter:
             else:
                 self._emit_stmt(s, yield_to)
             at += 1
+
+    def _cache_policy(self, s: Stmt, dt, width: int):
+        """The cache hint `s` is spelled with: the policy the builder gave
+        it (`cache`), or where it built without a target the request
+        (`nontemporal`) as this target spells it for the access's type and
+        width (`engines.cache_policy`) -- False for none."""
+        cache = s.attr('cache', engines.UNRESOLVED)
+        if cache is engines.UNRESOLVED:
+            cache = engines.cache_policy(s.attr('nontemporal'),
+                                         self._target(), dt, width)
+            if cache is engines.UNRESOLVED:
+                cache = None
+        return cache or False
 
     @contextlib.contextmanager
     def _diverging(self, cond):
@@ -1295,7 +1328,8 @@ class Emitter:
         if engines.spec_of(op) is not None:
             # A barrier, a fence, a counter wait, a priority: what the
             # registry writes it as on this target.
-            for text in engines.lower(s, self._target()).lines:
+            for text in engines.lower(s, self._target(),
+                                      name=self.operand).lines:
                 w(text)
             return
 
@@ -1384,11 +1418,10 @@ class Emitter:
             if nontemporal:
                 # The attribute is the kind of hint (`hints.cache_hint`), and
                 # the lexic spells whichever it has -- where the target has one
-                # for this type at all.
+                # for this type at all, which the builder decided where it
+                # knew the target (`cache`, `IRBuilder._transfer`).
                 dt, width = self.access_type(v.type, s.args[0])
-                target = self._target()
-                if target is None or not target.nontemporal(dt, width):
-                    nontemporal = False
+                nontemporal = self._cache_policy(s, dt, width)
             if nontemporal:
                 # Passed only when asked for: `declare` is overridden by the
                 # explicit-vector emitter, which never splits and whose
@@ -1443,9 +1476,7 @@ class Emitter:
                 return
             if space is MemSpace.GLOBAL and lex is not None:
                 dt, width = self.access_type(vt, s.args[0])
-                hint = s.attr('nontemporal') or False
-                if hint and not self._target().nontemporal(dt, width):
-                    hint = False
+                hint = self._cache_policy(s, dt, width) or False
                 w(lex.glb_store(access, self.operand(val),
                                 datatype=dt, length=width, nontemporal=hint))
                 return
@@ -1474,15 +1505,16 @@ class Emitter:
             elems = s.attr('elems', 1)
             zfill = s.attr('zfill', 0)
             if s.counter == 'bulk':
-                w(f'tensorforge::bulk_copy({s.attr("bulk")}, &{dst_b}[{dst_a}], '
-                  f'&{src_b}[{src_a}], {elems * self.elem_size(s.copy_dst)});')
+                w(f'tensorforge::bulk_copy({self.name(s.attr("object"))}, '
+                  f'&{dst_b}[{dst_a}], &{src_b}[{src_a}], '
+                  f'{self._copy_bytes(s)});')
                 return
             text = None
             if self._async_lex is not None:
                 elem = self.elem_size(s.copy_dst)
                 text = self._async_lex.copy_async(
-                    f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]', elems * elem,
-                    zfill * elem)
+                    f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]',
+                    self._copy_bytes(s), zfill * elem)
             if text is not None:
                 w(text)
             elif zfill:
@@ -1533,11 +1565,10 @@ class Emitter:
                 texts.append(lex.wait_async_regs(n))
             if cls in ('copy', 'all') and self._async_lex is not None:
                 texts.append(lex.wait_async(n))
-            # A bulk copy on its cursor, and a full drain on every cursor of
-            # the body: one with nothing in flight returns at once.
-            if cls == 'bulk':
-                texts.append(f'tensorforge::bulk_wait({s.attr("bulk")});')
-            elif cls == 'all':
+            # A full drain waits on every cursor of the body as well: one
+            # with nothing in flight returns at once.  The wait for a bulk
+            # copy is the wait for its barrier's phase (`WAIT_PHASE`).
+            if cls == 'all':
                 texts += [f'tensorforge::bulk_wait({c});'
                           for c in self._bulk_cursors]
             for txt in texts:

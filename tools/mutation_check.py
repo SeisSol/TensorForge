@@ -1175,7 +1175,8 @@ GROUPS = {
                    '                and x.target[0].id == t.dest.id) or (',
              '        if False or (', 1)),
         ('the wait moved with the transfer',
-         sub(TRANSFERS, 'Op.WAIT, Op.COMMIT_ASYNC', 'Op.COMMIT_ASYNC')),
+         subs(TRANSFERS, ('retires(s) or s.op in', 's.op in'),
+              ('retires(x) or x.op in', 'x.op in'))),
         ('the reads a merged run shares lifted out of it',
          sub(PASSES, "            elif loop.attr('rolled'):\n                # A merged run's loop keeps its reads.",
              "            elif False:\n                # A merged run's loop keeps its reads.", 1)),
@@ -1196,7 +1197,7 @@ GROUPS = {
          sub(MOVE, '        if t.shared and barrier:\n            continue',
              '        if False:\n            continue', 1)),
         ('the copy out of the loop and its wait left in it',
-         sub(MOVE, '        waits = [x for x in body if x.op is Op.WAIT and x.waited is not None\n'
+         sub(MOVE, '        waits = [x for x in body if retires(x) and x.waited is not None\n'
                    '                 and x.waited.id in tokens]',
              '        waits = []', 1)),
         ('the comment saying what a wait retires left behind',
@@ -1417,7 +1418,7 @@ GROUPS = {
              "    return s.op == Op.COPY_ASYNC and s.counter == 'copy'\n",
              '    return s.op == Op.COPY_ASYNC\n', 1)),
         ('a barrier behind the wait for a bulk copy',
-         sub(BARRIERS, "        if s.attr('bulk') is not None:\n",
+         sub(BARRIERS, "        if completes_on_barrier(s):\n",
              '        if False:\n', 1)),
         ('a second stage for a bulk copy',
          sub(WRAP, "        if any(x.op is Op.COPY_ASYNC and x.counter == 'bulk'\n"
@@ -1428,8 +1429,9 @@ GROUPS = {
                    '                attrs=p.wait.attrs))',
              '                effect=p.wait.effect, accesses=accesses))', 1)),
         ('a wait for a bulk copy without its cursor',
-         sub(BUILD, "                             attrs=(('bulk', cursor),) if cursor else ())",
-             '                             )', 1)),
+         sub(BUILD, '        if barrier is not None:\n'
+                    '            return self.emit(engines.wait_phase(barrier, tokens, accesses))\n',
+             '', 1)),
         ('a bulk copy in the pipeline of cp.async',
          sub(TRANSFERS, "    if any(x.op is Op.COPY_ASYNC and x.counter == 'bulk'\n"
                         '           for x in walk_stmts(tuple(t.pieces))):\n'
@@ -1735,9 +1737,9 @@ GROUPS = {
     'barrierreach': ('tests/test_races.py tests/test_rank0_operands.py', [
         ('a warp barrier meeting every lane that executes it',
          sub(ORACLE, "        if reach[0] == 'block':\n"
-                     "            return [(lanes, self.interps)]\n",
+                     "            return [(lanes, self.interps, {})]\n",
              "        if reach[0] in ('block', 'warp'):\n"
-             "            return [(lanes, self.interps)]\n", 1)),
+             "            return [(lanes, self.interps, {})]\n", 1)),
         ('a lane that skips a barrier never missed',
          sub(ORACLE, '                if missing:\n'
                      '                    tracker.arrival(missing[0], len(present))',

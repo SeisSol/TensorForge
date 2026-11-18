@@ -378,17 +378,32 @@ class Races:
     _BARRIER = re.compile(
         r'^(?:__syncthreads|__syncwarp|__builtin_amdgcn_s_barrier)\s*\('
         r'|^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.sync'
+        r'|^tensorforge::(?:sync|join)NamedBarrier\b'
         r'|^cooperative_groups::this_grid\(\)\.sync\('
         r'|.*\blaunchCursor\d+\.next\s*\(')
+    #: The first half of a rendezvous: an arrival at a named barrier that
+    #: waits for nobody (`engines.ARRIVE`) -- `bar.arrive` on NVIDIA, the
+    #: signal of a gfx1250 object.  What the arriving lane wrote ahead of it
+    #: is what the lanes waiting at the same barrier read behind their wait.
+    _ARRIVE = re.compile(
+        r'^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.arrive'
+        r'|^tensorforge::arriveNamedBarrier\b')
     _COMMIT = re.compile(r'^__pipeline_commit\s*\(\s*\)$')
     _WAIT = re.compile(r'^__pipeline_wait_prior\s*\(\s*(\d+)\s*\)$')
     #: The two barriers narrower than the block: a warp's, with its mask,
     #: and a counted one, with its operands -- `%n` naming the n-th input.
     _WARP_BARRIER = re.compile(r'^__syncwarp\s*\((?P<mask>.*)\)$')
     _NAMED_BARRIER = re.compile(
-        r'^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.sync(?:\.aligned)?\s+'
+        r'^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.(?:sync|arrive)'
+        r'(?:\.aligned)?\s+'
         r'(?P<ops>[^";]*);?"\s*(?::\s*:\s*(?P<inputs>.*?))?\s*'
         r'(?::\s*"memory"\s*)?\)$')
+    #: A gfx1250 object of the multiplication's, the element of the
+    #: kernel's array its row picks (`HipLexic.sync_mult`): the row is the
+    #: barrier's id, and the count the setup gave it is the multiplication's.
+    _OBJECT_BARRIER = re.compile(
+        r'^tensorforge::(?:sync|arrive)NamedBarrier\s*\(\s*&\s*\w+\s*'
+        r'\[(?P<row>.*)\]\s*\)$')
     _INPUT = re.compile(r'"\w+"\s*\(')
     #: Lanes per warp, which a warp barrier's mask counts in.
     WARP = 32
@@ -413,6 +428,9 @@ class Races:
         m = self._WARP_BARRIER.match(stmt)
         if m:
             return ('warp', m.group('mask').strip() or None)
+        m = self._OBJECT_BARRIER.match(stmt)
+        if m:
+            return ('named', m.group('row').strip(), None)
         m = self._NAMED_BARRIER.match(stmt)
         if m:
             inputs = self._inputs(m.group('inputs'))
@@ -455,9 +473,13 @@ class Races:
         #: (cursor, lane) -> when that lane last waited on the cursor.
         self._bulk_flight: Dict[int, Tuple[str, int]] = {}
         self._landed: Dict[Tuple[str, int], int] = {}
+        #: named barrier -> lane -> when it arrived without waiting.
+        self._arrived: Dict[int, Dict[int, int]] = {}
 
     def statement_kind(self, stmt: str) -> Optional[str]:
-        """`'barrier'`, `'commit'`, `'wait'` or None."""
+        """`'barrier'`, `'arrive'`, `'commit'`, `'wait'` or None."""
+        if self._ARRIVE.match(stmt):
+            return 'arrive'
         if self._BARRIER.match(stmt):
             return 'barrier'
         if self._COMMIT.match(stmt):
@@ -470,10 +492,26 @@ class Races:
         self.time += 1
         self.statement = stmt
 
-    def barrier(self, lanes: List[int]) -> None:
+    def barrier(self, lanes: List[int],
+                arrived: Optional[Dict[int, int]] = None) -> None:
+        """`lanes` meet: each is ordered behind what every other did so far
+        -- and behind what a lane that only arrived (`arrived`, lane -> when)
+        did up to its arrival, which waits for none of them."""
         for a in lanes:
             for b in lanes:
                 self._met[(a, b)] = self.time
+            for b, when in (arrived or {}).items():
+                self._met[(a, b)] = max(self._met.get((a, b), -1), when)
+
+    def arrive(self, key: int, lane: int) -> None:
+        """`lane` arrived at the named barrier `key` without waiting: the
+        lanes that wait there next meet what it did up to now."""
+        self._arrived.setdefault(key, {})[lane] = self.time
+
+    def arrivals(self, key: int) -> Dict[int, int]:
+        """The lanes that arrived at `key` since its last rendezvous, which
+        that rendezvous completes."""
+        return self._arrived.pop(key, {})
 
     def commit(self, lane: int) -> None:
         self._groups.setdefault(lane, []).append(self._open.pop(lane, set()))
@@ -1541,6 +1579,12 @@ class Interp:
             return
         if re.match(r'^__builtin_amdgcn_sched_barrier\s*\(', stmt):
             return                      # a fence for the compiler's schedule
+        if _NO_VALUE.match(stmt):
+            # The engines' orderings and hints (`pir.engines`): a priority, a
+            # scheduling group, a memory fence, a counter wait, a gfx1250
+            # object's setup and rendezvous -- nothing a value changes by.
+            # The rendezvous themselves are the race tracker's.
+            return
         if stmt.startswith('using namespace '):
             return
         am = _ATOMIC_ADD.match(stmt) or _ATOMIC_ADD_ASM.match(stmt)
@@ -1567,6 +1611,13 @@ class Interp:
         if re.match(r'^(?:const\s+)?auto\s*\*?\s*\w+', stmt) and '=' not in stmt:
             return
         raise Abort(f'unsupported statement {stmt!r}')
+
+
+#: Statements of the engines with no effect on a value (`Interp.assign`).
+_NO_VALUE = re.compile(
+    r'^(?:__builtin_amdgcn_(?:s_setprio|sched_group_barrier|fence|s_waitcnt'
+    r'|s_wait_asynccnt|s_wait_tensorcnt)|__threadfence_block'
+    r'|tensorforge::(?:sync|arrive|join)NamedBarrier(?:<[^>]*>)?)\s*\(')
 
 
 def _parenthesized(text: str) -> bool:
@@ -1771,10 +1822,15 @@ class Lockstep:
         tracker = self.tracker
         tracker.tick(stmt)
         kind = tracker.statement_kind(stmt)
+        if kind == 'arrive':
+            _, ident, _ = tracker.reach(stmt)
+            for it in lanes:
+                tracker.arrive(int(it.ev(ident)), it.lane)
         if kind == 'barrier':
-            for present, waited in self._meetings(stmt, lanes):
-                tracker.barrier([it.lane for it in present])
-                missing = [it.lane for it in waited if it not in present]
+            for present, waited, arrived in self._meetings(stmt, lanes):
+                tracker.barrier([it.lane for it in present], arrived)
+                missing = [it.lane for it in waited
+                           if it not in present and it.lane not in arrived]
                 if missing:
                     tracker.arrival(missing[0], len(present))
         for it in lanes:
@@ -1786,9 +1842,10 @@ class Lockstep:
             it.assign(stmt)
 
     def _meetings(self, stmt: str, lanes: List['Interp']):
-        """The rendezvous one barrier statement is, as `(present, waited)`
-        pairs: the lanes executing it that meet one another there, and every
-        lane of the run that has to be among them (`Races.reach`).
+        """The rendezvous one barrier statement is, as `(present, waited,
+        arrived)`: the lanes executing it that meet one another there, every
+        lane of the run that has to be among them (`Races.reach`), and of a
+        named barrier the lanes that arrived at it ahead without waiting.
 
         A lane's warp is its thread index in the block over the warp size,
         which is where the run places it (`evaluate_wave`): the lanes of one
@@ -1797,7 +1854,7 @@ class Lockstep:
         reach = self.tracker.reach(stmt)
         warp = Races.WARP
         if reach[0] == 'block':
-            return [(lanes, self.interps)]
+            return [(lanes, self.interps, {})]
         out = []
         if reach[0] == 'warp':
             mask_of = (lambda it: int(it.ev(reach[1])) & 0xffffffff) \
@@ -1808,7 +1865,7 @@ class Lockstep:
             for (w, mask), present in keys.items():
                 waited = [it for it in self.interps if it.lane // warp == w
                           and mask >> (it.lane % warp) & 1]
-                out.append((present, waited))
+                out.append((present, waited, {}))
             return out
         _, ident, count = reach
         keys = {}
@@ -1825,7 +1882,7 @@ class Lockstep:
                 counted = int(present[0].ev(count))
                 if counted != len(warps) * warp:
                     self.tracker.count(len(warps) * warp, counted)
-            out.append((present, waited))
+            out.append((present, waited, self.tracker.arrivals(key)))
         return out
 
     def run(self, block: List, lanes: Optional[List['Interp']] = None) -> None:

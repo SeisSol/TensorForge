@@ -275,11 +275,23 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # be padded.
         if s.op in (Op.LOAD, Op.STORE):
             carrier = s.target[:1] if s.op == Op.LOAD else s.args[1:2]
+            # What a lane moves is the statement's `width`, and it has to be
+            # what the value's type says: the emitter spells the access from
+            # the type and the engines read the width, and a pass that changed
+            # one and not the other would have them disagree unseen.
+            moved = s.attr('width')
+            if moved is not None and carrier:
+                said = engines.width_of(getattr(carrier[0], 'type', None),
+                                        s.args[0] if s.args else None)
+                if said is not None and said != moved:
+                    diag.append(f'{s.op}: moves {moved} bytes a lane by its '
+                                f'width and {said} by its type')
             wide = [t for t in carrier
                     if isinstance(getattr(t, 'type', None), ScalarType)
                     and t.type.length is not None]
             if wide:
-                need = wide[0].type.length * wide[0].type.base.size()
+                need = (moved if moved is not None
+                        else wide[0].type.length * wide[0].type.base.size())
                 claim = s.attr('align')
                 if claim == 'relaxed':
                     # Spelled with an element-aligned type, so there is no
@@ -802,6 +814,10 @@ def _strip(body: Tuple[Stmt, ...], dead: Set[int]) -> Tuple[Stmt, ...]:
 # Common subexpression elimination
 # --------------------------------------------------------------------------- #
 
+#: Attributes that are no part of a statement's identity (`_cse_key`).
+_NO_KEY = frozenset(('transfer', 'unstored') + engines.DERIVED)
+
+
 def _cse_key(s: Stmt, with_predicate: bool = True):
     def k(x: Operand):
         return ('v', x.id) if isinstance(x, Value) else ('c', type(x).__name__, x)
@@ -825,14 +841,17 @@ def _cse_key(s: Stmt, with_predicate: bool = True):
     # `unstored`, which says what the lanes its predicate holds off mean and
     # nothing about the value where it holds: two reads of one place under
     # one predicate are one read, and whether a read under another predicate
-    # may stand in is `_may_stand_in`'s question.
+    # may stand in is `_may_stand_in`'s question.  Nor what an access's
+    # other facts decide (`engines.DERIVED`): its width is its value's type,
+    # which is in the key, and a pass that drops it from a statement it
+    # rebuilds makes no other access of it.
     own = s._cse
     if own is None:
         # What of the key is the statement's and so fixed, kept on it: a
         # sweep to the fixed point keys every statement once a sweep.  The
         # result's layout is read anew -- a builder may still set it.
         attrs = tuple(a for a in s.attrs
-                      if a[0] not in ('transfer', 'unstored'))
+                      if a[0] not in _NO_KEY)
         own = (s.op, tuple(k(a) for a in s.args), s.text, attrs)
         object.__setattr__(s, '_cse', own)
     return own + (tuple((t.layout, t.type) for t in s.target),) + (

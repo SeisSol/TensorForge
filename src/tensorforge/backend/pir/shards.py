@@ -55,6 +55,7 @@ from tensorforge.common.basic_types import Datatype
 from .core import (BOOL, INDEX, Access, BufferType, Effect, MemSpace, Op,
                    Participants, ScalarType, Stmt, Uniformity, Value,
                    accesses_conflict, walk_stmts)
+from .engines import GLOBAL_POLICY
 from .transfers import executed
 
 
@@ -1213,7 +1214,7 @@ def _moved(stmt: Stmt, buf: Value, shift: int, scratch) -> List[Stmt]:
     out.append(replace(stmt, args=(buf, index),
                        accesses=(Access(Effect.READ, MemSpace.SHARED, buf),),
                        attrs=tuple((k, v) for k, v in stmt.attrs
-                                   if k != 'nontemporal')))
+                                   if k not in GLOBAL_POLICY)))
     return out
 
 

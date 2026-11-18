@@ -602,12 +602,12 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     # other barrier of the multiplication is: a named one does not exist for
     # every width (`Target.sync_mult`).
     from ..sync_block import SyncThreads
-    cursor = writer.bulk_channel(
+    barrier = writer.bulk_channel(
         self._dest.name, leader=f'{self._linear_idx()} == 0',
         participants=SyncThreads(self._context,
                                  self._num_threads).participants(),
         threads=self._num_threads)
-    if cursor is None:
+    if barrier is None:
       return False
     # The claim a copy of the same bytes in hops leaves on the image.
     self._dest._record_linear_layout(0, 1, self._lane_span(), writer)
@@ -615,7 +615,7 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
     src_access_index = self._src.access_address(self._context, index, writer)
     self._tokens.append(writer.copy_bulk(
         self._destination_buffer(writer), self._src.pir_buffer(writer),
-        cursor=cursor, dst_index=(f'0 + {dest_access_index}',),
+        barrier=barrier, dst_index=(f'0 + {dest_access_index}',),
         src_index=(f'0 + {src_access_index}',), elems=self._loadsize))
     return True
 

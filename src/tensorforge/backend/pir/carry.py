@@ -110,6 +110,7 @@ from .ahead import Clone, counted
 from .core import (Access, BufferType, Effect, MemSpace, Op, Stmt, Value,
                    collect_accesses, collect_effect, defined_within, may_alias,
                    walk_stmts)
+from .engines import kept_facts
 from .flow import body_masks
 from .shards import _Indices, _NotStatic
 from .transfers import neutral, tag
@@ -1128,7 +1129,7 @@ class _Carrier:
         return [replace(s, args=(head.operand, value, slot),
                         accesses=(Access(Effect.WRITE, MemSpace.REGISTER,
                                          head.image),),
-                        attrs=())]
+                        attrs=kept_facts(s))]
 
     def _slot_of(self, value: Value, s: Stmt, tail: _Unit):
         for e in tail.events:
@@ -1427,7 +1428,7 @@ class _Carrier:
                         read, args=(operand, slot),
                         accesses=(Access(Effect.READ, MemSpace.REGISTER,
                                          source),),
-                        attrs=()))
+                        attrs=kept_facts(read)))
                 out.append(s)
             return out
 
@@ -1913,12 +1914,12 @@ class _Carrier:
                 s, args=(image, slot),
                 accesses=(Access(Effect.READ, MemSpace.REGISTER, image),),
                 attrs=tuple((k, v) for k, v in s.attrs
-                            if k in ('extern', 'other'))))
+                            if k in ('extern', 'other', 'width'))))
         else:
             out.append(replace(
                 s, args=(image, s.args[1], slot),
                 accesses=(Access(Effect.WRITE, MemSpace.REGISTER, image),),
-                attrs=()))
+                attrs=kept_facts(s)))
         return out
 
     def _stored_behind(self, loop: Stmt, stmts: List[Stmt],

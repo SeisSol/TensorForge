@@ -73,8 +73,8 @@ from typing import (Any, Callable, Dict, FrozenSet, List, Mapping, Optional,
                     Sequence, Tuple)
 
 from .core import (AliasClass, BufferType, Effect, MemSpace, Op, Stmt,
-                   Uniformity, Value, walk_stmts)
-from .engines import settles
+                   Uniformity, Value, retires, walk_stmts)
+from .engines import completes_on_barrier, settles
 
 #: The two kinds of shared memory a window is part of: one copy per
 #: multiplication, and one for the whole block.
@@ -325,7 +325,7 @@ class _Pass:
                 needed = True
                 handoff = handoff or hit[0]
                 block = block or hit[1] == BLOCK
-        if s.op == Op.WAIT:
+        if retires(s):
             return needed, handoff, block
         for key, ext, root in writes:
             if ext is _LEVEL:
@@ -375,7 +375,7 @@ class _Pass:
         reads, writes = self.accesses(s)
         if not reads and not writes:
             return state
-        if s.attr('bulk') is not None:
+        if completes_on_barrier(s):
             # A bulk copy, or the wait for one: every thread waits for the
             # copy itself, and the barrier it completes on makes the bytes
             # visible to whoever waits on it -- no lane hands them to another.
