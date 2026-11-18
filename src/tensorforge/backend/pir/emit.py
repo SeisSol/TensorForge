@@ -321,6 +321,9 @@ class Emitter:
         #: those waits itself (`engines.TransferEngine.waited_on`), which a
         #: full drain then writes too; None elsewhere.
         self._copy_counter: Optional[str] = None
+        #: The engine the body's copies go through, where it is one
+        #: (`Target.one_wait_counter`).
+        self._copy_engine: Optional[str] = None
         self._prefetch_lex = None
         self._prefetch_note = ''
         self._inline: set = set()
@@ -835,6 +838,7 @@ class Emitter:
         """
         self._async_lex = None
         self._copy_counter = None
+        self._copy_engine = None
         copies = [s for s in walk_stmts(body) if s.op == Op.COPY_ASYNC]
         # A bulk copy is none of these: it is the tensor memory accelerator's,
         # whose size is the window's, and it completes on its own barrier,
@@ -871,6 +875,9 @@ class Emitter:
         counters = {engines.waited_on(c.attr('engine')) for c in copies}
         if len(counters) == 1:
             self._copy_counter = next(iter(counters))
+        kinds = {c.attr('engine') for c in copies}
+        if len(kinds) == 1:
+            self._copy_engine = next(iter(kinds))
 
     def _lds_dma_refusal(self, body: Tuple[Stmt, ...], hw: Any
                          ) -> Optional[str]:
@@ -1569,7 +1576,8 @@ class Emitter:
                 elem = self.elem_size(s.copy_dst)
                 text = self._async_lex.copy_async(
                     f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]',
-                    self._copy_bytes(s), zfill * elem)
+                    self._copy_bytes(s), zfill * elem,
+                    engine=s.attr('engine'))
             if text is not None:
                 w(text)
             elif zfill:
@@ -1613,7 +1621,7 @@ class Emitter:
             # fell back to plain assignments they are not in flight and must
             # not be counted.
             unified = (self._async_lex is not None
-                       and self._target().one_wait_counter())
+                       and self._target().one_wait_counter(self._copy_engine))
             n = s.attr('prior_unified' if unified else 'prior', 0)
             texts = []
             if cls in ('load', 'all'):

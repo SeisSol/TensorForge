@@ -164,7 +164,7 @@ class CudaLexic(Lexic):
   def get_headers(self):
     return ["tensorforge_device/cuda.h", "cuda_pipeline.h"]
 
-  def copy_async(self, dst, src, nbytes, zfill: int = 0):
+  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None):
     # The size is not only a count here.  Measured from what this toolchain
     # emits for sm_120: sixteen bytes lower to `cp.async.cg` and
     # `LDGSTS.E.BYPASS.128`, four and eight to `cp.async.ca`, which fills L1 on

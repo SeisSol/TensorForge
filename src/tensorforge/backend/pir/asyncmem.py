@@ -31,7 +31,9 @@ third count, its `count`: the units issued behind the one it names that are
 certainly instructions of their own when it runs (`engines.one_to_one`) --
 not the loads into registers `prior_unified` counts as well, which the
 compiler moves across a copy, merges and drops, so that a count including
-them can exceed what is in flight (`_counted`).
+them can exceed what is in flight (`_counted`) -- and that its counter
+counts: gfx1250's `asynccnt` counts its copies into the LDS and nothing
+else.
 
 On the copy class the counted unit is not the copy but the *group*, and a
 group is closed by a `commit.async`.  That is why the commit is a statement
@@ -122,6 +124,11 @@ class _Unit(NamedTuple):
     #: on that counter may count among the operations behind the one it
     #: waits for.
     pinned: bool = False
+    #: The counter its engine is waited on (`engines.waited_on`): a wait
+    #: written on one counter counts what that counter counts and nothing
+    #: else -- gfx1250's `asynccnt` its copies into the LDS, and not a
+    #: transfer another counter tracks.
+    waited: Optional[str] = None
 
     @property
     def ops(self) -> int:
@@ -425,7 +432,8 @@ def _sched(body: Tuple[Stmt, ...], state: _State,
             if s.counter != 'copy':
                 state.outstanding.append(
                     _Unit(frozenset({s.target[0].id}), s.counter,
-                          pinned=_pinned(s)))
+                          pinned=_pinned(s),
+                          waited=engines.waited_on(s.attr('engine'))))
             out.append(s)
             continue
 
@@ -559,7 +567,8 @@ def _sched_wait(s: Stmt, state: _State, diag: List[str]) -> Stmt:
     after = state.outstanding[idx + 1:]
     prior = sum(1 for u in after if u.cls == cls)
     unified = sum(u.ops for u in after)
-    pinned = sum(1 for u in after if u.pinned)
+    counter = s.attr('counter') if s.op == Op.WAIT_COUNTER else None
+    pinned = sum(1 for u in after if u.pinned and u.waited == counter)
 
     # Retire the unit and everything issued before it *in its own class*.  A
     # unified counter also retires the other class, but leaving those entries

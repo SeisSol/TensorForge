@@ -256,14 +256,19 @@ class HipLexic(CudaLexic):
     return '__builtin_amdgcn_sched_barrier(0);'
 
   # CDNA has no __pipeline_*; the equivalent is a direct global->LDS load
-  # plus an explicit vmcnt wait (`Target.copy_async_sizes`).
-  def copy_async(self, dst, src, nbytes, zfill: int = 0):
+  # plus an explicit vmcnt wait (`Target.copy_async_sizes`), and on gfx1250
+  # and gfx1251 their copy into the LDS plus an explicit asynccnt wait
+  # (`engine` 'async_lds').
+  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None):
     if self._underlying_hardware != 'amd':
-      return super().copy_async(dst, src, nbytes, zfill)
+      return super().copy_async(dst, src, nbytes, zfill, engine)
     if zfill:
       # `global_load_lds` has no src-size operand: it moves `nbytes` and reads
       # them.  Refused rather than approximated, so the caller narrows.
+      # Nor has gfx1250's copy.
       return None
+    if engine == 'async_lds':
+      return _async_to_lds(dst, src, nbytes)
 
     # The source is cast to a pointer to non-const: ROCm 7.14's clang (23)
     # declares the parameter `void __global *`, and a pointer to const does
@@ -395,3 +400,23 @@ class HipLexic(CudaLexic):
       return f'{builtin}(&{access}, {variable});'
     return (f'__hip_atomic_fetch_add(&{access}, {variable}, '
             f'__ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);')
+
+
+#: The element gfx1250's copy into the LDS is declared over, by the bytes a
+#: lane moves: `__builtin_amdgcn_global_load_async_to_lds_b8` to `_b128`
+#: (clang 22) take a `char`, an `int` and two and four of them as a vector.
+_ASYNC_LDS_ELEMENT = {1: 'char', 4: 'int', 8: 'tensorforge::VectorT<int, 2>',
+                      16: 'tensorforge::VectorT<int, 4>'}
+
+
+def _async_to_lds(dst, src, nbytes):
+  """gfx1250's copy of `nbytes` bytes a lane from `src` into the LDS at
+  `dst`: each lane's own address, unlike the LDS-DMA's one a wave, and no
+  offset or cache policy of its own (the two trailing immediates).  None
+  for a size it does not take (`Target.copy_async_sizes`)."""
+  elem = _ASYNC_LDS_ELEMENT.get(nbytes)
+  if elem is None:
+    return None
+  return (f'__builtin_amdgcn_global_load_async_to_lds_b{8 * nbytes}('
+          f'(__attribute__((address_space(1))) {elem}*)({src}), '
+          f'(__attribute__((address_space(3))) {elem}*)({dst}), 0, 0);')

@@ -687,7 +687,8 @@ def test_every_transfer_engine_completes_one_way_and_is_counted_by_it():
     """The class a wait counts a transfer in follows from how its engine
     completes: commit groups, a counter, a barrier."""
     assert set(engines.TRANSFER_ENGINES) == {
-        'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load'}
+        'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load',
+        'async_lds'}
     assert engines.counter_of('cp_async') == 'copy'
     assert engines.counter_of('lds_dma') == 'load'
     assert engines.counter_of('load') == 'load'
@@ -1167,7 +1168,8 @@ def test_amd_stages_through_the_dma_only_where_asked_and_whole_waves():
     assert staging('gfx942', 64) and staging('gfx90a', 128)
     assert not staging('gfx942', 64, on=False)
     assert not staging('gfx942', 32) and not staging('gfx942', 64, elem=8)
-    assert not staging('gfx1150', 64) and not staging('gfx1250', 64)
+    # gfx1250's copy into the LDS has neither constraint (`test_async_lds`).
+    assert not staging('gfx1150', 64)
     assert Context(arch='sm_86', backend='cuda',
                    fp_type=Datatype.F32).target.async_staging()
 

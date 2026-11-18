@@ -555,8 +555,13 @@ declare('amd_async_copies',
             'and each lane moves one element of four bytes to its own place '
             'past a base the wave shares, which is the one destination the '
             'instruction writes; any other copy keeps the body to loads and '
-            'stores.  Off until measured: on gfx942 a copy a trip ahead did '
-            'not beat an unrolled synchronous one.')
+            'stores.  On gfx1250 and gfx1251 through their copy into the LDS '
+            '(`global_load_async_to_lds`) instead: each lane to an address of '
+            'its own, 1, 4, 8 or 16 bytes, at any width of a multiplication, '
+            'and each wait written on `asynccnt` -- which neither the compiler '
+            'nor a block barrier waits for.  Off until measured: on gfx942 a '
+            'copy a trip ahead did not beat an unrolled synchronous one, and '
+            'no gfx1250 has run one.')
 
 declare('enable_prefetch',
         default=False,

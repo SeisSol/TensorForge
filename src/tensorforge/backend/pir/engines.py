@@ -366,6 +366,13 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
     TransferEngine('load', (Op.LOAD_ASYNC,), Completion.COUNTER,
                    'a load into registers issued ahead of its use: vmcnt on '
                    "AMD, NVIDIA's scoreboard"),
+    TransferEngine('async_lds', (Op.COPY_ASYNC,), Completion.COUNTER,
+                   "gfx1250's global_load_async_to_lds into the LDS, each "
+                   'lane to its own address, counted in asynccnt one '
+                   'operation at a time -- which counts nothing else; its '
+                   'waits are written out, since neither the compiler nor a '
+                   'block barrier waits for it',
+                   waited_on='asynccnt', one_to_one=True),
 )}
 
 #: The class `asyncmem` counts a transfer in, by the kind of completion its
@@ -404,17 +411,18 @@ def copy_engine(target: Any) -> str:
     """The engine `IRBuilder.copy_async` issues through on `target`.
 
     AMD's LDS-DMA where HIP spells one for the device (`Target.
-    async_copy_path`); `cp.async` everywhere else and where the target is
-    not known.  Whether the body's copies then go through it at all is the
-    emitter's decision, once for the whole body (`Emitter._decide_async`):
-    a size or a device without the path lowers every copy as a load and a
-    store.
+    async_copy_path`), and on gfx1250 and gfx1251 their copy into the LDS
+    (`Target.async_lds`); `cp.async` everywhere else and where the target
+    is not known.  Whether the body's copies then go through it at all is
+    the emitter's decision, once for the whole body (`Emitter.
+    _decide_async`): a size or a device without the path lowers every copy
+    as a load and a store.
     """
     hw = getattr(target, 'hw', None)
     if (getattr(target, 'backend', None) == 'hip'
             and getattr(hw, 'vendor', None) == 'amd'
             and target.async_copy_path()):
-        return 'lds_dma'
+        return 'async_lds' if target.async_lds() else 'lds_dma'
     return 'cp_async'
 
 
