@@ -8,7 +8,8 @@ from functools import reduce
 from typing import List, Union
 
 import numpy as np
-from ..basic_types import Addressing, DataFlowDirection, Datatype, Residence
+from ..basic_types import (Addressing, DataFlowDirection, Datatype,
+                           ElementAddressing, Residence, element_addressing)
 from tensorforge.common.exceptions import GenerationError
 
 class Tensor:
@@ -146,6 +147,12 @@ class Tensor:
         else:
             self.bbox = BoundingBox([0] * len(self.shape), list(self.shape))
 
+        # One spelling per meaning: an `ElementAddressing` whose parameters
+        # are all defaults is the bare kind, so that comparing two tensors'
+        # addressings (`is_similar`) compares what they mean, and so that a
+        # description stating the defaults renders as one that states none.
+        if isinstance(addressing, ElementAddressing):
+            addressing = addressing.normalized()
         self.addressing = addressing
         self.residence = residence
         self.ptr_type = self.addressing.to_pointer()
@@ -207,6 +214,12 @@ class Tensor:
 
         if any(dimshape < dimupper for dimshape, dimupper in zip(self.shape, self.bbox.upper())):
             raise GenerationError(f'Bounding box {self.bbox} is smaller than tensor {self}')
+
+    def element_addressing(self):
+        """The parameters of this tensor's addressing, defaults filled in
+        (`basic_types.element_addressing`); None where the batch shares it or
+        it is a scalar."""
+        return element_addressing(self.addressing)
 
     def set_data_flow_direction(self, direction: DataFlowDirection):
         if self.direction is None or self.direction == direction:

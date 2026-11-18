@@ -9,9 +9,13 @@ Design:
 * Outputs are binary files the driver ``fwrite``\\ s after a D->H copy.
 * All buffer sizes and argument order are resolved from the
   :class:`Generator`'s symbol table — we don't re-parse the emitted C++.
-* STRIDED, NONE and pointer-based addressing are handled; any other
-  addressing is refused with ``NotImplementedError`` when the driver is
-  emitted.
+* STRIDED, NONE, pointer-based and the indexed addressings are handled,
+  with the parameters an operand's address takes of its own
+  (`ElementAddressing`); any other addressing is refused with
+  ``NotImplementedError`` when the driver is emitted.
+* Where the kernel reads the launch's index list, the driver reads it from
+  ``in_elementIndices.bin``, one ``unsigned`` per element, and an indexed
+  operand's buffer is as long as the cells the list names (`device_layout`).
 
 The same template covers CUDA and HIP because their runtime APIs agree
 on ``*Malloc`` / ``*Memcpy`` / ``*Stream`` up to the prefix. A tiny
@@ -24,7 +28,9 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from tensorforge.backend.symbol import SymbolType
-from tensorforge.common.basic_types import DataFlowDirection, FlagMode, Residence
+from tensorforge.common.basic_types import (RUNTIME, DataFlowDirection,
+                                            FlagMode, GeneralLexicon,
+                                            Residence, element_addressing)
 from tensorforge.generators import stacking
 
 from .layout import ctype
@@ -83,6 +89,100 @@ class DriverOperand:
     #: reads its input with one that does not, and the difference it reports
     #: is the fill's.
     values: tuple | None = None
+    #: Where an element's data is in the operand's device buffer
+    #: (`device_layout`): elements between two elements' -- or two cells'
+    #: -- data, where the kind steps by a stride; the offset known when the
+    #: kernel was generated; the pointers a cell holds and which of them.
+    #: For a stride or a slot the kernel takes at run time, the value the
+    #: driver passes (`RUNTIME_STRIDE_PAD`, the last slot).
+    stride: int = 0
+    offset: int = 0
+    slots: int = 1
+    slot: int = 0
+    runtime_stride: bool = False
+    runtime_slot: bool = False
+
+
+#: What a stride the kernel takes at run time is bound to: one element's
+#: storage and this many elements more.  Not the default, so a kernel that
+#: ignored the argument reads another element's data; eight keeps whatever
+#: alignment the element's storage had, up to 32 bytes of floats.
+RUNTIME_STRIDE_PAD = 8
+
+
+def _address_fields(t, storage: int) -> dict:
+    """`DriverOperand`'s address fields for tensor `t`, one element of which
+    stores `storage` scalars."""
+    params = element_addressing(t.addressing)
+    if params is None:
+        return {}
+    if params.stride is RUNTIME:
+        stride = storage + RUNTIME_STRIDE_PAD
+    elif params.stride is None:
+        stride = storage
+    else:
+        stride = params.stride
+    return dict(stride=stride, offset=params.offset, slots=params.slots,
+                slot=(params.slots - 1 if params.slot is RUNTIME
+                      else params.slot),
+                runtime_stride=params.stride is RUNTIME,
+                runtime_slot=params.slot is RUNTIME)
+
+
+def reads_index_list(ops) -> bool:
+    """Whether the kernel takes the launch's index list."""
+    return any(op.addressing in ("indexed", "indexed_pointer") for op in ops)
+
+
+def device_layout(op, batch: int, indices=None):
+    """`(length, starts)`: how many scalars the operand's device buffer
+    holds for a launch of `batch` elements over the index list `indices`,
+    and where each element's data starts in it.
+
+    One element's data is `op.storage_volume` scalars from its start.  A
+    strided operand steps by its stride; an indexed one too, by the cell its
+    entry of the list names; the pointer kinds keep one block of `offset +
+    storage` per element or per cell, each pointer at its block's start.
+    The compile-time offset is part of every start.  `device_layout_code`
+    states the same lengths and pointers in C++.
+    """
+    per = op.storage_volume or op.volume
+    if op.addressing == "none":
+        return per, [0] * batch
+    cells = (int(max(indices)) + 1) if indices is not None and len(indices) else 0
+    if op.addressing == "strided":
+        return (batch * op.stride + op.offset + per,
+                [e * op.stride + op.offset for e in range(batch)])
+    if op.addressing == "indexed":
+        return (cells * op.stride + op.offset + per,
+                [int(indices[e]) * op.stride + op.offset
+                 for e in range(batch)])
+    block = op.offset + per
+    if op.addressing == "pointer_based":
+        return batch * block, [e * block + op.offset for e in range(batch)]
+    if op.addressing == "indexed_pointer":
+        return (cells * block,
+                [int(indices[e]) * block + op.offset for e in range(batch)])
+    raise NotImplementedError(f"operand {op.kernel_name}: no device layout for "
+                              f"{op.addressing!r} addressing")
+
+
+def device_layout_code(op, per_name: str = "") -> str:
+    """The length of `device_layout`, as C++ over `batch` and `cells`."""
+    per = op.storage_volume or op.volume
+    if op.addressing == "none":
+        return f"(size_t){per}u"
+    if op.addressing == "strided":
+        return f"(batch * (size_t){op.stride}u + {op.offset + per}u)"
+    if op.addressing == "indexed":
+        return f"(cells * (size_t){op.stride}u + {op.offset + per}u)"
+    block = op.offset + per
+    if op.addressing == "pointer_based":
+        return f"(batch * (size_t){block}u)"
+    if op.addressing == "indexed_pointer":
+        return f"(cells * (size_t){block}u)"
+    raise NotImplementedError(f"operand {op.kernel_name}: no device layout for "
+                              f"{op.addressing!r} addressing")
 
 
 def collect_operands(generator) -> List[DriverOperand]:
@@ -160,9 +260,12 @@ def collect_operands(generator) -> List[DriverOperand]:
             shape=shape,
             volume=volume,
             ctype=ctype(t.datatype),
-            addressing=str(t.addressing),
+            # The kind: what an operand's buffer is shaped by.  Its own
+            # parameters are the fields beside it.
+            addressing=str(t.addressing.kind),
             residence=("argument" if getattr(t, "passed_by_value", False)
                        else "memory"),
+            **_address_fields(t, storage),
         ))
     return ops
 
@@ -192,8 +295,8 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
                        batch: str = "batch",
                        stream: str = "DEV_STREAM_PTR(stream)",
                        flags: str = "d_flags",
-                       buffer: Optional[Callable[[DriverOperand], str]] = None
-                       ) -> str:
+                       buffer: Optional[Callable[[DriverOperand], str]] = None,
+                       indices: str = "d_elementIndices") -> str:
     """The launcher call, as one C++ expression.
 
     Separated from ``emit`` because it is the second half of what
@@ -211,6 +314,10 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
     buffers are not ``d_<kernel name>`` -- a sequence of launches shares one
     buffer per tensor between them -- and its ``extraOffset`` still follows
     from here.
+
+    ``indices`` is the launch's index list, where the kernel reads one; the
+    caller owns that buffer as it owns the flags.  A stride or a slot the
+    kernel takes at run time is passed as `collect_operands` chose it.
     """
     call_args = []
     for op in ops:
@@ -227,7 +334,7 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
         else:
             if buffer is not None:
                 call_args.append(buffer(op))
-            elif op.addressing == "pointer_based":
+            elif op.addressing in ("pointer_based", "indexed_pointer"):
                 call_args.append(f"d_p_{op.kernel_name}")
             elif op.residence == "argument":
                 # by value: the launcher copies it out of host memory
@@ -240,6 +347,10 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
             # launcher signature in generator output).
             if op.addressing != "none":
                 call_args.append("0u")
+                if op.runtime_stride:
+                    call_args.append(f"(size_t){op.stride}u")
+                if op.runtime_slot:
+                    call_args.append(f"(size_t){op.slot}u")
     # The launcher signature has one ``numElements{i}`` parameter per
     # section. With a single descr or only fence-less chains the section
     # count is 1 — the default. ``GridFenceDescr`` / ``GridBarrierDescr``
@@ -252,6 +363,8 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
                     else len(getattr(built, "_sections", [None])))
     for _ in range(num_sections):
         call_args.append(batch)
+    if reads_index_list(ops):
+        call_args.append(indices)
     # Whether a ``flags{i}`` parameter sits beside each of them is the
     # kernel's flag mode; see ``FlagMode``.
     flag_mode = generator.flag_mode()
@@ -422,14 +535,39 @@ def emit(generator, backend: str, default_batch: int) -> str:
     for op in ops:
         if op.is_scalar:
             continue
-        if op.addressing not in ("strided", "none", "pointer_based"):
+        if op.addressing not in ("strided", "none", "pointer_based",
+                                 "indexed", "indexed_pointer"):
             raise NotImplementedError(
                 f"operand {op.kernel_name} uses {op.addressing!r} addressing; "
-                f"harness handles 'strided', 'none' and 'scalar'"
+                f"harness handles 'strided', 'none', 'pointer_based', "
+                f"'indexed', 'indexed_pointer' and 'scalar'"
             )
 
     # --- per-operand blocks ----------------------------------------------
     allocs_host, reads, allocs_dev, h2d, d2h, writes, frees = [], [], [], [], [], [], []
+    if reads_index_list(ops):
+        # The launch's index list, as long as the launch, and the cells it
+        # names: what an indexed operand's buffer is as long as.
+        # Read ahead of every other buffer: their lengths depend on it.
+        allocs_host.append(
+            "    unsigned* h_elementIndices = (unsigned*)std::malloc("
+            "batch * sizeof(unsigned));\n"
+            "    if (!h_elementIndices) die(\"host alloc\");")
+        allocs_host.append(
+            "    std::snprintf(path, sizeof(path), \"%s/in_elementIndices.bin\", "
+            "in_dir);\n"
+            "    read_bin(path, h_elementIndices, batch * sizeof(unsigned));\n"
+            "    size_t cells = 0;\n"
+            "    for (size_t i = 0; i < batch; ++i)\n"
+            "        if (h_elementIndices[i] + (size_t)1 > cells) "
+            "cells = h_elementIndices[i] + (size_t)1;")
+        allocs_dev.append(
+            "    unsigned* d_elementIndices = nullptr;\n"
+            "    DEV_MALLOC(d_elementIndices, batch * sizeof(unsigned));")
+        h2d.append("    DEV_MEMCPY_H2D(d_elementIndices, h_elementIndices, "
+                   "batch * sizeof(unsigned));")
+        frees.append("    DEV_FREE(d_elementIndices);\n"
+                     "    std::free(h_elementIndices);")
     for op in ops:
         if op.is_scalar:
             continue       # scalars don't allocate, they're literals at the call site
@@ -459,8 +597,12 @@ def emit(generator, backend: str, default_batch: int) -> str:
         per_element = op.storage_volume or op.volume
         if op.addressing == "none":
             total_expr = f"(size_t){per_element}u * {elem_bytes}"
-        else:
+        elif (op.addressing in ("strided", "pointer_based") and not op.offset
+              and op.stride == per_element):
+            # The bare kinds, as they always were.
             total_expr = f"(size_t){per_element}u * batch * {elem_bytes}"
+        else:
+            total_expr = f"{device_layout_code(op)} * {elem_bytes}"
 
         allocs_host.append(
             f"    void* h_{op.kernel_name} = std::malloc({total_expr});\n"
@@ -484,8 +626,31 @@ def emit(generator, backend: str, default_batch: int) -> str:
             f"    {op.ctype}* d_{op.kernel_name} = nullptr;\n"
             f"    DEV_MALLOC(d_{op.kernel_name}, {total_expr});"
         )
+        if op.addressing == "indexed_pointer":
+            # A cell's pointers, `slots` of them; the operand's slot points at
+            # the cell's block, and the others are null, so a kernel taking
+            # the wrong one faults rather than reading plausible numbers.
+            ptr_size = f"(cells * (size_t){op.slots}u * sizeof(void*))"
+            block = op.offset + per_element
+            allocs_host.append(
+                f"    void** h_p_{op.kernel_name} = (void**)std::malloc({ptr_size});\n"
+                f"    if (!h_p_{op.kernel_name}) die(\"host alloc\");")
+            base_typestr = f"{op.ctype}" if op.is_sink else f"const {op.ctype}"
+            allocs_dev.append(
+                f"    {base_typestr}** d_p_{op.kernel_name} = nullptr;\n"
+                f"    DEV_MALLOC(d_p_{op.kernel_name}, {ptr_size});")
+            h2d.append(
+                f"    for (size_t i = 0; i < cells * (size_t){op.slots}u; ++i)"
+                f" h_p_{op.kernel_name}[i] = nullptr;\n"
+                f"    for (size_t c = 0; c < cells; ++c)"
+                f" h_p_{op.kernel_name}[c * (size_t){op.slots}u + {op.slot}u]"
+                f" = d_{op.kernel_name} + c * (size_t){block}u;")
+            h2d.append(
+                f"    DEV_MEMCPY_H2D(d_p_{op.kernel_name}, h_p_{op.kernel_name}, {ptr_size});"
+            )
         if op.addressing == "pointer_based":
             ptr_size = "(batch * sizeof(void*))"
+            per_element = op.offset + per_element
 
             allocs_host.append(
                 f"    void** h_p_{op.kernel_name} = (void**)std::malloc({ptr_size});\n"

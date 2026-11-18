@@ -146,6 +146,7 @@ Optional module-level knobs the harness recognizes:
 | `XFAIL`           | `bool`             | optional; when true, conftest attaches `pytest.mark.xfail(strict=True, run=True)`                   |
 | `XFAIL_REASON`    | `str`              | optional but required-with-XFAIL; what's broken upstream and what fix turns the marker into xpass  |
 | `ATTRS`           | `dict`             | optional; the kernel attributes a frontend would pass. Omitting it is *not* `{}`: no `ATTRS` means the flag mask is generated with a null check (what a frontend without attributes gets), `{}` means no mask at all, `{"flags": True}` means a mask the launcher requires |
+| `INDICES`         | `fn(batch)` / list | optional; the launch's index list for a kernel with indexed operands (`Addressing.INDEXED`), default a fixed permutation of the batch. Elements naming one cell get the same input numbers; a list a destination is written through must name no cell twice |
 
 ### Elementwise cases
 
@@ -331,6 +332,7 @@ GEMMs but each tests exactly one feature axis:
 | `add_true.py`              | `add=True` on bare `MultilinearDescr`              | green; the constructor the yateto frontend calls, rather than `GemmDescr` with `beta=1`                                  |
 | `addressing_none.py`       | `Addressing.NONE` (batch-constant operator matrix) | green; SeisSol's static-operator pattern                                                                                  |
 | `addressing_ptr_based.py`  | `Addressing.PTR_BASED` (heterogeneous batches)     | green; the driver builds the per-batch pointer array (`T**`)                                                             |
+| `addressing_indexed*.py`   | `Addressing.INDEXED`, `INDEXED_POINTER`, `ElementAddressing` | green; the driver reads the index list and lays every operand out by its stride, offset and slot (`driver_emit.device_layout`) |
 | `sparsity_band.py`         | `Tensor(..., spp=MaskSPP(...))`                    | green; banded `B` operand with cells outside the mask zeroed by `INPUT_TRANSFORM`                                          |
 | `f64.py`, `f128.py`        | non-F32 dtypes                                     | green; F128 requires a compiler with `__float128` support                                                                 |
 

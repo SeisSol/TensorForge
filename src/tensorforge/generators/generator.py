@@ -14,7 +14,8 @@ from tensorforge.common.metrics import BuildMetrics
 from tensorforge.common.matrix.packing import (FIT_LEVELS, fit_kinds,
                                                pack as pack_operand)
 from tensorforge.common.basic_types import Addressing, Datatype, FlagMode, GeneralLexicon, Residence
-from tensorforge.common.helper import get_extra_offset_name
+from tensorforge.common.helper import (get_extra_offset_name, get_slot_name,
+                                       get_stride_name)
 from tensorforge.generators.kernel_params import KernelParam
 from tensorforge.backend.data_types import ShrMemObject
 from tensorforge.backend import pir
@@ -916,6 +917,7 @@ class Generator:
     return other
 
   def generate(self):
+    self._check_addressing()
     tuned = self._autotune()
     if tuned is not None:
       # built, by the configuration the tuner picked
@@ -934,6 +936,51 @@ class Generator:
       built = self._generate_bound()
     self._storage = self._stored_operands()
     return built
+
+  def _check_addressing(self) -> None:
+    """Refuse, by name, an addressing the target's lowering cannot build.
+
+    The index list (`Addressing.INDEXED`, `INDEXED_POINTER`) and the address
+    parameters of an `ElementAddressing` are spelled for the kernels CUDA,
+    HIP and SYCL take -- the SPMD lowering and the explicitly vectorized one
+    alike.  The OpenMP and OpenCL lexics declare their operands from lists of
+    their own (`TargetLexic.kernel_definition`), which know neither, and a
+    kernel built for them anyway would read element `n` where the caller
+    meant its entry of the list.
+    """
+    from tensorforge.common.vm.lexic import CudaLexic, HipLexic, SyclLexic
+    lexic = self._context.target.lexic
+    if isinstance(lexic, (CudaLexic, HipLexic, SyclLexic)):
+      return
+    for descr in self._descr_list:
+      views = list(getattr(descr, 'matrix_list', lambda: [])())
+      views += list(getattr(descr, 'condition_reads', lambda: [])())
+      for view in views:
+        tensor = getattr(view, 'tensor', view)
+        addressing = getattr(tensor, 'addressing', None)
+        if addressing is None:
+          continue
+        if addressing.kind.indexed() or not isinstance(addressing,
+                                                       Addressing):
+          raise GenerationError(
+              f'{tensor.alias or tensor.name}: {addressing} addressing on '
+              f'{self._context.target.backend}, whose lowering has no index '
+              f'list and no address parameters; CUDA, HIP and SYCL have them')
+
+  def _check_index_list(self) -> None:
+    """One index list per launch, and so one element count: refuse a kernel
+    whose sections run over counts of their own (`count_heads`) and read the
+    list, which would have to be as long as two of them at once."""
+    heads = self.count_heads()
+    symbols = list(self._scopes.get_global_scope().values())
+    if len(heads) > 1 and self._reads_index_list(symbols):
+      names = sorted(str(symbol.obj.alias or symbol.name) for symbol in symbols
+                     if getattr(symbol.obj, 'addressing', None) is not None
+                     and symbol.obj.addressing.indexed())
+      raise GenerationError(
+          f'{", ".join(names)}: addressed through the launch\'s index list, '
+          f'in a kernel whose {len(heads)} sections run over element counts '
+          f'of their own; the list is one per launch, as long as one count')
 
   @staticmethod
   def trial(descrs, context: Context,
@@ -1457,6 +1504,7 @@ class Generator:
     if not pinned:
       self._base_kernel_name = Generator.NAME_PLACEHOLDER
 
+    self._check_index_list()
     self._settle_module_operands()
     self._launch = self._make_launch_config()
     self._attach_small()
@@ -3010,23 +3058,27 @@ class Generator:
     self._small, self._small_args = small, args
 
   def _host_params(self) -> List[tuple]:
-    """The launcher's parameters as `(name, tensor, offset, type)`: the
-    tensor it passes, or None for a count, a flag mask, a table of numbers
-    and the stream; whether it is the tensor's offset; and its declaration
-    without the name."""
+    """The launcher's parameters as `(name, tensor, role, type)`: the
+    tensor it passes, or None for a count, a flag mask, a table of numbers,
+    the index list and the stream; which of the tensor's parameters it is --
+    the empty string for the tensor itself, else the suffix of its offset,
+    its stride or its slot; and its declaration without the name."""
     lexic = self._context.target.lexic
     symbols = list(self._scopes.get_global_scope().values())
     tensors = {symbol.name: symbol.obj for symbol in symbols}
     params = self._base_params(symbols)
     params.append(KernelParam.opaque('void*', GeneralLexicon.STREAM_PTR_STR))
-    suffix = GeneralLexicon.EXTRA_OFFSET
+    suffixes = (GeneralLexicon.EXTRA_OFFSET, GeneralLexicon.STRIDE,
+                GeneralLexicon.SLOT)
     out = []
     for param in params:
       declared = param.declaration(lexic, host=True)
       if declared is None:
         continue
-      offset = param.name.endswith(suffix)
-      base = param.name[:-len(suffix)] if offset else param.name
+      offset = next((suffix for suffix in suffixes
+                     if param.name.endswith(suffix)
+                     and param.name[:-len(suffix)] in tensors), '')
+      base = param.name[:-len(offset)] if offset else param.name
       kind = (declared[:-len(param.name)].strip()
               if declared.endswith(param.name) else declared)
       out.append((param.name, tensors.get(base), offset, kind))
@@ -4551,12 +4603,23 @@ class Generator:
         params.append(KernelParam.value(symbol, datatype))
         continue
       param = KernelParam.of_symbol(symbol, datatype)
-      if (symbol.obj.addressing == Addressing.PTR_BASED
+      # Of the kind, so that an operand with an offset of its own keeps the
+      # promise, and `INDEXED_POINTER` gets it: what it passes is an array
+      # of pointers the kernel never writes, as `PTR_BASED`'s is.
+      if (symbol.obj.addressing.kind in (Addressing.PTR_BASED,
+                                         Addressing.INDEXED_POINTER)
               and self._promise_arrays()):
         param = dataclasses.replace(param, promise=True)
       params.append(param)
       if symbol.obj.addressing not in (Addressing.SCALAR, Addressing.NONE):
         params.append(KernelParam.size(get_extra_offset_name(symbol)))
+        # The address parameters bound at run time, beside the extra offset
+        # they add to (`ElementAddressing`).
+        element = symbol.obj.element_addressing()
+        if element is not None and element.runtime('stride'):
+          params.append(KernelParam.size(get_stride_name(symbol)))
+        if element is not None and element.runtime('slot'):
+          params.append(KernelParam.size(get_slot_name(symbol)))
     self._check_arguments(params)
 
     # The per-column numbers of a packing read at a column the kernel
@@ -4573,6 +4636,12 @@ class Generator:
     for i in self.count_heads():
       params.append(KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}'))
 
+    if self._reads_index_list(symbol_list):
+      # One list for the launch, beside the count it is as long as.
+      params.append(dataclasses.replace(
+          KernelParam.indices(GeneralLexicon.ELEMENT_INDICES),
+          promise=self._promise_arrays()))
+
     if self._flags is not FlagMode.ABSENT:
       # A mask the kernel dereferences unconditionally has no default: the
       # signature is where "you have to pass one" is stated.
@@ -4583,6 +4652,16 @@ class Generator:
             promise=self._promise_arrays()))
 
     return params
+
+  @staticmethod
+  def _reads_index_list(symbol_list) -> bool:
+    """Whether an operand of the kernel is reached through the launch's
+    index list (`Addressing.INDEXED`, `INDEXED_POINTER`).  A stand-in is not
+    a parameter, and its members are in the list themselves."""
+    return any(getattr(symbol.obj, 'addressing', None) is not None
+               and symbol.obj.addressing.indexed()
+               and not getattr(symbol.obj, 'is_variant', False)
+               for symbol in symbol_list)
 
   def _promise_arrays(self) -> bool:
     """Whether the kernel promises its arrays of pointers and its flags
@@ -4680,8 +4759,16 @@ class Generator:
   @_of_the_build
   def generate_call_site(self,
                          mat_name_map,
-                         offset_name_map):
+                         offset_name_map,
+                         param_name_map=None):
+    """The launcher's call, with the caller's names for what it passes.
+
+    `param_name_map` names an operand's address parameters bound at run time
+    (`ElementAddressing`), by the operand's alias and then by `'stride'` or
+    `'slot'`; only an operand that has one needs an entry.
+    """
     args = []
+    param_name_map = param_name_map or {}
 
     # add tensors
     symbols = list(self._scopes.get_global_scope().values())
@@ -4697,17 +4784,28 @@ class Generator:
         args.append(mat_name_map[symbol.obj.alias])
         if symbol.obj.addressing not in [Addressing.SCALAR, Addressing.NONE]:
           args.append(offset_name_map[symbol.obj.alias])
+          # In the order `_base_params` declares them, behind the offset.
+          element = symbol.obj.element_addressing()
+          for role in ('stride', 'slot'):
+            if element is not None and element.runtime(role):
+              args.append(param_name_map[symbol.obj.alias][role])
 
     flags = []
     regions = 0
+    indices = GeneralLexicon.ELEMENT_INDICES
     for desc in self._descr_list:
       if isinstance(desc, RegionDescription):
+        if regions == 0:
+          indices = f'{desc.name}.{GeneralLexicon.ELEMENT_INDICES}'
         regions += 1
         args.append(f'{desc.name}.numElements')
         flags.append(f'{desc.name}.flags')
     if regions == 0:
       args.append('numElements')
       flags.append('flags')
+
+    if self._reads_index_list(symbols):
+      args.append(indices)
 
     # The element counts are always arguments; the masks beside them are only
     # arguments when the signature has parameters for them.

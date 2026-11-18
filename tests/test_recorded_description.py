@@ -73,8 +73,10 @@ def test_there_is_at_least_one_recording():
 @pytest.mark.parametrize("recording", RECORDINGS)
 def test_a_recording_states_the_version_it_was_made_against(recording):
     """One made against another version would be replayed wrong rather than
-    refused, so the version travels with it."""
-    assert recording["version"] == YatetoFrontend.INTERFACE_VERSION
+    refused, so the version travels with it -- and it is one this side
+    reads: the recordings predate the bindings of version 8, and a version 7
+    description is read with every binding at its default."""
+    assert recording["version"] in YatetoFrontend.READABLE_VERSIONS
 
 
 @pytest.mark.parametrize("recording", RECORDINGS)

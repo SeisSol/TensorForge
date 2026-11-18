@@ -7,8 +7,10 @@ from contextlib import contextmanager
 
 from .abstract_instruction import AbstractInstruction
 from tensorforge.common.context import Context
-from tensorforge.common.helper import get_extra_offset_name, Addressing
-from tensorforge.common.basic_types import GeneralLexicon, DataFlowDirection, StridedAddressing
+from tensorforge.common.helper import (get_extra_offset_name, get_slot_name,
+                                       get_stride_name, Addressing)
+from tensorforge.common.basic_types import (GeneralLexicon, DataFlowDirection,
+                                            RUNTIME, element_addressing)
 from tensorforge.common.exceptions import (GenerationError,
                                            InternalError)
 from tensorforge.backend.pir.core import Access, Effect, Qual
@@ -255,16 +257,76 @@ class GetElementPtr(AbstractInstruction):
 
     `Addressing.PTR_BASED` does: the source is an array of pointers and the
     address is `&m[batchId][off]`, which loads `m[batchId]` before offsetting
-    it.  Strided addressing and the batch-invariant modes do not -- the
-    right-hand side is arithmetic on a base the caller passed in.
+    it.  So do the indexed kinds, which read the element's entry of the index
+    list first, and `INDEXED_POINTER` then the pointer it names.  Strided
+    addressing and the batch-invariant modes do not -- the right-hand side is
+    arithmetic on a base the caller passed in.
 
     The distinction decides whether this binding may be emitted outside the
     per-element flag guard.  A masked element is one the caller told us not to
     process, and nothing in the interface promises its pointer is valid to
     dereference; an element whose *index* is merely multiplied by a stride
-    carries no such promise to break.
+    carries no such promise to break.  An index list's entry for a masked
+    element is held to nothing either, so an indexed address is followed
+    under the same guard.
     """
-    return getattr(self._src.obj, 'addressing', None) == Addressing.PTR_BASED
+    addressing = getattr(self._src.obj, 'addressing', None)
+    return addressing is not None and addressing.follows_pointer()
+
+  def _indexed(self) -> bool:
+    """Whether this binding reads the launch's index list."""
+    addressing = getattr(self._src.obj, 'addressing', None)
+    return addressing is not None and addressing.indexed()
+
+  def _index_entry(self, element: str) -> str:
+    """The entry of the launch's index list for `element`, widened before
+    anything multiplies it: the list holds 32-bit indices, and a cell index
+    times a stride overflows 32 bits long before memory runs out."""
+    return (f'static_cast<size_t>('
+            f'{GeneralLexicon.ELEMENT_INDICES}[{element}])')
+
+  def _element_address(self, element: str, extra: str, volume) -> str:
+    """The address of the data of element `element` (text), for every kind
+    that reaches an element of the batch, with the operand's extra offset
+    `extra` (` + mN_extraOffset` or empty).
+
+    `volume` is the default stride, one element's storage.  Where the
+    parameters are the defaults this is the text each kind always had, down
+    to the byte; a stride, an offset or a slot of the operand's own
+    (`ElementAddressing`) is spliced in as a number, or as the parameter that
+    carries it where it is bound at run time.
+    """
+    obj = self._src.obj
+    params = element_addressing(obj.addressing)
+    kind = params.kind
+    sub = obj.get_offset_to_first_element()
+    offset = f' + {params.offset}' if params.offset else ''
+    if kind in (Addressing.STRIDED, Addressing.INDEXED):
+      if params.stride is None:
+        stride = f'{volume}'
+      elif params.stride is RUNTIME:
+        stride = get_stride_name(self._src)
+      else:
+        stride = f'{params.stride}'
+      at = element if kind is Addressing.STRIDED else self._index_entry(element)
+      return (f'&{self.source_name()}[{at} * {stride} + '
+              f'{sub}{offset}{extra}]')
+    if kind is Addressing.PTR_BASED:
+      entry = element
+    elif kind is Addressing.INDEXED_POINTER:
+      entry = self._index_entry(element)
+      if params.slots != 1:
+        entry = f'{entry} * {params.slots}'
+      if params.slot is RUNTIME:
+        entry = f'{entry} + {get_slot_name(self._src)}'
+      elif params.slot:
+        entry = f'{entry} + {params.slot}'
+    else:
+      raise InternalError(f'{self._src.name}: no element address for '
+                          f'{obj.addressing}')
+    source = self._context.target.lexic.batch_source(self.source_name())
+    return self._element_pointer(
+        f'&{source}[{entry}][{sub}{offset}{extra}]')
 
   def _alias_root(self):
     """What the accesses through this binding are recorded against.
@@ -437,28 +499,11 @@ class GetElementPtr(AbstractInstruction):
 
     const_mod = 'const'
 
-    address = ''
-    if isinstance(batch_addressing, StridedAddressing):
-      main_offset = f'{self._INDEX_HOLE} * {batch_addressing.stride}'
-      sub_offset = f'{batch_obj.get_offset_to_first_element()}'
-      address = f'{main_offset} + {batch_addressing.offset} + {sub_offset}{extra_offset}'
-      rhs = self._coerce(datatype, const_mod, f'&{self.source_name()}[{address}]')
-      lhs = self._declarator(datatype, const_mod)
-    if batch_addressing == Addressing.STRIDED:
-      # distance between batch elements is the *stored* volume, i.e.
-      # prod(upper - lower), not prod(shape)
-      main_offset = f'{self._INDEX_HOLE} * {batch_obj.storage_volume()}'
-      sub_offset = f'{batch_obj.get_offset_to_first_element()}'
-      address = f'{main_offset} + {sub_offset}{extra_offset}'
-      rhs = self._coerce(datatype, const_mod, f'&{self.source_name()}[{address}]')
-      lhs = self._declarator(datatype, const_mod)
-    elif batch_addressing == Addressing.PTR_BASED:
-      main_offset = f'{self._INDEX_HOLE}'
-      sub_offset = f'{batch_obj.get_offset_to_first_element()}'
-      address = f'{main_offset}][{sub_offset}{extra_offset}'
-      source = self._context.target.lexic.batch_source(self.source_name())
-      rhs = self._coerce(datatype, const_mod,
-                         self._element_pointer(f'&{source}[{address}]'))
+    if batch_addressing.per_element():
+      # The default stride is the *stored* volume, i.e. prod(upper - lower),
+      # not prod(shape).
+      rhs = self._coerce(datatype, const_mod, self._element_address(
+          self._INDEX_HOLE, extra_offset, batch_obj.storage_volume()))
       lhs = self._declarator(datatype, const_mod)
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'
@@ -468,7 +513,8 @@ class GetElementPtr(AbstractInstruction):
       rhs = f'{self.source_name()}'
       lhs = f'{datatype} {self._dest.name}'
     else:
-      GenerationError(f'unknown addressing of {self._src.name}, given {batch_addressing}')
+      raise GenerationError(f'unknown addressing of {self._src.name}, given '
+                            f'{batch_addressing}')
 
     self._emit_binding(writer, lhs, rhs,
                        scalar=batch_addressing == Addressing.SCALAR)
@@ -543,18 +589,12 @@ class GetElementPtr(AbstractInstruction):
     volume = obj.storage_volume() // k
     from tensorforge.backend.pir.core import BufferType
     values = []
+    if not obj.addressing.per_element():
+      raise InternalError(f'{self._src.name}: stacked, and the batch shares '
+                          f'it ({obj.addressing})')
     for e in range(k):
       element = f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'
-      if obj.addressing == Addressing.PTR_BASED:
-        source = self._context.target.lexic.batch_source(self._src.name)
-        rhs = self._element_pointer(
-            f'&{source}[{element}][{obj.get_offset_to_first_element()}{extra}]')
-      elif obj.addressing == Addressing.STRIDED:
-        rhs = (f'&{self._src.name}[{element} * {volume} + '
-               f'{obj.get_offset_to_first_element()}{extra}]')
-      else:
-        raise InternalError(f'{self._src.name}: stacked, and the batch shares '
-                            f'it ({obj.addressing})')
+      rhs = self._element_address(element, extra, volume)
       name = f'{self._dest.name}_s{e}'
       readonly = obj.direction == DataFlowDirection.SOURCE
       lhs = f'{self._pointer_type(datatype, "const", readonly)} {name}'
@@ -565,8 +605,9 @@ class GetElementPtr(AbstractInstruction):
                                readonly=readonly),
           self._src, args=(stack, *actives), kind=Effect.READ, hint=name,
           extern=name, alias_root=self._src,
-          attrs=(('element_pointer', True),)
-          if self.dereferences_the_batch() else (),
+          attrs=((('element_pointer', True),)
+                 if self.dereferences_the_batch() else ())
+          + ((('indexed', True),) if self._indexed() else ()),
           quals=(Qual.RESTRICT,) if readonly else ()))
     # Not `restrict` where the operand is written: the pointers of an element
     # the stack lacks are its first element's, so two of them reach the same
@@ -653,7 +694,12 @@ class GetElementPtr(AbstractInstruction):
           # pass that the address is a pointer of the element's own, valid to
           # follow for an element the caller did not mask.
           attrs=((('element_pointer', True),) if owns else ())
-          + ((('per_mult', True),) if per_mult else ()),
+          + ((('per_mult', True),) if per_mult else ())
+          # What `element_pointer` does not say: the address reads the
+          # index list and not an array of pointers, so a hint for the
+          # successor's entry of the array (`pir.prefetch`) has none to ask
+          # for.
+          + ((('indexed', True),) if self._indexed() else ()),
           # Only where nothing is written through it.  `restrict` promises
           # that what this pointer reaches is reached through no other in
           # scope, and a pass may clone this computation for the next element

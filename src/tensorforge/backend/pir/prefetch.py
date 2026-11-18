@@ -123,6 +123,12 @@ class _Hints:
         for _, s in self.l.top():
             if not (s.attr('element_pointer') and self.l.names_element(s)):
                 continue
+            if s.attr('indexed'):
+                # Its address reads the index list, not an array of pointers
+                # indexed by the element: the base is the operand's data,
+                # and its entry at the successor's index is another cell's.
+                # The data hint (`_operands`) follows the address itself.
+                continue
             base = s.accesses[0].base
             if id(base) in seen:
                 continue

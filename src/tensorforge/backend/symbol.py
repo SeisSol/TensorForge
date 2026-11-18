@@ -8,7 +8,7 @@ import contextlib
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from functools import reduce
 from tensorforge.common.context import Context
-from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import Datatype, ElementAddressing
 from tensorforge.common.exceptions import GenerationError, InternalError
 from .writer import Writer
 from . import elementmask
@@ -24,6 +24,28 @@ import numpy as np
 #: that declares only element alignment.  Legal at any base; the compiler
 #: splits it rather than emitting a transfer the hardware needs aligned.
 RELAXED = 'relaxed'
+
+
+def _held_by_address(obj, promised: int, elem: int) -> int:
+  """`promised`, as far as an operand's own stride and offset keep it.
+
+  The frontend's alignment is a promise about the base of every element's
+  data.  Where the address takes a stride or an offset of the operand's own
+  (`ElementAddressing`) and they are numbers, they move that base by what
+  they are, and the promise holds only to the largest power of two dividing
+  both: a member twelve bytes into a struct is four-byte aligned whatever
+  the struct is.  A stride bound at run time is the caller's to keep, as the
+  extra offset always was.  The bare kinds are left as they were.
+  """
+  addressing = getattr(obj, 'addressing', None)
+  if not isinstance(addressing, ElementAddressing):
+    return promised
+  held = promised
+  for number in (addressing.stride, addressing.offset):
+    if isinstance(number, int) and number:
+      size = number * elem
+      held = min(held, size & -size)
+  return max(elem, held)
 
 
 class SymbolType(enum.Enum):
@@ -2360,7 +2382,8 @@ class Symbol:
     if self.stype in (SymbolType.SharedMem, SymbolType.Scratch):
       return max(elem, 16)
     if self.stype in (SymbolType.Global, SymbolType.Data, SymbolType.Batch):
-      return max(elem, getattr(self.obj, 'alignment', 0) or 0)
+      promised = max(elem, getattr(self.obj, 'alignment', 0) or 0)
+      return _held_by_address(self.obj, promised, elem)
     return elem
 
   def clone(self):

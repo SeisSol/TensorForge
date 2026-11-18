@@ -80,7 +80,8 @@ from tensorforge.common.basic_types import Datatype, FlagMode
 from tensorforge.common.matrix import prepare
 
 from . import layout
-from .driver_emit import collect_operands, launcher_call_expr
+from .driver_emit import (collect_operands, launcher_call_expr,
+                          reads_index_list)
 
 #: Bytes per element, keyed by the C++ spelling `driver_emit` produces.
 _ELEM_BYTES = {"__half": 2, "float": 4, "double": 8, "__float128": 16}
@@ -255,15 +256,26 @@ def operand_buffer(op, stem: str, written: bool,
         region=(regions or {}).get(alias))
 
 
-def _check_addressing(ops) -> None:
+def _check_addressing(ops, indexed: bool = True) -> None:
     for op in ops:
         if op.is_scalar:
             continue
-        if op.addressing not in ("strided", "none", "pointer_based"):
+        kinds = ("strided", "none", "pointer_based") + (
+            ("indexed", "indexed_pointer") if indexed else ())
+        if op.addressing not in kinds:
             raise NotImplementedError(
                 f"operand {op.kernel_name} uses {op.addressing!r} addressing; "
-                f"the measurement driver handles 'strided', 'none', "
-                f"'pointer_based' and 'scalar'")
+                f"the measurement driver handles "
+                f"{', '.join(repr(k) for k in kinds)} and 'scalar'")
+        per = op.storage_volume or op.volume
+        if (op.addressing != "none"
+                and (op.offset or op.stride != per or op.slots != 1)):
+            # One element after another, as the bare kinds lay the batch
+            # out: a stride, an offset or slots of the operand's own would
+            # need the buffer's length and the checksum's walk restated.
+            raise NotImplementedError(
+                f"operand {op.kernel_name} has address parameters of its own; "
+                f"the measurement driver lays out the bare kinds")
         if op.residence == "argument":
             raise NotImplementedError(
                 f"operand {op.kernel_name} is passed by value; the "
@@ -290,7 +302,7 @@ def buffer_code(buffers: Sequence[Buffer]) -> Tuple[List[str], List[str],
         span = _span(b)
         decls.append(f"static {b.ctype}* d_{b.stem} = nullptr;")
         allocs.append(f"    DEV_MALLOC(d_{b.stem}, {span});")
-        if b.addressing == "pointer_based":
+        if b.addressing in ("pointer_based", "indexed_pointer"):
             # The pointers are *contiguous and in order*: element i lives at
             # `slab + i * per`, exactly where a STRIDED operand would put it.
             #
@@ -302,8 +314,12 @@ def buffer_code(buffers: Sequence[Buffer]) -> Tuple[List[str], List[str],
             # scatter as much as the code.  Identity is therefore the *upper
             # bound* on what pointer indirection can achieve, and a number
             # from it must not be read as what a mesh-ordered SeisSol batch
-            # will see.  Measuring that needs a second layout and a statement
-            # of which one the row came from.
+            # will see.  `TFB_ELEMENT_ORDER=shuffled` at run time is the
+            # second layout (`tfb_element_order`): the table points at a
+            # fixed permutation of the slabs, as an index list names one.
+            #
+            # An indexed pointer's table is one entry a cell, in the cells'
+            # order: the index list is what names the element's.
             #
             # `i * per` and not `i`: `d_X` is a `ctype*`, so `+ i` advances by
             # one scalar where the kernel indexes by one batch element.
@@ -317,12 +333,15 @@ def buffer_code(buffers: Sequence[Buffer]) -> Tuple[List[str], List[str],
             ptr_elem = b.ctype if b.written else f"const {b.ctype}"
             decls.append(f"static {ptr_elem}** d_p_{b.stem} = nullptr;")
             allocs.append(f"    DEV_MALLOC(d_p_{b.stem}, {ptr_bytes});")
+            reorder = ("      tfb_reorder(h, batch);\n"
+                       if b.addressing == "pointer_based" else "")
             fills.append(
                 f"    {{ void** h = (void**)std::malloc({ptr_bytes});\n"
                 f"      if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
                 f"std::exit(2); }}\n"
                 f"      for (size_t i = 0; i < batch; ++i)\n"
                 f"        h[i] = d_{b.stem} + i * (size_t){b.per}u;\n"
+                + reorder +
                 f"      DEV_MEMCPY_H2D(d_p_{b.stem}, h, {ptr_bytes});\n"
                 f"      std::free(h); }}")
             frees.append(f"    DEV_FREE(d_p_{b.stem}); d_p_{b.stem} = nullptr;")
@@ -350,6 +369,26 @@ def buffer_code(buffers: Sequence[Buffer]) -> Tuple[List[str], List[str],
                 f"      std::free(h); }}")
         frees.append(f"    DEV_FREE(d_{b.stem}); d_{b.stem} = nullptr;")
     return decls, allocs, fills, frees
+
+
+def indices_code() -> Tuple[List[str], List[str], List[str], List[str]]:
+    """The launch's index list of a kernel that reads one: the cells in
+    `tfb_element_order`'s order -- the identity, or the permutation
+    `TFB_ELEMENT_ORDER=shuffled` asks for at run time."""
+    return (["static unsigned* d_elementIndices = nullptr;"],
+            ["    DEV_MALLOC(d_elementIndices, batch * sizeof(unsigned));"],
+            ["    { std::vector<size_t> tfb_order(batch);\n"
+             "      tfb_element_order(tfb_order.data(), batch);\n"
+             "      unsigned* h = (unsigned*)std::malloc("
+             "batch * sizeof(unsigned));\n"
+             "      if (!h) { std::fprintf(stderr, \"host alloc\\n\"); "
+             "std::exit(2); }\n"
+             "      for (size_t i = 0; i < batch; ++i) "
+             "h[i] = (unsigned)tfb_order[i];\n"
+             "      DEV_MEMCPY_H2D(d_elementIndices, h, "
+             "batch * sizeof(unsigned));\n"
+             "      std::free(h); }"],
+            ["    DEV_FREE(d_elementIndices); d_elementIndices = nullptr;"])
 
 
 def flags_code() -> Tuple[List[str], List[str], List[str], List[str]]:
@@ -470,13 +509,42 @@ def entry_points(tag: str, decls: Sequence[str], allocs: Sequence[str],
         f"  return {launches}u;\n}}\n")
 
 
+#: The order a pointer table points at the batch's slabs and an index list
+#: names its cells in: the identity, or with `TFB_ELEMENT_ORDER=shuffled` at
+#: run time a fixed permutation (Fisher-Yates over a fixed LCG), so that one
+#: binary measures both an ordered batch and a scattered one.
+_ELEMENT_ORDER = r"""
+static inline void tfb_element_order(size_t* order, size_t batch) {
+  for (size_t i = 0; i < batch; ++i) order[i] = i;
+  const char* how = std::getenv("TFB_ELEMENT_ORDER");
+  if (how == nullptr || std::strcmp(how, "shuffled") != 0) return;
+  unsigned long long state = 0x9E3779B97F4A7C15ull;
+  for (size_t i = batch; i > 1; --i) {
+    state = state * 6364136223846793005ull + 1442695040888963407ull;
+    const size_t j = (size_t)((state >> 33) % i);
+    const size_t t = order[i - 1]; order[i - 1] = order[j]; order[j] = t;
+  }
+}
+/* A pointer table laid out slab by slab, put in that order: entry i is then
+   slab order[i]'s, as an index list's entry i names cell order[i]. */
+static inline void tfb_reorder(void** h, size_t batch) {
+  std::vector<size_t> order(batch);
+  tfb_element_order(order.data(), batch);
+  std::vector<void*> was(h, h + batch);
+  for (size_t i = 0; i < batch; ++i) h[i] = was[order[i]];
+}
+"""
+
+
 def tu_head(backend: str, includes_src: str) -> str:
     """What every workload's translation unit starts with."""
     lang = "sycl" if backend in ("oneapi", "acpp", "esimd", "sycl") else backend
     return ("// generated by tests/harness/driver_bench.py -- do not edit\n"
             "#include <cmath>\n#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n#include <string>\n"
+            "#include <vector>\n"
             + _TU_PREAMBLE[lang]
             + _macros(lang)
+            + _ELEMENT_ORDER
             + "\n" + includes_src + "\n")
 
 
@@ -503,6 +571,9 @@ def emit_workload_tu(generator, backend: str, name: str,
     decls, allocs, fills, frees = buffer_code(buffers)
     if generator.flag_mode() is FlagMode.REQUIRED:
         for part, extra in zip((decls, allocs, fills, frees), flags_code()):
+            part.extend(extra)
+    if reads_index_list(ops):
+        for part, extra in zip((decls, allocs, fills, frees), indices_code()):
             part.extend(extra)
 
     call = launcher_call_expr(generator, ops, batch="batch",
@@ -556,7 +627,9 @@ def emit_sequence_tu(generators: Sequence, backend: str, name: str,
     pieces = []
     for n, gen in enumerate(generators):
         ops = collect_operands(gen)
-        _check_addressing(ops)
+        # A sequence's launches share their buffers by name, and an index
+        # list per launch is not something they share yet.
+        _check_addressing(ops, indexed=False)
         keys = {}
         for op in ops:
             if op.is_scalar:

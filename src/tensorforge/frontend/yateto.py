@@ -5,6 +5,7 @@
 from tensorforge.interface import YatetoInterface as yi
 from tensorforge.analysis.cost import list_cost
 from tensorforge.common.basic_types import Addressing, Datatype, DataFlowDirection, Residence
+from tensorforge.common.basic_types import ElementAddressing, RUNTIME, element_addressing
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.spp import FullSPP, ListSPP
@@ -384,6 +385,49 @@ class DescriptionReader(Reader):
       f'as data and `VarOffset` can carry it, but the box arithmetic still '
       f'treats every offset as a number.')
 
+  #: The keys of a binding, each with the value the bare formula means.
+  BINDING_DEFAULTS = {'stride': None, 'offset': 0, 'slots': 1, 'slot': 0}
+
+  #: The interface version of the description being read, set by `read`.
+  _version = None
+
+  @classmethod
+  def _bound(cls, name, addressing, binding):
+    """`addressing` with the parameters its description binds (version 8).
+
+    Every key, defaults where a key does not apply, for a formula that names
+    an element; `null` for one that does not.  Absent in a version 7
+    description, which states no parameters because it can state none, and
+    whose formulas all mean the defaults -- so absent is read as `null`.
+    `'runtime'` is a kernel argument (`RUNTIME`).  What the kind does not
+    take, or a value it does not admit, is refused by name: read past, it
+    would address the data at the default and not where the caller put it.
+    """
+    if binding is None:
+      return addressing
+    if not addressing.per_element():
+      raise NotImplementedError(
+        f'tensor {name}: the description binds {binding} to {addressing} '
+        f'addressing, which reaches no element of the batch and takes no '
+        f'parameters.')
+    if not isinstance(binding, dict) or set(binding) != set(cls.BINDING_DEFAULTS):
+      raise NotImplementedError(
+        f'tensor {name}: a binding states exactly '
+        f'{", ".join(sorted(cls.BINDING_DEFAULTS))}; given {binding!r}.')
+    def value(key):
+      given = binding[key]
+      if given == str(RUNTIME):
+        return RUNTIME
+      return given
+    try:
+      return ElementAddressing(addressing, stride=value('stride'),
+                               offset=value('offset'), slots=value('slots'),
+                               slot=value('slot')).normalized()
+    except ValueError as error:
+      raise NotImplementedError(
+        f'tensor {name}: the binding {binding} for {addressing} addressing: '
+        f'{error}.') from None
+
   def add_tensor(self, d):
     name = d['name']
     name = f'{self._prefix}{name}'
@@ -402,6 +446,10 @@ class DescriptionReader(Reader):
       addressing = Addressing.STRIDED
     elif addressingStr == 'n&+o&':
       addressing = Addressing.PTR_BASED
+    elif addressingStr == 'i*N+o&':
+      addressing = Addressing.INDEXED
+    elif addressingStr == 'i*K+k&+o&':
+      addressing = Addressing.INDEXED_POINTER
     elif addressingStr == '':
       addressing = Addressing.SCALAR
     elif addressingStr is None and residence in (Residence.CODE,
@@ -419,6 +467,14 @@ class DescriptionReader(Reader):
         f'tensor {name}: the description states addressing '
         f'{addressingStr!r} with residence {residence}, which this frontend '
         f'has no reading for.')
+
+    if 'binding' not in d and self._version != 7:
+      # Version 8 states it for every tensor, `null` included: a description
+      # without it would have its strides read at their defaults.
+      raise NotImplementedError(
+        f'tensor {name}: interface version {self._version} states a '
+        f'binding for every tensor, and this one has none.')
+    addressing = self._bound(name, addressing, d.get('binding'))
 
     if storagetype == 'full':
       spp = FullSPP(shape)
@@ -468,10 +524,11 @@ class DescriptionReader(Reader):
     lists them in the order they were met, so nothing forward-references.
     """
     version = description.get('version')
-    if version != YatetoFrontend.INTERFACE_VERSION:
+    if version not in YatetoFrontend.READABLE_VERSIONS:
       raise NotImplementedError(
         f'the description states interface version {version}, this side '
-        f'reads {YatetoFrontend.INTERFACE_VERSION}.')
+        f'reads {", ".join(map(str, YatetoFrontend.READABLE_VERSIONS))}.')
+    self._version = version
     for tensor in description['tensors']:
       self.add_tensor(tensor)
     for operation in description['operations']:
@@ -750,6 +807,7 @@ class KernelEmitter:
   def _gen_call_site(self, generator):
     mat_name_map = {}
     offset_name_map = {}
+    param_name_map = {}
     for name, matrix in self._cache.items():
       if matrix.direction == DataFlowDirection.SOURCE and matrix.addressing != Addressing.SCALAR:
         datatype = matrix.datatype
@@ -764,14 +822,21 @@ class KernelEmitter:
       else:
         parts = name.split('.')
         assert len(parts) <= 2
-        varname = f'extraOffset_{parts[-1]}'
-        if len(parts) == 2:
-          offset_name_map[name] = f'{parts[0]}.{varname}'
-        else:
-          offset_name_map[name] = varname
+        member = lambda prefix: (f'{parts[0]}.{prefix}_{parts[-1]}'
+                                 if len(parts) == 2 else
+                                 f'{prefix}_{parts[-1]}')
+        offset_name_map[name] = member('extraOffset')
+        # The members yateto's kernel struct has for the address parameters
+        # bound at run time, named as the extra offset is.
+        element = element_addressing(matrix.addressing)
+        if element is not None:
+          param_name_map[name] = {role: member(role)
+                                  for role in ('stride', 'slot')
+                                  if element.runtime(role)}
 
     return generator.generate_call_site(mat_name_map,
-                                        offset_name_map)
+                                        offset_name_map,
+                                        param_name_map)
 
 class TensorForgeWriter:
   def __init__(self, tensorforge_generator, headers):
@@ -838,7 +903,18 @@ class YatetoFrontend:
   #: The version of yateto's export interface this reads. yateto refuses an
   #: exporter that speaks an older one, because the fields added since would
   #: be dropped silently rather than missed loudly.
-  INTERFACE_VERSION = 7
+  #:
+  #: 8: a tensor's `binding` -- a stride, an offset, slots and a slot of its
+  #:    own, numbers or `'runtime'` -- and the formulas of the indexed kinds
+  #:    (`Addressing.INDEXED`, `INDEXED_POINTER`).
+  INTERFACE_VERSION = 8
+
+  #: The versions a description may state.  7 as well as 8: a version 7
+  #: description has no binding because it could state none, and every
+  #: formula it has means the defaults, which is what an absent binding is
+  #: read as (`DescriptionReader._bound`) -- so the recordings made against
+  #: it read as they always did.  Anything else is refused.
+  READABLE_VERSIONS = (7, 8)
 
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.

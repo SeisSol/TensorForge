@@ -101,6 +101,39 @@ def _reference_for_case(case, inputs: Dict[str, np.ndarray],
 
 
 # ----------------------------------------------------------------------
+# Device layout of an operand with an address of its own
+# ----------------------------------------------------------------------
+
+def _laid_out(op) -> bool:
+    """Whether the operand's device buffer is not the batch one element
+    after another: an indexed kind, or a stride or an offset of its own."""
+    per = op.storage_volume or op.volume
+    if op.is_scalar or op.addressing == "none":
+        return False
+    return (op.addressing in ("indexed", "indexed_pointer") or op.offset != 0
+            or (op.addressing == "strided" and op.stride != per))
+
+
+def _scatter(flat: np.ndarray, op, batch: int, indices) -> np.ndarray:
+    """The batch, one element after another, put where the device buffer
+    holds each element (`driver_emit.device_layout`).  Elements naming one
+    cell hold the same numbers, so which of them lands last is moot."""
+    per = op.storage_volume or op.volume
+    length, starts = driver_emit.device_layout(op, batch, indices)
+    out = np.zeros(length, dtype=flat.dtype)
+    for e, start in enumerate(starts):
+        out[start:start + per] = flat[e * per:(e + 1) * per]
+    return out
+
+
+def _gather(buffer: np.ndarray, op, batch: int, indices) -> np.ndarray:
+    """The inverse of `_scatter`: each element's data, one after another."""
+    per = op.storage_volume or op.volume
+    _, starts = driver_emit.device_layout(op, batch, indices)
+    return np.concatenate([buffer[start:start + per] for start in starts])
+
+
+# ----------------------------------------------------------------------
 # Main driver
 # ----------------------------------------------------------------------
 
@@ -182,6 +215,20 @@ def run_case(case, target: Target, cache_root: Path,
                          f"({[o.alias or o.kernel_name for o in sinks]}); "
                          "set OUTPUT to the one reference() returns")
 
+    # The launch's index list, where the kernel reads one (`Addressing.
+    # INDEXED`): the case's `INDICES(batch)`, or a fixed permutation of the
+    # batch -- an order the identity would not catch a kernel ignoring.
+    indices = None
+    if driver_emit.reads_index_list(ops_meta):
+        given = getattr(case, "INDICES", None)
+        indices = (np.asarray(given(batch) if callable(given) else given,
+                              dtype=np.int64) if given is not None
+                   else np.random.default_rng(12345).permutation(batch))
+        if indices.shape != (batch,) or indices.min() < 0:
+            return RunResult(False, float("inf"), float("inf"),
+                             f"INDICES gives {indices.shape} entries for a "
+                             f"batch of {batch}, or a negative one")
+
     inputs_by_alias: Dict[str, np.ndarray] = {}
     flats: Dict[str, np.ndarray] = {}          # kernel_name -> flat buffer
     #: Each operand's own element, which the driver sizes and reads its file
@@ -206,6 +253,12 @@ def run_case(case, target: Target, cache_root: Path,
             if key in input_transform:
                 view[...] = input_transform[key](np.asarray(view)).astype(
                     layout.np_dtype(odt), copy=False)
+            if op.addressing in ("indexed", "indexed_pointer"):
+                # Two entries of the list naming one cell read one cell's
+                # data: the first such element's, for the reference too.
+                first = {}
+                for e, cell in enumerate(indices):
+                    view[e] = view[first.setdefault(int(cell), e)]
             inputs_by_alias[key] = np.array(view, copy=True)
         else:
             # SOURCESINK: acts as both input and initial accumulator (beta!=0).
@@ -243,6 +296,10 @@ def run_case(case, target: Target, cache_root: Path,
                 f"storage_parts={op.storage_parts}; the generator asked for a "
                 f"form the harness cannot write, which would ship a buffer of "
                 f"the right size and the wrong contents")
+        if _laid_out(op):
+            # Into the device layout the operand's address states: by its
+            # stride and offset, by its entry of the index list.
+            flat = _scatter(flat, op, batch, indices)
         flats[op.kernel_name] = flat
 
     expected = _reference_for_case(case, inputs_by_alias, dest_in_view)
@@ -252,6 +309,9 @@ def run_case(case, target: Target, cache_root: Path,
         tmp = Path(tmp)
         in_dir = tmp / "in"; in_dir.mkdir()
         out_dir = tmp / "out"; out_dir.mkdir()
+        if indices is not None:
+            (in_dir / "in_elementIndices.bin").write_bytes(
+                indices.astype(np.uint32).tobytes())
         for op in ops_meta:
             if op.is_source:
                 elem = elems[op.kernel_name]
@@ -293,6 +353,8 @@ def run_case(case, target: Target, cache_root: Path,
         got_bytes = (out_dir / f"out_{sink_op.kernel_name}.bin").read_bytes()
         elem = elems[sink_op.kernel_name]
         got_flat = np.frombuffer(got_bytes, dtype=layout.np_export_dtype(elem)).astype(layout.np_dtype(elem))
+        if _laid_out(sink_op):
+            got_flat = _gather(got_flat, sink_op, batch, indices)
         if sink_op.pack_index is not None:
             got_view = layout.unpack(got_flat, np.asarray(sink_op.pack_index),
                                      sink_op.shape, batch)
@@ -316,3 +378,115 @@ def run_case(case, target: Target, cache_root: Path,
             return RunResult(False, max_abs, max_rel, f"mismatch; see {detail_dir}")
 
         return RunResult(True, max_abs, max_rel, "")
+
+
+# ----------------------------------------------------------------------
+# One kernel over given inputs, for a comparison between two builds
+# ----------------------------------------------------------------------
+
+def execute(gen, target: Target, cache_root: Path, tensorforge_include: Path,
+            batch: int, inputs: Dict[str, np.ndarray], indices=None,
+            runtime_timeout: float = 60.0) -> Dict[str, np.ndarray]:
+    """Build `gen`'s kernel with the correctness driver, run it once over
+    `batch` elements, and return what it wrote: every sink's `(batch,
+    *shape)` array, by alias.
+
+    For a comparison of two builds of one computation rather than of a build
+    with a reference -- the same operands addressed two ways, where the one
+    that already holds is the reference.  `inputs` gives each source its
+    batch, `(batch, *shape)` by alias, as `run_case` hands it to a reference;
+    a batch-constant one is `(1, *shape)`.  A sink that is not given starts
+    at zero.  `indices` is the launch's index list where the kernel reads
+    one; elements naming one cell have to be given the same numbers.
+    """
+    ctx = gen._context
+    driver_src = driver_emit.emit(gen, target.backend, default_batch=batch)
+    includes_src = "\n".join(f'#include "{header}"'
+                             for header in ctx.target.headers()) + "\n"
+    includes_src += "\n".join(f'#include "{header}"'
+                              for header in gen.get_helper_headers())
+    exe = build(BuildInputs(
+        workdir=cache_root, includes_src=includes_src,
+        kernel_src=gen.get_kernel(), header_src=gen.get_header(),
+        launcher_src=gen.get_launcher(), driver_src=driver_src,
+        target=target, tensorforge_include=tensorforge_include), cache_root)
+    ops = driver_emit.collect_operands(gen)
+    if driver_emit.reads_index_list(ops) and indices is None:
+        raise ValueError("the kernel reads an index list and none is given")
+    flats, elems = {}, {}
+    for op in ops:
+        if op.is_scalar:
+            continue
+        key = op.alias or op.kernel_name
+        odt = layout.datatype_of(op.ctype, ctx.fp_type)
+        elems[op.kernel_name] = odt
+        op_batch = 1 if op.addressing == "none" else batch
+        given = inputs.get(key)
+        if given is None:
+            if op.is_source:
+                raise ValueError(f"no input for {key}")
+            given = np.zeros((op_batch, *op.shape))
+        given = np.asarray(given, dtype=layout.np_dtype(odt))
+        flat = np.concatenate([np.asarray(given[b]).ravel(order="F")
+                               for b in range(op_batch)])
+        # Stored as the kernel reads it, as `run_case` stores it: packed,
+        # then split into the parts a prepared operand takes.
+        if op.pack_index is not None:
+            flat = layout.pack(given, np.asarray(op.pack_index), odt)
+        if op.storage_parts == 2:
+            flat = layout.split_tf32(
+                flat, odt, planar=(op.storage_volume // 2
+                                   if op.storage_planar else 0))
+        elif op.storage_parts == prepare.BF16_PARTS:
+            flat = layout.split_bf16(
+                flat, odt, planar=(op.storage_volume // prepare.BF16_PARTS
+                                   if op.storage_planar else 0))
+        elif op.storage_parts != 1:
+            raise NotImplementedError(
+                f"{key}: no host-side preparation for storage_parts="
+                f"{op.storage_parts}")
+        if _laid_out(op):
+            flat = _scatter(flat, op, batch, indices)
+        flats[op.kernel_name] = flat
+    with tempfile.TemporaryDirectory(prefix="tf_exec_") as tmp:
+        tmp = Path(tmp)
+        in_dir = tmp / "in"; in_dir.mkdir()
+        out_dir = tmp / "out"; out_dir.mkdir()
+        if indices is not None and driver_emit.reads_index_list(ops):
+            (in_dir / "in_elementIndices.bin").write_bytes(
+                np.asarray(indices).astype(np.uint32).tobytes())
+        for op in ops:
+            if op.is_scalar or not op.is_source:
+                continue
+            (in_dir / f"in_{op.kernel_name}.bin").write_bytes(
+                flats[op.kernel_name].astype(
+                    layout.np_export_dtype(elems[op.kernel_name])).tobytes())
+        env = os.environ.copy()
+        if target.vendor == "nvidia":
+            env["CUDA_VISIBLE_DEVICES"] = str(target.device_index)
+        elif target.vendor == "amd":
+            env["HIP_VISIBLE_DEVICES"] = str(target.device_index)
+        proc = subprocess.run([str(exe), str(in_dir), str(out_dir), str(batch),
+                               "0"], capture_output=True, text=True,
+                              timeout=runtime_timeout, check=False, env=env)
+        if proc.returncode != 0:
+            raise RuntimeError(f"driver exit {proc.returncode}: "
+                               f"{proc.stderr[-2000:]}")
+        out = {}
+        for op in ops:
+            if op.is_scalar or not op.is_sink:
+                continue
+            elem = elems[op.kernel_name]
+            got = np.frombuffer(
+                (out_dir / f"out_{op.kernel_name}.bin").read_bytes(),
+                dtype=layout.np_export_dtype(elem)).astype(
+                    layout.np_dtype(elem))
+            if _laid_out(op):
+                got = _gather(got, op, batch, indices)
+            if op.pack_index is not None:
+                view = layout.unpack(got, np.asarray(op.pack_index),
+                                     op.shape, batch)
+            else:
+                view = layout.view_of(got, op.shape, batch)
+            out[op.alias or op.kernel_name] = np.array(view)
+    return out

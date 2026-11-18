@@ -83,6 +83,21 @@ BACKENDS = ('cuda', 'hip')
 #: How the export spells an addressing mode, as the generators spell it.
 ADDRESSING = {'n&+o&': 'pointer_based', 'n*N+o&': 'strided', '&': 'none'}
 
+
+def _forge_addressing(tensor: Dict) -> str:
+    """How gemmforge and chainforge spell the tensor's addressing; refused
+    where they have no spelling -- the index list's formulas, and a binding
+    with a stride, an offset or a slot of its own (interface version 8),
+    which they would read at the default."""
+    formula = tensor['addressing']
+    binding = tensor.get('binding')
+    if formula not in ADDRESSING or (
+            binding and binding != {'stride': None, 'offset': 0, 'slots': 1,
+                                    'slot': 0}):
+        raise ValueError(f"{tensor['name']}: gemmforge and chainforge have no "
+                         f"addressing {formula!r} with binding {binding}")
+    return ADDRESSING[formula]
+
 #: Bytes per element of the exported datatypes.
 ELEMENT = {'f64': 8, 'f32': 4}
 
@@ -187,7 +202,7 @@ def _gemmforge_matrix(gf, tensor: Dict, m: Tuple[int, int],
     box = _layout(tensor)
     return gf.DenseMatrix(
         num_rows=box[0][1], num_cols=box[1][1],
-        addressing=ADDRESSING[tensor['addressing']],
+        addressing=_forge_addressing(tensor),
         bbox=[m[0] - box[0][0], n[0] - box[1][0],
               m[1] - box[0][0], n[1] - box[1][0]])
 
@@ -197,7 +212,7 @@ def _chainforge_matrix(cf, tensor: Dict, m: Tuple[int, int],
     box = _layout(tensor)
     return cf.DenseMatrix(
         num_rows=box[0][1] - box[0][0], num_cols=box[1][1] - box[1][0],
-        addressing=cf.Addressing.str2addr(ADDRESSING[tensor['addressing']]),
+        addressing=cf.Addressing.str2addr(_forge_addressing(tensor)),
         bbox=[m[0] - box[0][0], k[0] - box[1][0],
               m[1] - box[0][0], k[1] - box[1][0]],
         alias=tensor['name'],
