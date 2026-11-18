@@ -128,8 +128,12 @@ def test_no_site_label_is_ambiguous():
 ])
 def test_the_censuses_still_see_something(tool, marker):
     """Each reaches into the generator and would report an empty corpus if
-    what it reaches into were renamed, without any error to notice."""
-    out = _run(tool)
+    what it reaches into were renamed, without any error to notice.
+
+    `operand_layouts.py` generates every case, the stacked ones included, and
+    takes seven to eleven minutes on its own; under a full parallel suite it ran
+    past 900 s, so the censuses get twice that."""
+    out = _run(tool, timeout=1800)
     assert re.search(marker, out), f"{tool} produced nothing recognizable:\n{out[-800:]}"
     numbers = [int(n) for n in re.findall(r"^\s*(\d+)\s", out, re.M)]
     assert numbers and max(numbers) > 0, f"{tool} counted nothing:\n{out[-800:]}"
