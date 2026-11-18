@@ -56,6 +56,10 @@ class SyclLexic(Lexic):
     #: the context sets it, 0 here: a lexic no context made writes the
     #: spelling that needs no header).
     self.split_broadcast = 0
+    #: Whether runs of a multiplication's reads are read by sub-group block
+    #: reads (`Options.spmd_block_runs`, `tensorforge::subGroupRun`), which
+    #: the context sets.
+    self.block_runs = False
     #: Whether a kernel may call DPAS from the SPMD lowering
     #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
     #: as it sets the split above: the call is declared in the header that
@@ -357,9 +361,11 @@ class SyclLexic(Lexic):
       # extension; AdaptiveCpp has neither the header nor the property.
       headers = ['sycl/sycl.hpp',
                  'sycl/ext/intel/experimental/grf_size_properties.hpp']
-      if (self.split_broadcast or self.dpas) and self._sub_groups is not None:
-        # `tensorforge::split_broadcast`, which `broadcast` writes, and
-        # `tensorforge::dpasTF32`, which the matrix path does.
+      if ((self.split_broadcast or self.dpas or self.block_runs)
+          and self._sub_groups is not None):
+        # `tensorforge::split_broadcast`, which `broadcast` writes,
+        # `tensorforge::dpasTF32`, which the matrix path does, and
+        # `tensorforge::subGroupRun`, which a run reads through.
         headers.append('tensorforge_device/sycl_spmd.h')
       return headers
     return ['sycl/sycl.hpp']
@@ -492,6 +498,13 @@ class SyclLexic(Lexic):
       # is another count; `slmCast` converts through the bytes.
       return f'tensorforge::slmCast<{elem}>({window})'
     return super().shared_window_retype(window, elem)
+
+  def sub_group_run(self, elem, count, address):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    return (f'sycl::vec<{elem}, {count}>',
+            f'tensorforge::subGroupRun<{count}>(item.get_sub_group(), '
+            f'{address})')
 
   def get_slm_load(self, elem, width, address):
     if not self._explicit_simd:

@@ -48,6 +48,7 @@ BUILD = Path('src/tensorforge/backend/pir/build.py')
 SYM = Path('src/tensorforge/backend/symbol.py')
 HIP = Path('src/tensorforge/include/tensorforge_device/hip.h')
 EMIT = Path('src/tensorforge/backend/pir/emit.py')
+BLOCKS = Path('src/tensorforge/backend/pir/block_reads.py')
 ABSTR = Path('src/tensorforge/backend/instructions/abstract_instruction.py')
 EQUIV = Path('tools/access_equiv.py')
 ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
@@ -1393,6 +1394,49 @@ GROUPS = {
     # everything behind a barrier, its barrier kept apart; no group, no
     # barrier behind its wait; one stage; and every wait -- the drains and
     # the one behind the loop included -- a wait on the cursor.
+    # Windows and runs as block reads (`pir.block_reads`), and runs under SPMD.
+    'blockreads': ('tests/test_block_reads.py tests/test_esimd_emitter.py', [
+        ('the read of a window behind its first element',
+         sub(BLOCKS, '            if head is not None:\n'
+                     '                out.append(head)\n'
+                     '            part = members.get(id(s))\n'
+                     '            if part is not None:\n'
+                     '                out.append(part)\n',
+             '            part = members.get(id(s))\n'
+             '            if part is not None:\n'
+             '                out.append(part)\n'
+             '            if head is not None:\n'
+             '                out.append(head)\n', 1)),
+        ('a window\'s elements counted from zero',
+         sub(BLOCKS, '                          tuple((x, f - lo) for x, f in st[\'loads\'])))',
+             '                          tuple((x, f) for x, f in st[\'loads\'])))', 1)),
+        ('a run sliced a lane apart',
+         sub(BLOCKS, "                       tuple((x, k * w) for k, x in enumerate(ch['loads']))))",
+             "                       tuple((x, k) for k, x in enumerate(ch['loads']))))", 1)),
+        ('an SPMD run of three reads',
+         sub(BLOCKS, '            size = 1\n'
+                     '            while size * 2 <= count:\n'
+                     '                size *= 2\n',
+             '            size = count\n', 1)),
+        ('a predicated read in an SPMD run',
+         sub(BLOCKS, '        if not _single_read(x) or len(x.args) != 2:\n',
+             '        if x.op != Op.LOAD or len(x.args) != 2:\n', 1)),
+        ('a store to its buffer not parting an SPMD run',
+         sub(BLOCKS, '        if x.op == Op.STORE and x.args and is_buffer(x.args[0]):\n'
+                     '            close(buffer_name(x.args[0], names))\n'
+                     '            continue\n'
+                     '        if _run_ends(x, MemSpace.GLOBAL) or x.regions:',
+             '        if x.op == Op.STORE and x.args and is_buffer(x.args[0]):\n'
+             '            continue\n'
+             '        if _run_ends(x, MemSpace.GLOBAL) or x.regions:', 1)),
+        ('the SPMD run read at a lane\'s own address',
+         sub(BLOCKS, '    head = replace(first, target=(vec,), args=(first.args[0], start),',
+             '    head = replace(first, target=(vec,),', 1)),
+        ('an SPMD run where the sub-group is not the multiplication',
+         sub(EMIT, '                or target.sub_group_width(lanes) != lanes):\n',
+             '                ):\n', 1)),
+    ]),
+
     'bulk': ('tests/test_bulk_copies.py', [
         ('a bulk copy on a part without one',
          sub(TARGET, '        return level is not None and level >= 90\n',

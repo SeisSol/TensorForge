@@ -31,6 +31,31 @@ SYCL_EXTERNAL tensorforgeDpasFloat8 intel_sub_group_tf32_tf32_matrix_mad_k8(
 
 namespace tensorforge {
 
+/// `N` reads of a sub-group's lanes at consecutive offsets of global memory,
+/// as one block read (`Options.spmd_block_runs`, `pir.block_reads`): element
+/// `j` of what work-item `l` gets is `p[j * size + l]`, `size` the
+/// sub-group's.  `p` has to point into global memory -- the cast asks no
+/// question, and the block read reads there.  `sub_group::load`, which DPC++
+/// lowers to `__spirv_SubgroupBlockReadINTEL` (one `load.ugm.d32xNt` on the
+/// Max 1550) and marks deprecated in favor of `group_load`; the warning is
+/// held off here rather than repeated for every kernel.
+template <int N, typename T>
+inline sycl::vec<T, N> subGroupRun(const sycl::sub_group &group, const T *p) {
+  using namespace sycl::access;
+  const auto global = sycl::ext::oneapi::experimental::static_address_cast<
+      address_space::global_space>(
+      sycl::multi_ptr<T, address_space::generic_space, decorated::yes>(
+          const_cast<T *>(p)));
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  return group.load<N>(global);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+}
+
 /// `x` rounded to TF32: to nearest, ties away from zero, the low thirteen bits
 /// of the significand cleared.  The upper half of an operand split for DPAS
 /// (`primitives/intel_spmd.py`), and the rounding has to be done here: DPAS

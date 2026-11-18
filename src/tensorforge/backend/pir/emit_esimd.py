@@ -34,6 +34,7 @@ from typing import Any, Optional
 
 from tensorforge.common.basic_types import Datatype, is_floating
 
+from . import block_reads
 from .core import (BufferType, IRError, MemSpace, Op, ScalarType, TokenType,
                    Value, base_elem, walk_stmts)
 from .emit import Emitter
@@ -60,16 +61,9 @@ class EsimdEmitter(Emitter):
         #: Register buffers held as one `simd`, by name (`_plan_register_buffers`).
         self._simd_buffers: set = set()
         self._alloc_names: dict = {}
-        #: Scalar shared-memory reads served from a register window
-        #: (`_plan_windows`): statement id -> (window, element).
-        self._windows: dict = {}
-        #: The first read of each window: statement id -> (buffer, lo, width, name).
-        self._window_heads: dict = {}
-        #: Vector reads served from one block message (`_plan_runs`):
-        #: statement id -> (run name, element offset), and the run's first
-        #: read -> (element type, width).
-        self._runs: dict = {}
-        self._run_heads: dict = {}
+        #: The vectors the block reads of the body define (`block_reads`),
+        #: by value id: the name each is spelled by.
+        self._blocks: dict = {}
 
     # -- types ------------------------------------------------------------- #
 
@@ -507,11 +501,11 @@ class EsimdEmitter(Emitter):
             else:
                 self._emit_simd_store(s)
             return
-        if op == Op.LOAD and id(s) in self._windows:
-            self._emit_window_load(s)
+        if op == Op.LOAD and block_reads.is_block(s):
+            self._emit_block(s)
             return
-        if op == Op.LOAD and id(s) in self._runs:
-            self._emit_run_load(s)
+        if block_reads.is_part(s):
+            self._emit_block_part(s)
             return
         if (getattr(s, 'op', None) == 'select' and len(s.args) == 3
                 and s.target and self._masked(s.args[0], s.target[0])):
@@ -618,12 +612,8 @@ class EsimdEmitter(Emitter):
 
     # -- register buffers -------------------------------------------------- #
 
-    _SPACES = {'Global': MemSpace.GLOBAL, 'SharedMem': MemSpace.SHARED,
-               'Register': MemSpace.REGISTER}
-
-    #: What a `simd` holds here.  `__float128` is not a device type on pvc at
-    #: all, and its literal needs a GNU suffix; its arrays stay as they were.
-    _VECTOR_ELEMS = (Datatype.F32, Datatype.F64)
+    #: What a `simd` holds here (`block_reads.VECTOR_ELEMS`).
+    _VECTOR_ELEMS = block_reads.VECTOR_ELEMS
 
     @staticmethod
     def _width(v) -> int:
@@ -635,52 +625,21 @@ class EsimdEmitter(Emitter):
             n *= v.lane_span()
         return n
 
-    @staticmethod
-    def _is_buffer(x) -> bool:
-        return ((isinstance(x, Value) and isinstance(x.type, BufferType))
-                or hasattr(x, 'stype'))
+    _is_buffer = staticmethod(block_reads.is_buffer)
+    _comment = staticmethod(block_reads.is_comment)
+    _const_flat = staticmethod(block_reads.const_flat)
 
     def _buf_name(self, x) -> str:
-        """The name a buffer is spelled by.  Accesses reach one either as the
-        `Value` its `Op.ALLOC` defined or as the macro layer's `Symbol`, and
-        only the name says they are the same buffer."""
-        if isinstance(x, Value):
-            return self._alloc_names.get(x.id, str(x))
-        return getattr(x, 'name', str(x))
+        """The name a buffer is spelled by (`block_reads.buffer_name`)."""
+        return block_reads.buffer_name(x, self._alloc_names)
 
     def _space(self, x):
-        if isinstance(x, Value) and isinstance(x.type, BufferType):
-            return x.type.space
-        stype = getattr(x, 'stype', None)
-        return self._SPACES.get(getattr(stype, 'name', None), MemSpace.UNKNOWN)
-
-    @staticmethod
-    def _comment(x) -> bool:
-        """A raw statement that is only a comment: the macro layer writes the
-        instruction it lowers above it (`// r1 = +(r0 * s0) + None`), which
-        names every buffer and touches none."""
-        text = (x.text or '').strip()
-        return x.op == Op.RAWSTMT and bool(text) and all(
-            line.strip().startswith('//') for line in text.splitlines())
+        return block_reads.space_of(x)
 
     def _plan_allocs(self, stmts) -> dict:
-        """name -> the `Value` its `Op.ALLOC` defines.
-
-        A pointer binding into global memory is a buffer the accesses name as
-        well, by the name it binds -- not an allocation, so it is named here
-        and not offered as one."""
-        allocs = {}
-        self._alloc_names = {}
-        for a in stmts:
-            if not (a.target and isinstance(a.target[0].type, BufferType)):
-                continue
-            v = a.target[0]
-            if a.op == Op.ALLOC:
-                name = a.attr('extern') or str(v)
-                self._alloc_names[v.id] = name
-                allocs[name] = (a, v)
-            elif a.attr('extern'):
-                self._alloc_names[v.id] = a.attr('extern')
+        """name -> the `Value` its `Op.ALLOC` defines, and the names of the
+        buffers kept for `_buf_name` (`block_reads.allocations`)."""
+        allocs, self._alloc_names = block_reads.allocations(stmts)
         return allocs
 
     def _plan_register_buffers(self, stmts, allocs, consts=None, order=None) -> set:
@@ -812,154 +771,56 @@ class EsimdEmitter(Emitter):
             self.writer(f'{self.base_name(buf)}.template select<{w}, 1>({addr}) = '
                         f'{self.operand(val)};')
 
-    # -- shared-memory windows ---------------------------------------------- #
+    # -- block reads -------------------------------------------------------- #
 
-    #: The widest window, in elements: 64 registers of 64 bytes.
-    WINDOW_MAX = 1024
+    def _emit_block(self, s) -> None:
+        """The read of a window or a run (`block_reads`): one block message
+        into the vector the reads it serves are extracts of.
 
-    def _plan_windows(self, body, allocs) -> None:
-        """Scalar reads of shared memory, served from one block read.
-
-        A broadcast operand is read one element at a time -- `float b =
-        s0[k]` -- and under SPMD that is one load shared by the lanes.  Here
-        one work-item is the whole vector and each read is a message of its
-        own: 1836 SLM reads in `local_flux`, next to 727 global ones.  A run
-        of them with constant addresses and nothing in between that could
-        change the buffer is one `copy_from` into a `simd`, and the reads
-        become register elements.
-
-        What may sit between two reads of a window: anything that does not
-        write shared memory or synchronize.  Any shared store ends every
-        window, not just the stored buffer's -- the arena reuses offsets, and
-        a store through another name can land on the same bytes.  A window
-        reaches into a nested region only if nothing in that region ends it,
-        so a loop cannot read a window that its own last iteration made stale.
+        A window from its first element, through the target's own read of
+        shared memory -- a window is an offset into SLM, and `copy_from` on it
+        does not compile (or, on a raw pointer, reads global memory).  A run
+        from the address of the first read it serves, as that read spelled
+        it.
         """
-        shared = {n: v for n, (a, v) in allocs.items()
-                  if v.type.space == MemSpace.SHARED
-                  and v.type.elem in self._VECTOR_ELEMS
-                  and getattr(v.type, 'swizzle', None) is None}
-        consts = {}
-        seq = []
-
-        def lin(stmts, depth):
-            for x in stmts:
-                if x.op == Op.CONST and x.target:
-                    consts[x.target[0].id] = x.attr('value')
-                seq.append((x, depth))
-                for r in x.regions:
-                    lin(r.body, depth + 1)
-        lin(body, 0)
-
-        def ends(x) -> bool:
-            if self._comment(x):
-                return False
-            if x.op in Op.RAW or x.op in (Op.BARRIER, Op.WAIT, Op.CALL,
-                                          Op.COMMIT_ASYNC, Op.COPY_ASYNC,
-                                          Op.ACCUM):
-                return True
-            if x.op == Op.STORE:
-                b = x.args[0] if x.args else None
-                return self._space(b) not in (MemSpace.REGISTER, MemSpace.GLOBAL)
-            return (not x.pure and not x.regions and x.op not in (
-                Op.LOAD, Op.LOAD_ASYNC, Op.PREFETCH, Op.ALLOC, Op.DECLARE,
-                Op.YIELD, Op.EXIT, Op.CONST))
-
-        memo = {}
-
-        def ends_inside(x) -> bool:
-            if id(x) not in memo:
-                memo[id(x)] = any(ends(y) for y in walk_stmts(
-                    tuple(z for r in x.regions for z in r.body)))
-            return memo[id(x)]
-
-        open_ = {}
-        count = [0]
-
-        def close(name):
-            st = open_.pop(name, None)
-            if st is None or len(st['loads']) < 2:
-                return
-            vol = shared[name].type.volume
-            flats = [f for _, f in st['loads']]
-            lo, hi = min(flats), max(flats)
-            width = hi - lo + 1
-            if width > self.WINDOW_MAX or width > 8 * len(flats):
-                return
-            width = min(-(-width // 16) * 16, vol - lo)
-            wname = f'{name}_w{count[0]}'
-            count[0] += 1
-            first = st['loads'][0][0]
-            self._window_heads[id(first)] = (first.args[0], lo, width, wname,
-                                             shared[name].type.elem.ctype())
-            for x, f in st['loads']:
-                self._windows[id(x)] = (wname, f - lo)
-
-        for x, depth in seq:
-            for n in [n for n, st in open_.items() if depth < st['depth']]:
-                close(n)
-            if ends(x) or (x.regions and ends_inside(x)):
-                for n in list(open_):
-                    close(n)
-                continue
-            if not (x.op == Op.LOAD and x.predicate is None and x.target
-                    and x.args and self._is_buffer(x.args[0])):
-                continue
-            buf, v = x.args[0], x.target[0]
-            name = self._buf_name(buf)
-            if (name not in shared or x.attr('nontemporal')
-                    or not isinstance(v.type, ScalarType) or v.type.length
-                    or v.layout is None or v.distributed):
-                continue
-            flat = self._const_flat(buf, x.args[1:], consts)
-            if flat is None or not 0 <= flat < shared[name].type.volume:
-                continue
-            open_.setdefault(name, {'depth': depth, 'loads': []})['loads'].append((x, flat))
-        for n in list(open_):
-            close(n)
-
-    @staticmethod
-    def _const_flat(buf, indices, consts):
-        """The element `address` would compute, if every index is known."""
-        nums = []
-        for i in indices:
-            n = consts.get(i.id) if isinstance(i, Value) else i
-            if isinstance(n, bool) or not isinstance(n, int):
-                return None
-            nums.append(n)
-        if not nums:
-            return 0
-        if isinstance(buf, Value) and isinstance(buf.type, BufferType):
-            shape = buf.type.shape
-        else:
-            view = getattr(buf, 'data_view', None)
-            shape = tuple(view.shape) if view is not None else None
-        if shape is None or len(shape) != len(nums):
-            return sum(nums)
-        flat = nums[-1]
-        for k in reversed(range(len(nums) - 1)):
-            flat = nums[k] + shape[k] * flat
-        return flat
-
-    def _emit_window_load(self, s) -> None:
-        head = self._window_heads.get(id(s))
-        if head is not None:
-            buf, lo, width, wname, elem = head
-            start = f'{self.base_name(buf)} + {lo}'
+        vec, buf = s.target[0], s.args[0]
+        name = s.attr('extern')
+        elem, width = vec.type.base.ctype(), vec.type.length
+        self._blocks[vec.id] = name
+        self.bind(vec, name)
+        if len(s.attr('shape')) == 1:
+            start = (f'{self.base_name(buf)} + '
+                     f'{block_reads.const_flat(buf, s.args[1:], {})}')
             lex = self._lexic()
-            # Through the target's own read of shared memory: a window is an
-            # offset into SLM, and `copy_from` on it does not compile (or, on
-            # a raw pointer, reads global memory).
-            slm = lex.get_slm_load(elem, width, start) if lex is not None else None
+            slm = (lex.get_slm_load(elem, width, start) if lex is not None
+                   else None)
             if slm is not None:
-                self.writer(f'{self.simd_type(elem, width)} {wname} = {slm};')
+                self.writer(f'{self.simd_type(elem, width)} {name} = {slm};')
             else:
-                self.writer(f'{self.simd_type(elem, width)} {wname};')
-                self.writer(f'{wname}.copy_from({start});')
-        wname, k = self._windows[id(s)]
-        v = s.target[0]
+                self.writer(f'{self.simd_type(elem, width)} {name};')
+                self.writer(f'{name}.copy_from({start});')
+            return
+        addr = self.address(buf, s.args[1:])
+        ptr = self._as_pointer(f'{self.base_name(buf)}[{addr}]')
+        slm = self._slm_load_width(buf, elem, width, ptr)
+        if slm is not None:
+            self.writer(f'{self.simd_type(elem, width)} {name} = {slm};')
+        else:
+            self.writer(f'{self.simd_type(elem, width)} {name};')
+            self.writer(f'{name}.copy_from({ptr});')
+
+    def _emit_block_part(self, s) -> None:
+        """A read a window or a run serves: a window's element, declared as
+        the read was; a run's lanes, as the vector they are."""
+        v, vec = s.target[0], s.args[0]
+        block = self._blocks[vec.id]
         named = s.attr('extern')
-        self.declare(v, f'{wname}[{k}]', s, name=named)
+        if s.op == Op.EXTRACT:
+            self.declare(v, f'{block}[{s.attr("lane")}]', s, name=named)
+        else:
+            w = self._vector_width(v)
+            self.writer(f'{self.ctype(v.type, v)} {named or self.name(v)}('
+                        f'{block}.template select<{w}, 1>({s.args[1]}));')
         if named:
             self.bind(v, named)
 
@@ -1030,186 +891,6 @@ class EsimdEmitter(Emitter):
             else:
                 self.writer(text)
 
-    # -- load runs ---------------------------------------------------------- #
-
-    #: What one block message moves: LSC's transposed read takes at most 64
-    #: dwords (`d32x64t`) per address.
-    RUN_BYTES = 256
-
-    @staticmethod
-    def _messages(width: int, elem_bytes: int) -> int:
-        """Block messages a `width`-element read is issued as: powers of two,
-        at most `RUN_BYTES` each -- how `copy_from` and `slmLoad` split it."""
-        cap = max(1, EsimdEmitter.RUN_BYTES // elem_bytes)
-        count, left, size = 0, width, cap
-        while left:
-            while size > left:
-                size //= 2
-            count += 1
-            left -= size
-        return count
-
-    def _plan_runs(self, body, allocs) -> None:
-        """Adjacent vector reads of one buffer, as one block message.
-
-        Every message costs about five instructions besides the read: a 64-bit
-        add for the address, a copy of it into the payload register, two
-        `mov null` IGC puts around a send on this part, and a scoreboard wait.
-        A lead dimension of 56 on 32 lanes is two reads per column, one of 32
-        and a tail -- three messages (32 + 16 + 8) where one of 64 would do.
-        Read as one, `local_flux` on pvc takes 6450 instructions instead of
-        9386, with the tail at full width (`Options.full_lane_tails`).
-
-        A run is reads of the same buffer at constant, consecutive offsets,
-        each one element per lane, taken together only where that is fewer
-        messages and stays inside the buffer's own extent -- so the elements
-        past a tail's `valid` lanes are the buffer's next ones, in range, and
-        land only in lanes whose results are never stored.  The later reads
-        of a run have to be dominated by the first and nothing may write the
-        buffer in between; for shared memory nothing may synchronize either.
-        """
-        consts, seq = {}, []
-
-        def lin(stmts, depth):
-            for x in stmts:
-                if x.op == Op.CONST and x.target:
-                    consts[x.target[0].id] = x.attr('value')
-                seq.append((x, depth))
-                for r in x.regions:
-                    lin(r.body, depth + 1)
-        lin(body, 0)
-
-        def extent(buf, name):
-            if name in allocs:
-                return allocs[name][1].type.volume
-            if isinstance(buf, Value) and isinstance(buf.type, BufferType):
-                return buf.type.volume
-            # A prepared operand is longer than its matrix: its order pads
-            # (`Tensor.storage_order`), and the padding is stored -- which is
-            # what lets a run of a slot-major operand read to the end of its
-            # last slot.
-            obj = getattr(buf, 'obj', None)
-            if (obj is not None
-                    and getattr(obj, 'storage_order', None) is not None):
-                return int(obj.storage_volume())
-            view = getattr(buf, 'data_view', None)
-            shape = getattr(view, 'shape', None) if view is not None else None
-            if not shape:
-                return None
-            n = 1
-            for d in shape:
-                n *= int(d)
-            return n
-
-        def ends(x, space) -> bool:
-            if self._comment(x):
-                return False
-            # A fence ends a run as the raw text it replaces did: a run read
-            # as one message would carry the loads behind it across it.
-            if x.op in Op.RAW or x.op in (Op.CALL, Op.COPY_ASYNC, Op.ACCUM,
-                                          Op.FENCE, Op.WAIT_COUNTER,
-                                          Op.SET_PRIORITY):
-                return True
-            if space is MemSpace.SHARED and x.op in (Op.BARRIER, Op.WAIT,
-                                                      Op.COMMIT_ASYNC,
-                                                      Op.SYNC_INIT, Op.ARRIVE,
-                                                      Op.WAIT_PHASE):
-                return True
-            return False
-
-        chains = {}          # buffer name -> open chain
-        count = [0]
-
-        def close(name):
-            ch = chains.pop(name, None)
-            if ch is None or len(ch['loads']) < 2:
-                return
-            w, eb = ch['width'], ch['elem_bytes']
-            total = w * len(ch['loads'])
-            before = len(ch['loads']) * self._messages(w, eb)
-            if self._messages(total, eb) >= before:
-                return
-            vol = ch['extent']
-            if vol is None or ch['flat'] + total > vol:
-                return
-            rname = f'{name}_run{count[0]}'
-            count[0] += 1
-            first = ch['loads'][0]
-            self._run_heads[id(first)] = (ch['elem'], total)
-            for k, x in enumerate(ch['loads']):
-                self._runs[id(x)] = (rname, k * w)
-
-        for x, depth in seq:
-            for n in [n for n, ch in chains.items() if depth < ch['depth']]:
-                close(n)
-            if x.op == Op.STORE and x.args and self._is_buffer(x.args[0]):
-                close(self._buf_name(x.args[0]))
-                if self._space(x.args[0]) is MemSpace.SHARED:
-                    for n in [n for n, ch in chains.items()
-                              if ch['space'] is MemSpace.SHARED]:
-                        close(n)
-                continue
-            if any(ends(x, ch['space']) for ch in chains.values()):
-                for n in [n for n, ch in chains.items() if ends(x, ch['space'])]:
-                    close(n)
-            if x.regions:
-                continue
-            if not (x.op == Op.LOAD and x.predicate is None and x.target
-                    and x.args and self._is_buffer(x.args[0])):
-                continue
-            buf, v = x.args[0], x.target[0]
-            space = self._space(buf)
-            if space not in (MemSpace.GLOBAL, MemSpace.SHARED):
-                continue
-            if (not isinstance(v.type, ScalarType) or v.type.length
-                    or v.layout is None or not v.distributed
-                    or v.type.base not in self._VECTOR_ELEMS
-                    or x.attr('nontemporal') or x.attr('head')):
-                # A head keeps its narrower read (`_declare_unpredicated`);
-                # a run reads the whole vector.
-                continue
-            flat = self._const_flat(buf, x.args[1:], consts)
-            if flat is None:
-                continue
-            name = self._buf_name(buf)
-            w = self._vector_width(v)
-            ch = chains.get(name)
-            eb = v.type.base.size()
-            if (ch is not None and ch['width'] == w and ch['next'] == flat
-                    and (len(ch['loads']) + 1) * w * eb <= self.RUN_BYTES):
-                ch['loads'].append(x)
-                ch['next'] = flat + w
-                continue
-            close(name)
-            chains[name] = {'loads': [x], 'width': w, 'flat': flat,
-                            'next': flat + w, 'depth': depth, 'space': space,
-                            'elem': v.type.base.ctype(), 'elem_bytes': eb,
-                            'extent': extent(buf, name)}
-        for n in list(chains):
-            close(n)
-
-    def _emit_run_load(self, s) -> None:
-        v, buf = s.target[0], s.args[0]
-        rname, off = self._runs[id(s)]
-        head = self._run_heads.get(id(s))
-        if head is not None:
-            elem, total = head
-            addr = self.address(buf, s.args[1:])
-            ptr = self._as_pointer(f'{self.base_name(buf)}[{addr}]')
-            slm = self._slm_load_width(buf, elem, total, ptr)
-            if slm is not None:
-                self.writer(f'{self.simd_type(elem, total)} {rname} = {slm};')
-            else:
-                self.writer(f'{self.simd_type(elem, total)} {rname};')
-                self.writer(f'{rname}.copy_from({ptr});')
-        named = s.attr('extern')
-        nm = named or self.name(v)
-        w = self._vector_width(v)
-        self.writer(f'{self.ctype(v.type, v)} {nm}({rname}.template '
-                    f'select<{w}, 1>({off}));')
-        if named:
-            self.bind(v, named)
-
     # -- entry ------------------------------------------------------------- #
 
     def run(self, body) -> None:
@@ -1226,11 +907,8 @@ class EsimdEmitter(Emitter):
                     lin(r.body)
         lin(body)
         self._simd_buffers = self._plan_register_buffers(stmts, allocs, consts, order)
-        self._windows, self._window_heads = {}, {}
-        self._plan_windows(body, allocs)
-        self._runs, self._run_heads = {}, {}
-        self._plan_runs(body, allocs)
-        super().run(body)
+        self._blocks = {}
+        super().run(block_reads.block_reads(body))
         if self.unresolved and self.strict:
             names = ', '.join(repr(v) for v in self.unresolved[:8])
             more = ('' if len(self.unresolved) <= 8

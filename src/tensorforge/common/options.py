@@ -1028,6 +1028,21 @@ declare('sycl_split_broadcast',
             'sub-group split lost to the default almost everywhere, at four '
             'broadcasts and three selects a read.')
 
+declare('spmd_block_runs',
+        default=False,
+        env='TF_SPMD_BLOCK_RUNS',
+        parse=parse_bool,
+        doc='Under SPMD SYCL with a stated sub-group (oneAPI on Intel), read a '
+            'run of a multiplication\'s reads -- of one global buffer, at '
+            'offsets one sub-group apart, a lane each -- as one sub-group '
+            'block read (`sub_group::load`, `tensorforge::subGroupRun`, '
+            '`pir.block_reads`): work-item `l` gets element `l` of each read '
+            'in order, where every read was a message of its own.  Only where '
+            'the multiplication is the sub-group, for up to eight reads and '
+            'a power of two of them, inside the buffer\'s own extent.  The '
+            'explicit vector reads its runs as one block message already.  '
+            'Off until measured.')
+
 declare('sycl_dpas',
         default=False,
         env='TF_SYCL_DPAS',

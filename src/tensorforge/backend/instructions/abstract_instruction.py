@@ -975,10 +975,14 @@ class AbstractInstruction(ABC):
       _record_pressure(metrics, context, body, _explicit_simd(context),
                        num_threads)
     context.pin_loads = _pin_every(context, body, num_threads)
+    # The lanes of the multiplication, for what the emitter decides by them
+    # (`Emitter._spmd_run_lanes`).
+    context.mult_lanes = num_threads
     try:
       pir.emit(body, writer, context, metrics)
     finally:
       context.pin_loads = 0
+      context.mult_lanes = None
 
   def through_pir(self, writer: Writer, build) -> None:
     """Route ``build(sink)`` through the pseudo-IR into ``writer``.
