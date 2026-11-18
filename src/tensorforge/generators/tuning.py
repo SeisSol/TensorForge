@@ -1994,6 +1994,25 @@ MATRIX_TWIN = {80: (Datatype.F64,),
                100: (Datatype.F64, Datatype.F32)}
 
 
+#: How many bytes a matrix twin (`_matrix_candidates`) may spill however
+#: little the default spills, before `lanes_rule` leaves it; past that, the
+#: guard of every other candidate (`SPILL_GROWTH`).  Within it the walk's price
+#: decides, which charges the spilling (`SPILL_WEIGHT`).  The twin executes a
+#: half to a third of the default's instructions, and the guard, set where a
+#: narrower SIMT count spilled and lost, kept it out of SeisSol's order-8
+#: `volume` on GB200 (batch 262144, ns an element, rule pick against the twin
+#: written out): in single precision the default spills nothing and the twin
+#: 148 B, 19.2 against 12.0 (the twin at the default unroll, 40 B, 14.9); in
+#: double the default spills 156 B and the twins 384 to 648 B, 28.6 against
+#: 21.3.  Where the twins spill more -- the order-8 derivative in double, 1.6
+#: to 4.6 KB -- their price is above the rule's pick anyway.  The rule with the
+#: floor against the rule without, orders 6 and 8: GB200 order-8 `volume` -39 %
+#: (single) and -21 % (double), the derivative in single -6 %; GH200 the
+#: order-6 derivative and `volume` in double -26 % and -17 %, order 8 -10 %
+#: (`volume`, double) and -9 % (derivative, single); every other pick the same.
+MATRIX_SPILL_FLOOR = 1024
+
+
 def _matrix_candidates(descrs, first: Build, context: Context,
                        origin: Candidate,
                        fixed: Optional[Mapping[str, Any]]) -> List[Candidate]:
@@ -2868,7 +2887,8 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
             other = scorer.resources(result)
         except Exception:                     # noqa: BLE001
             other = None
-        if other is None or other.spill_bytes > max(limit, seen.spill_bytes):
+        if other is None or other.spill_bytes > max(allowed(cand),
+                                                    seen.spill_bytes):
             return cand, seen
         builds[alt], counts[alt] = result, count
         if cost(alt, other) < cost(cand, seen):
@@ -2885,6 +2905,13 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
     keep = (float(getattr(opts, 'lanes_occupancy_keep', 0.0) or 0.0)
             if counted else 0.0)
     limit = max(SPILL_GROWTH * report.spill_bytes, floor)
+
+    def allowed(cand: Candidate) -> float:
+        """The spilling `cand` may have and still be taken: `limit`, or for a
+        matrix twin of a default off the path at least `MATRIX_SPILL_FLOOR`."""
+        if cand.get('tensor_cores') and not origin.get('tensor_cores'):
+            return max(limit, MATRIX_SPILL_FLOOR)
+        return limit
     held = _resident_warps(builds[origin], unpinned, hw) if keep else None
     large_grf = _grf_twin(context, fixed)
 
@@ -3037,7 +3064,7 @@ def lanes_rule(descr_factory, context: Context, scorer: 'CompiledScore',
         except Exception:                     # noqa: BLE001
             seen = None
         cand, seen = pinned(cand, seen)
-        if seen is None or seen.spill_bytes > limit:
+        if seen is None or seen.spill_bytes > allowed(cand):
             continue
         if split_traffic(cand, seen):
             continue
