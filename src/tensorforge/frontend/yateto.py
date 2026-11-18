@@ -466,7 +466,7 @@ class DescriptionReader(Reader):
       raise NotImplementedError(
         f'tensor {name}: the description states addressing '
         f'{addressingStr!r} with residence {residence}, which this frontend '
-        f'has no reading for.')
+        f'has no reyateto-hintsading for.')
 
     if 'binding' not in d and self._version != 7:
       # Version 8 states it for every tensor, `null` included: a description
@@ -498,7 +498,42 @@ class DescriptionReader(Reader):
 
     self._cache[name] = Tensor(shape, addressing, bbox, name, is_temporary, spp,
                                values, datatype, d.get('alignment', 0),
-                               residence=residence)
+                               residence=residence,
+                               attrs=self._tensor_attrs(name, d.get('attrs')))
+
+  #: The tensor attributes this side reads, and the values it reads them as.
+  #:
+  #: yateto puts only attributes that permit among a tensor's `attrs`: each
+  #: allows an optimization and asks for none, so the kernel built as if it
+  #: were absent is correct (yateto's `ExportGenerator`, `TensorAttributes`).
+  #: Being there is what lists a key as safe to ignore, so a key this side
+  #: does not read -- or a value it does not -- is skipped, rather than a
+  #: newer yateto refused for something that may be ignored.  What must not
+  #: be ignored travels otherwise: a field of its own under a new interface
+  #: version, which `read` refuses until this side speaks it, and which it
+  #: then honors or refuses by tensor.
+  #:
+  #: `temporal: 'invariant'` says the data does not change over the time
+  #: loop.  It is read onto the tensor (`Tensor.time_invariant`), for a
+  #: prologue to find the operands it may read; nothing reads it yet.
+  TENSOR_ATTRIBUTES = {'temporal': ('invariant',)}
+
+  @classmethod
+  def _tensor_attrs(cls, name, attrs):
+    """What the description claims about a tensor's data, as far as read here.
+
+    Absent is no claim, and so is what a yateto that predates the field
+    sends.  Something other than a mapping of names is refused: that is a
+    description this side cannot read, not an attribute it may skip.
+    """
+    if attrs is None:
+      return {}
+    if not isinstance(attrs, dict) or not all(isinstance(key, str) for key in attrs):
+      raise NotImplementedError(
+        f'tensor {name}: the description states attrs {attrs!r}, which is not '
+        f'a mapping of attribute names to values.')
+    return {key: value for key, value in attrs.items()
+            if value in cls.TENSOR_ATTRIBUTES.get(key, ())}
 
   @staticmethod
   def _values(values):
@@ -1036,12 +1071,26 @@ class YatetoFrontend:
     Silent about an operand whose elements are spread over several slots:
     what those slots hold is arithmetic on a cell's value, and until
     something computes it there is nothing to offer.
+
+    An offering has one key per kind of request, and the one kind made here
+    is `data` -- with `parts` and `planar` saying how it is packed; yateto
+    also knows `order`.  It runs the other way from a tensor's `attrs`, and
+    so does its rule: an attribute only permits, and a reader may skip one
+    it does not know, while an offering asks for a buffer in another
+    format, so a side that cannot grant one kind refuses the whole offering
+    by name (yateto's `_grantOffering`).  A new kind therefore gets a key of
+    its own; `_format_offering` is where those for buffers the caller fills
+    would be made.
     """
     type(self)._unclaimed = None
     if self._emitter is None:
       return {}
     offerings = {}
     for name, tensor in self._emitter.tensors().items():
+      offer = self._format_offering(name, tensor)
+      if offer is not None:
+        offerings[name] = offer
+        continue
       if tensor.addressing is not Addressing.NONE:
         continue
       if getattr(tensor, 'storage_order', None) is None:
@@ -1053,6 +1102,28 @@ class YatetoFrontend:
                          'parts': int(tensor.storage_parts),
                          'planar': bool(tensor.storage_planar)}
     return offerings
+
+  def _format_offering(self, name, tensor):
+    """Another format for a buffer the caller fills, offered; or None.
+
+    Where such an offer would be made, and none is yet.  The formats in view
+    -- elements held in blocks of several, values scaled by powers of two, a
+    narrower storage type -- change what the caller writes, where `data` is
+    a constant yateto stores for itself.  So the kernel may only read such a
+    format, and this may only offer it, where the caller has said that it
+    takes it: a tensor attribute, one that permits, so that a side ignoring
+    it builds today's kernel.  No caller can say so yet, and None keeps the
+    format the tensor gives itself.
+
+    Each format is a kind of its own -- `blocks`, `scale`, `precision` --
+    never a new meaning of `data` or `order`, so that a side that does not
+    know it refuses it by name rather than grants something else.  And every
+    kernel naming the buffer has to offer the same, since the caller fills
+    one buffer for all of them: yateto sees them all and is where that is
+    checked.  Collected like the rest -- `_rearranged` counts an offer made
+    here, so a caller that never collects one is stopped.
+    """
+    return None
 
   def flop_report(self):
     """The arithmetic this kernel's operations contain, per batch element.
@@ -1099,10 +1170,11 @@ class YatetoFrontend:
     """
     if self._emitter is None:
       return False
-    return any(tensor.addressing is Addressing.NONE
-               and getattr(tensor, 'storage_order', None) is not None
-               and tensor.storage_values() is not None
-               for tensor in self._emitter.tensors().values())
+    return any(self._format_offering(name, tensor) is not None
+               or (tensor.addressing is Addressing.NONE
+                   and getattr(tensor, 'storage_order', None) is not None
+                   and tensor.storage_values() is not None)
+               for name, tensor in self._emitter.tensors().items())
 
   def _claim_check(self):
     """Stop if the last kernel's arrangement was never collected.

@@ -23,7 +23,8 @@ class Tensor:
         data: Union[np.ndarray, dict, None] = None,
         datatype: Datatype = None,
         alignment: int = 0,
-        residence: Residence = Residence.MEMORY):
+        residence: Residence = Residence.MEMORY,
+        attrs: Union[dict, None] = None):
         self.name = None
         self.alias = alias
         self.shape = tuple(shape)
@@ -138,6 +139,16 @@ class Tensor:
         self.spp = spp
         self.datatype = datatype
         self.alignment = alignment
+        #: What the caller states about the data beyond what a kernel is built
+        #: from: the tensor attributes yateto exports, as far as the frontend
+        #: reads them (`DescriptionReader.TENSOR_ATTRIBUTES`).
+        #:
+        #: Each one permits an optimization and asks for none, and nothing in
+        #: the build reads one yet, so a kernel is the same with or without
+        #: them.  On the tensors a frontend makes; one the generator derives --
+        #: a stand-in, a stack, a dense image -- starts without, and whoever
+        #: first needs them there decides what they mean for it.
+        self.attrs = dict(attrs) if attrs else {}
 
         if self.spp is None:
             self.spp = FullSPP(self.shape)
@@ -220,6 +231,16 @@ class Tensor:
         (`basic_types.element_addressing`); None where the batch shares it or
         it is a scalar."""
         return element_addressing(self.addressing)
+
+    @property
+    def time_invariant(self) -> bool:
+        """Whether the caller claims the data does not change over the time loop.
+
+        What a prologue would read: anything that depends on such operands
+        alone can be computed once, ahead of the loop, instead of in every
+        step.
+        """
+        return self.attrs.get('temporal') == 'invariant'
 
     def set_data_flow_direction(self, direction: DataFlowDirection):
         if self.direction is None or self.direction == direction:
