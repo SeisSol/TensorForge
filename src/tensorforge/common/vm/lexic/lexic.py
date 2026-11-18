@@ -436,6 +436,27 @@ class Lexic(ABC):
   def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
     return f'{rhs}'
 
+  # --- buffer resources -----------------------------------------------------
+  # AMD's buffer instructions (`pir.buffers`): a resource's type, the resource
+  # over a buffer of `nbytes` bytes, and the accesses through one, `length`
+  # elements of `datatype` at an element index.  A predicate is `keep`, which
+  # the access takes into its offset rather than into a select or a branch.
+  # None where the target has no such instructions, which is where
+  # `Target.buffer_resources` keeps the pass from asking.
+
+  def buffer_resource_type(self):
+    return None
+
+  def buffer_resource(self, base, nbytes):
+    return None
+
+  def buffer_load(self, resource, index, *, datatype, length=1, keep=None):
+    return None
+
+  def buffer_store(self, resource, index, value, *, datatype, length=1,
+                   keep=None):
+    return None
+
   # --- atomic accumulation --------------------------------------------------
   # Declared here so that every backend answers through one interface, the one
   # the single call site uses.  Declared per backend, the interfaces drift

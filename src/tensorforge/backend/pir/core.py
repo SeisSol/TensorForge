@@ -274,7 +274,8 @@ class TokenType:
 TOKEN = TokenType()
 
 
-IRType = Union[ScalarType, BufferType, TokenType, 'SyncObjectType']
+IRType = Union[ScalarType, BufferType, TokenType, 'SyncObjectType',
+               'ResourceType']
 
 BOOL = ScalarType(Datatype.BOOL)
 INDEX = ScalarType(Datatype.I32)
@@ -977,6 +978,11 @@ class Op:
     LOAD_ASYNC = 'load.async'   # global -> register, ditto
     COMMIT_ASYNC = 'commit.async'   # closes issued copies into one counted group
     WAIT = 'wait'
+    # The descriptor AMD's buffer instructions address global memory through:
+    # a buffer and its size in bytes (`engines.ResourceType`).  Pure -- it
+    # reads no memory, it describes some -- and named by the accesses that go
+    # through it (`resource`, `pir.buffers`).
+    RESOURCE = 'resource'
     # Synchronization and ordering, each an entry of `engines.REGISTRY`,
     # which says what the passes may assume of it and how it is written.
     # `barrier` is the combined form: every participant of its object

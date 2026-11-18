@@ -944,6 +944,16 @@ class AbstractInstruction(ABC):
     if setprio and context.target.backend == 'hip':
       # Behind every pass that moves a statement (`pir.priority`).
       body = pir.set_priority(body, setprio)
+    if options.buffer_transfers and context.target.buffer_resources():
+      # Behind every pass that moves, clones or redirects an access: the
+      # resource an access names is then its base's (`pir.buffers`).
+      buffered: list = []
+      body = pir.buffer_transfers(body, builder.scratch, threads=lanes,
+                                  wave=context.target.hw.vec_unit_length,
+                                  report=buffered)
+      if options.ir_debug:
+        for line in buffered:
+          print(line)
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)

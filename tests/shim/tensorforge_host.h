@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <tuple>
+#include <type_traits>
 
 // --------------------------------------------------------------------------
 // Execution-space keywords and the thread geometry.
@@ -293,6 +294,21 @@ template <int Row, typename T> T movdpp16Kept(T a);
 // rendezvous.  Over the barrier's type, as in the header.
 template <unsigned Waves, typename Barrier> void joinNamedBarrier(Barrier *);
 template <typename Barrier> void syncNamedBarrier(Barrier *);
+
+// The buffer resources (`pir.buffers`): AMDGPU's resource type is opaque
+// here, made over a pointer of either space, and an access through one
+// moves `N` elements of `T`, its guard last.
+struct BufferResource {};
+template <typename Pointer>
+BufferResource bufferResource(Pointer base, std::int32_t bytes);
+template <typename T, std::size_t N>
+using BufferValue = typename std::conditional<N == 1, T, VectorT<T, N>>::type;
+template <typename T, std::size_t N = 1>
+BufferValue<T, N> bufferLoad(BufferResource resource, std::int32_t index,
+                             bool keep = true);
+template <typename T, std::size_t N = 1>
+void bufferStore(BufferResource resource, std::int32_t index,
+                 BufferValue<T, N> value, bool keep = true);
 
 // cuda.h
 //

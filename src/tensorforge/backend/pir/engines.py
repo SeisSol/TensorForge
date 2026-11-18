@@ -349,6 +349,12 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
     TransferEngine('load', (Op.LOAD_ASYNC,), Completion.COUNTER,
                    'a load into registers issued ahead of its use: vmcnt on '
                    "AMD, NVIDIA's scoreboard"),
+    TransferEngine('buffer', (Op.LOAD, Op.STORE), Completion.SYNC,
+                   "AMD's buffer instructions, 4, 8 or 16 bytes a lane "
+                   'through a resource the wave holds (`resource`, '
+                   '`pir.buffers`): an offset past its size reads zero and '
+                   'writes nothing, which is what a predicate becomes; its '
+                   "waits stay the compiler's, as a load's do"),
 )}
 
 #: The class `asyncmem` counts a transfer in, by the kind of completion its
@@ -469,8 +475,34 @@ DERIVED = ('width', 'cache')
 def kept_facts(s: Stmt) -> Tuple:
     """The attributes an access keeps where a pass points it elsewhere and
     drops the rest -- at a register, which takes no hint and no alignment:
-    what a lane moves, which is still its value's."""
+    what a lane moves, which is still its value's.
+
+    Not the buffer engine's (`engine`, `resource`): a register is no buffer.
+    Nor do the passes that point a read at shared memory (`trips`, `shards`)
+    or at the next element's binding (`wrap`) have anything of it to keep or
+    to drop, since the engine is taken behind all of them (`pir.buffers`) --
+    a read moved to the next element and still naming this element's
+    resource would read this element."""
     return tuple((k, v) for k, v in s.attrs if k == 'width')
+
+
+@dataclass(frozen=True)
+class ResourceType:
+    """The type of a buffer resource (`Op.RESOURCE`): what an AMD buffer
+    instruction addresses global memory through -- a base, a size in bytes,
+    and what an access past that size does -- held once for the wave, in
+    four scalar registers.  Spelled by the target
+    (`Lexic.buffer_resource_type`); no part of what a lane's registers hold,
+    so the pressure counts it as nothing, as it does a token.
+
+    ``elem`` is the element of the buffer it is made over, which an access
+    through it counts its index in and reads its words as -- an access
+    through an operand's symbol names no binding whose type would say."""
+
+    elem: Any = None
+
+    def __repr__(self):
+        return 'resource' if self.elem is None else f'resource<{self.elem}>'
 
 
 # --------------------------------------------------------------------------- #
@@ -1292,5 +1324,5 @@ __all__ = [
     'effect_of', 'family', 'fence_stmt', 'lower', 'object_demand',
     'object_of', 'objects', 'set_priority', 'settles', 'spec_of',
     'sync_init', 'sync_object', 'verify_engine', 'wait_counter',
-    'wait_phase',
+    'wait_phase', 'ResourceType',
 ]

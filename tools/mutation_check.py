@@ -95,6 +95,7 @@ PROMISE = Path('src/tensorforge/backend/instructions/compute/promise.py')
 MULTILINEAR = Path('src/tensorforge/backend/instructions/compute/multilinear.py')
 CROSSLANE = Path('src/tensorforge/backend/instructions/compute/crosslane.py')
 TILING = PKG / 'tiling.py'
+BUFFERS = Path('src/tensorforge/backend/pir/buffers.py')
 
 
 def _run_tests(target):
@@ -3611,6 +3612,69 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/dchain.py'),
              '            if any(_reads_or_writes(x, (dest,), dest.obj)\n',
              '            if False and any(_reads_or_writes(x, (dest,), dest.obj)\n', 1)),
+    ]),
+    # AMD's buffer engine: what it takes, where the resource goes, and the
+    # guard in the offset.
+    'buffers': ('tests/test_buffer_transfers.py', [
+        ('a binding the wave does not hold alike taken',
+         sub(BUFFERS, '    if threads is not None and threads >= wave and threads % wave == 0:\n',
+             '    if True:\n', 1)),
+        ('a binding taken at the level its declaration states',
+         sub(BUFFERS, '        for y in self._reads(x):\n',
+             '        for y in ():\n', 1)),
+        ('a hinted access taken',
+         sub(BUFFERS, "REFUSED = ('nontemporal', 'cache', 'other', 'valid', 'head', 'volatile')\n",
+             "REFUSED = ('other', 'valid', 'head', 'volatile')\n", 1)),
+        ('a load with a value of its own under its guard taken',
+         sub(BUFFERS, "REFUSED = ('nontemporal', 'cache', 'other', 'valid', 'head', 'volatile')\n",
+             "REFUSED = ('nontemporal', 'cache', 'valid', 'head', 'volatile')\n", 1)),
+        ('an operand passed by value taken',
+         sub(BUFFERS, '            or _by_value(s.accesses[0].base)):\n',
+             '            or False):\n', 1)),
+        ('an access through the symbol left global',
+         sub(BUFFERS, "        base = (named or {}).get(getattr(base, 'name', None))\n",
+             '        base = None\n', 1)),
+        ('a name declared in a region taken as declared behind it',
+         sub(BUFFERS, '        named = dict(named)\n        out = []\n',
+             '        out = []\n', 1)),
+        ('the resources at the top of the body',
+         sub(BUFFERS, '            out.extend(behind(s.target))\n',
+             '            pass\n', 1)),
+        ('a resource sized in elements',
+         sub(BUFFERS, '                         args=(base, base.type.volume * base.type.elem.size()),\n',
+             '                         args=(base, base.type.volume),\n', 1)),
+        ('a guarded store through the engine under a branch as well',
+         sub(EMIT, '                    and not _folds_predicate(s) and not _through_buffer(s)):\n',
+             '                    and not _folds_predicate(s)):\n', 1)),
+        ('a guarded load through the engine selected as well',
+         sub(EMIT, '        if (s.predicate is not None and _folds_predicate(s)\n'
+                   '                and not _through_buffer(s)):\n',
+             '        if (s.predicate is not None and _folds_predicate(s)):\n', 1)),
+        ('the guard dropped from an access through the engine',
+         sub(EMIT, '        keep = None if s.predicate is None else self.operand(s.predicate)\n'
+                   '        text = None\n',
+             '        keep = None\n        text = None\n', 1)),
+        ('a vector through the engine spelled as one element',
+         sub(HIP_LEXIC, "  return elem if length == 1 else f'{elem}, {length}'\n",
+             '  return elem\n', 1)),
+        ('the engine whatever the option',
+         sub(ABSTR, '    if options.buffer_transfers and context.target.buffer_resources():\n',
+             '    if context.target.buffer_resources():\n', 1)),
+        ('buffer resources on every target',
+         sub(TARGET, "        return self.backend == 'hip' and self.hw.vendor == 'amd'\n\n"
+                     '    def native_atomic(',
+             '        return True\n\n    def native_atomic(', 1)),
+        ('a guard that keeps every lane',
+         sub(HIP, '         (keep ? 0u : BufferOutOfRange);\n',
+             '         0u;\n', 1)),
+        ('the words of a load converted rather than reinterpreted',
+         sub(HIP, '    return __builtin_bit_cast(\n'
+                  '        V, __builtin_amdgcn_raw_buffer_load_b32(resource, offset, 0, 0));\n',
+             '    return static_cast<V>(\n'
+             '        __builtin_amdgcn_raw_buffer_load_b32(resource, offset, 0, 0));\n', 1)),
+        ('gfx11 resources without the raw range check',
+         sub(HIP, '#elif defined(__GFX11__)\n  constexpr std::int32_t Flags = 0x31004000;\n',
+             '#elif defined(__GFX11__)\n  constexpr std::int32_t Flags = 0x01004000;\n', 1)),
     ]),
 }
 

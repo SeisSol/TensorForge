@@ -47,6 +47,14 @@ def _folds_predicate(s: Stmt) -> bool:
     return bool(s.target) or s.op in Op.DECLARING
 
 
+def _through_buffer(s: Stmt) -> bool:
+    """Is `s` an access through the buffer engine (`pir.buffers`)?  Its
+    predicate is part of its offset -- past the resource, where an access
+    reads zero and writes nothing -- so a store under one needs no branch,
+    and a load no select."""
+    return s.attr('engine') == 'buffer'
+
+
 def _unwrap(expr: str) -> str:
     """Drop one redundant paren level: `Writer.If` adds its own."""
     if not (expr.startswith('(') and expr.endswith(')')):
@@ -521,6 +529,10 @@ class Emitter:
             return _text_category(text, 'other'), []
         if op == Op.RAWBLOCK:
             return 'branch', []
+        if op == Op.RESOURCE:
+            # A buffer resource is an address computed once, as a pointer
+            # binding's is.
+            return 'int', []
         spec = engines.spec_of(op)
         if spec is not None:
             return spec.pipe, []
@@ -619,6 +631,13 @@ class Emitter:
                     restrict=Qual.RESTRICT in quals)
             const = 'const ' if getattr(t, 'readonly', False) else ''
             return f'{const}{t.elem.ctype()}*'
+        if isinstance(t, engines.ResourceType):
+            lex = self._lexic()
+            spelled = None if lex is None else lex.buffer_resource_type()
+            if spelled is None:
+                raise IRError('a buffer resource on a target without buffer '
+                              'instructions (`Target.buffer_resources`)')
+            return spelled
         raise IRError(f'cannot render type {t!r}')
 
     # -- lexic ------------------------------------------------------------- #
@@ -923,8 +942,12 @@ class Emitter:
         result, which computes the same thing and reads differently to a
         compiler that carries the predicate backwards --- see
         `split_predicated_load`, the only caller that asks for it.
+
+        An access through the buffer engine has its predicate in `expr`
+        already (`_buffer_access`).
         """
-        if s.predicate is not None and _folds_predicate(s):
+        if (s.predicate is not None and _folds_predicate(s)
+                and not _through_buffer(s)):
             other = s.attr('other')
             other = (self.operand(other) if other is not None
                      else self.zero(v.type, v))
@@ -1005,6 +1028,34 @@ class Emitter:
         if volatile:
             return f'*(volatile {self.ctype(t)}*)&{access}'
         return access
+
+    def _buffer_access(self, s: Stmt, addr: str, t,
+                       value: Optional[str] = None) -> str:
+        """`s` through the buffer engine (`pir.buffers`): a load of a value
+        of type `t` at element `addr`, or where `value` is given the store of
+        it -- through the resource `s` names, with its predicate as the
+        access's guard.  The element is the buffer's, which the resource
+        says and a stored number of another type converts to as an
+        assignment converts it; the count is the value's."""
+        lex = self._lexic()
+        resource = s.attr('resource')
+        datatype = resource.type.elem
+        length = getattr(t, 'length', None) or 1
+        keep = None if s.predicate is None else self.operand(s.predicate)
+        text = None
+        if lex is not None and value is None:
+            text = lex.buffer_load(self.operand(resource), addr,
+                                   datatype=datatype, length=length,
+                                   keep=keep)
+        elif lex is not None:
+            text = lex.buffer_store(self.operand(resource), addr, value,
+                                    datatype=datatype, length=length,
+                                    keep=keep)
+        if text is None:
+            raise IRError(f'a {s.op} through the buffer engine on a target '
+                          f'without buffer instructions '
+                          f'(`Target.buffer_resources`)')
+        return text
 
     def initializer(self, v: Value, name: str, expr: str) -> str:
         """The declaration that starts a loop-carried value at `expr`.
@@ -1128,7 +1179,7 @@ class Emitter:
                     at = end
                     continue
             if (s.predicate is not None and s.op != Op.YIELD
-                    and not _folds_predicate(s)):
+                    and not _folds_predicate(s) and not _through_buffer(s)):
                 with self.writer.If(self.operand(s.predicate)):
                     with self._diverging(s.predicate):
                         self._emit_stmt(s, yield_to)
@@ -1385,12 +1436,31 @@ class Emitter:
               f'{s.attr("init", "")};')
             return
 
+        if op == Op.RESOURCE:
+            lex = self._lexic()
+            text = (None if lex is None else
+                    lex.buffer_resource(self.operand(s.args[0]), s.args[1]))
+            if text is None:
+                raise IRError('a buffer resource on a target without buffer '
+                              'instructions (`Target.buffer_resources`)')
+            self.declare(s.target[0], text, s)
+            return
+
         if op == Op.LOAD:
             lex = self._lexic()
 
             v = s.target[0]
             self._pin_load(s)
             addr = self.address(s.args[0], s.args[1:])
+            if _through_buffer(s):
+                # No select and no clamped address: the predicate is the
+                # access's own (`_buffer_access`).
+                named = s.attr('extern')
+                self.declare(v, self._buffer_access(s, addr, v.type), s,
+                             name=named)
+                if named:
+                    self.bind(v, named)
+                return
             # Clamp the address and hoist the load out of the select, where the
             # target asks for it: the read then happens in every lane, at an
             # address the predicate keeps in bounds, and the predicate decides
@@ -1452,6 +1522,9 @@ class Emitter:
             addr = self.address(s.args[0], s.args[2:])
             val = s.args[1]
             vt = val.type if isinstance(val, Value) else None
+            if _through_buffer(s):
+                w(self._buffer_access(s, addr, vt, self.operand(val)))
+                return
             access = self.elem_access(s.args[0], addr, vt,
                                       s.attr('align') == 'relaxed',
                                       bool(s.attr('volatile')))
