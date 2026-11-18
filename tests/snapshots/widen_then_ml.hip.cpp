@@ -1,5 +1,5 @@
 // === base name ===
-kernel_cb42b70e47781d14
+kernel_356f45903ab34e7d
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_cb42b70e47781d14 = {{32, 8, 1}, 32, 20, 1, 8, 2048, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_cb42b70e47781d14(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_cb42b70e47781d14(const float * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, const double * m2, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_356f45903ab34e7d = {{32, 8, 1}, 32, 20, 1, 8, 2048, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_356f45903ab34e7d(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_356f45903ab34e7d(const float * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, const double * m2, size_t numElements0, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_cb42b70e47781d14(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_356f45903ab34e7d(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 8, 1);
@@ -67,14 +67,14 @@ tensorforge::LaunchConfig launch_config_kernel_cb42b70e47781d14(size_t numElemen
         int device, smCount, blocksPerSM;
         CHECK_RES(hipGetDevice(&device));
         CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
-        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_cb42b70e47781d14, block.x * block.y * block.z, 512 * sizeof(float)));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_356f45903ab34e7d, block.x * block.y * block.z, 512 * sizeof(float)));
         CHECK_ERR;
         int gfxMajor = 0;
         CHECK_RES(hipDeviceGetAttribute(&gfxMajor, hipDeviceAttributeComputeCapabilityMajor, device));
         if (gfxMajor >= 10 && (512 * sizeof(float)) > 0) {
           int ldsPerMP = 0, blocksNoLds = 0;
           CHECK_RES(hipDeviceGetAttribute(&ldsPerMP, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device));
-          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_cb42b70e47781d14, block.x * block.y * block.z, 0));
+          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_356f45903ab34e7d, block.x * block.y * block.z, 0));
           const int blocksByLds = static_cast<int>((2 * static_cast<std::size_t>(ldsPerMP)) / (512 * sizeof(float)));
           blocksPerSM = std::max(blocksPerSM, std::min(blocksNoLds, blocksByLds));
         }
@@ -97,13 +97,13 @@ tensorforge::LaunchConfig launch_config_kernel_cb42b70e47781d14(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_cb42b70e47781d14(const float * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, const double * m2, size_t numElements0, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_cb42b70e47781d14(numElements0, streamPtr);
+void launcher_kernel_356f45903ab34e7d(const float * m0, size_t m0_extraOffset, double * m1, size_t m1_extraOffset, const double * m2, size_t numElements0, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_356f45903ab34e7d(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_cb42b70e47781d14), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
+        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_356f45903ab34e7d), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
         CHECK_ERR;
         shmemsizeset = true;
       }
@@ -113,7 +113,7 @@ void launcher_kernel_cb42b70e47781d14(const float * m0, size_t m0_extraOffset, d
   tensorforge::SpacePtr<double, tensorforge::GlobalMemspace> m1Arg = (tensorforge::SpacePtr<double, tensorforge::GlobalMemspace>)m1;
   tensorforge::SpacePtr<const double, tensorforge::ConstantMemspace> m2Arg = (tensorforge::SpacePtr<const double, tensorforge::ConstantMemspace>)m2;
   tensorforge::SpacePtr<const unsigned, tensorforge::GlobalMemspace> flags0Arg = (tensorforge::SpacePtr<const unsigned, tensorforge::GlobalMemspace>)flags0;
-  hipLaunchKernelGGL(kernel_kernel_cb42b70e47781d14, grid, block, config.sharedMemBytes, stream, m0Arg, m0_extraOffset, m1Arg, m1_extraOffset, m2Arg, numElements0, flags0Arg);
+  hipLaunchKernelGGL(kernel_kernel_356f45903ab34e7d, grid, block, config.sharedMemBytes, stream, m0Arg, m0_extraOffset, m1Arg, m1_extraOffset, m2Arg, numElements0, flags0Arg);
   CHECK_ERR;
 }
 
@@ -121,7 +121,7 @@ void launcher_kernel_cb42b70e47781d14(const float * m0, size_t m0_extraOffset, d
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_cb42b70e47781d14(tensorforge::SpacePtr<const float, tensorforge::GlobalMemspace> m0, size_t m0_extraOffset, tensorforge::SpacePtr<double, tensorforge::GlobalMemspace> m1, size_t m1_extraOffset, tensorforge::SpacePtr<const double, tensorforge::ConstantMemspace> m2, size_t numElements0, tensorforge::SpacePtrRestrict<const unsigned, tensorforge::GlobalMemspace> flags0) {
+ kernel_kernel_356f45903ab34e7d(tensorforge::SpacePtr<const float, tensorforge::GlobalMemspace> m0, size_t m0_extraOffset, tensorforge::SpacePtr<double, tensorforge::GlobalMemspace> m1, size_t m1_extraOffset, tensorforge::SpacePtr<const double, tensorforge::ConstantMemspace> m2, size_t numElements0, tensorforge::SpacePtrRestrict<const unsigned, tensorforge::GlobalMemspace> flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     using namespace tensorforge::literals;
@@ -213,7 +213,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v82_acc)
           : "v"(v100_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -229,7 +228,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v83_acc)
           : "v"(v101_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -245,7 +243,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v84_acc)
           : "v"(v102_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -261,7 +258,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v85_acc)
           : "v"(v103_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -277,7 +273,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v86_acc)
           : "v"(v104_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -293,7 +288,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v87_acc)
           : "v"(v105_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -309,7 +303,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v88_acc)
           : "v"(v106_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -325,7 +318,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v89_acc)
           : "v"(v107_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );
@@ -341,7 +333,6 @@ __launch_bounds__(256)
           "v_fmac_f64_dpp %0, %1, %9 row_newbcast:7 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %10 row_newbcast:8 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
           "v_fmac_f64_dpp %0, %1, %11 row_newbcast:9 row_mask:0xf bank_mask:0xf bound_ctrl:1\n\t"
-          "s_nop 1\n\t"
           : "+&v"(v90_acc)
           : "v"(v108_bc), "v"(v63_data), "v"(v65_data), "v"(v67_data), "v"(v69_data), "v"(v71_data), "v"(v73_data), "v"(v75_data), "v"(v77_data), "v"(v79_data), "v"(v81_data)
           );

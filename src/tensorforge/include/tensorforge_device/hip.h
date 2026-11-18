@@ -435,7 +435,9 @@ __device__ __forceinline__ T swap(T value) {
 // reads a VGPR two wait states after a VALU write of it at the earliest: an
 // accumulator of a block fed straight into the MFMA behind it made SeisSol's
 // elastic F32 `derivative` at order 5 wrong in its largest number by 7 % on
-// MI300A and 15 % on MI210.  So each waits behind itself too (`DPPDONE`).
+// MI300A and 15 % on MI210.  So each waits behind itself too (`DPPDONE`).  A
+// block of the generator's waits behind itself only in a kernel that issues
+// an MFMA (`Options.amd_dpp_waits`); a call here cannot tell, and waits.
 #ifdef __GFX9__
 #define DPPWAIT "s_nop 1\n\t"
 #define DPPDONE "\n\ts_nop 1"

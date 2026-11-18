@@ -135,6 +135,18 @@ def parse_crosslane_pins(text: str) -> str:
 #: What `Options.crosslane_pins` takes.
 CROSSLANE_PINS = ('use', 'definition', 'none')
 
+
+def parse_dpp_waits(text: str) -> str:
+  """`needed` or `always` (`Options.amd_dpp_waits`)."""
+  value = text.strip().lower()
+  if value not in DPP_WAITS:
+    raise ValueError(f'expected one of {DPP_WAITS}, got {text!r}')
+  return value
+
+
+#: What `Options.amd_dpp_waits` takes.
+DPP_WAITS = ('needed', 'always')
+
 _DEFAULT_PARSERS = {bool: parse_bool, int: parse_int, str: parse_str}
 
 
@@ -1456,6 +1468,51 @@ declare('amd_moved_pins',
             'order-6 `localFluxAll` in double precision at 16 lanes spilled '
             '812 B on gfx942 and ran four times as long: LLVM had the moves '
             'ahead and the accumulators in AGPRs.')
+
+declare('amd_dpp_waits',
+        default='needed',
+        env='TF_AMD_DPP_WAITS',
+        parse=parse_dpp_waits,
+        doc='Where the fused DPP FMAs of CDNA 2 and 3 -- inline assembly, a '
+            'block of up to 32 products the compiler\'s hazard recognizer does '
+            'not look into (`primitives.amd.dpp_block`) -- wait for the '
+            'hazards around them.  `needed`: two wait states in front of '
+            'every block, where the compiler may put anything; behind a block '
+            'only in a kernel that issues a matrix instruction, the one reader '
+            'of a block\'s result hipcc does not wait for by itself; and a run '
+            'kept whole where it broadcasts an accumulator it wrote, with a '
+            'wait inside only where that write is fewer than two wait states '
+            'back.  `always`: two wait states in front of and behind every '
+            'block, and a run cut in front of such a broadcast, as before.  '
+            'Over SeisSol\'s elastic kernels at orders 4 to 8 and viscoelastic '
+            'ones at 4 and 6, the double-precision kernels lose half their '
+            'waits (13444 to 6722 on gfx90a, gfx942 and gfx950) and the '
+            'single-precision ones, which issue MFMAs, none; registers and '
+            'occupancy stay, every result on MI300A is the same bit for bit, '
+            'and the double-precision kernels there take 0.8 % less time at 16 '
+            'lanes and 0.7 % at 32 (geometric means; the order-8 `volume` '
+            '-2.1 and -2.8 %, `localFluxAll` -0.7 and -2.7 %, the viscoelastic '
+            'order-6 `volumeExt` -2.8 % at 16; none more than 1.6 % slower, '
+            'less than the single-precision kernels, unchanged, move between '
+            'two builds of different names).')
+
+declare('amd_dpp_block_operands',
+        default=0,
+        env='TF_AMD_DPP_BLOCK_OPERANDS',
+        parse=parse_int,
+        doc='Under `amd_dpp_waits=needed`, let a run of fused DPP products go '
+            'on past 32 as one block while it reads and writes no more '
+            'distinct operands than this, one wait in front of the run instead '
+            'of one every 32 products; 0 cuts every run at 32.  A block holds '
+            'all its '
+            'operands in registers at once.  At 44, as many as the largest '
+            'blocks of 32 in SeisSol\'s kernels take, another 616 of their 16770 '
+            'waits go, but the registers move in 22 of the 80 kernels on '
+            'gfx942, and the occupancy drops in two (`neighboringFlux` at 16 '
+            'lanes, order 4 in double precision 4 to 3 waves, order 8 in '
+            'single 2 to 1); on MI300A the double-precision kernels gain 0.4 % '
+            'at 16 lanes and 0.2 % at 32 over `needed`, within what the '
+            'unchanged kernels move between builds.  Off.')
 
 declare('reread_over_budget',
         default=True,
