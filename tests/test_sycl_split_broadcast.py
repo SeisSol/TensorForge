@@ -38,7 +38,9 @@ def test_more_blocks_than_asked_read_at_an_index_per_work_item():
 
 
 def test_zero_keeps_the_index_per_work_item():
-    lexic = _lexic(sycl_split_broadcast=0)
+    # The sub-group runs (`spmd_block_runs`, on by default) bring the same
+    # header; off here, so that the split is the only one that could.
+    lexic = _lexic(sycl_split_broadcast=0, spmd_block_runs=False)
     assert 'select_from_group' in lexic.broadcast('v', 3, 8)
     assert 'tensorforge_device/sycl_spmd.h' not in lexic.get_headers()
 
