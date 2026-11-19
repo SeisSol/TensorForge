@@ -57,7 +57,7 @@ def test_every_engine_op_is_a_name_pir_knows():
     one has a lowering for a target it does not name (`'*'`)."""
     assert set(engines.REGISTRY) == {
         Op.BARRIER, Op.SYNC_INIT, Op.ARRIVE, Op.WAIT_PHASE, Op.FENCE,
-        Op.WAIT_COUNTER, Op.SET_PRIORITY}
+        Op.WAIT_COUNTER, Op.SET_PRIORITY, Op.MATRIX_MAC}
     for name, spec in engines.REGISTRY.items():
         assert name in Op.KNOWN and spec.name == name
         assert '*' in spec.lower

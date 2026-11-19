@@ -345,7 +345,7 @@ def test_the_matmul_emits_no_raw_statements(enabled):
     Every operand in this path is a value: the accessors hand back the value
     instead of a name to write into, the accumulator slots and the padding
     fragments are `declare`, the warp syncs are `barrier`, the staging store
-    is `store` over a `pack`, and `mma.sync` is `asm_stmt`.
+    is `store` over a `pack`, and `mma.sync` is the matrix op (`matrix_mac`).
 
     A count, not a list, because the list would need re-recording on every
     unrelated change.  Zero is the only number here that means anything: one

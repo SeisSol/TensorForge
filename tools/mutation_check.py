@@ -3928,6 +3928,81 @@ GROUPS = {
              'intel_esimd::simd<T, Width * Height> blockLoad2d(const T *, unsigned, unsigned,\n'
              '                                                 int, int) {\n', 1)),
     ]),
+    # The matrix op (`Op.MATRIX_MAC`) on NVIDIA's engines: what it states,
+    # the inline PTX the registry writes it as, and the figures read off it.
+    'matrixnv': ('tests/test_matrix_mac.py', [
+        ('the instruction named with D and A swapped',
+         sub(ENGINES, "    return (f'mma.sync.aligned.m{m}n{n}k{k}.row.col.{_PTX_TYPES[d]}.'\n"
+                      "            f'{_PTX_TYPES[a]}.{_PTX_TYPES[b]}.{_PTX_TYPES[c]}')\n",
+             "    return (f'mma.sync.aligned.m{m}n{n}k{k}.row.col.{_PTX_TYPES[a]}.'\n"
+             "            f'{_PTX_TYPES[d]}.{_PTX_TYPES[b]}.{_PTX_TYPES[c]}')\n", 1)),
+        ('C written as an output alone',
+         sub(ENGINES, "    operands = ([(f'+{acc}', v) for v in c] + [(reg, v) for v in a]\n",
+             "    operands = ([(f'={acc}', v) for v in c] + [(reg, v) for v in a]\n", 1)),
+        ('D numbered from A',
+         sub(ENGINES, '    d = group(len(c), 0)\n', '    d = group(len(c), len(a))\n', 1)),
+        ('FP64 operands in 32-bit registers',
+         sub(ENGINES, "    acc, reg = ('d', 'd') if wide else ('f', 'r')\n",
+             "    acc, reg = ('d', 'r') if wide else ('f', 'r')\n", 1)),
+        ('an FP64 instruction one issue on sm_100',
+         sub(EMIT, '        return max(1, (m * n * k) // (8 * 8 * 4))\n',
+             '        return 1\n', 1)),
+        ('sm_90 counting DMMA as eight',
+         sub(EMIT, "        if (hw is None or getattr(hw, 'family', None) != 'nvidia'\n"
+                   "                or (hw.sm_level() or 0) < 100):\n",
+             "        if (hw is None or getattr(hw, 'family', None) != 'nvidia'\n"
+             "                or (hw.sm_level() or 0) < 90):\n", 1)),
+        ('the matrix op no work',
+         sub(EMIT, '            if op == Op.MATRIX_MAC and engines.matrix_engine(s).work:\n',
+             '            if False:\n', 1)),
+        ('the issues past the first left out of the code',
+         sub(EMIT, '        if op == Op.MATRIX_MAC:\n'
+                   '            self._record_code_units(self._issues(s) - 1)\n',
+             '        if False:\n'
+             '            self._record_code_units(self._issues(s) - 1)\n', 1)),
+        ('the issue category lost',
+         sub(ENGINES, "def _matrix(s: Stmt) -> str:\n    return 'matrix'\n",
+             "def _matrix(s: Stmt) -> str:\n    return 'other'\n", 1)),
+        ('C not declared as read and written',
+         sub(BUILD, '        accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER,\n'
+                    '                                base=w) for w in c)\n',
+             '        accesses = ()\n', 1)),
+        ('the accumulators left unpinned',
+         sub(BUILD, "            self._require_addressable(w, 'matrix.mac')\n"
+                    '            self.pin(w)\n',
+             "            self._require_addressable(w, 'matrix.mac')\n", 1)),
+        ('the op made movable',
+         sub(BUILD, '            movable=engines.movable_of(Op.MATRIX_MAC, attrs),\n',
+             '            movable=True,\n', 1)),
+        ('the term left off the op',
+         sub(BUILD, '        if term is not None:\n'
+                    "            attrs += (('term', tuple(term)),)\n",
+             '        if False:\n'
+             "            attrs += (('term', tuple(term)),)\n", 1)),
+        ('the collective left off the op',
+         sub(BUILD, '        if found.collective is not None:\n'
+                    "            attrs += (('collective', found.collective),)\n",
+             '        if False:\n'
+             "            attrs += (('collective', found.collective),)\n", 1)),
+        ('the op checked by its slots alone',
+         sub(ENGINES, '    if spec.check is not None:\n        diag.extend(spec.check(s))\n',
+             '    if False:\n        diag.extend(spec.check(s))\n', 1)),
+        ('written in place and declared as writing nothing',
+         sub(ENGINES, "    if op == Op.MATRIX_MAC and dict(attrs).get('in_place'):\n"
+                      '        return Effect.WRITE\n',
+             "    if op == Op.MATRIX_MAC and dict(attrs).get('in_place'):\n"
+             '        return Effect.NONE\n', 1)),
+        ('the layouts of A and D swapped',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '            self._layouts = (a_fragment_bits(self), None,\n'
+             '                             d_fragment_bits(self))\n',
+             '            self._layouts = (d_fragment_bits(self), None,\n'
+             '                             a_fragment_bits(self))\n', 1)),
+        ('TF32 issued as DMMA',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             "_ENGINES = {MMAMode.TF32: ('mma_sync', (Datatype.TF32, Datatype.TF32,\n",
+             "_ENGINES = {MMAMode.TF32: ('dmma', (Datatype.TF32, Datatype.TF32,\n", 1)),
+    ]),
 }
 
 

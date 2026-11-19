@@ -994,6 +994,11 @@ class Op:
     FENCE = 'fence'                 # order the schedule, memory, or both
     WAIT_COUNTER = 'wait.counter'   # wait on a hardware completion counter
     SET_PRIORITY = 'set.priority'   # the wave's issue priority from here on
+    # D = A * B + C on the fragments of a matrix engine, a collective of the
+    # wave (`engines.MATRIX_ENGINES`): the fragments are values, D the
+    # result -- or C itself, written in place, where the instruction
+    # accumulates into its operand (`mma.sync`'s `"+f"`).
+    MATRIX_MAC = 'matrix.mac'
     CALL = 'call'
     DECLARE = 'declare'     # `Ty name{};` -- a definition with no initializer
     ACCUM = 'accum'         # `target += value;` -- in-place, no result

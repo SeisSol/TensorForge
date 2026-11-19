@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: MIT
 """Inline assembly whose operands are values, not baked-in names.
 
-`mma.sync` has no intrinsic, so the NVIDIA path emits PTX directly.  That does
-not make it opaque.  What the statement reads and writes is exactly as
-knowable as for any other vendor primitive --- the operands go in as values,
-the ones with a read-write or write-only constraint go in as declared register
-accesses, and two `mma.sync` calls on different accumulators then provably do
-not conflict.
+An instruction with no intrinsic is written as assembly.  That does not make
+it opaque.  What the statement reads and writes is exactly as knowable as for
+any other vendor primitive --- the operands go in as values, the ones with a
+read-write or write-only constraint go in as declared register accesses, and
+two statements on different registers then provably do not conflict.
+`mma.sync`, the instruction this was written for, is a matrix op now
+(`Op.MATRIX_MAC`, `tests/test_matrix_mac.py`), written as the same assembly.
 
 Raw text with the operand names interpolated would have two consequences
 beyond the opacity count: the values it named would have no use edge, so
@@ -126,12 +127,25 @@ def test_the_statement_is_pinned():
 
 def test_it_is_not_a_second_op():
     """`Op.CALL`, so the passes have one set of rules to know rather than two
-    that must agree."""
+    that must agree -- and not the matrix op either, which is an engine's
+    instruction and states it: assembly is only text with operands."""
     b = builder()
     c = b.declare(hint='c')
     b.asm_stmt('"mma "\n"{%0};"', [('+f', c)])
     ops = {s.op for s, _ in walk(b.finish())}
-    assert Op.CALL in ops
+    assert Op.CALL in ops and Op.MATRIX_MAC not in ops
+
+
+def test_assembly_is_no_matrix_work():
+    """The issue category and the work of a matrix instruction are read off
+    the matrix op; assembly is text, and counts as other code."""
+    from tensorforge.backend.pir.emit import Emitter as _Emitter
+    b = builder()
+    c = b.declare(hint='c')
+    stmt = b.asm_stmt('"mma "\n"{%0};"', [('+f', c)])
+    emitter = _Emitter(lambda line: None)
+    assert emitter._mix_category(stmt)[0] == 'other'
+    assert emitter._issues(stmt) == 1
 
 
 # --------------------------------------------------------------------------- #

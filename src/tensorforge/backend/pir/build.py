@@ -676,12 +676,14 @@ class IRBuilder:
                  *, movable: bool = False) -> Stmt:
         """Inline assembly whose operands are values, not baked-in names.
 
-        `mma.sync` has no intrinsic, so the NVIDIA path has to emit PTX
-        directly.  That does not make it opaque.  What the statement reads and
-        writes is exactly as knowable as for any other vendor primitive: the
-        operands go in as values, the ones with a read-write or write-only
-        constraint go in as declared register accesses, and two `mma.sync`
-        calls on different accumulators then provably do not conflict.
+        An instruction with no intrinsic has to be written as assembly.  That
+        does not make it opaque.  What the statement reads and writes is
+        exactly as knowable as for any other vendor primitive: the operands
+        go in as values, the ones with a read-write or write-only constraint
+        go in as declared register accesses, and two statements on different
+        registers then provably do not conflict.  (`mma.sync`, which this
+        was written for, is a matrix op now, `matrix_mac`, and written as
+        such assembly by the registry: `engines.asm_text`.)
 
         ``operands`` is ordered, `(constraint, value)`, outputs and read-write
         operands first.  That order is not a convention, it is how the
@@ -694,7 +696,10 @@ class IRBuilder:
 
         Not `Op.ASM`: the effects are `Op.CALL`'s effects and the only
         difference is the rendering, so a second op would be a second set of
-        rules for the passes to learn.
+        rules for the passes to learn.  An instruction that is more than its
+        text -- a matrix instruction, whose engine, shape and collective the
+        metrics and the passes read -- is an op of the engines registry
+        instead.
         """
         seen_input = False
         for constraint, _ in operands:
@@ -726,6 +731,57 @@ class IRBuilder:
             accesses=accesses,
             attrs=(('asm', template),
                    ('constraints', tuple(c for c, _ in operands))))
+
+    def matrix_mac(self, engine: str, shape: Tuple[int, int, int],
+                   types: Tuple[Datatype, Datatype, Datatype, Datatype],
+                   a: Sequence[Operand], b: Sequence[Operand],
+                   c: Sequence[Operand], *, layouts: Optional[Tuple] = None,
+                   term: Optional[Tuple[int, int]] = None,
+                   modifiers: Tuple = ()) -> Stmt:
+        """D = A * B + C on the matrix engine `engine`
+        (`engines.MATRIX_ENGINES`), written into C in place: the registers
+        of the fragments as values, A's, B's and C's in the order the
+        instruction takes them, `shape` (m, n, k), `types` the elements of
+        A, B, C and D.
+
+        In place, as `mma.sync` accumulates: C's registers are read and
+        written, and so declared -- a read and a write of each, in the
+        register space -- and pinned, as an operand an instruction writes
+        through has to be.  The statement allocates no value, which is what
+        the instruction it replaces allocated.  Pinned too: one instruction
+        of the wave together (`collective`), which no pass reorders.
+
+        `layouts` are the fragment layouts of A, B and D where the vendor
+        states them (`BitLayout`, None where not), `term` the halves of A
+        and B a split product multiplies (0 the upper, 1 the lower),
+        `modifiers` the vendor's own, as `(name, value)` pairs.
+        """
+        found = engines.MATRIX_ENGINES.get(engine)
+        if found is None:
+            raise IRError(f'a matrix op on engine {engine!r}; there are '
+                          f'{", ".join(sorted(engines.MATRIX_ENGINES))}')
+        a, b, c = tuple(a), tuple(b), tuple(c)
+        for w in c:
+            self._require_addressable(w, 'matrix.mac')
+            self.pin(w)
+        accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER,
+                                base=w) for w in c)
+        attrs = (('engine', engine), ('shape', tuple(shape)),
+                 ('types', tuple(types)),
+                 ('fragments', (len(a), len(b), len(c))), ('in_place', True))
+        if layouts is not None:
+            attrs += (('layouts', tuple(layouts)),)
+        if term is not None:
+            attrs += (('term', tuple(term)),)
+        if modifiers:
+            attrs += (('modifiers', tuple(modifiers)),)
+        if found.collective is not None:
+            attrs += (('collective', found.collective),)
+        return self._emit_op(
+            Op.MATRIX_MAC, (), a + b + c, pure=False,
+            movable=engines.movable_of(Op.MATRIX_MAC, attrs),
+            effect=engines.effect_of(Op.MATRIX_MAC, attrs),
+            accesses=accesses, attrs=attrs)
 
     def _require_addressable(self, value: Operand, callee: str) -> None:
         """A written argument has to be something that has an address.

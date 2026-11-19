@@ -84,6 +84,8 @@ from enum import Enum
 from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
                     Optional, Sequence, Tuple)
 
+from tensorforge.common.basic_types import Datatype
+
 from .core import (Access, Effect, IRError, MemSpace, Op, Participants, Stmt,
                    Uniformity, Value, walk_stmts)
 
@@ -739,8 +741,10 @@ class OpSpec:
     kind of completion it waits for.  ``units`` is what it adds to the code
     count (`Emitter._record_code`), ``pipe`` the category `analysis.pipeline`
     counts its issue under -- the ones the statements it replaces were
-    counted as, so that no figure moves.  ``lower`` maps a backend family
-    (`family`) to its lowering, `'*'` for every other.
+    counted as, so that no figure moves -- or a function of the statement
+    where the category is one of its shape (`pipe_of`).  ``lower`` maps a
+    backend family (`family`) to its lowering, `'*'` for every other;
+    ``check`` is what `verify_engine` asks of a statement beyond its slots.
     """
 
     name: str
@@ -752,10 +756,11 @@ class OpSpec:
     retires: Optional[Completion]
     settles: bool
     units: int
-    pipe: str
+    pipe: Any
     lower: Mapping[str, Lowering]
     hazards: Tuple[Hazard, ...] = ()
     arrival: Optional[Uniformity] = None
+    check: Optional[Callable[[Stmt], List[str]]] = None
 
     def lowering(self, fam: str) -> Lowering:
         got = self.lower.get(fam, self.lower.get('*'))
@@ -1123,6 +1128,173 @@ def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
 
 
 # --------------------------------------------------------------------------- #
+# Matrix engines
+# --------------------------------------------------------------------------- #
+
+def asm_text(template: str, operands: Sequence[Tuple[str, Any]],
+             name: Callable) -> str:
+    """Inline assembly: `template`, then the outputs and the inputs of
+    `operands` -- `(constraint, value)`, outputs first, which is how the
+    assembler numbers them -- each value spelled by `name`."""
+    outs = ', '.join(f'"{c}"({name(v)})' for c, v in operands
+                     if c.startswith(('=', '+')))
+    ins = ', '.join(f'"{c}"({name(v)})' for c, v in operands
+                    if not c.startswith(('=', '+')))
+    return f'asm({template}\n: {outs}\n: {ins}\n);'
+
+
+def fragments(s: Stmt) -> Tuple[Tuple[Any, ...], Tuple[Any, ...],
+                                Tuple[Any, ...]]:
+    """The A, B and C fragments of a `MATRIX_MAC`, the registers of each in
+    the order the instruction takes them."""
+    na, nb, nc = s.attr('fragments')
+    return (s.args[:na], s.args[na:na + nb],
+            s.args[na + nb:na + nb + nc])
+
+
+#: The PTX type of an `mma.sync` operand, by what it holds.
+_PTX_TYPES = {Datatype.TF32: 'tf32', Datatype.F32: 'f32',
+              Datatype.F64: 'f64', Datatype.I8: 's8', Datatype.I32: 's32'}
+
+
+def mma_sync_name(shape: Tuple[int, int, int],
+                  types: Tuple[Any, Any, Any, Any]) -> str:
+    """The `mma.sync` instruction of `shape` (m, n, k) over `types` (A, B,
+    C, D): A row-major and B column-major, as every entry of the NVIDIA
+    path takes them (`primitives.nvidia.INSTRS`)."""
+    m, n, k = shape
+    a, b, c, d = types
+    return (f'mma.sync.aligned.m{m}n{n}k{k}.row.col.{_PTX_TYPES[d]}.'
+            f'{_PTX_TYPES[a]}.{_PTX_TYPES[b]}.{_PTX_TYPES[c]}')
+
+
+def _lower_mma_sync(s: Stmt, env: Spelling) -> Lowered:
+    """`mma.sync` as inline PTX: C read and written in place, under `"+f"`
+    (`"+d"` for FP64), and so listed once -- as D, at `%0` on -- and named
+    again where the instruction reads C; A and B in 32-bit registers
+    (`"r"`, a TF32 half each) or in FP64 ones (`"d"`).
+
+    Listing the accumulator under `"=f"` and again under `"f"` would state
+    two unrelated operands that happen to name one C++ lvalue, and nothing
+    would then make the compiler give them one register: it could read the
+    accumulator from one and write the product to another, dropping the
+    accumulation.  So there is no form but the one in place."""
+    if not s.attr('in_place'):
+        raise IRError('mma.sync accumulates into its operand: a MATRIX_MAC '
+                      'of it is in place')
+    a, b, c = fragments(s)
+    types = s.attr('types')
+    if types[3] not in (Datatype.F32, Datatype.F64):
+        raise IRError(f'mma.sync into {types[3]} is not written: the '
+                      f'accumulator is FP32 or FP64 here')
+    wide = types[3] == Datatype.F64
+    acc, reg = ('d', 'd') if wide else ('f', 'r')
+    operands = ([(f'+{acc}', v) for v in c] + [(reg, v) for v in a]
+                + [(reg, v) for v in b])
+
+    def group(count: int, first: int) -> str:
+        return '{' + ','.join(f'%{i + first}' for i in range(count)) + '}'
+
+    d = group(len(c), 0)
+    template = (f'"{mma_sync_name(s.attr("shape"), types)} "\n'
+                f'"{d}, {group(len(a), len(c))}, '
+                f'{group(len(b), len(c) + len(a))}, {d};"')
+    return Lowered((asm_text(template, operands, env.name),))
+
+
+@dataclass(frozen=True)
+class MatrixEngine:
+    """What issues a `MATRIX_MAC`: D = A * B + C on the fragments the
+    engine takes, as one instruction.
+
+    ``collective`` is who executes the instruction together -- every lane
+    of the wave for a warp-wide `mma.sync`, which a lane-varying branch
+    around it breaks.  ``work`` is whether its issue counts as arithmetic
+    (`Emitter._record_work`: one operation over a tile the emitter is not
+    told the flops of).  ``pipe`` is the category `analysis.pipeline`
+    counts the issue under, a function of the statement where the price is
+    one of the shape.  ``spell`` writes the statement.
+    """
+
+    name: str
+    collective: Optional[Participants]
+    work: bool
+    pipe: Callable[[Stmt], str]
+    spell: Lowering
+    doc: str = ''
+    hazards: Tuple[Hazard, ...] = ()
+
+
+def _matrix(s: Stmt) -> str:
+    return 'matrix'
+
+
+MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
+    MatrixEngine('mma_sync', Participants.WAVE, True, _matrix,
+                 _lower_mma_sync,
+                 "NVIDIA's warp-wide mma.sync, TF32 operands in 32-bit "
+                 'registers into an FP32 accumulator (sm_80 on)'),
+    MatrixEngine('dmma', Participants.WAVE, True, _matrix, _lower_mma_sync,
+                 "NVIDIA's FP64 mma.sync, which ptxas lowers to DMMA.8x8x4 "
+                 'whatever its shape from sm_100 on (`Emitter._issues`)'),
+)}
+
+
+def matrix_engine(s: Stmt) -> MatrixEngine:
+    """The engine a `MATRIX_MAC` names."""
+    found = MATRIX_ENGINES.get(s.attr('engine'))
+    if found is None:
+        raise IRError(f'a matrix op on engine {s.attr("engine")!r}; there '
+                      f'are {", ".join(sorted(MATRIX_ENGINES))}')
+    return found
+
+
+def _lower_matrix_mac(s: Stmt, env: Spelling) -> Lowered:
+    return matrix_engine(s).spell(s, env)
+
+
+def _matrix_pipe(s: Stmt) -> str:
+    return matrix_engine(s).pipe(s)
+
+
+def _check_matrix_mac(s: Stmt) -> List[str]:
+    """A `MATRIX_MAC` takes the registers its fragments count, and has a
+    result unless it writes C in place -- which it then declares as a read
+    and a write of each of C's registers."""
+    diag = []
+    if s.attr('engine') not in MATRIX_ENGINES:
+        diag.append(f'{s.op}: engine {s.attr("engine")!r} is none of '
+                    f'{", ".join(sorted(MATRIX_ENGINES))}')
+    counts = s.attr('fragments')
+    if (not isinstance(counts, tuple) or len(counts) != 3
+            or sum(counts) != len(s.args)):
+        diag.append(f'{s.op}: {len(s.args)} operands for the fragments '
+                    f'{counts!r}')
+        return diag
+    if s.attr('in_place'):
+        if s.target:
+            diag.append(f'{s.op}: in place, and a result besides')
+        c = fragments(s)[2]
+        want = [v for v in c if isinstance(v, Value)]
+        if [a.base for a in s.accesses] != want or any(
+                a.space != MemSpace.REGISTER
+                or a.kind != Effect.READ | Effect.WRITE
+                for a in s.accesses):
+            diag.append(f'{s.op}: in place without a read and a write of '
+                        f'each register of C')
+    elif len(s.target) != 1:
+        diag.append(f'{s.op}: {len(s.target)} results, where D is one')
+    return diag
+
+
+def pipe_of(s: Stmt) -> str:
+    """The category `analysis.pipeline` counts the issue of `s`, an engine
+    op, under (`OpSpec.pipe`)."""
+    pipe = REGISTRY[s.op].pipe
+    return pipe(s) if callable(pipe) else pipe
+
+
+# --------------------------------------------------------------------------- #
 # The entries
 # --------------------------------------------------------------------------- #
 
@@ -1190,6 +1362,31 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            results=(), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_set_priority}),
+    # D = A * B + C on a matrix engine (`MATRIX_ENGINES`).  The fragments
+    # are values -- the operands, A's registers, B's, then C's -- and D the
+    # result, or C itself where the instruction writes it in place
+    # (`in_place`), declared then as a read and a write of each of C's
+    # registers (`effect_of`).  Pinned: one instruction of the wave, and
+    # the passes reorder no collective.  The other slots: the engine, the
+    # shape (m, n, k), the element types of A, B, C and D, the register
+    # counts of the fragments, the fragment layouts where the vendor states
+    # them (`BitLayout`s of A, B and D, None where it does not), the term
+    # of a split product (which halves of A and B), the vendor's modifiers,
+    # and the collective that executes it.
+    OpSpec(Op.MATRIX_MAC, operands=(Slot('engine', (str,)),
+                                    Slot('shape', (tuple,)),
+                                    Slot('types', (tuple,)),
+                                    Slot('fragments', (tuple,)),
+                                    Slot('in_place', (bool,), False),
+                                    Slot('layouts', (tuple,), False),
+                                    Slot('term', (tuple,), False),
+                                    Slot('modifiers', (tuple,), False),
+                                    Slot('collective', (Participants,),
+                                         False)),
+           results=('d',), effect=Effect.NONE, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=1, pipe=_matrix_pipe, lower={'*': _lower_matrix_mac},
+           check=_check_matrix_mac),
 )}
 
 
@@ -1222,6 +1419,8 @@ def verify_engine(s: Stmt) -> List[str]:
         if not isinstance(value, slot.kinds):
             diag.append(f'{s.op}: {slot.name} {value!r} is not a '
                         f'{" or ".join(k.__name__ for k in slot.kinds)}')
+    if spec.check is not None:
+        diag.extend(spec.check(s))
     effect = effect_of(s.op, s.attrs)
     movable = movable_of(s.op, s.attrs)
     if s.effect != effect or s.movable != movable:
@@ -1253,12 +1452,16 @@ def _retires_copies(op: str, attrs: Tuple) -> bool:
 
 def effect_of(op: str, attrs: Tuple = ()) -> Effect:
     """The effect a statement of `op` with `attrs` declares: the registry's,
-    but none for a fence that is no wall (`fence_stmt`), and for the wait on
+    but none for a fence that is no wall (`fence_stmt`), a write for a
+    matrix op that writes C in place -- of its registers, the accesses say
+    -- and for the wait on
     an mbarrier or a counter's for transfers it names the `wait`'s -- it
     makes what the copies wrote visible, the accesses they declared, and
     orders nobody else's (`wait_phase`, `wait_counter`)."""
     if op == Op.FENCE and dict(attrs).get('wall') is False:
         return Effect.NONE
+    if op == Op.MATRIX_MAC and dict(attrs).get('in_place'):
+        return Effect.WRITE
     if _retires_copies(op, attrs):
         return Effect.READ | Effect.WRITE | Effect.ASYNC
     return REGISTRY[op].effect
@@ -1490,4 +1693,6 @@ __all__ = [
     'object_of', 'objects', 'set_priority', 'settles', 'spec_of',
     'sync_init', 'sync_object', 'verify_engine', 'wait_counter',
     'wait_phase', 'ResourceType',
+    'MATRIX_ENGINES', 'MatrixEngine', 'asm_text', 'fragments',
+    'matrix_engine', 'mma_sync_name', 'pipe_of',
 ]
