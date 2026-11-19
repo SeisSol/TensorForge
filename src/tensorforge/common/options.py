@@ -1397,7 +1397,10 @@ declare('amd_fused_transpose',
 declare('amd_matrix_k4',
         default=False,
         parse=parse_matrix_k4,
-        doc='On CDNA 2 and 3, compute a product of a batch-constant operator '
+        doc='On CDNA -- where the instruction is: from gfx908 on '
+            '(`mai-insts`) in single precision, from gfx90a on '
+            '(`gfx90a-insts`) in double and for the emulation --, compute a '
+            'product of a batch-constant operator '
             'and a per-element operand at 16 lanes a multiplication through a '
             '16x16x4 instruction -- `v_mfma_f64_16x16x4f64` in double '
             'precision, `v_mfma_f32_16x16x4f32` in single in place of the '
