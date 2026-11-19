@@ -673,8 +673,8 @@ class BatchLoop(AbstractInstruction):
         the top of what the element computes, for every address through the
         list to take (`GetElementPtr.entry_value`): one per element of a
         stack, picked as the stack's addresses pick their element
-        (`stacking.element`).  Only where `Options.carry_element_index` asks
-        for it and the region has such an address -- the body is otherwise
+        (`stacking.element`).  Only where `Options.carry_element_index` is not
+        `never` and the region has such an address -- the body is otherwise
         the one it always was.
 
         Once, where each address spelling `elementIndices[batchId0]` read it
@@ -686,11 +686,15 @@ class BatchLoop(AbstractInstruction):
 
         Inside the element guard, where the addresses are: a masked
         element's entry is held to nothing, and it is not read for one, as
-        it was not.
+        it was not.  At its top, where the addresses through the list always
+        stood: where the loop does not carry the entry (`pir.entries`), the
+        element reads it there.
         """
+        from tensorforge.common.options import carry_mode
         bound = self._entry_frame
         if (bound is None or not hasattr(writer, 'decl_expr')
-                or not self._context.get_user_options().carry_element_index
+                or carry_mode(self._context.get_user_options()
+                              .carry_element_index) == 'never'
                 or not self._reads_index_list()):
             return
         from tensorforge.backend.pir.core import SCALAR_LAYOUT, SIZE

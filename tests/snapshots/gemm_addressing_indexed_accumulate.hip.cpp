@@ -1,5 +1,5 @@
 // === base name ===
-kernel_331ed82199555ccf
+kernel_d7c4b8f89b687306
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_331ed82199555ccf = {{32, 8, 1}, 32, 20, 1, 8, 1536, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_331ed82199555ccf(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_331ed82199555ccf(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_d7c4b8f89b687306 = {{32, 8, 1}, 32, 20, 1, 8, 1536, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_d7c4b8f89b687306(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_d7c4b8f89b687306(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_331ed82199555ccf(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_d7c4b8f89b687306(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 8, 1);
@@ -67,14 +67,14 @@ tensorforge::LaunchConfig launch_config_kernel_331ed82199555ccf(size_t numElemen
         int device, smCount, blocksPerSM;
         CHECK_RES(hipGetDevice(&device));
         CHECK_RES(hipDeviceGetAttribute(&smCount, hipDeviceAttributeMultiprocessorCount, device));
-        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_331ed82199555ccf, block.x * block.y * block.z, 384 * sizeof(float)));
+        CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_d7c4b8f89b687306, block.x * block.y * block.z, 384 * sizeof(float)));
         CHECK_ERR;
         int gfxMajor = 0;
         CHECK_RES(hipDeviceGetAttribute(&gfxMajor, hipDeviceAttributeComputeCapabilityMajor, device));
         if (gfxMajor >= 10 && (384 * sizeof(float)) > 0) {
           int ldsPerMP = 0, blocksNoLds = 0;
           CHECK_RES(hipDeviceGetAttribute(&ldsPerMP, hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, device));
-          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_331ed82199555ccf, block.x * block.y * block.z, 0));
+          CHECK_RES(hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocksNoLds, kernel_kernel_d7c4b8f89b687306, block.x * block.y * block.z, 0));
           const int blocksByLds = static_cast<int>((2 * static_cast<std::size_t>(ldsPerMP)) / (384 * sizeof(float)));
           blocksPerSM = std::max(blocksPerSM, std::min(blocksNoLds, blocksByLds));
         }
@@ -97,13 +97,13 @@ tensorforge::LaunchConfig launch_config_kernel_331ed82199555ccf(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_331ed82199555ccf(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_331ed82199555ccf(numElements0, streamPtr);
+void launcher_kernel_d7c4b8f89b687306(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_d7c4b8f89b687306(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_331ed82199555ccf), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
+        CHECK_RES(hipFuncSetAttribute(reinterpret_cast<const void*>(&kernel_kernel_d7c4b8f89b687306), hipFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes));
         CHECK_ERR;
         shmemsizeset = true;
       }
@@ -114,7 +114,7 @@ void launcher_kernel_331ed82199555ccf(float ** m0, size_t m0_extraOffset, const 
   tensorforge::SpacePtr<const float, tensorforge::GlobalMemspace> m2Arg = (tensorforge::SpacePtr<const float, tensorforge::GlobalMemspace>)m2;
   tensorforge::SpacePtr<const unsigned, tensorforge::GlobalMemspace> elementIndicesArg = (tensorforge::SpacePtr<const unsigned, tensorforge::GlobalMemspace>)elementIndices;
   tensorforge::SpacePtr<const unsigned, tensorforge::GlobalMemspace> flags0Arg = (tensorforge::SpacePtr<const unsigned, tensorforge::GlobalMemspace>)flags0;
-  hipLaunchKernelGGL(kernel_kernel_331ed82199555ccf, grid, block, config.sharedMemBytes, stream, m0Arg, m0_extraOffset, m1Arg, m2Arg, m2_extraOffset, numElements0, elementIndicesArg, flags0Arg);
+  hipLaunchKernelGGL(kernel_kernel_d7c4b8f89b687306, grid, block, config.sharedMemBytes, stream, m0Arg, m0_extraOffset, m1Arg, m2Arg, m2_extraOffset, numElements0, elementIndicesArg, flags0Arg);
   CHECK_ERR;
 }
 
@@ -122,7 +122,7 @@ void launcher_kernel_331ed82199555ccf(float ** m0, size_t m0_extraOffset, const 
 // === kernel ===
 __global__ void 
 __launch_bounds__(256)
- kernel_kernel_331ed82199555ccf(float *const * __restrict__ m0, size_t m0_extraOffset, tensorforge::SpacePtr<const float, tensorforge::ConstantMemspace> m1, tensorforge::SpacePtr<const float, tensorforge::GlobalMemspace> m2, size_t m2_extraOffset, size_t numElements0, tensorforge::SpacePtrRestrict<const unsigned, tensorforge::GlobalMemspace> elementIndices, tensorforge::SpacePtrRestrict<const unsigned, tensorforge::GlobalMemspace> flags0) {
+ kernel_kernel_d7c4b8f89b687306(float *const * __restrict__ m0, size_t m0_extraOffset, tensorforge::SpacePtr<const float, tensorforge::ConstantMemspace> m1, tensorforge::SpacePtr<const float, tensorforge::GlobalMemspace> m2, size_t m2_extraOffset, size_t numElements0, tensorforge::SpacePtrRestrict<const unsigned, tensorforge::GlobalMemspace> elementIndices, tensorforge::SpacePtrRestrict<const unsigned, tensorforge::GlobalMemspace> flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     using namespace tensorforge::literals;
@@ -169,7 +169,6 @@ __launch_bounds__(256)
         float v208_data = v43_g ? (__builtin_nontemporal_load(&peel_glb_m2[(v37_lead + (v205_i1 * 9))])) : (0.0f);
         r0[v205_i1] = v208_data;
       }
-      size_t v213_elementIndex = peel_elementIndex;
       for (size_t v21_batchIdGroup0 = (threadIdx.y - threadIdx.y % 2) + blockDim.y * (blockIdx.x); v21_batchIdGroup0 < numElements0; v21_batchIdGroup0 += (gridDim.x * blockDim.y)) {
         size_t v192_groupNextAhead = v21_batchIdGroup0 + (gridDim.x * blockDim.y);
         size_t v194_groupNext = (v192_groupNextAhead < numElements0) ? v192_groupNextAhead : v21_batchIdGroup0;
@@ -183,7 +182,8 @@ __launch_bounds__(256)
         size_t v25_ahead1 = v24_batchId0 + (gridDim.x * blockDim.y);
         size_t v27_batchId1 = (v25_ahead1 < numElements0) ? v25_ahead1 : v24_batchId0;
         __builtin_amdgcn_sched_barrier(0);
-        tensorforge::SpacePtrRestrict<float, tensorforge::GlobalMemspace> const glb_m0 = (tensorforge::SpacePtrRestrict<float, tensorforge::GlobalMemspace>)&m0[v213_elementIndex * 2 + 1][0 + m0_extraOffset];
+        const size_t elementIndex = static_cast<size_t>(elementIndices[v24_batchId0]);
+        tensorforge::SpacePtrRestrict<float, tensorforge::GlobalMemspace> const glb_m0 = (tensorforge::SpacePtrRestrict<float, tensorforge::GlobalMemspace>)&m0[elementIndex * 2 + 1][0 + m0_extraOffset];
         float r1[9]{};
         // r1 = load{g>r}(glb_m0);
         float r2[9]{};
@@ -288,7 +288,6 @@ __launch_bounds__(256)
             }
           }
         }
-        v213_elementIndex = wrap_elementIndex;
       }
     }
   }
