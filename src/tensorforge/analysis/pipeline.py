@@ -91,7 +91,9 @@ INSTRUCTIONS_PER_STATEMENT_P10: Dict[str, Dict[str, float]] = {
               'shared.store': 1.0, 'barrier': 2.0, 'branch': 1.67},
 }
 
-#: Clocks one MFMA holds its SIMD for, by the shape its builtin names, measured
+#: Clocks one MFMA holds its SIMD for, by the shape its builtin names -- the
+#: instruction of its matrix op, whose category is `mfma.<shape>`
+#: (`pir.engines.mfma_category`) --, measured
 #: on gfx942 (MI300A, 2026-10-27; `~/tf-probe/mi300a/coissue.hip`: four
 #: independent accumulators, four waves a SIMD).  The 64-lane entries that
 #: are not listed were not measured and take their nominal passes.  The
@@ -352,7 +354,9 @@ def executed_flops(generator) -> Optional[int]:
     `None` where the build reached a statement whose arithmetic the emitter
     was not told -- a matrix instruction is one statement over a whole tile.
     A figure short by the bulk of the arithmetic is worse than none, because
-    a rate divided by it looks like efficiency.
+    a rate divided by it looks like efficiency.  Intel's DPAS is the
+    exception: it records nothing (`pir.engines.MatrixEngine.work`), so the
+    figure of a build that issues it is short and taken as exact.
     """
     built = getattr(generator, 'built', None)
     metrics = getattr(built, 'metrics', None) if built is not None else None

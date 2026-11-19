@@ -462,11 +462,9 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                 kkkm = trueK % block
                                 _check_mfma_operand(tA[km][kkkm], threads, fn,
                                                     tile)
-                                return writer.call(
-                                    fn, vtype, tA[km][kkkm], lead, acc,
-                                    scale, kkm, blgp,
-                                    hint='acc', movable=False,
-                                    materialize=True, layout=acclayout)
+                                return tile.op.mac(
+                                    writer, vtype, tA[km][kkkm], lead, acc,
+                                    scale, kkm, blgp)
 
                             # Two counts of the contraction meet here.  The
                             # shared matrix is transposed a block of lanes at
@@ -617,13 +615,10 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                         # accumulator, so the chain is
                                         # naturally SSA -- each step reads the
                                         # previous result.
-                                        acc = writer.call(
-                                            fn, vtype,
+                                        acc = tile.op.mac(
+                                            writer, vtype,
                                             tA[km][kkkm], tB[kkk], acc,
-                                            scale, kkm, 0,
-                                            hint='acc', movable=False,
-                                            materialize=True,
-                                            layout=acclayout)
+                                            scale, kkm, 0)
 
                             for jj in range(min(block, N - j)):
                                 C(writer, _column(writer, tile, acc, jj, ftype),
@@ -696,12 +691,10 @@ def matmul32(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                                         _check_mfma_operand(a, threads, fn,
                                                             tile)
                                         for h in range(width):
-                                            accs[h] = writer.call(
-                                                fn, vtype, a,
+                                            accs[h] = tile.op.mac(
+                                                writer, vtype, a,
                                                 writer.extract(rows, h, ftype),
-                                                accs[h], scale, t // block, 0,
-                                                hint='acc', movable=False,
-                                                materialize=True)
+                                                accs[h], scale, t // block, 0)
                             for jj in range(min(block, N - j)):
                                 C(writer, writer.pack(wtype, *(
                                     _column(writer, tile, acc, jj, ftype)
@@ -785,7 +778,6 @@ def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
         ftype = ScalarType(dtype)
         block = tile.block
         scale = tile.scale(threads)
-        fn = op.callee
         # The split's outputs, and the instruction's operands.  Not `dtype`:
         # that is what the accumulator keeps, and reaching it is the whole
         # reason there is more than one product.
@@ -848,12 +840,10 @@ def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                         kkm = kk // width
                         for j in blocks:
                             for ti, tj in products:
-                                accs[j] = writer.call(
-                                    fn, vtype,
+                                accs[j] = op.mac(
+                                    writer, vtype,
                                     aterms[(j, k // threads)][ti], bterms[tj],
-                                    accs[j], scale, kkm, 0,
-                                    hint='acc', movable=False,
-                                    materialize=True, layout=acclayout)
+                                    accs[j], scale, kkm, 0)
 
                 for j in blocks:
                     for jj in range(min(block, N - j)):

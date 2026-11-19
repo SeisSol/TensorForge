@@ -66,6 +66,20 @@ class MMAMode:
     BF16 = 2
     I8 = 3
 
+#: The products of 3xTF32, in the order they are issued: which halves of A
+#: and B each multiplies, 0 the upper and 1 the lower -- the upper by the
+#: upper, the upper by B's lower, A's lower by the upper.  The fourth, the
+#: lower by the lower, is not issued.
+TF32_TERMS = ((0, 0), (0, 1), (1, 0))
+
+#: The matrix engine, and the elements of A, B, C and D, an instruction of
+#: each mode is (`engines.MATRIX_ENGINES`).
+_ENGINES = {MMAMode.TF32: ('mma_sync', (Datatype.TF32, Datatype.TF32,
+                                        Datatype.F32, Datatype.F32)),
+            MMAMode.DIRECT: ('dmma', (Datatype.F64,) * 4),
+            MMAMode.I8: ('mma_sync', (Datatype.I8, Datatype.I8,
+                                      Datatype.I32, Datatype.I32))}
+
 class MMAInstr:
     def __init__(self, m, n, k, b, d, name, mode, sm):
         self.n = n
@@ -80,54 +94,40 @@ class MMAInstr:
         #: the PTX ISA.  It is a field so that a selection can refuse an entry
         #: the target does not have, which a comment cannot do.
         self.sm = sm
+        #: The matrix engine the instruction is, and the elements of A, B, C
+        #: and D (`IRBuilder.matrix_mac`).  `name` is what they spell
+        #: (`engines.mma_sync_name`).
+        self.engine, self.types = _ENGINES[mode]
+        self._layouts = None
 
     def headers(self):
         return []
 
-    def asmcall(self, writer, D, A, B, C, uses=()):
-        """The `mma.sync` itself.
+    def layouts(self):
+        """The fragment layouts of A, B and D as the op states them: A and D
+        as PTX lays them out (`a_fragment_bits`, `d_fragment_bits`), B as
+        None -- which lane holds which element of B is only implicit here
+        (`_bfrag`)."""
+        if self._layouts is None:
+            self._layouts = (a_fragment_bits(self), None,
+                             d_fragment_bits(self))
+        return self._layouts
 
-        `D` and `C` are the same accumulator at every call site -- the
-        instruction reads it and writes it back.  Listing it as `"=f"` under
-        outputs and again as `"f"` under inputs states two *unrelated* operands
-        that happen to name one C++ lvalue, and nothing then requires the
-        compiler to give them the same register: it may read the accumulator
-        into one and write the result into another, dropping the accumulation.
-        `"+f"` says read-and-write, and then the operand is listed once.
+    def asmcall(self, writer, D, A, B, C, uses=(), term=None):
+        """The `mma.sync` itself: one matrix op (`IRBuilder.matrix_mac`),
+        written as inline PTX (`engines._lower_mma_sync`).
 
-        Numbering follows from that.  The assembler numbers outputs and inputs
-        in one sequence, so folding C into D shifts A and B down by `len(C)`;
-        `asm_stmt` checks the template against the operand list rather than
-        trusting that the two were edited together.
+        `D` and `C` are the same accumulator at every call site: the
+        instruction reads it and writes it back, in place, which is the only
+        form there is -- listed as an output and again as an input, the
+        accumulator would be two operands the compiler need not give one
+        register.  `term` is which halves of A and B a 3xTF32 product
+        multiplies (`TF32_TERMS`), None for a product in full.
         """
-        typeid = "f" if self.d == Datatype.F32 else "d"
-        typeidx = "r" if self.d == Datatype.F32 else "d"
-
-        inout = D if D is C or list(D) == list(C) else None
-
-        grp = lambda n, b: "{" + ','.join(f"%{i + b}" for i in range(n)) + "}"
-
-        if inout is not None:
-            operands = ([(f'+{typeid}', v) for v in inout]
-                        + [(typeidx, v) for v in A]
-                        + [(typeidx, v) for v in B])
-            dgrp = grp(len(inout), 0)
-            agrp = grp(len(A), len(inout))
-            bgrp = grp(len(B), len(inout) + len(A))
-            cgrp = dgrp
-        else:
-            operands = ([(f'={typeid}', v) for v in D]
-                        + [(typeidx, v) for v in A]
-                        + [(typeidx, v) for v in B]
-                        + [(typeid, v) for v in C])
-            dgrp = grp(len(D), 0)
-            agrp = grp(len(A), len(D))
-            bgrp = grp(len(B), len(D) + len(A))
-            cgrp = grp(len(C), len(D) + len(A) + len(B))
-
-        template = (f'"{self.name} "\n'
-                    f'"{dgrp}, {agrp}, {bgrp}, {cgrp};"')
-        writer.asm_stmt(template, operands)
+        if not (D is C or list(D) == list(C)):
+            raise InternalError('mma.sync accumulates in place: D has to be C')
+        writer.matrix_mac(self.engine, (self.m, self.n, self.k), self.types,
+                          A, B, C, layouts=self.layouts(), term=term)
 
     def epilogue(self):
         pass
@@ -155,16 +155,19 @@ class MMAInstr:
             Atf32 = a_split if a_split is not None else tfconvert(writer, A)
             Btf32 = b_split if b_split is not None else tfconvert(writer, B)
             half = lambda xs, h: [x[h] for x in xs]
-            return [(half(Atf32, 0), half(Btf32, 0)),
-                    (half(Atf32, 0), half(Btf32, 1)),
-                    (half(Atf32, 1), half(Btf32, 0))]
+            return [(half(Atf32, i), half(Btf32, j)) for i, j in TF32_TERMS]
         return [(A, B)]
+
+    def term(self, index):
+        """The halves product `index` of `products` multiplies, or None for
+        a product in full (`TF32_TERMS`)."""
+        return TF32_TERMS[index] if self.mode == MMAMode.TF32 else None
 
     def generate(self, writer, context, A, B, C, uses=(), a_split=None):
         """Every product of one accumulator, issued in order (`products`)."""
         with writer.Scope():
-            for a, b in self.products(writer, A, B, a_split):
-                self.asmcall(writer, C, a, b, C, uses)
+            for i, (a, b) in enumerate(self.products(writer, A, B, a_split)):
+                self.asmcall(writer, C, a, b, C, uses, term=self.term(i))
 
 INSTRS = [
     MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32, 80), # SM_80
@@ -764,9 +767,10 @@ def instr_for(dtype, columns=0, lead=0, depth=0, sm=None):
 #: so two names: `supports()` is a property of the shape, `ENABLED` is a
 #: decision about the generator, and only the second is something to flip.
 #:
-#: Parked pending a run on real hardware.  `"+f"` versus `"=f"`/`"f"` on the
-#: accumulator is a register-allocation difference no front end can see, and
-#: the corpus is checked for well-formedness, not executed.
+#: Off where nothing asks: `Options.tensor_cores` turns the path on, and on
+#: NVIDIA the lanes rule builds it as a twin of the default where it measured
+#: faster and keeps it where the count ranks it ahead (`tuning.MATRIX_TWIN`,
+#: `Preferences.tune_matrix_path`).
 ENABLED = False
 
 
@@ -1458,7 +1462,8 @@ def _stacked(writer, ops, ctx, span, atom, M, N, K, kx, threads, mults,
                             a_op, b_op = prods[ii, jt][term]
                             acc = [accs[term % naccs][jt][cc][ii // atom.m]
                                    for cc in range(cregs)]
-                            atom.asmcall(writer, acc, a_op, b_op, acc)
+                            atom.asmcall(writer, acc, a_op, b_op, acc,
+                                         term=atom.term(term))
 
             for ii in (tiles if naccs > 1 else ()):
                 for jt in range(ntiles):
@@ -2319,7 +2324,8 @@ def matmul(writer, ops, ctx, span):
                                     a_op, b_op = prods[ii, p][term]
                                     acc = [accs[term % naccs][p][c][ii // atom.m]
                                            for c in range(cregs)]
-                                    atom.asmcall(writer, acc, a_op, b_op, acc)
+                                    atom.asmcall(writer, acc, a_op, b_op, acc,
+                                                 term=atom.term(term))
 
                         # The remainder on the fragments already in hand: a
                         # lane's A fragment `iii + kf * mregs` is row `g + 8

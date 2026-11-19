@@ -54,11 +54,12 @@ EMULATION = False
 
 #: Whether the `k > 1` scheme is deployed.
 #:
-#: Turning it on is what makes F64 take a matrix instruction at all, and it
-#: changes every F64 kernel on CDNA 2 and later.  The check available without
-#: a machine is that the emitted calls match the plans, which says the emitter
-#: is faithful and nothing about whether the instruction then computes the
-#: right thing.
+#: Not the only way F64 takes a matrix instruction: the stacked scheme issues
+#: `mfma_f64_16x16x4f64` where `Options.amd_matrix_k4` asks for it
+#: (`stacked`).  Turning this on adds the exchange's, and changes every F64
+#: kernel on CDNA 2 and later.  The check available without a machine is that
+#: the emitted calls match the plans, which says the emitter is faithful and
+#: nothing about whether the instruction then computes the right thing.
 EXCHANGE = False
 
 

@@ -142,10 +142,6 @@ _SFU_CALL = re.compile(r'(?:^|[^a-z0-9])_*(exp2?|log2?|sqrt|rsqrt|rcp|sin|cos'
                        r'|tan|pow|erf|cbrt|tanh|sinh|cosh)f?(?:$|[^a-z0-9])',
                        re.IGNORECASE)
 
-#: Matrix instructions reached as builtins (`__builtin_amdgcn_mfma_*`, WMMA);
-#: NVIDIA's arrive as inline assembly.
-_MATRIX_CALL = re.compile(r'(mfma|wmma|smfmac)', re.IGNORECASE)
-
 #: An FMA whose operand comes from another lane through a DPP modifier: one
 #: VALU instruction, the move is free.  So it is arithmetic, not a move.
 _FMA_CALL = re.compile(r'(fmac?dpp|fmadpp|fma_dpp)', re.IGNORECASE)
@@ -192,14 +188,6 @@ def _split_issues(s) -> int:
     blocks = int(m.group(2)) // max(1, int(m.group(1)))
     return max(1, 2 * blocks - 1)
 
-
-def _mfma_category(callee: str) -> str:
-    """One AMD matrix builtin as `mfma.<shape>`, the shape as the builtin
-    names it (`mfma.f32_4x4x1f32`): the instructions differ by an order of
-    magnitude in how long they hold the SIMD, and `analysis.pipeline` prices
-    each (`MFMA_CLOCKS`)."""
-    m = re.search(r'mfma_(\w+)', callee)
-    return f'mfma.{m.group(1)}' if m else 'mfma'
 
 #: Calls that constrain the compiler and lay nothing down (`pin` is an empty
 #: `asm volatile` holding a value in a register).
@@ -280,9 +268,6 @@ def _code_copies(unroll, trips: Optional[int]) -> int:
         return min(unroll, trips) if trips else unroll
     return 1
 
-
-#: The shape an `mma.sync` names (`Emitter._issues`).
-_MMA_SHAPE = re.compile(r'mma\.sync\.aligned\.m(\d+)n(\d+)k(\d+)\.')
 
 #: The fence `Emitter._pin_load` writes in front of every so many loads: one
 #: of the schedule, which the target writes as the statement its compiler
@@ -371,8 +356,11 @@ class Emitter:
         #
         # `op` and `value` say what the operation is worth; a caller that
         # passes neither -- the matrix instruction, whose tile the emitter is
-        # not told -- leaves the flop figure inexact rather than short.
-        # `work=False` adds the flops alone (see the DPP multiply-add).
+        # not told -- leaves the flop figure inexact rather than short.  But
+        # for Intel's DPAS, which is not recorded at all (its engines say so,
+        # `MatrixEngine.work`): a build that issues it counts short and still
+        # calls the figure exact.  `work=False` adds the flops alone (see the
+        # DPP multiply-add).
         record = getattr(self.metrics, 'record_work', None)
         if record is None:
             return
@@ -410,21 +398,19 @@ class Emitter:
 
     def _issues(self, s: Stmt) -> int:
         """Instructions a matrix statement issues where that is not one: an
-        FP64 `mma.sync` from sm_100 on, which ptxas lowers to `DMMA.8x8x4`
-        whatever its shape -- `m16n8k16` is eight of them (CUDA 13,
-        2026-09-11).  Counted as one, the FP64 matrix path would look eight
-        times shorter there than it is, in the issue mix the lanes rule ranks
-        by and in the code the instruction cache holds."""
-        text = s.attr('asm') if s.op == Op.CALL else None
-        if not text or '.f64' not in text:
+        FP64 `mma.sync` (`dmma`) from sm_100 on, which ptxas lowers to
+        `DMMA.8x8x4` whatever its shape -- `m16n8k16` is eight of them (CUDA
+        13, 2026-09-11).  Counted as one, the FP64 matrix path would look
+        eight times shorter there than it is, in the issue mix the lanes
+        rule ranks by and in the code the instruction cache holds.  Read off
+        the op's engine and shape (`MATRIX_MAC`)."""
+        if s.op != Op.MATRIX_MAC or s.attr('engine') != 'dmma':
             return 1
-        shape = _MMA_SHAPE.search(text)
         hw = getattr(getattr(self.context, 'target', None), 'hw', None)
-        if (shape is None or hw is None
-                or getattr(hw, 'family', None) != 'nvidia'
+        if (hw is None or getattr(hw, 'family', None) != 'nvidia'
                 or (hw.sm_level() or 0) < 100):
             return 1
-        m, n, k = (int(x) for x in shape.groups())
+        m, n, k = s.attr('shape')
         return max(1, (m * n * k) // (8 * 8 * 4))
 
     def _record_mix(self, s: Stmt) -> None:
@@ -501,8 +487,6 @@ class Emitter:
                 return 'fp64', []
             return ('fp' if base in _WORK_TYPES else 'int'), []
         if op == Op.CALL:
-            if s.attr('asm') is not None:
-                return 'matrix', []
             if s.attr('assign'):
                 return None, []
             callee = s.attr('callee') or ''
@@ -511,10 +495,6 @@ class Emitter:
                 return None, []
             if _NO_CODE_CALL.search(callee):
                 return None, []
-            if re.search(r'mfma', callee, re.IGNORECASE):
-                return _mfma_category(callee), []
-            if _MATRIX_CALL.search(callee):
-                return 'matrix', []
             if _FMA_CALL.search(callee):
                 wide = any(getattr(getattr(a, 'type', None), 'base', None)
                            == Datatype.F64 for a in s.args)
@@ -552,9 +532,8 @@ class Emitter:
             # A buffer resource is an address computed once, as a pointer
             # binding's is, and so are a tensor descriptor's words.
             return 'int', []
-        spec = engines.spec_of(op)
-        if spec is not None:
-            return spec.pipe, []
+        if engines.spec_of(op) is not None:
+            return engines.pipe_of(s), []
         if op in (Op.WAIT, Op.COMMIT_ASYNC):
             return 'sync', []
         if op in (Op.IF, Op.WHILE, Op.EXIT):
@@ -1591,7 +1570,7 @@ class Emitter:
             # (`IRBuilder.touches`) writes nothing, like a mark.
             return
         self._record_code(op)
-        if op == Op.CALL and s.attr('asm') is not None:
+        if op == Op.MATRIX_MAC:
             self._record_code_units(self._issues(s) - 1)
         self._record_mix(s)
 
@@ -1672,11 +1651,19 @@ class Emitter:
             return
 
         if engines.spec_of(op) is not None:
-            # A barrier, a fence, a counter wait, a priority: what the
-            # registry writes it as on this target.
-            for text in engines.lower(s, self._target(),
-                                      name=self.operand).lines:
+            # A barrier, a fence, a counter wait, a priority, a matrix
+            # instruction: what the registry writes it as on this target.
+            if op == Op.MATRIX_MAC and engines.matrix_engine(s).work:
+                # One operation over a whole tile, whose flops the emitter
+                # is not told: the figure is left inexact rather than short.
+                self._record_work()
+            lowered = engines.lower(s, self._target(), name=self.operand)
+            for text in lowered.lines:
                 w(text)
+            if lowered.result is not None:
+                # An op with a result: declared as this emitter declares a
+                # value, its type spelled by the target's lexic.
+                self.declare(s.target[0], lowered.result, s)
             return
 
         if op == Op.ALLOC:
@@ -2006,19 +1993,13 @@ class Emitter:
             return
 
         if op == Op.CALL and s.attr('asm') is not None:
-            # A matrix instruction is one operation over a whole tile.
-            self._record_work()
             # The operands are rendered here rather than baked into the
             # template, which is the whole point: the constraint list names
-            # values the IR knows, so the split that produced a fragment has a
-            # real use and cannot be removed underneath the asm.
-            constraints = s.attr('constraints')
-            pairs = list(zip(constraints, s.args))
-            outs = ', '.join(f'"{c}"({self.operand(v)})'
-                             for c, v in pairs if c.startswith(('=', '+')))
-            ins = ', '.join(f'"{c}"({self.operand(v)})'
-                            for c, v in pairs if not c.startswith(('=', '+')))
-            w(f'asm({s.attr("asm")}\n: {outs}\n: {ins}\n);')
+            # values the IR knows, so what produced an operand has a real
+            # use and cannot be removed underneath the asm.  (A matrix
+            # instruction is no such call: it is a `MATRIX_MAC`.)
+            pairs = list(zip(s.attr('constraints'), s.args))
+            w(engines.asm_text(s.attr('asm'), pairs, self.operand))
             return
 
         if op == Op.CALL:
@@ -2054,11 +2035,6 @@ class Emitter:
                 acc = s.target[0] if s.target else (s.args[0] if s.args
                                                     else None)
                 self._record_work('fma', acc, work=False)
-            elif callee is not None and _MATRIX_CALL.search(callee):
-                # A matrix instruction reached as a builtin, as the asm one
-                # above: one operation over a whole tile the emitter is not
-                # told, so the flop figure is left inexact rather than short.
-                self._record_work()
             args = ', '.join(self.operand(a) for a in s.args)
             if not s.target:
                 # A void intrinsic: invoked for what it does to a register it
