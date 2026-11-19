@@ -28,7 +28,7 @@ class DetectedGPU:
     name: str        # human-readable product name
 
 
-def _run(cmd: List[str], timeout: float = 5.0) -> str | None:
+def _run(cmd: List[str], timeout: float = 30.0) -> str | None:
     """Run ``cmd`` and return stdout, or None if the tool is missing / fails."""
     if shutil.which(cmd[0]) is None:
         return None
@@ -84,7 +84,7 @@ def detect_amd() -> List[DetectedGPU]:
     indices in discovery order, which matches what ``HIP_VISIBLE_DEVICES``
     selects.
     """
-    out = _run(["rocminfo"], timeout=10.0)
+    out = _run(["rocminfo"], timeout=30.0)
     if out is None:
         return []
 
