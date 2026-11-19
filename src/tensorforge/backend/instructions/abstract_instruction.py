@@ -844,6 +844,8 @@ class AbstractInstruction(ABC):
     """
     options = context.get_user_options()
     move = wrap = prefetch = held = rows = None
+    from tensorforge.common.options import carry_mode
+    entry_carry = carry_mode(options.carry_element_index)
     report: list = []
     hints: list = []
     kept: list = []
@@ -859,7 +861,7 @@ class AbstractInstruction(ABC):
                            cover=options.issue_cover,
                            pointer_stage=options.pointer_stage,
                            trip_reads=options.trip_reads,
-                           trip_shards=trips)
+                           trip_shards=trips, carry=entry_carry)
     if options.enable_prefetch or options.prefetch_data:
       prefetch = pir.Prefetch(builder.scratch,
                               pointers=options.enable_prefetch,

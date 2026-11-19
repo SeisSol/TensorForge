@@ -251,7 +251,7 @@ class WrapLoads(Pass):
                  report: Optional[List[str]] = None, pipeline=memory_path,
                  early: bool = False, cover: int = 0,
                  pointer_stage: bool = False, trip_reads: bool = False,
-                 trip_shards: Optional[dict] = None):
+                 trip_shards: Optional[dict] = None, carry: str = 'always'):
         self._scratch = scratch
         self._distance = distance
         self._stages = stages
@@ -262,6 +262,7 @@ class WrapLoads(Pass):
         self._pointer_stage = pointer_stage
         self._trip_reads = trip_reads
         self._trip_shards = trip_shards
+        self._carry = carry
 
     def run(self, pc: BodyContext) -> None:
         if self._trip_shards is not None and not pc.explicit_simd:
@@ -274,7 +275,8 @@ class WrapLoads(Pass):
                              pipeline=self._pipeline, early=self._early,
                              cover=self._cover,
                              explicit_simd=pc.explicit_simd,
-                             pointer_stage=self._pointer_stage)
+                             pointer_stage=self._pointer_stage,
+                             carry=self._carry)
 
 
 class Prefetch(Pass):

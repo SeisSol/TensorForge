@@ -88,7 +88,10 @@ the copies for the next element read the next one's at the head -- which is
 the next iteration's own.  So that read comes in with the next iteration in
 place of the one at its top, the peel's for the first element starts the
 loop, and the element's addresses wait for their pointers alone, not for the
-entry ahead of them.
+entry ahead of them.  Where that pays: carried, the entry holds a register
+from the top of the body to its first reader, and where that stretch reaches
+the body's pressure peak -- the element's output, read behind the products --
+it stays read at the top of the element instead (`entries`).
 
 *A second stage*, where `stages` asks for one, takes the tail out of the
 picture for a shared transfer whose copies the hardware carries out on its
@@ -184,6 +187,7 @@ from .ahead import Clone, ElementLoop, Refusal, behind_defs, counted
 from .asyncmem import strip_commits
 from .core import (BOOL, INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
                    walk_stmts, retires)
+from .entries import Pressure, cheap_to_hold, is_entry
 from .passes import substitute
 from .transfers import (Transfer, executed, memory_path, neutral, opaque,
                         same, transfers, writes)
@@ -194,7 +198,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                pipeline=memory_path, early: bool = False,
                cover: int = 0,
                explicit_simd: bool = False,
-               pointer_stage: bool = False) -> Tuple[Stmt, ...]:
+               pointer_stage: bool = False,
+               carry: str = 'always') -> Tuple[Stmt, ...]:
     """`body` with the first `distance` transfers of each batch loop issued
     one element ahead, and of each loop whose trips are counted one trip
     ahead.
@@ -209,7 +214,11 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     `explicit_simd` is whether the body is lowered as an explicit vector,
     whose loads a uniform predicate cannot hold back (`_Rewrite._guarded`).
     `pointer_stage` carries the next element's own pointers into the
-    iteration for a transfer at the head (`_Rewrite._staged`).
+    iteration for a transfer at the head (`_Rewrite._staged`).  `carry` says
+    where the loop carries the next element's entry of the index list into
+    the next iteration (`_Rewrite._carry`): `always` wherever the body still
+    reads it, `auto` where holding it keeps clear of the body's pressure
+    peak (`entries`).
 
     A batch loop is a `for` that names its successor index and its first
     element (`next`, `first`); a loop over groups of rows names its first
@@ -247,8 +256,8 @@ def wrap_loads(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
             rewrite = _Loop(s, allocs, scratch, report, stages, around,
                             early=early, cover=cover,
                             explicit_simd=explicit_simd,
-                            pointer_stage=pointer_stage).wrap(distance,
-                                                              pipeline)
+                            pointer_stage=pointer_stage,
+                            carry=carry).wrap(distance, pipeline)
             before, loop, after = rewrite.run()
         except Refusal as why:
             if report is not None:
@@ -513,7 +522,7 @@ class _Loop(ElementLoop):
                  stages: int = 1, around: Sequence[Stmt] = (),
                  kind: Optional[str] = None, early: bool = False,
                  cover: int = 0, explicit_simd: bool = False,
-                 pointer_stage: bool = False):
+                 pointer_stage: bool = False, carry: str = 'always'):
         super().__init__(loop, scratch, report, around)
         self.allocs = allocs
         self.stages = stages
@@ -522,6 +531,10 @@ class _Loop(ElementLoop):
         #: Whether the next element's own pointers ride the loop, for a
         #: transfer at the head (`_Rewrite._staged`).
         self.pointer_stage = pointer_stage
+        #: Where an element's entry of the index list is carried into the
+        #: next iteration (`_Rewrite._carry`): `always`, or by the rule
+        #: (`auto`).
+        self.carry = carry
         #: Whether a transfer for the next element goes right behind the last
         #: access to its buffer rather than to the tail (`_Rewrite._early`).
         self.early = early
@@ -1065,8 +1078,7 @@ class _Rewrite:
         entries: List[Tuple[Stmt, Optional[Value], Optional[Value]]] = []
         for p in self.plans:
             for s in p.deps:
-                if s.attr('element_index') and all(s is not e
-                                                   for e, _, _ in entries):
+                if is_entry(s) and all(s is not e for e, _, _ in entries):
                     old = s.target[0]
                     entries.append((s, peel_copy.mapping.get(old.id),
                                     tail_copy.mapping.get(old.id)))
@@ -1202,6 +1214,14 @@ class _Rewrite:
         that moved, what reads it goes (`_drop_unread`), and a carried entry
         would hold a register for nothing.
 
+        Under `auto`, only where holding the entry from the top of the body
+        to its first reader keeps clear of the body's pressure peak
+        (`entries.cheap_to_hold`).  Where the reader is the element's
+        output, behind the products, the entry stays read at the top of the
+        element, where the addresses through the list always stood -- for
+        SeisSol's `localFlux[0]` at order 6 on sm_90, the machine code of an
+        entry read in each address (`entries`).
+
         A copy for the next element that nothing reads -- its pointers
         carried into the iteration instead (`_staged`), and the entry not
         -- goes.
@@ -1217,10 +1237,18 @@ class _Rewrite:
         mapping: Dict[int, Value] = {}
         gone: set = set()
         yields: List[Value] = []
+        pressure = None
         for s, first, ahead in entries:
             if (not plain or id(s) not in alive or first is None
                     or ahead is None):
                 continue
+            if l.carry == 'auto':
+                if pressure is None:
+                    # Of the body as it stands without the carry: the entry
+                    # is read where it was, and what reads it is what stays.
+                    pressure = Pressure(kept, l.explicit_simd)
+                if not cheap_to_hold(kept, s, pressure=pressure):
+                    continue
             held = self._fresh(s.target[0])
             mapping[s.target[0].id] = held
             gone.add(id(s))

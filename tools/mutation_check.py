@@ -97,6 +97,7 @@ MULTILINEAR = Path('src/tensorforge/backend/instructions/compute/multilinear.py'
 CROSSLANE = Path('src/tensorforge/backend/instructions/compute/crosslane.py')
 TILING = PKG / 'tiling.py'
 BUFFERS = Path('src/tensorforge/backend/pir/buffers.py')
+ENTRIES = Path('src/tensorforge/backend/pir/entries.py')
 
 
 def _run_tests(target):
@@ -1794,8 +1795,27 @@ GROUPS = {
          sub(WRAP, '            fetch = ahead_copy.stmts(_unseen(reads, ahead_copy), named=True)\n',
              '            fetch = ahead_copy.stmts(reads, named=True)\n', 1)),
         ('the switch ignored',
-         sub(BATCHLOOP, '                or not self._context.get_user_options().carry_element_index\n',
-             '', 1)),
+         sub(BATCHLOOP, "                              .carry_element_index) == 'never'\n",
+             "                              .carry_element_index) == 'off'\n", 1)),
+    ]),
+
+    # Whether the loop carries an entry (`pir.entries`): the rule kept, the
+    # peak a stretch and not a statement, the reader looked for through the
+    # bindings and through a store's symbol.
+    'carrydistance': ('tests/test_carry_element_index.py -n 6', [
+        ('every entry the body reads carried, the rule ignored',
+         sub(WRAP, "            if l.carry == 'auto':\n",
+             "            if False:\n", 1)),
+        ('the peak taken for the one statement at the maximum',
+         sub(ENTRIES, 'SCARCE = 0.9\n', 'SCARCE = 1.0\n', 1)),
+        ('a binding taken for the reader of the entry',
+         sub(ENTRIES, '        if _binds_address(x):\n', '        if False:\n', 1)),
+        ("a store's destination not read through its symbol",
+         sub(ENTRIES, '    if names and any(not isinstance(a, Value)\n',
+             '    if False and any(not isinstance(a, Value)\n', 1)),
+        ('the stretch judged by the pressure at its reader alone',
+         sub(ENTRIES, '        return max(self._curve[:j + 1]) < self._scarce\n',
+             '        return self._curve[j] < self._scarce\n', 1)),
     ]),
 
     # The launch-control traversal reading the next element off the queue

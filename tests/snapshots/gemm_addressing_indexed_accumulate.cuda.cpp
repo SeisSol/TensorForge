@@ -1,5 +1,5 @@
 // === base name ===
-kernel_27cc0c436104a8d5
+kernel_ed775bd7a4eb188f
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_27cc0c436104a8d5 = {{32, 4, 1}, 32, 20, 1, 4, 1536, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_27cc0c436104a8d5(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_27cc0c436104a8d5(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_ed775bd7a4eb188f = {{32, 4, 1}, 32, 20, 1, 4, 1536, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_ed775bd7a4eb188f(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_ed775bd7a4eb188f(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_27cc0c436104a8d5(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_ed775bd7a4eb188f(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   dim3 block (32, 4, 1);
@@ -69,7 +69,7 @@ tensorforge::LaunchConfig launch_config_kernel_27cc0c436104a8d5(size_t numElemen
         CHECK_ERR;
         cudaDeviceGetAttribute(&smCount, cudaDevAttrMultiProcessorCount, device);
         CHECK_ERR;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_27cc0c436104a8d5, block.x * block.y * block.z, 384 * sizeof(float));
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel_kernel_ed775bd7a4eb188f, block.x * block.y * block.z, 384 * sizeof(float));
         CHECK_ERR;
         if (blocksPerSM > 0) {
           gridsize = smCount * blocksPerSM;
@@ -90,13 +90,13 @@ tensorforge::LaunchConfig launch_config_kernel_27cc0c436104a8d5(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_27cc0c436104a8d5(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_27cc0c436104a8d5(numElements0, streamPtr);
+void launcher_kernel_ed775bd7a4eb188f(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_ed775bd7a4eb188f(numElements0, streamPtr);
   dim3 block (config.block[0], config.block[1], config.block[2]);
   dim3 grid (config.grid[0], config.grid[1], config.grid[2]);
   static bool shmemsizeset = false;
       if (!shmemsizeset) {
-        cudaFuncSetAttribute(kernel_kernel_27cc0c436104a8d5, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
+        cudaFuncSetAttribute(kernel_kernel_ed775bd7a4eb188f, cudaFuncAttributeMaxDynamicSharedMemorySize, config.sharedMemBytes);
         CHECK_ERR;
         shmemsizeset = true;
       }
@@ -105,7 +105,7 @@ void launcher_kernel_27cc0c436104a8d5(float ** m0, size_t m0_extraOffset, const 
   float *const * m0Arg = (float *const *)m0;
   const unsigned * elementIndicesArg = (const unsigned *)elementIndices;
   const unsigned * flags0Arg = (const unsigned *)flags0;
-  kernel_kernel_27cc0c436104a8d5<<<grid,block,config.sharedMemBytes,stream>>>(m0Arg, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, elementIndicesArg, flags0Arg);
+  kernel_kernel_ed775bd7a4eb188f<<<grid,block,config.sharedMemBytes,stream>>>(m0Arg, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, elementIndicesArg, flags0Arg);
   CHECK_ERR;
 }
 
@@ -113,7 +113,7 @@ void launcher_kernel_27cc0c436104a8d5(float ** m0, size_t m0_extraOffset, const 
 // === kernel ===
 __global__ void 
 __launch_bounds__(128, 1)
- kernel_kernel_27cc0c436104a8d5(float *const * __restrict__ m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * __restrict__ elementIndices, const unsigned * __restrict__ flags0) {
+ kernel_kernel_ed775bd7a4eb188f(float *const * __restrict__ m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * __restrict__ elementIndices, const unsigned * __restrict__ flags0) {
   extern __shared__ char totalShrMemPtr[];
    {
     using namespace tensorforge::literals;
@@ -166,7 +166,6 @@ __launch_bounds__(128, 1)
       }
       uint32_t v476_flagWord = flagWordFirst;
       uint32_t v477_flagWordNext = flagWordSecond;
-      size_t v528_elementIndex = peel_elementIndex;
       for (size_t v9_batchId0 = (threadIdx.y + blockDim.y * (blockIdx.x)); v9_batchId0 < numElements0; v9_batchId0 += (gridDim.x * blockDim.y)) {
         size_t v10_ahead1 = v9_batchId0 + (gridDim.x * blockDim.y);
         size_t v12_batchId1 = (v10_ahead1 < numElements0) ? v10_ahead1 : v9_batchId0;
@@ -178,7 +177,8 @@ __launch_bounds__(128, 1)
         const bool allowed = static_cast<bool>(v476_flagWord);
         const bool allowed_next = static_cast<bool>(v477_flagWordNext);
         if (allowed) {
-          float *const __restrict__ glb_m0 = &m0[v528_elementIndex * 2 + 1][0 + m0_extraOffset];
+          const size_t elementIndex = static_cast<size_t>(elementIndices[v9_batchId0]);
+          float *const __restrict__ glb_m0 = &m0[elementIndex * 2 + 1][0 + m0_extraOffset];
           // wait(s0 = load{g>s}(glb_m2[0, 1]));
           __pipeline_wait_prior(0);
           float r1[9]{};
@@ -344,7 +344,6 @@ __launch_bounds__(128, 1)
         __pipeline_commit();
         v476_flagWord = v477_flagWordNext;
         v477_flagWordNext = flagWordAhead;
-        v528_elementIndex = wrap_elementIndex;
       }
       __pipeline_wait_prior(0);
     }

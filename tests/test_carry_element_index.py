@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""An element's entry of the index list, read once and carried across the
-batch loop (`Options.carry_element_index`).
+"""An element's entry of the index list, read once, and carried across the
+batch loop where that pays (`Options.carry_element_index`).
 
 An operand addressed through the launch's index list (`Addressing.INDEXED`,
 `INDEXED_POINTER`) reads `elementIndices[n]` before its own address.  Read
@@ -10,21 +10,27 @@ in each address, at the top of the element, that is a load every address of
 the element waits for first -- index, pointer and data, where a pointer
 table has two.  The loop reads the entry once, as a value every address
 takes (`BatchLoop._bind_entries`), and where the wrap reads the next
-element's for the transfers it issues ahead, the loop carries that one into
-the next iteration (`pir.wrap`, `_Rewrite._carry`).
+element's for the transfers it issues ahead, the loop can carry that one into
+the next iteration (`pir.wrap`, `_Rewrite._carry`).  Under `auto` it does
+where holding the entry to its first reader keeps clear of the body's
+pressure peak, and otherwise reads it at the top of the element
+(`pir.entries`); `always` carries it wherever the body reads it, `never`
+reads it in each address.
 
 Checked here: the text -- one read an element, the next element's carried,
-the first element's in the peel, nothing carried that nothing reads, and
-the old text where the switch is off or nothing reads the list; and the
+the first element's in the peel, nothing carried that nothing reads, the
+rule on the kernels that decided it and on bodies built for it, and the old
+text under `never` or where nothing reads the list; and the
 numbers on the host oracle against NumPy, over index lists that repeat and
 skip cells and over permutations, with a mask holding elements back, every
 row of the block taking several trips, under the passes that clone an
-address for another element.
+address for another element, in every mode.
 """
 
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import re
 
@@ -37,7 +43,8 @@ from tensorforge.common.basic_types import (RUNTIME, Addressing, Datatype,
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
-from tensorforge.common.options import Options, registry
+from tensorforge.common.options import (Options, carry_mode, parse_carry,
+                                        registry)
 from tensorforge.generators.descriptions import GemmDescr
 from tensorforge.generators.generator import Generator
 from tensorforge.reference import kernel_eval
@@ -129,8 +136,28 @@ def _same_but_for_the_name(one: str, other: str) -> bool:
 # The switch
 # --------------------------------------------------------------------------- #
 
-def test_on_by_default():
-    assert registry()["carry_element_index"].default is True
+def test_the_rule_by_default():
+    assert registry()["carry_element_index"].default == "auto"
+
+
+@pytest.mark.parametrize("given,mode", [
+    ("auto", "auto"), ("ALWAYS", "always"), ("never", "never"),
+    (True, "always"), (False, "never")])
+def test_the_modes_and_the_switch_it_was(given, mode):
+    """A boolean, as the option was before it had a rule, reads as `always`
+    or `never`."""
+    assert carry_mode(given) == mode
+    if isinstance(given, str):
+        assert parse_carry(given) == mode
+    with pytest.raises(ValueError):
+        carry_mode("sometimes")
+
+
+def test_never_is_the_switch_off():
+    """`never` and `False` are one kernel under two names."""
+    one = _generate(OWN, carry_element_index="never")
+    other = _generate(OWN, carry_element_index=False)
+    assert _same_but_for_the_name(one.get_kernel(), other.get_kernel())
 
 
 # --------------------------------------------------------------------------- #
@@ -141,7 +168,7 @@ def test_the_entry_is_read_once_an_element_and_carried():
     """The element's addresses take the carried entry; the head reads the
     next element's once, for the copies there and for the next iteration;
     the peel reads the first element's, which the loop starts with."""
-    kernel = _generate(OWN).get_kernel()
+    kernel = _generate(OWN, carry_element_index="always").get_kernel()
     ahead, loop = _loop(kernel)
     assert _reads(ahead) == [
         next(line for line in _reads(ahead)
@@ -172,7 +199,8 @@ def test_every_target_reads_an_elements_entry_once(backend, arch):
     however its batch loop is spelled -- per row, or a group of rows a
     sub-group takes together: the list is read once per element and loop
     position, and every address of an operand through it takes the value."""
-    kernel = _generate(OWN, backend, arch).get_kernel()
+    kernel = _generate(OWN, backend, arch,
+                       carry_element_index="always").get_kernel()
     ahead, loop = _loop(kernel)
     reads = _reads(ahead) + _reads(loop)
     assert reads and all(re.match(r"const size_t \w*elementIndex = static_cast"
@@ -197,7 +225,8 @@ def test_every_target_reads_an_elements_entry_once(backend, arch):
 def test_without_the_wrap_the_entry_is_read_at_the_top_of_the_element():
     """Nothing ahead of the loop and nothing carried: one read inside the
     element's guard, which every address takes."""
-    kernel = _generate(OWN, enable_wrap_loads=False).get_kernel()
+    kernel = _generate(OWN, enable_wrap_loads=False,
+                       carry_element_index="always").get_kernel()
     ahead, loop = _loop(kernel)
     assert not _reads(ahead)
     assert _reads(loop) == ["const size_t elementIndex = static_cast<size_t>"
@@ -213,11 +242,13 @@ def test_without_the_wrap_the_entry_is_read_at_the_top_of_the_element():
                                        for line in addresses), addresses
 
 
-def test_nothing_is_carried_where_nothing_left_reads_the_entry():
+@pytest.mark.parametrize("mode", ["always", "auto"])
+def test_nothing_is_carried_where_nothing_left_reads_the_entry(mode):
     """Every address through the list is for a transfer the wrap moved: the
     element computes with what was fetched for it, and its own copy of the
-    address goes -- so does the read, and nothing is carried."""
-    kernel = _generate(INPUTS).get_kernel()
+    address goes -- so does the read, and nothing is carried, whatever the
+    mode."""
+    kernel = _generate(INPUTS, carry_element_index=mode).get_kernel()
     assert "peel_elementIndex" in kernel and "wrap_elementIndex" in kernel
     assert not re.search(r"\bv\d+_elementIndex\b", kernel)
     assert not re.search(r"\bconst size_t elementIndex\b", kernel)
@@ -231,7 +262,7 @@ def test_off_every_address_reads_the_list(backend, arch):
     """Off, the text the addresses always had: each reads its entry of the
     list, widened before the stride multiplies it."""
     kernel = _generate(INPUTS, backend, arch,
-                       carry_element_index=False).get_kernel()
+                       carry_element_index="never").get_kernel()
     assert "elementIndex " not in kernel and "elementIndex;" not in kernel
     assert re.search(r"&m1\[static_cast<size_t>\(elementIndices\[[^\]]+\]\)"
                      r" \* m1_stride \+ 0 \+ m1_extraOffset\]", kernel)
@@ -248,19 +279,22 @@ def test_off_every_address_reads_the_list(backend, arch):
 @pytest.mark.parametrize("backend,arch", TARGETS, ids=IDS)
 def test_a_kernel_without_the_list_is_the_same_either_way(addressings,
                                                           backend, arch):
-    """Nothing reads the list: the switch changes nothing but the name."""
-    on = _generate(addressings, backend, arch, enable_multibuffer=True)
-    off = _generate(addressings, backend, arch, enable_multibuffer=True,
-                    carry_element_index=False)
-    for part in ("get_kernel", "get_launcher", "get_header"):
-        assert _same_but_for_the_name(getattr(on, part)(),
-                                      getattr(off, part)()), part
+    """Nothing reads the list: no mode changes anything but the name."""
+    auto = _generate(addressings, backend, arch, enable_multibuffer=True)
+    for mode in ("always", "never"):
+        other = _generate(addressings, backend, arch, enable_multibuffer=True,
+                          carry_element_index=mode)
+        for part in ("get_kernel", "get_launcher", "get_header"):
+            assert _same_but_for_the_name(getattr(auto, part)(),
+                                          getattr(other, part)()), (mode,
+                                                                    part)
 
 
 def test_a_stack_reads_each_of_its_elements_entries_once():
     """`stack_elements = 2`: each element of the stack its own entry, read
     once and carried, picked as its addresses pick their element."""
-    kernel = _generate(OWN, stack_elements=2).get_kernel()
+    kernel = _generate(OWN, stack_elements=2,
+                       carry_element_index="always").get_kernel()
     ahead, loop = _loop(kernel)
     assert sorted(_names(_reads(ahead))) == ["peel_elementIndex_s0",
                                              "peel_elementIndex_s1"]
@@ -304,7 +338,8 @@ def test_a_group_of_rows_carries_each_rows_entry():
     """SYCL's SPMD lowering drives the rows of a sub-group together: each
     row's entry is read once, from the row's element the group's index
     gives, and the copy for the next group is what the next trip reads."""
-    kernel = _generate(OWN, "acpp", "pvc").get_kernel()
+    kernel = _generate(OWN, "acpp", "pvc",
+                       carry_element_index="always").get_kernel()
     _, loop = _loop(kernel)
     assert "batchIdGroup0" in loop[0]
     assert len(_reads(loop)) == 1 and "wrap_elementIndex" in _reads(loop)[0]
@@ -321,11 +356,13 @@ def test_rows_each_multiplication_reads_as_the_waves_keep_their_reads(
     monkeypatch.setattr(amd, "ORDER", (Strategy.GENERIC,))
     options = dict(lanes_per_mult=16, wave_group_traversal=True,
                    wave_uniform_group_rows=True)
-    on = _generate(OWN, "hip", "gfx942", **options).get_kernel()
-    off = _generate(OWN, "hip", "gfx942", carry_element_index=False,
+    off = _generate(OWN, "hip", "gfx942", carry_element_index="never",
                     **options).get_kernel()
-    assert "tensorforge::pick<" in on
-    assert _same_but_for_the_name(on, off)
+    for mode in ("auto", "always"):
+        on = _generate(OWN, "hip", "gfx942", carry_element_index=mode,
+                       **options).get_kernel()
+        assert "tensorforge::pick<" in on
+        assert _same_but_for_the_name(on, off), mode
 
 
 def test_the_queue_reads_the_entry_once_and_carries_nothing():
@@ -345,6 +382,175 @@ def test_the_queue_reads_the_entry_once_and_carries_nothing():
     reads = _reads(kernel.splitlines())
     names = _names(reads)
     assert "elementIndex" in names and len(names) == len(set(names))
+
+
+# --------------------------------------------------------------------------- #
+# The rule (`auto`)
+# --------------------------------------------------------------------------- #
+
+def _carried(kernel: str) -> bool:
+    """Whether the loop carries an element's entry."""
+    return bool(re.search(r"\bv\d+_elementIndex(?:_s\d)? = wrap_elementIndex",
+                          kernel))
+
+
+def _seissol(config, kernel, addressing, arch, **options):
+    """SeisSol's `kernel` with every operand an element owns reached through
+    the list -- `i*N+o&` (`indexed`) or `i*K+k&+o&` (`ipointer`) -- as the
+    carry bench reaches them."""
+    import seissol_suite as suite
+    from tensorforge.frontend.yateto import DescriptionReader
+    formula = {"indexed": "i*N+o&", "ipointer": "i*K+k&+o&"}[addressing]
+    described = copy.deepcopy(suite.description("elastic-linearck", config,
+                                                kernel))
+    described["version"] = 8
+    for tensor in described["tensors"]:
+        own = tensor["addressing"] in ("n*N+o&", "n&+o&")
+        tensor["binding"] = (dict(stride=None, offset=0, slots=1, slot=0)
+                             if own else None)
+        if tensor["addressing"] == "n&+o&" and not tensor["flags"]["temporary"]:
+            tensor["addressing"] = formula
+    descrs = DescriptionReader(None, {}).read(described)[0]
+    dtype = Datatype.F32 if config.endswith("-s") else Datatype.F64
+    gen = Generator(descrs, Context(arch=arch, backend="cuda", fp_type=dtype,
+                                    options=Options(**options)))
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.generate()
+    return gen.get_kernel()
+
+
+@pytest.mark.parametrize("config,kernel", [
+    ("elastic-linearck-o4-s", "gpu_volume"),
+    ("elastic-linearck-o4-d", "gpu_neighboringFlux[0]")])
+def test_the_rule_carries_where_the_first_reader_comes_early(config, kernel):
+    """Through a pointer per cell, the operands the element reads first hang
+    off its entry, well before the body's peak: the entry is carried, as
+    `always` carries it -- these are the kernels the carry took back under
+    GB200's occupancy cliff."""
+    auto = _seissol(config, kernel, "ipointer", "sm_100")
+    always = _seissol(config, kernel, "ipointer", "sm_100",
+                      carry_element_index="always")
+    assert _carried(auto)
+    assert _same_but_for_the_name(auto, always)
+
+
+def test_the_rule_reads_an_output_entry_at_the_top():
+    """`localFlux[0]` at order 6 in single precision, through the list, on
+    sm_90: the entry's one reader is the element's output, loaded behind the
+    products, at the start of the climb to the body's peak.  Carried there it
+    cost 4.7 % on GH200; not carried, it is read once at the top of the
+    element, with the binding it feeds -- which compiles to the machine code
+    of the entry read in each address."""
+    args = ("elastic-linearck-o6-s", "gpu_localFlux[0]", "indexed", "sm_90")
+    assert _carried(_seissol(*args, carry_element_index="always"))
+    kernel = _seissol(*args)
+    assert not _carried(kernel)
+    lines = kernel.splitlines()
+    guard = next(i for i, line in enumerate(lines) if "if (allowed)" in line)
+    read = next(i for i, line in enumerate(lines)
+                if "const size_t elementIndex = " in line)
+    assert read == guard + 1, lines[guard:read + 1]
+    assert re.search(r"\bglb_m\d+ = &m\d+\[elementIndex \* ",
+                     lines[read + 1]), lines[read + 1]
+
+
+def test_an_entry_only_stored_through_is_read_at_the_top():
+    """The output of a small product, only stored, and stored behind the
+    product: not carried, and read at the top of the element, as the
+    addresses through the list always were.  The copy of the read for the
+    next element stays at the head, where the next element's pointers have
+    the body to arrive in."""
+    kernel = _generate(OWN).get_kernel()
+    assert not _carried(kernel)
+    lines = kernel.splitlines()
+    head = next(i for i, line in enumerate(lines)
+                if "const size_t wrap_elementIndex = " in line)
+    guard = next(i for i, line in enumerate(lines) if "if (allowed)" in line)
+    read = next(i for i, line in enumerate(lines)
+                if "const size_t elementIndex = " in line)
+    store = next(i for i, line in enumerate(lines)
+                 if line.strip() == "// glb_m0 = store{r>g}(r1);")
+    assert head < guard and read == guard + 1 and read + 1 < store
+    assert "glb_m0 = &m0[elementIndex * " in lines[read + 1]
+
+
+def test_a_store_reads_the_entry_through_the_binding_it_names(monkeypatch):
+    """The rule's reader of that entry is the store: it names its
+    destination by the binding's symbol, which the binding takes from the
+    entry (`entries.first_reader`)."""
+    from tensorforge.backend.pir import entries, wrap
+    seen = []
+    judge = wrap.cheap_to_hold
+
+    def spy(body, entry, explicit_simd=False, pressure=None):
+        seen.append(entries.first_reader(body, entry))
+        return judge(body, entry, explicit_simd, pressure=pressure)
+
+    monkeypatch.setattr(wrap, "cheap_to_hold", spy)
+    _generate(OWN)
+    assert seen and all(r is not None and r.op == "store" for r in seen)
+
+
+def _placed_body(late: bool):
+    """A batch loop built for the rule: the element's entry, a binding
+    through it, a stretch of 48 values live at once, and the binding stored
+    through ahead of that stretch, or behind it."""
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import (SIZE, BufferType, Effect,
+                                              MemSpace, ScalarType)
+    b = IRBuilder(fptype=DTYPE)
+    count = b.extern_value("numElements0", SIZE, hint="count")
+    with b.for_(0, count, 1, hint="batchId0", index_type=SIZE) as f:
+        k = f.induction
+        entry = b.decl_expr(
+            "const size_t elementIndex",
+            "static_cast<size_t>(elementIndices[{0}])", SIZE, None, args=(k,),
+            hint="elementIndex", extern="elementIndex",
+            attrs=(("element_index", True),))
+        out = b.decl_expr(
+            "float *const glb_m0", "&m0[{0} * 64]",
+            BufferType(DTYPE, (64,), MemSpace.GLOBAL), "m0", args=(entry,),
+            kind=Effect.READ, space=MemSpace.GLOBAL, hint="glb_m0",
+            extern="glb_m0")
+        src = b.decl_expr(
+            "const float *const glb_m1", "&m1[0]",
+            BufferType(DTYPE, (64,), MemSpace.GLOBAL, readonly=True), "m1",
+            kind=Effect.READ, space=MemSpace.GLOBAL, hint="glb_m1",
+            extern="glb_m1")
+        if not late:
+            b.store(out, 1.0, 0)
+        values = [b.load(src, i, hint="x") for i in range(48)]
+        total = values[0]
+        for value in values[1:]:
+            total = b.op("add", ScalarType(DTYPE), total, value, hint="sum")
+        b.store(out, total, 1)
+    return b.finish()
+
+
+def _loop_body(body):
+    from tensorforge.backend.pir.core import Op
+    return list(next(s for s in body if s.op is Op.FOR).regions[0].body)
+
+
+def test_an_entry_read_past_the_peak_is_not_held():
+    """Its binding's only reader stands behind 48 values live at once:
+    holding the entry to there reaches the peak."""
+    from tensorforge.backend.pir import entries
+    stmts = _loop_body(_placed_body(late=True))
+    entry = next(s for s in stmts if entries.is_entry(s))
+    assert not entries.cheap_to_hold(stmts, entry)
+    reader = entries.first_reader(stmts, entry)
+    assert reader.op == "store", "looked through the binding"
+    assert stmts.index(reader) > 48
+
+
+def test_an_entry_read_before_the_peak_is_held():
+    """The binding is stored through ahead of the stretch: holding the entry
+    to there costs nothing, and the loop may carry it."""
+    from tensorforge.backend.pir import entries
+    stmts = _loop_body(_placed_body(late=False))
+    entry = next(s for s in stmts if entries.is_entry(s))
+    assert entries.cheap_to_hold(stmts, entry)
 
 
 # --------------------------------------------------------------------------- #
@@ -427,24 +633,33 @@ def _lists(elements):
     return repeats, once
 
 
-#: The passes that compute an address again for another element, and what
-#: the switch is set to; on every one of them the kernel reads what the list
-#: names.
+#: The passes that compute an address again for another element, and the
+#: modes of the switch; on every one of them the kernel reads what the list
+#: names.  `auto` carries where the rule says so and reads right before the
+#: first reader elsewhere, `always` carries wherever the body reads the entry.
 OPTIONS = [
     dict(),
     dict(enable_wrap_loads=False),
     dict(enable_multibuffer=True),
-    dict(enable_multibuffer=True, pointer_stage=False),
     dict(stack_elements=2),
-    dict(stack_elements=2, enable_multibuffer=True),
-    dict(enable_prefetch=True, prefetch_data=True),
     # The rows of a wave driven as one group, as SYCL's SPMD lowering
     # drives a sub-group's: each row's element is bound from the group's
     # index, and the copy for the next group computes it again.
     dict(wave_group_traversal=True),
-    dict(wave_group_traversal=True, stack_elements=2),
-    dict(carry_element_index=False),
-    dict(carry_element_index=False, enable_multibuffer=True),
+    dict(carry_element_index="always"),
+    dict(carry_element_index="always", enable_multibuffer=True),
+    dict(carry_element_index="always", enable_multibuffer=True,
+         pointer_stage=False),
+    dict(carry_element_index="always", stack_elements=2),
+    dict(carry_element_index="always", stack_elements=2,
+         enable_multibuffer=True),
+    dict(carry_element_index="always", enable_prefetch=True,
+         prefetch_data=True),
+    dict(carry_element_index="always", wave_group_traversal=True),
+    dict(carry_element_index="always", wave_group_traversal=True,
+         stack_elements=2),
+    dict(carry_element_index="never"),
+    dict(carry_element_index="never", enable_multibuffer=True),
 ]
 OPTION_IDS = [",".join(f"{k}={v}" for k, v in o.items()) or "default"
               for o in OPTIONS]
@@ -480,8 +695,9 @@ def test_inputs_through_a_list_that_repeats_and_skips(options, oracle_target):
     dict(enable_multibuffer=True, move_distance=2),
     dict(enable_multibuffer=True, move_distance=2, pointer_stage=False),
     dict(move_distance=2),
+    dict(move_distance=2, carry_element_index="always"),
     dict(enable_multibuffer=True, move_distance=2,
-         carry_element_index=False)],
+         carry_element_index="never")],
     ids=lambda o: ",".join(f"{k}={v}" for k, v in o.items()))
 def test_two_staged_pointers_through_a_list_that_repeats(options,
                                                          oracle_target):
