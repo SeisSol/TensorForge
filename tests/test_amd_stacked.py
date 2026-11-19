@@ -266,6 +266,18 @@ class SimWriter:
             out[...] = term
             rest = (rest - term).astype(np.float32)
 
+    def matrix_mac(self, engine, shape, types, a, b, c, *, result=None,
+                   instruction=None, modifiers=(), **kw):
+        # An MFMA as the matrix op states it: one register vector a
+        # fragment, the instruction by name, the modifiers by theirs --
+        # simulated as the builtin it is written as.
+        assert engine == "mfma" and result is not None
+        assert len(a) == len(b) == len(c) == 1
+        named = dict(modifiers)
+        return self.call(f"__builtin_amdgcn_{instruction}", result, a[0],
+                         b[0], c[0], named.get("cbsz", 0),
+                         named.get("abid", 0), named.get("blgp", 0))
+
     def call(self, callee, type_, *args, **kw):
         if callee == "tensorforge::packBF16x4":
             # Terms the host split, stored as the floats they stand for.

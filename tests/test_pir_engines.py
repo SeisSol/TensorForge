@@ -301,12 +301,13 @@ def test_a_schedule_fence_is_the_statement_the_compiler_holds_to():
             assert got.lines == ('tensorforge::intel_esimd::fence<128>();',)
             continue
         fence = target.lexic.pin_fence()
-        assert got == ((fence[0],), fence[1]) if fence else got == ((), False)
+        assert got == (engines.Lowered((fence[0],), fence[1]) if fence
+                       else engines.Lowered((), False))
         if backend == 'hip':
             assert got.lines == (target.lexic.loop_body_fence(),)
     sm86 = _target('cuda', 'sm_86')
     assert engines.lower(engines.fence_stmt('schedule'), sm86) == (
-        ('__syncwarp();',), True)
+        engines.Lowered(('__syncwarp();',), True))
 
 
 def test_a_scheduling_group_is_amd_s_and_a_hint_elsewhere():
@@ -338,7 +339,8 @@ def test_a_memory_fence_of_the_wave_and_of_the_block():
     gfx942, sm86 = _target('hip', 'gfx942'), _target('cuda', 'sm_86')
     oneapi, esimd = _target('oneapi', 'pvc'), _target('esimd', 'pvc')
     assert _lines(warp, gfx942) == (gfx942.lexic.handoff_fence(),)
-    assert engines.lower(warp, sm86) == (('__syncwarp();',), True)
+    assert engines.lower(warp, sm86) == engines.Lowered(('__syncwarp();',),
+                                                        True)
     assert _lines(warp, oneapi) == (
         'sycl::group_barrier(item.get_sub_group());',)
     assert _lines(warp, esimd) == ()

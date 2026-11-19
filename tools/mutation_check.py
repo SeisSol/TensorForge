@@ -3964,16 +3964,16 @@ GROUPS = {
          sub(ENGINES, "def _matrix(s: Stmt) -> str:\n    return 'matrix'\n",
              "def _matrix(s: Stmt) -> str:\n    return 'other'\n", 1)),
         ('C not declared as read and written',
-         sub(BUILD, '        accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER,\n'
-                    '                                base=w) for w in c)\n',
-             '        accesses = ()\n', 1)),
+         sub(BUILD, '            accesses = tuple(Access(Effect.READ | Effect.WRITE,\n'
+                    '                                    MemSpace.REGISTER, base=w) for w in c)\n',
+             '            accesses = ()\n', 1)),
         ('the accumulators left unpinned',
-         sub(BUILD, "            self._require_addressable(w, 'matrix.mac')\n"
-                    '            self.pin(w)\n',
-             "            self._require_addressable(w, 'matrix.mac')\n", 1)),
+         sub(BUILD, "                self._require_addressable(w, 'matrix.mac')\n"
+                    '                self.pin(w)\n',
+             "                self._require_addressable(w, 'matrix.mac')\n", 1)),
         ('the op made movable',
-         sub(BUILD, '            movable=engines.movable_of(Op.MATRIX_MAC, attrs),\n',
-             '            movable=True,\n', 1)),
+         sub(BUILD, '        movable = engines.movable_of(Op.MATRIX_MAC, attrs)\n',
+             '        movable = True\n', 1)),
         ('the term left off the op',
          sub(BUILD, '        if term is not None:\n'
                     "            attrs += (('term', tuple(term)),)\n",
@@ -4002,6 +4002,68 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
              "_ENGINES = {MMAMode.TF32: ('mma_sync', (Datatype.TF32, Datatype.TF32,\n",
              "_ENGINES = {MMAMode.TF32: ('dmma', (Datatype.TF32, Datatype.TF32,\n", 1)),
+    ]),
+    # AMD's MFMA on the matrix op: D declared as the emitter declares a
+    # value, the builtin's operands and modifiers, the category priced by
+    # shape, and the wait a DPP block owes the instruction.
+    'matrixamd': ('tests/test_matrix_mac.py', [
+        ('the modifiers out of order',
+         sub(ENGINES, "MFMA_MODIFIERS = ('cbsz', 'abid', 'blgp')\n",
+             "MFMA_MODIFIERS = ('abid', 'cbsz', 'blgp')\n", 1)),
+        ('the operands out of order',
+         sub(ENGINES, '    args = [env.name(v) for v in (*a, *b, *c)]\n',
+             '    args = [env.name(v) for v in (*b, *a, *c)]\n', 1)),
+        ('D declared in a type of its own',
+         sub(EMIT, '                self.declare(s.target[0], lowered.result, s)\n',
+             "                w(f'auto {self.name(s.target[0])} = {lowered.result};')\n", 1)),
+        ('D left undeclared',
+         sub(EMIT, '            if lowered.result is not None:\n',
+             '            if False:\n', 1)),
+        ('the category without the shape',
+         sub(ENGINES, "        return f'mfma.{instruction[len(\"mfma_\"):]}'\n",
+             "        return 'mfma'\n", 1)),
+        ('an MFMA no work',
+         sub(ENGINES, "    MatrixEngine('mfma', Participants.WAVE, True, _mfma_pipe, _lower_mfma,\n",
+             "    MatrixEngine('mfma', Participants.WAVE, False, _mfma_pipe, _lower_mfma,\n", 1)),
+        ('D inlined into its reader',
+         sub(BUILD, "                      attrs=attrs + (('no_inline', True),))\n",
+             '                      attrs=attrs)\n', 1)),
+        ('an MFMA declared impure',
+         sub(BUILD, '        self._emit_op(Op.MATRIX_MAC, (v,), a + b + c, pure=True,\n',
+             '        self._emit_op(Op.MATRIX_MAC, (v,), a + b + c, pure=False,\n', 1)),
+        ('D uniform where its fragments are not',
+         sub(BUILD, '        v = self.value(result, hint=hint, uniform=_join(a + b + c),\n',
+             '        v = self.value(result, hint=hint, uniform=Uniformity.GRID,\n', 1)),
+        ('the instruction left off the op',
+         sub(BUILD, '        if instruction is not None:\n'
+                    "            attrs += (('instruction', instruction),)\n",
+             '        if False:\n'
+             "            attrs += (('instruction', instruction),)\n", 1)),
+        ('the vendor\'s layouts left off',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '            layouts=vendor_layouts(self))\n',
+             '            layouts=None)\n', 1)),
+        ('a derived layout taken for the vendor\'s',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '    stated = (Provenance.MEASURED, Provenance.DOCUMENTED)\n',
+             '    stated = (Provenance.MEASURED, Provenance.DOCUMENTED,\n'
+             '              Provenance.DERIVED)\n', 1)),
+        ('the emulated operands taken as D\'s type',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '            (self.a.dtype, self.b.dtype, self.d.dtype, self.d.dtype),\n',
+             '            (self.d.dtype, self.d.dtype, self.d.dtype, self.d.dtype),\n', 1)),
+        ('a kernel of MFMAs not waiting behind its blocks',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/dpp_block.py'), '            if (stmt.op == Op.MATRIX_MAC\n'
+                  '                    and stmt.attr(\'engine\') == HAZARD.then):\n',
+             '            if False:\n', 1)),
+        ('any matrix op taken for an MFMA',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/dpp_block.py'), '            if (stmt.op == Op.MATRIX_MAC\n'
+                  '                    and stmt.attr(\'engine\') == HAZARD.then):\n',
+             '            if stmt.op == Op.MATRIX_MAC:\n', 1)),
+        ('the wait behind a block one state short',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/dpp_block.py'), "HAZARD = Hazard(then='mfma', states=2)\n",
+             "HAZARD = Hazard(then='mfma', states=1)\n", 1)),
+        ('raw text spelling an MFMA not read',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/dpp_block.py'), "            if any(_MATRIX.search(text) for text in (stmt.attr('asm') or '',\n"
+                  "                                                     stmt.text or '')):\n",
+             '            if False:\n', 1)),
     ]),
 }
 

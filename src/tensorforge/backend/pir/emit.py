@@ -142,10 +142,6 @@ _SFU_CALL = re.compile(r'(?:^|[^a-z0-9])_*(exp2?|log2?|sqrt|rsqrt|rcp|sin|cos'
                        r'|tan|pow|erf|cbrt|tanh|sinh|cosh)f?(?:$|[^a-z0-9])',
                        re.IGNORECASE)
 
-#: Matrix instructions reached as builtins (`__builtin_amdgcn_mfma_*`, WMMA);
-#: NVIDIA's arrive as inline assembly.
-_MATRIX_CALL = re.compile(r'(mfma|wmma|smfmac)', re.IGNORECASE)
-
 #: An FMA whose operand comes from another lane through a DPP modifier: one
 #: VALU instruction, the move is free.  So it is arithmetic, not a move.
 _FMA_CALL = re.compile(r'(fmac?dpp|fmadpp|fma_dpp)', re.IGNORECASE)
@@ -192,14 +188,6 @@ def _split_issues(s) -> int:
     blocks = int(m.group(2)) // max(1, int(m.group(1)))
     return max(1, 2 * blocks - 1)
 
-
-def _mfma_category(callee: str) -> str:
-    """One AMD matrix builtin as `mfma.<shape>`, the shape as the builtin
-    names it (`mfma.f32_4x4x1f32`): the instructions differ by an order of
-    magnitude in how long they hold the SIMD, and `analysis.pipeline` prices
-    each (`MFMA_CLOCKS`)."""
-    m = re.search(r'mfma_(\w+)', callee)
-    return f'mfma.{m.group(1)}' if m else 'mfma'
 
 #: Calls that constrain the compiler and lay nothing down (`pin` is an empty
 #: `asm volatile` holding a value in a register).
@@ -501,10 +489,6 @@ class Emitter:
                 return None, []
             if _NO_CODE_CALL.search(callee):
                 return None, []
-            if re.search(r'mfma', callee, re.IGNORECASE):
-                return _mfma_category(callee), []
-            if _MATRIX_CALL.search(callee):
-                return 'matrix', []
             if _FMA_CALL.search(callee):
                 wide = any(getattr(getattr(a, 'type', None), 'base', None)
                            == Datatype.F64 for a in s.args)
@@ -1594,9 +1578,13 @@ class Emitter:
                 # One operation over a whole tile, whose flops the emitter
                 # is not told: the figure is left inexact rather than short.
                 self._record_work()
-            for text in engines.lower(s, self._target(),
-                                      name=self.operand).lines:
+            lowered = engines.lower(s, self._target(), name=self.operand)
+            for text in lowered.lines:
                 w(text)
+            if lowered.result is not None:
+                # An op with a result: declared as this emitter declares a
+                # value, its type spelled by the target's lexic.
+                self.declare(s.target[0], lowered.result, s)
             return
 
         if op == Op.ALLOC:
@@ -1920,11 +1908,6 @@ class Emitter:
                 acc = s.target[0] if s.target else (s.args[0] if s.args
                                                     else None)
                 self._record_work('fma', acc, work=False)
-            elif callee is not None and _MATRIX_CALL.search(callee):
-                # A matrix instruction reached as a builtin, as the asm one
-                # above: one operation over a whole tile the emitter is not
-                # told, so the flop figure is left inexact rather than short.
-                self._record_work()
             args = ', '.join(self.operand(a) for a in s.args)
             if not s.target:
                 # A void intrinsic: invoked for what it does to a register it

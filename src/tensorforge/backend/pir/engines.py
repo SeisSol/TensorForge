@@ -653,10 +653,16 @@ class Lowered(NamedTuple):
     """What an op is written as: its lines, and whether every lane of the
     warp has to execute them -- a full-mask `__syncwarp`, a sub-group
     barrier -- which a caller writing them under a lane-varying condition
-    has to know (`Emitter._pin_load`)."""
+    has to know (`Emitter._pin_load`).
+
+    `result` is the expression an op with a result is: the emitter declares
+    the result with it as its initializer, spelling the declaration as its
+    lexic and its model of a value do (`Emitter.declare`) -- a scalar, a
+    vector type of the target's, a `simd` under the explicit vector."""
 
     lines: Tuple[str, ...] = ()
     converged: bool = False
+    result: Optional[str] = None
 
 
 class Spelling:
@@ -718,9 +724,9 @@ class Slot:
 @dataclass(frozen=True)
 class Hazard:
     """A wait the hardware does not interlock: `states` wait states between
-    this op and a following `then`.  None of the ops here has one; the shape
-    is for the matrix engines and the DPP blocks (an AMD VALU write read by
-    an MFMA as A or B, two states), which come with them."""
+    this op and a following `then` -- a matrix engine by its name, which is
+    what the DPP blocks' VALU writes owe an MFMA reading them as A or B, two
+    states (`amd.dpp_block.HAZARD`)."""
 
     then: str
     states: int
@@ -1229,6 +1235,40 @@ def _matrix(s: Stmt) -> str:
     return 'matrix'
 
 
+#: The modifiers of AMD's MFMA builtins, in the order they follow the
+#: operands: `cbsz` and `abid` broadcast a block of A to the others, `blgp`
+#: swizzles B's lane groups.  Zero where a modifier is not stated.
+MFMA_MODIFIERS = ('cbsz', 'abid', 'blgp')
+
+
+def mfma_category(instruction: str) -> str:
+    """The issue category an MFMA counts under, `mfma.<shape>` -- the shape
+    as its builtin names it (`mfma.f32_4x4x1f32`, of `mfma_f32_4x4x1f32`):
+    the instructions differ by an order of magnitude in how long they hold
+    the SIMD, and `analysis.pipeline` prices each (`MFMA_CLOCKS`)."""
+    if instruction.startswith('mfma_'):
+        return f'mfma.{instruction[len("mfma_"):]}'
+    return 'mfma'
+
+
+def _mfma_pipe(s: Stmt) -> str:
+    return mfma_category(s.attr('instruction') or '')
+
+
+def _lower_mfma(s: Stmt, env: Spelling) -> Lowered:
+    """An MFMA as its builtin, `__builtin_amdgcn_<instruction>(A, B, C,
+    cbsz, abid, blgp)`: D is what it returns, the result's initializer."""
+    if not s.target or s.attr('instruction') is None:
+        raise IRError('an MFMA returns D and names its instruction: its '
+                      'matrix op has a result and an `instruction`')
+    a, b, c = fragments(s)
+    modifiers = dict(s.attr('modifiers', ()))
+    args = [env.name(v) for v in (*a, *b, *c)]
+    args += [str(modifiers.get(name, 0)) for name in MFMA_MODIFIERS]
+    return Lowered(result=f'__builtin_amdgcn_{s.attr("instruction")}('
+                          f'{", ".join(args)})')
+
+
 MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
     MatrixEngine('mma_sync', Participants.WAVE, True, _matrix,
                  _lower_mma_sync,
@@ -1237,6 +1277,11 @@ MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
     MatrixEngine('dmma', Participants.WAVE, True, _matrix, _lower_mma_sync,
                  "NVIDIA's FP64 mma.sync, which ptxas lowers to DMMA.8x8x4 "
                  'whatever its shape from sm_100 on (`Emitter._issues`)'),
+    MatrixEngine('mfma', Participants.WAVE, True, _mfma_pipe, _lower_mfma,
+                 "AMD's MFMA (CDNA), one builtin returning D, the "
+                 'instruction named by the catalog row it is '
+                 '(`amd.catalog.MatrixOp`) and priced by its shape '
+                 '(`mfma_category`)'),
 )}
 
 
@@ -1369,14 +1414,16 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     # registers (`effect_of`).  Pinned: one instruction of the wave, and
     # the passes reorder no collective.  The other slots: the engine, the
     # shape (m, n, k), the element types of A, B, C and D, the register
-    # counts of the fragments, the fragment layouts where the vendor states
-    # them (`BitLayout`s of A, B and D, None where it does not), the term
-    # of a split product (which halves of A and B), the vendor's modifiers,
-    # and the collective that executes it.
+    # counts of the fragments, the instruction where the engine has several
+    # of a shape (an MFMA's builtin), the fragment layouts where the vendor
+    # states them (`BitLayout`s of A, B and D, None where it does not), the
+    # term of a split product (which halves of A and B), the vendor's
+    # modifiers, and the collective that executes it.
     OpSpec(Op.MATRIX_MAC, operands=(Slot('engine', (str,)),
                                     Slot('shape', (tuple,)),
                                     Slot('types', (tuple,)),
                                     Slot('fragments', (tuple,)),
+                                    Slot('instruction', (str,), False),
                                     Slot('in_place', (bool,), False),
                                     Slot('layouts', (tuple,), False),
                                     Slot('term', (tuple,), False),
@@ -1695,4 +1742,5 @@ __all__ = [
     'wait_phase', 'ResourceType',
     'MATRIX_ENGINES', 'MatrixEngine', 'asm_text', 'fragments',
     'matrix_engine', 'mma_sync_name', 'pipe_of',
+    'MFMA_MODIFIERS', 'mfma_category',
 ]

@@ -735,40 +735,50 @@ class IRBuilder:
     def matrix_mac(self, engine: str, shape: Tuple[int, int, int],
                    types: Tuple[Datatype, Datatype, Datatype, Datatype],
                    a: Sequence[Operand], b: Sequence[Operand],
-                   c: Sequence[Operand], *, layouts: Optional[Tuple] = None,
+                   c: Sequence[Operand], *, result=None, hint: str = 'acc',
+                   layout: Optional[RegisterLayout] = None,
+                   instruction: Optional[str] = None,
+                   layouts: Optional[Tuple] = None,
                    term: Optional[Tuple[int, int]] = None,
-                   modifiers: Tuple = ()) -> Stmt:
+                   modifiers: Tuple = ()):
         """D = A * B + C on the matrix engine `engine`
-        (`engines.MATRIX_ENGINES`), written into C in place: the registers
-        of the fragments as values, A's, B's and C's in the order the
-        instruction takes them, `shape` (m, n, k), `types` the elements of
-        A, B, C and D.
+        (`engines.MATRIX_ENGINES`): the registers of the fragments as
+        values, A's, B's and C's in the order the instruction takes them,
+        `shape` (m, n, k), `types` the elements of A, B, C and D.  One
+        instruction of the wave together (`collective`), which no pass
+        reorders: the statement is pinned.
 
-        In place, as `mma.sync` accumulates: C's registers are read and
-        written, and so declared -- a read and a write of each, in the
+        Two forms, as the instruction is one or the other.  In place
+        (`result` None), as `mma.sync` accumulates: C's registers are read
+        and written, and so declared -- a read and a write of each, in the
         register space -- and pinned, as an operand an instruction writes
-        through has to be.  The statement allocates no value, which is what
-        the instruction it replaces allocated.  Pinned too: one instruction
-        of the wave together (`collective`), which no pass reorders.
+        through has to be; no value is allocated, and the statement is
+        returned.  With a result, as an MFMA returns D: D is a new value of
+        type `result` (`hint`, `layout`, None for a layout nobody knows), as
+        uniform as the fragments, and is returned; the statement is pure, as
+        the function of its operands it is, and kept in a variable of its
+        own (`no_inline`), as every link of an accumulator chain has to be
+        (`call`'s `materialize`).
 
-        `layouts` are the fragment layouts of A, B and D where the vendor
-        states them (`BitLayout`, None where not), `term` the halves of A
-        and B a split product multiplies (0 the upper, 1 the lower),
-        `modifiers` the vendor's own, as `(name, value)` pairs.
+        `instruction` names the instruction where the engine has several of
+        one shape and types (an MFMA's builtin), `layouts` the fragment
+        layouts of A, B and D where the vendor states them (`BitLayout`,
+        None where not), `term` the halves of A and B a split product
+        multiplies (0 the upper, 1 the lower), `modifiers` the vendor's own,
+        as `(name, value)` pairs.
         """
         found = engines.MATRIX_ENGINES.get(engine)
         if found is None:
             raise IRError(f'a matrix op on engine {engine!r}; there are '
                           f'{", ".join(sorted(engines.MATRIX_ENGINES))}')
         a, b, c = tuple(a), tuple(b), tuple(c)
-        for w in c:
-            self._require_addressable(w, 'matrix.mac')
-            self.pin(w)
-        accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER,
-                                base=w) for w in c)
         attrs = (('engine', engine), ('shape', tuple(shape)),
                  ('types', tuple(types)),
-                 ('fragments', (len(a), len(b), len(c))), ('in_place', True))
+                 ('fragments', (len(a), len(b), len(c))))
+        if instruction is not None:
+            attrs += (('instruction', instruction),)
+        if result is None:
+            attrs += (('in_place', True),)
         if layouts is not None:
             attrs += (('layouts', tuple(layouts)),)
         if term is not None:
@@ -777,11 +787,23 @@ class IRBuilder:
             attrs += (('modifiers', tuple(modifiers)),)
         if found.collective is not None:
             attrs += (('collective', found.collective),)
-        return self._emit_op(
-            Op.MATRIX_MAC, (), a + b + c, pure=False,
-            movable=engines.movable_of(Op.MATRIX_MAC, attrs),
-            effect=engines.effect_of(Op.MATRIX_MAC, attrs),
-            accesses=accesses, attrs=attrs)
+        movable = engines.movable_of(Op.MATRIX_MAC, attrs)
+        effect = engines.effect_of(Op.MATRIX_MAC, attrs)
+        if result is None:
+            for w in c:
+                self._require_addressable(w, 'matrix.mac')
+                self.pin(w)
+            accesses = tuple(Access(Effect.READ | Effect.WRITE,
+                                    MemSpace.REGISTER, base=w) for w in c)
+            return self._emit_op(Op.MATRIX_MAC, (), a + b + c, pure=False,
+                                 movable=movable, effect=effect,
+                                 accesses=accesses, attrs=attrs)
+        v = self.value(result, hint=hint, uniform=_join(a + b + c),
+                       layout=layout)
+        self._emit_op(Op.MATRIX_MAC, (v,), a + b + c, pure=True,
+                      movable=movable, effect=effect,
+                      attrs=attrs + (('no_inline', True),))
+        return v
 
     def _require_addressable(self, value: Operand, callee: str) -> None:
         """A written argument has to be something that has an address.

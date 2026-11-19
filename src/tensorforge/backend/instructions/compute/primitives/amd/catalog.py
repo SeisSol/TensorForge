@@ -46,6 +46,7 @@ emits can consume them, and the check against LLVM treats the omission as
 `NOT_MODELED` rather than passing over it.
 """
 
+import functools
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -209,6 +210,24 @@ class MatrixOp:
         arranges yet.
         """
         return threads == self.wave
+
+    def mac(self, writer, type_, a, b, c, cbsz: int = 0, abid: int = 0,
+            blgp: int = 0):
+        """D = A * B + C as this instruction: the matrix op of engine `mfma`
+        (`IRBuilder.matrix_mac`), A, B and C one register vector each -- the
+        builtin's operands, in its order -- and D a new value of `type_`,
+        which it returns: a link of an accumulator chain, in a variable of
+        its own, its layout one nobody wrote down (`codegen.matmul32`).
+        `cbsz`, `abid` and `blgp` are the broadcast and swizzle modifiers
+        (`broadcast`), all three stated; the layouts the vendor has for A, B
+        and D go along (`vendor_layouts`)."""
+        return writer.matrix_mac(
+            'mfma', (self.m, self.n, self.k),
+            (self.a.dtype, self.b.dtype, self.d.dtype, self.d.dtype),
+            (a,), (b,), (c,), result=type_, hint='acc',
+            instruction=self.builtin,
+            modifiers=(('cbsz', cbsz), ('abid', abid), ('blgp', blgp)),
+            layouts=vendor_layouts(self))
 
     def cbsz(self, threads: int) -> int:
         """How many blocks share one A operand: the instruction's `cbsz`.
@@ -481,6 +500,19 @@ _TILE_TRANSPOSES = {
     16: ('tensorforge::transpose16x16b32', False),
     32: ('tensorforge::transpose32x32b32', False),
 }
+
+
+@functools.lru_cache(maxsize=None)
+def vendor_layouts(op: MatrixOp):
+    """The layouts of A, B and D the vendor states for `op` -- measured on
+    the hardware or documented (`layouts.provenance`) -- as `BitLayout`s,
+    None for an operand it states none of: what a matrix op of the
+    instruction carries (`IRBuilder.matrix_mac`).  A layout derived here
+    from a precedent is TensorForge's inference, and stays out."""
+    from .layouts import Provenance, fragment_layout, provenance
+    stated = (Provenance.MEASURED, Provenance.DOCUMENTED)
+    return tuple(fragment_layout(op, w) if provenance(op, w) in stated
+                 else None for w in 'ABD')
 
 
 @dataclass(frozen=True)

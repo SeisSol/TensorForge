@@ -291,3 +291,173 @@ def test_an_instruction_is_counted_as_the_ones_it_issues(arch, atom, issues):
     assert metrics.mix == [('matrix', issues, issues)]
     assert metrics.code == issues
     assert metrics.work == [(1, None)]
+
+
+# -- AMD's MFMA ---------------------------------------------------------------- #
+
+from tensorforge.backend.instructions.compute.primitives.amd import (  # noqa: E402
+    catalog, dpp_block, stacked)
+from tensorforge.backend.pir.core import ScalarType, Uniformity  # noqa: E402
+
+MFMA4 = next(o for o in catalog.MATRIX_OPS if o.builtin == 'mfma_f32_4x4x1f32')
+MFMA64 = next(o for o in catalog.MATRIX_OPS
+              if o.builtin == 'mfma_f64_16x16x4f64')
+
+
+def _mfma(op, how='op', modifiers=(2, 1, 4)):
+    """One MFMA on declared fragments: as the matrix op (`MatrixOp.mac`), or
+    as the builtin call the AMD path wrote before it (`how='call'`)."""
+    b = IRBuilder(fptype=op.d.dtype)
+    acc = ScalarType(op.d.dtype, op.d.per_lane)
+    a = b.declare(ScalarType(op.a.dtype, op.a.per_lane) if op.a.per_lane > 1
+                  else ScalarType(op.a.dtype), hint='a')
+    bb = b.declare(ScalarType(op.b.dtype, op.b.per_lane) if op.b.per_lane > 1
+                   else ScalarType(op.b.dtype), hint='b')
+    c = b.declare(acc, hint='acc')
+    if how == 'op':
+        d = op.mac(b, acc, a, bb, c, *modifiers)
+    else:
+        d = b.call(op.callee, acc, a, bb, c, *modifiers, hint='acc',
+                   movable=False, materialize=True)
+    return b, (a, bb, c), d
+
+
+def _hip(arch='gfx942', dtype=Datatype.F32):
+    return Context(arch=arch, backend='hip', fp_type=dtype, options=Options())
+
+
+def test_an_mfma_is_a_matrix_op_with_a_result():
+    """D is a new value, the statement pure and pinned, kept in a variable of
+    its own; the instruction, its modifiers and the vendor's layouts are on
+    it."""
+    b, (a, bb, c), d = _mfma(MFMA4)
+    s = _stmt(b.finish())
+    assert s.target == (d,) and s.args == (a, bb, c)
+    assert s.pure and not s.movable and s.effect == Effect.NONE
+    assert not s.accesses and s.attr('no_inline')
+    assert s.attr('engine') == 'mfma' and s.attr('instruction') == MFMA4.builtin
+    assert s.attr('shape') == (4, 4, 1) and s.attr('fragments') == (1, 1, 1)
+    assert s.attr('types') == (Datatype.F32,) * 4
+    assert s.attr('modifiers') == (('cbsz', 2), ('abid', 1), ('blgp', 4))
+    assert s.attr('collective') is Participants.WAVE
+    assert s.attr('in_place') is None
+    assert s.attr('layouts') == catalog.vendor_layouts(MFMA4)
+    assert d.type == ScalarType(Datatype.F32, 4) and d.layout is None
+
+
+def test_d_is_as_uniform_as_the_fragments():
+    """D is a lane's own where a fragment is, as the call's result was."""
+    b = IRBuilder(fptype=Datatype.F64)
+    acc = ScalarType(Datatype.F64, MFMA64.d.per_lane)
+    a = b.declare(ScalarType(Datatype.F64), hint='a', uniform=Uniformity.LANE)
+    bb = b.declare(ScalarType(Datatype.F64), hint='b')
+    c = b.declare(acc, hint='acc')
+    d = MFMA64.mac(b, acc, a, bb, c)
+    assert d.uniformity == Uniformity.LANE
+
+
+@pytest.mark.parametrize('op', [MFMA4, MFMA64] + [
+    next(o for o in catalog.MATRIX_OPS if o.builtin == name)
+    for name in ('mfma_f32_16x16x1f32', 'mfma_f32_16x16x4f32',
+                 stacked.EMULATED[Datatype.F32])], ids=lambda o: o.builtin)
+def test_it_writes_what_the_builtin_call_wrote(op):
+    """The declaration of D, its type spelled by the target's lexic, and the
+    builtin with the fragments and the modifiers: the text of the call the
+    AMD path issued before the op."""
+    context = _hip(dtype=op.d.dtype)
+    got = _emitted(_mfma(op)[0].finish(), context)
+    want = _emitted(_mfma(op, how='call')[0].finish(), context)
+    assert got == want
+    assert f'= {op.callee}(' in got and '2, 1, 4);' in got
+
+
+def test_a_lowering_with_a_result_is_declared_by_the_emitter():
+    """`Lowered.result`: the expression the emitter declares D with."""
+    b, _, d = _mfma(MFMA4)
+    s = _stmt(b.finish())
+    lowered = engines.lower(s, None, name=str)
+    assert lowered.lines == () and lowered.result.startswith(
+        '__builtin_amdgcn_mfma_f32_4x4x1f32(')
+
+
+def test_an_mfma_without_its_result_is_not_written():
+    b, (a, bb, c), d = _mfma(MFMA4)
+    s = _stmt(b.finish())
+    import dataclasses
+    with pytest.raises(IRError, match='returns D'):
+        engines.lower(dataclasses.replace(s, target=()), None, name=str)
+
+
+def test_an_mfma_counts_under_its_shape_as_matrix_work():
+    b, *_ = _mfma(MFMA4)
+    metrics = _Metrics()
+    _emitted(b.finish(), _hip(), metrics)
+    assert metrics.mix == [('mfma.f32_4x4x1f32', 1, 1)]
+    assert metrics.work == [(1, None)]
+
+
+def test_the_category_is_the_instructions():
+    assert engines.mfma_category('mfma_f64_16x16x4f64') == 'mfma.f64_16x16x4f64'
+    assert engines.mfma_category('wmma_f32_16x16x16_f16') == 'mfma'
+
+
+def test_every_mfma_the_paths_issue_is_priced():
+    """Each instruction the lane-batched tiles, the stacked scheme and its
+    emulation issue has its own clocks in the pipeline model, rather than the
+    4x4x1 default an unknown shape takes."""
+    from tensorforge.analysis.pipeline import MFMA_CLOCKS
+    issued = ({t.op.builtin for t in catalog.MFMA_TILES
+               if t.block in catalog.LANE_BATCHED_BLOCKS}
+              | set(stacked.INSTRUCTIONS.values())
+              | set(stacked.EMULATED.values()))
+    for name in issued:
+        assert engines.mfma_category(name)[len('mfma.'):] in MFMA_CLOCKS, name
+
+
+def test_an_mfma_verifies():
+    b, *_ = _mfma(MFMA4)
+    assert not [d for d in verify(b.finish(), strict=False) if 'matrix' in d]
+
+
+# -- the wait a DPP block owes an MFMA ------------------------------------------ #
+
+def test_the_wait_behind_a_block_is_the_hazard_an_mfma_has():
+    """A VALU write read by an MFMA as A or B: two wait states, `s_nop 1`."""
+    assert dpp_block.HAZARD == engines.Hazard(then='mfma', states=2)
+    assert dpp_block.WAIT_AFTER == 's_nop 1'
+
+
+def test_a_kernel_with_an_mfma_waits_behind_its_blocks():
+    b, *_ = _mfma(MFMA4)
+    assert dpp_block.waits_behind([b.finish()])
+
+
+def test_a_kernel_without_one_does_not():
+    """Not for NVIDIA's matrix op either: its engine owes no such wait."""
+    b, *_ = _issue(TF32)
+    assert not dpp_block.waits_behind([b.finish()])
+    plain = IRBuilder(fptype=Datatype.F32)
+    plain.declare(hint='x')
+    assert not dpp_block.waits_behind([plain.finish()])
+
+
+def test_raw_text_that_spells_one_counts_too():
+    b = IRBuilder(fptype=Datatype.F32)
+    b('__builtin_amdgcn_mfma_f32_4x4x1f32(x, y, z, 0, 0, 0);')
+    assert dpp_block.waits_behind([b.finish()])
+
+
+def test_a_layout_derived_here_is_not_the_vendors():
+    """gfx950's `mfma_f32_16x16x32_bf16` has layouts TensorForge derives
+    from a precedent: none of them goes on the op as the vendor's."""
+    op = next(o for o in catalog.MATRIX_OPS
+              if o.builtin == 'mfma_f32_16x16x32_bf16')
+    assert catalog.vendor_layouts(op) == (None, None, None)
+
+
+def test_an_emulated_product_states_its_bf16_operands():
+    op = next(o for o in catalog.MATRIX_OPS
+              if o.builtin == stacked.EMULATED[Datatype.F32])
+    b, *_ = _mfma(op, modifiers=(0, 0, 0))
+    assert _stmt(b.finish()).attr('types') == (
+        Datatype.BF16, Datatype.BF16, Datatype.F32, Datatype.F32)

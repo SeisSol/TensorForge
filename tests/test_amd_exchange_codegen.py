@@ -71,6 +71,16 @@ class Recorder:
         self.calls.append((callee, args + (out,)))
         return out
 
+    def matrix_mac(self, engine, shape, types, a, b, c, *, result=None,
+                   instruction=None, modifiers=(), **kw):
+        """An MFMA, recorded as the builtin call it is written as: the
+        fragments, then the modifiers in the builtin's order."""
+        assert engine == "mfma" and result is not None
+        named = dict(modifiers)
+        return self.call(f"__builtin_amdgcn_{instruction}", result,
+                         *a, *b, *c, *(named.get(m, 0)
+                                       for m in ("cbsz", "abid", "blgp")))
+
     def call_stmt(self, callee, *args, **kw):
         self.calls.append((callee, args))
         return None
