@@ -1407,8 +1407,9 @@ class Emitter:
     def _slack_skips(self, s: Stmt) -> bool:
         """A statement `_record_slack` does not count as standing anywhere:
         the read of a window or a run, which is no statement of the body the
-        distances are counted in -- the reads it serves are."""
-        return block_reads.is_block(s)
+        distances are counted in -- the reads it serves are.  A 2D block is
+        one, read where it was built."""
+        return block_reads.is_block(s) and not block_reads.is_block2d(s)
 
     def _slack_loads(self, s: Stmt) -> bool:
         """A statement whose value `_record_slack` counts as loaded: a load,
@@ -1454,6 +1455,51 @@ class Emitter:
                           f'target does not spell')
         self.writer(f'{spelled[0]} {name} = {spelled[1]};')
 
+    def _emit_block2d(self, s: Stmt) -> None:
+        """A 2D block read under SPMD (`block_reads.load_block2d`): the
+        sub-group's block read, every work-item its column of the block, or
+        its row where it transposes -- which is the lanes' share as it is.
+
+        Only where the kernel states a sub-group of 16 that is the
+        multiplication (`mult_lanes`), as a run is read
+        (`_spmd_run_lanes`): the message hands the block to 16 work-items
+        of a full sub-group, the lanes of the value.  Never under a
+        predicate: the message reads the block whole.  And a lane's share
+        is one `sycl::vec`, which holds at most 16 elements
+        (`block_reads.BLOCK2D_SPMD_MAX`): 32 rows are the explicit
+        vector's."""
+        v, base = s.target[0], s.args[0]
+        lanes = block_reads.BLOCK2D_LANES
+        target = self._target()
+        if (target is None or target.explicit_simd
+                or target.pinned_sub_groups is None
+                or getattr(self.context, 'mult_lanes', None) != lanes
+                or target.sub_group_width(lanes) != lanes):
+            raise IRError(f'{v}: a 2D block read where no sub-group of '
+                          f'{lanes} is stated as the multiplication')
+        if s.predicate is not None:
+            raise IRError(f'{v}: a 2D block read under a predicate, which '
+                          f'one message for the sub-group has none of')
+        _, _, count = block_reads.block2d_geometry(s)
+        if count > block_reads.BLOCK2D_SPMD_MAX:
+            raise IRError(f'{v}: a share of {count} elements a lane under '
+                          f'SPMD, where it is one sycl::vec of at most '
+                          f'{block_reads.BLOCK2D_SPMD_MAX}')
+        rows, cols = s.attr('shape')
+        surface_width, surface_height = s.attr('surface')
+        lex = self._lexic()
+        read = (getattr(lex, 'sub_group_block2d', None) if lex is not None
+                else None)
+        spelled = (read(v.type.base.ctype(), rows, cols,
+                        bool(s.attr('transpose')), self.base_name(base),
+                        surface_width, surface_height, s.attr('pitch'),
+                        self.operand(s.args[1]), self.operand(s.args[2]))
+                   if read is not None else None)
+        if spelled is None:
+            raise IRError(f'{v}: a 2D block read, which this target does '
+                          f'not spell')
+        self.writer(f'{spelled[0]} {self.name(v)} = {spelled[1]};')
+
     def _emit_block_part(self, s: Stmt) -> None:
         """A read a run serves under SPMD: its element of the vector."""
         v, vec = s.target[0], s.args[0]
@@ -1475,6 +1521,9 @@ class Emitter:
             self._record_code_units(self._issues(s) - 1)
         self._record_mix(s)
 
+        if block_reads.is_block2d(s):
+            self._emit_block2d(s)
+            return
         if block_reads.is_block(s):
             self._emit_block(s)
             return

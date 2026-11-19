@@ -60,6 +60,10 @@ class SyclLexic(Lexic):
     #: reads (`Options.spmd_block_runs`, `tensorforge::subGroupRun`), which
     #: the context sets.
     self.block_runs = False
+    #: Whether a body reads 2D blocks under SPMD (`tensorforge::
+    #: subGroupBlock2d`, `pir.block_reads.load_block2d`): set by what builds
+    #: them, which nothing does yet.
+    self.block2d = False
     #: Whether a kernel may call DPAS from the SPMD lowering
     #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
     #: as it sets the split above: the call is declared in the header that
@@ -361,11 +365,13 @@ class SyclLexic(Lexic):
       # extension; AdaptiveCpp has neither the header nor the property.
       headers = ['sycl/sycl.hpp',
                  'sycl/ext/intel/experimental/grf_size_properties.hpp']
-      if ((self.split_broadcast or self.dpas or self.block_runs)
+      if ((self.split_broadcast or self.dpas or self.block_runs
+           or self.block2d)
           and self._sub_groups is not None):
         # `tensorforge::split_broadcast`, which `broadcast` writes,
-        # `tensorforge::dpasTF32`, which the matrix path does, and
-        # `tensorforge::subGroupRun`, which a run reads through.
+        # `tensorforge::dpasTF32`, which the matrix path does,
+        # `tensorforge::subGroupRun`, which a run reads through, and
+        # `tensorforge::subGroupBlock2d`, a 2D block.
         headers.append('tensorforge_device/sycl_spmd.h')
       return headers
     return ['sycl/sycl.hpp']
@@ -505,6 +511,26 @@ class SyclLexic(Lexic):
     return (f'sycl::vec<{elem}, {count}>',
             f'tensorforge::subGroupRun<{count}>(item.get_sub_group(), '
             f'{address})')
+
+  def sub_group_block2d(self, elem, rows, cols, transpose, base, width,
+                        height, pitch, x, y):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    count = cols if transpose else rows
+    kind = elem if count == 1 else f'sycl::vec<{elem}, {count}>'
+    flag = 'true' if transpose else 'false'
+    return (kind,
+            f'tensorforge::subGroupBlock2d<{elem}, {rows}, {cols}, {flag}>('
+            f'item.get_sub_group(), {base}, {width}, {height}, {pitch}, '
+            f'{x}, {y})')
+
+  def block2d_load(self, elem, width, height, transpose, base, surface_width,
+                   surface_height, pitch, x, y):
+    if not self._explicit_simd:
+      return None
+    flag = 'true' if transpose else 'false'
+    return (f'tensorforge::blockLoad2d<{elem}, {width}, {height}, {flag}>('
+            f'{base}, {surface_width}, {surface_height}, {pitch}, {x}, {y})')
 
   def get_slm_load(self, elem, width, address):
     if not self._explicit_simd:

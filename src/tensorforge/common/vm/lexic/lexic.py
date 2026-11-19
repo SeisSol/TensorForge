@@ -190,6 +190,24 @@ class Lexic(ABC):
     """
     return None
 
+  def sub_group_block2d(self, elem: str, rows: int, cols: int,
+                        transpose: bool, base: str, width: int, height: int,
+                        pitch: int, x: str, y: str):
+    """A 2D block of `rows` x `cols` read by a sub-group of 16 from the
+    surface at `base` (`width` and `pitch` bytes, `height` rows), at column
+    `x` and row `y`, as `(type, expression)`: the column a work-item gets,
+    or its row where the read transposes (`pir.block_reads.load_block2d`).
+    None where there is no such read."""
+    return None
+
+  def block2d_load(self, elem: str, width: int, height: int,
+                   transpose: bool, base: str, surface_width: int,
+                   surface_height: int, pitch: int, x: str, y: str):
+    """The same read under the explicit vector, as an expression: a block
+    `width` elements wide and `height` rows high, in the order the message
+    returns it.  None where there is no such read."""
+    return None
+
   def get_slm_load(self, elem: str, width: int, address: str) -> str:
     """A vector read of shared memory, where that is its own instruction.
 
