@@ -2158,11 +2158,13 @@ GROUPS = {
     # in the kernel's prototype, the launcher's left as the interface has it.
     'restrictarrays': ('tests/test_restrict_arrays.py', [
         ('the arrays of pointers left unpromised',
-         sub(GEN, '      if (symbol.obj.addressing == Addressing.PTR_BASED\n',
+         sub(GEN, '      if (symbol.obj.addressing.kind in (Addressing.PTR_BASED,\n'
+                  '                                         Addressing.INDEXED_POINTER)\n',
              '      if (False\n', 1)),
         ('every pointer promised, the batch\'s own operand too',
-         sub(GEN, '      if (symbol.obj.addressing == Addressing.PTR_BASED\n',
-             '      if (symbol.obj.addressing != Addressing.SCALAR\n', 1)),
+         sub(GEN, '      if (symbol.obj.addressing.kind in (Addressing.PTR_BASED,\n'
+                  '                                         Addressing.INDEXED_POINTER)\n',
+             '      if (symbol.obj.addressing.kind != Addressing.SCALAR\n', 1)),
         ('the flags left unpromised',
          sub(GEN, '            promise=self._promise_arrays()))',
              '            promise=False))', 1)),
@@ -3731,6 +3733,7 @@ GROUPS = {
         ('the interpreter writing a copy where its source is',
          sub(ORACLE, "        base = dst + int(self.ev(am.group('di')))\n",
              "        base = dst + int(self.ev(am.group('si')))\n", 1)),
+    ]),
     # AMD's buffer engine: what it takes, where the resource goes, and the
     # guard in the offset.
     'buffers': ('tests/test_buffer_transfers.py', [

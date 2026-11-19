@@ -450,6 +450,7 @@ def _async_to_lds(dst, src, nbytes):
           f'(__attribute__((address_space(1))) {elem}*)({src}), '
           f'(__attribute__((address_space(3))) {elem}*)({dst}), 0, 0);')
 
+
 def _buffer_args(datatype, length):
   """`T` or `T, N`: the element of the buffer and how many an access moves."""
   elem = datatype.ctype()

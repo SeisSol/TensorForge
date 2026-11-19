@@ -466,7 +466,7 @@ class DescriptionReader(Reader):
       raise NotImplementedError(
         f'tensor {name}: the description states addressing '
         f'{addressingStr!r} with residence {residence}, which this frontend '
-        f'has no reyateto-hintsading for.')
+        f'has no reading for.')
 
     if 'binding' not in d and self._version != 7:
       # Version 8 states it for every tensor, `null` included: a description
