@@ -44,7 +44,7 @@ products.  Emulation is for FP32, where three products against 52 TF is a
 gain.
 """
 
-from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType
+from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType, join_layout
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import InternalError
 from .. import broadcast, ranking, split
@@ -139,17 +139,17 @@ TF32_SPLIT_TERMS = 2
 #:
 #: Derived rather than stated: the pair covers about 22 bits and the cross
 #: terms `hi*lo` and `lo*hi` make up the difference, while `lo*lo` sits below
-#: the accumulator's rounding and is dropped.  That is the same three-product
-#: arrangement `nvidia.py` uses for `mma.sync ... .tf32`, and it comes out of
-#: the same formula rather than being asserted twice.
+#: the accumulator's rounding and is dropped.  The same three products
+#: `nvidia.py` issues for `mma.sync ... .tf32` (`nvidia.TF32_TERMS`), in
+#: another order: smallest first here, as `split.products` lists them, and
+#: the upper halves first there, which states its own.
 TF32_TERMS = len(split.products(TF32_SPLIT_TERMS))
 
 #: Whether the path is deployed, as opposed to whether it *can* emit for a
 #: given shape -- that second question is `supports()`.  Two different facts,
 #: so two names, and only this one is a decision about the generator.
 #:
-#: Parked pending a run on real hardware, for the same reason as the NVIDIA
-#: path.
+#: Parked pending a run on real hardware.
 #:
 #: Everything short of that is settled.  The fragment layout is derived from
 #: the vISA pseudo-code and checked by placing a matrix through the offsets,
@@ -471,7 +471,6 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                     budget=register_budget(ctx))
     if atom is None or threads != atom.n:
         return False
-    acc_ct = dtype.ctype()
     depth = K + kx
 
     for j0 in range(0, N, atom.m):
@@ -553,10 +552,15 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                 bterms, aterms = (bhi, blo), (ahi, alo)
                 for p, q in split.products(TF32_SPLIT_TERMS):
                     bf, af = bterms[p], aterms[q]
-                    writer.assign(acc, writer.rawexpr(
-                        f'tensorforge::intel_xmx::dpas<{atom.depth}, '
-                        f'{atom.repeat}, {acc_ct}>({{0}}, {{1}}, {{2}})',
-                        acc, bf, af, type_=acc.type, hint='dp', pure=True))
+                    # The matrix op of engine `dpas_esimd`, D written into
+                    # the assignment to the accumulator: `af` is A, M by K
+                    # -- XMX's Src2 -- and `bf` B, K by N, its Src1.
+                    writer.assign(acc, writer.matrix_mac(
+                        'dpas_esimd', (atom.m, atom.n, atom.k),
+                        (Datatype.TF32, Datatype.TF32, dtype, dtype),
+                        (af,), (bf,), (acc,), result=acc.type, hint='dp',
+                        layout=join_layout((acc, bf, af)), materialize=False,
+                        term=(q, p), modifiers=(('depth', atom.depth),)))
 
         # Read-out is a run too: `c_offset(m, n) = m*N + n`, so one output
         # column is `acc.select<N, 1>(m * N)` -- already the shape the store
@@ -678,9 +682,12 @@ ORDER = (Strategy.MATRIX, Strategy.BROADCAST, Strategy.GENERIC)
 
 
 def convergence(strategy, shape, n, ctx):
-    """None: DPAS is offered only under the explicit vector, where the
-    multiplication is one work-item's vector with no neighbors to wait for,
-    and the broadcast chain asks nothing of its own."""
+    """None.  Under the explicit vector the multiplication is one
+    work-item's vector, with no neighbors to wait for.  Under SPMD, DPAS is
+    offered only where the multiplication is the sub-group of 16
+    (`intel_spmd.offered`): the lanes that issue it together are its own,
+    and no other multiplication shares the instruction.  The broadcast
+    chain asks nothing of its own."""
     return None
 
 

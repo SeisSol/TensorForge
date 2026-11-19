@@ -78,6 +78,7 @@ contraction stays on the FMA path (`Options.sycl_dpas_min_depth`), as does a
 product of fewer than `MIN_COLUMNS` columns.  F64 has no DPAS on this part.
 """
 
+from tensorforge.backend.pir import engines
 from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
@@ -147,8 +148,9 @@ def chain_atom(ctx, dtype, columns=0, lead=0, depth=0):
     return ChainAtom()
 
 
-#: The callee of one instruction (`tensorforge_device/sycl_spmd.h`).
-DPAS = 'tensorforge::dpasTF32'
+#: The callee of one instruction (`tensorforge_device/sycl_spmd.h`): what
+#: the matrix op of engine `dpas_spmd` is written as (`mac`).
+DPAS = engines.DPAS_SPMD
 #: The rounding of the upper half of a split (`sycl_spmd.h`).
 ROUND = 'tensorforge::roundTF32'
 
@@ -186,6 +188,22 @@ def d_fragment_bits() -> BitLayout:
                        Bit(Place.VECTOR, 4)),
                       (Bit(Place.LANE, 1), Bit(Place.LANE, 2),
                        Bit(Place.LANE, 4), Bit(Place.LANE, 8))))
+
+
+def mac(writer, type_, a, b, c, term):
+    """One DPAS, D = A * B + C: the matrix op of engine `dpas_spmd`
+    (`IRBuilder.matrix_mac`), written as `tensorforge::dpasTF32`
+    (`tensorforge_device/sycl_spmd.h`) over the sub-group the target spells;
+    A, B and C a vector a work-item, D a new value
+    of `type_` -- a link of the accumulator chain, in a variable of its own,
+    its layout one nobody wrote down -- with the layouts measured above and
+    `term`, the halves of A and B the product multiplies."""
+    return writer.matrix_mac(
+        'dpas_spmd', (COLUMNS, SUB_GROUP, DEPTH),
+        (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
+        (a,), (b,), (c,), result=type_, hint='dacc',
+        layouts=(a_fragment_bits(), b_fragment_bits(), d_fragment_bits()),
+        term=term)
 
 
 def tile_cells():
@@ -558,7 +576,6 @@ class _Product:
         self.fp = ScalarType(Datatype.F32)
         self.v4 = ScalarType(Datatype.F32, 4)
         self.v8 = ScalarType(Datatype.F32, 8)
-        self.group = ctx.target.lexic.active_sub_group_mask()
         self.exchange = ctx.target.lexic.exchange_xor('{0}', SUB_GROUP // 2)
         if self.exchange is None:
             raise _Declined()
@@ -947,9 +964,8 @@ class _Product:
                              else self.operator(s, c))
             bterms = (hi, lo)
             for p, q in PRODUCTS:
-                acc[s] = w.call(DPAS, self.v8, self.group, aterms[q],
-                                bterms[p], acc[s], hint='dacc',
-                                movable=False, materialize=True)
+                acc[s] = mac(w, self.v8, aterms[q], bterms[p], acc[s],
+                             (q, p))
             for t in carried:
                 products = []
                 for k in range(DEPTH):

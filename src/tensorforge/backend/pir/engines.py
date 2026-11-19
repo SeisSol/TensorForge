@@ -1399,6 +1399,45 @@ def _lower_mfma(s: Stmt, env: Spelling) -> Lowered:
                           f'{", ".join(args)})')
 
 
+def _other(s: Stmt) -> str:
+    return 'other'
+
+
+#: The function the SPMD lowering's DPAS is written as
+#: (`tensorforge_device/sycl_spmd.h`).
+DPAS_SPMD = 'tensorforge::dpasTF32'
+
+
+def _lower_dpas_spmd(s: Stmt, env: Spelling) -> Lowered:
+    """DPAS from the SPMD lowering, `tensorforge::dpasTF32(sub-group, A, B,
+    C)` (`DPAS_SPMD`): D is what it returns, the sub-group the one the lexic
+    spells."""
+    group = (env.lexic.active_sub_group_mask() if env.lexic is not None
+             else None)
+    if not s.target or group is None:
+        raise IRError('DPAS under SPMD returns D and runs over the sub-group '
+                      'the target spells')
+    a, b, c = fragments(s)
+    args = [group] + [env.name(v) for v in (*a, *b, *c)]
+    return Lowered(result=f'{DPAS_SPMD}({", ".join(args)})')
+
+
+def _lower_dpas_esimd(s: Stmt, env: Spelling) -> Lowered:
+    """DPAS under the explicit vector, `tensorforge::intel_xmx::dpas<depth,
+    repeat, T>(C, B, A)`: the systolic depth, the repeat count -- M --, the
+    accumulator's element, and the operands in XMX's order, B its Src1 and
+    A its Src2.  D is what it returns."""
+    if not s.target:
+        raise IRError('DPAS returns D: its matrix op has a result')
+    a, b, c = fragments(s)
+    m, _, _ = s.attr('shape')
+    depth = dict(s.attr('modifiers', ())).get('depth')
+    types = s.attr('types')
+    args = [env.name(v) for v in (*c, *b, *a)]
+    return Lowered(result=f'tensorforge::intel_xmx::dpas<{depth}, {m}, '
+                          f'{types[3].ctype()}>({", ".join(args)})')
+
+
 MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
     MatrixEngine('mma_sync', Participants.WAVE, True, _matrix,
                  _lower_mma_sync,
@@ -1412,6 +1451,18 @@ MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
                  'instruction named by the catalog row it is '
                  '(`amd.catalog.MatrixOp`) and priced by its shape '
                  '(`mfma_category`)'),
+    # Intel's DPAS counts as other code, and as no work: the figures it was
+    # counted under as a call and as raw text, kept as they were -- so a
+    # build that issues it counts its arithmetic short.
+    MatrixEngine('dpas_spmd', Participants.WAVE, False, _other,
+                 _lower_dpas_spmd,
+                 "Intel's DPAS from the SPMD lowering, TF32 into FP32 at an "
+                 'execution size of 16: the sub-group of 16 issues it '
+                 'together (`primitives.intel_spmd`)'),
+    MatrixEngine('dpas_esimd', None, False, _other, _lower_dpas_esimd,
+                 "Intel's DPAS under the explicit vector (`xmx::dpas`): the "
+                 'work-item issues it alone, the sub-group being its vector '
+                 '(`primitives.intel`)'),
 )}
 
 
@@ -1874,5 +1925,5 @@ __all__ = [
     'TENSOR_FENCE', 'TensorDescType', 'tdm_refusal',
     'MATRIX_ENGINES', 'MatrixEngine', 'asm_text', 'fragments',
     'matrix_engine', 'mma_sync_name', 'pipe_of',
-    'MFMA_MODIFIERS', 'mfma_category',
+    'MFMA_MODIFIERS', 'mfma_category', 'DPAS_SPMD',
 ]

@@ -356,8 +356,11 @@ class Emitter:
         #
         # `op` and `value` say what the operation is worth; a caller that
         # passes neither -- the matrix instruction, whose tile the emitter is
-        # not told -- leaves the flop figure inexact rather than short.
-        # `work=False` adds the flops alone (see the DPP multiply-add).
+        # not told -- leaves the flop figure inexact rather than short.  But
+        # for Intel's DPAS, which is not recorded at all (its engines say so,
+        # `MatrixEngine.work`): a build that issues it counts short and still
+        # calls the figure exact.  `work=False` adds the flops alone (see the
+        # DPP multiply-add).
         record = getattr(self.metrics, 'record_work', None)
         if record is None:
             return

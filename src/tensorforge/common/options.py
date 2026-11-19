@@ -1454,7 +1454,10 @@ declare('amd_fused_transpose',
 declare('amd_matrix_k4',
         default=False,
         parse=parse_matrix_k4,
-        doc='On CDNA 2 and 3, compute a product of a batch-constant operator '
+        doc='On CDNA -- where the instruction is: from gfx908 on '
+            '(`mai-insts`) in single precision, from gfx90a on '
+            '(`gfx90a-insts`) in double and for the emulation --, compute a '
+            'product of a batch-constant operator '
             'and a per-element operand at 16 lanes a multiplication through a '
             '16x16x4 instruction -- `v_mfma_f64_16x16x4f64` in double '
             'precision, `v_mfma_f32_16x16x4f32` in single in place of the '
@@ -2309,12 +2312,16 @@ declare('tensor_cores',
         default=None,
         env='TF_TENSOR_CORES',
         parse=parse_optional_bool,
-        doc='Use the NVIDIA matrix instructions (`mma.sync`) where the shape '
-            'allows.  None takes `primitives.nvidia.ENABLED`, the deployment '
-            'switch, which is off; an option so that one build can ask for the '
-            'path and the next one not, as a search over configurations has '
-            'to -- flipping the module constant changes it for every build in '
-            'the process.')
+        doc='Use the matrix instructions where the shape allows: NVIDIA\'s '
+            '`mma.sync` (`primitives.nvidia`) and, under the explicit vector, '
+            'Intel\'s DPAS (`primitives.intel`).  The SPMD lowering\'s DPAS '
+            'has an option of its own (`sycl_dpas`), as AMD\'s stacked scheme '
+            'has (`amd_matrix_k4`), and AMD\'s lane-batched MFMA none: it is '
+            'taken wherever a tile fits.  None takes each path\'s '
+            '`ENABLED`, the deployment switch, off for both; an option so '
+            'that one build can ask for the path and the next one not, as a '
+            'search over configurations has to -- flipping the module '
+            'constant changes it for every build in the process.')
 
 declare('mma_prefetch',
         default=None,

@@ -4168,7 +4168,8 @@ GROUPS = {
          sub(ENGINES, "    MatrixEngine('mfma', Participants.WAVE, True, _mfma_pipe, _lower_mfma,\n",
              "    MatrixEngine('mfma', Participants.WAVE, False, _mfma_pipe, _lower_mfma,\n", 1)),
         ('D inlined into its reader',
-         sub(BUILD, "                      attrs=attrs + (('no_inline', True),))\n",
+         sub(BUILD, "                      attrs=attrs + ((('no_inline', True),) if materialize\n"
+                    '                                     else ()))\n',
              '                      attrs=attrs)\n', 1)),
         ('an MFMA declared impure',
          sub(BUILD, '        self._emit_op(Op.MATRIX_MAC, (v,), a + b + c, pure=True,\n',
@@ -4206,6 +4207,47 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/dpp_block.py'), "            if any(_MATRIX.search(text) for text in (stmt.attr('asm') or '',\n"
                   "                                                     stmt.text or '')):\n",
              '            if False:\n', 1)),
+    ]),
+    # Intel's DPAS on the matrix op: the SPMD call over the sub-group, the
+    # explicit vector's written into the assignment to its accumulator, and
+    # the figures it was counted under.
+    'matrixintel': ('tests/test_matrix_mac.py', [
+        ('the sub-group left out of the SPMD call',
+         sub(ENGINES, '    args = [group] + [env.name(v) for v in (*a, *b, *c)]\n',
+             '    args = [env.name(v) for v in (*a, *b, *c)]\n', 1)),
+        ('XMX\'s operands in the op\'s order',
+         sub(ENGINES, '    args = [env.name(v) for v in (*c, *b, *a)]\n',
+             '    args = [env.name(v) for v in (*a, *b, *c)]\n', 1)),
+        ('the systolic depth read off another modifier',
+         sub(ENGINES, "    depth = dict(s.attr('modifiers', ())).get('depth')\n",
+             "    depth = dict(s.attr('modifiers', ())).get('repeat')\n", 1)),
+        ('the element of A for the accumulator\'s',
+         sub(ENGINES, "                          f'{types[3].ctype()}>({\", \".join(args)})')\n",
+             "                          f'{types[0].ctype()}>({\", \".join(args)})')\n", 1)),
+        ('the explicit vector\'s DPAS in a variable of its own',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel.py'), '                        layout=join_layout((acc, bf, af)), materialize=False,\n',
+             '                        layout=join_layout((acc, bf, af)), materialize=True,\n', 1)),
+        ('M and N swapped in the explicit vector\'s shape',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel.py'), "                        'dpas_esimd', (atom.m, atom.n, atom.k),\n",
+             "                        'dpas_esimd', (atom.n, atom.m, atom.k),\n", 1)),
+        ('DPAS counted as matrix work',
+         sub(ENGINES, "    MatrixEngine('dpas_spmd', Participants.WAVE, False, _other,\n",
+             "    MatrixEngine('dpas_spmd', Participants.WAVE, True, _other,\n", 1)),
+        ('DPAS under the matrix category',
+         sub(ENGINES, "def _other(s: Stmt) -> str:\n    return 'other'\n",
+             "def _other(s: Stmt) -> str:\n    return 'matrix'\n", 1)),
+        ('the explicit vector\'s DPAS a collective of the wave',
+         sub(ENGINES, "    MatrixEngine('dpas_esimd', None, False, _other, _lower_dpas_esimd,\n",
+             "    MatrixEngine('dpas_esimd', Participants.WAVE, False, _other,\n"
+             '                 _lower_dpas_esimd,\n', 1)),
+        ('the SPMD product\'s term left off',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel_spmd.py'), '        term=term)\n', '        term=None)\n', 1)),
+        ('the measured layouts left off',
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel_spmd.py'), '        layouts=(a_fragment_bits(), b_fragment_bits(), d_fragment_bits()),\n',
+             '        layouts=None,\n', 1)),
+        ('a matrix op not ending a run',
+         sub(BLOCKS, '                                  Op.SET_PRIORITY, Op.MATRIX_MAC):\n',
+             '                                  Op.SET_PRIORITY):\n', 1)),
     ]),
 }
 
