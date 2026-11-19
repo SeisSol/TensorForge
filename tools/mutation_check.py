@@ -3760,6 +3760,14 @@ GROUPS = {
         ('the interpreter writing a copy where its source is',
          sub(ORACLE, "        base = dst + int(self.ev(am.group('di')))\n",
              "        base = dst + int(self.ev(am.group('si')))\n", 1)),
+        ('no fence ahead of the copy',
+         sub(HIP_LEXIC, "  return (f'{COMPILER_FENCE}\\n'\n", "  return (''\n", 1)),
+        ('no fence behind the wait',
+         sub(ENGINES, "        return Lowered((f'__builtin_amdgcn_s_wait_asynccnt({count});',\n"
+                      '                        COMPILER_FENCE))\n',
+             "        return Lowered((f'__builtin_amdgcn_s_wait_asynccnt({count});',))\n", 1)),
+        ('the interpreter not knowing the fence',
+         sub(ORACLE, "    r'|__atomic_signal_fence'\n", '', 1)),
     ]),
     # AMD's buffer engine: what it takes, where the resource goes, and the
     # guard in the offset.

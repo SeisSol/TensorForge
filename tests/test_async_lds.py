@@ -84,8 +84,10 @@ def test_staging_takes_it_where_asked_whatever_the_lanes():
     (1, 8, 'char'), (4, 32, 'int'), (8, 64, 'tensorforge::VectorT<int, 2>'),
     (16, 128, 'tensorforge::VectorT<int, 4>')])
 def test_the_lexic_spells_one_builtin_a_size(nbytes, bits, elem):
+    """Behind a fence of the compiler alone, on a line of its own."""
     lex = HipLexic('hip', 'amd')
     assert lex.copy_async('&s0[i]', '&m1[j]', nbytes, engine='async_lds') == (
+        f'{engines.COMPILER_FENCE}\n'
         f'__builtin_amdgcn_global_load_async_to_lds_b{bits}('
         f'(__attribute__((address_space(1))) {elem}*)(&m1[j]), '
         f'(__attribute__((address_space(3))) {elem}*)(&s0[i]), 0, 0);')
@@ -156,6 +158,22 @@ def test_a_wait_is_asynccnt_s_and_counts_the_copies_behind_it():
         '__builtin_amdgcn_s_wait_asynccnt(2);',
         '__builtin_amdgcn_s_wait_asynccnt(1);',
         '__builtin_amdgcn_s_wait_asynccnt(0);']
+
+
+def test_a_fence_stands_ahead_of_each_copy_and_behind_each_wait():
+    """A fence of the compiler alone, which emits nothing: ahead of a copy,
+    so that a read of a place another lane's copy writes is not moved
+    behind it, and behind a wait, so that a read of what the copies wrote
+    is not moved ahead of it (`engines.COMPILER_FENCE`)."""
+    ctx, body = _body()
+    _, lines = _emit(ctx, body)
+    text = '\n'.join(lines).splitlines()
+    copies = [i for i, l in enumerate(text) if 'async_to_lds_b32(' in l]
+    waits = [i for i, l in enumerate(text) if 's_wait_asynccnt(' in l]
+    assert len(copies) == 3 and len(waits) == 3
+    assert all(text[i - 1] == engines.COMPILER_FENCE for i in copies)
+    assert all(text[i + 1] == engines.COMPILER_FENCE for i in waits)
+    assert text.count(engines.COMPILER_FENCE) == 6
 
 
 def test_a_load_into_registers_is_not_counted():
@@ -334,3 +352,31 @@ def test_the_compiler_keeps_the_copies_and_the_counts(arch, tmp_path):
               (re.match(r's_wait_asynccnt ((0x)?[0-9a-f]+)$', ins)
                for ins in asm) if m]
     assert counts == [2, 1, 0]
+
+
+@pytest.mark.parametrize('arch', ['gfx1250', 'gfx1251'])
+def test_a_read_ahead_of_the_copy_is_issued_ahead_of_it(arch, tmp_path):
+    """A lane reads its neighbor's place, which the neighbor's copy writes,
+    once ahead of the copy and once behind its wait, as the lexic and the
+    registry write the two.  The compiler takes the copy to write its own
+    lane's place alone: without the fence ahead of it, clang 22 and 23
+    issued the first read behind the copy, where the neighbor's copy may
+    have written the place already (2026-11-19)."""
+    copy = HipLexic('hip', 'amd').copy_async(
+        '&blk[t]', '&m1[t]', 4, engine='async_lds')
+    wait = engines.lower(engines.wait_counter('asynccnt', 0),
+                         _target(arch).target).lines
+    src = ('#include "tensorforge_device/hip.h"\n'
+           '__global__ void __launch_bounds__(32) k(float *__restrict__ m0, '
+           'float *__restrict__ m1) {\n  extern __shared__ float blk[];\n'
+           '  const int t = threadIdx.x;\n'
+           '  const float a = blk[t ^ 1];\n'
+           + ''.join(f'  {l}\n' for l in copy.splitlines() + list(wait))
+           + '  const float b = blk[t ^ 1];\n'
+           '  m0[t] = a + b;\n}\n')
+    asm = _assemble(src, arch, tmp_path)
+    order = [ins.split()[0] for ins in asm
+             if ins.startswith(('ds_load', 'ds_read', 'global_load_async',
+                                's_wait_asynccnt'))]
+    assert order == ['ds_load_b32', 'global_load_async_to_lds_b32',
+                     's_wait_asynccnt', 'ds_load_b32'], order

@@ -1159,6 +1159,20 @@ def _lower_wait_counter_cuda(s: Stmt, env: Spelling) -> Lowered:
     return Lowered((env.lexic.wait_async(count),))
 
 
+#: A fence of the compiler alone, which emits no instruction: no access to
+#: memory moves across it.  It stands ahead of gfx1250's copy into the LDS
+#: (`async_lds`, `HipLexic.copy_async`) and behind each wait on `asynccnt`.
+#: clang 22 and 23 declare the copy to write only the LDS address its own
+#: lane names (`memory(argmem: ...)`), and the wait to touch no memory a
+#: program names; but every lane's copy writes its own place, which the
+#: other lanes read.  Compiled for gfx1250 and gfx1251, a lane's read of its
+#: neighbor's place, written ahead of the copy, was issued behind it -- when
+#: the neighbor's copy may already have written there (2026-11-19).  Nor
+#: does that model keep a read of what the copies wrote behind their wait:
+#: no probe has shown one moved ahead of it, but nothing there forbids it.
+COMPILER_FENCE = '__atomic_signal_fence(__ATOMIC_SEQ_CST);'
+
+
 def _lower_wait_counter_hip(s: Stmt, env: Spelling) -> Lowered:
     """A counter wait written where TF wants it rather than where
     `SIInsertWaitcnts` would put it.
@@ -1182,6 +1196,12 @@ def _lower_wait_counter_hip(s: Stmt, env: Spelling) -> Lowered:
                           f'{limit} on {model}')
         return Lowered((f'__builtin_amdgcn_s_waitcnt('
                         f'{_gfx9_waitcnt(counter, count)});',))
+    if (env.amd and model in ('gfx1250', 'gfx1251')
+            and counter == 'asynccnt'):
+        # The fence behind it keeps a read of what the copies wrote behind
+        # the wait (`COMPILER_FENCE`).
+        return Lowered((f'__builtin_amdgcn_s_wait_asynccnt({count});',
+                        COMPILER_FENCE))
     if (env.amd and model in ('gfx1250', 'gfx1251')
             and counter in ('asynccnt', 'tensorcnt')):
         lines = (f'__builtin_amdgcn_s_wait_{counter}({count});',)
