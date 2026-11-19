@@ -562,6 +562,8 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 diag.append('copy.async: must declare the read and the write')
             if not (s.effect & Effect.ASYNC):
                 diag.append('copy.async: must carry Effect.ASYNC')
+            if s.attr('form') == 'buffer':
+                diag.extend(verify_buffer(s))
 
         elif s.op == Op.COMMIT_ASYNC:
             if s.target:

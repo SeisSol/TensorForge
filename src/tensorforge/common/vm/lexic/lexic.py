@@ -465,6 +465,12 @@ class Lexic(ABC):
                    keep=None):
     return None
 
+  def buffer_load_lds(self, resource, index, lds, *, datatype):
+    """The LDS-DMA through `resource` (`pir.buffers`, the LDS form): element
+    `index` of it, a lane, into the LDS at `lds` -- one base a wave, lane
+    t's element t places past it."""
+    return None
+
   # --- atomic accumulation --------------------------------------------------
   # Declared here so that every backend answers through one interface, the one
   # the single call site uses.  Declared per backend, the interfaces drift

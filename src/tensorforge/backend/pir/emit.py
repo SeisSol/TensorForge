@@ -1753,7 +1753,17 @@ class Emitter:
                   f'{self._copy_bytes(s)});')
                 return
             text = None
-            if self._async_lex is not None:
+            if self._async_lex is not None and s.attr('form') == 'buffer':
+                # The LDS-DMA through its source's resource (`pir.buffers`):
+                # the element `src_a` of the binding the resource is over.
+                resource = s.attr('resource')
+                text = self._async_lex.buffer_load_lds(
+                    self.operand(resource), src_a, f'&{dst_b}[{dst_a}]',
+                    datatype=resource.type.elem)
+                if text is None:
+                    raise IRError('an LDS-DMA copy through a resource on a '
+                                  'target without the buffer form of it')
+            elif self._async_lex is not None:
                 elem = self.elem_size(s.copy_dst)
                 text = self._async_lex.copy_async(
                     f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]',
