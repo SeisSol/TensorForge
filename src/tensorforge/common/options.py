@@ -2252,12 +2252,16 @@ declare('tensor_cores',
         default=None,
         env='TF_TENSOR_CORES',
         parse=parse_optional_bool,
-        doc='Use the NVIDIA matrix instructions (`mma.sync`) where the shape '
-            'allows.  None takes `primitives.nvidia.ENABLED`, the deployment '
-            'switch, which is off; an option so that one build can ask for the '
-            'path and the next one not, as a search over configurations has '
-            'to -- flipping the module constant changes it for every build in '
-            'the process.')
+        doc='Use the matrix instructions where the shape allows: NVIDIA\'s '
+            '`mma.sync` (`primitives.nvidia`) and, under the explicit vector, '
+            'Intel\'s DPAS (`primitives.intel`).  The SPMD lowering\'s DPAS '
+            'has an option of its own (`sycl_dpas`), as AMD\'s stacked scheme '
+            'has (`amd_matrix_k4`), and AMD\'s lane-batched MFMA none: it is '
+            'taken wherever a tile fits.  None takes each path\'s '
+            '`ENABLED`, the deployment switch, off for both; an option so '
+            'that one build can ask for the path and the next one not, as a '
+            'search over configurations has to -- flipping the module '
+            'constant changes it for every build in the process.')
 
 declare('mma_prefetch',
         default=None,

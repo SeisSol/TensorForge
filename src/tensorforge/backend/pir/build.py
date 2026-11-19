@@ -737,6 +737,7 @@ class IRBuilder:
                    a: Sequence[Operand], b: Sequence[Operand],
                    c: Sequence[Operand], *, result=None, hint: str = 'acc',
                    layout: Optional[RegisterLayout] = None,
+                   materialize: bool = True,
                    instruction: Optional[str] = None,
                    layouts: Optional[Tuple] = None,
                    term: Optional[Tuple[int, int]] = None,
@@ -758,7 +759,9 @@ class IRBuilder:
         uniform as the fragments, and is returned; the statement is pure, as
         the function of its operands it is, and kept in a variable of its
         own (`no_inline`), as every link of an accumulator chain has to be
-        (`call`'s `materialize`).
+        (`call`'s `materialize`) -- unless `materialize` is False, which
+        leaves it to be written into its one reader, as the explicit
+        vector's DPAS is into the assignment to its accumulator.
 
         `instruction` names the instruction where the engine has several of
         one shape and types (an MFMA's builtin), `layouts` the fragment
@@ -802,7 +805,8 @@ class IRBuilder:
                        layout=layout)
         self._emit_op(Op.MATRIX_MAC, (v,), a + b + c, pure=True,
                       movable=movable, effect=effect,
-                      attrs=attrs + (('no_inline', True),))
+                      attrs=attrs + ((('no_inline', True),) if materialize
+                                     else ()))
         return v
 
     def _require_addressable(self, value: Operand, callee: str) -> None:

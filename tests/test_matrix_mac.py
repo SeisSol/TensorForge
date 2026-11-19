@@ -461,3 +461,181 @@ def test_an_emulated_product_states_its_bf16_operands():
     b, *_ = _mfma(op, modifiers=(0, 0, 0))
     assert _stmt(b.finish()).attr('types') == (
         Datatype.BF16, Datatype.BF16, Datatype.F32, Datatype.F32)
+
+
+# -- Intel's DPAS ---------------------------------------------------------------- #
+
+from tensorforge.backend.instructions.compute.primitives import (  # noqa: E402
+    intel, intel_spmd)
+from tensorforge.backend.pir.core import SCALAR_LAYOUT, join_layout  # noqa: E402
+from tensorforge.backend.pir.emit_esimd import EsimdEmitter  # noqa: E402
+
+
+def _sycl(dpas=True):
+    context = Context(arch='pvc', backend='oneapi', fp_type=Datatype.F32,
+                      options=Options())
+    context.target.lexic.dpas = dpas
+    return context
+
+
+def _spmd_dpas(how='op'):
+    """One SPMD DPAS on declared fragments: as the matrix op
+    (`intel_spmd.mac`), or as the call the SPMD path issued before it."""
+    b = IRBuilder(fptype=Datatype.F32)
+    a = b.declare(ScalarType(Datatype.F32, 4), hint='a')
+    bb = b.declare(ScalarType(Datatype.F32, 8), hint='b')
+    c = b.declare(ScalarType(Datatype.F32, 8), hint='dacc')
+    v8 = ScalarType(Datatype.F32, 8)
+    if how == 'op':
+        d = intel_spmd.mac(b, v8, a, bb, c, (1, 0))
+    else:
+        d = b.call('tensorforge::dpasTF32', v8, 'item.get_sub_group()', a, bb,
+                   c, hint='dacc', movable=False, materialize=True)
+    return b, (a, bb, c), d
+
+
+def test_spmd_dpas_is_a_matrix_op_with_a_result():
+    """The sub-group of 16 issues it together; D a new value, pinned and in
+    a variable of its own; the layouts are the measured ones."""
+    b, (a, bb, c), d = _spmd_dpas()
+    s = _stmt(b.finish())
+    assert s.target == (d,) and s.args == (a, bb, c)
+    assert s.attr('engine') == 'dpas_spmd'
+    assert s.attr('shape') == (8, 16, 8)
+    assert s.attr('types') == (Datatype.TF32, Datatype.TF32, Datatype.F32,
+                               Datatype.F32)
+    assert s.attr('term') == (1, 0) and s.attr('no_inline')
+    assert s.attr('collective') is Participants.WAVE
+    assert s.attr('layouts') == (intel_spmd.a_fragment_bits(),
+                                 intel_spmd.b_fragment_bits(),
+                                 intel_spmd.d_fragment_bits())
+    assert s.pure and not s.movable and d.layout is None
+
+
+def test_spmd_dpas_writes_what_the_call_wrote():
+    """`NativeFloat8 d = tensorforge::dpasTF32(item.get_sub_group(), a, b,
+    c);`, the sub-group as the lexic spells it."""
+    got = _emitted(_spmd_dpas()[0].finish(), _sycl())
+    want = _emitted(_spmd_dpas('call')[0].finish(), _sycl())
+    assert got == want
+    assert 'tensorforge::dpasTF32(item.get_sub_group(), ' in got
+
+
+def test_spmd_dpas_needs_the_targets_sub_group():
+    b, *_ = _spmd_dpas()
+    with pytest.raises(IRError, match='sub-group'):
+        engines.lower(_stmt(b.finish()), None, name=str)
+
+
+def test_spmd_dpas_takes_the_products_in_their_order():
+    """Smallest first (`split.products`): A's lower half by B's upper, A's
+    upper by B's lower, then the upper halves -- `term` is (A's half, B's)."""
+    assert [(q, p) for p, q in intel_spmd.PRODUCTS] == [(1, 0), (0, 1),
+                                                       (0, 0)]
+
+
+def _esimd_dpas(how='op'):
+    """One ESIMD DPAS into an accumulator, as `dpas_matmul` issues it: the
+    matrix op written into the assignment, or the raw expression it was."""
+    atom = intel.ATOMS['tf32']
+    b = IRBuilder(fptype=Datatype.F32)
+    acc = b.declare(ScalarType(Datatype.F32, atom.c_elems), hint='dacc',
+                    layout=SCALAR_LAYOUT)
+    af = b.declare(ScalarType(Datatype.TF32, atom.a_elems), hint='ahi',
+                   layout=SCALAR_LAYOUT)
+    bf = b.declare(ScalarType(Datatype.TF32, atom.b_elems), hint='bhi',
+                   layout=SCALAR_LAYOUT)
+    if how == 'op':
+        d = b.matrix_mac(
+            'dpas_esimd', (atom.m, atom.n, atom.k),
+            (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
+            (af,), (bf,), (acc,), result=acc.type, hint='dp',
+            layout=join_layout((acc, bf, af)), materialize=False,
+            term=(0, 0), modifiers=(('depth', atom.depth),))
+    else:
+        d = b.rawexpr(f'tensorforge::intel_xmx::dpas<{atom.depth}, '
+                      f'{atom.repeat}, float>({{0}}, {{1}}, {{2}})',
+                      acc, bf, af, type_=acc.type, hint='dp', pure=True)
+    b.assign(acc, d)
+    return b, d
+
+
+def _esimd_emitted(body):
+    lines = []
+    context = Context(arch='pvc', backend='esimd', fp_type=Datatype.F32)
+    EsimdEmitter(writer=lines.append, context=context, strict=False).run(body)
+    return '\n'.join(lines)
+
+
+def test_esimd_dpas_is_written_into_the_assignment():
+    """`acc = dpas<8, 8, float>(acc, B, A)`: D is written into the one
+    statement that reads it, as the raw expression was, under the explicit
+    vector's declaration."""
+    got = _esimd_emitted(_esimd_dpas()[0].finish())
+    assert got == _esimd_emitted(_esimd_dpas('raw')[0].finish())
+    assert 'tensorforge::intel_xmx::dpas<8, 8, float>(' in got
+
+
+def test_esimd_dpas_is_the_work_items_alone():
+    """The explicit vector's work-item is the sub-group: there is no
+    collective to state, and D is free to be written into its reader."""
+    b, d = _esimd_dpas()
+    s = _stmt(b.finish())
+    assert s.attr('engine') == 'dpas_esimd'
+    assert s.attr('collective') is None and not s.attr('no_inline')
+    assert s.attr('modifiers') == (('depth', 8),)
+    assert d.layout == SCALAR_LAYOUT
+
+
+@pytest.mark.parametrize('how', ['spmd', 'esimd'])
+def test_dpas_counts_as_other_code_and_no_work(how):
+    """The figures DPAS was counted under, as a call and as raw text: one
+    unit of other code, no work."""
+    metrics = _Metrics()
+    if how == 'spmd':
+        _emitted(_spmd_dpas()[0].finish(), _sycl(), metrics)
+    else:
+        b, _ = _esimd_dpas()
+        context = Context(arch='pvc', backend='esimd', fp_type=Datatype.F32)
+        EsimdEmitter(writer=lambda line: None, context=context,
+                     metrics=metrics, strict=False).run(b.finish())
+    assert ('other', 1, 1) in metrics.mix
+    assert not [m for m in metrics.mix if m[0] == 'matrix']
+    assert metrics.work == []
+
+
+def test_a_matrix_op_ends_a_run_and_a_window():
+    """As the call and the raw text it was: a block read does not reach
+    across it."""
+    from tensorforge.backend.pir import block_reads
+    b, *_ = _spmd_dpas()
+    s = _stmt(b.finish())
+    assert block_reads._run_ends(s, MemSpace.GLOBAL)
+
+
+def test_esimd_dpas_in_a_kernel_updates_its_accumulator():
+    """`square_notrans` with `tensor_cores` under the explicit vector:
+    every DPAS is the right-hand side of the assignment to the accumulator
+    it reads as C, never a declaration of its own -- and three products of
+    the halves for each of two column blocks and two depths."""
+    import contextlib
+    import importlib.util
+    import io
+    import re
+    from pathlib import Path
+    from tensorforge.generators.generator import Generator
+    path = Path(__file__).parent / 'cases' / 'square_notrans.py'
+    spec = importlib.util.spec_from_file_location('square_notrans', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen = Generator(mod.descr_list(), Context(
+            arch='pvc', backend='esimd', fp_type=Datatype.F32,
+            options=Options(tensor_cores=True)))
+        gen.generate()
+    lines = [line.strip() for line in gen.get_kernel().splitlines()
+             if 'intel_xmx::dpas<' in line]
+    assert len(lines) == 2 * intel.TF32_TERMS * 2
+    assignment = re.compile(r'(\w+) = \(tensorforge::intel_xmx::dpas<8, 8, '
+                            r'float>\(\1, \w+, \w+\)\);$')
+    assert all(assignment.match(line) for line in lines), lines

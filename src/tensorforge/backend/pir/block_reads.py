@@ -264,7 +264,7 @@ def plan_windows(body, allocs, names) -> List[Window]:
             return False
         if x.op in Op.RAW or x.op in (Op.BARRIER, Op.WAIT, Op.CALL,
                                       Op.COMMIT_ASYNC, Op.COPY_ASYNC,
-                                      Op.ACCUM):
+                                      Op.ACCUM, Op.MATRIX_MAC):
             return True
         if x.op == Op.STORE:
             b = x.args[0] if x.args else None
@@ -372,10 +372,11 @@ def _run_ends(x: Stmt, space: MemSpace) -> bool:
     if is_comment(x):
         return False
     # A fence ends a run as the raw text it replaces did: a run read as one
-    # message would carry the loads behind it across it.
+    # message would carry the loads behind it across it -- and a matrix
+    # instruction as the call or the text it was.
     if x.op in Op.RAW or x.op in (Op.CALL, Op.COPY_ASYNC, Op.ACCUM,
                                   Op.FENCE, Op.WAIT_COUNTER,
-                                  Op.SET_PRIORITY):
+                                  Op.SET_PRIORITY, Op.MATRIX_MAC):
         return True
     if space is MemSpace.SHARED and x.op in (Op.BARRIER, Op.WAIT,
                                               Op.COMMIT_ASYNC, Op.SYNC_INIT,
