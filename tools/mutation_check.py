@@ -4070,6 +4070,7 @@ GROUPS = {
                        '        tracker = self.mem.tracker\n'
                        '        if tracker is not None:\n'
                        '            tracker.dma = None\n'))),
+    ]),
     # The matrix op (`Op.MATRIX_MAC`) on NVIDIA's engines: what it states,
     # the inline PTX the registry writes it as, and the figures read off it.
     'matrixnv': ('tests/test_matrix_mac.py', [
