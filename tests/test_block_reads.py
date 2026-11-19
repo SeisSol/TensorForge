@@ -211,7 +211,7 @@ def test_an_spmd_run_is_a_sub_group_block_read_where_asked():
 
 
 @pytest.mark.parametrize('lanes,reads,options', [
-    (16, 16, {}), (32, 16, {'spmd_block_runs': True}),
+    (16, 16, {'spmd_block_runs': False}), (32, 16, {'spmd_block_runs': True}),
     (24, 24, {'spmd_block_runs': True}), (None, 16, {'spmd_block_runs': True}),
 ], ids=['off', 'narrower-than-the-multiplication', 'no-sub-group-of-24',
         'lanes-unknown'])
@@ -224,9 +224,23 @@ def test_no_spmd_run_where_not_asked_or_not_the_sub_group(lanes, reads,
     assert 'subGroupRun' not in src, src
 
 
-def test_spmd_runs_are_off_by_default():
-    from tensorforge.common.options import registry
-    assert registry()['spmd_block_runs'].default is False
+def test_an_spmd_run_is_the_default_under_oneapi():
+    """On by default where it was measured, DPC++'s SPMD lowering for
+    Intel; the same sixteen reads and lanes with nothing asked."""
+    src, _ = _spmd_src(16)
+    assert 'tensorforge::subGroupRun<4>(' in src, src
+
+
+@pytest.mark.parametrize('arch,backend,expected', [
+    ('pvc', 'oneapi', True), ('pvc', 'acpp', False), ('pvc', 'esimd', False),
+    ('sm_90', 'cuda', False), ('gfx942', 'hip', False),
+])
+def test_spmd_runs_are_a_oneapi_preference(arch, backend, expected):
+    """The row's value under `oneapi` alone (`ONEAPI_ONLY`): AdaptiveCpp's
+    lowering of the device states no sub-group, and the explicit vector
+    reads its runs as one message already."""
+    ctx = Context(arch=arch, backend=backend, fp_type=F32, options=Options())
+    assert ctx.get_user_options().spmd_block_runs is expected
 
 
 def test_the_shim_parses_an_spmd_run():

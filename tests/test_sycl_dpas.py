@@ -539,11 +539,14 @@ def test_other_widths_take_no_dpas(lanes):
 
 def test_the_header_is_asked_for():
     """`dpasTF32` is declared where the split broadcast is, and a kernel
-    that takes the path needs it whether or not the split is on."""
+    that takes the path needs it whether or not the split is on.  The
+    sub-group runs, on by default under `oneapi`, ask for it as well, so
+    they are off where nothing is to."""
     header = 'tensorforge_device/sycl_spmd.h'
-    assert header in _ctx(sycl_dpas=True,
-                          sycl_split_broadcast=0).target.headers()
-    assert header not in _ctx(sycl_split_broadcast=0).target.headers()
+    assert header in _ctx(sycl_dpas=True, sycl_split_broadcast=0,
+                          spmd_block_runs=False).target.headers()
+    assert header not in _ctx(sycl_split_broadcast=0,
+                              spmd_block_runs=False).target.headers()
 
 
 def test_a_dpas_kernel_parses():

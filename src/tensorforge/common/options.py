@@ -1080,7 +1080,7 @@ declare('sycl_split_broadcast',
             'broadcasts and three selects a read.')
 
 declare('spmd_block_runs',
-        default=False,
+        rule=lambda target: target.prefs.spmd_block_runs,
         env='TF_SPMD_BLOCK_RUNS',
         parse=parse_bool,
         doc='Under SPMD SYCL with a stated sub-group (oneAPI on Intel), read a '
@@ -1092,7 +1092,9 @@ declare('spmd_block_runs',
             'the multiplication is the sub-group, for up to eight reads and '
             'a power of two of them, inside the buffer\'s own extent.  The '
             'explicit vector reads its runs as one block message already.  '
-            'Off until measured.')
+            'On under DPC++\'s SPMD lowering for Intel (`oneapi`), where it '
+            'was measured: 0.95x the time over 41 SeisSol kernels on the Max '
+            '1550, every result bit-identical (`Preferences.spmd_block_runs`).')
 
 declare('sycl_dpas',
         default=False,

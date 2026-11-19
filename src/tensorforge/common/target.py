@@ -140,6 +140,7 @@ class Preferences:
     reassociate_products: bool = False
     fma_interleave: bool = False
     fma_interleave_group: int = 0
+    spmd_block_runs: bool = False
     #: What the autotuner turns (`generators.tuning`): the matrix path,
     tune_matrix_path: bool = False
     #: staging the batch-constant operands,
@@ -360,6 +361,19 @@ PREFERENCES = {
         # `ONEAPI_ONLY`).
         fma_interleave=True,
         fma_interleave_group=8,
+        # A run of a multiplication's reads as one sub-group block read
+        # (`Options.spmd_block_runs`).  Over 41 SeisSol kernels (elastic
+        # orders 5 to 8, viscoelastic 5 and 6, both precisions; the 15 the
+        # remat stop was fitted on, its holdout and `neighboringFlux`) on
+        # the Max 1550 (IGC 2.41.5, SNG2 562717) 0.95x the time in
+        # geometric mean at a batch of 262144 and at 4096, every result
+        # bit-identical; the viscoelastic order-6 `fluxLocalAll` 0.63x in
+        # single and 0.76x in double, the order-8 single `volume` 0.84x;
+        # order 5 unchanged.  Slower the viscoelastic order-6 double
+        # `volumeExt` (+5 %) and `derivative` (+2 %).  The explicit vector
+        # reads its runs as one message already, and AdaptiveCpp states no
+        # sub-group (`ONEAPI_ONLY`).
+        spmd_block_runs=True,
         tune_preload_globals=True,
         lanes_down_to_wave=True),
 }
@@ -371,7 +385,7 @@ PREFERENCES = {
 #: AdaptiveCpp's, the explicit vector -- keeps the plain defaults
 #: (`Target.prefs`).
 ONEAPI_ONLY = ('move_loads', 'wrap_loads', 'lanes_per_mult', 'fma_interleave',
-               'fma_interleave_group')
+               'fma_interleave_group', 'spmd_block_runs')
 
 
 def _explicit_simd(prefs: Preferences) -> Preferences:
@@ -394,7 +408,8 @@ def _explicit_simd(prefs: Preferences) -> Preferences:
                    preload_globals=True, tune_preload_globals=False,
                    lanes_down_to_wave=False,
                    move_loads=True, wrap_loads=True, lanes_per_mult=0,
-                   fma_interleave=False, fma_interleave_group=0)
+                   fma_interleave=False, fma_interleave_group=0,
+                   spmd_block_runs=False)
 
 
 class Target:
