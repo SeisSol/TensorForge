@@ -43,6 +43,23 @@ so that it is in scope wherever the binding is; an access names it
 type: what the reads through it reach, one batch element of the operand as
 it is stored (`ptr_manip.GetElementPtr._extent`).
 
+The LDS form (`form='buffer'`): an LDS-DMA copy (`engines`, `lds_dma`,
+gfx90a, gfx94x and gfx950) whose source is such a binding reads through its
+resource as well, `buffer_load_dword ... lds` (`tensorforge::bufferLoadLds`):
+the same one base a wave in the LDS, lane t's four bytes t places past it,
+the same waits on `vmcnt`, and a read past the resource -- a whole hop of
+the copy that reaches past the operand -- gives zero where the global form
+reads past the operand.  Its guard stays the branch it is: a lane a
+predicate holds off by its offset still writes, zero, into its place in the
+LDS, where the branch writes nothing -- past the window's end, into the next
+buffer.  AMD's CDNA3 ISA guide says so (the MI300 Instruction Set
+Architecture Reference Guide, 9.1.5.1 Range Checking: a read out of range
+returns zero; 9.1.9.1 Clamping Rules: the memory address is clamped as for
+any buffer fetch, and only the active mask keeps a lane from writing its
+LDS location), and Triton's AMD backend relies on it (`triton-lang/triton`
+#12345, `facebookexperimental/triton` #3851: the zero fill of masked lanes).
+So a predicated copy keeps the global form.
+
 Behind every pass that moves, clones or redirects an access
 (`abstract_instruction._optimize_shared_body`).  `wrap` copies a read for
 the next element onto that element's binding, which needs a resource of its
@@ -108,6 +125,8 @@ def buffer_base(s: Stmt, named: Optional[Mapping[str, Value]] = None
     scope at `s` are declared as, which is where an access through an
     operand's symbol finds its binding.  The binding's level is the
     caller's to weigh."""
+    if s.op == Op.COPY_ASYNC:
+        return _copy_base(s, named)
     if s.op == Op.LOAD:
         effect, value = Effect.READ, (s.target[0] if s.target else None)
     elif s.op == Op.STORE:
@@ -138,6 +157,42 @@ def buffer_base(s: Stmt, named: Optional[Mapping[str, Value]] = None
         # Reinterpreted rather than converted (`IRBuilder._converting_store`).
         return None
     if elem.size() * (length or 1) not in WIDTHS:
+        return None
+    return base
+
+
+#: Bytes a lane moves through the LDS form (`raw_ptr_buffer_load_lds`): the
+#: one size the LDS-DMA is issued with (`engines.lds_dma_refusal`).
+LDS_WIDTHS = (4,)
+
+
+def _copy_base(s: Stmt, named: Optional[Mapping[str, Value]]
+               ) -> Optional[Value]:
+    """The binding an LDS-DMA copy reads through, where its buffer form
+    takes it (the module's LDS form): a copy of one element of four bytes a
+    lane, its source a binding in global memory as `buffer_base` takes one,
+    not zero-filled -- the instruction has no source size -- and not
+    predicated: a lane its predicate holds off would still write, zero, into
+    its place in the LDS, where the branch writes nothing."""
+    if (s.attr('engine') != 'lds_dma' or s.attr('form') is not None
+            or s.regions or s.predicate is not None or s.attr('zfill')):
+        return None
+    if s.attr('width') not in LDS_WIDTHS or s.attr('elems', 1) != 1:
+        return None
+    reads = [a for a in s.accesses if a.kind == Effect.READ]
+    if (len(reads) != 1 or reads[0].space is not MemSpace.GLOBAL
+            or _by_value(reads[0].base)):
+        return None
+    base = s.copy_src
+    if not isinstance(base, Value):
+        if _by_value(base):
+            return None
+        base = (named or {}).get(getattr(base, 'name', None))
+    if not (isinstance(base, Value) and isinstance(base.type, BufferType)
+            and base.type.space is MemSpace.GLOBAL):
+        return None
+    elem = base.type.elem
+    if elem not in ELEMENTS or elem.size() != s.attr('width'):
         return None
     return base
 
@@ -173,6 +228,19 @@ def verify_buffer(s: Stmt) -> List[str]:
     if not (isinstance(resource, Value)
             and isinstance(resource.type, ResourceType)):
         diag.append(f'{s.op}: through the buffer engine without a resource')
+    if s.op == Op.COPY_ASYNC:
+        # The LDS form: a read of global memory through the resource, the
+        # LDS-DMA's write, and no predicate (`_copy_base`).
+        if s.attr('engine') != 'lds_dma':
+            diag.append(f'{s.op}: the buffer form of a copy that is no '
+                        f'LDS-DMA')
+        if not any(a.kind == Effect.READ and a.space is MemSpace.GLOBAL
+                   for a in s.accesses):
+            diag.append(f'{s.op}: through a resource, of no global memory')
+        if s.predicate is not None:
+            diag.append(f'{s.op}: a predicated copy through a resource, whose '
+                        f'lanes held off would write zero into the LDS')
+        return diag
     if any(a.space is not MemSpace.GLOBAL for a in s.accesses):
         diag.append(f'{s.op}: through the buffer engine outside global '
                     f'memory')
@@ -301,7 +369,13 @@ def buffer_transfers(body: Tuple[Stmt, ...],
                     for r in s.regions))
             else:
                 base = taken(s, named)
-                if base is not None:
+                if base is not None and s.op == Op.COPY_ASYNC:
+                    # The LDS form: still the LDS-DMA, its waits and its
+                    # one destination a wave, read through the resource.
+                    s = replace(s, attrs=s.attrs + (
+                        ('form', 'buffer'),
+                        ('resource', made[base.id].target[0])))
+                elif base is not None:
                     s = replace(s, attrs=s.attrs + (
                         ('engine', 'buffer'),
                         ('resource', made[base.id].target[0])))

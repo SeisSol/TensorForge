@@ -3998,6 +3998,51 @@ GROUPS = {
         ('copies for the lanes of two teams taken',
          sub(EMIT, '        if len(teams) > 1:\n', '        if False:\n', 1)),
     ]),
+    # The buffer engine's LDS form: an LDS-DMA copy through its source's
+    # resource, the copies it leaves alone, and the interpreter's model.
+    'buflds': ('tests/test_buffer_lds.py', [
+        ('a predicated copy taken, whose held-off lanes write zero',
+         sub(BUFFERS, '            or s.regions or s.predicate is not None or s.attr(\'zfill\')):\n',
+             '            or s.regions or s.attr(\'zfill\')):\n', 1)),
+        ('a copy of another width taken',
+         sub(BUFFERS, "    if s.attr('width') not in LDS_WIDTHS or s.attr('elems', 1) != 1:\n",
+             '    if False:\n', 1)),
+        ('a copy of another engine taken',
+         sub(BUFFERS, "    if (s.attr('engine') != 'lds_dma' or s.attr('form') is not None\n",
+             "    if (s.attr('form') is not None\n", 1)),
+        ('the copy turned into the engine\'s load',
+         sub(BUFFERS, '                if base is not None and s.op == Op.COPY_ASYNC:\n',
+             '                if False:\n', 1)),
+        ('the copy written through the global pointer',
+         sub(EMIT, "            if self._async_lex is not None and s.attr('form') == 'buffer':\n",
+             '            if False:\n', 1)),
+        ('every lane reading the resource\'s first element',
+         sub(HIP_LEXIC, "            f'{lds}, {index});')\n",
+             "            f'{lds}, 0);')\n", 1)),
+        ('the verifier taking a predicated copy through a resource',
+         sub(BUFFERS, '        if s.predicate is not None:\n'
+                      "            diag.append(f'{s.op}: a predicated copy through a resource, whose '\n",
+             '        if False:\n'
+             "            diag.append(f'{s.op}: a predicated copy through a resource, whose '\n", 1)),
+        ('the interpreter reading past the resource',
+         sub(ORACLE, '    if resource.inside(at, int(count), int(size), keep):\n',
+             '    if True:\n', 1)),
+        ('the interpreter writing past the resource or a guard',
+         sub(ORACLE, '        if not resource.inside(at, count, size, keep):\n            return\n',
+             '', 1)),
+        ('the interpreter writing each lane at its own address',
+         sub(ORACLE, "        base = base + int(first.ev(bl.group('di')))\n",
+             "        base = base + int(self.ev(bl.group('di'))) - self.lane % Races.DMA_WAVE\n", 1)),
+        ('the interpreter landing the copy as it is issued',
+         subs(ORACLE, ("        value = _buffer_load(1, size, resource, self.ev(bl.group('index')))\n"
+                       '        tracker = self.mem.tracker\n'
+                       '        if tracker is not None:\n'
+                       '            tracker.dma = wave\n',
+                       "        value = _buffer_load(1, size, resource, self.ev(bl.group('index')))\n"
+                       '        tracker = self.mem.tracker\n'
+                       '        if tracker is not None:\n'
+                       '            tracker.dma = None\n'))),
+    ]),
 }
 
 

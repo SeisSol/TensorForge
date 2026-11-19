@@ -1424,6 +1424,30 @@ bufferStore(BufferResource resource, std::int32_t index,
   }
 }
 
+/// The LDS-DMA through `resource` (`pir.buffers`, its LDS form): element
+/// `index` of it into the LDS, `buffer_load_dword ... lds` -- the wave's one
+/// base in M0, the address of its first lane's `lds`, and lane t's element t
+/// places past it, counted in `vmcnt` as the global form is.  An element past
+/// the resource reads zero, and is written: zero.  No guard -- a lane a guard
+/// held off by its offset would write zero into its place, where the branch
+/// around the copy writes nothing.  gfx90a, gfx94x and gfx950; a device
+/// compile for another architecture stops where a kernel asks for one.
+template <typename T, typename LdsPointer>
+__device__ __forceinline__ void
+bufferLoadLds(BufferResource resource, LdsPointer lds, std::int32_t index) {
+#if __has_builtin(__builtin_amdgcn_raw_ptr_buffer_load_lds)
+  // Four bytes, as an immediate: clang takes no `sizeof` of a template's
+  // parameter for one.
+  static_assert(sizeof(T) == 4, "the LDS-DMA moves a lane's four bytes here");
+  __builtin_amdgcn_raw_ptr_buffer_load_lds(
+      resource, (__attribute__((address_space(3))) void *)(lds), 4,
+      static_cast<std::int32_t>(bufferOffset<T>(index, true)), 0, 0, 0);
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static_assert(sizeof(T) == 0,
+                "no buffer load into the LDS on this architecture");
+#endif
+}
+
 #endif // __HIP_PLATFORM_AMD__
 
 // Tensor copies (`pir.tensors`, `Options.amd_tensor_copies`).

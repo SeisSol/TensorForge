@@ -125,6 +125,9 @@ inline int max(int a, int b) { return a < b ? b : a; }
 
 // The scheduling barrier a batch loop without a guard is fenced with.
 void __builtin_amdgcn_sched_barrier(int);
+// The wait for CDNA's LDS-DMA copies (`pir.engines`, `vmcnt`), the gfx9
+// immediate.
+void __builtin_amdgcn_s_waitcnt(int);
 // The scheduling groups the stacked tiles interleave their issues and the next
 // step's reads with (`Options.amd_matrix_k4_pipeline`): mask, size, sync id.
 void __builtin_amdgcn_sched_group_barrier(int, int, int);
@@ -312,6 +315,9 @@ BufferValue<T, N> bufferLoad(BufferResource resource, std::int32_t index,
 template <typename T, std::size_t N = 1>
 void bufferStore(BufferResource resource, std::int32_t index,
                  BufferValue<T, N> value, bool keep = true);
+// Their LDS form: the LDS-DMA through a resource.
+template <typename T, typename LdsPointer>
+void bufferLoadLds(BufferResource resource, LdsPointer lds, std::int32_t index);
 
 // The tensor copies (`pir.tensors`): a tile's descriptor, opaque here, made
 // over pointers of any space, and the copy through one.

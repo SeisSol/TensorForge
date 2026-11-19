@@ -413,6 +413,12 @@ class HipLexic(CudaLexic):
       return super().tensor_load(descriptor)
     return f'tensorforge::tensorLoad({descriptor});'
 
+  def buffer_load_lds(self, resource, index, lds, *, datatype):
+    if self._underlying_hardware != 'amd':
+      return super().buffer_load_lds(resource, index, lds, datatype=datatype)
+    return (f'tensorforge::bufferLoadLds<{datatype.ctype()}>({resource}, '
+            f'{lds}, {index});')
+
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """The intrinsic where this target has one, `__hip_atomic_fetch_add` else.
 

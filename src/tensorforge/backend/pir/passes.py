@@ -565,6 +565,8 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 diag.append('copy.async: must carry Effect.ASYNC')
             if s.attr('engine') == 'tdm':
                 diag.extend(verify_tensor(s))
+            if s.attr('form') == 'buffer':
+                diag.extend(verify_buffer(s))
 
         elif s.op == Op.TENSOR_DESC:
             diag.extend(verify_tensor(s))

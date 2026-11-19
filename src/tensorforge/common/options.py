@@ -1365,10 +1365,14 @@ declare('buffer_transfers',
             '8 or 16 bytes of 32- or 64-bit numbers with no cache hint '
             '(`pir.buffers`).  A buffer access past its resource reads zero '
             'and writes nothing, so a guard is an offset past it: no select, '
-            'no clamped address and no branch around a store.  Off until '
-            'measured: the guarded loads of 48 kernels patched to this form '
-            'ran 1.6 % faster on MI300A at 64 lanes in the geometric mean, '
-            'from 12.6 % faster to 23.3 % slower (2026-11-06).')
+            'no clamped address and no branch around a store.  With '
+            '`amd_async_copies` on gfx90a, gfx94x and gfx950, the LDS-DMA '
+            'staging copies of such a base read through its resource as well '
+            '(`buffer_load_dword ... lds`), their guards still branches: a '
+            'lane held off by its offset would write zero into the LDS.  Off '
+            'until measured: the guarded loads of 48 kernels patched to this '
+            'form ran 1.6 % faster on MI300A at 64 lanes in the geometric '
+            'mean, from 12.6 % faster to 23.3 % slower (2026-11-06).')
 
 declare('pin_loads',
         rule=lambda target: target.prefs.pin_loads,

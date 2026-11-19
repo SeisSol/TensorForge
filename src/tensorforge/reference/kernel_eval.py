@@ -150,6 +150,40 @@ class _TensorTile(NamedTuple):
     pitch: int
     width: int
 
+
+#: The buffer engine's helpers (`hip.h`, `pir.buffers`): a resource over
+#: `bytes` bytes from `base`; a write through one, `N` elements of `T` at an
+#: element index with an optional guard last (a read is an expression,
+#: `BUFLOAD`); and the LDS-DMA through one, its LDS form.
+_BUFFER_RESOURCE = re.compile(
+    r'^(?:const\s+)?tensorforge::BufferResource\s+(?P<name>\w+)\s*=\s*'
+    r'tensorforge::bufferResource\s*\(\s*(?P<base>.+?)\s*,'
+    r'\s*(?P<bytes>[^,()]+)\)$')
+_BUFFER_STORE = re.compile(
+    r'^tensorforge::bufferStore\s*<\s*(?P<type>[\w:]+)\s*'
+    r'(?:,\s*(?P<n>\d+)\s*)?>\s*\((?P<args>.*)\)$')
+_BUFFER_LDS = re.compile(
+    r'^tensorforge::bufferLoadLds\s*<\s*(?P<type>[\w:]+)\s*>\s*\(\s*'
+    r'(?P<rsrc>\w+)\s*,\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
+    r'\s*(?P<index>.+)\)$')
+
+#: Bytes of the elements the buffer helpers name.
+_BUFFER_ELEMENT = {'float': 4, 'double': 8, 'int': 4, 'unsigned': 4,
+                   'int32_t': 4, 'uint32_t': 4, 'int64_t': 8, 'uint64_t': 8,
+                   'size_t': 8, 'std::int32_t': 4, 'std::uint32_t': 4,
+                   'std::int64_t': 8, 'std::uint64_t': 8, 'std::size_t': 8}
+
+
+class _Resource(NamedTuple):
+    """A buffer resource: `nbytes` bytes from `base`.  An access is inside
+    it where all its bytes are; one past it reads zero and writes nothing --
+    what a guard makes of an access, its offset moved 2^31 past it."""
+    base: Any
+    nbytes: int
+
+    def inside(self, index: int, count: int, size: int, keep=True) -> bool:
+        return bool(keep) and index >= 0 and (index + count) * size <= self.nbytes
+
 #: A bulk copy's cursor, armed by the thread the condition names
 #: (`tensorforge::bulk_arm`); the copy through it, which that thread issues for
 #: the whole multiplication; and the wait on it, after which the bytes are
@@ -1005,6 +1039,20 @@ def _pick(count, mult, *values):
     return values[int(mult)]
 
 
+def _buffer_load(count, size, resource, index, keep=True):
+    """`tensorforge::bufferLoad<T, count>(resource, index, keep)`: `count`
+    elements of `size` bytes from element `index` of the resource, zero
+    where `keep` is false or any of them lies past it (`_Resource`)."""
+    if not isinstance(resource, _Resource) or not size:
+        raise Abort(f'a buffer read through {resource!r} of {size} B')
+    at = int(index)
+    if resource.inside(at, int(count), int(size), keep):
+        values = [resource.base[at + k] for k in range(int(count))]
+    else:
+        values = [0.0] * int(count)
+    return values[0] if int(count) == 1 else Vec(values)
+
+
 def _same(a, b) -> bool:
     """Whether two lanes hold the same value: a pointer by where it points."""
     if isinstance(a, Ptr) and isinstance(b, Ptr):
@@ -1040,6 +1088,12 @@ def _py(expr: str) -> str:
     e = _fold_reads(e)
     # `pick<G>(m, a, b, ...)`: multiplication `m`'s value among `G`.
     e = re.sub(r'\btensorforge::pick\s*<\s*(\d+)\s*>\s*\(', r'PICK(\1, ', e)
+    # `bufferLoad<T, N>(r, i, keep)`: `N` elements of `T` through the
+    # resource `r` (`Interp._buffer_load`), the element's size said here.
+    e = re.sub(r'\btensorforge::bufferLoad\s*<\s*([\w:]+)\s*(?:,\s*(\d+)\s*)?'
+               r'>\s*\(',
+               lambda m: (f'BUFLOAD({m.group(2) or 1}, '
+                          f'{_BUFFER_ELEMENT.get(m.group(1), 0)}, '), e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__builtin_nontemporal_load\s*\(\s*&', 'DEREF(', e)
@@ -1257,6 +1311,7 @@ class Interp:
         self.env['WAVE_UNIFORM'] = self._wave_uniform
         self.env['REDUCE'] = self._reduce
         self.env['PICK'] = _pick
+        self.env['BUFLOAD'] = _buffer_load
         self.env['VEC'] = lambda *xs: Vec(xs)
         self.env['FMA'] = lambda a, b, c: a * b + c
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
@@ -1572,6 +1627,60 @@ class Interp:
             if tracker is not None:
                 tracker.issuing = False
 
+    def _buffer_store(self, bs, stmt: str) -> None:
+        """`tensorforge::bufferStore<T, N>(resource, index, value, keep)`:
+        written where `keep` holds and all of it lies inside the resource,
+        nowhere else (`_Resource`)."""
+        args = _top_level(bs.group('args'), ',')
+        size = _BUFFER_ELEMENT.get(bs.group('type'))
+        if len(args) not in (3, 4) or size is None:
+            raise Abort(f'buffer write not modeled: {stmt!r}')
+        resource = self.ev(args[0])
+        if not isinstance(resource, _Resource):
+            raise Abort(f'a buffer write through {resource!r}: {stmt!r}')
+        at, value = int(self.ev(args[1])), self.ev(args[2])
+        keep = self.ev(args[3]) if len(args) == 4 else True
+        count = int(bs.group('n') or 1)
+        if not resource.inside(at, count, size, keep):
+            return
+        values = value if isinstance(value, Vec) else Vec([value])
+        for k in range(count):
+            resource.base[at + k] = values[k]
+
+    def _buffer_lds(self, bl, stmt: str) -> None:
+        """The LDS-DMA through a resource, its LDS form: the LDS-DMA's one
+        destination a wave (`_lds_dma`), each lane's element read through
+        the resource -- zero past it, and written all the same."""
+        resource = self.env.get(bl.group('rsrc'))
+        dst = self.env.get(bl.group('dst'))
+        if not isinstance(resource, _Resource) or not isinstance(dst, Ptr):
+            raise Abort(f'buffer LDS-DMA between unknown buffers: {stmt!r}')
+        size = _BUFFER_ELEMENT.get(bl.group('type'))
+        width = self.widths.get(bl.group('dst'))
+        if size != 4 or (width is not None and width != size):
+            raise Abort(f'buffer LDS-DMA of {bl.group("type")!r} into '
+                        f'{bl.group("dst")!r}, whose element size is '
+                        f'{width!r}: {stmt!r}')
+        wave = self.lane // Races.DMA_WAVE
+        first = self
+        if self.lockstep is not None:
+            first = min((it for it in self.lockstep.current
+                         if it.lane // Races.DMA_WAVE == wave),
+                        key=lambda it: it.lane, default=self)
+        base = first.env.get(bl.group('dst'))
+        if not isinstance(base, Ptr):
+            raise Abort(f'buffer LDS-DMA into an unknown buffer: {stmt!r}')
+        base = base + int(first.ev(bl.group('di')))
+        value = _buffer_load(1, size, resource, self.ev(bl.group('index')))
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.dma = wave
+        try:
+            base[self.lane % Races.DMA_WAVE] = value
+        finally:
+            if tracker is not None:
+                tracker.dma = None
+
     def _lds_dma(self, dm, stmt: str) -> None:
         """AMD's LDS-DMA: what the instruction writes, not what its operands
         name.
@@ -1779,6 +1888,25 @@ class Interp:
         if re.search(r'tensor_load_to_lds|tensorforge::tensor(?:Load|'
                      r'Descriptor)\b', stmt):
             raise Abort(f'tensor copy not modeled: {stmt!r}')
+        br = _BUFFER_RESOURCE.match(stmt)
+        if br:
+            base = self.ev(br.group('base'))
+            if not isinstance(base, Ptr):
+                raise Abort(f'a buffer resource over no buffer: {stmt!r}')
+            self.env[br.group('name')] = _Resource(
+                base, int(self.ev(br.group('bytes'))))
+            return
+        bs = _BUFFER_STORE.match(stmt)
+        if bs:
+            self._buffer_store(bs, stmt)
+            return
+        bl = _BUFFER_LDS.match(stmt)
+        if bl:
+            self._buffer_lds(bl, stmt)
+            return
+        if re.match(r'^(?:const\s+)?tensorforge::(?:BufferResource|buffer'
+                    r'(?:Store|LoadLds))\b', stmt):
+            raise Abort(f'buffer access not modeled: {stmt!r}')
         # A global window bound through a memory-space pointer,
         # `tensorforge::SpacePtrRestrict<double, tensorforge::GlobalMemspace>
         # const glb_m0 = ...`, is a pointer to its element type here: the
