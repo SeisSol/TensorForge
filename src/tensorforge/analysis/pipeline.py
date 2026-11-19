@@ -91,7 +91,9 @@ INSTRUCTIONS_PER_STATEMENT_P10: Dict[str, Dict[str, float]] = {
               'shared.store': 1.0, 'barrier': 2.0, 'branch': 1.67},
 }
 
-#: Clocks one MFMA holds its SIMD for, by the shape its builtin names, measured
+#: Clocks one MFMA holds its SIMD for, by the shape its builtin names -- the
+#: instruction of its matrix op, whose category is `mfma.<shape>`
+#: (`pir.engines.mfma_category`) --, measured
 #: on gfx942 (MI300A, 2026-10-27; `~/tf-probe/mi300a/coissue.hip`: four
 #: independent accumulators, four waves a SIMD).  The 64-lane entries that
 #: are not listed were not measured and take their nominal passes.  The

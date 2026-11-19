@@ -294,11 +294,9 @@ def matmul_exchange(writer, C, shared, lead, M, N, K, kx, threads, dtype,
                                                         head, K)
                                 if built is None or built is False:
                                     return False
-                                acc[(i, g)] = writer.call(
-                                    op.callee, acctype,
-                                    fragments[group], built, acc[(i, g)],
-                                    0, 0, 0, hint='acc', movable=False,
-                                    materialize=True)
+                                acc[(i, g)] = op.mac(
+                                    writer, acctype, fragments[group], built,
+                                    acc[(i, g)])
 
                 for i in range(M):
                     for column in range(min(ext, N - j)):

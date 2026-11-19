@@ -71,6 +71,7 @@ import re
 from typing import (Callable, Dict, Iterable, Iterator, List, Optional,
                     Sequence, Tuple)
 
+from tensorforge.backend.pir.engines import Hazard
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.options import DPP_WAITS
 
@@ -101,13 +102,21 @@ WAIT_STATES = 2
 #: The wait in front of a block: two wait states.
 WAIT = 's_nop 1'
 
-#: The wait behind a block, for a VALU write of its an MFMA reads next: two.
-WAIT_AFTER = 's_nop 1'
+#: The wait a VALU write owes a matrix instruction that reads it as its A or
+#: B, in the engines' terms: two wait states between the write and an MFMA
+#: (LLVM's `LegacyVALUNotDotWritesVGPRWaitStates`; measured on gfx942,
+#: 2026-11-15).  The compiler keeps it behind a VALU instruction and not
+#: behind assembly, so a block keeps it itself, where a kernel issues one
+#: (`waits_behind`).  The other way the hardware interlocks.
+HAZARD = Hazard(then='mfma', states=2)
+
+#: The wait behind a block, for a VALU write of its an MFMA reads next.
+WAIT_AFTER = f's_nop {HAZARD.states - 1}'
 
 _INSTRUCTION = {Datatype.F32: 'v_fmac_f32_dpp', Datatype.F64: 'v_fmac_f64_dpp'}
 
-#: A matrix instruction, in the name of a builtin or the text of assembly:
-#: `__builtin_amdgcn_mfma_*`, `smfmac`, WMMA.
+#: A matrix instruction in text the IR does not see into, assembly or raw:
+#: `mfma`, `smfmac`, WMMA.
 _MATRIX = re.compile(r'mfma|smfmac|wmma', re.IGNORECASE)
 
 
@@ -217,14 +226,17 @@ def waits_in(run: Sequence) -> int:
 
 def waits_behind(bodies: Iterable[Sequence]) -> bool:
     """Whether a block of a kernel made of `bodies` waits behind itself: where
-    any statement of them issues a matrix instruction -- a builtin by its
-    name, assembly or raw text by what it spells."""
-    from tensorforge.backend.pir.core import walk_stmts
+    any statement of them is the matrix instruction its write owes a wait
+    (`HAZARD`) -- a matrix op of that engine -- or assembly or raw text
+    spells a matrix instruction."""
+    from tensorforge.backend.pir.core import Op, walk_stmts
     for body in bodies:
         for stmt in walk_stmts(body):
-            if any(_MATRIX.search(text) for text in (
-                    stmt.attr('callee') or '', stmt.attr('asm') or '',
-                    stmt.text or '')):
+            if (stmt.op == Op.MATRIX_MAC
+                    and stmt.attr('engine') == HAZARD.then):
+                return True
+            if any(_MATRIX.search(text) for text in (stmt.attr('asm') or '',
+                                                     stmt.text or '')):
                 return True
     return False
 

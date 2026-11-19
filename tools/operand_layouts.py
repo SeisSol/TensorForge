@@ -41,15 +41,15 @@ def call_stmt(self, callee, *args, **kw):
     return orig(self, callee, *args, **kw)
 pirbuild.IRBuilder.call_stmt = call_stmt
 
-# and the MFMA, which goes through call()
-origc = pirbuild.IRBuilder.call
-def call(self, callee, type_, *args, **kw):
-    if 'mfma_f32_4x4x1f32' in callee:
-        A = args[0] if args else None
+# and the MFMA, which is a matrix op (`IRBuilder.matrix_mac`)
+origm = pirbuild.IRBuilder.matrix_mac
+def matrix_mac(self, engine, shape, types, a, b, c, **kw):
+    if kw.get('instruction') == 'mfma_f32_4x4x1f32':
+        A = a[0] if a else None
         got = A.layout if isinstance(A, Value) else None
         stats['mfma A: ' + (repr(got) if got else 'untracked')] += 1
-    return origc(self, callee, type_, *args, **kw)
-pirbuild.IRBuilder.call = call
+    return origm(self, engine, shape, types, a, b, c, **kw)
+pirbuild.IRBuilder.matrix_mac = matrix_mac
 
 for p in sorted(Path('tests/cases').rglob('*.py')):
     spec = importlib.util.spec_from_file_location(p.stem, p)

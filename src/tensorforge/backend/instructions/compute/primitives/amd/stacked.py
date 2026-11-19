@@ -635,10 +635,8 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
                     if b is None:
                         return False
                     for c0 in tiles:
-                        acc[(rt, c0)] = writer.call(
-                            op.callee, acctype, frags[c0], b, acc[(rt, c0)],
-                            0, 0, 0, hint='acc', movable=False,
-                            materialize=True)
+                        acc[(rt, c0)] = op.mac(writer, acctype, frags[c0], b,
+                                               acc[(rt, c0)])
                 continue
             # The fragments of the step `depth` on, read before this step's
             # issues: their loads have the issues to land behind
@@ -651,10 +649,8 @@ def _emit(writer, ops, ctx, span, op, mults, width) -> bool:
             frags, operators = got
             for rt in live:
                 for c0 in tiles:
-                    acc[(rt, c0)] = writer.call(
-                        op.callee, acctype, frags[c0], operators[rt],
-                        acc[(rt, c0)], 0, 0, 0, hint='acc', movable=False,
-                        materialize=True)
+                    acc[(rt, c0)] = op.mac(writer, acctype, frags[c0],
+                                           operators[rt], acc[(rt, c0)])
             if interleaved(ctx) and i + depth < len(steps_):
                 _interleave(writer, len(live) * len(tiles))
         if chain is not None:
@@ -790,10 +786,9 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
                     return False
                 for c0 in tiles:
                     for i, j in pairs:
-                        acc[(rt, c0)] = writer.call(
-                            op.callee, acctype, frags[c0][i], b[j],
-                            acc[(rt, c0)], 0, 0, 0, hint='acc',
-                            movable=False, materialize=True)
+                        acc[(rt, c0)] = op.mac(writer, acctype,
+                                               frags[c0][i], b[j],
+                                               acc[(rt, c0)])
         if chain is not None:
             chain.state['accs'] = acc
             if chain.closes and chain.phase == 'all':
