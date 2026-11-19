@@ -24,7 +24,9 @@ are skipped with a clear reason — ``pytest`` itself still runs (and
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
+import json
 import os
 from pathlib import Path
 from typing import List
@@ -80,11 +82,34 @@ def _discover_cases() -> list:
 # Target discovery (session-cached)
 # ----------------------------------------------------------------------
 
+#: The targets the controller discovered, as JSON, for the workers it starts.
+#: Under xdist every worker is a session of its own, and each one used to probe
+#: on its own: `nvidia-smi` under load could take longer than its timeout in one
+#: of them, which then collected no tests for that GPU -- and xdist stops the
+#: whole run when its workers collect different tests.  The probe compiles of
+#: the workers also shared one scratch directory.  Discovered once and handed
+#: down, every worker collects the same.
+TARGETS_ENV = "TF_TEST_TARGETS_JSON"
+
+
+def targets_to_json(targets: List[Target]) -> str:
+    return json.dumps([dataclasses.asdict(t) for t in targets])
+
+
+def targets_from_json(text: str) -> List[Target]:
+    return [Target(**fields) for fields in json.loads(text)]
+
+
 def _discover_targets_session(config) -> List[Target]:
-    """Probe once per pytest session; cache on config for the run."""
+    """Probe once per pytest session; cache on config for the run.  A worker
+    takes what its controller found (`TARGETS_ENV`)."""
     cached = getattr(config, "_tf_targets", None)
     if cached is not None:
         return cached
+    handed = os.environ.get(TARGETS_ENV)
+    if handed is not None:
+        config._tf_targets = targets_from_json(handed)
+        return config._tf_targets
     gpus = detect_all()
     # `TF_TEST_BACKENDS=esimd,oneapi` keeps a run to the lowerings asked for:
     # on an Intel device both SYCL generators are targets, and a comparison
@@ -99,6 +124,14 @@ def _discover_targets_session(config) -> List[Target]:
 # ----------------------------------------------------------------------
 # Pytest hooks
 # ----------------------------------------------------------------------
+
+def pytest_configure(config):
+    """The controller discovers the targets before xdist starts its workers,
+    which inherit its environment and so the same list (`TARGETS_ENV`)."""
+    if hasattr(config, "workerinput") or TARGETS_ENV in os.environ:
+        return
+    os.environ[TARGETS_ENV] = targets_to_json(_discover_targets_session(config))
+
 
 def pytest_addoption(parser):
     parser.addoption(
