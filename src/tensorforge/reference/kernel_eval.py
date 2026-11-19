@@ -1835,6 +1835,7 @@ class Interp:
 _NO_VALUE = re.compile(
     r'^(?:__builtin_amdgcn_(?:s_setprio|sched_group_barrier|fence|s_waitcnt'
     r'|s_wait_asynccnt|s_wait_tensorcnt)|__threadfence_block'
+    r'|__atomic_signal_fence'
     r'|tensorforge::(?:sync|arrive|join)NamedBarrier(?:<[^>]*>)?'
     r'|tensorforge::prefetch(?:Runs)?(?:L1|L2|Hinted)(?:<[^>]*>)?)\s*\(')
 

@@ -381,7 +381,8 @@ def test_counter_waits_per_target():
         with pytest.raises(IRError):
             _lines(engines.wait_counter('vmcnt', 64), target)
     gfx1250 = _target('hip', 'gfx1250')
-    assert _lines(engines.wait_counter('asynccnt', 1), gfx1250) == (
+    # And the compiler's fence behind it (`test_async_lds`).
+    assert _lines(engines.wait_counter('asynccnt', 1), gfx1250)[:-1] == (
         '__builtin_amdgcn_s_wait_asynccnt(1);',)
     assert _lines(engines.wait_counter('tensorcnt', 0), gfx1250) == (
         '__builtin_amdgcn_s_wait_tensorcnt(0);',)

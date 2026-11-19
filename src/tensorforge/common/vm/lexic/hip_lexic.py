@@ -258,7 +258,8 @@ class HipLexic(CudaLexic):
   # CDNA has no __pipeline_*; the equivalent is a direct global->LDS load
   # plus an explicit vmcnt wait (`Target.copy_async_sizes`), and on gfx1250
   # and gfx1251 their copy into the LDS plus an explicit asynccnt wait
-  # (`engine` 'async_lds').
+  # (`engine` 'async_lds'), each behind a fence of the compiler alone
+  # (`_async_to_lds`): two lines.
   def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None):
     if self._underlying_hardware != 'amd':
       return super().copy_async(dst, src, nbytes, zfill, engine)
@@ -442,11 +443,18 @@ def _async_to_lds(dst, src, nbytes):
   """gfx1250's copy of `nbytes` bytes a lane from `src` into the LDS at
   `dst`: each lane's own address, unlike the LDS-DMA's one a wave, and no
   offset or cache policy of its own (the two trailing immediates).  None
-  for a size it does not take (`Target.copy_async_sizes`)."""
+  for a size it does not take (`Target.copy_async_sizes`).
+
+  Behind a fence of the compiler alone, on a line of its own
+  (`engines.COMPILER_FENCE`): the compiler takes the copy to write its own
+  lane's place and no other, and would move a read of another lane's place
+  -- which that lane's copy writes -- from ahead of the copy to behind it."""
+  from tensorforge.backend.pir.engines import COMPILER_FENCE
   elem = _ASYNC_LDS_ELEMENT.get(nbytes)
   if elem is None:
     return None
-  return (f'__builtin_amdgcn_global_load_async_to_lds_b{8 * nbytes}('
+  return (f'{COMPILER_FENCE}\n'
+          f'__builtin_amdgcn_global_load_async_to_lds_b{8 * nbytes}('
           f'(__attribute__((address_space(1))) {elem}*)({src}), '
           f'(__attribute__((address_space(3))) {elem}*)({dst}), 0, 0);')
 
