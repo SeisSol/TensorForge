@@ -147,6 +147,34 @@ def parse_dpp_waits(text: str) -> str:
 #: What `Options.amd_dpp_waits` takes.
 DPP_WAITS = ('needed', 'always')
 
+
+#: What `Options.carry_element_index` takes.
+CARRY_ENTRY = ('auto', 'always', 'never')
+
+
+def carry_mode(value) -> str:
+  """`Options.carry_element_index` as one of `CARRY_ENTRY`: a boolean, as the
+  switch was before it had a rule, reads as `always` or `never`."""
+  if value is True:
+    return 'always'
+  if value is False:
+    return 'never'
+  mode = str(value).strip().lower()
+  if mode not in CARRY_ENTRY:
+    raise ValueError(f'expected one of {CARRY_ENTRY} or a boolean, '
+                     f'got {value!r}')
+  return mode
+
+
+def parse_carry(text: str) -> str:
+  """`auto`, `always` or `never`, or a boolean for the last two
+  (`Options.carry_element_index`)."""
+  low = text.strip().lower()
+  if low in CARRY_ENTRY:
+    return low
+  return carry_mode(parse_bool(text))
+
+
 _DEFAULT_PARSERS = {bool: parse_bool, int: parse_int, str: parse_str}
 
 
@@ -484,21 +512,29 @@ declare('pointer_stage',
             'transfer as cover, and nothing changes.  See backend/pir/wrap.py.')
 
 declare('carry_element_index',
-        default=True,
-        parse=parse_bool,
-        doc='Read an element\'s entry of the launch\'s index list once, as one '
-            'value every address through it takes -- the operands of '
-            '`Addressing.INDEXED` and `INDEXED_POINTER` -- rather than once '
-            'in each address; and where `enable_wrap_loads` reads the next '
-            'element\'s entry for a transfer it issues ahead, carry that '
-            'entry into the next iteration as the element\'s own, as the flag '
-            'words ride the loop, with the first element\'s read in the '
-            'peel.  Read at the head of the element, the entry is a load '
-            'every address of the element waits for before its own: through '
-            'a pointer per cell, index, pointer and data are three dependent '
-            'loads where a pointer table has two.  Carried, it is there.  It '
-            'costs a register for the carried entry, and nothing for a kernel '
-            'without such an operand.  See backend/pir/wrap.py.')
+        default='auto',
+        parse=parse_carry,
+        doc='Where an element\'s entry of the launch\'s index list is read -- '
+            'the operands of `Addressing.INDEXED` and `INDEXED_POINTER` reach '
+            'their data through it.  It is read once, as one value every '
+            'address through it takes, rather than once in each address; and '
+            'where `enable_wrap_loads` reads the next element\'s entry for a '
+            'transfer it issues ahead, the loop can carry that entry into the '
+            'next iteration as the element\'s own, as the flag words ride the '
+            'loop, with the first element\'s read in the peel.  Read at the '
+            'top of the element, the entry is a load the addresses wait for '
+            'before their own: through a pointer per cell, index, pointer and '
+            'data are three dependent loads where a pointer table has two.  '
+            'Carried, it is there -- and it holds a register from the top of '
+            'the body to its first reader.  `auto` carries it where that '
+            'stretch stays clear of the body\'s pressure peak -- through a '
+            'pointer per cell, that takes SeisSol\'s volume and neighbor flux '
+            'back under GB200\'s occupancy cliff -- and otherwise reads it at '
+            'the top of the element, where the addresses through the list '
+            'always stood (`pir.entries`); `always` carries it wherever the '
+            'body still reads it; `never` reads it in each address.  Nothing '
+            'changes for a kernel without such an operand.  See '
+            'backend/pir/entries.py and backend/pir/wrap.py.')
 
 declare('trip_reads',
         default=False,

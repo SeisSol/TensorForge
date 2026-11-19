@@ -1,5 +1,5 @@
 // === base name ===
-kernel_a620ac78f762e09f
+kernel_dea09e8102df9986
 
 // === header ===
 #ifndef TENSORFORGE_LAUNCH_TYPES
@@ -27,9 +27,9 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-inline constexpr tensorforge::LaunchInfo launch_info_kernel_a620ac78f762e09f = {{1, 8, 1}, 32, 20, 1, 8, 3072, false, true, 1};
-tensorforge::LaunchConfig launch_config_kernel_a620ac78f762e09f(size_t numElements0, void* streamPtr = nullptr);
-void launcher_kernel_a620ac78f762e09f(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
+inline constexpr tensorforge::LaunchInfo launch_info_kernel_dea09e8102df9986 = {{1, 8, 1}, 32, 20, 1, 8, 3072, false, true, 1};
+tensorforge::LaunchConfig launch_config_kernel_dea09e8102df9986(size_t numElements0, void* streamPtr = nullptr);
+void launcher_kernel_dea09e8102df9986(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0 = nullptr, void* streamPtr = nullptr);
 
 
 // === launcher ===
@@ -58,7 +58,7 @@ struct LaunchConfig {
 };
 } // namespace tensorforge
 #endif
-tensorforge::LaunchConfig launch_config_kernel_a620ac78f762e09f(size_t numElements0, void* streamPtr) {
+tensorforge::LaunchConfig launch_config_kernel_dea09e8102df9986(size_t numElements0, void* streamPtr) {
   (void)numElements0;
   (void)streamPtr;
   sycl::range<3> block (1, 8, 1);
@@ -73,24 +73,24 @@ tensorforge::LaunchConfig launch_config_kernel_a620ac78f762e09f(size_t numElemen
   config.cooperative = false;
   return config;
 }
-void launcher_kernel_a620ac78f762e09f(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0, void* streamPtr) {
-  const tensorforge::LaunchConfig config = launch_config_kernel_a620ac78f762e09f(numElements0, streamPtr);
+void launcher_kernel_dea09e8102df9986(float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0, void* streamPtr) {
+  const tensorforge::LaunchConfig config = launch_config_kernel_dea09e8102df9986(numElements0, streamPtr);
   sycl::range<3> block (config.block[0], config.block[1], config.block[2]);
   sycl::range<3> grid (config.grid[0], config.grid[1], config.grid[2]);
   if (streamPtr == nullptr) {
     throw std::invalid_argument("stream may not be null!");
   }
   sycl::queue *stream = static_cast<sycl::queue *>(streamPtr);
-  kernel_kernel_a620ac78f762e09f(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, elementIndices, flags0);
+  kernel_kernel_dea09e8102df9986(stream, grid, block, m0, m0_extraOffset, m1, m2, m2_extraOffset, numElements0, elementIndices, flags0);
   CHECK_ERR;
 }
 
 
 // === kernel ===
-class kernel_kernel_a620ac78f762e09f_k;
-inline void kernel_kernel_a620ac78f762e09f(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0) {
+class kernel_kernel_dea09e8102df9986_k;
+inline void kernel_kernel_dea09e8102df9986(sycl::queue *stream, sycl::range<3> group_count, sycl::range<3> group_size, float ** m0, size_t m0_extraOffset, const float * m1, const float * m2, size_t m2_extraOffset, size_t numElements0, const unsigned * elementIndices, unsigned * flags0) {
   stream->submit([&](sycl::handler &cgh) {
-    cgh.parallel_for<kernel_kernel_a620ac78f762e09f_k>(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]] {
+    cgh.parallel_for<kernel_kernel_dea09e8102df9986_k>(sycl::nd_range<3>{{group_count.get(2) * group_size.get(2), group_count.get(1) * group_size.get(1), group_count.get(0) * group_size.get(0)}, {group_size.get(2), group_size.get(1), group_size.get(0)}}, sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>}, [=](sycl::nd_item<3> item) [[intel::sycl_explicit_simd]] [[intel::kernel_args_restrict]] {
       tensorforge::slmReserve<768 * sizeof(float)>(); {
         using namespace tensorforge::literals;
         // generated with TensorForge. Version: 0.0.1
@@ -139,7 +139,6 @@ inline void kernel_kernel_a620ac78f762e09f(sycl::queue *stream, sycl::range<3> g
           }
           uint32_t v468_flagWord(flagWordFirst);
           uint32_t v469_flagWordNext(flagWordSecond);
-          size_t v501_elementIndex(peel_elementIndex);
           for (size_t v9_batchId0 = (item.get_local_id(1) + item.get_group().get_local_range(1) * (item.get_group().get_group_id(2))); v9_batchId0 < numElements0; v9_batchId0 += (item.get_group_range(2) * item.get_group().get_local_range(1))) {
             size_t v10_ahead1 = v9_batchId0 + (item.get_group_range(2) * item.get_group().get_local_range(1));
             size_t v12_batchId1 = (v10_ahead1 < numElements0) ? v10_ahead1 : v9_batchId0;
@@ -151,7 +150,8 @@ inline void kernel_kernel_a620ac78f762e09f(sycl::queue *stream, sycl::range<3> g
             const bool allowed = static_cast<bool>(v468_flagWord);
             const bool allowed_next = static_cast<bool>(v469_flagWordNext);
             if (allowed) {
-              float *const __restrict__ glb_m0 = &m0[v501_elementIndex * 2 + 1][0 + m0_extraOffset];
+              const size_t elementIndex = static_cast<size_t>(elementIndices[v9_batchId0]);
+              float *const __restrict__ glb_m0 = &m0[elementIndex * 2 + 1][0 + m0_extraOffset];
               tensorforge::intel_esimd::simd<float, 288> r1(0.0f);
               // ir1 = +(glb_m1 * s0)
               // [(0, 20), (0, 9)] [(0, 9)]
@@ -341,7 +341,6 @@ inline void kernel_kernel_a620ac78f762e09f(sycl::queue *stream, sycl::range<3> g
             }
             v468_flagWord = v469_flagWordNext;
             v469_flagWordNext = flagWordAhead;
-            v501_elementIndex = wrap_elementIndex;
           }
         }
       }
