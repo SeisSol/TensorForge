@@ -33,7 +33,7 @@ import functools
 import hashlib
 import re
 import struct
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 _DECL = re.compile(
     # `alignas(N)` is a declaration specifier, not a statement of its own: a
@@ -120,6 +120,35 @@ _ASYNC_LDS = re.compile(
     r'\(\s*__attribute__\s*\(\(\s*address_space\s*\(\s*3\s*\)\s*\)\)'
     r'\s*[\w:<>, ]+?\s*\*\s*\)\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]'
     r'\s*\)\s*,\s*0\s*,\s*0\s*\)$')
+
+#: gfx1250's tensor copy as `HipLexic` writes it: the descriptor of a tile of
+#: `rows` rows of `cols` elements of `T` from `&src[i]` in global memory, its
+#: rows `pitch` apart, to `&dst[j]` in the LDS, row after row; and the copy
+#: through one, which one wave issues.
+_TENSOR_DESC = re.compile(
+    r'^(?:const\s+)?tensorforge::TensorDescriptor\s+(?P<name>\w+)\s*=\s*'
+    r'tensorforge::tensorDescriptor\s*<\s*(?P<type>[\w:]+)\s*>\s*\(\s*'
+    r'&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,\s*'
+    r'&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*'
+    r'(?P<rows>[^,]+),\s*(?P<cols>[^,]+),\s*(?P<pitch>[^,()]+)\)$')
+_TENSOR_LOAD = re.compile(
+    r'^tensorforge::tensorLoad\s*\(\s*(?P<desc>\w+)\s*\)$')
+
+#: Bytes of the elements a tensor descriptor names.
+_TENSOR_ELEMENT = {'float': 4, 'double': 8, 'int': 4, 'unsigned': 4,
+                   'int32_t': 4, 'uint32_t': 4, 'int64_t': 8, 'uint64_t': 8}
+
+
+class _TensorTile(NamedTuple):
+    """A tensor descriptor: the tile it moves, `rows` rows of `cols`
+    elements of `width` bytes, from `src` with its rows `pitch` apart, to
+    `dst` row after row."""
+    dst: Any
+    src: Any
+    rows: int
+    cols: int
+    pitch: int
+    width: int
 
 #: A bulk copy's cursor, armed by the thread the condition names
 #: (`tensorforge::bulk_arm`); the copy through it, which that thread issues for
@@ -431,6 +460,12 @@ class Races:
     #: Lanes per wave on gfx1250 and gfx1251, whose copies into the LDS are
     #: counted a wave at a time as well.
     ASYNC_WAVE = 32
+    #: A wait on gfx1250's counter of its tensor copies, a wave's; not
+    #: drained by a block barrier either.
+    _WAIT_TENSOR = re.compile(
+        r'^__builtin_amdgcn_s_wait_tensorcnt\s*\(\s*(\d+)\s*\)$')
+    #: Lanes per wave whose tensor copies one counter counts.
+    TENSOR_WAVE = 32
     #: The two barriers narrower than the block: a warp's, with its mask,
     #: and a counted one, with its operands -- `%n` naming the n-th input.
     _WARP_BARRIER = re.compile(r'^__syncwarp\s*\((?P<mask>.*)\)$')
@@ -517,7 +552,8 @@ class Races:
         #: named barrier -> lane -> when it arrived without waiting.
         self._arrived: Dict[int, Dict[int, int]] = {}
         #: Set while an LDS-DMA copy writes: the wave it counts in -- for
-        #: gfx1250's copies into the LDS, `('async', wave)`.
+        #: gfx1250's copies into the LDS, `('async', wave)`, and for its
+        #: tensor copies `('tensor', wave)`.
         self.dma: Optional[int] = None
         #: wave -> its LDS-DMA copies in flight, oldest first, each the time
         #: it was issued and the slots it writes; slot -> (wave, time, lane)
@@ -531,7 +567,9 @@ class Races:
 
     def statement_kind(self, stmt: str) -> Optional[str]:
         """`'barrier'`, `'arrive'`, `'commit'`, `'wait'`, `'vmcnt'`,
-        `'asynccnt'` or None."""
+        `'asynccnt'`, `'tensorcnt'` or None."""
+        if self._WAIT_TENSOR.match(stmt):
+            return 'tensorcnt'
         if self._ARRIVE.match(stmt):
             return 'arrive'
         if self._BARRIER.match(stmt):
@@ -556,6 +594,16 @@ class Races:
         youngest -- as `vmcnt` lands the LDS-DMA's, on a counter of their
         own (`_dma`, under `('async', wave)`)."""
         return self.vmcnt(('async', wave), keep)
+
+    @classmethod
+    def tensorcnt_of(cls, stmt: str) -> int:
+        """The count an `s_wait_tensorcnt` waits down to."""
+        return int(cls._WAIT_TENSOR.match(stmt).group(1))
+
+    def tensorcnt(self, wave: int, keep: int) -> int:
+        """gfx1250's tensor copies of `wave` land but its `keep` youngest,
+        on their own counter (`_dma`, under `('tensor', wave)`)."""
+        return self.vmcnt(('tensor', wave), keep)
 
     @classmethod
     def vmcnt_of(cls, stmt: str) -> int:
@@ -589,6 +637,8 @@ class Races:
         wave waited for: the wait is the wave's, and its lanes go on in
         lockstep behind it."""
         wave = self._dma_wave.get(slot)
+        if isinstance(wave, tuple) and wave[0] == 'tensor':
+            return wave == ('tensor', self.lane // self.TENSOR_WAVE)
         if isinstance(wave, tuple):
             return wave == ('async', self.lane // self.ASYNC_WAVE)
         return wave == self.lane // self.DMA_WAVE
@@ -1590,6 +1640,53 @@ class Interp:
             if tracker is not None:
                 tracker.dma = None
 
+    def _tensor_desc(self, td, stmt: str) -> None:
+        """A tensor descriptor: the tile it names, from the source's element
+        at `si`, its rows `pitch` apart, to the destination's at `di`."""
+        src = self.env.get(td.group('src'))
+        dst = self.env.get(td.group('dst'))
+        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+            raise Abort(f'tensor descriptor between unknown buffers: {stmt!r}')
+        width = _TENSOR_ELEMENT.get(td.group('type'))
+        known = self.widths.get(td.group('dst'))
+        if width is None or (known is not None and known != width):
+            raise Abort(f'tensor descriptor of {td.group("type")!r} into '
+                        f'{td.group("dst")!r}, whose element size is '
+                        f'{known!r}: {stmt!r}')
+        self.env[td.group('name')] = _TensorTile(
+            dst + int(self.ev(td.group('di'))),
+            src + int(self.ev(td.group('si'))),
+            int(self.ev(td.group('rows'))), int(self.ev(td.group('cols'))),
+            int(self.ev(td.group('pitch'))), width)
+
+    def _tensor_load(self, tl, stmt: str) -> None:
+        """gfx1250's tensor copy: one instruction of the wave that reaches
+        it, so the copy is made once -- by the first of the wave's lanes
+        executing it -- row after row into the LDS, and in flight until a
+        wait of that wave's on `tensorcnt` retires it (`Races.tensorcnt`).
+        A block barrier does not: its fence waits for no `tensorcnt`."""
+        tile = self.env.get(tl.group('desc'))
+        if not isinstance(tile, _TensorTile):
+            raise Abort(f'tensor copy through an unknown descriptor: {stmt!r}')
+        wave = self.lane // Races.TENSOR_WAVE
+        if self.lockstep is not None:
+            first = min((it.lane for it in self.lockstep.current
+                         if it.lane // Races.TENSOR_WAVE == wave),
+                        default=self.lane)
+            if first != self.lane:
+                return
+        values = [tile.src[r * tile.pitch + c]
+                  for r in range(tile.rows) for c in range(tile.cols)]
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.dma = ('tensor', wave)
+        try:
+            for k, value in enumerate(values):
+                tile.dst[k] = value
+        finally:
+            if tracker is not None:
+                tracker.dma = None
+
     def _bulk_copy(self, bc, stmt: str) -> None:
         """The copy through a bulk cursor: the leader moves the bytes for the
         whole multiplication, every other lane only notes it."""
@@ -1671,6 +1768,17 @@ class Interp:
             if tracker is not None:
                 tracker.bulk_wait(tracker.lane, cursor.name)
             return
+        td = _TENSOR_DESC.match(stmt)
+        if td:
+            self._tensor_desc(td, stmt)
+            return
+        tl = _TENSOR_LOAD.match(stmt)
+        if tl:
+            self._tensor_load(tl, stmt)
+            return
+        if re.search(r'tensor_load_to_lds|tensorforge::tensor(?:Load|'
+                     r'Descriptor)\b', stmt):
+            raise Abort(f'tensor copy not modeled: {stmt!r}')
         # A global window bound through a memory-space pointer,
         # `tensorforge::SpacePtrRestrict<double, tensorforge::GlobalMemspace>
         # const glb_m0 = ...`, is a pointer to its element type here: the
@@ -1835,6 +1943,7 @@ class Interp:
 _NO_VALUE = re.compile(
     r'^(?:__builtin_amdgcn_(?:s_setprio|sched_group_barrier|fence|s_waitcnt'
     r'|s_wait_asynccnt|s_wait_tensorcnt)|__threadfence_block'
+    r'|__atomic_signal_fence'
     r'|tensorforge::(?:sync|arrive|join)NamedBarrier(?:<[^>]*>)?'
     r'|tensorforge::prefetch(?:Runs)?(?:L1|L2|Hinted)(?:<[^>]*>)?)\s*\(')
 
@@ -2068,6 +2177,10 @@ class Lockstep:
             keep = tracker.asynccnt_of(stmt)
             for wave in sorted({it.lane // Races.ASYNC_WAVE for it in lanes}):
                 tracker.asynccnt(wave, keep)
+        if kind == 'tensorcnt':
+            keep = tracker.tensorcnt_of(stmt)
+            for wave in sorted({it.lane // Races.TENSOR_WAVE for it in lanes}):
+                tracker.tensorcnt(wave, keep)
         if kind == 'barrier':
             for present, waited, arrived in self._meetings(stmt, lanes):
                 tracker.barrier([it.lane for it in present], arrived)

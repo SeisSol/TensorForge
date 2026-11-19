@@ -954,6 +954,16 @@ class AbstractInstruction(ABC):
       if options.ir_debug:
         for line in buffered:
           print(line)
+    if (getattr(options, 'amd_tensor_copies', False)
+        and context.target.tensor_copies()):
+      # Behind every pass that moves, clones or redirects a copy: the
+      # descriptor a tensor copy names is made over what it names by then
+      # (`pir.tensors`).
+      described: list = []
+      body = pir.tensor_descriptors(body, builder.scratch, report=described)
+      if options.ir_debug:
+        for line in described:
+          print(line)
     if wrap is not None:
       if metrics is not None:
         metrics.record_wrap(report)

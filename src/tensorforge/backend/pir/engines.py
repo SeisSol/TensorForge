@@ -49,7 +49,10 @@ that (`counter_of`).  Every transfer says how many bytes a lane moves
 (`waited_on`): the compiler places none in front of a read of what a copy
 wrote, and the instruction's one destination -- a base a wave, lane t's
 bytes t places past it -- is checked where the copy is written
-(`lds_dma_refusal`).
+(`lds_dma_refusal`).  gfx1250's tensor data mover (`tdm`) copies a whole
+tile, `shape` rows of a `pitch` apart, through a descriptor
+(`Op.TENSOR_DESC`), issued once by the first wave of the lanes it is for
+(`leader`, `tdm_refusal`) and waited for on that wave's `tensorcnt`.
 
 What this increment keeps, on purpose:
 
@@ -379,6 +382,15 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    '`pir.buffers`): an offset past its size reads zero and '
                    'writes nothing, which is what a predicate becomes; its '
                    "waits stay the compiler's, as a load's do"),
+    TransferEngine('tdm', (Op.COPY_ASYNC,), Completion.COUNTER,
+                   "gfx1250's tensor data mover (`tensor_load_to_lds`): a "
+                   'tile of `shape` rows a `pitch` apart into the LDS, row '
+                   'after row, through a descriptor (`Op.TENSOR_DESC`), '
+                   'issued once by the first wave of the lanes it is for and '
+                   "counted in that wave's tensorcnt, which counts nothing "
+                   'else; its waits are written out, and a barrier behind '
+                   'the wait shows the tile to the other waves',
+                   waited_on='tensorcnt', one_to_one=True),
 )}
 
 #: The class `asyncmem` counts a transfer in, by the kind of completion its
@@ -529,6 +541,88 @@ def lds_dma_refusal(copy: Stmt, defs: Mapping[int, Stmt],
         if not isinstance(cond, tuple) and not lane_prefix(cond, defs):
             return 'a guard around it can leave out the first lane of a wave'
     return None
+
+
+#: What a tensor descriptor holds a tile's extents in, and its pitch, in
+#: elements: the rows and the columns in sixteen bits each (`tile_dim1`,
+#: `tile_dim0`), the pitch in forty-eight (`tensor_dim0_stride`) -- see
+#: `hip.h`, `tensorDescriptorWords`.
+TDM_TILE_LIMIT = (1 << 16) - 1
+TDM_PITCH_LIMIT = (1 << 48) - 1
+
+#: The element sizes a tensor descriptor's data size spells, in bytes.
+TDM_ELEMENT_BYTES = (1, 2, 4, 8)
+
+#: The lanes a tensor copy is for (`team`): a multiplication's, whose
+#: guards it has to share, or the block's.
+TDM_TEAMS = {'mult': Uniformity.MULT, 'block': Uniformity.BLOCK}
+
+
+def tdm_refusal(copy: Stmt, defs: Mapping[int, Stmt], level: Uniformity,
+                wave: int) -> Optional[str]:
+    """Why gfx1250's tensor data mover cannot issue `copy`, or None where it
+    can.
+
+    One instruction a wave, and every operand of it the wave's: so the copy
+    is issued once for the `threads` lanes it is for -- a multiplication's or
+    the block's (`team`) -- by the first wave of them, under the predicate `x
+    < wave` with `x` the lane past a base they share (`lane_linear`).  They
+    are a whole number of waves, so that their first `wave` lanes are that
+    wave and no wave holds lanes of two tiles, and `level`, the least
+    uniform of the guards and loop bounds around the copy, is one they all
+    share, so that the first wave reaches the copy wherever any of them
+    does.  The tile's extents and pitch fit the descriptor's fields
+    (`TDM_TILE_LIMIT`, `TDM_PITCH_LIMIT`), and its element is a size the
+    descriptor spells (`TDM_ELEMENT_BYTES`).
+    """
+    threads = copy.attr('threads')
+    if not threads:
+        return 'the copy does not say how many lanes it is for'
+    if threads % wave:
+        return f'{threads} lanes are no whole number of waves of {wave}'
+    team = TDM_TEAMS.get(copy.attr('team'))
+    if team is None:
+        return f'the copy is for the lanes of {copy.attr("team")!r}'
+    shape, pitch = copy.attr('shape'), copy.attr('pitch')
+    if not (isinstance(shape, tuple) and len(shape) == 2
+            and all(isinstance(n, int) and 1 <= n <= TDM_TILE_LIMIT
+                    for n in shape)):
+        return (f'a tile of {shape!r} is not two extents of 1 to '
+                f'{TDM_TILE_LIMIT}')
+    if not (isinstance(pitch, int) and shape[1] <= pitch <= TDM_PITCH_LIMIT):
+        return (f'a pitch of {pitch!r} is shorter than a row of {shape[1]} '
+                f'or longer than {TDM_PITCH_LIMIT}')
+    width, elems = copy.attr('width'), copy.attr('elems')
+    if not (width and elems == shape[0] * shape[1]
+            and width % elems == 0 and width // elems in TDM_ELEMENT_BYTES):
+        return (f'{width!r} bytes in {elems!r} elements is no tile of '
+                f'elements of {TDM_ELEMENT_BYTES} bytes')
+    lead = copy.predicate
+    d = defs.get(lead.id) if isinstance(lead, Value) else None
+    if not (copy.attr('leader') and d is not None and d.op == 'lt'
+            and len(d.args) == 2 and d.predicate is None
+            and _lane_terms(d.args[0], defs) == 1 and d.args[1] == wave):
+        return f'it is not issued by the first wave of its lanes (x < {wave})'
+    if level < team:
+        return 'a guard around it is not one its lanes share'
+    return None
+
+
+@dataclass(frozen=True)
+class TensorDescType:
+    """The type of a tensor descriptor (`Op.TENSOR_DESC`): what gfx1250's
+    tensor data mover copies a tile through -- the tile's LDS and global
+    addresses, its rows and columns, the pitch of its rows -- held once for
+    the wave, in scalar registers.  Spelled by the target
+    (`Lexic.tensor_descriptor_type`); no part of what a lane's registers
+    hold, as a buffer resource is not.
+
+    ``elem`` is the element of the tile, whose size the descriptor says."""
+
+    elem: Any = None
+
+    def __repr__(self):
+        return 'tdesc' if self.elem is None else f'tdesc<{self.elem}>'
 
 
 def element_of(type_: Any, base: Any) -> Any:
@@ -1090,8 +1184,23 @@ def _lower_wait_counter_hip(s: Stmt, env: Spelling) -> Lowered:
                         f'{_gfx9_waitcnt(counter, count)});',))
     if (env.amd and model in ('gfx1250', 'gfx1251')
             and counter in ('asynccnt', 'tensorcnt')):
-        return Lowered((f'__builtin_amdgcn_s_wait_{counter}({count});',))
+        lines = (f'__builtin_amdgcn_s_wait_{counter}({count});',)
+        if counter == 'tensorcnt':
+            lines += (TENSOR_FENCE,)
+        return Lowered(lines)
     raise IRError(f'no {counter} counter to wait on on {model or "HIP"}')
+
+
+#: What follows a wait on `tensorcnt`: a fence of the compiler alone, which
+#: emits no instruction.  clang 22 declares the tensor load to touch no
+#: memory a program names -- its operands are the descriptor's words, no
+#: pointer -- and the wait to touch none either, so a read of the tile
+#: behind both is free to move ahead of them, or to be answered by an
+#: earlier read of the same address: compiled for gfx1250, a read of an
+#: LDS address behind a tensor load into it and its wait came out as the
+#: value read before the load (2026-11-18).  The load's own fence, ahead of
+#: it, is `tensorforge::tensorLoad`'s (`hip.h`).
+TENSOR_FENCE = '__atomic_signal_fence(__ATOMIC_SEQ_CST);'
 
 
 def _lower_wait_counter_other(s: Stmt, env: Spelling) -> Lowered:
@@ -1490,4 +1599,6 @@ __all__ = [
     'object_of', 'objects', 'set_priority', 'settles', 'spec_of',
     'sync_init', 'sync_object', 'verify_engine', 'wait_counter',
     'wait_phase', 'ResourceType',
+    'TDM_ELEMENT_BYTES', 'TDM_PITCH_LIMIT', 'TDM_TEAMS', 'TDM_TILE_LIMIT',
+    'TENSOR_FENCE', 'TensorDescType', 'tdm_refusal',
 ]

@@ -93,6 +93,10 @@ AMD_GLOBAL_LOAD_LDS = frozenset({'gfx90a', 'gfx940', 'gfx941', 'gfx942',
 #: the LDS: each lane to an address of its own, counted in `asynccnt`.
 AMD_ASYNC_LDS = frozenset({'gfx1250', 'gfx1251'})
 
+#: AMD parts with gfx12.5's tensor data mover (`tensor_load_to_lds`): a 2D
+#: tile into the LDS by one wave, counted in `tensorcnt`.
+AMD_TENSOR_DATA_MOVER = frozenset({'gfx1250', 'gfx1251'})
+
 
 @dataclass(frozen=True)
 class Preferences:
@@ -837,13 +841,25 @@ class Target:
         level = self.hw.sm_level()
         return level is not None and level >= 90
 
+    def tensor_copies(self) -> bool:
+        """Whether a window may go into the LDS as one tile by gfx12.5's
+        tensor data mover (`tensor_load_to_lds`, engine `tdm`): HIP on
+        gfx1250 and gfx1251, whose copy is counted in `tensorcnt` -- which
+        counts nothing else and which neither the compiler nor a block
+        barrier waits for."""
+        return (self.backend == 'hip' and self.hw.vendor == 'amd'
+                and str(self.hw.model) in AMD_TENSOR_DATA_MOVER)
+
     def one_wait_counter(self, engine: Optional[str] = None) -> bool:
         """Whether loads into registers and asynchronous copies through
         `engine` retire through one counter, so that a wait for either counts
         both: AMD's `vmcnt`.  Not gfx12.5's copy into the LDS (`async_lds`),
         which counts on `asynccnt` alone -- a load into a register between
-        two copies goes to `loadcnt`.  NVIDIA scoreboards register loads in
-        hardware and counts copies in groups of its own."""
+        two copies goes to `loadcnt` -- nor its tensor copy (`tdm`), on
+        `tensorcnt`.  NVIDIA scoreboards register loads in hardware and
+        counts copies in groups of its own."""
+        if engine == 'tdm':
+            return False
         return self.hw.vendor == 'amd' and engine != 'async_lds'
 
     def async_staging(self, options=None, threads: Optional[int] = None,

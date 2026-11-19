@@ -332,6 +332,9 @@ class Emitter:
         #: The engine the body's copies go through, where it is one
         #: (`Target.one_wait_counter`).
         self._copy_engine: Optional[str] = None
+        #: Whether the body issues tensor copies (`_decide_async`), whose
+        #: counter a full drain waits on as well.
+        self._tensor_copies = False
         #: The vectors the block reads of the body define (`block_reads`),
         #: by value id: the name each is spelled by.
         self._blocks: Dict[int, str] = {}
@@ -545,9 +548,9 @@ class Emitter:
             return _text_category(text, 'other'), []
         if op == Op.RAWBLOCK:
             return 'branch', []
-        if op == Op.RESOURCE:
+        if op in (Op.RESOURCE, Op.TENSOR_DESC):
             # A buffer resource is an address computed once, as a pointer
-            # binding's is.
+            # binding's is, and so are a tensor descriptor's words.
             return 'int', []
         spec = engines.spec_of(op)
         if spec is not None:
@@ -653,6 +656,13 @@ class Emitter:
             if spelled is None:
                 raise IRError('a buffer resource on a target without buffer '
                               'instructions (`Target.buffer_resources`)')
+            return spelled
+        if isinstance(t, engines.TensorDescType):
+            lex = self._lexic()
+            spelled = None if lex is None else lex.tensor_descriptor_type()
+            if spelled is None:
+                raise IRError('a tensor descriptor on a target without the '
+                              'tensor data mover (`Target.tensor_copies`)')
             return spelled
         raise IRError(f'cannot render type {t!r}')
 
@@ -875,6 +885,16 @@ class Emitter:
                                            for c in copies
                                            if c.counter == 'bulk'}))
         copies = [c for c in copies if c.counter != 'bulk']
+        # Nor is a tensor copy: one instruction a wave over a whole tile,
+        # counted on a counter nothing else counts -- and refused where it
+        # cannot be issued rather than lowered as loads and stores, which a
+        # lane of its first wave would each make over the whole tile.
+        self._tensor_copies = any(c.attr('engine') == 'tdm' for c in copies)
+        if self._tensor_copies:
+            why = self._tdm_refusal(body)
+            if why is not None:
+                raise IRError(f'a tensor copy cannot be issued: {why}')
+            copies = [c for c in copies if c.attr('engine') != 'tdm']
         if not copies:
             return
 
@@ -943,6 +963,60 @@ class Emitter:
             return None
 
         return visit(body, ())
+
+    def _tdm_refusal(self, body: Tuple[Stmt, ...]) -> Optional[str]:
+        """Why one of the body's tensor copies cannot be issued, or None
+        (`engines.tdm_refusal`): asked of each with the least uniform of the
+        conditions and loop bounds around it -- an `if`'s condition, a
+        loop's bounds, and the lane's for any other region, whose head
+        cannot be read.
+
+        And the copies are all for the same lanes (`team`, `threads`): a
+        wave counts the copies it issues, and the count of a wait is the
+        copies behind the one it waits for (`asyncmem._pinned`) -- the
+        block's first wave issues a multiplication's copies and the block's,
+        the first wave of another multiplication only its own, for which a
+        count of both is too many."""
+        target = self._target()
+        if target is None or not target.tensor_copies():
+            model = getattr(getattr(target, 'hw', None), 'model', None)
+            return f'{model or "this target"} has no tensor data mover'
+        teams = sorted({(str(s.attr('team')), s.attr('threads'))
+                        for s in walk_stmts(body)
+                        if s.op == Op.COPY_ASYNC
+                        and s.attr('engine') == 'tdm'}, key=str)
+        if len(teams) > 1:
+            return ('its tensor copies are for the lanes of '
+                    + ' and of '.join(f'{team!r} ({threads})'
+                                      for team, threads in teams)
+                    + ', which different waves issue and count')
+        defs = {v.id: s for s in walk_stmts(body) for v in s.target}
+        wave = int(target.hw.vec_unit_length)
+
+        def level_of(v) -> Uniformity:
+            return v.uniformity if isinstance(v, Value) else Uniformity.GRID
+
+        def visit(stmts, level) -> Optional[str]:
+            for s in stmts:
+                if s.op == Op.COPY_ASYNC and s.attr('engine') == 'tdm':
+                    why = engines.tdm_refusal(s, defs, level, wave)
+                    if why is not None:
+                        return why
+                if not s.regions:
+                    continue
+                if s.op == Op.IF:
+                    inner = min(level, level_of(s.args[0]))
+                elif s.op == Op.FOR:
+                    inner = min([level] + [level_of(b) for b in s.loop_bounds])
+                else:
+                    inner = Uniformity.LANE
+                for r in s.regions:
+                    why = visit(r.body, inner)
+                    if why is not None:
+                        return why
+            return None
+
+        return visit(body, Uniformity.GRID)
 
     def _copy_bytes(self, s: Stmt) -> int:
         """Bytes a lane's copy moves: the statement's `width`, which the
@@ -1590,9 +1664,11 @@ class Emitter:
                 self._emit_body(s.regions[0].body, yield_to)
             return
 
-        if op == Op.WAIT_COUNTER and s.args and self._async_lex is None:
+        if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None
+                and s.attr('engine') != 'tdm'):
             # The wait for copies the body writes as loads and stores
-            # (`_decide_async`): nothing of theirs is in flight.
+            # (`_decide_async`): nothing of theirs is in flight.  A tensor
+            # copy is never one of them.
             return
 
         if engines.spec_of(op) is not None:
@@ -1662,6 +1738,25 @@ class Emitter:
             if text is None:
                 raise IRError('a buffer resource on a target without buffer '
                               'instructions (`Target.buffer_resources`)')
+            self.declare(s.target[0], text, s)
+            return
+
+        if op == Op.TENSOR_DESC:
+            lex = self._lexic()
+            ndst = s.attr('ndst', 0)
+            dst, src = s.args[0], s.args[1]
+            dst_a = self.address(dst, s.args[2:2 + ndst])
+            src_a = self.address(src, s.args[2 + ndst:])
+            rows, cols = s.attr('shape')
+            elem = s.target[0].type.elem
+            text = None if lex is None or elem is None else (
+                lex.tensor_descriptor(f'&{self.base_name(dst)}[{dst_a}]',
+                                      f'&{self.base_name(src)}[{src_a}]',
+                                      rows, cols, s.attr('pitch'),
+                                      datatype=elem))
+            if text is None:
+                raise IRError('a tensor descriptor on a target without the '
+                              'tensor data mover (`Target.tensor_copies`)')
             self.declare(s.target[0], text, s)
             return
 
@@ -1789,6 +1884,20 @@ class Emitter:
                 w(text)
             return
 
+        if op == Op.COPY_ASYNC and s.attr('engine') == 'tdm':
+            # Through its descriptor (`pir.tensors`), under its first wave's
+            # predicate, which the body's writer put around it.
+            lex = self._lexic()
+            desc = s.attr('desc')
+            text = (None if lex is None or desc is None
+                    else lex.tensor_load(self.operand(desc)))
+            if text is None:
+                raise IRError('a tensor copy that names no descriptor '
+                              '(`pir.tensors`), or on a target without the '
+                              'tensor data mover (`Target.tensor_copies`)')
+            w(text)
+            return
+
         if op == Op.COPY_ASYNC:
             dst_b = self.base_name(s.copy_dst)
             src_b = self.base_name(s.copy_src)
@@ -1864,6 +1973,11 @@ class Emitter:
                 # places no wait in front of a read of what they wrote.
                 texts += list(engines.lower(
                     engines.wait_counter(self._copy_counter, 0),
+                    self._target()).lines)
+            if cls == 'all' and self._tensor_copies:
+                # And on the tensor copies' counter, which counts them alone.
+                texts += list(engines.lower(
+                    engines.wait_counter('tensorcnt', 0),
                     self._target()).lines)
             # A full drain waits on every cursor of the body as well: one
             # with nothing in flight returns at once.  The wait for a bulk

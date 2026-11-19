@@ -26,7 +26,7 @@ from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
 
 from tensorforge.common.basic_types import GeneralLexicon
-from .core import (INDEX, SCALAR_LAYOUT, Access, BufferType,
+from .core import (BOOL, INDEX, SCALAR_LAYOUT, Access, BufferType,
                    Participants, Effect, IRError, LaneAxis, MemSpace, Op,
                    Operand, Region, RegisterLayout, ScalarType, Stmt,
                    TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
@@ -1681,6 +1681,67 @@ class IRBuilder:
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
         self._token_bulk[tok.id] = barrier
+        return tok
+
+    def copy_tensor(self, dst: Any, src: Any, *, shape: Sequence[int],
+                    pitch: int, threads: int, team: str = 'mult',
+                    dst_index: Sequence[Operand] = (),
+                    src_index: Sequence[Operand] = (),
+                    lane: Optional[Value] = None,
+                    hint: str = 'tm') -> Value:
+        """Issue one copy of a tile through gfx1250's tensor data mover
+        (`tdm`), ``src -> dst``; returns its token.
+
+        The tile is `shape` -- rows, then the elements of a row -- of the
+        global buffer `src` from `src_index` on, its rows `pitch` elements
+        apart there, into the LDS window `dst` from `dst_index` on, row
+        after row with nothing between them.  One instruction a wave, issued
+        once for the `threads` lanes of `team` -- a multiplication's or the
+        block's -- by the first wave of them: under the predicate `lane <
+        wave` (`leader`), with `lane` their number from zero, the
+        multiplication's lane where none is given (`thread_id`).
+
+        A `copy.async` to every pass -- the accesses on the copy and its
+        wait, a token one wait consumes -- counted in the issuing wave's
+        `tensorcnt`, on which its wait is written (`wait`, `engines.
+        wait_counter`); the barrier that shows the tile to the other waves
+        is placed as for any copy (`barriers`).  The descriptor it goes
+        through is made behind every pass that moves, clones or redirects
+        it (`pir.tensors`).  A permuted window cannot take it: the copy
+        writes the tile in order.
+        """
+        swizzle = getattr(getattr(dst, 'type', None), 'swizzle', None)
+        if swizzle is not None and swizzle.width > 1:
+            raise IRError(f'a tensor copy writes {dst} in order, and it is '
+                          f'permuted ({swizzle})')
+        if team not in engines.TDM_TEAMS:
+            raise IRError(f'a tensor copy for the lanes of {team!r}; there '
+                          f'are {", ".join(engines.TDM_TEAMS)}')
+        rows, cols = (int(n) for n in shape)
+        dst_space = self._space_of(dst)
+        src_space = self._space_of(src)
+        accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
+                    Access(Effect.WRITE, dst_space, self.alias_root(dst)))
+        if lane is None:
+            lane = self.thread_id('x')
+        lead = self.op('lt', BOOL, lane, self._wave(), hint='lead')
+        tok = self.value(TokenType(engines.completes_of('tdm')), hint=hint)
+        attrs = (('ndst', len(tuple(dst_index))), ('elems', rows * cols),
+                 ('engine', 'tdm'), ('completes', engines.completes_of('tdm')))
+        width = engines.width_of(None, dst)
+        if width is not None:
+            attrs += (('width', width * rows * cols),)
+        attrs += (('shape', (rows, cols)), ('pitch', int(pitch)),
+                  ('threads', int(threads)), ('team', team),
+                  ('leader', True))
+        self._emit_op(Op.COPY_ASYNC, (tok,),
+                      (dst, src) + tuple(dst_index) + tuple(src_index),
+                      pure=False, movable=True, predicate=lead,
+                      effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                      accesses=accesses, attrs=attrs)
+        self._token_accesses[tok.id] = accesses
+        self._token_results[tok.id] = ()
+        self._token_engine[tok.id] = 'tdm'
         return tok
 
     def load_async(self, base: Any, *indices: Operand, type_=None,

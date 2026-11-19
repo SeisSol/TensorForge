@@ -38,6 +38,7 @@ from .barriers import Arena
 from .blocks import RegisterBlocks
 from .priority import set_priority
 from .buffers import buffer_transfers
+from .tensors import tensor_descriptors
 from .pipeline import (Atomics, BodyContext, CarryTrips, Forward, GroupRows,
                        KeepOwn, MoveLoads, PlaceBarriers, PlaceBuffers,
                        Prefetch, ShardLoads, WrapLoads, optimize,

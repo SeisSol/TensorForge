@@ -26,6 +26,7 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
 from .asyncmem import check_commits, check_tokens
 from . import engines
 from .buffers import verify_buffer
+from .tensors import verify_tensor
 from .transfers import tagged
 
 
@@ -562,6 +563,11 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 diag.append('copy.async: must declare the read and the write')
             if not (s.effect & Effect.ASYNC):
                 diag.append('copy.async: must carry Effect.ASYNC')
+            if s.attr('engine') == 'tdm':
+                diag.extend(verify_tensor(s))
+
+        elif s.op == Op.TENSOR_DESC:
+            diag.extend(verify_tensor(s))
 
         elif s.op == Op.COMMIT_ASYNC:
             if s.target:

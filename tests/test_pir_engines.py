@@ -383,8 +383,11 @@ def test_counter_waits_per_target():
     gfx1250 = _target('hip', 'gfx1250')
     assert _lines(engines.wait_counter('asynccnt', 1), gfx1250) == (
         '__builtin_amdgcn_s_wait_asynccnt(1);',)
+    # The tensor copies' wait, and the compiler's fence behind it
+    # (`engines.TENSOR_FENCE`).
     assert _lines(engines.wait_counter('tensorcnt', 0), gfx1250) == (
-        '__builtin_amdgcn_s_wait_tensorcnt(0);',)
+        '__builtin_amdgcn_s_wait_tensorcnt(0);',
+        '__atomic_signal_fence(__ATOMIC_SEQ_CST);')
     for backend, arch, counter in (('hip', 'gfx1150', 'vmcnt'),
                                    ('hip', 'gfx942', 'asynccnt'),
                                    ('cuda', 'sm_86', 'vmcnt'),
@@ -687,7 +690,8 @@ def test_every_transfer_engine_completes_one_way_and_is_counted_by_it():
     """The class a wait counts a transfer in follows from how its engine
     completes: commit groups, a counter, a barrier."""
     assert set(engines.TRANSFER_ENGINES) == {
-        'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load', 'buffer', 'async_lds'}
+        'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load', 'buffer', 'async_lds',
+        'tdm'}
     assert engines.counter_of('cp_async') == 'copy'
     assert engines.counter_of('lds_dma') == 'load'
     assert engines.counter_of('load') == 'load'

@@ -275,7 +275,7 @@ TOKEN = TokenType()
 
 
 IRType = Union[ScalarType, BufferType, TokenType, 'SyncObjectType',
-               'ResourceType']
+               'ResourceType', 'TensorDescType']
 
 BOOL = ScalarType(Datatype.BOOL)
 INDEX = ScalarType(Datatype.I32)
@@ -983,6 +983,12 @@ class Op:
     # reads no memory, it describes some -- and named by the accesses that go
     # through it (`resource`, `pir.buffers`).
     RESOURCE = 'resource'
+    # The descriptor gfx1250's tensor data mover copies a tile through: its
+    # LDS and global addresses, the tile's rows and columns and the pitch of
+    # its rows in global memory (`engines.TensorDescType`).  Pure, as a
+    # resource is, and named by the copy that goes through it (`desc`,
+    # `pir.tensors`).
+    TENSOR_DESC = 'tensor.desc'
     # Synchronization and ordering, each an entry of `engines.REGISTRY`,
     # which says what the passes may assume of it and how it is written.
     # `barrier` is the combined form: every participant of its object
