@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <type_traits>
 #include <utility>
 
 // from include/tensorforge_device/base.h
@@ -300,6 +301,17 @@ inline T split_broadcast(const sycl::sub_group &group, T value, int lane) {
 // device's.
 template <int N, typename T>
 inline sycl::vec<T, N> subGroupRun(const sycl::sub_group &, const T *) {
+  return {};
+}
+
+// `tensorforge_device/sycl_spmd.h`: a 2D block read by a sub-group of 16
+// (`pir.block_reads.load_block2d`).  Its signature: a work-item's column of
+// `Rows` elements, or its row of `Cols` where the read transposes, one of
+// them a number; the elements are the device's.
+template <typename T, int Rows, int Cols, bool Transposed>
+inline std::conditional_t<(Transposed ? Cols : Rows) == 1, T,
+                          sycl::vec<T, Transposed ? Cols : Rows>>
+subGroupBlock2d(const sycl::sub_group &, const T *, int, int, int, int, int) {
   return {};
 }
 
@@ -633,6 +645,14 @@ template <typename T, int N> intel_esimd::simd<T, N> slmLoad(SlmPtr<T>) {
 }
 template <typename T, int N>
 void slmStore(SlmPtr<T>, intel_esimd::simd<T, N>) {}
+
+/// Mirrors `blockLoad2d` in `isycl.h`: a block of `Width` x `Height` of a
+/// surface, one 2D block message (`pir.block_reads.load_block2d`).
+template <typename T, int Width, int Height, bool Transposed>
+intel_esimd::simd<T, Width * Height> blockLoad2d(const T *, unsigned, unsigned,
+                                                 unsigned, int, int) {
+  return {};
+}
 
 /// Mirrors `prefetchL1`/`prefetchL2` in `isycl.h`: one element, or `N` from
 /// the address as one block message.

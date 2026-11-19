@@ -583,6 +583,20 @@ template <typename T, int N> ESIMD_INLINE auto slmLoad(SlmPtr<T> at) {
   }
 }
 
+/// A 2D block of `Width` x `Height` elements of the surface at `base` --
+/// `width` bytes wide, `height` rows high, rows `pitch` bytes apart -- from
+/// column `x` and row `y` (`pir.block_reads.load_block2d`): one LSC 2D block
+/// message, `load_2d`, which takes the three extents less one.  The block in
+/// rows, or transposed in columns of `Height` -- the lanes' share of it in
+/// the order a lane axis has.
+template <typename T, int Width, int Height, bool Transposed>
+ESIMD_INLINE intel_esimd::simd<T, Width * Height>
+blockLoad2d(const T *base, unsigned width, unsigned height, unsigned pitch,
+            int x, int y) {
+  return intel_esimd::load_2d<T, Width, Height, 1, Transposed, false>(
+      base, width - 1, height - 1, pitch - 1, x, y);
+}
+
 /// A mask as 1 and 0 of `T`: the register image of a boolean tensor is the
 /// kernel's floating-point type, and a comparison is written into it.
 template <typename T, int N>

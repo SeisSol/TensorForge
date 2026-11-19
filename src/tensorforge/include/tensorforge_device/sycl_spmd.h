@@ -7,6 +7,8 @@
 #include <sycl/sycl.hpp>
 
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 
 #if defined(__SYCL_DEVICE_ONLY__)
 /// The two vector types the DPAS builtin below is declared over: OpenCL's
@@ -27,6 +29,28 @@ typedef float tensorforgeDpasFloat8 __attribute__((ext_vector_type(8)));
 SYCL_EXTERNAL tensorforgeDpasFloat8 intel_sub_group_tf32_tf32_matrix_mad_k8(
     tensorforgeDpasFloat4 a, tensorforgeDpasFloat8 b,
     tensorforgeDpasFloat8 acc);
+
+/// `cl_intel_subgroup_2d_block_io`: a 2D block of 32-bit data read by a
+/// sub-group of 16, each work-item its column of a block of 16 columns, or
+/// its row of a block of 16 rows where the read transposes -- the shapes
+/// `tensorforge::subGroupBlock2d` takes, of those IGC 2.41 has.  Declared as
+/// the DPAS builtin above is; unused, they are no reference.
+typedef int tensorforgeInt2 __attribute__((ext_vector_type(2)));
+#define TENSORFORGE_BLOCK2D_READ(NAME)                                         \
+  SYCL_EXTERNAL void NAME(__attribute__((opencl_global)) void *base,           \
+                          int width, int height, int pitch,                    \
+                          tensorforgeInt2 coord,                               \
+                          __attribute__((opencl_private)) std::uint32_t *out);
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_32b_1r16x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_32b_2r16x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_32b_4r16x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_32b_8r16x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_32b_16r16x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r1x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r2x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r4x1c)
+TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r8x1c)
+#undef TENSORFORGE_BLOCK2D_READ
 #endif
 
 namespace tensorforge {
@@ -54,6 +78,101 @@ inline sycl::vec<T, N> subGroupRun(const sycl::sub_group &group, const T *p) {
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
+}
+
+/// What a work-item gets of a 2D block: `Count` elements, one as a number.
+template <typename T, int Count>
+using Block2dShare = std::conditional_t<Count == 1, T, sycl::vec<T, Count>>;
+
+/// A 2D block of `Rows` x `Cols` 32-bit elements of the surface at `base` --
+/// `width` bytes wide, `height` rows high, rows `pitch` bytes apart -- from
+/// column `x` and row `y`, read by the sub-group `group`, which has to be 16
+/// wide and full (`pir.block_reads.load_block2d`): work-item `l` gets column
+/// `x + l`, its `Rows` elements, or transposed row `y + l` and its `Cols`.
+///
+/// Off the device -- the host pass, or a CPU stand-in that executes it --
+/// the same elements read one at a time, and zero where they lie outside
+/// the surface: the extension leaves their value unstated, so zero is this
+/// model's choice, not a statement about the device.
+template <typename T, int Rows, int Cols, bool Transposed>
+inline Block2dShare<T, Transposed ? Cols : Rows>
+subGroupBlock2d(const sycl::sub_group &group, const T *base, int width,
+                int height, int pitch, int x, int y) {
+  static_assert(sizeof(T) == 4, "a 2D block read of 32-bit data");
+  static_assert(Transposed ? Rows == 16 : Cols == 16,
+                "a column or a row a work-item of a sub-group of 16");
+  constexpr int Count = Transposed ? Cols : Rows;
+  std::uint32_t words[Count];
+#if defined(__SYCL_DEVICE_ONLY__)
+  (void)group;
+  auto *surface =
+      (__attribute__((opencl_global)) void *)(const_cast<T *>(base));
+  auto *out = (__attribute__((opencl_private)) std::uint32_t *)(&words[0]);
+  const tensorforgeInt2 at{x, y};
+  if constexpr (Transposed) {
+    static_assert(Cols == 1 || Cols == 2 || Cols == 4 || Cols == 8,
+                  "a transposed block of 1, 2, 4 or 8 columns");
+    if constexpr (Cols == 1)
+      intel_sub_group_2d_block_read_transpose_32b_16r1x1c(
+          surface, width, height, pitch, at, out);
+    else if constexpr (Cols == 2)
+      intel_sub_group_2d_block_read_transpose_32b_16r2x1c(
+          surface, width, height, pitch, at, out);
+    else if constexpr (Cols == 4)
+      intel_sub_group_2d_block_read_transpose_32b_16r4x1c(
+          surface, width, height, pitch, at, out);
+    else
+      intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+          surface, width, height, pitch, at, out);
+  } else {
+    static_assert(Rows == 1 || Rows == 2 || Rows == 4 || Rows == 8 ||
+                      Rows == 16,
+                  "a block of 1, 2, 4, 8 or 16 rows: a work-item's share is "
+                  "one sycl::vec");
+    if constexpr (Rows == 1)
+      intel_sub_group_2d_block_read_32b_1r16x1c(surface, width, height, pitch,
+                                                at, out);
+    else if constexpr (Rows == 2)
+      intel_sub_group_2d_block_read_32b_2r16x1c(surface, width, height, pitch,
+                                                at, out);
+    else if constexpr (Rows == 4)
+      intel_sub_group_2d_block_read_32b_4r16x1c(surface, width, height, pitch,
+                                                at, out);
+    else if constexpr (Rows == 8)
+      intel_sub_group_2d_block_read_32b_8r16x1c(surface, width, height, pitch,
+                                                at, out);
+    else
+      intel_sub_group_2d_block_read_32b_16r16x1c(surface, width, height, pitch,
+                                                 at, out);
+  }
+#else
+  const int lane = static_cast<int>(group.get_local_linear_id());
+  const auto *bytes = reinterpret_cast<const unsigned char *>(base);
+  for (int k = 0; k < Count; ++k) {
+    const int col = x + (Transposed ? k : lane);
+    const int row = y + (Transposed ? lane : k);
+    const bool inside = col >= 0 && row >= 0 &&
+                        col * static_cast<int>(sizeof(T)) < width &&
+                        row < height;
+    words[k] = 0u;
+    if (inside) {
+      std::memcpy(&words[k],
+                  bytes + static_cast<std::size_t>(row) * pitch +
+                      static_cast<std::size_t>(col) * sizeof(T),
+                  sizeof(T));
+    }
+  }
+#endif
+  if constexpr (Count == 1) {
+    return sycl::bit_cast<T>(words[0]);
+  } else {
+    sycl::vec<T, Count> share;
+#pragma unroll
+    for (int k = 0; k < Count; ++k) {
+      share[k] = sycl::bit_cast<T>(words[k]);
+    }
+    return share;
+  }
 }
 
 /// `x` rounded to TF32: to nearest, ties away from zero, the low thirteen bits

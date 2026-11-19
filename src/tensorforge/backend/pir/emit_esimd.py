@@ -490,6 +490,9 @@ class EsimdEmitter(Emitter):
         override.
         """
         op = getattr(s, 'op', None)
+        if op == Op.LOAD and block_reads.is_block2d(s):
+            self._emit_block2d(s)
+            return
         if (op == Op.ALLOC and s.target
                 and self._buf_name(s.target[0]) in self._simd_buffers):
             self._emit_simd_alloc(s)
@@ -808,6 +811,30 @@ class EsimdEmitter(Emitter):
         else:
             self.writer(f'{self.simd_type(elem, width)} {name};')
             self.writer(f'{name}.copy_from({ptr});')
+
+    def _emit_block2d(self, s) -> None:
+        """A 2D block read (`block_reads.load_block2d`): one `load_2d` of the
+        block, whose order -- the block's rows in turn, or its columns where
+        it transposes -- is the slot-major order of the lanes' share, so the
+        `simd` it returns is the value as it is, its initializer.  Never
+        under a predicate: the message reads the block whole."""
+        v, base = s.target[0], s.args[0]
+        if s.predicate is not None:
+            raise IRError(f'{v}: a 2D block read under a predicate, which '
+                          f'one message for the block whole has none of')
+        width, height, _ = block_reads.block2d_geometry(s)
+        surface_width, surface_height = s.attr('surface')
+        lex = self._lexic()
+        load = getattr(lex, 'block2d_load', None) if lex is not None else None
+        text = (load(v.type.base.ctype(), width, height,
+                     bool(s.attr('transpose')), self.base_name(base),
+                     surface_width, surface_height, s.attr('pitch'),
+                     self.operand(s.args[1]), self.operand(s.args[2]))
+                if load is not None else None)
+        if text is None:
+            raise IRError(f'{v}: a 2D block read, which this target does '
+                          f'not spell')
+        self.writer(f'{self.ctype(v.type, v)} {self.name(v)} = {text};')
 
     def _emit_block_part(self, s) -> None:
         """A read a window or a run serves: a window's element, declared as

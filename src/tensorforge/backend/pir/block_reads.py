@@ -31,6 +31,16 @@ not what the analyses that ran before it measured -- the pressure and the
 code they counted, and the decisions taken on those counts, stay what they
 were.  The vectors it defines are numbered apart from every value (`_ids`),
 so that nothing built after it is renumbered either.
+
+A **2D block** is the same statement over a surface: a `load` with
+`engine='block'`, the block's `shape` (rows, columns), the surface's `pitch`
+and extent (`surface`), and `transpose` / `vnni`.  It is one LSC 2D block
+message, which hands every lane of a sub-group of 16 one column of the
+block, or one row where it transposes; `load_block2d` builds one.  Nothing
+here produces one: it pays on a layout that puts sixteen equally strided
+elements on the lanes, and TensorForge lays out none -- `stacking` keeps the
+lanes on a matrix's rows, stacks at most two elements on its last axis, and
+reaches each through a pointer of its own.
 """
 
 from __future__ import annotations
@@ -40,8 +50,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from tensorforge.common.basic_types import Datatype
 
-from .core import (BufferType, MemSpace, Op, RegisterLayout, ScalarType, Stmt,
-                   Uniformity, Value, walk_stmts)
+from .core import (Access, BufferType, Effect, IRError, LaneAxis, MemSpace, Op,
+                   RegisterLayout, ScalarType, Stmt, Uniformity, Value,
+                   walk_stmts)
 
 #: The widest window, in elements: 64 registers of 64 bytes.
 WINDOW_MAX = 1024
@@ -203,9 +214,11 @@ def _linear(body) -> Tuple[Dict[int, Any], List[Tuple[Stmt, int]]]:
 
 
 def _single_read(x: Stmt) -> bool:
-    """An unpredicated load of a buffer, defining its value."""
+    """An unpredicated load of a buffer, defining its value -- and no block
+    read already, such as a 2D block, whose arguments are no index."""
     return (x.op == Op.LOAD and x.predicate is None and bool(x.target)
-            and bool(x.args) and is_buffer(x.args[0]))
+            and bool(x.args) and is_buffer(x.args[0])
+            and x.attr('engine') != 'block')
 
 
 # --------------------------------------------------------------------------- #
@@ -772,8 +785,204 @@ def is_part(s: Stmt) -> bool:
             and isinstance(s.args[0], Value) and s.args[0].id <= _WINDOW_IDS)
 
 
-__all__ = ['RUN_BYTES', 'Run', 'SPMD_RUN_MAX', 'VECTOR_ELEMS', 'WINDOW_MAX',
-           'Window', 'plan_spmd_runs',
+# --------------------------------------------------------------------------- #
+# 2D blocks
+# --------------------------------------------------------------------------- #
+
+#: The lanes a 2D block read hands its block to: a sub-group of 16, full --
+#: the only one the 2D block messages take (`cl_intel_subgroup_2d_block_io`,
+#: restrictions) -- one column a lane, or one row where it transposes.
+BLOCK2D_LANES = 16
+
+#: The rows of 32-bit data a lane reads of its column, untransposed: what
+#: `load_2d` takes, and `intel_sub_group_2d_block_read_32b_{R}r16x1c`, which
+#: IGC 2.41 has for these; sixteen columns of four bytes are the 64 a block
+#: row reads.
+BLOCK2D_ROWS = (1, 2, 4, 8, 16, 32)
+
+#: The most elements a lane's share holds under SPMD, where it is one
+#: `sycl::vec` -- of 1, 2, 3, 4, 8 or 16 elements, as DPC++ states it --
+#: so that 32 rows are read under the explicit vector only.
+BLOCK2D_SPMD_MAX = 16
+
+#: The columns of 32-bit data a lane reads of its row, transposed
+#: (`..._transpose_32b_16r{C}x1c`): at most eight, as `load_2d` checks
+#: (`check_lsc_block_2d_restrictions` in DPC++'s `esimd/memory.hpp`).
+BLOCK2D_COLS = (1, 2, 4, 8)
+
+#: The surface a 2D block is read from, as `cl_intel_subgroup_2d_block_io`
+#: states its restrictions (Khronos registry): the base cache-line aligned,
+#: the width from 64 bytes to 2^24 and a whole number of elements, the
+#: height from 1 to 2^24 rows, the pitch at least the width and a multiple
+#: of 16 bytes -- held to 2^24 here as well, which the extension leaves
+#: unstated.  Undefined otherwise: nothing checks them on the device, so a
+#: read has to here.
+SURFACE_BASE_ALIGN = 64
+SURFACE_MIN_WIDTH = 64
+SURFACE_PITCH_ALIGN = 16
+SURFACE_MAX = 1 << 24
+
+
+def block2d_refusal(elem: Datatype, rows: int, cols: int, *,
+                    transpose: bool = False, vnni: bool = False,
+                    store: bool = False, lanes: int = BLOCK2D_LANES,
+                    width: Optional[int] = None, height: Optional[int] = None,
+                    pitch: Optional[int] = None, align: Optional[int] = None,
+                    table: bool = False) -> Optional[str]:
+    """Why a 2D block of `rows` x `cols` elements of `elem` cannot be one
+    message here, or None where it can.
+
+    `width` and `pitch` are the surface's in bytes, `height` in rows,
+    `align` what the base is known to be aligned to; `table` says that the
+    rows are elements reached through a table, of pointers or of indices,
+    rather than at one stride.  The limits, each its own answer:
+
+    * elements through a table share no pitch: reading them as one surface
+      would need a check of the table at run time and a fallback where the
+      elements are not equally strided, which nothing writes yet;
+    * there is no transposed 2D block store, and no 2D store is built;
+    * VNNI packs 8- and 16-bit data, and these are 32- or 64-bit;
+    * a 64-bit block transposes at most 8 rows, half the 16 lanes -- IGC
+      stops at "unsupported block configuration: width=8, height=16" -- and
+      untransposed, sixteen of its columns are 128 bytes, past the 64 a row
+      of a block reads;
+    * a lane reads one column of 16, 1 to 32 rows of it, or transposed one
+      row of 16, 1 to 8 columns of it (`BLOCK2D_ROWS`, `BLOCK2D_COLS`);
+    * the surface rules (`SURFACE_*`).
+    """
+    if store:
+        if transpose:
+            return 'the hardware has no transposed 2D block store'
+        return 'no 2D block store is built: nothing writes one yet'
+    if table:
+        return ('elements reached through a table, of pointers or of '
+                'indices, share no pitch: read as one surface they would '
+                'need a check of the table at run time and a fallback where '
+                'they are not equally strided')
+    size = elem.size()
+    if vnni:
+        return (f'the VNNI transform packs 8- and 16-bit data, not '
+                f'{8 * size}-bit')
+    if size not in (4, 8):
+        return f'a 2D block here reads 32- or 64-bit data, not {8 * size}-bit'
+    if lanes != BLOCK2D_LANES:
+        return (f'a 2D block is read by a full sub-group of '
+                f'{BLOCK2D_LANES}, not by {lanes} lanes')
+    if size == 8:
+        if transpose:
+            return (f'a 64-bit block transposes at most 8 rows, half of the '
+                    f'{BLOCK2D_LANES} lanes, not {rows}')
+        return (f'{BLOCK2D_LANES} columns of 64 bits are '
+                f'{8 * BLOCK2D_LANES} bytes, and a row of a 2D block reads '
+                f'at most 64')
+    if not transpose and (cols != BLOCK2D_LANES or rows not in BLOCK2D_ROWS):
+        return (f'untransposed, a lane reads one column of '
+                f'{BLOCK2D_LANES} and {BLOCK2D_ROWS} rows of it, not '
+                f'{rows} x {cols}')
+    if transpose and (rows != BLOCK2D_LANES or cols not in BLOCK2D_COLS):
+        return (f'transposed, a lane reads one row of {BLOCK2D_LANES} and '
+                f'{BLOCK2D_COLS} columns of it, not {rows} x {cols}')
+    if align is None or align % SURFACE_BASE_ALIGN:
+        return (f'the surface base has to be {SURFACE_BASE_ALIGN}-byte '
+                f'aligned, and is known to be {align}')
+    if width is None or not SURFACE_MIN_WIDTH <= width <= SURFACE_MAX:
+        return (f'a surface {width} bytes wide: from {SURFACE_MIN_WIDTH} '
+                f'to 2^24')
+    if width % size:
+        return (f'a surface {width} bytes wide is no whole number of '
+                f'{size}-byte elements')
+    if height is None or not 0 < height <= SURFACE_MAX:
+        return f'a surface {height} rows high: from 1 to 2^24'
+    if (pitch is None or pitch < width or pitch % SURFACE_PITCH_ALIGN
+            or pitch > SURFACE_MAX):
+        return (f'a pitch of {pitch} bytes: at least the width {width}, a '
+                f'multiple of {SURFACE_PITCH_ALIGN}, at most 2^24')
+    return None
+
+
+def load_block2d(builder, base: Any, x: Any, y: Any, *, rows: int,
+                 cols: int, width: int, height: int, pitch: int,
+                 transpose: bool = False, vnni: bool = False,
+                 align: Optional[int] = None, elements: bool = False,
+                 hint: str = 'blk') -> Value:
+    """A 2D block of `rows` x `cols` elements read from the surface at
+    `base` -- `width` bytes wide, `height` rows high, rows `pitch` bytes
+    apart, in global memory -- at column `x` and row `y` (in elements and
+    rows), into `builder`'s body.
+
+    What it defines is the lanes' share: a value over the 16 lanes of the
+    sub-group, lane `l` holding column `x + l`, its `rows` elements in order
+    -- or, transposed, row `y + l` and its `cols` elements.  So it is one
+    value under both lowerings: a `simd` of 16 times that many elements
+    under the explicit vector, the slot-major order a lane axis has, which
+    is the order `load_2d` returns the block in; a vector of that many under
+    SPMD, which is what the sub-group's block read hands each work-item.
+    What a block reads past the surface's edge the extension leaves
+    unstated -- the CPU models read zero -- and nothing here relies on it.
+
+    One message reads for the whole sub-group, so the base, the surface and
+    the coordinates are the sub-group's, the same in every lane.  `align` is
+    what the caller knows of the base's alignment in bytes.  `elements`
+    says that the surface's rows are elements of the batch, `pitch` apart --
+    the layout that stacks elements on the lanes, read transposed: then an
+    operand that reaches its elements through a table, of pointers or of
+    indices, has no pitch to give (`block2d_refusal`).  Refused where
+    `block2d_refusal` says why, with that answer.  Built behind the passes,
+    as the windows and runs are: none of them reads a block's arguments.
+    """
+    if isinstance(base, Value) and isinstance(base.type, BufferType):
+        elem, space = base.type.elem, base.type.space
+    else:
+        elem = getattr(base, 'datatype', None) or builder._fptype
+        space = space_of(base)
+    if space is not MemSpace.GLOBAL:
+        raise IRError(f'a 2D block read of {base}: it reads global memory, '
+                      f'not {space.name.lower()}')
+    kind = getattr(getattr(getattr(base, 'obj', None), 'addressing', None),
+                   'kind', None)
+    table = elements and kind is not None and kind.follows_pointer()
+    why = block2d_refusal(elem, rows, cols, transpose=transpose, vnni=vnni,
+                          width=width, height=height, pitch=pitch,
+                          align=align, table=table)
+    if why is not None:
+        raise IRError(f'a 2D block read of {rows} x {cols}: {why}')
+    count = cols if transpose else rows
+    v = builder.value(ScalarType(elem, count) if count > 1
+                      else ScalarType(elem), hint=hint,
+                      uniform=Uniformity.LANE,
+                      layout=RegisterLayout((LaneAxis(BLOCK2D_LANES),)))
+    builder.emit(Stmt(
+        op=Op.LOAD, target=(v,), args=(base, x, y), pure=False,
+        movable=True, effect=Effect.READ,
+        accesses=(Access(Effect.READ, MemSpace.GLOBAL,
+                         builder.alias_root(base)),),
+        attrs=(('engine', 'block'), ('shape', (rows, cols)),
+               ('pitch', pitch), ('surface', (width, height)),
+               ('transpose', bool(transpose)), ('vnni', bool(vnni)),
+               ('width', count * elem.size()))))
+    return v
+
+
+def is_block2d(s: Stmt) -> bool:
+    """A 2D block read (`load_block2d`): a block read over a surface, told
+    from a run -- whose shape is two-dimensional as well -- by its pitch."""
+    return is_block(s) and s.attr('pitch') is not None
+
+
+def block2d_geometry(s: Stmt) -> Tuple[int, int, int]:
+    """`(width, height, count)` of a 2D block read: the block's extent in
+    the surface's own terms -- `load_2d`'s block width in elements and its
+    height in rows, the read transposing the rows of 16 -- and the elements
+    a lane gets."""
+    rows, cols = s.attr('shape')
+    return cols, rows, (cols if s.attr('transpose') else rows)
+
+
+__all__ = ['BLOCK2D_COLS', 'BLOCK2D_LANES', 'BLOCK2D_ROWS', 'BLOCK2D_SPMD_MAX',
+           'RUN_BYTES', 'Run', 'SPMD_RUN_MAX', 'SURFACE_BASE_ALIGN',
+           'SURFACE_MAX', 'SURFACE_MIN_WIDTH', 'SURFACE_PITCH_ALIGN',
+           'VECTOR_ELEMS', 'WINDOW_MAX', 'Window', 'block2d_geometry',
+           'block2d_refusal', 'is_block2d', 'load_block2d', 'plan_spmd_runs',
            'allocations', 'block_reads', 'buffer_name', 'const_flat',
            'is_block', 'is_buffer', 'is_comment', 'is_part', 'messages',
            'plan_runs', 'plan_windows', 'space_of', 'vector_width']
