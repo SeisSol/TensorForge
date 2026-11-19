@@ -55,6 +55,24 @@ class LoopMode(Enum):
     LAUNCHCTRL = 'launchctrl'  # hardware work queue (Blackwell cluster launch)
 
 
+class Trip(Enum):
+    """What one trip of the loop hands the block."""
+
+    #: An element a multiplication: each row of the block its own, the rows
+    #: of a group driven together where the thread-block policy asks for it
+    #: (`BatchLoop._grouped`).
+    ELEMENT = 'element'
+    #: A group of E consecutive elements for the whole block, the
+    #: multi-element layout's (`generators.element_group`): one
+    #: multiplication an element, all of them on every trip together, and
+    #: the block's barriers legal in the body.  The group traversal is the
+    #: body's need here and not the policy's choice, so a loop that cannot
+    #: take it -- a work queue handing out elements, a stack of them, a
+    #: block of more than the group -- is an error rather than a per-row
+    #: loop.
+    ELEMENT_GROUP = 'element_group'
+
+
 class BatchLoop(AbstractInstruction):
     def __init__(self,
                  context: Context,
@@ -70,7 +88,8 @@ class BatchLoop(AbstractInstruction):
                  narrow_group: bool = False,
                  stack: int = 1,
                  wave_rows: int = 0,
-                 count_index: Optional[int] = None):
+                 count_index: Optional[int] = None,
+                 trip: Trip = Trip.ELEMENT):
         super().__init__(context)
         self._section_index = section_index
         #: Whose element count and flags this loop runs over: its own
@@ -131,6 +150,19 @@ class BatchLoop(AbstractInstruction):
         # the rows are the lanes' own.  The group is the wave then: one
         # multiplication per row of it.
         self._wave_rows = int(wave_rows)
+        #: What a trip hands the block (`Trip`).
+        self._trip = trip
+        if trip is Trip.ELEMENT_GROUP:
+            why = ('a work queue hands out elements, not groups'
+                   if mode is LoopMode.LAUNCHCTRL else
+                   f'a trip of {self._stack} stacked elements is no group'
+                   if self._stack != 1 else
+                   'a group of one element is no group'
+                   if self._group_size < 2 else
+                   'the group is the block, not part of it'
+                   if self._narrow_group else None)
+            if why is not None:
+                raise InternalError(f'an element-group loop: {why}')
         self._is_ready = True
 
     # -- structure ------------------------------------------------------- #
@@ -151,7 +183,15 @@ class BatchLoop(AbstractInstruction):
         self._region.append(instr)
 
     def set_mults_per_block(self, mults: int) -> None:
+        if self._trip is Trip.ELEMENT_GROUP and mults != self._group_size:
+            raise InternalError(
+                f'an element group of {self._group_size} in a block of '
+                f'{mults} multiplications: the group is the block')
         self._mults_per_block = int(mults)
+
+    @property
+    def trip(self) -> Trip:
+        return self._trip
 
     def _grouped(self) -> bool:
         """Whether the traversal is driven by a group of rows rather than one.
@@ -171,6 +211,9 @@ class BatchLoop(AbstractInstruction):
         may hold several groups -- and the loop is then uniform per group,
         which `uniform_scope` says, rather than per block.
         """
+        if self._trip is Trip.ELEMENT_GROUP:
+            # Checked where the loop was made and its block sized.
+            return True
         return (self._group_size > 1
                 and (self._narrow_group
                      or self._mults_per_block == self._group_size)
@@ -1378,7 +1421,9 @@ class BatchLoop(AbstractInstruction):
             lexic.rows_per_mult = saved
 
     def __str__(self) -> str:
-        return (f'batchloop.{self._mode.value} '
+        trip = (f'{self._trip.value}({self._group_size}) '
+                if self._trip is Trip.ELEMENT_GROUP else '')
+        return (f'batchloop.{self._mode.value} {trip}'
                 f'[{self._num_elements()}] '
                 f'uniform={self.uniform_scope().name.lower()} '
                 f'({len(self._region)} instructions)')

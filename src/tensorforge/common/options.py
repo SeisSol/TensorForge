@@ -148,6 +148,18 @@ def parse_dpp_waits(text: str) -> str:
 DPP_WAITS = ('needed', 'always')
 
 
+#: What `Options.multi_element` takes.
+MULTI_ELEMENT = ('off', 'auto', 'force')
+
+
+def parse_multi_element(text: str) -> str:
+  """`off`, `auto` or `force` (`Options.multi_element`)."""
+  value = str(text).strip().lower()
+  if value not in MULTI_ELEMENT:
+    raise ValueError(f'expected one of {MULTI_ELEMENT}, got {text!r}')
+  return value
+
+
 #: What `Options.carry_element_index` takes.
 CARRY_ENTRY = ('auto', 'always', 'never')
 
@@ -2322,6 +2334,20 @@ declare('tensor_cores',
             'that one build can ask for the path and the next one not, as a '
             'search over configurations has to -- flipping the module '
             'constant changes it for every build in the process.')
+
+declare('multi_element',
+        default='off',
+        env='TF_MULTI_ELEMENT',
+        parse=parse_multi_element,
+        doc='Lay a kernel out over groups of elements rather than one element '
+            'a multiplication where its operations allow it (the multi-element '
+            'layout, `generators.element_group`): a block of E warps, one a '
+            'multiplication, takes E consecutive elements together, stages '
+            'their operands side by side in shared memory and the '
+            'batch-constant operator once for the block.  `off` never; '
+            '`force` wherever the fill rule finds a plan; `auto` where it '
+            'finds one measured to pay -- none yet, so `auto` is `off` for '
+            'now.')
 
 declare('mma_prefetch',
         default=None,
