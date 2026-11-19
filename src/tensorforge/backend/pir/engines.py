@@ -1219,8 +1219,9 @@ def _lower_wait_counter_hip(s: Stmt, env: Spelling) -> Lowered:
 #: earlier read of the same address: compiled for gfx1250, a read of an
 #: LDS address behind a tensor load into it and its wait came out as the
 #: value read before the load (2026-11-18).  The load's own fence, ahead of
-#: it, is `tensorforge::tensorLoad`'s (`hip.h`).
-TENSOR_FENCE = '__atomic_signal_fence(__ATOMIC_SEQ_CST);'
+#: it, is `tensorforge::tensorLoad`'s (`hip.h`).  The same fence as the
+#: asynchronous copies' (`COMPILER_FENCE`), for the same reason.
+TENSOR_FENCE = COMPILER_FENCE
 
 
 def _lower_wait_counter_other(s: Stmt, env: Spelling) -> Lowered:
