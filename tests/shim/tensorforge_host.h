@@ -115,6 +115,9 @@ __tfshim_v4f __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(__tfshim_v4s,
 // (`Lexic.handoff_fence`): an ordering, a memory scope by name.
 void __builtin_amdgcn_fence(int, const char *);
 
+// The wait for gfx1250's tensor copies (`pir.engines`, `tensorcnt`).
+void __builtin_amdgcn_s_wait_tensorcnt(int);
+
 // The device library's integer `min` and `max`, which index arithmetic is
 // spelled with on CUDA and HIP (`Operation.MIN`, `pir.emit._LEXIC_BINOP`).
 inline int min(int a, int b) { return a < b ? a : b; }
@@ -309,6 +312,15 @@ BufferValue<T, N> bufferLoad(BufferResource resource, std::int32_t index,
 template <typename T, std::size_t N = 1>
 void bufferStore(BufferResource resource, std::int32_t index,
                  BufferValue<T, N> value, bool keep = true);
+
+// The tensor copies (`pir.tensors`): a tile's descriptor, opaque here, made
+// over pointers of any space, and the copy through one.
+struct TensorDescriptor {};
+template <typename T, typename LdsPointer, typename GlobalPointer>
+TensorDescriptor tensorDescriptor(LdsPointer lds, GlobalPointer global,
+                                  std::uint32_t rows, std::uint32_t cols,
+                                  std::uint64_t pitch);
+template <typename Descriptor> void tensorLoad(const Descriptor &d);
 
 // cuda.h
 //

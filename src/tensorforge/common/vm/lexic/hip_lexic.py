@@ -392,6 +392,27 @@ class HipLexic(CudaLexic):
     return (f'tensorforge::bufferStore<{_buffer_args(datatype, length)}>('
             f'{resource}, {index}, {value}{_kept(keep)});')
 
+  # The tensor data mover's helpers (`tensorforge::tensorDescriptor`,
+  # `tensorLoad`): the element is a template argument, whose size the
+  # descriptor states; the copy's leader predicate is the emitter's.
+
+  def tensor_descriptor_type(self):
+    if self._underlying_hardware != 'amd':
+      return super().tensor_descriptor_type()
+    return 'tensorforge::TensorDescriptor'
+
+  def tensor_descriptor(self, dst, src, rows, cols, pitch, *, datatype):
+    if self._underlying_hardware != 'amd':
+      return super().tensor_descriptor(dst, src, rows, cols, pitch,
+                                       datatype=datatype)
+    return (f'tensorforge::tensorDescriptor<{datatype.ctype()}>({dst}, '
+            f'{src}, {rows}, {cols}, {pitch})')
+
+  def tensor_load(self, descriptor):
+    if self._underlying_hardware != 'amd':
+      return super().tensor_load(descriptor)
+    return f'tensorforge::tensorLoad({descriptor});'
+
   def atomic_store(self, ctx, access, variable, op, datatype, length=1):
     """The intrinsic where this target has one, `__hip_atomic_fetch_add` else.
 

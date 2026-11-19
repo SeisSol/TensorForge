@@ -511,7 +511,17 @@ def _pinned(s: Stmt) -> bool:
     for: one instruction the compiler issues as written (`engines.
     one_to_one`), issued by every lane's wave -- a predicated one is
     branched around by a wave none of whose lanes take it, and a count that
-    includes it is one too many there."""
+    includes it is one too many there.
+
+    Except under the predicate that picks the one wave issuing it for all
+    the lanes it is for (`leader`, gfx1250's tensor copy): the counter is
+    that wave's, which issues every such copy of its lanes, and every other
+    wave has none in flight -- the count is that wave's either way.  So long
+    as the body's tensor copies are all for the same lanes, which the
+    emitter holds them to (`Emitter._tdm_refusal`): a wave that issues
+    some of them and not others counts fewer."""
+    if s.attr('leader') is True and s.attr('engine') == 'tdm':
+        return True
     return s.predicate is None and engines.one_to_one(s.attr('engine'))
 
 

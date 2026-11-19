@@ -465,6 +465,23 @@ class Lexic(ABC):
                    keep=None):
     return None
 
+  # --- tensor copies --------------------------------------------------------
+  # gfx1250's tensor data mover (`pir.tensors`): a descriptor's type, the
+  # descriptor of a tile of `rows` rows of `cols` elements of `datatype`, its
+  # rows `pitch` elements apart in global memory, from `src` there to `dst`
+  # in the LDS (both addresses), and the copy through one.  None where the
+  # target has no such copy, which is where `Target.tensor_copies` keeps the
+  # producer from making one.
+
+  def tensor_descriptor_type(self):
+    return None
+
+  def tensor_descriptor(self, dst, src, rows, cols, pitch, *, datatype):
+    return None
+
+  def tensor_load(self, descriptor):
+    return None
+
   # --- atomic accumulation --------------------------------------------------
   # Declared here so that every backend answers through one interface, the one
   # the single call site uses.  Declared per backend, the interfaces drift

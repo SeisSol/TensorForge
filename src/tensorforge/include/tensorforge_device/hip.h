@@ -1426,6 +1426,159 @@ bufferStore(BufferResource resource, std::int32_t index,
 
 #endif // __HIP_PLATFORM_AMD__
 
+// Tensor copies (`pir.tensors`, `Options.amd_tensor_copies`).
+//
+// gfx1250's tensor data mover copies a tile of global memory into the LDS in
+// one instruction a wave, `tensor_load_to_lds`, which reads a descriptor from
+// scalar registers: group 0 (four words) the addresses, group 1 (eight words)
+// the element size and the tile's extents; groups 2 and 3 hold a third to
+// fifth dimension and are zero for a tile of at most two.  The copy counts in
+// the wave's `tensorcnt`, which nothing else counts and which neither the
+// compiler nor a block barrier waits for: TensorForge writes each wait
+// (`__builtin_amdgcn_s_wait_tensorcnt`), and a barrier behind it shows the
+// tile to the other waves.
+//
+// The layout is the one three implementations agree on, written here from
+// their descriptions:
+//  - LLVM's AMDGPU dialect lowering, `AMDGPUMakeDmaBaseLowering` and
+//    `AMDGPULowerDescriptor` in mlir/lib/Conversion/AMDGPUToROCDL/
+//    AMDGPUToROCDL.cpp (llvm-project 965d54395147), with the words its test
+//    expects of a 2D tile in mlir/test/Conversion/AMDGPUToROCDL/gfx1250.mlir
+//    (llvm-project 155462f440ff);
+//  - Triton's AMD backend, `createTDMDescriptor` and `fillTDMDescriptor` in
+//    third_party/amd/lib/TritonAMDGPUToLLVM/TDMUtility.cpp (triton
+//    fbd70d9e44ca);
+//  - composable_kernel, `TDM_GROUP0` and `TDM_GROUP1` in include/ck_tile/
+//    core/arch/amd_tdm_descriptor.hpp (rocm-libraries 550b283cbd21).
+// Extents, the pitch and the tile count elements of the data size; the
+// addresses count bytes.  No gfx1250 has run it.
+//
+//   group 0  word 0, bits 1:0    1: a descriptor that copies (0 copies none)
+//            word 1              the LDS byte address
+//            word 2              the global byte address, bits 31:0
+//            word 3, bits 24:0   the global byte address, bits 56:32
+//                    bits 31:30  2, the descriptor's type
+//   group 1  word 0, bits 17:16  the data size, log2 of its bytes -- the
+//                                workgroup mask (15:0), the atomic barrier,
+//                                iteration, padding and early timeout
+//                                (18-21) and the padding's fields all zero
+//            word 1, bits 31:16  the extent of a row, bits 15:0
+//            word 2, bits 15:0   the extent of a row, bits 31:16
+//                    bits 31:16  the extent of the rows, bits 15:0
+//            word 3, bits 15:0   the extent of the rows, bits 31:16
+//                    bits 31:16  the tile's row
+//            word 4, bits 15:0   the tile's rows; bits 31:16, a third, zero
+//            word 5              the pitch of the rows, bits 31:0
+//            word 6, bits 15:0   the pitch, bits 47:32; bits 31:16 zero
+//            word 7              zero
+//
+// The extents bound what the copy reads; they are the tile's own here, so
+// that nothing of it lies past them.
+
+/// The words of the descriptor of a tile of `rows` rows of `cols` elements
+/// of `1 << sizeLog2` bytes, from the global byte address `global`, its rows
+/// `pitch` elements apart, to the LDS byte address `lds`, row after row.
+struct TensorDescriptorWords {
+  std::uint32_t group0[4];
+  std::uint32_t group1[8];
+};
+
+__host__ __device__ constexpr TensorDescriptorWords
+tensorDescriptorWords(std::uint32_t lds, std::uint64_t global,
+                      std::uint32_t rows, std::uint32_t cols,
+                      std::uint64_t pitch, std::uint32_t sizeLog2) {
+  return TensorDescriptorWords{
+      {1u, lds, static_cast<std::uint32_t>(global),
+       (static_cast<std::uint32_t>(global >> 32) & 0x1FFFFFFu) | (2u << 30)},
+      {(sizeLog2 & 3u) << 16, (cols & 0xFFFFu) << 16,
+       (cols >> 16) | ((rows & 0xFFFFu) << 16),
+       (rows >> 16) | ((cols & 0xFFFFu) << 16), rows & 0xFFFFu,
+       static_cast<std::uint32_t>(pitch),
+       static_cast<std::uint32_t>(pitch >> 32) & 0xFFFFu, 0u}};
+}
+
+#if defined(__HIP_PLATFORM_AMD__)
+
+using TensorGroup0 = std::uint32_t __attribute__((ext_vector_type(4)));
+using TensorGroup1 = std::uint32_t __attribute__((ext_vector_type(8)));
+
+/// A tile's descriptor, as the instruction reads it: the wave's.
+struct TensorDescriptor {
+  TensorGroup0 group0;
+  TensorGroup1 group1;
+};
+
+/// The descriptor of a tile of `rows` rows of `cols` elements of `T`, from
+/// `global` -- its rows `pitch` elements apart -- to `lds`, row after row.
+/// Templates over the pointers, which are in any of the spaces a kernel
+/// names them in.  Its words are the wave's, and read from the first lane
+/// they are in scalar registers whatever the compiler makes of them -- as
+/// composable_kernel reads them.
+template <typename T, typename LdsPointer, typename GlobalPointer>
+__device__ __forceinline__ TensorDescriptor
+tensorDescriptor(LdsPointer lds, GlobalPointer global, std::uint32_t rows,
+                 std::uint32_t cols, std::uint64_t pitch) {
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
+                    sizeof(T) == 8,
+                "a tensor copy moves elements of 1, 2, 4 or 8 bytes");
+  constexpr std::uint32_t sizeLog2 = sizeof(T) == 8   ? 3u
+                                     : sizeof(T) == 4 ? 2u
+                                     : sizeof(T) == 2 ? 1u
+                                                      : 0u;
+  // The LDS byte address is the pointer's offset in the LDS: the generic
+  // pointer in the LDS's address space.
+  const std::uint32_t local =
+      static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(
+          (__attribute__((address_space(3))) const void *)(lds)));
+  const std::uint64_t remote =
+      reinterpret_cast<std::uintptr_t>((const void *)(global));
+  const TensorDescriptorWords words =
+      tensorDescriptorWords(local, remote, rows, cols, pitch, sizeLog2);
+  TensorDescriptor d;
+  for (int i = 0; i < 4; ++i) {
+    d.group0[i] = __builtin_amdgcn_readfirstlane(words.group0[i]);
+  }
+  for (int i = 0; i < 8; ++i) {
+    d.group1[i] = __builtin_amdgcn_readfirstlane(words.group1[i]);
+  }
+  return d;
+}
+
+/// The copy through `d`, by the wave that reaches it: the generator puts it
+/// under the predicate of the first wave of the lanes it is for.  A fence of
+/// the compiler alone ahead of it, which emits nothing: clang 22 declares
+/// the copy to touch no memory a program names, so a read of the window
+/// ahead of it would otherwise be free to move behind it -- its wait has the
+/// other fence (`pir.engines.TENSOR_FENCE`).  A template, so that a device
+/// compile for an architecture without the copy stops where a kernel asks
+/// for one.
+template <typename Descriptor>
+__device__ __forceinline__ void tensorLoad(const Descriptor &d) {
+  __atomic_signal_fence(__ATOMIC_SEQ_CST);
+#if __has_builtin(__builtin_amdgcn_tensor_load_to_lds_d2)
+  // clang 22: the two groups of a tile of at most two dimensions.
+  using Words4 = int __attribute__((ext_vector_type(4)));
+  using Words8 = int __attribute__((ext_vector_type(8)));
+  __builtin_amdgcn_tensor_load_to_lds_d2(__builtin_bit_cast(Words4, d.group0),
+                                         __builtin_bit_cast(Words8, d.group1),
+                                         0);
+#elif __has_builtin(__builtin_amdgcn_tensor_load_to_lds)
+  // clang 23: one form for every rank, five groups -- the first of unsigned
+  // words, the others of signed ones -- the last three zero for this tile.
+  using Words4 = int __attribute__((ext_vector_type(4)));
+  using Words8 = int __attribute__((ext_vector_type(8)));
+  __builtin_amdgcn_tensor_load_to_lds(d.group0,
+                                      __builtin_bit_cast(Words8, d.group1),
+                                      Words4{}, Words4{}, Words8{}, 0);
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static_assert(sizeof(Descriptor) == 0,
+                "no tensor data mover on this architecture "
+                "(Target.tensor_copies)");
+#endif
+}
+
+#endif // __HIP_PLATFORM_AMD__
+
 __device__ __forceinline__ std::tuple<short, short, short>
 splitFloatBF16(float input) {
   const auto i1 = static_cast<__bf16>(input);

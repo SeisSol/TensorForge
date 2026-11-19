@@ -75,6 +75,23 @@ def _copied(user):
   return None
 
 
+def _tensor_tile(length, read_shape):
+  """The tile one run of `length` elements is to the tensor data mover
+  (`GlbToShrLoader._write_tensor`): rows of the operand's leading extent
+  where that divides the run, one row of all of it otherwise -- each extent
+  within the sixteen bits the descriptor holds it in -- and None where
+  neither fits.  Its rows lie as far apart as they are long, so any such
+  tile is the run."""
+  from tensorforge.backend.pir.engines import TDM_TILE_LIMIT
+  lead = read_shape[0] if read_shape else length
+  if (lead and length % lead == 0 and lead <= TDM_TILE_LIMIT
+      and length // lead <= TDM_TILE_LIMIT):
+    return (length // lead, lead)
+  if 0 < length <= TDM_TILE_LIMIT:
+    return (1, length)
+  return None
+
+
 # to find a number coprime to the number of shared memory banks
 def _find_next_coprime(number, conumber):
   for i in range(number, number + conumber):
@@ -572,7 +589,9 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
           self._write_datatransfer(writer, 0, 0, index[:-1] + [e],
                                    self._loadsize // k, allow_nontemporal,
                                    linscale)
-      elif not (structured_issue and self._write_bulk(writer, index, linscale)):
+      elif not (structured_issue
+                and (self._write_bulk(writer, index, linscale)
+                     or self._write_tensor(writer, index, linscale))):
         self._write_datatransfer(writer, 0, 0, index, self._loadsize,
                                  allow_nontemporal, linscale)
 
@@ -628,6 +647,62 @@ class GlbToShrLoader(AbstractShrMemWrite, LoadInstruction):
         self._destination_buffer(writer), self._src.pir_buffer(writer),
         barrier=barrier, dst_index=(f'0 + {dest_access_index}',),
         src_index=(f'0 + {src_access_index}',), elems=self._loadsize))
+    return True
+
+  def _write_tensor(self, writer, index, linscale) -> bool:
+    """The whole window as one tile of gfx1250's tensor data mover
+    (`Options.amd_tensor_copies`), where it can be one; False where the
+    transfer keeps its copies a lane.
+
+    Where it can: the target has the tensor data mover
+    (`Target.tensor_copies`), and the transfer is in a section's body, whose
+    descriptors are made behind every pass that moves a copy (`pir.tensors`).
+    The window is one run, as the copy moves it: no reordering, no rows of
+    its own, no padded rows, no permutation, one binding for its source, of
+    elements whose size the descriptor spells.  It is an operator the block
+    preloads (`_blockwide`), for the block's lanes, a whole number of waves:
+    the block's first wave issues the copy, and the descriptor is that
+    wave's (`IRBuilder.copy_tensor`).  A multiplication's own window keeps
+    its copies a lane: the tensor copies of a body are all for the same
+    lanes, since a wave counts only the ones it issues
+    (`Emitter._tdm_refusal`).  The run is a tile of rows of the operand's
+    leading extent where that divides it, and one row otherwise
+    (`_tensor_tile`).
+    """
+    if not getattr(self._context.get_user_options(), 'amd_tensor_copies',
+                   False):
+      return False
+    target = self._context.target
+    if not target.tensor_copies() or self._explicit_simd():
+      return False
+    if (self._src.stack() > 1 or self._loop_indices or self._needs_reorder
+        or linscale is not None):
+      return False
+    if not self._shared_body or not hasattr(writer, 'copy_tensor'):
+      return False
+    if self._swizzle_cap(writer) != 16:
+      return False
+    from tensorforge.backend.pir.engines import TDM_ELEMENT_BYTES
+    if self._dest.get_fptype().size() not in TDM_ELEMENT_BYTES:
+      return False
+    if not self._blockwide:
+      return False
+    threads = self._num_threads
+    if threads % target.hw.vec_unit_length:
+      return False
+    lane = self._linear_index_value(writer)
+    tile = _tensor_tile(self._loadsize, self._read_shape)
+    if lane is None or tile is None:
+      return False
+    # The claim a copy of the same bytes in hops leaves on the image.
+    self._dest._record_linear_layout(0, 1, self._lane_span(), writer)
+    dest_access_index = self._dest.access_address(self._context, index, writer)
+    src_access_index = self._src.access_address(self._context, index, writer)
+    self._tokens.append(writer.copy_tensor(
+        self._destination_buffer(writer), self._src.pir_buffer(writer),
+        shape=tile, pitch=tile[1], threads=threads, team='block', lane=lane,
+        dst_index=(f'0 + {dest_access_index}',),
+        src_index=(f'0 + {src_access_index}',)))
     return True
 
   def _bypass_covering(self, writer, src_offset, length, linscale=None) -> int:

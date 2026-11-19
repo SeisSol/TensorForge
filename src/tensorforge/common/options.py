@@ -575,6 +575,23 @@ declare('amd_async_copies',
             'copy a trip ahead did not beat an unrolled synchronous one, and '
             'no gfx1250 has run one.')
 
+declare('amd_tensor_copies',
+        default=False,
+        parse=parse_bool,
+        doc='On gfx1250 and gfx1251, with `amd_async_copies`, stage an '
+            'operator the block preloads into the LDS as one tile of the '
+            'tensor data mover (`tensor_load_to_lds`) rather than as a copy a '
+            'lane: the block\'s first wave issues the whole run through a '
+            'descriptor and waits for it on `tensorcnt`, and the barrier '
+            'behind the wait shows it to the other waves.  Only where the '
+            'block\'s lanes are a whole number of waves and the window is one '
+            'run in order -- no rows of its own, no padded rows, no '
+            'permutation; any other window, and a multiplication\'s own, keeps '
+            'its copies a lane.  The descriptor\'s '
+            'layout is the one LLVM\'s AMDGPU lowering, Triton and '
+            'composable_kernel agree on (`hip.h`, `tensorDescriptorWords`).  '
+            'Compiled only: no gfx1250 has run one.')
+
 declare('enable_prefetch',
         default=False,
         parse=parse_bool,

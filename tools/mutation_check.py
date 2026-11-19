@@ -97,6 +97,7 @@ MULTILINEAR = Path('src/tensorforge/backend/instructions/compute/multilinear.py'
 CROSSLANE = Path('src/tensorforge/backend/instructions/compute/crosslane.py')
 TILING = PKG / 'tiling.py'
 BUFFERS = Path('src/tensorforge/backend/pir/buffers.py')
+TENSORS = Path('src/tensorforge/backend/pir/tensors.py')
 
 
 def _run_tests(target):
@@ -3796,6 +3797,75 @@ GROUPS = {
         ('gfx11 resources without the raw range check',
          sub(HIP, '#elif defined(__GFX11__)\n  constexpr std::int32_t Flags = 0x31004000;\n',
              '#elif defined(__GFX11__)\n  constexpr std::int32_t Flags = 0x01004000;\n', 1)),
+    ]),
+    # gfx1250's tensor data mover: the engine and its counter, the copy by
+    # the first wave, its descriptor's words, its waits, and the
+    # interpreter's model of it.
+    'tdm': ('tests/test_tdm.py tests/test_pir_engines.py', [
+        ('the tiles counted on asynccnt',
+         sub(ENGINES, "                   waited_on='tensorcnt', one_to_one=True),\n",
+             "                   waited_on='asynccnt', one_to_one=True),\n", 1)),
+        ('a tile under its first wave left out of the count behind a wait',
+         sub(ASYNCMEM, "    if s.attr('leader') is True and s.attr('engine') == 'tdm':\n"
+                       '        return True\n',
+             "    if s.attr('leader') is True and s.attr('engine') == 'tdm':\n"
+             '        return False\n', 1)),
+        ('the copy issued by every wave',
+         sub(BUILD, '                      pure=False, movable=True, predicate=lead,\n',
+             '                      pure=False, movable=True, predicate=None,\n', 1)),
+        ('lanes of no whole number of waves taken',
+         sub(ENGINES, '    if threads % wave:\n'
+                      "        return f'{threads} lanes are no whole number",
+             '    if False:\n'
+             "        return f'{threads} lanes are no whole number", 1)),
+        ('a guard the lanes do not share taken',
+         sub(ENGINES, '    if level < team:\n', '    if False:\n', 1)),
+        ('a predicate of another wave taken for the first',
+         sub(ENGINES, '            and _lane_terms(d.args[0], defs) == 1 and d.args[1] == wave):\n',
+             '            and _lane_terms(d.args[0], defs) == 1):\n', 1)),
+        ('the tensor data mover on every AMD part',
+         sub(TARGET, '        return (self.backend == \'hip\' and self.hw.vendor == \'amd\'\n'
+                     '                and str(self.hw.model) in AMD_TENSOR_DATA_MOVER)\n',
+             '        return (self.backend == \'hip\' and self.hw.vendor == \'amd\')\n', 1)),
+        ('the tile without the option',
+         sub(LOAD, "    if not getattr(self._context.get_user_options(), 'amd_tensor_copies',\n"
+                   '                   False):\n      return False\n',
+             '', 1)),
+        ('no descriptor ahead of the copy',
+         sub(TENSORS, '                out.append(made)\n', '', 1)),
+        ('the waits dropped where the copies a lane are loads',
+         sub(EMIT, '        if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None\n'
+                   "                and s.attr('engine') != 'tdm'):\n",
+             '        if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None):\n', 1)),
+        ('a drain that leaves the tiles in flight',
+         sub(EMIT, "            if cls == 'all' and self._tensor_copies:\n",
+             '            if False:\n', 1)),
+        ('no fence behind the wait',
+         sub(ENGINES, "        if counter == 'tensorcnt':\n            lines += (TENSOR_FENCE,)\n",
+             '', 1)),
+        ('the tile\'s extents swapped in the descriptor',
+         sub(HIP, '       (rows >> 16) | ((cols & 0xFFFFu) << 16), rows & 0xFFFFu,\n',
+             '       (rows >> 16) | ((cols & 0xFFFFu) << 16), cols & 0xFFFFu,\n', 1)),
+        ('the descriptor of another type',
+         sub(HIP, '       (static_cast<std::uint32_t>(global >> 32) & 0x1FFFFFFu) | (2u << 30)},\n',
+             '       (static_cast<std::uint32_t>(global >> 32) & 0x1FFFFFFu) | (1u << 30)},\n', 1)),
+        ('the high bits of the pitch dropped',
+         sub(HIP, '       static_cast<std::uint32_t>(pitch >> 32) & 0xFFFFu, 0u}};\n',
+             '       0u, 0u}};\n', 1)),
+        ('the interpreter copying the tile for every lane',
+         sub(ORACLE, '            if first != self.lane:\n                return\n',
+             '', 1)),
+        ('the interpreter landing a tile as it is issued',
+         sub(ORACLE, "            tracker.dma = ('tensor', wave)\n",
+             '            tracker.dma = None\n', 1)),
+        ('the interpreter reading the rows a row apart',
+         sub(ORACLE, '        values = [tile.src[r * tile.pitch + c]\n',
+             '        values = [tile.src[r * tile.cols + c]\n', 1)),
+        ('the interpreter landing every tile at any wait',
+         sub(ORACLE, '        return int(cls._WAIT_TENSOR.match(stmt).group(1))\n',
+             '        return 0\n', 1)),
+        ('copies for the lanes of two teams taken',
+         sub(EMIT, '        if len(teams) > 1:\n', '        if False:\n', 1)),
     ]),
 }
 
