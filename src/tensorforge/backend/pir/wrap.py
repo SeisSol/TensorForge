@@ -81,6 +81,15 @@ the stretch ahead of it in its own iteration:
   with a whole iteration to arrive.  The word and not the condition: a
   comparison right behind the load is a use right behind it.
 
+Where an address reads the launch's index list, the element's entry of it
+rides the loop as well (`carry_element_index`, `_Rewrite._carry`).  The loop
+reads it once, at the top of the element (`BatchLoop._bind_entries`), and
+the copies for the next element read the next one's at the head -- which is
+the next iteration's own.  So that read comes in with the next iteration in
+place of the one at its top, the peel's for the first element starts the
+loop, and the element's addresses wait for their pointers alone, not for the
+entry ahead of them.
+
 *A second stage*, where `stages` asks for one, takes the tail out of the
 picture for a shared transfer whose copies the hardware carries out on its
 own.  At the tail the copy for ``k + 1`` has little ahead of its wait: what
@@ -175,6 +184,7 @@ from .ahead import Clone, ElementLoop, Refusal, behind_defs, counted
 from .asyncmem import strip_commits
 from .core import (BOOL, INDEX, Effect, MemSpace, Op, Region, Stmt, Value,
                    walk_stmts, retires)
+from .passes import substitute
 from .transfers import (Transfer, executed, memory_path, neutral, opaque,
                         same, transfers, writes)
 
@@ -423,18 +433,28 @@ def _drop_unread(body: Tuple[Stmt, ...],
     gone = set(names) - read
     if not gone:
         return body
+    return _without(body, gone)
 
-    def strip(stmts):
-        out = []
-        for s in stmts:
-            if id(s) in gone:
-                continue
-            if s.regions:
-                s = replace(s, regions=tuple(replace(r, body=strip(r.body))
-                                             for r in s.regions))
-            out.append(s)
-        return tuple(out)
-    return strip(body)
+
+def _without(body: Tuple[Stmt, ...], gone: set) -> Tuple[Stmt, ...]:
+    """`body` without the statements whose ids are in `gone`, wherever they
+    stand."""
+    out = []
+    for s in body:
+        if id(s) in gone:
+            continue
+        if s.regions:
+            s = replace(s, regions=tuple(replace(r, body=_without(r.body, gone))
+                                         for r in s.regions))
+        out.append(s)
+    return tuple(out)
+
+
+def _unseen(stmts: Sequence[Stmt], copy: Clone) -> List[Stmt]:
+    """`stmts` without those `copy` has copied already: what two bindings
+    read alike, copied once."""
+    return [x for x in stmts
+            if not (x.target and all(v.id in copy.mapping for v in x.target))]
 
 
 def _name(v: Value, alloc: Optional[Stmt]) -> str:
@@ -1039,10 +1059,21 @@ class _Rewrite:
         inits += staged.inits
         carried += staged.held
         results += [self._fresh(v) for v in staged.held]
+        # The element's entries of the index list the copies read
+        # (`BatchLoop._bind_entries`), each with its copy for the first
+        # element and for the next: what the loop may carry (`_carry`).
+        entries: List[Tuple[Stmt, Optional[Value], Optional[Value]]] = []
+        for p in self.plans:
+            for s in p.deps:
+                if s.attr('element_index') and all(s is not e
+                                                   for e, _, _ in entries):
+                    old = s.target[0]
+                    entries.append((s, peel_copy.mapping.get(old.id),
+                                    tail_copy.mapping.get(old.id)))
         loop = self._body(heads, tails_reg, tails_shared, tail_flag_stmts,
                           waits, carry, own, nxt, yields, carried, inits,
                           results, top, following, early_rest,
-                          early_guard, staged.fetched)
+                          early_guard, staged.fetched, entries)
         return before, loop, after
 
     def _staged(self, taken: set, tail_copy: Clone, before: List[Stmt],
@@ -1085,8 +1116,11 @@ class _Rewrite:
             owner = next(p for p in self.plans
                          if any(s is d for d in p.deps))
             reads = _closure(s, owner.deps)
-            starts = second_copy.stmts(reads, named=True)
-            fetch = ahead_copy.stmts(reads, named=True)
+            # What two of them read alike -- an element's entry of the index
+            # list (`BatchLoop._bind_entries`) -- is read once.
+            starts = second_copy.stmts(_unseen(reads, second_copy),
+                                       named=True)
+            fetch = ahead_copy.stmts(_unseen(reads, ahead_copy), named=True)
             before += starts
             heads += fetch
             old = s.target[0]
@@ -1140,10 +1174,82 @@ class _Rewrite:
             last -= sum(1 for i in placed if i < last)
             rest[last + 1:last + 1] = block
 
+    def _carry(self, body: List[Stmt], entries, inits: List[Value],
+               carried: List[Value], results: List[Value]):
+        """`(body, yields)`: `body` with the element's entries of the index
+        list the loop carries read from what it carries, and what it yields
+        for them; `inits`, `carried` and `results` take theirs.
+
+        The head reads the next element's entry for the copies of the
+        bindings there (`entries`, the copy for the next element), and that
+        element is the next iteration's own wherever there is a next
+        iteration: the successor the loop names is its induction one stride
+        on, held at the last element only where no iteration follows.  So
+        the loop carries that read into the next iteration in place of the
+        one at the top of the element, and the peel's read of the first
+        element's starts it -- the first element is the first iteration's
+        wherever the loop runs at all.  The element's addresses then wait
+        for their pointers, and not for the entry ahead of those.
+
+        Only in a batch loop whose elements are a stride apart -- the
+        `while` of a queried loop carries its element alone, as its copies'
+        tokens find (`_Loop._plan`) -- and not in a loop whose trips are
+        counted, which has no element.  A loop over groups of rows is one:
+        the copy for the next group computes each row's element from the
+        group's index as the body does (`element`), so it reads the entry
+        the next trip reads.  And only where the body keeps something that
+        reads the entry: where every address that did was for a transfer
+        that moved, what reads it goes (`_drop_unread`), and a carried entry
+        would hold a register for nothing.
+
+        A copy for the next element that nothing reads -- its pointers
+        carried into the iteration instead (`_staged`), and the entry not
+        -- goes.
+        """
+        if not entries:
+            return body, []
+        l = self.l
+        plain = l.strided and l.kind is None
+        kept = (_drop_unread(tuple(body),
+                             [d for p in self.plans for d in p.deps])
+                if plain else ())
+        alive = {id(x) for x in walk_stmts(kept)}
+        mapping: Dict[int, Value] = {}
+        gone: set = set()
+        yields: List[Value] = []
+        for s, first, ahead in entries:
+            if (not plain or id(s) not in alive or first is None
+                    or ahead is None):
+                continue
+            held = self._fresh(s.target[0])
+            mapping[s.target[0].id] = held
+            gone.add(id(s))
+            inits.append(first)
+            carried.append(held)
+            results.append(self._fresh(held))
+            yields.append(ahead)
+        if mapping:
+            # Behind this, the readers of a carried entry are statements of
+            # their own, which `_drop_unread` would not know for the copies
+            # they are: what the moved transfers alone read goes here.
+            body = list(kept)
+        read = {v.id for x in walk_stmts(tuple(body)) for v in x.operands()}
+        read |= {v.id for v in yields}
+        for _, _, ahead in entries:
+            if ahead is not None and ahead.id not in read:
+                gone |= {id(x) for x in body
+                         if any(v.id == ahead.id for v in x.target)}
+        if not gone:
+            return body, yields
+        out = _without(tuple(body), gone)
+        if mapping:
+            out = substitute(out, mapping)
+        return list(out), yields
+
     def _body(self, heads, tails_reg, tails_shared, tail_flag_stmts, waits,
               carry, own, nxt, yields, carried, inits, results, top,
               following, early_rest=(), early_guard=(),
-              fetched=()) -> Stmt:
+              fetched=(), entries=()) -> Stmt:
         l = self.l
         region = l.region
         moved = {id(s) for p in self.plans for s in p.transfer.stmts}
@@ -1291,6 +1397,8 @@ class _Rewrite:
         if l.guard_at is not None:
             new += rest
         new = top + new
+        new, entry_yields = self._carry(new, entries, inits, carried,
+                                        results)
 
         yielded = list(terminator.args if terminator is not None else ())
         yielded += yields
@@ -1299,6 +1407,7 @@ class _Rewrite:
         if following is not None:
             yielded.append(following)
         yielded += fetched
+        yielded += entry_yields
         if yielded:
             new.append(replace(terminator, args=tuple(yielded))
                        if terminator is not None

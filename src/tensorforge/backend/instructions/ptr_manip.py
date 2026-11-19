@@ -65,6 +65,14 @@ class GetElementPtr(AbstractInstruction):
   #: reads the copy of the chain.
   _TABLE_HOLE = '\x00operandTable\x00'
 
+  #: Stands in for the element's entry of the index list where the loop reads
+  #: it once as a value (`entry_value`).  The binding takes the value as its
+  #: operand in place of the element: a pass that computes the binding again
+  #: for another element computes the entry again with it, and one that
+  #: carries the entry across the back edge hands the binding the carried one
+  #: (`pir.wrap`).
+  _ENTRY_HOLE = '\x00elementEntry\x00'
+
   def _member_accesses(self, writer):
     """The buffers this pass may touch beyond its source: any the table
     holds.
@@ -222,7 +230,10 @@ class GetElementPtr(AbstractInstruction):
                                lambda: str(self._variant)),
                               (self._TABLE_HOLE, self._table.value(writer)
                                if self._TABLE_HOLE in escaped else None,
-                               lambda: self._table.name)):
+                               lambda: self._table.name),
+                              (self._ENTRY_HOLE, self.entry_value(writer)
+                               if self._ENTRY_HOLE in escaped else None,
+                               lambda: self.list_entry(self.batch_index()))):
       if hole not in escaped:
         continue
       if value is None:
@@ -235,7 +246,8 @@ class GetElementPtr(AbstractInstruction):
   def _as_text(self, rhs: str) -> str:
     """The right-hand side with its holes spelled out, for an emitter that
     takes no operands."""
-    out = (rhs.replace(self._INDEX_HOLE, self.batch_index())
+    out = (rhs.replace(self._ENTRY_HOLE, self.list_entry(self.batch_index()))
+           .replace(self._INDEX_HOLE, self.batch_index())
            .replace(self._VARIANT_HOLE, str(self._variant)))
     if self._table is not None:
       out = out.replace(self._TABLE_HOLE, self._table.name)
@@ -278,14 +290,41 @@ class GetElementPtr(AbstractInstruction):
     addressing = getattr(self._src.obj, 'addressing', None)
     return addressing is not None and addressing.indexed()
 
-  def _index_entry(self, element: str) -> str:
+  def reads_index_list(self) -> bool:
+    """Whether the address this binds is reached through the launch's index
+    list: an operand of an indexed kind bound from its argument.  A binding
+    that selects from a table reads the members' bindings, which have read
+    the list already."""
+    return self._table is None and self._indexed()
+
+  def entry_value(self, writer, e: int = 0):
+    """The element's entry of the index list -- element `e`'s of a stack --
+    as the value the loop around this body reads it into
+    (`BatchLoop._bind_entries`), or None where the loop reads none: the
+    address then reads the list itself, as text.
+
+    One read for every address of the element, where each address reading
+    its own would be one each -- and a value, which a pass that carries the
+    entry across the back edge can replace by the carried one
+    (`pir.wrap`)."""
+    if not self.reads_index_list() or not hasattr(writer, 'decl_expr'):
+      return None
+    from .batch_loop import BatchLoop
+    bound = BatchLoop.indices_in(writer)
+    if not bound:
+      return None
+    return bound.get(stacking.entry_key(e))
+
+  @staticmethod
+  def list_entry(element: str) -> str:
     """The entry of the launch's index list for `element`, widened before
     anything multiplies it: the list holds 32-bit indices, and a cell index
     times a stride overflows 32 bits long before memory runs out."""
     return (f'static_cast<size_t>('
             f'{GeneralLexicon.ELEMENT_INDICES}[{element}])')
 
-  def _element_address(self, element: str, extra: str, volume) -> str:
+  def _element_address(self, element: str, extra: str, volume,
+                       index: str = None) -> str:
     """The address of the data of element `element` (text), for every kind
     that reaches an element of the batch, with the operand's extra offset
     `extra` (` + mN_extraOffset` or empty).
@@ -295,12 +334,17 @@ class GetElementPtr(AbstractInstruction):
     to the byte; a stride, an offset or a slot of the operand's own
     (`ElementAddressing`) is spliced in as a number, or as the parameter that
     carries it where it is bound at run time.
+
+    `index` spells the element's entry of the index list where the loop has
+    read it into a value (`entry_value`); None reads it from the list here.
     """
     obj = self._src.obj
     params = element_addressing(obj.addressing)
     kind = params.kind
     sub = obj.get_offset_to_first_element()
     offset = f' + {params.offset}' if params.offset else ''
+    if index is None and kind.indexed():
+      index = self.list_entry(element)
     if kind in (Addressing.STRIDED, Addressing.INDEXED):
       if params.stride is None:
         stride = f'{volume}'
@@ -308,13 +352,13 @@ class GetElementPtr(AbstractInstruction):
         stride = get_stride_name(self._src)
       else:
         stride = f'{params.stride}'
-      at = element if kind is Addressing.STRIDED else self._index_entry(element)
+      at = element if kind is Addressing.STRIDED else index
       return (f'&{self.source_name()}[{at} * {stride} + '
               f'{sub}{offset}{extra}]')
     if kind is Addressing.PTR_BASED:
       entry = element
     elif kind is Addressing.INDEXED_POINTER:
-      entry = self._index_entry(element)
+      entry = index
       if params.slots != 1:
         entry = f'{entry} * {params.slots}'
       if params.slot is RUNTIME:
@@ -502,8 +546,10 @@ class GetElementPtr(AbstractInstruction):
     if batch_addressing.per_element():
       # The default stride is the *stored* volume, i.e. prod(upper - lower),
       # not prod(shape).
+      entry = (self._ENTRY_HOLE if self.entry_value(writer) is not None
+               else None)
       rhs = self._coerce(datatype, const_mod, self._element_address(
-          self._INDEX_HOLE, extra_offset, batch_obj.storage_volume()))
+          self._INDEX_HOLE, extra_offset, batch_obj.storage_volume(), entry))
       lhs = self._declarator(datatype, const_mod)
     elif batch_addressing == Addressing.NONE:
       address = f'{batch_obj.get_offset_to_first_element()}'
@@ -566,7 +612,10 @@ class GetElementPtr(AbstractInstruction):
 
     The stack's index and the masks are operands, so a pass that moves a
     transfer to another stack (`pir.ahead.Clone`) computes these again for
-    it as it does a single element's pointer.
+    it as it does a single element's pointer.  Through the index list, the
+    operand is the element's entry where the loop reads it into a value
+    (`entry_value`): the element it is the entry of is picked there, the
+    same way.
     """
     from .batch_loop import BatchLoop
     obj = self._src.obj
@@ -583,9 +632,6 @@ class GetElementPtr(AbstractInstruction):
     datatype = self._fp_as_str if obj.datatype is None else obj.datatype
     extra = (f' + {get_extra_offset_name(self._src)}'
              if self._include_extra_offset else '')
-    # `{0}` the stack's index, `{1 + e}` element `e`'s mask.
-    first = ' : '.join([f'{{{1 + e}}} ? {k} * {{0}} + {e}' for e in range(k)]
-                       + [f'{k} * {{0}}'])
     volume = obj.storage_volume() // k
     from tensorforge.backend.pir.core import BufferType
     values = []
@@ -593,8 +639,14 @@ class GetElementPtr(AbstractInstruction):
       raise InternalError(f'{self._src.name}: stacked, and the batch shares '
                           f'it ({obj.addressing})')
     for e in range(k):
-      element = f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'
-      rhs = self._element_address(element, extra, volume)
+      entry = self.entry_value(writer, e)
+      if entry is None:
+        # `{0}` the stack's index, `{1 + e}` element `e`'s mask.
+        rhs = self._element_address(stacking.element(k, e), extra, volume)
+        args = (stack, *actives)
+      else:
+        rhs = self._element_address('', extra, volume, '{0}')
+        args = (entry,)
       name = f'{self._dest.name}_s{e}'
       readonly = obj.direction == DataFlowDirection.SOURCE
       lhs = f'{self._pointer_type(datatype, "const", readonly)} {name}'
@@ -603,7 +655,7 @@ class GetElementPtr(AbstractInstruction):
           lhs, rhs, BufferType(self._dest.get_fptype(),
                                (self._extent() // k,), MemSpace.GLOBAL,
                                readonly=readonly),
-          self._src, args=(stack, *actives), kind=Effect.READ, hint=name,
+          self._src, args=args, kind=Effect.READ, hint=name,
           extern=name, alias_root=self._src,
           attrs=((('element_pointer', True),)
                  if self.dereferences_the_batch() else ())

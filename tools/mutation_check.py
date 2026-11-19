@@ -1772,6 +1772,32 @@ GROUPS = {
              '                           pointer_stage=False,', 1)),
     ]),
 
+    # An element's entry of the index list read once and carried across the
+    # batch loop: the next element's entry carried, the peel's starting the
+    # loop, nothing carried that nothing reads, a stack's elements each their
+    # own, the entry after next read once for the staged pointers -- and the
+    # switch that turns all of it off.
+    'carryindex': ('tests/test_carry_element_index.py -n 6', [
+        ("the element's own entry carried instead of the next one's",
+         sub(WRAP, '            yields.append(ahead)\n',
+             '            yields.append(held)\n', 1)),
+        ("the loop started with the next element's entry, not the peel's",
+         sub(WRAP, '            inits.append(first)\n',
+             '            inits.append(ahead)\n', 1)),
+        ('an entry carried where nothing left in the body reads it',
+         sub(WRAP, '            if (not plain or id(s) not in alive or first is None\n',
+             '            if (not plain or first is None\n', 1)),
+        ("a stack's elements reading its first element's entry",
+         sub(BATCHLOOP, 'GetElementPtr.list_entry(stacking.element(k, e)),',
+             'GetElementPtr.list_entry(stacking.element(k, 0)),', 1)),
+        ('the entry after next read again for every pointer staged',
+         sub(WRAP, '            fetch = ahead_copy.stmts(_unseen(reads, ahead_copy), named=True)\n',
+             '            fetch = ahead_copy.stmts(reads, named=True)\n', 1)),
+        ('the switch ignored',
+         sub(BATCHLOOP, '                or not self._context.get_user_options().carry_element_index\n',
+             '', 1)),
+    ]),
+
     # The launch-control traversal reading the next element off the queue
     # at the top: the transfer for it, the peel ahead of the loop, one guard
     # for the size and the mask, the copies it cannot carry left where they
@@ -1994,8 +2020,8 @@ GROUPS = {
          sub(BATCHLOOP, "            either = ' || '.join(f'{{{e}}}' for e in range(self._stack))",
              "            either = '{0}'", 1)),
         ('every element of the stack through the first one\'s pointer',
-         sub(PTR, "      element = f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'",
-             "      element = f'({k} * {{0}})'", 1)),
+         sub(STACKING, "  return f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'",
+             "  return f'({k} * {{0}})'", 1)),
         ('the stack\'s index added to the address instead of picking the pointer',
          sub(SYM, "      if self.stack() > 1:\n        # The stack's index picks",
              "      if False:\n        # The stack's index picks", 1)),

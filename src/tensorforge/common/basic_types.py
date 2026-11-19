@@ -553,6 +553,9 @@ class GeneralLexicon:
   #: The launch's index list (`Addressing.INDEXED`): one per launch, as long
   #: as `numElements0`, and the same name in yateto's kernel struct.
   ELEMENT_INDICES = 'elementIndices'
+  #: An element's entry of it, where the loop reads that once as a value
+  #: (`BatchLoop._bind_entries`).
+  ELEMENT_INDEX = 'elementIndex'
   #: Suffixes of an operand's address parameters bound at run time
   #: (`ElementAddressing`, `RUNTIME`), beside its `EXTRA_OFFSET`.
   STRIDE = '_stride'

@@ -92,6 +92,25 @@ def mask_key(e: int) -> str:
   return f'stackMask{e}'
 
 
+def entry_key(e: int = 0) -> str:
+  """What the batch loop publishes the entry of the launch's index list of
+  element `e` of its stack under -- of its element, without a stack
+  (`BatchLoop._bind_entries`) -- for the addresses that take it."""
+  return f'elementEntry{e}'
+
+
+def element(k: int, e: int) -> str:
+  """The element of the batch that element `e` of a stack of `k` reads, as
+  text with the stack's index at `{0}` and element `e`'s mask at `{1 + e}`:
+  its own where its mask holds, and otherwise the first of the stack whose
+  mask holds, or the stack's first where none does -- an element past the
+  end of the batch, or one its flag masks, has nothing an address may
+  follow (`GetElementPtr._gen_stacked`)."""
+  first = ' : '.join([f'{{{1 + j}}} ? {k} * {{0}} + {j}' for j in range(k)]
+                     + [f'{k} * {{0}}'])
+  return f'({{{1 + e}}} ? {k} * {{0}} + {e} : ({first}))'
+
+
 def stack(descrs: List[OperationDescription], k: int) -> List[OperationDescription]:
   """`descrs` with `k` consecutive elements computed together.
 

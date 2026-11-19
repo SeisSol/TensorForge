@@ -1799,7 +1799,8 @@ class Interp:
         if _NO_VALUE.match(stmt):
             # The engines' orderings and hints (`pir.engines`): a priority, a
             # scheduling group, a memory fence, a counter wait, a gfx1250
-            # object's setup and rendezvous -- nothing a value changes by.
+            # object's setup and rendezvous, a cache hint for the next
+            # element's data (`pir.prefetch`) -- nothing a value changes by.
             # The rendezvous themselves are the race tracker's.
             return
         if stmt.startswith('using namespace '):
@@ -1834,7 +1835,8 @@ class Interp:
 _NO_VALUE = re.compile(
     r'^(?:__builtin_amdgcn_(?:s_setprio|sched_group_barrier|fence|s_waitcnt'
     r'|s_wait_asynccnt|s_wait_tensorcnt)|__threadfence_block'
-    r'|tensorforge::(?:sync|arrive|join)NamedBarrier(?:<[^>]*>)?)\s*\(')
+    r'|tensorforge::(?:sync|arrive|join)NamedBarrier(?:<[^>]*>)?'
+    r'|tensorforge::prefetch(?:Runs)?(?:L1|L2|Hinted)(?:<[^>]*>)?)\s*\(')
 
 
 def _parenthesized(text: str) -> bool:

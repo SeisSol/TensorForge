@@ -208,14 +208,20 @@ def test_the_defaults_render_byte_for_byte_as_before():
 @pytest.mark.parametrize("backend,arch", TARGETS,
                          ids=[f"{b}-{a}" for b, a in TARGETS])
 def test_every_target_spells_the_addresses(backend, arch):
+    """The entry of the list is read once, into a value the addresses take
+    (`carry_element_index`; `tests/test_carry_element_index.py` has the
+    spelling without)."""
     gen = _generate(_gemm(MIXED), backend, arch)
     kernel = gen.get_kernel()
-    # A: the entry of the list, widened before the stride multiplies it.
-    assert re.search(r"&m1\[static_cast<size_t>\(elementIndices\[[^\]]+\]\)"
-                     r" \* m1_stride \+ 0 \+ m1_extraOffset\]", kernel)
+    # The entry of the list, widened before a stride multiplies it.
+    assert re.search(r"const size_t \w*elementIndex = static_cast<size_t>"
+                     r"\(elementIndices\[[^\]]+\]\);", kernel)
+    # A: the entry times the stride, then the offset.
+    assert re.search(r"&m1\[\w*elementIndex \* m1_stride \+ 0 \+ "
+                     r"m1_extraOffset\]", kernel)
     # B: the cell's pointer, its slot, then the offset into what it reaches.
-    assert re.search(r"&m2\[static_cast<size_t>\(elementIndices\[[^\]]+\]\)"
-                     r" \* 4 \+ m2_slot\]\[0 \+ 4 \+ m2_extraOffset\]", kernel)
+    assert re.search(r"&m2\[\w*elementIndex \* 4 \+ m2_slot\]\[0 \+ 4 \+ "
+                     r"m2_extraOffset\]", kernel)
     # C: a stride and an offset of its own, numbers in the code.
     assert re.search(r"&m0\[[^\]]* \* 300 \+ 0 \+ 8 \+ m0_extraOffset\]",
                      kernel)

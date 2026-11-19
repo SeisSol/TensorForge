@@ -650,6 +650,69 @@ class BatchLoop(AbstractInstruction):
     #: where a trip computes one element (`_stack_actives`).
     _actives = None
 
+    #: The frame of the traversal whose body is being built, where it reads
+    #: its element's entries of the index list into values there
+    #: (`_bind_entries`); None for a traversal spelled as text, and for a
+    #: group of rows each multiplication reads as the wave's, whose addresses
+    #: read the list themselves.
+    _entry_frame = None
+
+    def _reads_index_list(self) -> bool:
+        """Whether a binding of the region reaches its operand through the
+        launch's index list (`GetElementPtr.reads_index_list`)."""
+        from .ptr_manip import GetElementPtr
+
+        def reads(instrs) -> bool:
+            return any((isinstance(i, GetElementPtr) and i.reads_index_list())
+                       or any(reads(r) for r in i.regions())
+                       for i in instrs)
+        return reads(self._region)
+
+    def _bind_entries(self, writer) -> None:
+        """Read the element's entry of the launch's index list into a value at
+        the top of what the element computes, for every address through the
+        list to take (`GetElementPtr.entry_value`): one per element of a
+        stack, picked as the stack's addresses pick their element
+        (`stacking.element`).  Only where `Options.carry_element_index` asks
+        for it and the region has such an address -- the body is otherwise
+        the one it always was.
+
+        Once, where each address spelling `elementIndices[batchId0]` read it
+        once per operand -- and a value, which is what the carry needs: where
+        `pir.wrap` reads the next element's entry for the transfers it issues
+        ahead, the loop hands that one to the next iteration in place of
+        this read, and the element's addresses wait for their pointers
+        alone.
+
+        Inside the element guard, where the addresses are: a masked
+        element's entry is held to nothing, and it is not read for one, as
+        it was not.
+        """
+        bound = self._entry_frame
+        if (bound is None or not hasattr(writer, 'decl_expr')
+                or not self._context.get_user_options().carry_element_index
+                or not self._reads_index_list()):
+            return
+        from tensorforge.backend.pir.core import SCALAR_LAYOUT, SIZE
+        from .ptr_manip import GetElementPtr
+        name = GeneralLexicon.ELEMENT_INDEX
+        element = bound[self._batch(0)]
+        if self._actives is None:
+            reads = [(name, GetElementPtr.list_entry('{0}'), (element,))]
+        else:
+            k = self._stack
+            reads = [(f'{name}_s{e}',
+                      GetElementPtr.list_entry(stacking.element(k, e)),
+                      (element, *self._actives)) for e in range(k)]
+        for e, (decl, text, args) in enumerate(reads):
+            # Carried across the back edge as the flag words are, so typed
+            # and laid out as they are (`ahead.ElementLoop.word`): a loop
+            # declares what it carries from those.
+            bound[stacking.entry_key(e)] = writer.decl_expr(
+                f'const size_t {decl}', text, SIZE, None, args=args,
+                hint=decl, extern=decl, layout=SCALAR_LAYOUT,
+                attrs=(('element_index', True),))
+
     def _active_name(self, e: int) -> str:
         return f'{GeneralLexicon.BATCH_ID_NAME}Stack{self._section_index}_{e}'
 
@@ -767,6 +830,7 @@ class BatchLoop(AbstractInstruction):
         """The part of the region that a mask, if there is one, may skip."""
         if AbstractInstruction._shared_body:
             # Already inside one -- opened by `gen_code` around the loop.
+            self._bind_entries(writer)
             for instr in guarded:
                 instr.gen_code(writer)
         else:
@@ -889,11 +953,13 @@ class BatchLoop(AbstractInstruction):
                             # ahead and has no way to know how the traversal
                             # clamps.
                             loop._next_index = self._first_lookahead
+                            self._entry_frame = bound
                             with self._stacked(writer, loop.induction, bound):
                                 self._emit_body(writer)
                     finally:
                         self._induction = None
                         self._parted = None
+                        self._entry_frame = None
                 return
             self._refuse_stack('a traversal spelled as text')
             with writer.For(f'size_t {self._batch(0)} = {self._start}; '
@@ -952,11 +1018,13 @@ class BatchLoop(AbstractInstruction):
             with BatchLoop.batch_indices(writer) as bound:
                 bound[self._batch(0)] = index
                 self._induction = index
+                self._entry_frame = bound
                 try:
                     with writer.if_(inside):
                         self._emit_body(writer)
                 finally:
                     self._induction = None
+                    self._entry_frame = None
         else:
             writer(f'const size_t {self._batch(0)} = {self._block_id()};')
             with writer.If(self._size_guard()):
@@ -1009,6 +1077,7 @@ class BatchLoop(AbstractInstruction):
             try:
                 with BatchLoop.batch_indices(builder) as bound:
                     bound[self._batch(0)] = loop.induction
+                    self._entry_frame = bound
                     if lookahead:
                         self._queried_lookahead(builder, loop, index, queue,
                                                 lexic)
@@ -1016,6 +1085,7 @@ class BatchLoop(AbstractInstruction):
                         self._queried_body(builder, loop, index, queue, lexic)
             finally:
                 self._induction = None
+                self._entry_frame = None
 
     def _queried_lookahead(self, builder, loop, index, queue, lexic) -> None:
         """The body of the queried traversal where a pass moves transfers
@@ -1267,6 +1337,12 @@ class BatchLoop(AbstractInstruction):
                     self._lookahead_bindings(writer, bound)
                     loop._next_index = self._first_lookahead
                     loop._element_index = batch
+                    # Not where each multiplication reads its row as the
+                    # wave's: `pir.rows` copies what an address reads
+                    # through the row once per multiplication, the entry
+                    # with it, and a value read once for the lanes would be
+                    # left behind unread.
+                    self._entry_frame = None if wave else bound
                     # No block around the body: the mask holds only the global
                     # writes, so every read runs on every trip -- the case
                     # `_emit_body` fences when the flags are absent, and here
@@ -1282,6 +1358,7 @@ class BatchLoop(AbstractInstruction):
                         self._emit_guarded(writer, list(self._region))
             finally:
                 self._induction = None
+                self._entry_frame = None
 
     @contextmanager
     def _rows_per_mult(self, on: bool):

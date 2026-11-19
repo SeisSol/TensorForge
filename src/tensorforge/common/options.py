@@ -483,6 +483,23 @@ declare('pointer_stage',
             'next.  Elsewhere the read at the head has the body ahead of the '
             'transfer as cover, and nothing changes.  See backend/pir/wrap.py.')
 
+declare('carry_element_index',
+        default=True,
+        parse=parse_bool,
+        doc='Read an element\'s entry of the launch\'s index list once, as one '
+            'value every address through it takes -- the operands of '
+            '`Addressing.INDEXED` and `INDEXED_POINTER` -- rather than once '
+            'in each address; and where `enable_wrap_loads` reads the next '
+            'element\'s entry for a transfer it issues ahead, carry that '
+            'entry into the next iteration as the element\'s own, as the flag '
+            'words ride the loop, with the first element\'s read in the '
+            'peel.  Read at the head of the element, the entry is a load '
+            'every address of the element waits for before its own: through '
+            'a pointer per cell, index, pointer and data are three dependent '
+            'loads where a pointer table has two.  Carried, it is there.  It '
+            'costs a register for the carried entry, and nothing for a kernel '
+            'without such an operand.  See backend/pir/wrap.py.')
+
 declare('trip_reads',
         default=False,
         parse=parse_bool,
