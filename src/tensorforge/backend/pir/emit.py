@@ -27,7 +27,7 @@ from tensorforge.common.operation import Operation
 from . import block_reads, engines
 from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants, Qual, ScalarType, Stmt, TokenType, Uniformity,
-                   Value, def_use, walk_stmts)
+                   Value, def_use, retires, walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
@@ -528,9 +528,10 @@ class Emitter:
             return _text_category(text, 'other'), []
         if op == Op.RAWBLOCK:
             return 'branch', []
-        if op in (Op.RESOURCE, Op.TENSOR_DESC):
+        if op in (Op.RESOURCE, Op.TENSOR_DESC, Op.MATRIX_DESC):
             # A buffer resource is an address computed once, as a pointer
-            # binding's is, and so are a tensor descriptor's words.
+            # binding's is, and so are a tensor descriptor's words and a
+            # matrix descriptor's.
             return 'int', []
         if engines.spec_of(op) is not None:
             return engines.pipe_of(s), []
@@ -642,6 +643,13 @@ class Emitter:
             if spelled is None:
                 raise IRError('a tensor descriptor on a target without the '
                               'tensor data mover (`Target.tensor_copies`)')
+            return spelled
+        if isinstance(t, engines.MatrixDescType):
+            lex = self._lexic()
+            spelled = None if lex is None else lex.matrix_descriptor_type()
+            if spelled is None:
+                raise IRError('a matrix descriptor on a target without '
+                              'shared-memory matrix operands')
             return spelled
         raise IRError(f'cannot render type {t!r}')
 
@@ -1644,7 +1652,7 @@ class Emitter:
             return
 
         if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None
-                and s.attr('engine') != 'tdm'):
+                and s.attr('engine') != 'tdm' and retires(s)):
             # The wait for copies the body writes as loads and stores
             # (`_decide_async`): nothing of theirs is in flight.  A tensor
             # copy is never one of them.
@@ -1725,6 +1733,21 @@ class Emitter:
             if text is None:
                 raise IRError('a buffer resource on a target without buffer '
                               'instructions (`Target.buffer_resources`)')
+            self.declare(s.target[0], text, s)
+            return
+
+        if op == Op.MATRIX_DESC:
+            # The layout's bits, and the start address the device adds from
+            # where the allocator placed the buffer.
+            lex = self._lexic()
+            buffer = s.args[0]
+            address = self.address(buffer, s.args[1:])
+            text = None if lex is None else lex.matrix_descriptor(
+                f'&{self.base_name(buffer)}[{address}]',
+                engines.matrix_descriptor_bits(s.target[0].type))
+            if text is None:
+                raise IRError('a matrix descriptor on a target without '
+                              'shared-memory matrix operands')
             self.declare(s.target[0], text, s)
             return
 

@@ -841,6 +841,22 @@ class Target:
         level = self.hw.sm_level()
         return level is not None and level >= 90
 
+    def arch_specific(self) -> bool:
+        """Whether the target is an NVIDIA part's arch-specific one
+        (`sm_90a`, `sm_100a`): the instructions only that target has may be
+        written for it, and the build is for it alone (`toolchain.Nvcc`)."""
+        model = str(self.hw.model)
+        return (self.hw.vendor == 'nvidia' and model.startswith('sm_')
+                and model.endswith('a'))
+
+    def wgmma(self) -> bool:
+        """Whether a product may go to wgmma, the asynchronous matrix engine
+        of a warpgroup (`engines.MATRIX_ENGINES['wgmma']`): CUDA on sm_90a
+        alone.  Plain sm_90 has none of it in its PTX, and Blackwell's
+        sm_100a has tcgen05 in its place."""
+        return (self.backend == 'cuda' and self.arch_specific()
+                and self.hw.sm_level() == 90)
+
     def tensor_copies(self) -> bool:
         """Whether a window may go into the LDS as one tile by gfx12.5's
         tensor data mover (`tensor_load_to_lds`, engine `tdm`): HIP on

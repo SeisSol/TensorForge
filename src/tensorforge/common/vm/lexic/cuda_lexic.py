@@ -182,6 +182,14 @@ class CudaLexic(Lexic):
   def commit_async(self):
     return '__pipeline_commit();'
 
+  def matrix_descriptor_type(self):
+    return 'uint64_t'
+
+  def matrix_descriptor(self, address, layout):
+    # The start address goes in on the device, from where the buffer is
+    # (`cuda.h`); the rest is a constant of the layout.
+    return f'tensorforge::matrixDescriptor({address}, {layout:#018x}ull)'
+
   def wait_async(self, prior):
     return f'__pipeline_wait_prior({prior});'
 

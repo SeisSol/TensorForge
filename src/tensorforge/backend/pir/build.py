@@ -263,6 +263,9 @@ class IRBuilder:
         #: token id -> the engine the copy that issued it goes through
         #: (`copy_async`), whose counter its wait may be written on
         self._token_engine: Dict[int, str] = {}
+        #: descriptor id -> the shared buffer it was made over (`matrix_desc`),
+        #: whose read a matrix op through it declares
+        self._desc_buffers: Dict[int, Any] = {}
         #: What goes ahead of everything else in the body (`bulk_channel`).
         self._prologue: List[Stmt] = []
         #: window name -> the mbarrier its bulk copies complete on in this
@@ -741,7 +744,9 @@ class IRBuilder:
                    instruction: Optional[str] = None,
                    layouts: Optional[Tuple] = None,
                    term: Optional[Tuple[int, int]] = None,
-                   modifiers: Tuple = ()):
+                   modifiers: Tuple = (),
+                   sources: Optional[Tuple] = None,
+                   scalars: Sequence[Tuple[str, Operand]] = ()):
         """D = A * B + C on the matrix engine `engine`
         (`engines.MATRIX_ENGINES`): the registers of the fragments as
         values, A's, B's and C's in the order the instruction takes them,
@@ -769,6 +774,15 @@ class IRBuilder:
         None where not), `term` the halves of A and B a split product
         multiplies (0 the upper, 1 the lower), `modifiers` the vendor's own,
         as `(name, value)` pairs.
+
+        `sources` says where A, B and C are (`engines.Source`), where an
+        engine takes an operand from anywhere but registers: an operand in
+        shared memory is one descriptor this body made (`matrix_desc`), and
+        the statement declares the read of its buffer behind C's registers,
+        since the descriptor reads nothing.  `scalars` are the operands
+        behind the fragments, as `(name, operand)` pairs -- wgmma's
+        `scale_d`.  An engine that completes behind the issue (wgmma) is in
+        place, and its statement is asynchronous (`engines.effect_of`).
         """
         found = engines.MATRIX_ENGINES.get(engine)
         if found is None:
@@ -790,6 +804,10 @@ class IRBuilder:
             attrs += (('modifiers', tuple(modifiers)),)
         if found.collective is not None:
             attrs += (('collective', found.collective),)
+        if sources is not None:
+            attrs += (('sources', tuple(sources)),)
+        if scalars:
+            attrs += (('scalars', tuple(n for n, _ in scalars)),)
         movable = engines.movable_of(Op.MATRIX_MAC, attrs)
         effect = engines.effect_of(Op.MATRIX_MAC, attrs)
         if result is None:
@@ -798,7 +816,10 @@ class IRBuilder:
                 self.pin(w)
             accesses = tuple(Access(Effect.READ | Effect.WRITE,
                                     MemSpace.REGISTER, base=w) for w in c)
-            return self._emit_op(Op.MATRIX_MAC, (), a + b + c, pure=False,
+            accesses += self._descriptor_reads(
+                (a, b, c), sources or (engines.Source.REGISTER,) * 3)
+            return self._emit_op(Op.MATRIX_MAC, (), a + b + c + tuple(
+                                     v for _, v in scalars), pure=False,
                                  movable=movable, effect=effect,
                                  accesses=accesses, attrs=attrs)
         v = self.value(result, hint=hint, uniform=_join(a + b + c),
@@ -808,6 +829,113 @@ class IRBuilder:
                       attrs=attrs + ((('no_inline', True),) if materialize
                                      else ()))
         return v
+
+    def _descriptor_reads(self, operands, sources) -> Tuple[Access, ...]:
+        """The reads of shared memory a matrix op makes through the
+        descriptors among `operands` (A's, B's, C's), by `sources`: one a
+        descriptor, of the buffer it was made over (`matrix_desc`)."""
+        reads = ()
+        for frag, source in zip(operands, sources):
+            if source is not engines.Source.SHARED:
+                continue
+            for v in frag:
+                buffer = (self._desc_buffers.get(v.id)
+                          if isinstance(v, Value) else None)
+                if buffer is None:
+                    raise IRError(f'matrix.mac: {v!r} is no descriptor this '
+                                  f'body made (`matrix_desc`)')
+                reads += (Access(Effect.READ, MemSpace.SHARED, buffer),)
+        return reads
+
+    def matrix_desc(self, buffer: Value, *index: Operand,
+                    desc: 'engines.MatrixDescType',
+                    hint: str = 'desc') -> Value:
+        """The shared-memory matrix descriptor of the operand that starts at
+        element `index` of `buffer` and is laid out as `desc` states
+        (`engines.MatrixDescType`): what wgmma reads A and B through.
+
+        Pure, as a buffer resource is: it reads nothing, and the matrix op
+        that goes through it declares the read (`matrix_mac`'s `sources`),
+        so its buffer is remembered for that.  Kept in a variable of its
+        own, which every lane of the collective holds alike: the hardware
+        takes it from a uniform register.  A swizzled operand starts on its
+        atom (`engines.swizzle_alignment`), which the buffer has to be
+        placed on (`alloc`'s `place_align`): the descriptor states no base
+        offset.
+        """
+        if not (isinstance(buffer, Value) and isinstance(buffer.type, BufferType)
+                and buffer.type.space == MemSpace.SHARED):
+            raise IRError(f'a matrix descriptor of {buffer!r}, which is no '
+                          f'buffer of shared memory')
+        elem = getattr(buffer.type.elem, 'base', buffer.type.elem)
+        if elem.size() != desc.elem.size():
+            raise IRError(f'a descriptor of {desc.elem} over a buffer of '
+                          f'{elem}')
+        if desc.swizzle:
+            align = engines.swizzle_alignment(desc.swizzle) // elem.size()
+            producer = self._producer(buffer)
+            placed = producer.attr('place_align') if producer else None
+            if not placed or placed % align:
+                raise IRError(f'a matrix descriptor swizzled by '
+                              f'{desc.swizzle} bytes over {buffer}, which is '
+                              f'not placed on {align} elements')
+        v = self.value(desc, hint=hint, uniform=_join((buffer,) + index))
+        self._emit_op(Op.MATRIX_DESC, (v,), (buffer,) + tuple(index),
+                      pure=True, movable=True, effect=Effect.NONE,
+                      attrs=(('no_inline', True),))
+        self._desc_buffers[v.id] = self.alias_root(buffer)
+        return v
+
+    def wgmma(self, n: int, a: Sequence[Operand], b: Operand,
+              d: Sequence[Value], *, scale_d: Operand = 1,
+              layouts: Optional[Tuple] = None) -> Stmt:
+        """One `wgmma.mma_async` of m64nNk8, TF32 into FP32
+        (`engines.wgmma_refusal`): `d`, the N / 2 accumulator registers a
+        lane holds, written in place; `a` one descriptor (`matrix_desc`) or
+        four TF32 registers; `b` one descriptor.  `scale_d` 0 writes D =
+        A * B, 1 adds to D.  Issued, not complete: a `commit_group` closes it
+        into a group and a `matrix_wait` retires it, and the registers are
+        the warpgroup's to touch only behind that wait.  What the lowering
+        would refuse is refused here (`engines.wgmma_refusal`): D's
+        registers are the lanes' own, declared so."""
+        a = tuple(a)
+        shared_a = len(a) == 1 and isinstance(a[0], Value) and isinstance(
+            a[0].type, engines.MatrixDescType)
+        sources = (engines.Source.SHARED if shared_a
+                   else engines.Source.REGISTER,
+                   engines.Source.SHARED, engines.Source.REGISTER)
+        s = self.matrix_mac(
+            'wgmma', (64, int(n), 8),
+            (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
+            a, (b,), d, layouts=layouts, sources=sources,
+            scalars=(('scale_d', scale_d),))
+        why = engines.wgmma_refusal(s)
+        if why is not None:
+            raise IRError(why)
+        return s
+
+    def commit_group(self, engine: str) -> Stmt:
+        """Close what `engine` issued since its last commit into one group
+        (`engines.commit_group`)."""
+        return self.emit(engines.commit_group(engine))
+
+    def matrix_wait(self, engine: str, count: int,
+                    registers: Sequence[Value] = (),
+                    reads: Sequence[Value] = ()) -> Stmt:
+        """Wait until at most `count` groups of `engine` are in flight
+        (`engines.matrix_wait`): `registers` are valid behind it, and the
+        buffers of the descriptors `reads` may be written again."""
+        buffers = []
+        for v in reads:
+            buffer = self._desc_buffers.get(v.id) if isinstance(v, Value) \
+                else None
+            if buffer is None:
+                raise IRError(f'a wait for {v!r}, which is no descriptor '
+                              f'this body made')
+            if all(buffer is not x for x in buffers):
+                buffers.append(buffer)
+        return self.emit(engines.matrix_wait(engine, count, registers,
+                                             buffers))
 
     def _require_addressable(self, value: Operand, callee: str) -> None:
         """A written argument has to be something that has an address.
@@ -2047,16 +2175,24 @@ class IRBuilder:
               scope: Optional['engines.SyncScope'] = None,
               mask: Optional[int] = None,
               group: Optional[Tuple[int, int, int]] = None,
-              wall: bool = True) -> Stmt:
+              wall: bool = True, engine: Optional[str] = None,
+              registers: Sequence[Value] = ()) -> Stmt:
         """A fence of the schedule, of memory, or of both
         (`engines.fence_stmt`).
 
         Where raw text stood for one -- a scheduling barrier, a sub-group
         barrier that holds the compiler, vISA's software fence -- this says
-        what it is, and the target says how it is written.
+        what it is, and the target says how it is written.  A fence of the
+        `registers` an asynchronous matrix `engine` reads and writes, and
+        of the async proxy, are the same op (`FenceKind.REGISTERS`,
+        `FenceKind.PROXY`).
         """
+        for v in registers:
+            self._require_addressable(v, 'fence')
         return self.emit(engines.fence_stmt(kind, scope=scope, mask=mask,
-                                            group=group, wall=wall))
+                                            group=group, wall=wall,
+                                            engine=engine,
+                                            registers=registers))
 
     def wait_counter(self, counter: str, count: int) -> Stmt:
         """Wait until at most ``count`` operations are outstanding on the

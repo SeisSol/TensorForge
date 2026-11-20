@@ -57,7 +57,7 @@ def test_every_engine_op_is_a_name_pir_knows():
     one has a lowering for a target it does not name (`'*'`)."""
     assert set(engines.REGISTRY) == {
         Op.BARRIER, Op.SYNC_INIT, Op.ARRIVE, Op.WAIT_PHASE, Op.FENCE,
-        Op.WAIT_COUNTER, Op.SET_PRIORITY, Op.MATRIX_MAC}
+        Op.WAIT_COUNTER, Op.SET_PRIORITY, Op.COMMIT_GROUP, Op.MATRIX_MAC}
     for name, spec in engines.REGISTRY.items():
         assert name in Op.KNOWN and spec.name == name
         assert '*' in spec.lower
@@ -148,7 +148,17 @@ def test_an_object_whose_parts_disagree_is_refused():
     SyncObjectType(SyncScope.BLOCK, SyncKind.MBARRIER, Participants.MULT)
 
 
-@pytest.mark.parametrize('who', list(Participants))
+#: What a barrier may cover: every set but the warpgroup, which is what
+#: wgmma executes together and no barrier's object (`sync_object`).
+BARRIER_SETS = [p for p in Participants if p is not Participants.WARPGROUP]
+
+
+def test_a_warpgroup_is_no_barrier_s():
+    with pytest.raises(IRError, match='warpgroup'):
+        engines.sync_object(Participants.WARPGROUP, 32, 128)
+
+
+@pytest.mark.parametrize('who', BARRIER_SETS)
 @pytest.mark.parametrize('threads', [None, 16, 32, 64, 96])
 def test_the_arrival_level_is_the_participants(who, threads):
     """What `verify` and the barrier placement read off a barrier is what
@@ -216,7 +226,7 @@ def test_a_barrier_is_written_as_the_lexic_wrote_it(backend, arch):
     combined form on an object is the instruction the barrier was."""
     target = _target(backend, arch)
     wave = target.hw.vec_unit_length
-    for who in Participants:
+    for who in BARRIER_SETS:
         for threads in (None, wave // 4, wave // 2, wave, 2 * wave,
                         3 * wave // 2, 4 * wave):
             for handoff in (False, True):
@@ -235,7 +245,7 @@ def test_a_barrier_is_written_as_the_lexic_wrote_it(backend, arch):
 
 def test_without_a_target_a_barrier_is_the_block_s():
     """The IR-level tests build bodies without one."""
-    for who in Participants:
+    for who in BARRIER_SETS:
         assert _lines(barrier_stmt(who, 1, 64), None) == ('__syncthreads();',)
 
 

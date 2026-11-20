@@ -506,6 +506,19 @@ class Lexic(ABC):
   def tensor_load(self, descriptor):
     return None
 
+  # --- matrix descriptors ---------------------------------------------------
+  # NVIDIA's shared-memory matrix descriptor (`Op.MATRIX_DESC`), what wgmma
+  # reads an operand through: its type, and the descriptor of the operand at
+  # `address` whose every other field `layout` holds
+  # (`engines.matrix_descriptor_bits`).  None where the target has no such
+  # operands.
+
+  def matrix_descriptor_type(self):
+    return None
+
+  def matrix_descriptor(self, address, layout):
+    return None
+
   # --- atomic accumulation --------------------------------------------------
   # Declared here so that every backend answers through one interface, the one
   # the single call site uses.  Declared per backend, the interfaces drift

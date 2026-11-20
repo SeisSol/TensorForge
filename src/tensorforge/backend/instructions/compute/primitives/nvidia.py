@@ -374,6 +374,41 @@ def a_fragment_bits(atom, threads: int = 32) -> BitLayout:
     return BitLayout((rows, cols))
 
 
+def wgmma_d_fragment_bits(n: int) -> BitLayout:
+    """The PTX layout of wgmma's FP32 accumulator, m64nN, over the 128 lanes
+    of the warpgroup (PTX ISA, "wgmma ... Register Fragments", the figure
+    of D for `.f32`): lane `l` of warp `w` holds, in register `i`, row
+    ``16 w + l / 4 + 8 ((i % 4) / 2)`` and column ``8 (i / 4) + 2 (l % 4) +
+    i % 2``.  So a row's low three bits are the lane's 2..4, its next the
+    slot's weight 2, its top two the warp's -- the warpgroup lane's 5 and 6;
+    a column's low bit is the slot's weight 1, its next two the lane's 0..1,
+    and the rest the slot's from weight 4 on, one n8 tile each four.
+
+    `d_fragment_bits` of `mma.sync`'s m16n8 for each warp, the warps along
+    M and the n8 tiles along the slots."""
+    rows = (tuple(Bit(Place.LANE, 1 << (2 + b)) for b in range(3))
+            + (Bit(Place.SLOT, 2),)
+            + tuple(Bit(Place.LANE, 1 << (5 + b)) for b in range(2)))
+    cols = ((Bit(Place.SLOT, 1),)
+            + tuple(Bit(Place.LANE, 1 << b) for b in range(2))
+            + tuple(Bit(Place.SLOT, 4 << b)
+                    for b in range((n // 8 - 1).bit_length())))
+    return BitLayout((rows, cols))
+
+
+def wgmma_a_fragment_bits() -> BitLayout:
+    """The PTX layout of wgmma's TF32 A in registers, m64k8, over the 128
+    lanes of the warpgroup: lane `l` of warp `w` holds, in register `i`, row
+    ``16 w + l / 4 + 8 (i % 2)`` and column ``l % 4 + 4 (i / 2)`` -- each
+    warp's sixteen rows as `mma.sync`'s m16n8k8 A (`a_fragment_bits`)."""
+    rows = (tuple(Bit(Place.LANE, 1 << (2 + b)) for b in range(3))
+            + (Bit(Place.SLOT, 1),)
+            + tuple(Bit(Place.LANE, 1 << (5 + b)) for b in range(2)))
+    cols = (tuple(Bit(Place.LANE, 1 << b) for b in range(2))
+            + (Bit(Place.SLOT, 2),))
+    return BitLayout((rows, cols))
+
+
 def _fragment_cells(atom, threads: int = 32, bits=None):
     """`a_fragment_bits` inverted: which cell of a tile each slot and lane
     holds.

@@ -610,6 +610,71 @@ __device__ __forceinline__ void bulk_wait(BulkCursor &cursor) {
 #endif
 }
 
+/// A shared-memory matrix descriptor (`Op.MATRIX_DESC`): what wgmma reads an
+/// operand in shared memory through.  `layout` holds every field but the
+/// start address -- the leading and the stride byte offset, the swizzle, the
+/// fixed bits of a format (`engines.matrix_descriptor_bits`) -- and the
+/// address goes in here, in 16-byte units, bits 0 to 13 (PTX ISA, wgmma's
+/// "Matrix Descriptor Format").  It is the operand's address in the shared
+/// window, so a buffer is described wherever the allocator placed it.
+__device__ __forceinline__ uint64_t matrixDescriptor(const void *operand,
+                                                     uint64_t layout) {
+  return layout |
+         ((static_cast<uint64_t>(__cvta_generic_to_shared(operand)) >> 4) &
+          0x3FFFull);
+}
+
+/// The fence, the commit and the wait of wgmma (PTX ISA, "wgmma.fence",
+/// "wgmma.commit_group", "wgmma.wait_group"; sm_90a).  The products
+/// themselves are written where they are issued, inside the guard nvcc
+/// defines for sm_90a alone (`engines.WGMMA_FEATURE`): `-arch=sm_90a` builds
+/// the source for `compute_90` as well, where ptxas refuses them.  These
+/// three trap there instead, as the bulk copy does below sm_90, so that a
+/// kernel whose products the guard left out never runs to the end.
+///
+/// The fence orders what the warpgroup wrote to the registers a product
+/// behind it reads -- its accumulator, its A in registers -- before that
+/// product; the commit closes the products issued since the last one into a
+/// group; the wait lets at most `Pending` groups stay in flight, and the
+/// registers of the others are valid behind it.  Each is executed by every
+/// thread of the warpgroup alike.
+__device__ __forceinline__ void wgmmaFence() {
+#if defined(__CUDA_ARCH_FEAT_SM90_ALL)
+  asm volatile("wgmma.fence.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void wgmmaCommit() {
+#if defined(__CUDA_ARCH_FEAT_SM90_ALL)
+  asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+template <int Pending> __device__ __forceinline__ void wgmmaWait() {
+#if defined(__CUDA_ARCH_FEAT_SM90_ALL)
+  asm volatile("wgmma.wait_group.sync.aligned %0;" ::"n"(Pending) : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// What the threads wrote to shared memory as ordinary stores, visible to
+/// what reads it through the async proxy behind this -- a product reading
+/// an operand through its descriptor, a bulk or a tensor copy -- and what
+/// they read, ordered before what that proxy writes there
+/// (`fence.proxy.async.shared::cta`, PTX ISA 8.0, sm_90).
+__device__ __forceinline__ void fenceProxyAsync() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
 ///
 /// A typedef and not a wrapper struct, and the reason is the constraint

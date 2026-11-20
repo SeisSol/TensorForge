@@ -63,10 +63,17 @@
   base: sm_60
   max_local_mem_size_per_block: 227kB # shared with L1; together 256 kiB
   icache_miss_factor: 3.0  # GH200, as on sm_80; assumed for sm_101 and sm_110
+# The arch-specific targets: the same parts, built for the instructions only
+# their `a` target has -- wgmma on sm_90a, tcgen05 on sm_100a -- which nvcc
+# takes as `-gencode=arch=compute_90a,code=sm_90a` (`toolchain.Nvcc`).
+- arch: sm_90a
+  base: sm_90
 - arch: sm_100
   base: sm_90
   icache_miss_factor: 2.6  # GB200; as on sm_80
   max_argument_size: 32764B
+- arch: sm_100a
+  base: sm_100
 - arch: sm_101
   base: sm_90
   max_argument_size: 32764B

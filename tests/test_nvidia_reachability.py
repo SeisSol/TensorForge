@@ -52,9 +52,16 @@ MODULES = ["nvidia"]
 #: matrix path is not.
 ENTRIES = reachability.protocol_members(MatrixPaths)
 
-# Unreachable on purpose.  Each entry would need a reason that says why
-# deleting it would be worse than keeping it.  There are none.
-KEPT_UNREACHABLE: dict = {}
+# Unreachable on purpose.  Each entry needs a reason that says why deleting
+# it would be worse than keeping it.
+KEPT_UNREACHABLE: dict = {
+    # The layouts PTX states for wgmma's fragments, which a product states
+    # on its op (`IRBuilder.wgmma`'s `layouts`): no path issues wgmma until
+    # the matrix tiling takes it on sm_90a (engines phase 3b, part 4), and
+    # `tests/test_wgmma.py` holds them to PTX's maps meanwhile.
+    'wgmma_a_fragment_bits': 'the A layout of wgmma, for the tiling on sm_90a',
+    'wgmma_d_fragment_bits': 'the D layout of wgmma, for the tiling on sm_90a',
+}
 
 
 @pytest.fixture(scope="module")

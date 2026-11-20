@@ -275,7 +275,7 @@ TOKEN = TokenType()
 
 
 IRType = Union[ScalarType, BufferType, TokenType, 'SyncObjectType',
-               'ResourceType', 'TensorDescType']
+               'ResourceType', 'TensorDescType', 'MatrixDescType']
 
 BOOL = ScalarType(Datatype.BOOL)
 INDEX = ScalarType(Datatype.I32)
@@ -508,6 +508,10 @@ class Uniformity(IntEnum):
     GRID = 4        # same everywhere
 
 
+#: Warps in a warpgroup (`Participants.WARPGROUP`).
+WARPGROUP_WAVES = 4
+
+
 class Participants(Enum):
     """What a barrier covers in hardware, as opposed to who must arrive.
 
@@ -523,6 +527,11 @@ class Participants(Enum):
     """
 
     WAVE = 'wave'            # the hardware wave, whatever the multiplication is
+    # Four consecutive warps of the block, the first of them a multiple of
+    # four: what NVIDIA's `wgmma` instructions execute together (PTX ISA,
+    # "Asynchronous Warpgroup Level Matrix Multiply-Accumulate Instructions",
+    # sm_90a).  A collective of the matrix engine, not a barrier's.
+    WARPGROUP = 'warpgroup'
     MULT = 'mult'            # exactly the threads of one multiplication
     MULTGROUP = 'multgroup'  # the multiplications that share a wave
     BLOCK = 'block'
@@ -537,10 +546,20 @@ class Participants(Enum):
         parts of one multiplication only, and group-uniformity where it is
         narrower, because the wave then holds several and all of them have to
         arrive.
+
+        A warpgroup holds parts of one multiplication only where the
+        multiplication is a whole number of warpgroups: its threads start a
+        warpgroup and end one.  Anywhere else a warpgroup holds lanes of two
+        multiplications or of several, and only what the whole block agrees
+        on reaches all of them alike.
         """
         if self is Participants.WAVE:
             return (Uniformity.MULT if num_threads >= wave
                     else Uniformity.MULTGROUP)
+        if self is Participants.WARPGROUP:
+            return (Uniformity.MULT
+                    if num_threads % (WARPGROUP_WAVES * wave) == 0
+                    else Uniformity.BLOCK)
         return {Participants.MULT: Uniformity.MULT,
                 Participants.MULTGROUP: Uniformity.MULTGROUP,
                 Participants.BLOCK: Uniformity.BLOCK,
@@ -989,6 +1008,12 @@ class Op:
     # resource is, and named by the copy that goes through it (`desc`,
     # `pir.tensors`).
     TENSOR_DESC = 'tensor.desc'
+    # The descriptor NVIDIA's asynchronous matrix engines read an operand in
+    # shared memory through (`wgmma`, `tcgen05`): the buffer and the element
+    # its matrix starts at, and the layout the type states
+    # (`engines.MatrixDescType`).  Pure, as a resource is: it reads no
+    # memory, and the matrix op that goes through it declares the read.
+    MATRIX_DESC = 'matrix.desc'
     # Synchronization and ordering, each an entry of `engines.REGISTRY`,
     # which says what the passes may assume of it and how it is written.
     # `barrier` is the combined form: every participant of its object
@@ -1000,6 +1025,9 @@ class Op:
     FENCE = 'fence'                 # order the schedule, memory, or both
     WAIT_COUNTER = 'wait.counter'   # wait on a hardware completion counter
     SET_PRIORITY = 'set.priority'   # the wave's issue priority from here on
+    # Close what an asynchronous engine issued since its last commit into one
+    # group, which the engine's own completion counts: `wgmma.commit_group`.
+    COMMIT_GROUP = 'commit.group'
     # D = A * B + C on the fragments of a matrix engine, a collective of the
     # wave (`engines.MATRIX_ENGINES`): the fragments are values, D the
     # result -- or C itself, written in place, where the instruction

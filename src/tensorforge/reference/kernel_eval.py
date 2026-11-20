@@ -310,6 +310,138 @@ def _round_tf32(value: float) -> float:
     return struct.unpack('<f', struct.pack('<I', bits & 0xffffffff))[0]
 
 
+#: `uint64_t d = tensorforge::matrixDescriptor(&buf[i], 0x...ull);` (`cuda.h`):
+#: a shared-memory matrix descriptor, the operand's address and the bits of
+#: every other field (`engines.matrix_descriptor_bits`).
+_MATRIX_DESC = re.compile(
+    r'^(?:const\s+)?(?:std::)?uint64_t\s+(?P<name>\w+)\s*=\s*'
+    r'tensorforge::matrixDescriptor\s*\(\s*&\s*(?P<buf>\w+)\s*\[(?P<idx>.*)\]'
+    r'\s*,\s*(?P<layout>0x[0-9a-fA-F]+)ull\s*\)$')
+_WGMMA_FENCE = re.compile(r'^tensorforge::wgmmaFence\s*\(\s*\)$')
+_WGMMA_COMMIT = re.compile(r'^tensorforge::wgmmaCommit\s*\(\s*\)$')
+_WGMMA_WAIT = re.compile(
+    r'^tensorforge::wgmmaWait\s*<\s*(?P<pending>\d+)\s*>\s*\(\s*\)$')
+_PROXY_FENCE = re.compile(r'^tensorforge::fenceProxyAsync\s*\(\s*\)$')
+#: An operand fence (`engines.operand_fence`): an empty volatile asm that
+#: only tells the compiler what it may not move, nothing to execute.
+_OPERAND_FENCE = re.compile(r'^asm\s+volatile\s*\(\s*""\s*:')
+#: The instruction of a `wgmma.mma_async`: the shape, the types of D, A, B.
+_WGMMA_NAME = re.compile(
+    r'wgmma\.mma_async\.sync\.aligned\.m(?P<m>\d+)n(?P<n>\d+)k(?P<k>\d+)'
+    r'\.(?P<d>\w+)\.(?P<a>\w+)\.(?P<b>\w+)\s+(?P<ops>[^;]*);')
+
+
+class _MatrixDesc(NamedTuple):
+    """A shared-memory matrix descriptor as a lane holds it: where its
+    operand starts, and the bits of its other fields."""
+    start: 'Ptr'
+    layout: int
+
+
+class _Wgmma(NamedTuple):
+    """One `wgmma.mma_async` statement: the shape, A's type, the operand
+    expressions of D, of A (one descriptor, or registers), of B's
+    descriptor, and `scale-d` -- the literal, or the expression of the
+    register the predicate is set from."""
+    m: int
+    n: int
+    k: int
+    atype: str
+    d: Tuple[str, ...]
+    a: Tuple[str, ...]
+    a_desc: bool
+    b: str
+    scale: str
+
+
+class _InFlight:
+    """What a register holds while a wgmma that writes it is in flight:
+    nothing a thread may read.  The product's value lands in it at the wait
+    that retires its group (`Interp._wgmma_wait`); before that the PTX ISA
+    leaves an access undefined ("wgmma.mma_async": accessing the
+    accumulator registers ... without first performing a wgmma.wait_group
+    ... is undefined behavior), and every use of this raises."""
+
+    __slots__ = ('name',)
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def _refuse(self, *args):
+        raise Abort(f'{self.name} read while a wgmma has it in flight, ahead '
+                    f'of the wait that retires it')
+
+    __add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = _refuse
+    __truediv__ = __rtruediv__ = __neg__ = __pos__ = __abs__ = _refuse
+    __float__ = __int__ = __index__ = __bool__ = _refuse
+    __lt__ = __le__ = __gt__ = __ge__ = _refuse
+
+    def __repr__(self):
+        return f'<{self.name} in flight>'
+
+
+def _wgmma_statement(stmt: str) -> Optional[_Wgmma]:
+    """`stmt` as a `wgmma.mma_async`, or None where it is something else.
+
+    The inline-asm form `engines._lower_wgmma` writes: a template naming
+    the instruction with D's registers in braces, then A -- one placeholder
+    for a descriptor, braces for registers --, B's descriptor, and
+    `scale-d`, the literal or the predicate a `setp` ahead of it sets from
+    an operand; then the outputs and the inputs, each a constraint and an
+    expression.  The immediate scales of A and B are 1: TF32 is not negated."""
+    head = re.match(r'^asm\s*(?:volatile\s*)?\(', stmt)
+    if head is None or 'wgmma.mma_async' not in stmt or not stmt.endswith(')'):
+        return None
+    parts = _top_level(stmt[head.end():-1], ':')
+    if len(parts) not in (3, 4):
+        raise Abort(f'wgmma without outputs and inputs: {stmt!r}')
+    template = ''.join(re.findall(r'"([^"]*)"', parts[0])).replace('\\n', '\n')
+    name = _WGMMA_NAME.search(template)
+    if name is None:
+        raise Abort(f'wgmma of a form not modeled: {template!r}')
+    operands = []
+    for text in parts[1:3]:
+        for operand in _top_level(text, ','):
+            if not operand.strip():
+                continue
+            om = re.match(r'^\s*"(?P<con>[^"]*)"\s*\((?P<expr>.*)\)\s*$',
+                          operand, re.S)
+            if om is None:
+                raise Abort(f'wgmma operand {operand!r}')
+            operands.append(om.group('expr').strip())
+    fields = [f.strip() for f in _top_level(
+        re.sub(r'\{([^}]*)\}', lambda mo: '{' + mo.group(1).replace(',', ' ')
+               + '}', name.group('ops')), ',')]
+    if len(fields) != 6 or fields[4:] != ['1', '1']:
+        raise Abort(f'wgmma operands not modeled: {name.group("ops")!r}')
+
+    def group(text):
+        return tuple(operands[int(p)] for p in re.findall(r'%(\d+)', text))
+    scale = fields[3]
+    if scale == 'p':
+        setp = re.search(r'setp\.ne\.b32\s+p\s*,\s*%(\d+)\s*,\s*0\s*;',
+                         template)
+        if setp is None:
+            raise Abort(f'wgmma predicate set by nothing modeled: {template!r}')
+        scale = operands[int(setp.group(1))]
+    elif scale not in ('0', '1'):
+        raise Abort(f'wgmma scale-d {scale!r}')
+    a_desc = not fields[1].startswith('{')
+    a = group(fields[1])
+    b = group(fields[2])
+    if len(b) != 1:
+        raise Abort(f'wgmma B of {len(b)} operands: {stmt!r}')
+    return _Wgmma(int(name.group('m')), int(name.group('n')),
+                  int(name.group('k')), name.group('a'), group(fields[0]),
+                  a, a_desc, b[0], scale)
+
+
+#: The swizzle a wgmma descriptor's two top bits state, in bytes (PTX ISA,
+#: wgmma's "Matrix Descriptor Format": 0 none, 1 128-byte, 2 64-byte,
+#: 3 32-byte).
+_WGMMA_SWIZZLE = {0: 0, 1: 128, 2: 64, 3: 32}
+
+
 class _Cursor(NamedTuple):
     """A lane's `tensorforge::BulkCursor`: which one, whether this lane
     issues the copies through it, and the barrier they complete on.
@@ -383,6 +515,9 @@ class Slot:
         return self.data[key]
 
     def write(self, base: str, idx: int, value) -> None:
+        if isinstance(value, _InFlight):
+            # A store reads the register it stores (`_InFlight`).
+            value._refuse()
         if self.tracker is not None and base == Races.SHARED:
             self.tracker.write(int(idx))
         self.data[(base, int(idx))] = value
@@ -1293,6 +1428,14 @@ class Interp:
         self.lane = getattr(self.env.get('threadIdx'), 'x', 0)
         #: The CTA ids a launch-control queue hands this block (`_LaunchCursor`).
         self.launches: Tuple[int, ...] = ()
+        #: wgmma products this lane issued and no commit closed yet, the
+        #: groups committed and not retired (oldest first), and the value
+        #: each register written by one in flight will hold, with how many
+        #: products in flight write it (`_wgmma`, `_wgmma_wait`).
+        self.wg_open: List[Tuple] = []
+        self.wg_groups: List[List[Tuple]] = []
+        self.wg_pending: Dict[Any, float] = {}
+        self.wg_writers: Dict[Any, int] = {}
         #: Element size per pointer name, from the type in its declaration.
         #: An async copy is measured in bytes and the memory here is untyped,
         #: so this is the only place the two can be reconciled.
@@ -1553,6 +1696,199 @@ class Interp:
                 self.env[text] = value
             else:
                 raise Abort(f'mma.sync writes {text!r}')
+
+    def _register(self, text: str):
+        """The register an operand expression names: a variable, or an
+        element of an array -- as a key, and how to write it."""
+        am = re.match(r'^(\w+)\s*\[(.*)\]$', text)
+        if am:
+            return (am.group(1), int(self.ev(am.group(2))))
+        if re.match(r'^\w+$', text):
+            return text
+        raise Abort(f'wgmma writes {text!r}')
+
+    def _store_register(self, key, value) -> None:
+        if isinstance(key, tuple):
+            self.env[key[0]][key[1]] = value
+        else:
+            self.env[key] = value
+
+    def _wgmma_current(self, text: str):
+        """What a product reads of the register `text` as C: the value a
+        product in flight will leave there, where one writes it -- products
+        of one shape accumulate in their order -- and its own value
+        otherwise."""
+        key = self._register(text)
+        if key in self.wg_pending:
+            return self.wg_pending[key]
+        return self.ev(text)
+
+    @staticmethod
+    def _descriptor_operand(lanes, text: str, rows: int, k: int,
+                            what: str, stmt: str):
+        """The `rows` x `k` operand the descriptor `text` names, as the
+        warpgroup's lanes hold it -- alike, or the instruction has none to
+        read -- from shared memory, by the canonical K-major layout its bits
+        state (PTX ISA, "Asynchronous Warpgroup Level Matrix Shared Memory
+        Layout" and "Matrix Descriptor Format"): core matrices of eight rows
+        of 16 bytes, the leading byte offset (bits 16 to 29, in 16-byte
+        units) between those next to each other along K and the stride byte
+        offset (bits 32 to 45) between those next to each other along the
+        rows; swizzled (bits 62 and 63), atoms of eight rows of 32, 64 or
+        128 bytes, K along a row and the stride byte offset between atoms,
+        each address's 16-byte chunk XORed with its row in the atom.  An
+        element is four bytes, a TF32 operand read as the instruction reads
+        it (`_tf32`), at the address its slot has with the buffer at 0 --
+        the operand is placed on its atom.  Returns the matrix and the
+        slots read, for the check where the product is retired."""
+        descs = [it.ev(text) for it in lanes.values()]
+        first = descs[0]
+        if not isinstance(first, _MatrixDesc):
+            raise Abort(f'wgmma {what} through no descriptor: {stmt!r}')
+        if any(not isinstance(d, _MatrixDesc) or d.layout != first.layout
+               or d.start.base != first.start.base
+               or d.start.off != first.start.off for d in descs):
+            raise Abort(f'the warpgroup\'s lanes hold different descriptors '
+                        f'of {what}: {stmt!r}')
+        layout = first.layout
+        lbo = ((layout >> 16) & 0x3FFF) << 4
+        sbo = ((layout >> 32) & 0x3FFF) << 4
+        swizzle = _WGMMA_SWIZZLE[(layout >> 62) & 3]
+        if (layout >> 49) & 7 or layout & 0x3FFF:
+            raise Abort(f'wgmma {what}: a descriptor with a base offset or '
+                        f'an address in its layout: {stmt!r}')
+        bits = {0: 0, 32: 1, 64: 2, 128: 3}[swizzle]
+        size = 4
+        start = first.start.off * size
+        matrix = [[0.0] * k for _ in range(rows)]
+        reads = []
+        for r in range(rows):
+            for x in range(k):
+                kb = x * size
+                if swizzle:
+                    if kb >= swizzle:
+                        raise Abort(f'wgmma {what}: K of {k} past a row of '
+                                    f'{swizzle} bytes')
+                    off = (r // 8) * sbo + (r % 8) * swizzle + kb
+                else:
+                    off = (r // 8) * sbo + (kb // 16) * lbo + (r % 8) * 16 \
+                        + kb % 16
+                address = start + off
+                address ^= ((address >> 7) & ((1 << bits) - 1)) << 4
+                slot = address // size
+                value = first.start.mem.read(first.start.base, slot)
+                reads.append((first.start.base, slot, value))
+                matrix[r][x] = _tf32(value)
+        return matrix, reads
+
+    def _wgmma(self, wg: _Wgmma, stmt: str) -> None:
+        """One `wgmma.mma_async`, for the warpgroup this lane is in: the
+        four warps of 128 consecutive threads of the block.
+
+        Evaluated once per statement and warpgroup, from the operands every
+        lane holds before any of them has executed it
+        (`Lockstep.wave_cache`); a warpgroup that is not whole at the
+        statement aborts: the instruction is `.aligned`.  The layouts are
+        PTX's, stated here from the ISA rather than taken from the emitter
+        (PTX ISA, "wgmma ... Register Fragments"): lane `l` of warp `w` of
+        the warpgroup is `g = l / 4` and `t = l % 4`; register `i` of D
+        holds row `16 w + g + 8 ((i % 4) / 2)`, column `8 (i / 4) + 2 t +
+        i % 2`; register `i` of A, where A is in registers, row `16 w + g +
+        8 (i % 2)`, column `t + 4 (i / 2)`.  A and B in shared memory are
+        read through their descriptors (`_descriptor_operand`), B as its N
+        rows of K.  `scale-d` 0 makes D = A * B, 1 makes D = A * B + D.
+
+        Nothing is written here: the products of each lane are noted as in
+        flight, its D registers then hold nothing readable (`_InFlight`),
+        and the values land at the wait that retires the group the commit
+        closed them into (`_wgmma_wait`).  What they read is checked
+        unchanged there."""
+        run = self.lockstep
+        if run is None:
+            raise Abort(f'wgmma outside a lockstep run: {stmt!r}')
+        team = self.lane // 128
+        key = ('wgmma', team, stmt)
+        cached = run.wave_cache.get(key)
+        if cached is None:
+            lanes = {it.lane % 128: it for it in run.current
+                     if it.lane // 128 == team}
+            if len(lanes) != 128:
+                raise Abort(f'wgmma with {len(lanes)} lanes of the warpgroup '
+                            f'taking part')
+            m, n, k = wg.m, wg.n, wg.k
+            if ((m, k) != (64, 8) or n % 8 or not 8 <= n <= 256
+                    or wg.atype != 'tf32' or len(wg.d) != n // 2
+                    or (not wg.a_desc and len(wg.a) != 4)):
+                raise Abort(f'wgmma of a shape not modeled: {stmt!r}')
+            reads = []
+            if wg.a_desc:
+                A, got = self._descriptor_operand(lanes, wg.a[0], m, k, 'A',
+                                                  stmt)
+                reads += got
+            else:
+                A = [[0.0] * k for _ in range(m)]
+                for l, it in lanes.items():
+                    w, g, t = l // 32, (l % 32) // 4, l % 4
+                    for i, text in enumerate(wg.a):
+                        A[16 * w + g + 8 * (i % 2)][t + 4 * (i // 2)] = \
+                            _tf32(it.ev(text))
+            B, got = self._descriptor_operand(lanes, wg.b, n, k, 'B', stmt)
+            reads += got
+            scales = {bool(it.ev(wg.scale)) for it in lanes.values()}
+            if len(scales) != 1:
+                raise Abort(f'the warpgroup\'s lanes disagree on scale-d: '
+                            f'{stmt!r}')
+            accumulate = scales.pop()
+            result = {}
+            for l, it in lanes.items():
+                w, g, t = l // 32, (l % 32) // 4, l % 4
+                out = []
+                for i, text in enumerate(wg.d):
+                    r = 16 * w + g + 8 * ((i % 4) // 2)
+                    c = 8 * (i // 4) + 2 * t + i % 2
+                    value = sum(A[r][x] * B[c][x] for x in range(k))
+                    if accumulate:
+                        value = it._wgmma_current(text) + value
+                    out.append(value)
+                a_regs = () if wg.a_desc else tuple(
+                    (text, it.ev(text)) for text in wg.a)
+                result[l] = (out, a_regs)
+            cached = (result, tuple(reads))
+            run.wave_cache[key] = cached
+        result, reads = cached
+        values, a_regs = result[self.lane % 128]
+        written = []
+        for text, value in zip(wg.d, values):
+            reg = self._register(text)
+            self.wg_pending[reg] = value
+            self.wg_writers[reg] = self.wg_writers.get(reg, 0) + 1
+            self._store_register(reg, _InFlight(text))
+            written.append(reg)
+        self.wg_open.append((tuple(written), a_regs, reads, stmt))
+
+    def _wgmma_wait(self, pending: int, stmt: str) -> None:
+        """`wgmma.wait_group N` for this lane: every group but the `N` most
+        recent ones retired, oldest first -- the values their products
+        leave land in the registers no product still in flight writes, and
+        what each read is checked unchanged, its A registers and the slots
+        of shared memory it read through its descriptors: a write of them
+        ahead of the wait is a race with the engine."""
+        mem = self.mem
+        while len(self.wg_groups) > pending:
+            for written, a_regs, reads, issued in self.wg_groups.pop(0):
+                for base, slot, value in reads:
+                    if not _same(mem.read(base, slot), value):
+                        raise Abort(f'{base}[{slot}] written while the wgmma '
+                                    f'reading it is in flight: {issued!r}')
+                for text, value in a_regs:
+                    if not _same(self.ev(text), value):
+                        raise Abort(f'{text} written while the wgmma reading '
+                                    f'it as A is in flight: {issued!r}')
+                for reg in written:
+                    self.wg_writers[reg] -= 1
+                    if not self.wg_writers[reg]:
+                        del self.wg_writers[reg]
+                        self._store_register(reg, self.wg_pending.pop(reg))
 
     def ev(self, expr: str):
         self.budget -= 1
@@ -1829,6 +2165,33 @@ class Interp:
         mma = _mma_statement(stmt)
         if mma is not None:
             self._mma(mma, stmt)
+            return
+        wg = _wgmma_statement(stmt)
+        if wg is not None:
+            self._wgmma(wg, stmt)
+            return
+        md = _MATRIX_DESC.match(stmt)
+        if md:
+            start = self.ev(md.group('buf'))
+            if not isinstance(start, Ptr):
+                raise Abort(f'a matrix descriptor of no buffer: {stmt!r}')
+            self.env[md.group('name')] = _MatrixDesc(
+                start + int(self.ev(md.group('idx'))),
+                int(md.group('layout'), 16))
+            return
+        if _WGMMA_FENCE.match(stmt) or _PROXY_FENCE.match(stmt) or \
+                _OPERAND_FENCE.match(stmt):
+            # Orderings the lanes here keep anyway: they run statement by
+            # statement, and what a product reads is read where it is
+            # issued -- and checked unchanged where it is retired.
+            return
+        if _WGMMA_COMMIT.match(stmt):
+            self.wg_groups.append(self.wg_open)
+            self.wg_open = []
+            return
+        ww = _WGMMA_WAIT.match(stmt)
+        if ww:
+            self._wgmma_wait(int(ww.group('pending')), stmt)
             return
         sp = _SPLIT_TF32.match(stmt)
         if sp:

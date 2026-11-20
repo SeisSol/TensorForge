@@ -143,11 +143,24 @@ class FenceKind(Enum):
     vISA's software fence, and a `__syncwarp()` where it stands for "ptxas
     moves no load across here".  `MEMORY` orders the memory accesses of the
     threads its scope holds.  `BOTH` is the two at once.
+
+    `REGISTERS` orders the accesses of the registers it names by the threads
+    against those of an asynchronous matrix engine (`engine`) that reads and
+    writes them, in the compiler's schedule and in the hardware:
+    `wgmma.fence`, ahead of a product whose accumulator or A fragment
+    anything else touched (PTX ISA, "wgmma.fence").  `PROXY` orders the
+    accesses of shared memory through the generic proxy -- an ordinary load
+    or store -- against those through the async proxy -- a bulk or tensor
+    copy, a matrix engine reading an operand through its descriptor
+    (`fence.proxy.async.shared::cta`, PTX ISA, "membar/fence", ISA 8.0,
+    sm_90).
     """
 
     SCHEDULE = 'schedule'
     MEMORY = 'memory'
     BOTH = 'both'
+    REGISTERS = 'registers'
+    PROXY = 'proxy'
 
 
 # --------------------------------------------------------------------------- #
@@ -1119,9 +1132,66 @@ def _memory_fence(s: Stmt, env: Spelling) -> Lowered:
                   f'{env.family or "no target"}')
 
 
+def _register_fence(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.fence` (PTX ISA, "wgmma.fence", sm_90a), behind the operand
+    fence over the registers it orders: the threads' accesses of them ahead
+    of it, in the compiler's schedule and in the hardware, before any
+    product the warpgroup issues behind it reads or writes them."""
+    engine = s.attr('engine')
+    if engine != 'wgmma' or env.family != 'cuda':
+        raise IRError(f'a fence of the registers of {engine!r} on '
+                      f'{env.family or "no target"}: wgmma\'s, on CUDA')
+    _wgmma_available(env)
+    registers = [v for v in s.args if isinstance(v, Value)]
+    lines = (operand_fence(registers, env.name),) if registers else ()
+    return Lowered(lines + ('tensorforge::wgmmaFence();',))
+
+
+def _proxy_fence(s: Stmt, env: Spelling) -> Lowered:
+    """`fence.proxy.async.shared::cta` (PTX ISA, "membar/fence", ISA 8.0,
+    sm_90): what the threads of the block wrote to shared memory through the
+    generic proxy, visible to what reads it through the async proxy behind
+    it -- a matrix engine through a descriptor, a bulk or tensor copy --
+    and the other way round.  CUDA from sm_90 on."""
+    if env.family != 'cuda':
+        raise IRError(f'a fence of the async proxy on '
+                      f'{env.family or "no target"}: CUDA has one')
+    level = env.hw.sm_level() if env.hw is not None else None
+    if level is not None and level < 90:
+        raise IRError(f'a fence of the async proxy on {env.model}: sm_90 '
+                      f'and newer have one')
+    return Lowered(('tensorforge::fenceProxyAsync();',))
+
+
+def _check_fence(s: Stmt) -> List[str]:
+    """A fence of registers names the engine whose accesses it orders and
+    declares a read and a write of each register it names; no other fence
+    names an operand."""
+    kind = s.attr('kind')
+    registers = [v for v in s.args if isinstance(v, Value)]
+    if kind is not FenceKind.REGISTERS:
+        return [f'{s.op}: a {getattr(kind, "value", kind)} fence names no '
+                f'operands'] if s.args else []
+    diag = []
+    if s.attr('engine') not in GROUP_ENGINES:
+        diag.append(f'{s.op}: a fence of the registers of '
+                    f'{s.attr("engine")!r}')
+    if len(registers) != len(s.args) or [a.base for a in s.accesses] != \
+            registers or any(a.space != MemSpace.REGISTER
+                             or a.kind != Effect.READ | Effect.WRITE
+                             for a in s.accesses):
+        diag.append(f'{s.op}: a fence of registers without a read and a '
+                    f'write of each')
+    return diag
+
+
 def _lower_fence(s: Stmt, env: Spelling) -> Lowered:
     kind = s.attr('kind')
     mask = s.attr('mask')
+    if kind is FenceKind.REGISTERS:
+        return _register_fence(s, env)
+    if kind is FenceKind.PROXY:
+        return _proxy_fence(s, env)
     if env.family == 'esimd' and mask is not None and s.attr('group') is None:
         # vISA's fence bits say what it orders, whichever kind the fence
         # was asked for as (`Options.esimd_unroll_fence`).
@@ -1165,6 +1235,8 @@ def _lower_wait_counter_cuda(s: Stmt, env: Spelling) -> Lowered:
     """`cp.async.wait_group`: at most `count` commit groups in flight, as
     the copies' own wait spells it (`Lexic.wait_async`)."""
     counter, count = s.attr('counter'), s.attr('count')
+    if counter == 'wgmma':
+        return _wait_wgmma(s, env)
     if counter != 'group' or env.lexic is None:
         raise IRError(f'no {counter} counter to wait on under CUDA')
     return Lowered((env.lexic.wait_async(count),))
@@ -1267,16 +1339,158 @@ def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
 # Matrix engines
 # --------------------------------------------------------------------------- #
 
+class Source(Enum):
+    """Where a matrix engine reads an operand from, or keeps D.
+
+    `REGISTER`: the fragment's registers, as every synchronous engine takes
+    them.  `SHARED`: shared memory, through one descriptor
+    (`MatrixDescType`, `Op.MATRIX_DESC`) -- wgmma's B always, its A where A
+    is not in registers -- whose read the matrix op declares, since the
+    descriptor reads nothing.  `TMEM`: NVIDIA's tensor memory (tcgen05), by
+    its address.
+    """
+
+    REGISTER = 'register'
+    SHARED = 'shared'
+    TMEM = 'tmem'
+
+
+#: The swizzles a matrix descriptor states, in bytes: the width of the rows
+#: of an atom of eight rows, whose 16-byte chunks are permuted by the row's
+#: place in the atom (`swizzled`) -- and 0 for none.
+SWIZZLE_BYTES = (0, 32, 64, 128)
+
+#: The formats of a matrix descriptor: wgmma's (sm_90a) and tcgen05's
+#: (sm_100a), which differ in a fixed field and in how a swizzle is
+#: numbered (`matrix_descriptor_bits`).
+DESC_FORMATS = ('wgmma', 'tcgen05')
+
+#: The swizzle field of each format, by the swizzle in bytes: wgmma's two
+#: bits from bit 62, tcgen05's three from bit 61 (PTX ISA, wgmma's "Matrix
+#: Descriptor Format" and tcgen05's "Shared Memory Descriptor").
+_SWIZZLE_FIELD = {'wgmma': ({0: 0, 128: 1, 64: 2, 32: 3}, 62),
+                  'tcgen05': ({0: 0, 128: 2, 64: 4, 32: 6}, 61)}
+
+
+@dataclass(frozen=True)
+class MatrixDescType:
+    """The type of a shared-memory matrix descriptor (`Op.MATRIX_DESC`):
+    the 64 bits NVIDIA's asynchronous matrix engines read an operand through,
+    where it starts and how it is laid out (PTX ISA, "Asynchronous
+    Warpgroup Level Matrix Shared Memory Layout" and its "Matrix Descriptor
+    Format"; tcgen05's "Shared Memory Descriptor").
+
+    The layout is a canonical one, K-major -- K contiguous in each row of M
+    or N -- and built of core matrices of eight rows of 16 bytes of K.
+    Without a swizzle a core matrix is 128 contiguous bytes, its rows 16
+    apart; `lbo`, the leading byte offset, is between the core matrices next
+    to each other along K, and `sbo`, the stride byte offset, between those
+    next to each other along M or N.  With a swizzle (`swizzle`: 32, 64 or
+    128 bytes) the eight rows of an atom are `swizzle` bytes each, K along
+    them, and their 16-byte chunks are permuted by the row's place in the
+    atom; `sbo` is between atoms along M or N, and `lbo` is not read for a
+    product whose K fits a row (16, its field 1, is what the prototypes
+    gave).  Which of the two offsets is which was settled on the hardware:
+    the swapped reading computed garbage on GH200 and on GB200
+    (`~/tf-probe/tcgen05`, `wg_selftest`, `gemm56`).
+
+    `elem` is the element the operand holds; `form` the engine whose format
+    the bits are in (`DESC_FORMATS`).  Like a resource, no part of what a
+    lane computes with: a 64-bit value every lane of the collective holds
+    alike.
+    """
+
+    elem: Any
+    swizzle: int = 0
+    lbo: int = 0
+    sbo: int = 0
+    form: str = 'wgmma'
+
+    def __post_init__(self):
+        if self.swizzle not in SWIZZLE_BYTES:
+            raise IRError(f'a matrix descriptor swizzles {self.swizzle!r} '
+                          f'bytes; there are {SWIZZLE_BYTES}')
+        if self.form not in DESC_FORMATS:
+            raise IRError(f'a matrix descriptor of the format {self.form!r}; '
+                          f'there are {DESC_FORMATS}')
+        for name in ('lbo', 'sbo'):
+            value = getattr(self, name)
+            if (not isinstance(value, int) or value < 0 or value % 16
+                    or value >> 4 >= 1 << 14):
+                raise IRError(f'a matrix descriptor with {name} {value!r}: a '
+                              f'multiple of 16 bytes below {16 << 14}')
+
+    def __repr__(self):
+        swz = f', sw{self.swizzle}' if self.swizzle else ''
+        return (f'mdesc<{self.elem}, {self.form}{swz}, lbo {self.lbo}, '
+                f'sbo {self.sbo}>')
+
+
+def matrix_descriptor_bits(desc: MatrixDescType) -> int:
+    """Every bit of a descriptor of `desc` but the start address, which the
+    device fills in from the operand's place (`tensorforge::
+    matrixDescriptor`, bits 0 to 13, the address in 16-byte units).
+
+    The leading and the stride byte offset in 16-byte units from bit 16 and
+    from bit 32, and the swizzle at the top (`_SWIZZLE_FIELD`); tcgen05's
+    format besides holds the constant 0b001 from bit 46.  The base offset,
+    bits 49 to 51, is zero: a swizzled operand starts on the alignment of
+    its atom (`swizzle_alignment`), where the pattern starts."""
+    field, shift = _SWIZZLE_FIELD[desc.form]
+    bits = (((desc.lbo >> 4) & 0x3FFF) << 16
+            | ((desc.sbo >> 4) & 0x3FFF) << 32
+            | field[desc.swizzle] << shift)
+    if desc.form == 'tcgen05':
+        bits |= 1 << 46
+    return bits
+
+
+def swizzle_alignment(swizzle: int) -> int:
+    """Bytes a swizzled operand starts on: the eight rows of its atom, over
+    which the permutation repeats -- 256, 512 and 1024 for 32, 64 and 128
+    bytes; 16 without a swizzle, the unit of the start address."""
+    return 8 * swizzle if swizzle else 16
+
+
+def swizzled(address: int, swizzle: int) -> int:
+    """`address` as a swizzle of `swizzle` bytes permutes it: the 16-byte
+    chunk -- bits 4 on -- XORed with the row of the atom -- bits 7 on --
+    one, two or three bits of each for 32, 64 and 128 bytes.  On the address
+    as the hardware forms it, so an operand starts on `swizzle_alignment`.
+    The same for a matrix engine reading through a descriptor and for a
+    tensor copy writing the tile."""
+    if not swizzle:
+        return address
+    bits = {32: 1, 64: 2, 128: 3}[swizzle]
+    return address ^ (((address >> 7) & ((1 << bits) - 1)) << 4)
+
+
+def descriptor_offset(desc: MatrixDescType, row: int, k: int) -> int:
+    """Bytes past the start of an operand laid out as `desc` states where
+    its element (`row`, `k`) is -- `row` along M or N, `k` along K -- before
+    the swizzle, which the hardware applies to the address (`swizzled`)."""
+    kb = k * desc.elem.size()
+    if not desc.swizzle:
+        return ((row // 8) * desc.sbo + (kb // 16) * desc.lbo
+                + (row % 8) * 16 + kb % 16)
+    return (row // 8) * desc.sbo + (row % 8) * desc.swizzle + kb
+
+
 def asm_text(template: str, operands: Sequence[Tuple[str, Any]],
-             name: Callable) -> str:
+             name: Callable, volatile: bool = False) -> str:
     """Inline assembly: `template`, then the outputs and the inputs of
     `operands` -- `(constraint, value)`, outputs first, which is how the
-    assembler numbers them -- each value spelled by `name`."""
+    assembler numbers them -- each value spelled by `name`.
+
+    `volatile` for an instruction whose order among the others of its kind
+    the compiler has to keep, and which it must neither fold nor drop: an
+    asynchronous one, whose effect the operands do not state."""
     outs = ', '.join(f'"{c}"({name(v)})' for c, v in operands
                      if c.startswith(('=', '+')))
     ins = ', '.join(f'"{c}"({name(v)})' for c, v in operands
                     if not c.startswith(('=', '+')))
-    return f'asm({template}\n: {outs}\n: {ins}\n);'
+    head = 'asm volatile(' if volatile else 'asm('
+    return f'{head}{template}\n: {outs}\n: {ins}\n);'
 
 
 def fragments(s: Stmt) -> Tuple[Tuple[Any, ...], Tuple[Any, ...],
@@ -1350,6 +1564,12 @@ class MatrixEngine:
     told the flops of).  ``pipe`` is the category `analysis.pipeline`
     counts the issue under, a function of the statement where the price is
     one of the shape.  ``spell`` writes the statement.
+
+    ``completes`` is how the completion of a product is observed: on issue
+    for the synchronous engines, by group for wgmma -- closed by
+    `COMMIT_GROUP` and waited for by `WAIT_COUNTER` on the engine's counter
+    (`GROUP_ENGINES`).  ``sources`` are where it may take A, B and C from,
+    each a tuple of `Source`s.
     """
 
     name: str
@@ -1359,6 +1579,9 @@ class MatrixEngine:
     spell: Lowering
     doc: str = ''
     hazards: Tuple[Hazard, ...] = ()
+    completes: Completion = Completion.SYNC
+    sources: Tuple[Tuple['Source', ...], ...] = (
+        (Source.REGISTER,), (Source.REGISTER,), (Source.REGISTER,))
 
 
 def _matrix(s: Stmt) -> str:
@@ -1401,6 +1624,159 @@ def _lower_mfma(s: Stmt, env: Spelling) -> Lowered:
 
 def _other(s: Stmt) -> str:
     return 'other'
+
+
+def sources_of(s: Stmt) -> Tuple[Source, Source, Source]:
+    """Where a `MATRIX_MAC` takes A, B and C from: its `sources`, or the
+    registers where it states none -- every synchronous engine's."""
+    return s.attr('sources') or (Source.REGISTER,) * 3
+
+
+#: The PTX type of a `wgmma` operand, by what it holds.
+_WGMMA_TYPES = {Datatype.TF32: 'tf32', Datatype.F32: 'f32'}
+
+#: The macro nvcc defines compiling for sm_90a, and only then: not for the
+#: `compute_90` PTX that `-arch=sm_90a` builds besides, where ptxas refuses
+#: every wgmma instruction (CUDA 13.4).  The product is written inside it,
+#: and the fence, the commit and the wait trap outside it (`cuda.h`), so a
+#: build of either kind compiles and none runs a kernel without them.
+WGMMA_FEATURE = '__CUDA_ARCH_FEAT_SM90_ALL'
+
+#: The N a TF32 `wgmma` takes: 8 to 256 in steps of 8 (PTX ISA,
+#: "wgmma.mma_async", the shapes of `.tf32`).
+WGMMA_N = tuple(range(8, 257, 8))
+
+
+def wgmma_name(shape: Tuple[int, int, int],
+               types: Tuple[Any, Any, Any, Any]) -> str:
+    """The `wgmma.mma_async` instruction of `shape` (m, n, k) over `types`
+    (A, B, C, D): `.dtype.atype.btype` behind the shape (PTX ISA,
+    "wgmma.mma_async", ISA 8.0, sm_90a)."""
+    m, n, k = shape
+    a, b, _, d = types
+    return (f'wgmma.mma_async.sync.aligned.m{m}n{n}k{k}.'
+            f'{_WGMMA_TYPES[d]}.{_WGMMA_TYPES[a]}.{_WGMMA_TYPES[b]}')
+
+
+def wgmma_refusal(s: Stmt) -> Optional[str]:
+    """Why `s` is no `wgmma` this lowering writes, or None.
+
+    TF32 operands into an FP32 accumulator, which is what the F32 paths
+    multiply (3xTF32), at m64nNk8: N a multiple of 8 up to 256.  D is N / 2
+    registers a lane -- the warpgroup's 128 lanes hold the 64 x N tile --
+    and A, where it is in registers, four (64 x 8 over 128 lanes).  A
+    descriptor is one operand.  The one scalar operand is `scale-d`: 0
+    writes D = A * B, 1 adds to what D holds; a value of either, or the
+    literal.  TF32 is K-major in both operands, so there is no transpose to
+    state, and the immediate scales of A and B are 1."""
+    shape, types = s.attr('shape'), s.attr('types')
+    if tuple(types or ()) != (Datatype.TF32, Datatype.TF32, Datatype.F32,
+                              Datatype.F32):
+        return (f'a wgmma over {types!r}: TF32 operands into an FP32 '
+                f'accumulator are written here')
+    if not (isinstance(shape, tuple) and len(shape) == 3 and shape[0] == 64
+            and shape[1] in WGMMA_N and shape[2] == 8):
+        return f'a wgmma of shape {shape!r}: m64nNk8, N in 8, 16, ..., 256'
+    a, b, c = fragments(s)
+    src_a, src_b, src_c = sources_of(s)
+    if src_b is not Source.SHARED or src_c is not Source.REGISTER:
+        return 'a wgmma takes B from shared memory and keeps D in registers'
+    if len(c) != shape[1] // 2:
+        return (f'{len(c)} registers of D for N = {shape[1]}: a lane holds '
+                f'{shape[1] // 2}')
+    if src_a is Source.REGISTER and len(a) != 4:
+        return f'{len(a)} registers of A, where a lane holds four'
+    scalars = s.args[len(a) + len(b) + len(c):]
+    if s.attr('scalars') != ('scale_d',) or len(scalars) != 1 or (
+            not isinstance(scalars[0], Value) and scalars[0] not in (0, 1)):
+        return (f'scale-d is one operand, 0 or 1 or a value of either, not '
+                f'{scalars!r}')
+    # The hardware takes the descriptors and scale-d from uniform registers
+    # (`gdesc[UR]`, `UPT` in the SASS of sm_90a): one value for the whole
+    # warpgroup, which a value of each lane is not.
+    shared = [v for frag, src in zip((a, b), (src_a, src_b))
+              if src is Source.SHARED for v in frag]
+    for v in shared + list(scalars):
+        if isinstance(v, Value) and v.uniformity <= Uniformity.LANE:
+            return (f'{v!r} differs between the lanes, and the warpgroup '
+                    f'takes one of it')
+    # And D is the lane's own: every lane holds other elements of it.  An
+    # accumulator declared the same in every lane is one a pass may take
+    # for that, as one of `mma.sync`'s once was (`nvidia.matmul`).
+    for v in c:
+        if not isinstance(v, Value) or v.uniformity > Uniformity.LANE:
+            return (f'{v!r} is a register of D, which differs between the '
+                    f'lanes, and is declared as one they agree on')
+    return None
+
+
+def _wgmma_available(env: Spelling) -> None:
+    """Refuse a target that has no wgmma: on CUDA, sm_90a alone
+    (`Target.wgmma`).  Without a target -- an IR-level test -- it is
+    written as it would be for one."""
+    if env.family not in ('cuda', ''):
+        raise IRError(f'wgmma has no spelling on {env.family}')
+    has = getattr(env.target, 'wgmma', None)
+    if callable(has) and not has():
+        raise IRError(f'wgmma on {env.model or "this target"}: sm_90a is the '
+                      f'target that has it')
+
+
+def _lower_wgmma(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.mma_async` as inline PTX (PTX ISA, "wgmma.mma_async", ISA
+    8.0, sm_90a): D read and written in place under `"+f"`, at `%0` on; A
+    through its descriptor (`"l"`) or in four 32-bit registers (`"r"`); B
+    through its descriptor; `scale-d` the literal where it is one, and
+    where it is a value a predicate set from it.
+
+    Volatile: the instruction reads shared memory through its descriptors,
+    which no operand states, and it is one of a sequence -- the fence ahead
+    of it, the commit and the wait behind -- whose order the compiler has
+    to keep; an `asm` that is not volatile may be moved across the others,
+    or two identical ones folded into one (as nvcc does with `mma.sync`).
+    Inside the guard of the target that has it (`WGMMA_FEATURE`)."""
+    if not s.attr('in_place'):
+        raise IRError('wgmma accumulates into its D registers: a MATRIX_MAC '
+                      'of it is in place')
+    _wgmma_available(env)
+    why = wgmma_refusal(s)
+    if why is not None:
+        raise IRError(why)
+    a, b, c = fragments(s)
+    scale = s.args[len(a) + len(b) + len(c)]
+    shared_a = sources_of(s)[0] is Source.SHARED
+    operands = ([('+f', v) for v in c]
+                + [('l' if shared_a else 'r', v) for v in a]
+                + [('l', v) for v in b])
+
+    def group(count: int, first: int) -> str:
+        return '{' + ', '.join(f'%{i + first}' for i in range(count)) + '}'
+
+    d = group(len(c), 0)
+    a_text = f'%{len(c)}' if shared_a else group(len(a), len(c))
+    b_text = f'%{len(c) + len(a)}'
+    name = wgmma_name(s.attr('shape'), s.attr('types'))
+    flag = scale if isinstance(scale, Value) else None
+
+    def spell(v):
+        # "r" takes 32 bits, and a flag is one byte: widened, the asm
+        # operand is the register `setp` tests (nvcc refuses the byte).
+        text = env.name(v)
+        return (f'static_cast<uint32_t>({text})'
+                if flag is not None and v is flag else text)
+
+    if flag is not None:
+        operands.append(('r', scale))
+        template = (f'"{{\\n.reg .pred p;\\nsetp.ne.b32 p, '
+                    f'%{len(operands) - 1}, 0;\\n"\n'
+                    f'"{name} "\n'
+                    f'"{d}, {a_text}, {b_text}, p, 1, 1;\\n}}"')
+    else:
+        template = (f'"{name} "\n'
+                    f'"{d}, {a_text}, {b_text}, {int(scale)}, 1, 1;"')
+    return Lowered((f'#if defined({WGMMA_FEATURE})',
+                    asm_text(template, operands, spell, volatile=True),
+                    '#endif'))
 
 
 #: The function the SPMD lowering's DPAS is written as
@@ -1463,7 +1839,22 @@ MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
                  "Intel's DPAS under the explicit vector (`xmx::dpas`): the "
                  'work-item issues it alone, the sub-group being its vector '
                  '(`primitives.intel`)'),
+    MatrixEngine('wgmma', Participants.WARPGROUP, True, _matrix,
+                 _lower_wgmma,
+                 "NVIDIA's asynchronous product of a warpgroup (sm_90a): A "
+                 'and B in shared memory through descriptors, A also in '
+                 'registers, D in registers, written in place; complete '
+                 'once a wait on its counter retires the group it was '
+                 'committed in (`COMMIT_GROUP`, `matrix_wait`)',
+                 completes=Completion.GROUP,
+                 sources=((Source.SHARED, Source.REGISTER), (Source.SHARED,),
+                          (Source.REGISTER,))),
 )}
+
+#: The engines whose products complete by group, and the counter a wait for
+#: their groups is written on (`matrix_wait`): wgmma's own, which counts
+#: nothing else.
+GROUP_ENGINES = {'wgmma': 'wgmma'}
 
 
 def matrix_engine(s: Stmt) -> MatrixEngine:
@@ -1486,31 +1877,129 @@ def _matrix_pipe(s: Stmt) -> str:
 def _check_matrix_mac(s: Stmt) -> List[str]:
     """A `MATRIX_MAC` takes the registers its fragments count, and has a
     result unless it writes C in place -- which it then declares as a read
-    and a write of each of C's registers."""
+    and a write of each of C's registers.
+
+    An operand in shared memory is one descriptor (`MatrixDescType`), from
+    a source its engine takes it from, and the op declares a read of shared
+    memory for it, behind C's registers; an operand in registers is no
+    descriptor.  The operands behind the fragments are the ones `scalars`
+    names.  An engine that completes after the issue writes D in place."""
     diag = []
-    if s.attr('engine') not in MATRIX_ENGINES:
+    engine = MATRIX_ENGINES.get(s.attr('engine'))
+    if engine is None:
         diag.append(f'{s.op}: engine {s.attr("engine")!r} is none of '
                     f'{", ".join(sorted(MATRIX_ENGINES))}')
     counts = s.attr('fragments')
+    scalars = s.attr('scalars') or ()
     if (not isinstance(counts, tuple) or len(counts) != 3
-            or sum(counts) != len(s.args)):
+            or sum(counts) + len(scalars) != len(s.args)):
         diag.append(f'{s.op}: {len(s.args)} operands for the fragments '
-                    f'{counts!r}')
+                    f'{counts!r}' + (f' and {scalars!r}' if scalars else ''))
         return diag
+    shared = 0
+    for i, (name, frag, source) in enumerate(zip('ABC', fragments(s),
+                                                 sources_of(s))):
+        if engine is not None and source not in engine.sources[i]:
+            diag.append(f'{s.op}: {engine.name} takes no {name} from '
+                        f'{getattr(source, "value", source)}')
+        descs = [v for v in frag if isinstance(v, Value)
+                 and isinstance(v.type, MatrixDescType)]
+        if source is Source.SHARED:
+            shared += 1
+            if len(frag) != 1 or len(descs) != 1:
+                diag.append(f'{s.op}: {name} in shared memory is one '
+                            f'descriptor, not {len(frag)} operand(s)')
+        elif descs:
+            diag.append(f'{s.op}: {name} in {source.value} through a '
+                        f'descriptor')
     if s.attr('in_place'):
         if s.target:
             diag.append(f'{s.op}: in place, and a result besides')
         c = fragments(s)[2]
         want = [v for v in c if isinstance(v, Value)]
-        if [a.base for a in s.accesses] != want or any(
+        regs = s.accesses[:len(want)]
+        if [a.base for a in regs] != want or any(
                 a.space != MemSpace.REGISTER
                 or a.kind != Effect.READ | Effect.WRITE
-                for a in s.accesses):
+                for a in regs):
             diag.append(f'{s.op}: in place without a read and a write of '
                         f'each register of C')
+        reads = s.accesses[len(want):]
+        if len(reads) != shared or any(
+                a.space != MemSpace.SHARED or a.kind != Effect.READ
+                for a in reads):
+            diag.append(f'{s.op}: {shared} operand(s) in shared memory and '
+                        f'{len(reads)} other access(es) declared, where each '
+                        f'is a read of shared memory')
+    elif engine is not None and engine.completes is not Completion.SYNC:
+        diag.append(f'{s.op}: {engine.name} completes behind its issue, and '
+                    f'writes D in place')
     elif len(s.target) != 1:
         diag.append(f'{s.op}: {len(s.target)} results, where D is one')
     return diag
+
+
+def _lower_commit_group_cuda(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.commit_group`: the products this warpgroup issued since its
+    last commit, one group (PTX ISA, "wgmma.commit_group", sm_90a)."""
+    engine = s.attr('engine')
+    if engine == 'wgmma':
+        _wgmma_available(env)
+        return Lowered(('tensorforge::wgmmaCommit();',))
+    raise IRError(f'no group of {engine!r} to commit under CUDA')
+
+
+def _lower_commit_group_other(s: Stmt, env: Spelling) -> Lowered:
+    raise IRError(f'no group of {s.attr("engine")!r} to commit on '
+                  f'{env.family or "no target"}')
+
+
+def _check_commit_group(s: Stmt) -> List[str]:
+    if s.attr('engine') not in GROUP_ENGINES:
+        return [f'{s.op}: {s.attr("engine")!r} commits no groups; '
+                f'{", ".join(sorted(GROUP_ENGINES))} do']
+    return []
+
+
+#: The constraint an operand fence names a register with, by its element:
+#: a TF32 fragment is a 32-bit integer register (`tensorforge::tf32`).
+_REGISTER_CONSTRAINTS = {Datatype.F32: 'f', Datatype.F64: 'd',
+                         Datatype.TF32: 'r', Datatype.I32: 'r'}
+
+
+def operand_fence(registers: Sequence[Value], name: Callable) -> str:
+    """An empty `asm volatile` that reads and writes `registers`, so that
+    the compiler keeps every other access of them on the side of it where
+    it stands.  The fence, the commit and the wait of an asynchronous
+    engine are volatile statements, which the compiler keeps in order, but
+    they name no register: without this a read of D could be scheduled
+    ahead of the wait that makes it valid, or a write of D behind the fence
+    that orders it before the product."""
+    operands = []
+    for v in registers:
+        base = getattr(getattr(v, 'type', None), 'base', None)
+        letter = _REGISTER_CONSTRAINTS.get(base)
+        if letter is None:
+            raise IRError(f'an operand fence over {v!r}, whose register '
+                          f'class is not known')
+        operands.append(f'"+{letter}"({name(v)})')
+    return f'asm volatile("" : {", ".join(operands)} :: "memory");'
+
+
+def _wait_wgmma(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.wait_group N` (PTX ISA, "wgmma.wait_group", sm_90a): at most
+    `count` of this warpgroup's groups still in flight; then the operand
+    fence over the registers the wait names, so that none of their reads
+    moves ahead of it (`operand_fence`)."""
+    count = s.attr('count')
+    if not isinstance(count, int) or count < 0:
+        raise IRError(f'a wait for at most {count!r} groups of wgmma')
+    _wgmma_available(env)
+    lines = (f'tensorforge::wgmmaWait<{count}>();',)
+    registers = [v for v in s.args if isinstance(v, Value)]
+    if registers:
+        lines += (operand_fence(registers, env.name),)
+    return Lowered(lines)
 
 
 def pipe_of(s: Stmt) -> str:
@@ -1568,10 +2057,12 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
                                Slot('scope', (SyncScope,), False),
                                Slot('mask', _INT, False),
                                Slot('group', (tuple,), False),
-                               Slot('wall', (bool,), False)),
+                               Slot('wall', (bool,), False),
+                               Slot('engine', (str,), False)),
            results=(), effect=Effect.UNKNOWN, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
-           units=1, pipe='other', lower={'*': _lower_fence}),
+           units=1, pipe='other', lower={'*': _lower_fence},
+           check=_check_fence),
     OpSpec(Op.WAIT_COUNTER, operands=(Slot('counter', (str,)),
                                       Slot('count', _INT),
                                       Slot('engine', (str,), False)),
@@ -1588,6 +2079,19 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            results=(), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_set_priority}),
+    # Close what an asynchronous engine issued since its last commit into
+    # one group, which a wait on the engine's counter retires
+    # (`GROUP_ENGINES`, `matrix_wait`).  Pinned: which products a group
+    # holds is where it stands.  Asynchronous, as an issue is: nothing of
+    # it may be predicated away, and DCE keeps it.
+    OpSpec(Op.COMMIT_GROUP, operands=(Slot('engine', (str,)),),
+           results=(), effect=Effect.ASYNC, movable=False,
+           completes=Completion.GROUP, retires=None, settles=False,
+           units=1, pipe='sync',
+           lower={'cuda': _lower_commit_group_cuda,
+                  '': _lower_commit_group_cuda,
+                  '*': _lower_commit_group_other},
+           check=_check_commit_group),
     # D = A * B + C on a matrix engine (`MATRIX_ENGINES`).  The fragments
     # are values -- the operands, A's registers, B's, then C's -- and D the
     # result, or C itself where the instruction writes it in place
@@ -1610,7 +2114,9 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
                                     Slot('term', (tuple,), False),
                                     Slot('modifiers', (tuple,), False),
                                     Slot('collective', (Participants,),
-                                         False)),
+                                         False),
+                                    Slot('sources', (tuple,), False),
+                                    Slot('scalars', (tuple,), False)),
            results=('d',), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe=_matrix_pipe, lower={'*': _lower_matrix_mac},
@@ -1688,11 +2194,34 @@ def effect_of(op: str, attrs: Tuple = ()) -> Effect:
     orders nobody else's (`wait_phase`, `wait_counter`)."""
     if op == Op.FENCE and dict(attrs).get('wall') is False:
         return Effect.NONE
+    if op == Op.MATRIX_MAC and _matrix_effect(attrs) is not None:
+        return _matrix_effect(attrs)
     if op == Op.MATRIX_MAC and dict(attrs).get('in_place'):
         return Effect.WRITE
     if _retires_copies(op, attrs):
         return Effect.READ | Effect.WRITE | Effect.ASYNC
     return REGISTRY[op].effect
+
+
+def _matrix_effect(attrs: Tuple) -> Optional[Effect]:
+    """The effect of a matrix op that reads an operand in shared memory, or
+    whose engine completes behind the issue: the write of D in place, the
+    read, and `ASYNC` -- which keeps it out of a predicated region and out
+    of DCE's reach, as it does an asynchronous copy.  None for any other,
+    whose effect is the one it always had."""
+    a = dict(attrs)
+    engine = MATRIX_ENGINES.get(a.get('engine'))
+    asynchronous = (engine is not None
+                    and engine.completes is not Completion.SYNC)
+    shared = Source.SHARED in (a.get('sources') or ())
+    if not asynchronous and not shared:
+        return None
+    effect = Effect.WRITE if a.get('in_place') else Effect.NONE
+    if shared:
+        effect |= Effect.READ
+    if asynchronous:
+        effect |= Effect.ASYNC
+    return effect
 
 
 def completes_on_barrier(s: Stmt) -> bool:
@@ -1837,11 +2366,17 @@ def sync_init_value(obj: Value, storage: Value, *, leader: str,
 def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
                mask: Optional[int] = None,
                group: Optional[Tuple[int, int, int]] = None,
-               wall: bool = True) -> Stmt:
+               wall: bool = True, engine: Optional[str] = None,
+               registers: Sequence[Value] = ()) -> Stmt:
     """A fence of `kind`.  `scope` is whose memory a memory fence orders
     (the block's where None), `mask` the backend's own scheduling mask (AMD
     `sched_barrier`, vISA's fence bits), and `group` an AMD scheduling group
     -- mask, size, id -- rather than a wall.
+
+    A fence of registers (`FenceKind.REGISTERS`) names the `engine` whose
+    accesses it orders and the `registers` it orders them for, which it
+    declares as read and written: the accumulators and the A fragments a
+    product behind it reads, where something else touched them.
 
     Not a `wall`: a fence of the schedule placed where the passes are done,
     for the device compiler alone -- pinned, and no effect the emitter keeps
@@ -1860,7 +2395,14 @@ def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
         attrs += (('group', tuple(int(x) for x in group)),)
     if not wall:
         attrs += (('wall', False),)
-    return _stmt(Op.FENCE, attrs)
+    if engine is not None:
+        attrs += (('engine', engine),)
+    registers = tuple(registers)
+    if registers and kind is not FenceKind.REGISTERS:
+        raise IRError(f'a {kind.value} fence names no registers')
+    accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER, v)
+                     for v in registers)
+    return _stmt(Op.FENCE, attrs, args=registers, accesses=accesses)
 
 
 def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
@@ -1890,6 +2432,44 @@ def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
                            None),)
     return _stmt(Op.WAIT_COUNTER, attrs, args=tuple(tokens),
                  accesses=tuple(accesses))
+
+
+def commit_group(engine: str) -> Stmt:
+    """Close what `engine` issued since its last commit into one group
+    (`GROUP_ENGINES`): `wgmma.commit_group`."""
+    if engine not in GROUP_ENGINES:
+        raise IRError(f'{engine!r} commits no groups; '
+                      f'{", ".join(sorted(GROUP_ENGINES))} do')
+    return _stmt(Op.COMMIT_GROUP, (('engine', engine),))
+
+
+def matrix_wait(engine: str, count: int, registers: Sequence[Value] = (),
+                reads: Sequence[Any] = ()) -> Stmt:
+    """Wait until at most `count` of the groups `engine` committed are in
+    flight (`wgmma.wait_group`), on the engine's own counter
+    (`GROUP_ENGINES`).
+
+    What the products of the retired groups wrote is valid behind it, and
+    what they read may be written again: the `registers` -- their D, and
+    their A where it is in registers -- which it names and declares as read
+    and written, and the shared buffers `reads`, read through their
+    descriptors, which it declares as read.  Pinned, as the products and
+    the commit are: its count is the caller's, a fact about where the
+    groups stand."""
+    counter = GROUP_ENGINES.get(engine)
+    if counter is None:
+        raise IRError(f'{engine!r} commits no groups to wait for; '
+                      f'{", ".join(sorted(GROUP_ENGINES))} do')
+    if int(count) < 0:
+        raise IRError(f'a wait for at most {count} groups')
+    registers = tuple(registers)
+    accesses = (tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER, v)
+                      for v in registers)
+                + tuple(Access(Effect.READ, MemSpace.SHARED, b)
+                        for b in reads))
+    return _stmt(Op.WAIT_COUNTER, (('counter', counter),
+                                   ('count', int(count))),
+                 args=registers, accesses=accesses)
 
 
 def set_priority(level: int, waves: Optional[str] = None) -> Stmt:
@@ -1926,4 +2506,9 @@ __all__ = [
     'MATRIX_ENGINES', 'MatrixEngine', 'asm_text', 'fragments',
     'matrix_engine', 'mma_sync_name', 'pipe_of',
     'MFMA_MODIFIERS', 'mfma_category', 'DPAS_SPMD',
+    'Source', 'MatrixDescType', 'SWIZZLE_BYTES', 'DESC_FORMATS',
+    'matrix_descriptor_bits', 'swizzle_alignment', 'swizzled',
+    'descriptor_offset', 'sources_of', 'WGMMA_FEATURE', 'WGMMA_N',
+    'wgmma_name', 'wgmma_refusal', 'GROUP_ENGINES', 'operand_fence',
+    'commit_group', 'matrix_wait',
 ]
