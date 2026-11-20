@@ -366,6 +366,9 @@ class GroupSection:
     dtype: Datatype
     #: The operators as the block stages them (`Stage`, `lower`).
     stages: Tuple[Stage, ...] = ()
+    #: How many of the inputs, in the order a trip stages them, take a
+    #: second stage: those `pir.wrap` may copy a trip ahead (`lower`).
+    doubled: int = 0
 
     @property
     def products(self) -> List[Product]:
@@ -817,14 +820,16 @@ def _lowering(step: Step, dtype, context, sm: int, matrix: bool) -> str:
 
 
 def lower(section: GroupSection, context, matrix: bool = True,
-          split: bool = False, lanes: bool = False) -> GroupSection:
+          split: bool = False, lanes: bool = False,
+          double: bool = True) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
-    B in TF32 halves where `split` asks.  An `fma` step reads only its
-    operators' nonzeros (`nonzero_terms`) where they carry their numbers
-    and `Options.skip_known_zeros` is on, as the per-element products
-    do."""
+    B in TF32 halves where `split` asks, the inputs a trip ahead in a
+    second stage where the options take them there (`second_stages`) and
+    `double` does not decline it.  An `fma` step reads only its operators'
+    nonzeros (`nonzero_terms`) where they carry their numbers and
+    `Options.skip_known_zeros` is on, as the per-element products do."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     sm = nvidia.sm_of(context)
     sparse = context.get_user_options().skip_known_zeros
@@ -836,8 +841,29 @@ def lower(section: GroupSection, context, matrix: bool = True,
             s, lowering=lowering,
             terms=nonzero_terms(s) if sparse and lowering == 'fma'
             else None))
-    return _pitched(_staged(dataclasses.replace(section, steps=tuple(steps)),
-                            sm, split))
+    staged = _staged(dataclasses.replace(section, steps=tuple(steps)), sm,
+                     split)
+    return _pitched(dataclasses.replace(
+        staged, doubled=second_stages(staged, context)
+        if double and not lanes else 0))
+
+
+def second_stages(section: GroupSection, context) -> int:
+    """How many of the section's inputs, in the order a trip stages them,
+    `pir.wrap` may copy a trip ahead into a second stage, which the group
+    then holds twice: the first `Options.move_distance` -- the transfers it
+    moves -- where the options ask for the move and for its second stage
+    (`enable_wrap_loads`, `enable_multibuffer`), the copies are the
+    hardware's (`Target.async_copy_path`), and the barrier placement runs
+    (`enable_sync_block_opt`): an instruction's own barrier ahead of the
+    staging stops the move.  At most that many: an input the pass leaves
+    where it is keeps its room unused."""
+    options = context.get_user_options()
+    if not (options.enable_wrap_loads and options.enable_multibuffer
+            and options.enable_sync_block_opt
+            and context.target.async_copy_path()):
+        return 0
+    return min(int(options.move_distance), len(section.inputs))
 
 
 def tiled(section: GroupSection) -> bool:
@@ -853,14 +879,16 @@ def split(section: GroupSection) -> bool:
 def shared_bytes(section: GroupSection, elements: int) -> int:
     """Shared memory a group of `elements` takes: the operators as staged
     -- their stages, and the terms of the steps that walk them -- each
-    element's copy of every input and intermediate, and its entry in every
-    pointer table."""
+    element's copy of every input and intermediate, its second copy of
+    every input staged a trip ahead (`GroupSection.doubled`), and its entry
+    in every pointer table."""
     size = section.dtype.size()
     operators = (sum(st.volume for st in section.stages)
                  + sum(s.terms.volume for s in section.steps
                        if s.terms is not None))
     per_element = sum(b.per_element for b in section.inputs
-                      + section.intermediates)
+                      + section.intermediates
+                      + section.inputs[:section.doubled])
     return (size * (operators + elements * per_element)
             + POINTER_BYTES * elements * len(section.pointer_tables))
 
@@ -1165,10 +1193,11 @@ def fill(section: GroupSection,
     Otherwise the size is the table's (`table_elements`) where the block
     holds it, halved while it does not -- in shared memory, in threads --
     and `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
-    target's (`lower`): the matrix tiling, B in TF32 halves at the sizes
-    where that fits; where no group of the tiling fits -- its padded stages
-    take room the FMA forms do not -- the FMA forms'.  The group carries
-    the section lowered."""
+    target's (`lower`): the matrix tiling, its inputs in a second stage and
+    B in TF32 halves at the sizes where those fit, the second stage first;
+    where no group of the tiling fits -- its padded stages take room the
+    FMA forms do not -- the FMA forms'.  The group carries the section
+    lowered."""
     target = context.target
     hw = target.hw
     if getattr(hw, 'vendor', None) != 'nvidia' or target.backend != 'cuda':
@@ -1196,8 +1225,15 @@ def fill(section: GroupSection,
         tilings = []
     elif split(tilings[0]):
         tilings.append(lower(section, context))
+    forms = [lower(section, context, matrix=False)]
+    # Each again with the inputs in one stage, where the options ask for a
+    # second: a group the second stage would halve is worth more than it.
+    for lowerings in (tilings, forms):
+        lowerings += [lower(section, context, matrix=tiled(t),
+                            split=split(t), double=False)
+                      for t in lowerings if t.doubled]
     candidates = [tilings] if tilings else []
-    candidates.append([lower(section, context, matrix=False)])
+    candidates.append(forms)
     for lowerings in candidates:
         elements = table_elements(lowerings[0])
         while True:
@@ -1236,5 +1272,5 @@ __all__ = ['Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
            'SMALL_EXTENT', 'Stage', 'Step', 'Terms', 'classify',
            'fill', 'fma_form', 'lanes_plan', 'lower',
            'matrix_enabled', 'matrix_shape', 'nonzero_terms',
-           'operator_nonzeros', 'plan', 'shared_bytes', 'split',
-           'table_elements', 'tiled']
+           'operator_nonzeros', 'plan', 'second_stages', 'shared_bytes',
+           'split', 'table_elements', 'tiled']

@@ -1264,8 +1264,11 @@ class BatchLoop(AbstractInstruction):
                 f'a block of {self._mults_per_block} multiplications does not '
                 f'hold whole groups of {self._group_size}')
         # The group a wave-collective instruction asked for is traversed as
-        # IR; the block-wide group is emitted as text.
-        if (self._narrow_group and self._mode is LoopMode.PERSISTENT
+        # IR, and so is the multi-element layout's, whose staging the
+        # transfer passes take one trip ahead (`pir.wrap`); the block-wide
+        # group is emitted as text.
+        if ((self._narrow_group or self._trip is Trip.ELEMENT_GROUP)
+                and self._mode is LoopMode.PERSISTENT
                 and hasattr(writer, 'for_')):
             self._gen_grouped_ir(writer)
             return

@@ -202,6 +202,11 @@ def _generate(descrs, context):
     return gen
 
 
+#: The options that take every input of the volume's trip a trip ahead into
+#: a second stage (`element_group.second_stages`).
+TWO_STAGES = {'enable_multibuffer': True, 'move_distance': 4}
+
+
 # -- the classification ------------------------------------------------------ #
 
 def _steps(section):
@@ -799,14 +804,16 @@ def test_the_operators_are_staged_once_ahead_of_the_loop(options, names):
 
 
 @pytest.mark.parametrize('options,barriers', [
-    ({}, 4), ({'tensor_cores': False}, 4)], ids=['matrix', 'fma'])
+    ({}, 4), ({'tensor_cores': False}, 3)], ids=['matrix', 'fma'])
 def test_the_group_takes_its_trips_together(options, barriers):
-    """The traversal is the group's: every warp's element from the group's
-    first, the block's barriers around the staging and ahead of the step
-    that reads the intermediates -- the matrix tiling adds into the outputs
-    from its accumulators, behind no barrier of its own."""
+    """The traversal is the group's, a loop the IR sees: every warp's
+    element from the group's first.  The block meets where the placement
+    finds the staging and the steps need it (`pir.barriers`) -- the trip's
+    head no more, its copies retired behind the trip's last reads -- and the
+    matrix tiling adds into the outputs from its accumulators, behind no
+    barrier of its own."""
     kernel = _kernel(multi_element='force', **options)
-    assert re.search(r'batchIdGroup0 \+ batchIdLane0', kernel)
+    assert re.search(r'batchIdGroup0 \+ (v\d+_)?batchIdLane0', kernel)
     assert kernel.count('__syncthreads();') == barriers
 
 
@@ -832,6 +839,59 @@ def test_a_matrix_step_writes_its_output_from_the_accumulators(
     assert len(reductions) == adds
     assert len(_stores(lines, r'eQ_\d+')) == adds + stores
     assert any('_pQ[' in line for line in lines) is bool(tables)
+
+
+def _loop(lines):
+    """The line the batch loop's group traversal starts on."""
+    return next(i for i, line in enumerate(lines)
+                if re.search(r'for \(size_t \w*batchIdGroup0 =', line))
+
+
+def test_the_staging_is_copied_a_trip_ahead():
+    """A trip's operands come by `cp.async`, and the first of them a trip
+    ahead (`pir.wrap`): the first group's copy ahead of the loop, each next
+    group's behind the last read of the buffer, one stage."""
+    lines = _kernel(multi_element='force').splitlines()
+    loop = _loop(lines)
+    peel = [i for i, line in enumerate(lines) if 'peel_glb_m0[' in line]
+    ahead = [i for i, line in enumerate(lines) if 'wrap_glb_m0[' in line]
+    assert peel and max(peel) < loop
+    assert ahead and min(ahead) > loop
+    assert all('__pipeline_memcpy_async(&' in lines[i] for i in peel + ahead)
+    assert any('__pipeline_wait_prior' in line for line in lines[loop:])
+
+
+@pytest.mark.parametrize('order,precision,arch,elements,doubled', [
+    (6, 's', 'sm_90', 16, 4), (6, 'd', 'sm_90', 8, 4),
+    (8, 's', 'sm_90', 7, 0), (6, 's', 'sm_120', 8, 0),
+    (4, 's', 'sm_120', 16, 4)])
+def test_a_second_stage_where_it_costs_no_group_size(order, precision, arch,
+                                                     elements, doubled):
+    """`enable_multibuffer` and a `move_distance` over the volume's four
+    inputs: each takes a second stage where the group keeps its size,
+    copied a trip ahead into the stage the trip does not read; where the
+    stage would cost the group -- o8 F32 on sm_90, from 7 to 4 -- the
+    group keeps its size and the inputs one stage, the trip's own barrier
+    ahead of their copies keeping them in the trip."""
+    section = eg.classify(_volume(order, precision))[0]
+    context = _context(arch, precision, **TWO_STAGES)
+    group = eg.fill(section, context)[0]
+    assert (group.elements, group.section.doubled) == (elements, doubled)
+    assert group.shared_bytes == eg.shared_bytes(group.section, elements)
+    plain = eg.fill(section, _context(arch, precision))[0]
+    assert plain.elements == elements
+    lines = _generate(_volume(order, precision), _context(
+        arch, precision, multi_element='force', **TWO_STAGES)
+    ).get_kernel().splitlines()
+    loop = _loop(lines)
+    peel = {m for line in lines[:loop]
+            for m in re.findall(r'peel_glb_(m\d+)\[', line)}
+    assert len(peel) == doubled
+    if not doubled:
+        first = next(i for i, line in enumerate(lines)
+                     if i > loop and '__pipeline_memcpy_async' in line)
+        assert any(line.strip() == '__syncthreads();'
+                   for line in lines[loop:first])
 
 
 @pytest.mark.parametrize('arch,precision,instruction,count', [
@@ -915,10 +975,11 @@ def test_ldmatrix_is_a_declared_read_of_its_buffer():
 def _stores(lines, pattern, zeros=False):
     """The lines that store into the buffers `pattern` names -- their data,
     or (`zeros`) the zeros of their padding -- and that add data into them
-    by a reduction (`red.global.add`)."""
+    by a reduction (`red.global.add`) or copy it in (`cp.async`)."""
     zero = re.compile(f'(?:{pattern})' + r'\[[^]]*\] = 0\.0f?;')
     store = re.compile(f'(?:{pattern})' + r'\[[^]]*\] = '
-                       + r'|red\.global\.add\.\w+ .*&' + f'(?:{pattern})\\[')
+                       + r'|red\.global\.add\.\w+ .*&' + f'(?:{pattern})\\['
+                       + r'|__pipeline_memcpy_async\(&\w*' + f'(?:{pattern})\\[')
     return [i for i, line in enumerate(lines)
             if store.search(line) and bool(zero.search(line)) == zeros]
 
@@ -991,8 +1052,12 @@ def test_an_element_past_the_end_writes_nothing(shape, options):
                for i in writes)
     published = re.findall(r'_pQ\[\w+\] = (.*);', text)
     assert bool(published) is bool(adds)
-    assert all(re.fullmatch(r'\(batchIdActive0 \? \(reinterpret_cast<int64_t>'
-                            r'\(glb_m\d+\)\) : 0_i64\)', p) for p in published)
+    # The word stored, where the scheduler named it ahead of the store.
+    published = [re.search(r'int64_t ' + p + r' = (.*);', text).group(1)
+                 if re.fullmatch(r'\w+', p) else p for p in published]
+    assert all(re.fullmatch(r'\(?batchIdActive0 \? \(reinterpret_cast<int64_t>'
+                            r'\(glb_m\d+\)\) : 0_i64\)?', p)
+               for p in published)
     for i in adds:
         pointer = re.search(r'&(eQ_\d+)\[', lines[i]).group(1)
         word = re.search(pointer + r' = reinterpret_cast<\w+\*>\((\w+)\);',
@@ -1203,13 +1268,17 @@ SEED = 29
     ('volume', 4, 'd', LANES), ('volume', 4, 's', LANES),
     ('localFlux', 4, 's', LANES), ('neighboringFlux', 4, 'd', LANES),
     ('localFluxAll', 4, 's', LANES), ('columns', 4, 's', LANES),
-    ('direction', 4, 'd', LANES)],
+    ('direction', 4, 'd', LANES),
+    ('volume', 4, 's', {}), ('volume', 4, 'd', {}),
+    ('volume', 4, 's', TWO_STAGES), ('chain', 4, 's', TWO_STAGES)],
     ids=['volume-o4d', 'volume-o4s-dense', 'reuse-o4s', 'localFlux-o4d',
          'neighboringFlux-o4s-own-barriers', 'localFluxAll-o4d',
          'direction-o4s', 'columns-o4d', 'lanes-volume-o4d',
          'lanes-volume-o4s', 'lanes-localFlux-o4s',
          'lanes-neighboringFlux-o4d', 'lanes-localFluxAll-o4s',
-         'lanes-columns-o4s', 'lanes-direction-o4d'])
+         'lanes-columns-o4s', 'lanes-direction-o4d', 'matrix-volume-o4s',
+         'matrix-volume-o4d', 'matrix-volume-o4s-two-stages',
+         'matrix-chain-o4s-two-stages'])
 def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
                                                   options, monkeypatch):
     """A group over itself and seven more elements on the host oracle: two
@@ -1388,7 +1457,8 @@ GPU_CASES = [
     ('neighboringFlux', 4, 's', {'tensor_cores': False}),
     ('localFluxAll', 6, 's', {'tensor_cores': False}),
     ('direction', 6, 'd', {'tensor_cores': False}),
-    ('columns', 6, 's', {'tensor_cores': False})]
+    ('columns', 6, 's', {'tensor_cores': False}),
+    ('volume', 4, 's', TWO_STAGES), ('chain', 6, 's', TWO_STAGES)]
 
 
 @pytest.mark.parametrize('shape,order,precision,options', GPU_CASES, ids=[
@@ -1396,7 +1466,8 @@ GPU_CASES = [
     'o6s-fma-dense', 'o4d-fma', 'o6d-fma-own-barriers', 'chain-o6s',
     'chain-o6d', 'reuse-o6s', 'chain-o6d-fma', 'reuse-o6s-fma',
     'localFlux-o6d-fma', 'neighboringFlux-o4s-fma', 'localFluxAll-o6s-fma',
-    'direction-o6d-fma', 'columns-o6s-fma'])
+    'direction-o6d-fma', 'columns-o6s-fma', 'o4s-two-stages',
+    'chain-o6s-two-stages'])
 def test_the_section_computes_on_the_gpu(shape, order, precision, options,
                                          target, cache_root,
                                          tensorforge_include):

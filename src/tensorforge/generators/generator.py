@@ -3911,7 +3911,8 @@ class Generator:
       section = element_group.lower(
           section, self._context, matrix=element_group.tiled(planned),
           split=element_group.split(planned),
-          lanes=self._element_group.lanes is not None)
+          lanes=self._element_group.lanes is not None,
+          double=planned.doubled > 0)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')

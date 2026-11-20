@@ -14,7 +14,11 @@ element, and the batch loop hands it E consecutive elements a trip
 
   1. each warp copies its element's operands -- the group operands and the
      small ones the section reads -- into the group's buffers, element-outer
-     (`element_group.Buffer`), through its own pointers;
+     (`element_group.Buffer`), through its own pointers, by asynchronous
+     copies (`cp.async`) that `pir.wrap` takes a trip ahead where it can:
+     the first `Options.move_distance` of them, into a second stage where
+     `Options.enable_multibuffer` asks and the plan has the room
+     (`element_group.second_stages`);
   2. the section's steps run in order, each by its lowering (`LOWERINGS`),
      reading the staged operators and the group's buffers, writing an
      intermediate's buffer or the section's output;
@@ -58,6 +62,7 @@ engines' products read across warps.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import Dict, List, Optional, Sequence
 
@@ -1253,13 +1258,25 @@ class MultiElementSection(AbstractInstruction):
                 arena=GeneralLexicon.TOTAL_SHR_MEM, hint=_hint('p', tensor),
                 place_align=unit if unit > 1 else None)
         # The block meets before any warp overwrites the group's buffers, so
-        # that the last trip's reads of them are done.
-        builder.barrier(Participants.BLOCK)
+        # that the last trip's reads of them are done -- a barrier of the
+        # instruction's own where nothing places them (`Options.
+        # enable_sync_block_opt`) or where the plan declined the inputs'
+        # second stage (`element_group.second_stages`): ahead of the
+        # staging it keeps `pir.wrap` from taking the copies a trip ahead.
+        # Otherwise the placement's, which meets them where the pass put
+        # them.
+        from tensorforge.generators.element_group import second_stages
+        if (not self._context.get_user_options().enable_sync_block_opt
+                or second_stages(section, self._context) > section.doubled):
+            builder.barrier(Participants.BLOCK)
+        tokens = []
         for buffer, symbol in zip(section.inputs, self._inputs):
-            self._stage(trip, buffer, symbol)
+            tokens += self._stage(trip, buffer, symbol)
         for buffer in section.inputs + section.intermediates:
             if buffer.pitch > buffer.height:
                 self._pad(trip, buffer)
+        if tokens:
+            builder.wait(*tokens)
         for tensor in section.pointer_tables:
             trip.publish(tensor)
         # What was written and read since the block last met: a step that
@@ -1275,25 +1292,35 @@ class MultiElementSection(AbstractInstruction):
             written.add(id(step.dest))
             read |= reads
 
-    def _stage(self, trip, buffer, symbol) -> None:
+    def _stage(self, trip, buffer, symbol) -> list:
         """The warp's element's box of an operand, from its own memory into
-        the group's buffer."""
+        the group's buffer, by asynchronous copies (`IRBuilder.copy_async`)
+        -- a cell a lane a hop, every hop issued before the trip waits for
+        any; their tokens.  The last hop's lanes past the box stand outside
+        a guard block, as a loader's ragged tail does: a copy predicated
+        itself is one `pir.wrap` does not take a trip ahead."""
         b = trip.builder
         source = _bound(b, symbol)
         height = buffer.height
         width = buffer.cols[1] - buffer.cols[0]
-        with b.for_(trip.lane, height * width, trip.group.threads,
-                    hint='j', uniform=Uniformity.LANE) as loop:
-            row = _index(b, 'add', b.op('rem', INDEX, loop.induction,
-                                        height, hint='r'),
-                         buffer.rows[0], 'r')
-            col = _index(b, 'add', b.op('div', INDEX, loop.induction,
-                                        height, hint='c'),
-                         buffer.cols[0], 'c')
-            value = b.load(source, _address(b, buffer.tensor, row, col),
-                           type_=trip.fp, hint='s')
-            b.store(trip.buffers[id(buffer.tensor)], value,
-                    trip.at(buffer, row, col))
+        total = height * width
+        lanes = trip.group.threads
+        tokens = []
+        for hop in range(0, total, lanes):
+            index = _index(b, 'add', trip.lane, hop, 'j')
+            guard = (contextlib.nullcontext() if hop + lanes <= total
+                     else b.if_(b.op('lt', BOOL, index, total, hint='in')))
+            with guard:
+                row = _index(b, 'add', b.op('rem', INDEX, index, height,
+                                            hint='r'), buffer.rows[0], 'r')
+                col = _index(b, 'add', b.op('div', INDEX, index, height,
+                                            hint='c'), buffer.cols[0], 'c')
+                tokens.append(b.copy_async(
+                    trip.buffers[id(buffer.tensor)], source,
+                    dst_index=(trip.at(buffer, row, col),),
+                    src_index=(_address(b, buffer.tensor, row, col),),
+                    elems=1, threads=lanes))
+        return tokens
 
     @staticmethod
     def _pad(trip, buffer) -> None:
