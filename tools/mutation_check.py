@@ -82,6 +82,8 @@ ASYNCMEM = Path('src/tensorforge/backend/pir/asyncmem.py')
 PIPE = Path('src/tensorforge/backend/pir/pipeline.py')
 ROWS = Path('src/tensorforge/backend/pir/rows.py')
 STACKING = Path('src/tensorforge/generators/stacking.py')
+ME_SECTION = Path('src/tensorforge/backend/instructions/compute/multi_element.py')
+ME_GROUP = Path('src/tensorforge/generators/element_group.py')
 BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
 TUNING = Path('src/tensorforge/generators/tuning.py')
 BOUND = Path('src/tensorforge/analysis/pipeline.py')
@@ -4249,6 +4251,83 @@ GROUPS = {
         ('a matrix op not ending a run',
          sub(BLOCKS, '                                  Op.SET_PRIORITY, Op.MATRIX_MAC):\n',
              '                                  Op.SET_PRIORITY):\n', 1)),
+    ]),
+    # The multi-element layout (`generators.element_group`, `compute.
+    # multi_element`, `Trip.ELEMENT_GROUP`): the classification and its
+    # steps, the fill rule, the option, the loop's group, and the lowering --
+    # its staging, its own barriers (a build without the barrier
+    # optimization), its masks, each product's window, its contractions.
+    # Three shapes: the volume, a chain with the star at the end, and a
+    # reused intermediate.  The numbers are the host oracle's and the local
+    # GPU's.
+    'multielement': ('tests/test_multi_element.py', [
+        ('a product adding outside its window',
+         sub(ME_SECTION, '            if (product.rows, product.cols) == (rows, cols):\n',
+             '            if True:\n', 1)),
+        ('the element\'s write without its mask',
+         sub(ME_SECTION, '            predicate = self.mask\n',
+             '            predicate = None\n', 1)),
+        ('every warp staging into the first slot',
+         sub(ME_SECTION, "                               group.elements, hint='slot')\n",
+             "                               1, hint='slot')\n", 1)),
+        ('a step reading what the block has not finished writing',
+         sub(ME_SECTION, '            if written & reads or id(step.dest) in written | read:\n',
+             '            if id(step.dest) in written | read:\n', 1)),
+        ('a step writing what the block has not finished reading',
+         sub(ME_SECTION, '            if written & reads or id(step.dest) in written | read:\n',
+             '            if written & reads:\n', 1)),
+        ('the operators read before the block has copied them',
+         sub(ME_SECTION, '        builder.barrier(Participants.BLOCK)\n        self.buffers = buffers\n',
+             '        self.buffers = buffers\n', 1)),
+        ('a trip\'s staging written over the last trip\'s reads',
+         sub(ME_SECTION, '        builder.barrier(Participants.BLOCK)\n'
+                         '        for buffer, symbol in zip(section.inputs, self._inputs):\n',
+             '        for buffer, symbol in zip(section.inputs, self._inputs):\n', 1)),
+        ('an accumulating step assigning',
+         sub(ME_SECTION, '        if not step.assigns:\n', '        if False:\n', 1)),
+        ('a buffer read at another height than staged',
+         sub(ME_SECTION, "            buffer.rows[1] - buffer.rows[0]), 'a')\n",
+             "            buffer.rows[1] - buffer.rows[0] + 1), 'a')\n", 1)),
+        ('a short contraction cut short',
+         sub(ME_SECTION, '        for k in range(lo, hi):\n',
+             '        for k in range(lo, hi - 1):\n', 1)),
+        ('a long contraction cut short',
+         sub(ME_SECTION, '    with b.for_(lo, hi, 1, inits=(0.0,), types=(trip.fp,),\n',
+             '    with b.for_(lo, hi - 1, 1, inits=(0.0,), types=(trip.fp,),\n', 1)),
+        ('a step over its first product\'s rows only',
+         sub(ME_GROUP, '        return _union([p.rows for p in self.products])\n',
+             '        return self.products[0].rows\n', 1)),
+        ('products into one destination never one step',
+         sub(ME_GROUP, '        if into and p.add and p.kind is into[0][0].kind:\n',
+             '        if False:\n', 1)),
+        ('a step left open past a read of its destination',
+         sub(ME_GROUP, '            if id(members[0].dest.tensor) in reads or dest in read_by:\n',
+             '            if dest in read_by:\n', 1)),
+        ('a step left open past a write of what it reads',
+         sub(ME_GROUP, '            if id(members[0].dest.tensor) in reads or dest in read_by:\n',
+             '            if id(members[0].dest.tensor) in reads:\n', 1)),
+        ('an element\'s own operator taken for the batch\'s',
+         sub(ME_GROUP, '    if tensor.addressing.kind is Addressing.NONE:\n',
+             '    if False:\n', 1)),
+        ('a small operand of any size',
+         sub(ME_GROUP, '            if max(extents) > SMALL_EXTENT:\n',
+             '            if False:\n', 1)),
+        ('a group larger than the block\'s shared memory',
+         sub(ME_GROUP, '        if need <= budget and 32 * elements <= hw.max_threads_per_block:\n',
+             '        if 32 * elements <= hw.max_threads_per_block:\n', 1)),
+        ('the work queue\'s loop taking a group',
+         sub(ME_GROUP, '    if options.launch_control:\n', '    if False:\n', 1)),
+        ('`auto` taking the layout',
+         sub(ME_GROUP, "    if context.get_user_options().multi_element != 'force':\n",
+             "    if context.get_user_options().multi_element == 'off':\n", 1)),
+        ('the layout on by default',
+         sub(OPTIONS, "declare('multi_element',\n        default='off',\n",
+             "declare('multi_element',\n        default='force',\n", 1)),
+        ('a block of more than the group',
+         sub(BATCHLOOP, '        if self._trip is Trip.ELEMENT_GROUP and mults != self._group_size:\n',
+             '        if False:\n', 1)),
+        ('the group\'s traversal one element a trip',
+         sub(GEN, '      return self._element_group.elements\n', '      return 1\n', 1)),
     ]),
 }
 

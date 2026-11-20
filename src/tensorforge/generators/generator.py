@@ -27,6 +27,7 @@ from tensorforge.generators import tuning
 from tensorforge.generators.lanes import LaneConfig
 from tensorforge.generators.legalize import legalize
 from tensorforge.generators import stacking
+from tensorforge.generators import element_group
 from tensorforge.backend.temporaries import Temporaries
 from tensorforge.backend.symbol import Symbol, SymbolType, passed_by_value
 from tensorforge.backend.instructions.abstract_instruction import AbstractInstruction
@@ -38,7 +39,7 @@ from tensorforge.backend.instructions.builders.ptr_manip_builder import GetEleme
 from tensorforge.backend.instructions.builders.allocator_builder import ShrMemAllocBuilder
 from tensorforge.backend.instructions.control.conditional import GuardedRegion
 from tensorforge.backend.instructions.sync_block import SyncThreads, SyncBlock, SyncGrid
-from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode
+from tensorforge.backend.instructions.batch_loop import BatchLoop, LoopMode, Trip
 from tensorforge.backend.writer import VarAlloc, Writer
 from tensorforge.common.exceptions import GenerationError, InternalError
 from contextlib import contextmanager
@@ -656,6 +657,9 @@ class Generator:
     #: instead" -- the thing a search over configurations needs and a constant
     #: cannot offer.
     self._lanes: Optional[LaneConfig] = lanes
+    #: The kernel's multi-element plan (`element_group.plan`), decided with
+    #: the lane geometry; None where it keeps one element a multiplication.
+    self._element_group: Optional[element_group.ElementGroup] = None
     #: Whether this build measures each body's peak register footprint
     #: (`BuildMetrics.pressure`): a liveness walk per body, which only a
     #: caller searching over configurations reads.
@@ -1433,7 +1437,9 @@ class Generator:
                          < self._context.target.hw.vec_unit_length,
                          stack=self._stack,
                          wave_rows=self._group_wave_rows(group),
-                         count_index=self._section.count_index)
+                         count_index=self._section.count_index,
+                         trip=(Trip.ELEMENT_GROUP if self._element_group
+                               else Trip.ELEMENT))
 
         self._section.stream = list(self._section.global_ir) + [loop]
 
@@ -1756,6 +1762,13 @@ class Generator:
     a change to what the offset means rather than to how it is spelled.
     """
     wave = self._context.target.hw.vec_unit_length
+    if self._element_group is not None:
+      # The block is the element group: its warps take the group's elements
+      # together, and its barriers stage them (`MultiElementSection`).
+      if start != self._get_2d_block_id():
+        raise InternalError('a multi-element section traversed from a '
+                            'rotated start: its group is no whole block')
+      return self._element_group.elements
     if self._section.streams:
       # A member a trip copied in is shared by every multiplication of the
       # block and fenced by block barriers (`pir.shards`), so the block is one
@@ -3345,10 +3358,18 @@ class Generator:
         f'{self._generate_launcher_proto(with_defaults=True)};\n')
 
   def _deduce_num_threads(self):
-    """Adopt the section's lane geometry: the caller's, or the deduced one."""
+    """Adopt the section's lane geometry: the caller's, or the deduced one --
+    or a warp a multiplication where the kernel takes the multi-element
+    layout (`element_group`), each warp one element of its block's group."""
     # Over the expansion: lane geometry follows from the operations, and a
     # descriptor that stands for several is not one of them.
     flat = [op for descr in self._descr_list for op in descr.operations()]
+    self._element_group = element_group.plan(flat, self._context)
+    if self._element_group is not None:
+      warp = self._element_group.threads
+      self._num_threads = self._num_active_threads = warp
+      self._lead_width = 1
+      return
     config = (self._lanes or lane_config.requested(flat, self._context)
               or lane_config.deduce(flat, self._context))
     self._num_threads = config.num_threads
@@ -3801,6 +3822,9 @@ class Generator:
         self._section.ir.extend(builder.get_instructions())
 
     self._scopes.add_scope()
+    if self._element_group is not None:
+      self._emit_element_group(descr_list)
+      return
     # Both of these belong to the section rather than to any one builder.
     #
     # The plan is the section's read/write geometry, computed once from the
@@ -3858,6 +3882,32 @@ class Generator:
           raise InternalError(f'{type(descr)} has no registered builder.')
 
     guard.flush()
+
+  def _emit_element_group(self, descr_list) -> None:
+    """The section of a kernel in the multi-element layout: its operators
+    staged ahead of the loop, and its steps over the loop's element group,
+    each by its lowering (`compute.multi_element`) -- in place of one
+    builder an operation."""
+    import dataclasses
+    from tensorforge.backend.instructions.compute.multi_element import (
+        MultiElementOperators, MultiElementSection)
+    # The section's own classification: the plan's was made of the
+    # descriptions as the generator was handed them, and the section's
+    # symbols are the ones its operations name.
+    flat = [op for descr in descr_list for op in descr.operations()]
+    section, why = element_group.classify(flat)
+    if section is None or section.shape() != self._element_group.section.shape():
+      raise InternalError(f'a section of a multi-element kernel is not the '
+                          f'one its plan was made for: {why or "another"}')
+    group = dataclasses.replace(self._element_group, section=section)
+    symbols = {id(t): self._scopes.get_symbol(t)
+               for t in (list(section.operators) + list(section.outputs)
+                         + [b.tensor for b in section.inputs])}
+    operators = MultiElementOperators(
+        self._context, group, [symbols[id(t)] for t in section.operators])
+    self._section.global_ir.append(operators)
+    self._section.ir.append(
+        MultiElementSection(self._context, group, symbols, operators))
 
   def _emit_closed_loop(self, loop, builders) -> None:
     """A merged run whose trips hand each other nothing but memory.
@@ -4166,6 +4216,16 @@ class Generator:
       policy.set_stages()
     num_mults_per_block = policy.get_num_mults_per_block()
     fits = num_mults_per_block >= 1
+    if self._element_group is not None:
+      # One group a block, whatever the policy would hold: the group's
+      # barriers reach the block, and its staging is sized for E elements.
+      group = self._element_group.elements
+      size = self._context.fp_type.size()
+      hw = self._context.target.hw
+      return group, ((global_size + group * size_per_mult) * size
+                     <= hw.max_local_mem_size_per_block
+                     and group * self._num_threads
+                     <= hw.max_threads_per_block)
     if self._section.streams and fits:
       # The block is one group, whose loop the copies' block barriers stand
       # in, and the rounding below takes the whole group whatever the policy
