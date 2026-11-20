@@ -134,11 +134,39 @@ def _columns_description(order=6, precision='s'):
     return d
 
 
+def _assign_description(order=6, precision='s'):
+    """The volume's last direction alone, assigning all of `Q`: `T = I
+    star(2)`, then `Q = kDivM(2) T` over `Q`'s box -- an operator step
+    that stores its D where the volume's add theirs."""
+    d = json.loads(json.dumps(_volume_description(order, precision)))
+    box = next(t for t in d['tensors'] if t['name'] == 'Q')['storage']
+    rows = [box['start'][0], box['start'][0] + box['sizes'][0]]
+    mixing, operator = d['operations'][-2:]
+    depth = operator['args'][0]['bbox'][1][1]
+    operator['result']['bbox'] = [[rows[0], 0], [rows[1], 9]]
+    operator['args'][0]['bbox'] = [[rows[0], 0], [rows[1], depth]]
+    operator['linear']['add'] = False
+    d['operations'] = [mixing, operator]
+    return d
+
+
+def _window_description(order=6, precision='s'):
+    """The volume with its first direction's product cut to rows 1..41 of
+    `Q`, where its operator has nonzeros further down: in the step's rows,
+    outside the product's window, a B that must stay zero there."""
+    d = json.loads(json.dumps(_volume_description(order, precision)))
+    operator = d['operations'][1]
+    for view in (operator['result'], operator['args'][0]):
+        view['bbox'][1][0] = 41
+    return d
+
+
 DESCRIPTIONS = {
     'volume': _volume_description, 'chain': _chain_description,
     'direction': _direction_description, 'columns': _columns_description,
     'reuse': lambda order, precision: _chain_description(order, precision,
                                                          reuse=True),
+    'assign': _assign_description, 'window': _window_description,
     # The flux kernels the layout takes besides the volume: a mixing
     # product, then two operator products, the first into an intermediate.
     'localFlux': _seissol('gpu_localFlux[0]'),
@@ -289,11 +317,13 @@ def test_what_the_layout_does_not_take_says_why(change, why):
 @pytest.mark.parametrize('shape,order,precision,arch,elements,lowering', [
     ('volume', 6, 's', 'sm_90', 16, 'mma_sync'),
     ('volume', 6, 'd', 'sm_90', 8, 'dmma'),
-    ('volume', 6, 'd', 'sm_80', 4, 'dmma'),
+    ('volume', 6, 'd', 'sm_80', 8, 'dmma'),
     ('volume', 6, 's', 'sm_120', 8, 'mma_sync'),
-    ('volume', 6, 'd', 'sm_120', 4, 'fma'),
+    ('volume', 6, 'd', 'sm_120', 4, 'dmma'),
     ('volume', 4, 's', 'sm_90', 32, 'mma_sync'),
-    ('volume', 8, 's', 'sm_90', 4, 'mma_sync'),
+    ('volume', 4, 'd', 'sm_120', 16, 'dmma'),
+    ('volume', 8, 's', 'sm_90', 7, 'mma_sync'),
+    ('volume', 8, 's', 'sm_80', 7, 'fma'),
     ('chain', 6, 's', 'sm_90', 16, 'mma_sync'),
     ('chain', 6, 's', 'sm_120', 8, 'mma_sync')])
 def test_the_group_is_the_tables_halved_until_it_fits(shape, order,
@@ -302,7 +332,7 @@ def test_the_group_is_the_tables_halved_until_it_fits(shape, order,
     """The design's size for the basis and the precision, halved while the
     operators and the group's buffers do not fit a block, the last size
     tried the smallest; the matrix tiling where a group of it fits, the FMA
-    forms where none does (o6 F64 on sm_120's 99 kB)."""
+    forms where none does (o8 F32 on sm_80's 164 kB)."""
     section = eg.classify(_descrs(shape, order, precision))[0]
     group, why = eg.fill(section, _context(arch, precision))
     assert group is not None, why
@@ -313,6 +343,21 @@ def test_the_group_is_the_tables_halved_until_it_fits(shape, order,
     assert group.shared_bytes == eg.shared_bytes(group.section, elements)
     assert group.shared_bytes <= (_context(arch, precision).target.hw
                                   .max_local_mem_size_per_block)
+
+
+def test_the_halving_tries_the_smallest_group_last(monkeypatch):
+    """14 halves to 7, and 7 to `MIN_ELEMENTS` rather than to 3: o8 F32 on
+    sm_90, the block a little short of a group of 7 in every form of the
+    tiling."""
+    section = eg.classify(_volume(8, 's'))[0]
+    context = _context('sm_90', 's')
+    need = min(eg.shared_bytes(eg.lower(section, context, split=halves), 7)
+               for halves in (True, False))
+    room = context.target.hw.max_local_mem_size_per_block
+    monkeypatch.setattr(eg, 'SHARED_RESERVE', room - need + 1)
+    group, why = eg.fill(section, context)
+    assert group is not None, why
+    assert group.elements == eg.MIN_ELEMENTS
 
 
 @pytest.mark.parametrize('options,default,lowering', [
@@ -347,8 +392,6 @@ def test_a_product_reads_its_window_of_the_operator(precision, depth, k, regs):
         (f'kDivM({d})', ((1, 54 + d), (0, 35))) for d in range(3)]
     assert {(st.n0, st.depth, st.width, st.k, st.regs) for st in stages} \
         == {(1, depth, 56, k, regs)}
-    assert [(b.tensor.alias, b.rows, b.cols) for b in group.section.results] \
-        == [('Q', (1, 56), (0, 9))]
 
 
 @pytest.mark.parametrize('order,arch,elements,split', [
@@ -701,7 +744,7 @@ def test_the_lanes_form_where_it_is_asked_for(options, lanes):
         assert group.elements == eg.LANE_ELEMENTS == 32
         assert group.warps == 3 and group.shared_bytes == 0
         assert {s.lowering for s in group.section.steps} == {'lane'}
-        assert group.section.stages == () and group.section.results == ()
+        assert group.section.stages == ()
 
 
 def test_the_lane_group_loop():
@@ -756,14 +799,39 @@ def test_the_operators_are_staged_once_ahead_of_the_loop(options, names):
 
 
 @pytest.mark.parametrize('options,barriers', [
-    ({}, 5), ({'tensor_cores': False}, 4)], ids=['matrix', 'fma'])
+    ({}, 4), ({'tensor_cores': False}, 4)], ids=['matrix', 'fma'])
 def test_the_group_takes_its_trips_together(options, barriers):
     """The traversal is the group's: every warp's element from the group's
-    first, the block's barriers around the staging -- and, with the matrix
-    tiling, one more between D's tiles and the outputs."""
+    first, the block's barriers around the staging and ahead of the step
+    that reads the intermediates -- the matrix tiling adds into the outputs
+    from its accumulators, behind no barrier of its own."""
     kernel = _kernel(multi_element='force', **options)
     assert re.search(r'batchIdGroup0 \+ batchIdLane0', kernel)
     assert kernel.count('__syncthreads();') == barriers
+
+
+@pytest.mark.parametrize('shape,arch,precision,adds,stores', [
+    ('volume', 'sm_90', 's', 4, 0), ('volume', 'sm_80', 'd', 2, 0),
+    ('volume', 'sm_120', 'd', 4, 0), ('assign', 'sm_90', 's', 0, 4),
+    ('assign', 'sm_80', 'd', 0, 2), ('chain', 'sm_90', 's', 0, 0)])
+def test_a_matrix_step_writes_its_output_from_the_accumulators(
+        shape, arch, precision, adds, stores):
+    """A lane's cells of D go into the output from its registers, each
+    through its row's element's pointer (`eQ_*`, read from the block's
+    table `pQ`): one reduction a cell where the step accumulates, a store
+    where it assigns, no buffer and no barrier between.  A section whose
+    matrix steps write intermediates only keeps no table."""
+    section = eg.classify(_descrs(shape, 6, precision))[0]
+    group = eg.fill(section, _context(arch, precision))[0]
+    tables = [t.alias for t in group.section.pointer_tables]
+    assert tables == (['Q'] if adds or stores else [])
+    lines = _kernel(arch=arch, precision=precision, shape=shape,
+                    multi_element='force').splitlines()
+    reductions = [line for line in lines if 'red.global.add.' in line]
+    assert len(reductions) == len([r for r in reductions if '&eQ_' in r])
+    assert len(reductions) == adds
+    assert len(_stores(lines, r'eQ_\d+')) == adds + stores
+    assert any('_pQ[' in line for line in lines) is bool(tables)
 
 
 @pytest.mark.parametrize('arch,precision,instruction,count', [
@@ -845,10 +913,12 @@ def test_ldmatrix_is_a_declared_read_of_its_buffer():
 
 
 def _stores(lines, pattern, zeros=False):
-    """The lines that store into the buffers `pattern` names: their data,
-    or (`zeros`) the zeros of their padding."""
-    zero = re.compile(pattern + r'\[[^]]*\] = 0\.0f?;')
-    store = re.compile(pattern + r'\[[^]]*\] = ')
+    """The lines that store into the buffers `pattern` names -- their data,
+    or (`zeros`) the zeros of their padding -- and that add data into them
+    by a reduction (`red.global.add`)."""
+    zero = re.compile(f'(?:{pattern})' + r'\[[^]]*\] = 0\.0f?;')
+    store = re.compile(f'(?:{pattern})' + r'\[[^]]*\] = '
+                       + r'|red\.global\.add\.\w+ .*&' + f'(?:{pattern})\\[')
     return [i for i, line in enumerate(lines)
             if store.search(line) and bool(zero.search(line)) == zeros]
 
@@ -872,10 +942,13 @@ def test_a_reused_intermediate_waits_for_its_readers():
 
 STAGED = r'_g(I|star\d)'
 OUTPUT = r'glb_m\d+'
+#: A matrix step's adds into `Q` from its accumulators, through its rows'
+#: elements' pointers.
+ADDED = r'eQ_\d+'
 
 
 @pytest.mark.parametrize('shape,options,phases', [
-    ('volume', {}, [STAGED, r'_g_tmp\d', r'_dQ', OUTPUT]),
+    ('volume', {}, [STAGED + r'|_pQ', r'_g_tmp\d', ADDED]),
     ('volume', {'tensor_cores': False}, [STAGED, r'_g_tmp\d', OUTPUT]),
     ('chain', {}, [STAGED, r'_g_chain\d', OUTPUT])],
     ids=['volume-matrix', 'volume-fma', 'chain-matrix'])
@@ -884,7 +957,7 @@ def test_the_barriers_stand_without_the_placement(shape, options, phases):
     enable_sync_block_opt`) keeps the instructions' own block barriers: one
     after the operators' copy, ahead of the loop, and in the trip one
     ahead of each phase whose stores another warp may still be reading --
-    the staging, the intermediates, the matrix tiling's D, the outputs."""
+    the staging with the pointer tables, the intermediates, the outputs."""
     kernel = _kernel(shape=shape, multi_element='force',
                      enable_sync_block_opt=False, **options)
     lines = kernel.splitlines()
@@ -900,16 +973,34 @@ def test_the_barriers_stand_without_the_placement(shape, options, phases):
 
 
 @pytest.mark.parametrize('shape,options', [
-    ('volume', {}), ('chain', {}), ('volume', LANES)],
-    ids=['volume', 'chain', 'volume-lanes'])
+    ('volume', {}), ('chain', {}), ('volume', LANES),
+    ('volume', {'arch': 'sm_80', 'precision': 'd'})],
+    ids=['volume', 'chain', 'volume-lanes', 'volume-sm80-d'])
 def test_an_element_past_the_end_writes_nothing(shape, options):
     """Every write of `Q` runs under the element's mask: the warp's, or in
-    the lanes form the lane's."""
+    the lanes form the lane's -- and where a matrix step adds a cell of any
+    warp's element from its accumulators, the element's pointer being
+    there, which its warp publishes null where the element is masked."""
     lines = _kernel(shape=shape, **{'multi_element': 'force',
                                     **options}).splitlines()
-    writes = _stores(lines, r'glb_m\d+')
-    assert writes and all(lines[i - 1].strip() == 'if (batchIdActive0) {'
-                          for i in writes)
+    text = '\n'.join(lines)
+    writes = _stores(lines, OUTPUT)
+    adds = _stores(lines, ADDED)
+    assert writes or adds
+    assert all(lines[i - 1].strip() == 'if (batchIdActive0) {'
+               for i in writes)
+    published = re.findall(r'_pQ\[\w+\] = (.*);', text)
+    assert bool(published) is bool(adds)
+    assert all(re.fullmatch(r'\(batchIdActive0 \? \(reinterpret_cast<int64_t>'
+                            r'\(glb_m\d+\)\) : 0_i64\)', p) for p in published)
+    for i in adds:
+        pointer = re.search(r'&(eQ_\d+)\[', lines[i]).group(1)
+        word = re.search(pointer + r' = reinterpret_cast<\w+\*>\((\w+)\);',
+                         text).group(1)
+        assert re.search(r'int64_t ' + word + r' = \w+_pQ\[', text)
+        held = re.search(r'bool (\w+) = ' + word + ' != 0;', text).group(1)
+        assert lines[i - 1].strip().startswith('if (')
+        assert re.search(r'\b' + held + r'\b', lines[i - 1])
 
 
 @pytest.mark.parametrize('precision,warps', [('s', 3), ('d', 8)])
@@ -1054,28 +1145,45 @@ def _host():
     return mod
 
 
+def _oracle_errors(shape, precision, arch, options):
+    """The kernel run by the host interpreter against NumPy: each output's
+    error, normwise."""
+    host = _host()
+    kernel = host.Kernel(DESCRIPTIONS[shape](6, precision), _dtype(precision),
+                         arch)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got, _ = kernel.run({'multi_element': 'force', **options})
+    want = kernel.expected()
+    errors = {}
+    for alias in {alias for alias, _ in want}:
+        keys = [key for key in want if key[0] == alias]
+        scale = max(abs(want[key]) for key in keys) or 1.0
+        errors[alias] = max(abs(got[key] - want[key]) for key in keys) / scale
+    return errors
+
+
 @pytest.mark.parametrize('shape,options', [
     ('volume', {}), ('chain', {}), ('reuse', {}),
-    ('volume', {'tensor_cores': False})],
-    ids=['volume', 'chain', 'reuse', 'volume-fma'])
+    ('volume', {'tensor_cores': False}), ('assign', {}), ('window', {})],
+    ids=['volume', 'chain', 'reuse', 'volume-fma', 'assign', 'window'])
 @pytest.mark.parametrize('precision,tolerance', [('s', 1e-6), ('d', 1e-12)])
 def test_the_section_computes_on_the_oracle(shape, options, precision,
                                             tolerance):
     """The kernel run by the host interpreter against NumPy, normwise --
     the section's real operators, on sm_90: the matrix tiling, and once the
     FMA forms."""
-    host = _host()
-    kernel = host.Kernel(DESCRIPTIONS[shape](6, precision), _dtype(precision),
-                         'sm_90')
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        got, _ = kernel.run({'multi_element': 'force', **options})
-    want = kernel.expected()
-    for alias in {alias for alias, _ in want}:
-        keys = [key for key in want if key[0] == alias]
-        scale = max(abs(want[key]) for key in keys) or 1.0
-        error = max(abs(got[key] - want[key]) for key in keys) / scale
+    for alias, error in _oracle_errors(shape, precision, 'sm_90',
+                                       options).items():
         assert error <= tolerance, (alias, error)
+
+
+@pytest.mark.parametrize('shape', ['volume', 'assign'])
+def test_sm_80s_shape_computes_on_the_oracle(shape):
+    """F64 on sm_80, `m8n8k4`: two cells of D a lane, each added into the
+    output from the accumulators, or stored where the step assigns."""
+    for alias, error in _oracle_errors(shape, 'd', 'sm_80', {}).items():
+        assert error <= 1e-12, (alias, error)
 
 
 #: The oracle's seed for its fill of memory (`kernel_eval.Slot`).

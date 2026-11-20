@@ -51,8 +51,10 @@ are one `Step`, lowered together: the matrix tiling concatenates them
 along K and keeps D in registers across them, the FMA forms sum them per
 output.  The matrix tiling reads each product's operator as a `Stage` --
 its window, zero elsewhere, padded to the instruction's tiles -- and
-hands D to its consumer's buffer, or to the output's (`results`), which
-each warp then adds into its element's output.
+hands D to its consumer's buffer, or adds it into the output straight
+from the accumulators: a tile's rows are several elements', so each warp
+shares its element's pointer to the output with the block
+(`pointer_tables`), and a lane adds each of its cells through its row's.
 
 The *lanes form* (`Options.multi_element_fma` `lanes`, `Lanes`) is the
 other arrangement of the FMA units: a lane an element rather than an
@@ -104,6 +106,10 @@ MIN_ELEMENTS = 4
 #: Bytes of a block's shared memory left to the rest of the kernel -- the
 #: arena's own windows -- when the group's staging is sized.
 SHARED_RESERVE = 1024
+
+#: Bytes of an element's entry in a pointer table (`pointer_tables`): a
+#: global address.
+POINTER_BYTES = 8
 
 #: The layout's deployment switch for the matrix engines: an operator step
 #: is tiled on them where `Options.tensor_cores` asks for it, or where the
@@ -358,14 +364,22 @@ class GroupSection:
     intermediates: Tuple[Buffer, ...]
     outputs: Tuple[object, ...]
     dtype: Datatype
-    #: The operators as the block stages them (`Stage`), and the buffers the
-    #: matrix steps hand an output's D to (`lower`).
+    #: The operators as the block stages them (`Stage`, `lower`).
     stages: Tuple[Stage, ...] = ()
-    results: Tuple[Buffer, ...] = ()
 
     @property
     def products(self) -> List[Product]:
         return [p for s in self.steps for p in s.products]
+
+    @property
+    def pointer_tables(self) -> Tuple[object, ...]:
+        """The outputs a matrix step adds into: the block keeps a table of
+        the group's pointers to each, every warp its element's -- a tile's
+        rows are several elements', and the lane that holds a cell of D adds
+        it through its row's element's pointer."""
+        return tuple(t for t in self.outputs
+                     if any(s.dest is t and s.lowering in MATRIX_LOWERINGS
+                            for s in self.steps))
 
     @property
     def basis(self) -> int:
@@ -378,13 +392,6 @@ class GroupSection:
     def buffer(self, tensor) -> Buffer:
         """The group's buffer of `tensor`, an input or an intermediate."""
         for b in self.inputs + self.intermediates:
-            if b.tensor is tensor:
-                return b
-        raise KeyError(tensor.alias)
-
-    def result(self, tensor) -> Buffer:
-        """The buffer a matrix step hands the output `tensor`'s D to."""
-        for b in self.results:
             if b.tensor is tensor:
                 return b
         raise KeyError(tensor.alias)
@@ -678,12 +685,10 @@ def _round(value: int, step: int) -> int:
 
 def _staged(section: GroupSection, sm: int,
             split: bool = False) -> GroupSection:
-    """The section with its operators' stages and its outputs' result
-    buffers, for the steps' lowerings: an operator as stored where an FMA
-    form reads it, a B a window where a matrix step does -- in TF32 halves
-    where `split` asks."""
+    """The section with its operators' stages, for the steps' lowerings:
+    an operator as stored where an FMA form reads it, a B a window where a
+    matrix step does -- in TF32 halves where `split` asks."""
     stages: List[Stage] = []
-    results: Dict[int, Tuple[object, List[Range], List[Range]]] = {}
 
     def add(stage):
         # By the tensor's identity: two operators alike in shape compare
@@ -713,14 +718,7 @@ def _staged(section: GroupSection, sm: int,
                       _round(p.depth[1] - p.depth[0], k),
                       _round(step.rows[1] - step.rows[0], n), k,
                       split and step.lowering == 'mma_sync'))
-        if matrix and not step.dest.is_tmp:
-            entry = results.setdefault(id(step.dest), (step.dest, [], []))
-            entry[1].append(step.rows)
-            entry[2].append(step.cols)
-    return dataclasses.replace(
-        section, stages=tuple(stages),
-        results=tuple(Buffer(t, Role.GROUP, _union(r), _union(c))
-                      for t, r, c in results.values()))
+    return dataclasses.replace(section, stages=tuple(stages))
 
 
 def _pitched(section: GroupSection) -> GroupSection:
@@ -822,11 +820,11 @@ def lower(section: GroupSection, context, matrix: bool = True,
           split: bool = False, lanes: bool = False) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
-    every step, where `lanes` is on -- and the stages and result buffers
-    those lowerings read and write, B in TF32 halves where `split` asks.
-    An `fma` step reads only its operators' nonzeros (`nonzero_terms`)
-    where they carry their numbers and `Options.skip_known_zeros` is on, as
-    the per-element products do."""
+    every step, where `lanes` is on -- and the stages those lowerings read,
+    B in TF32 halves where `split` asks.  An `fma` step reads only its
+    operators' nonzeros (`nonzero_terms`) where they carry their numbers
+    and `Options.skip_known_zeros` is on, as the per-element products
+    do."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     sm = nvidia.sm_of(context)
     sparse = context.get_user_options().skip_known_zeros
@@ -854,15 +852,17 @@ def split(section: GroupSection) -> bool:
 
 def shared_bytes(section: GroupSection, elements: int) -> int:
     """Shared memory a group of `elements` takes: the operators as staged
-    -- their stages, and the terms of the steps that walk them -- and each
-    element's copy of every input, intermediate and result."""
+    -- their stages, and the terms of the steps that walk them -- each
+    element's copy of every input and intermediate, and its entry in every
+    pointer table."""
     size = section.dtype.size()
     operators = (sum(st.volume for st in section.stages)
                  + sum(s.terms.volume for s in section.steps
                        if s.terms is not None))
     per_element = sum(b.per_element for b in section.inputs
-                      + section.intermediates + section.results)
-    return size * (operators + elements * per_element)
+                      + section.intermediates)
+    return (size * (operators + elements * per_element)
+            + POINTER_BYTES * elements * len(section.pointer_tables))
 
 
 def table_elements(section: GroupSection) -> int:
@@ -1167,9 +1167,8 @@ def fill(section: GroupSection,
     and `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
     target's (`lower`): the matrix tiling, B in TF32 halves at the sizes
     where that fits; where no group of the tiling fits -- its padded stages
-    and its outputs' result buffers take room the FMA forms do not -- the
-    FMA forms' (o6 F64 on sm_120's 99 kB).  The group carries the section
-    lowered."""
+    take room the FMA forms do not -- the FMA forms'.  The group carries
+    the section lowered."""
     target = context.target
     hw = target.hw
     if getattr(hw, 'vendor', None) != 'nvidia' or target.backend != 'cuda':
@@ -1232,9 +1231,10 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
 __all__ = ['Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
            'FMA_FORMS', 'GroupSection', 'Kind', 'LANE_CLASSES',
            'LANE_ELEMENTS', 'LANE_RANGES', 'LANE_REGISTERS', 'LOWERING',
-           'Lanes', 'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'Product',
-           'Role', 'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step', 'Terms',
-           'classify', 'fill', 'fma_form', 'lanes_plan', 'lower',
+           'Lanes', 'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS',
+           'POINTER_BYTES', 'Product', 'Role', 'SHARED_RESERVE',
+           'SMALL_EXTENT', 'Stage', 'Step', 'Terms', 'classify',
+           'fill', 'fma_form', 'lanes_plan', 'lower',
            'matrix_enabled', 'matrix_shape', 'nonzero_terms',
            'operator_nonzeros', 'plan', 'shared_bytes', 'split',
            'table_elements', 'tiled']

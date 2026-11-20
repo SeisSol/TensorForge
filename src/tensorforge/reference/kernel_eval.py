@@ -1071,7 +1071,9 @@ def _same(a, b) -> bool:
 def _py(expr: str) -> str:
     """Translate a C expression into a Python one."""
     e = expr
-    e = re.sub(r'\b(\d+)_i32\b', r'\1', e)
+    # `base.h`'s integer literals: `0_i64` is the null a pointer table holds
+    # for a masked element (`compute.multi_element`).
+    e = re.sub(r'\b(\d+)_i(?:32|64)\b', r'\1', e)
     # A float literal's suffix, and only a literal's: a name may end in a
     # digit and an `f` as well -- a table named by its numbers' digest,
     # `tf_ellw_..c0f` -- which a rule on the last digit alone cut short.

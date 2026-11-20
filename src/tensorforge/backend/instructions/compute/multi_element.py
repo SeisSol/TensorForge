@@ -18,8 +18,11 @@ element, and the batch loop hands it E consecutive elements a trip
   2. the section's steps run in order, each by its lowering (`LOWERINGS`),
      reading the staged operators and the group's buffers, writing an
      intermediate's buffer or the section's output;
-  3. an output is written back per element, under the element's mask, as
-     read-modify-write where the step accumulates.
+  3. an FMA form writes an output per element, under the element's mask,
+     as read-modify-write where the step accumulates; the matrix tiling
+     writes it from the accumulators, a cell through its row's element's
+     pointer, which each warp shares with the block in the trip
+     (`_Trip.publish`), null where its element is masked.
 
 The lowerings are the FMA forms, `fma` for an operator product and `rows`
 for a mixing one -- the warp of an element computes that element's outputs
@@ -28,9 +31,10 @@ its own window of the destination -- and the matrix tiling of an operator
 step (`mma_sync`, `dmma`; `_matrix`), which reads the same buffers: A from
 the group operand's (by ldmatrix in F32, where the buffer is pitched for
 it), B from the operator's stage, and D reaching its consumer's buffer, or
-the output through a result buffer.  Where the operators' nonzeros are
-known, `fma` walks only those (`_sparse`): a lane executes the nonzeros of
-its output's row, the rows sorted so that a warp's lanes walk about as many
+the output from the accumulators: one reduction a cell (`red.global.add`),
+a store where the step assigns.  Where the operators' nonzeros are known,
+`fma` walks only those (`_sparse`): a lane executes the nonzeros of its
+output's row, the rows sorted so that a warp's lanes walk about as many
 each.
 
 The lanes form (`element_group.Lanes`) is lowered by `_lanes` instead: a
@@ -60,8 +64,8 @@ from typing import Dict, List, Optional, Sequence
 from tensorforge.backend import elementmask
 from tensorforge.backend.instructions.abstract_instruction import \
     AbstractInstruction
-from tensorforge.backend.pir.core import (BOOL, INDEX, MemSpace,
-                                          Participants, ScalarType,
+from tensorforge.backend.pir.core import (BOOL, INDEX, BufferType, Effect,
+                                          MemSpace, Participants, ScalarType,
                                           Uniformity)
 from tensorforge.common.basic_types import Datatype, GeneralLexicon
 from tensorforge.common.context import Context
@@ -69,6 +73,9 @@ from tensorforge.common.exceptions import InternalError
 
 #: The longest contraction a lowering writes out rather than loops over.
 UNROLL = 16
+
+#: A global address as a pointer table holds it (`_Trip.publish`).
+WORD = ScalarType(Datatype.I64)
 
 
 def _hint(prefix: str, tensor) -> str:
@@ -339,7 +346,8 @@ class _Trip:
         #: A sparse step's tables, by its terms (`MultiElementOperators`).
         self.tables = tables or {}
         self.buffers: Dict[int, object] = {}
-        self.results: Dict[int, object] = {}
+        #: The block's pointer tables, by output (`publish`).
+        self.pointers: Dict[int, object] = {}
         # The warp's element's mask, which every write of an output runs
         # under.  The element group's traversal is text, and its mask a
         # name: the warp's own, since a warp is its element.
@@ -390,6 +398,41 @@ class _Trip:
             old = b.load(target, at, type_=self.fp, hint='q')
             total = b.op('add', self.fp, old, total, hint='q')
         b.store(target, total, at, predicate=predicate)
+
+    def publish(self, tensor) -> None:
+        """The warp's element's pointer to the output `tensor`, into the
+        block's table at the warp's slot, by one lane: null where the
+        element is masked, so that nothing is written through it."""
+        b = self.builder
+        word = b.rawexpr('reinterpret_cast<int64_t>({0})',
+                         _bound(b, self.symbols[id(tensor)]), type_=WORD,
+                         hint='p', pure=True, movable=True)
+        if self.mask is not None:
+            word = b.op('select', WORD, self.mask, word, 0, hint='p')
+        b.store(self.pointers[id(tensor)], word, self.slot,
+                predicate=b.op('eq', BOOL, self.lane, 0, hint='in'))
+
+    def pointer(self, tensor, element):
+        """Element `element`'s pointer to the output `tensor`, from the
+        block's table (`publish`), and whether it has one -- null where the
+        element is masked.  Read as the binding it is, a pointer to the
+        output (`IRBuilder.decl_expr`)."""
+        b = self.builder
+        word = b.load(self.pointers[id(tensor)], element, type_=WORD,
+                      hint='p')
+        symbol = self.symbols[id(tensor)]
+        bound = _bound(b, symbol)
+        if not isinstance(getattr(bound, 'type', None), BufferType):
+            raise InternalError(f'{tensor.alias}: no pointer bound in the '
+                                f'body to read another element\'s like')
+        ctype = self.section.dtype.ctype()
+        name = f'{_hint("e", tensor)}_{b.next_index()}'
+        pointer = b.decl_expr(f'{ctype} *const {name}',
+                              f'reinterpret_cast<{ctype}*>({{0}})',
+                              bound.type, symbol, args=(word,),
+                              kind=Effect.READ, hint=name, extern=name,
+                              alias_root=b.alias_root(symbol))
+        return pointer, b.op('ne', BOOL, word, 0, hint='in')
 
 
 def _product(trip, product, row, col):
@@ -631,9 +674,13 @@ def _matrix(trip, step) -> None:
     is the group operand's buffer as it stands, row `m` of it an element's
     column, the contraction contiguous; B the product's stage, zero outside
     its window and in the padding.  A warp takes the tiles of D in turn, D
-    in registers across the products, and hands each to the destination's
-    buffer -- the intermediate's, or the output's result buffer, which each
-    warp then adds into its own element's output under its mask."""
+    in registers across the products, and hands each to the destination:
+    the intermediate's buffer, or the output, straight from the
+    accumulators -- a lane's cells through the pointers of their rows'
+    elements (`_Trip.pointer`), one reduction a cell where the step
+    accumulates, so that each output gets one add of the step whichever
+    warp holds it, a store where it assigns, and nothing where the element
+    is masked."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     from tensorforge.generators.element_group import matrix_shape
     b = trip.builder
@@ -650,12 +697,10 @@ def _matrix(trip, step) -> None:
     a_cells = _a_lane_cells(atom)
     d_cells = nvidia.d_lane_cells(atom)
     kregs = k_ // 4
+    dest = target = None
     if step.dest.is_tmp:
         dest = section.buffer(step.dest)
         target = trip.buffers[id(step.dest)]
-    else:
-        dest = section.result(step.dest)
-        target = trip.results[id(step.dest)]
     quad = b.op('div', INDEX, trip.lane, 4, hint='q')
     inquad = b.op('rem', INDEX, trip.lane, 4, hint='q')
     # A by ldmatrix where the step is F32 and its group operands' buffers
@@ -769,8 +814,10 @@ def _matrix(trip, step) -> None:
                     products = atom.products(b, a, regs)
                 for term, (fa, fb) in enumerate(products):
                     atom.asmcall(b, accs, fa, fb, accs, term=atom.term(term))
-        # D, to the destination's buffer: the cells of the group's rows and
-        # the step's rows, the padding's left out.
+        # D, to the intermediate's buffer, or to the output from the
+        # accumulators: the cells of the group's rows and the step's rows,
+        # the padding's left out.
+        pointers = {}
         for slot, (r0, c0) in d_cells.items():
             m = b.op('add', INDEX, m0, _index(b, 'add', quad, r0, 'm'),
                      hint='m')
@@ -780,6 +827,23 @@ def _matrix(trip, step) -> None:
             if M % m_:
                 live = b.op('and', BOOL, live,
                             b.op('lt', BOOL, m, M, hint='in'), hint='in')
+            if target is None:
+                # The row's element's pointer and its column; a row past
+                # the group reads the first entry and writes nothing.
+                if r0 not in pointers:
+                    e = b.op('div', INDEX, m, width, hint='e')
+                    if M % m_:
+                        e = b.op('select', INDEX, b.op(
+                            'lt', BOOL, m, M, hint='in'), e, 0, hint='e')
+                    col = _index(b, 'add', b.op('rem', INDEX, m, width,
+                                                hint='j'), cols[0], 'j')
+                    pointers[r0] = trip.pointer(step.dest, e) + (col,)
+                pointer, held, col = pointers[r0]
+                b.store(pointer, accs[slot], _address(
+                    b, step.dest, _index(b, 'add', n, rows[0], 'i'), col),
+                    predicate=b.op('and', BOOL, live, held, hint='in'),
+                    atomic=not step.assigns)
+                continue
             at = b.op('select', INDEX, live, rows_of(
                 m, dest, cols[0], _index(b, 'add', n, rows[0], 'i')), 0,
                 hint='a')
@@ -788,19 +852,6 @@ def _matrix(trip, step) -> None:
                 value = b.op('add', fp, b.load(target, at, type_=fp,
                                                hint='q'), value, hint='q')
             b.store(target, value, at, predicate=live)
-    if step.dest.is_tmp:
-        return
-    # The output's D is in the result buffer, every warp's tiles of it: the
-    # block meets, and each warp adds its own element's into its output.
-    b.barrier(Participants.BLOCK)
-    with b.for_(trip.lane, height * width, trip.group.threads, hint='o',
-                uniform=Uniformity.LANE) as loop:
-        row = _index(b, 'add', b.op('rem', INDEX, loop.induction, height,
-                                    hint='i'), rows[0], 'i')
-        col = _index(b, 'add', b.op('div', INDEX, loop.induction, height,
-                                    hint='j'), cols[0], 'j')
-        total = b.load(target, trip.at(dest, row, col), type_=fp, hint='d')
-        trip.write(step, row, col, total)
 
 
 class _LaneTrip:
@@ -1194,11 +1245,13 @@ class MultiElementSection(AbstractInstruction):
                 section.dtype, (elements * buffer.per_element,),
                 MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
                 hint=_hint('g', buffer.tensor))
-        for buffer in section.results:
-            trip.results[id(buffer.tensor)] = builder.alloc(
-                section.dtype, (elements * buffer.per_element,),
-                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
-                hint=_hint('d', buffer.tensor))
+        # A pointer table's entries on 8 bytes, in the arena's elements.
+        unit = max(1, WORD.base.size() // self._context.fp_type.size())
+        for tensor in section.pointer_tables:
+            trip.pointers[id(tensor)] = builder.alloc(
+                Datatype.I64, (elements,), MemSpace.SHARED,
+                arena=GeneralLexicon.TOTAL_SHR_MEM, hint=_hint('p', tensor),
+                place_align=unit if unit > 1 else None)
         # The block meets before any warp overwrites the group's buffers, so
         # that the last trip's reads of them are done.
         builder.barrier(Participants.BLOCK)
@@ -1207,6 +1260,8 @@ class MultiElementSection(AbstractInstruction):
         for buffer in section.inputs + section.intermediates:
             if buffer.pitch > buffer.height:
                 self._pad(trip, buffer)
+        for tensor in section.pointer_tables:
+            trip.publish(tensor)
         # What was written and read since the block last met: a step that
         # reads what is written, or writes what is written or read, waits.
         written = {id(b.tensor) for b in section.inputs}
