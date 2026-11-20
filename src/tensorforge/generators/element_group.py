@@ -213,17 +213,30 @@ class Buffer:
     """The group's copy of one operand in shared memory: per element, the
     box `rows` x `cols` of it, column by column -- an element's rows of a
     group operand side by side, its basis contiguous -- and the elements
-    one after another."""
+    one after another.
+
+    `stride` is how far one column starts from the next where a reader
+    wants more than the box's rows -- the matrix tiling's ldmatrix, whose
+    rows are 16 bytes (`_pitched`); `pitch` is the distance either way.
+    The elements past the rows are padding, zero."""
 
     tensor: object
     role: Role
     rows: Range
     cols: Range
+    stride: int = 0
+
+    @property
+    def height(self) -> int:
+        return self.rows[1] - self.rows[0]
+
+    @property
+    def pitch(self) -> int:
+        return self.stride or self.height
 
     @property
     def per_element(self) -> int:
-        return ((self.rows[1] - self.rows[0])
-                * (self.cols[1] - self.cols[0]))
+        return self.pitch * (self.cols[1] - self.cols[0])
 
 
 @dataclass(frozen=True)
@@ -235,21 +248,32 @@ class Stage:
     B is the product's window of the operator, transposed onto the
     instruction's axes -- `B(k, n) = K(n0 + n, k0 + k)`, `k0` the window's
     first column, `n0` the step's first row -- zero wherever the product
-    has no entry, `depth` rows of `ld` columns: the contraction padded to
-    the instruction's depth, the step's rows to its width and the row length
-    to a stride whose fragment reads meet no bank twice."""
+    has no entry, the contraction padded to `depth` (a multiple of the
+    instruction's `k`) and the step's rows to `width` (of its n, 8).  It is
+    stored in the order the instruction's fragments are read: tile after
+    tile of `k` x 8, K outer, and in a tile lane after lane, each lane's
+    registers of B side by side (`regs`) -- one load a lane and fragment.
+    `split` stores each value as its two TF32 halves, the upper ones first,
+    which the 3xTF32 products then read prepared (`fill`)."""
 
     tensor: object
     window: Optional[Tuple[Range, Range]] = None
     n0: int = 0
     depth: int = 0
-    ld: int = 0
+    width: int = 0
+    k: int = 0
+    split: bool = False
+
+    @property
+    def regs(self) -> int:
+        """A lane's registers of B a fragment, both halves where split."""
+        return (self.k // 4) * (2 if self.split else 1)
 
     @property
     def volume(self) -> int:
         if self.window is None:
             return int(self.tensor.storage_volume())
-        return self.depth * self.ld
+        return self.depth * self.width * (2 if self.split else 1)
 
 
 @dataclass(frozen=True)
@@ -573,10 +597,12 @@ def _round(value: int, step: int) -> int:
     return -(-value // step) * step
 
 
-def _staged(section: GroupSection, sm: int) -> GroupSection:
+def _staged(section: GroupSection, sm: int,
+            split: bool = False) -> GroupSection:
     """The section with its operators' stages and its outputs' result
     buffers, for the steps' lowerings: an operator as stored where an FMA
-    form reads it, a B a window where a matrix step does."""
+    form reads it, a B a window where a matrix step does -- in TF32 halves
+    where `split` asks."""
     stages: List[Stage] = []
     results: Dict[int, Tuple[object, List[Range], List[Range]]] = {}
 
@@ -597,13 +623,10 @@ def _staged(section: GroupSection, sm: int) -> GroupSection:
                 add(Stage(t))
                 continue
             _, n, k = matrix_shape(step.lowering, sm)
-            width = _round(step.rows[1] - step.rows[0], n)
-            if section.dtype is Datatype.F64:
-                ld = width + 4
-            else:
-                ld = width + (8 if width % 32 in (0, 16) else 0)
             add(Stage(t, (p.rows, p.depth), step.rows[0],
-                      _round(p.depth[1] - p.depth[0], k), ld))
+                      _round(p.depth[1] - p.depth[0], k),
+                      _round(step.rows[1] - step.rows[0], n), k,
+                      split and step.lowering == 'mma_sync'))
         if matrix and not step.dest.is_tmp:
             entry = results.setdefault(id(step.dest), (step.dest, [], []))
             entry[1].append(step.rows)
@@ -612,6 +635,38 @@ def _staged(section: GroupSection, sm: int) -> GroupSection:
         section, stages=tuple(stages),
         results=tuple(Buffer(t, Role.GROUP, _union(r), _union(c))
                       for t, r, c in results.values()))
+
+
+def _pitched(section: GroupSection) -> GroupSection:
+    """The section with a pitch for every buffer an F32 matrix step reads A
+    from: ldmatrix takes a fragment's rows 16 bytes at a time
+    (`compute.multi_element`), so a column of the buffer -- a row of A --
+    starts on a multiple of four floats, and an odd number of 16-byte units
+    from the next (four more than a multiple of eight floats), which puts a
+    fragment's eight rows on eight different bank groups.  Long enough for
+    every step of K a product reads, the padding zero, so that the padded
+    end of the contraction multiplies zeros."""
+    need: Dict[int, int] = {}
+    for step in section.steps:
+        if step.lowering != 'mma_sync':
+            continue
+        _, _, k = matrix_shape(step.lowering, 0)
+        for p in step.products:
+            buffer = section.buffer(p.second.tensor)
+            span = (p.depth[0] - buffer.rows[0]) + _round(
+                p.depth[1] - p.depth[0], k)
+            need[id(buffer.tensor)] = max(
+                need.get(id(buffer.tensor), buffer.height), span)
+
+    def pitched(buffer):
+        n = need.get(id(buffer.tensor))
+        if n is None:
+            return buffer
+        return dataclasses.replace(buffer, stride=n + (4 - n % 8) % 8)
+
+    return dataclasses.replace(
+        section, inputs=tuple(map(pitched, section.inputs)),
+        intermediates=tuple(map(pitched, section.intermediates)))
 
 
 def matrix_enabled(context) -> bool:
@@ -635,22 +690,29 @@ def _lowering(step: Step, dtype, context, sm: int, matrix: bool) -> str:
     return 'mma_sync' if dtype is Datatype.F32 else 'dmma'
 
 
-def lower(section: GroupSection, context,
-          matrix: bool = True) -> GroupSection:
+def lower(section: GroupSection, context, matrix: bool = True,
+          split: bool = False) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off -- and the stages and result
-    buffers those lowerings read and write."""
+    buffers those lowerings read and write, B in TF32 halves where `split`
+    asks."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     sm = nvidia.sm_of(context)
     steps = tuple(dataclasses.replace(
         s, lowering=_lowering(s, section.dtype, context, sm, matrix))
         for s in section.steps)
-    return _staged(dataclasses.replace(section, steps=steps), sm)
+    return _pitched(_staged(dataclasses.replace(section, steps=steps), sm,
+                            split))
 
 
 def tiled(section: GroupSection) -> bool:
     """Whether a step of the section is lowered on the matrix engines."""
     return any(s.lowering in MATRIX_LOWERINGS for s in section.steps)
+
+
+def split(section: GroupSection) -> bool:
+    """Whether the section's B stages hold TF32 halves."""
+    return any(st.split for st in section.stages)
 
 
 def shared_bytes(section: GroupSection, elements: int) -> int:
@@ -680,10 +742,12 @@ def fill(section: GroupSection,
 
     The size is the table's (`table_elements`) where the block holds it,
     halved while it does not -- in shared memory, in threads -- and
-    `MIN_ELEMENTS` the last size tried.  Each step's lowering is the target's (`lower`), and
-    where no group of the matrix tiling fits -- its padded stages and its
-    outputs' result buffers take room the FMA forms do not -- the FMA forms'
-    (o6 F64 on sm_120's 99 kB).  The group carries the section lowered."""
+    `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
+    target's (`lower`): the matrix tiling, B in TF32 halves at the sizes
+    where that fits; where no group of the tiling fits -- its padded stages
+    and its outputs' result buffers take room the FMA forms do not -- the
+    FMA forms' (o6 F64 on sm_120's 99 kB).  The group carries the section
+    lowered."""
     target = context.target
     hw = target.hw
     if getattr(hw, 'vendor', None) != 'nvidia' or target.backend != 'cuda':
@@ -698,21 +762,29 @@ def fill(section: GroupSection,
         return None, (f'a trip of {options.stack_elements} stacked elements '
                       f'is no element group')
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
-    candidates = [lower(section, context)]
-    if tiled(candidates[0]):
-        candidates.append(lower(section, context, matrix=False))
-    for lowered in candidates:
-        elements = table_elements(lowered)
+    # The matrix tiling, with B in TF32 halves where that costs no group
+    # size -- the halves take twice B's room -- then the FMA forms.
+    tilings = [lower(section, context, split=True)]
+    if not tiled(tilings[0]):
+        tilings = []
+    elif split(tilings[0]):
+        tilings.append(lower(section, context))
+    candidates = [tilings] if tilings else []
+    candidates.append([lower(section, context, matrix=False)])
+    for lowerings in candidates:
+        elements = table_elements(lowerings[0])
         while True:
-            need = shared_bytes(lowered, elements)
-            if need <= budget and 32 * elements <= hw.max_threads_per_block:
-                return ElementGroup(elements, lowered, need), ''
+            for lowered in lowerings:
+                need = shared_bytes(lowered, elements)
+                if (need <= budget
+                        and 32 * elements <= hw.max_threads_per_block):
+                    return ElementGroup(elements, lowered, need), ''
             if elements <= MIN_ELEMENTS:
                 break
             elements = max(MIN_ELEMENTS, elements // 2)
     return None, (f'the operators and a group of {MIN_ELEMENTS} take '
-                  f'{shared_bytes(candidates[-1], MIN_ELEMENTS)} B of shared '
-                  f'memory, more than the {budget} B a block has: the '
+                  f'{shared_bytes(candidates[-1][0], MIN_ELEMENTS)} B of '
+                  f'shared memory, more than the {budget} B a block has: the '
                   f'operator needs to be streamed')
 
 
@@ -733,5 +805,5 @@ __all__ = ['Buffer', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
            'GroupSection', 'Kind', 'LOWERING', 'MATRIX', 'MATRIX_LOWERINGS',
            'MIN_ELEMENTS', 'Product', 'Role', 'SHARED_RESERVE',
            'SMALL_EXTENT', 'Stage', 'Step', 'classify', 'fill', 'lower',
-           'matrix_enabled', 'matrix_shape', 'plan', 'shared_bytes',
+           'matrix_enabled', 'matrix_shape', 'plan', 'shared_bytes', 'split',
            'table_elements', 'tiled']

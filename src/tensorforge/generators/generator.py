@@ -3897,9 +3897,10 @@ class Generator:
     flat = [op for descr in descr_list for op in descr.operations()]
     section, why = element_group.classify(flat)
     if section is not None:
+      planned = self._element_group.section
       section = element_group.lower(
-          section, self._context,
-          matrix=element_group.tiled(self._element_group.section))
+          section, self._context, matrix=element_group.tiled(planned),
+          split=element_group.split(planned))
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')

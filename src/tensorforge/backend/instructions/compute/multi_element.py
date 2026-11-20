@@ -20,12 +20,14 @@ element, and the batch loop hands it E consecutive elements a trip
   3. an output is written back per element, under the element's mask, as
      read-modify-write where the step accumulates.
 
-The lowerings so far are the FMA forms, `fma` for an operator product and
-`rows` for a mixing one: the warp of an element computes that element's
-outputs of the step, a lane an output, each product of the step adding only
-into its own window of the destination.  The matrix engines' tiling of an
-operator product is the next lowering; it reads the same buffers, and its D
-reaches a per-row consumer or an output through shared memory.
+The lowerings are the FMA forms, `fma` for an operator product and `rows`
+for a mixing one -- the warp of an element computes that element's outputs
+of the step, a lane an output, each product of the step adding only into
+its own window of the destination -- and the matrix tiling of an operator
+step (`mma_sync`, `dmma`; `_matrix`), which reads the same buffers: A from
+the group operand's (by ldmatrix in F32, where the buffer is pitched for
+it), B from the operator's stage, and D reaching its consumer's buffer, or
+the output through a result buffer.
 
 The instructions place their barriers themselves, as every builder does:
 the block's barrier after the operators' copy, one at the head of each trip
@@ -95,6 +97,15 @@ def _address(builder, tensor, row, col):
     return _box_index(builder, row, col, lower, int(tensor.bbox.sizes()[0]))
 
 
+def _as_float(builder, half):
+    """A TF32 half's bits as the float shared memory stores them, without
+    arithmetic."""
+    from tensorforge.common.basic_types import Datatype
+    return builder.rawexpr('__uint_as_float({0})', half,
+                           type_=ScalarType(Datatype.F32), hint='h',
+                           pure=True, movable=True)
+
+
 def _bound(builder, symbol):
     """The global binding of a symbol in this body, or the symbol, which the
     builder resolves to it."""
@@ -144,42 +155,73 @@ class MultiElementOperators(AbstractInstruction):
                                    MemSpace.SHARED,
                                    arena=GeneralLexicon.TOTAL_SHR_MEM,
                                    hint=_hint('k' if stage.window is None
-                                              else 'b', tensor))
+                                              else 'b', tensor),
+                                   place_align=(None if stage.window is None
+                                                else 4))
             source = _bound(builder, symbols[id(tensor)])
-            with builder.for_(tid, stage.volume, threads, hint='i',
-                              uniform=Uniformity.LANE) as loop:
-                if stage.window is None:
+            if stage.window is None:
+                with builder.for_(tid, stage.volume, threads, hint='i',
+                                  uniform=Uniformity.LANE) as loop:
                     value = builder.load(source, loop.induction, type_=fp,
                                          hint='k')
-                else:
-                    value = self._entry(builder, stage, source, fp,
-                                        loop.induction)
-                builder.store(shared, value, loop.induction)
+                    builder.store(shared, value, loop.induction)
+            else:
+                self._fragments(builder, stage, source, shared, fp, tid,
+                                threads)
             buffers[(id(tensor), stage.window)] = shared
         builder.barrier(Participants.BLOCK)
         self.buffers = buffers
 
     @staticmethod
-    def _entry(builder, stage, source, fp, index):
-        """Entry `index` of a matrix product's B, `B(k, n)` at `k * ld + n`:
-        the operator's `(n0 + n, k0 + k)` inside the product's window, zero
-        outside it -- read from a clamped address, so that no lane reads past
-        the operator."""
+    def _fragments(builder, stage, source, shared, fp, tid, threads):
+        """A matrix product's B in the order the instruction's fragments are
+        read (`element_group.Stage`): cell after cell of B -- lane `l`'s
+        register `j` of tile `(kt, nt)` is `B(kt k + l % 4 + 4 j, 8 nt +
+        l / 4)`, the operator's `(n0 + n, k0 + k)` inside the product's
+        window and zero outside it -- written where the lane reads it, its
+        two TF32 halves apart where the stage is split.  The operator is read
+        at a clamped address, so that no lane reads past it."""
+        from tensorforge.backend.instructions.compute.primitives import \
+            nvidia
         b = builder
         (r0, r1), (d0, d1) = stage.window
-        k = b.op('div', INDEX, index, stage.ld, hint='k')
-        n = b.op('rem', INDEX, index, stage.ld, hint='n')
-        row = _index(b, 'add', n, stage.n0, 'r')
-        col = _index(b, 'add', k, d0, 'c')
-        inside = b.op('and', BOOL, b.op('and', BOOL,
-                                        b.op('ge', BOOL, row, r0, hint='in'),
-                                        b.op('lt', BOOL, row, r1, hint='in'),
-                                        hint='in'),
-                      b.op('lt', BOOL, col, d1, hint='in'), hint='in')
-        at = b.op('select', INDEX, inside,
-                  _address(b, stage.tensor, row, col), 0, hint='a')
-        value = b.load(source, at, type_=fp, hint='k')
-        return b.op('select', fp, inside, value, b.const(0.0, fp), hint='k')
+        kregs = stage.k // 4
+        ntiles = stage.width // 8
+        cells = stage.depth * stage.width
+        with b.for_(tid, cells, threads, hint='i',
+                    uniform=Uniformity.LANE) as loop:
+            fragment = b.op('div', INDEX, loop.induction, kregs, hint='f')
+            j = b.op('rem', INDEX, loop.induction, kregs, hint='j')
+            lane = b.op('rem', INDEX, fragment, 32, hint='l')
+            tile = b.op('div', INDEX, fragment, 32, hint='t')
+            k = b.op('add', INDEX, b.op('add', INDEX, b.op(
+                'mul', INDEX, b.op('div', INDEX, tile, ntiles, hint='t'),
+                stage.k, hint='k'), b.op('rem', INDEX, lane, 4, hint='k'),
+                hint='k'), b.op('mul', INDEX, j, 4, hint='k'), hint='k')
+            n = b.op('add', INDEX, b.op('mul', INDEX, b.op(
+                'rem', INDEX, tile, ntiles, hint='t'), 8, hint='n'),
+                b.op('div', INDEX, lane, 4, hint='n'), hint='n')
+            row = _index(b, 'add', n, stage.n0, 'r')
+            col = _index(b, 'add', k, d0, 'c')
+            inside = b.op('and', BOOL, b.op(
+                'and', BOOL, b.op('ge', BOOL, row, r0, hint='in'),
+                b.op('lt', BOOL, row, r1, hint='in'), hint='in'),
+                b.op('lt', BOOL, col, d1, hint='in'), hint='in')
+            at = b.op('select', INDEX, inside,
+                      _address(b, stage.tensor, row, col), 0, hint='a')
+            value = b.op('select', fp, inside,
+                         b.load(source, at, type_=fp, hint='k'),
+                         b.const(0.0, fp), hint='k')
+            slot = b.op('add', INDEX, b.op('mul', INDEX, fragment,
+                                           stage.regs, hint='s'), j,
+                        hint='s')
+            if stage.split:
+                (upper, lower), = nvidia.tfconvert(b, [value])
+                b.store(shared, _as_float(b, upper), slot)
+                b.store(shared, _as_float(b, lower),
+                        b.op('add', INDEX, slot, kregs, hint='s'))
+            else:
+                b.store(shared, value, slot)
 
     def __str__(self) -> str:
         return (f'multi-element operators '
@@ -217,8 +259,8 @@ class _Trip:
         b = self.builder
         base = b.op('mul', INDEX, self.slot, buffer.per_element, hint='b')
         return _index(b, 'add', base, _box_index(
-            b, row, col, (buffer.rows[0], buffer.cols[0]),
-            buffer.rows[1] - buffer.rows[0]), 'a')
+            b, row, col, (buffer.rows[0], buffer.cols[0]), buffer.pitch),
+            'a')
 
     def read(self, sub, row, col):
         """`(row, col)` of an operand of a product: the staged operator, or
@@ -387,6 +429,23 @@ def _matrix(trip, step) -> None:
         target = trip.results[id(step.dest)]
     quad = b.op('div', INDEX, trip.lane, 4, hint='q')
     inquad = b.op('rem', INDEX, trip.lane, 4, hint='q')
+    # A by ldmatrix where the step is F32 and its group operands' buffers
+    # are pitched for it (`element_group._pitched`): lane `l` names row
+    # `l % 8 + 8 ((l / 8) % 2)` of the tile at column `4 (l / 16)`, and the
+    # four registers are A's in the instruction's order (`ldmatrixX4`).
+    ldmatrix = step.lowering == 'mma_sync' and all(
+        section.buffer(p.second.tensor).stride for p in step.products)
+    if ldmatrix:
+        if [a_cells[slot] for slot in sorted(a_cells)] != [
+                (0, 0), (8, 0), (0, 4), (8, 4)]:
+            raise InternalError(f'the A layout of {atom.name} is not the '
+                                f'one ldmatrix.x4 loads')
+        lrow = b.op('add', INDEX, b.op('rem', INDEX, trip.lane, 8, hint='l'),
+                    b.op('mul', INDEX, b.op('rem', INDEX, b.op(
+                        'div', INDEX, trip.lane, 8, hint='l'), 2, hint='l'),
+                        8, hint='l'), hint='l')
+        lcol = b.op('mul', INDEX, b.op('div', INDEX, trip.lane, 16,
+                                       hint='l'), 4, hint='l')
 
     def rows_of(m, buffer, col_lo, row):
         """The index in `buffer` of row `row` of the group's row `m`: element
@@ -396,8 +455,7 @@ def _matrix(trip, step) -> None:
                    col_lo - buffer.cols[0], 'j')
         base = b.op('mul', INDEX, e, buffer.per_element, hint='b')
         return _index(b, 'add', base, _box_index(
-            b, row, j, (buffer.rows[0], 0),
-            buffer.rows[1] - buffer.rows[0]), 'a')
+            b, row, j, (buffer.rows[0], 0), buffer.pitch), 'a')
 
     with b.for_(trip.slot, mtiles * ntiles, trip.group.elements, hint='t',
                 uniform=Uniformity.MULT) as tiles:
@@ -407,6 +465,11 @@ def _matrix(trip, step) -> None:
         n0 = b.op('mul', INDEX, nt, n_, hint='n')
         accs = [b.declare(fp, hint='c', uniform=Uniformity.LANE)
                 for _ in d_cells]
+        if ldmatrix:
+            lm = b.op('add', INDEX, m0, lrow, hint='m')
+            if M % m_:
+                lm = b.op('select', INDEX, b.op('lt', BOOL, lm, M, hint='in'),
+                          lm, 0, hint='m')
         # The lane's rows of A, the same for every product and step of K.
         a_rows = {}
         for slot, (r0, _) in a_cells.items():
@@ -425,8 +488,18 @@ def _matrix(trip, step) -> None:
             k_lo, k_hi = product.depth
             depth = k_hi - k_lo
             for kt in range(0, depth, k_):
-                a = []
-                for slot in range(len(a_cells)):
+                if ldmatrix:
+                    # The lane's row of the tile, 16 bytes of it: the
+                    # padding and the clamped rows past the group read
+                    # numbers, zeros or rows whose D is not written.
+                    at = rows_of(lm, group, cols[0],
+                                 _index(b, 'add', lcol, k_lo + kt, 'k'))
+                    a = list(b.split_op('tensorforge::ldmatrixX4',
+                                        (fp,) * 4, source, at,
+                                        hints=('a',) * 4, reads=(source,)))
+                else:
+                    a = []
+                for slot in (() if ldmatrix else range(len(a_cells))):
                     r0, c0 = a_cells[slot]
                     m, live = a_rows[r0]
                     kk = _index(b, 'add', inquad, kt + c0, 'k')
@@ -443,15 +516,29 @@ def _matrix(trip, step) -> None:
                     value = b.load(source, at, type_=fp, hint='a')
                     a.append(b.op('select', fp, live, value,
                                   b.const(0.0, fp), hint='a'))
-                bb = []
-                for j in range(kregs):
-                    k = _index(b, 'add', inquad, kt + 4 * j, 'k')
-                    bb.append(b.load(staged, b.op(
-                        'add', INDEX, b.op('mul', INDEX, k, stage.ld,
-                                           hint='k'),
-                        b.op('add', INDEX, n0, quad, hint='n'), hint='a'),
-                        type_=fp, hint='b'))
-                for term, (fa, fb) in enumerate(atom.products(b, a, bb)):
+                # The lane's registers of B for this tile and step of K,
+                # side by side: one load (`element_group.Stage`).
+                at = b.op('mul', INDEX, b.op('add', INDEX, b.op(
+                    'mul', INDEX, b.op('add', INDEX, nt,
+                                       (kt // k_) * ntiles, hint='f'),
+                    32, hint='f'), trip.lane, hint='f'), stage.regs,
+                    hint='f')
+                if stage.regs == 1:
+                    regs = [b.load(staged, at, type_=fp, hint='b')]
+                else:
+                    vec = b.load(staged, at, type_=ScalarType(
+                        section.dtype, stage.regs), hint='b',
+                        align=stage.regs * section.dtype.size())
+                    regs = [b.extract(vec, r, hint='b')
+                            for r in range(stage.regs)]
+                if stage.split:
+                    halves = [(nvidia._as_tf32(b, regs[j]),
+                               nvidia._as_tf32(b, regs[kregs + j]))
+                              for j in range(kregs)]
+                    products = atom.products(b, a, None, b_split=halves)
+                else:
+                    products = atom.products(b, a, regs)
+                for term, (fa, fb) in enumerate(products):
                     atom.asmcall(b, accs, fa, fb, accs, term=atom.term(term))
         # D, to the destination's buffer: the cells of the group's rows and
         # the step's rows, the padding's left out.
@@ -542,6 +629,9 @@ class MultiElementSection(AbstractInstruction):
         builder.barrier(Participants.BLOCK)
         for buffer, symbol in zip(section.inputs, self._inputs):
             self._stage(trip, buffer, symbol)
+        for buffer in section.inputs + section.intermediates:
+            if buffer.pitch > buffer.height:
+                self._pad(trip, buffer)
         # What was written and read since the block last met: a step that
         # reads what is written, or writes what is written or read, waits.
         written = {id(b.tensor) for b in section.inputs}
@@ -560,9 +650,9 @@ class MultiElementSection(AbstractInstruction):
         the group's buffer."""
         b = trip.builder
         source = _bound(b, symbol)
-        height = buffer.rows[1] - buffer.rows[0]
-        base = b.op('mul', INDEX, trip.slot, buffer.per_element, hint='b')
-        with b.for_(trip.lane, buffer.per_element, trip.group.threads,
+        height = buffer.height
+        width = buffer.cols[1] - buffer.cols[0]
+        with b.for_(trip.lane, height * width, trip.group.threads,
                     hint='j', uniform=Uniformity.LANE) as loop:
             row = _index(b, 'add', b.op('rem', INDEX, loop.induction,
                                         height, hint='r'),
@@ -573,7 +663,24 @@ class MultiElementSection(AbstractInstruction):
             value = b.load(source, _address(b, buffer.tensor, row, col),
                            type_=trip.fp, hint='s')
             b.store(trip.buffers[id(buffer.tensor)], value,
-                    b.op('add', INDEX, base, loop.induction, hint='j'))
+                    trip.at(buffer, row, col))
+
+    @staticmethod
+    def _pad(trip, buffer) -> None:
+        """Zeros past the rows of every column of the warp's element, where
+        the buffer has a pitch (`element_group.Buffer`): what the matrix
+        tiling's padded steps of K read, to multiply zeros."""
+        b = trip.builder
+        pad = buffer.pitch - buffer.height
+        width = buffer.cols[1] - buffer.cols[0]
+        with b.for_(trip.lane, pad * width, trip.group.threads, hint='z',
+                    uniform=Uniformity.LANE) as loop:
+            row = _index(b, 'add', b.op('rem', INDEX, loop.induction, pad,
+                                        hint='r'), buffer.rows[1], 'r')
+            col = _index(b, 'add', b.op('div', INDEX, loop.induction, pad,
+                                        hint='c'), buffer.cols[0], 'c')
+            b.store(trip.buffers[id(buffer.tensor)], b.const(0.0, trip.fp),
+                    trip.at(buffer, row, col))
 
     def __str__(self) -> str:
         section = self._group.section

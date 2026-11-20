@@ -645,7 +645,8 @@ class IRBuilder:
                              accesses=accesses, attrs=(('callee', callee),))
 
     def split_op(self, name: str, types: Sequence, *args: Operand,
-                 hints: Sequence[str] = (), attrs: Tuple = ()) -> Tuple[Value, ...]:
+                 hints: Sequence[str] = (), attrs: Tuple = (),
+                 reads: Sequence[Any] = ()) -> Tuple[Value, ...]:
         """A pure operation with more than one result.
 
         `splitFloatTF32(uint32_t &upper, uint32_t &lower, float value)` is a
@@ -665,7 +666,24 @@ class IRBuilder:
         meaning to, and `tensorforge::splitFloatTF32` is a thing the emitter
         prints.  `_cse_key` reads `attrs`, so two different callees still hash
         apart.
+
+        `reads` names the shared buffers an operation reads through its
+        arguments -- `ldmatrixX4`, which loads a warp's fragments from the
+        rows its lanes name.  Then it is no pure function of its arguments:
+        it is declared a read of each, pinned where it stands, and every pass
+        orders it against the buffers' writes as it orders a load; and its
+        results are the lanes' own.
         """
+        if reads:
+            vs = tuple(self.value(t, hint=h, uniform=Uniformity.LANE)
+                       for t, h in zip(types, list(hints) + [''] * len(types)))
+            accesses = tuple(Access(Effect.READ, self._space_of(r),
+                                    self.alias_root(r)) for r in reads)
+            self._emit_op(Op.SPLIT, vs, tuple(args), pure=False,
+                          movable=False, effect=Effect.READ,
+                          accesses=accesses,
+                          attrs=(('callee', name),) + tuple(attrs))
+            return vs
         vs = tuple(self.value(t, hint=h)
                    for t, h in zip(types, list(hints) + [''] * len(types)))
         self._emit_op(Op.SPLIT, vs, tuple(args), pure=True,

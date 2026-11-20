@@ -296,21 +296,36 @@ def test_the_matrix_engines_follow_the_switch(options, default, lowering,
         lowering]
 
 
-@pytest.mark.parametrize('precision,depth,ld', [('s', 40, 56), ('d', 36, 60)])
-def test_a_product_reads_its_window_of_the_operator(precision, depth, ld):
+@pytest.mark.parametrize('precision,depth,k,regs', [('s', 40, 8, 4),
+                                                     ('d', 36, 4, 1)])
+def test_a_product_reads_its_window_of_the_operator(precision, depth, k, regs):
     """Each operator product's B is its own window, the step's rows its
     columns from the step's first: the contraction padded to the
-    instruction's depth, the row length to a stride that meets no bank
-    twice; the operators as stored are not staged where nothing reads
-    them."""
+    instruction's depth, the rows to its width, in fragment order -- a
+    lane's registers side by side, in F32 both TF32 halves of each where
+    the group has the room; the operators as stored are not staged where
+    nothing reads them."""
     section = eg.classify(_volume(6, precision))[0]
     group = eg.fill(section, _context('sm_90', precision))[0]
     stages = group.section.stages
     assert [(st.tensor.alias, st.window) for st in stages] == [
         (f'kDivM({d})', ((1, 54 + d), (0, 35))) for d in range(3)]
-    assert {(st.n0, st.depth, st.ld) for st in stages} == {(1, depth, ld)}
+    assert {(st.n0, st.depth, st.width, st.k, st.regs) for st in stages} \
+        == {(1, depth, 56, k, regs)}
     assert [(b.tensor.alias, b.rows, b.cols) for b in group.section.results] \
         == [('Q', (1, 56), (0, 9))]
+
+
+@pytest.mark.parametrize('order,arch,elements,split', [
+    (6, 'sm_90', 16, True), (6, 'sm_120', 8, False), (4, 'sm_120', 16, True)])
+def test_b_comes_split_where_it_costs_no_group_size(order, arch, elements,
+                                                    split):
+    """The halves take twice B's room: the fill rule takes them at the
+    largest group that fits either way, and only where they fit there."""
+    section = eg.classify(_volume(order, 's'))[0]
+    group = eg.fill(section, _context(arch))[0]
+    assert group.elements == elements
+    assert eg.split(group.section) is split
 
 
 def test_an_operator_too_large_for_a_block_is_refused():
@@ -430,9 +445,78 @@ def test_an_operator_step_is_tiled_on_the_matrix_engine(arch, precision,
     assert kernel.count('mma.sync.aligned.' + instruction) == count
 
 
-def _stores(lines, pattern):
+@pytest.mark.parametrize('shape,precision,pitched,count', [
+    ('volume', 's', {'_tmp0': 44, '_tmp2': 44, '_tmp4': 44}, 15),
+    ('volume', 'd', {}, 0),
+    ('chain', 's', {'I': 44}, 10)])
+def test_f32_a_fragments_come_by_ldmatrix(shape, precision, pitched, count):
+    """In F32 a matrix step reads A by ldmatrix, a load of four 8x8 matrices
+    a warp, so the buffers it reads have a pitch: rows of 16 bytes, four
+    floats more than a multiple of eight, long enough for every padded step
+    of K; F64 reads A lane by lane."""
+    section = eg.classify(_descrs(shape, 6, precision))[0]
+    group = eg.fill(section, _context('sm_90', precision))[0]
+    got = {b.tensor.alias: b.pitch for b in group.section.inputs
+           + group.section.intermediates if b.stride}
+    assert got == pitched
+    assert all(pitch % 8 == 4 for pitch in got.values())
+    kernel = _kernel(precision=precision, shape=shape,
+                     multi_element='force')
+    assert kernel.count('tensorforge::ldmatrixX4(') == count
+
+
+def test_the_padding_is_zero_before_the_tiling_reads_it():
+    """The pitch's padding of every column is written with zeros in each
+    trip, ahead of the barrier the matrix step waits behind -- what its
+    padded steps of K multiply the operator's zero rows with."""
+    kernel = _kernel(multi_element='force', enable_sync_block_opt=False)
+    lines = kernel.splitlines()
+    barriers = [i for i, line in enumerate(lines)
+                if line.strip() == '__syncthreads();']
+    first_read = min(i for i, line in enumerate(lines)
+                     if 'tensorforge::ldmatrixX4(' in line)
+    ahead = max(b for b in barriers if b < first_read)
+    for d in (0, 2, 4):
+        zeros = _stores(lines, rf'_g_tmp{d}', zeros=True)
+        assert zeros and max(zeros) < ahead, d
+
+
+def test_the_barrier_placement_sees_the_ldmatrix_reads():
+    """With the barrier optimization (`pir.barriers`) the block still meets
+    between the intermediates' last write and ldmatrix's first read of
+    them."""
+    lines = _kernel(multi_element='force').splitlines()
+    writes = _stores(lines, r'_g_tmp\d')
+    first_read = min(i for i, line in enumerate(lines)
+                     if 'tensorforge::ldmatrixX4(' in line)
+    assert any(max(writes) < i < first_read for i, line in enumerate(lines)
+               if line.strip() == '__syncthreads();')
+
+
+def test_ldmatrix_is_a_declared_read_of_its_buffer():
+    """Every pass orders ldmatrix by what it says it reads: each
+    `ldmatrixX4` is a read of the buffer its lanes name, in shared memory,
+    and no pure function a pass may move or merge."""
+    from tensorforge.backend.pir.core import Effect, MemSpace, Op, walk_stmts
+    gen = _generate(_volume(6, 's'), _context(multi_element='force'))
+    loads = [st for section in gen.built._sections
+             for st in walk_stmts(section.body)
+             if st.op == Op.SPLIT
+             and st.attr('callee') == 'tensorforge::ldmatrixX4']
+    assert len(loads) == 15
+    for st in loads:
+        assert not st.pure and not st.movable
+        assert [(a.kind, a.space) for a in st.accesses] == [
+            (Effect.READ, MemSpace.SHARED)]
+
+
+def _stores(lines, pattern, zeros=False):
+    """The lines that store into the buffers `pattern` names: their data,
+    or (`zeros`) the zeros of their padding."""
+    zero = re.compile(pattern + r'\[[^]]*\] = 0\.0f?;')
+    store = re.compile(pattern + r'\[[^]]*\] = ')
     return [i for i, line in enumerate(lines)
-            if re.search(pattern + r'\[[^]]*\] = ', line)]
+            if store.search(line) and bool(zero.search(line)) == zeros]
 
 
 def test_a_reused_intermediate_waits_for_its_readers():
