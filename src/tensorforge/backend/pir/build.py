@@ -272,19 +272,21 @@ class IRBuilder:
         #: to be taken over only within it (`begin_operation`); None otherwise.
         self._operation: Optional[int] = None
 
-    def begin_operation(self) -> None:
+    def begin_operation(self, force: bool = False) -> None:
         """An operation joins this body: from here on, until the next one
         does, what it loads from memory is its own.
 
         Only while the context asks for it (`reread_per_operation`, set by a
-        build that did not fit its registers).  A load of a number from
-        memory then carries the operation it was written for, which is part
-        of what `load_cse` keys it on -- so a later operation reading the
-        same location reads it again instead of keeping the first one's
-        value live through everything in between.  Addresses, indices and
-        pointers are exempt: they are what every operation of the body
-        shares, and cheap to hold."""
-        if getattr(self.context, 'reread_per_operation', False):
+        build that did not fit its registers), or the caller does (`force`:
+        a lowering whose parts read the same memory and hold nothing of it
+        in between -- the multi-element lanes form's walks).  A load of a
+        number from memory then carries the operation it was written for,
+        which is part of what `load_cse` keys it on -- so a later operation
+        reading the same location reads it again instead of keeping the
+        first one's value live through everything in between.  Addresses,
+        indices and pointers are exempt: they are what every operation of
+        the body shares, and cheap to hold."""
+        if force or getattr(self.context, 'reread_per_operation', False):
             self._operation = (self._operation or 0) + 1
 
     # -- values ------------------------------------------------------------ #

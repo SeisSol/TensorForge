@@ -31,6 +31,13 @@ each.  The matrix engines' tiling of an
 operator product is the next lowering; it reads the same buffers, and its D
 reaches a per-row consumer or an output through shared memory.
 
+The lanes form (`element_group.Lanes`) is lowered by `_lanes` instead: a
+lane its element, read and written through its own pointers -- 16 bytes of
+a column at a time where that is one aligned access -- the warps of the
+block each a share of the output, nothing staged and no barrier.  Every
+step's lowering there is `lane`, and a column is evaluated backwards from
+the output (`_LaneTrip`).
+
 The instructions place their barriers themselves, as every builder does:
 the block's barrier after the operators' copy, one at the head of each trip
 (the last trip's reads before this trip's writes -- the barrier the loop
@@ -709,9 +716,348 @@ def _matrix(trip, step) -> None:
         trip.write(step, row, col, total)
 
 
+class _LaneTrip:
+    """What the lanes form's lowering of a trip shares (`element_group.
+    Lanes`): the lane's element -- its own pointers and its mask, as the
+    traversal binds them, a lane each -- the column the warp computes and
+    the rows of its range, and what of the column it holds.
+
+    The section is evaluated backwards from the output, a column at a
+    time: an operator step's intermediate is computed into registers where
+    a product is about to read it (`walk`), a mixing step's entry where it
+    is read (`mixed`), and an element's own operand is read from its memory
+    (`entry`)."""
+
+    def __init__(self, builder, context, group, symbols):
+        from tensorforge.generators import element_group
+        self.kinds = element_group.Kind
+        self.builder = builder
+        self.context = context
+        self.group = group
+        self.section = group.section
+        self.fp = ScalarType(self.section.dtype)
+        self.symbols = symbols
+        self.cones = element_group.Cones(self.section)
+        # The lane's element's mask, a lane's own here.
+        mask, name = elementmask.active()
+        if mask is None and name is not None:
+            mask = builder.extern_value(name, BOOL, uniform=Uniformity.LANE,
+                                        hint='active')
+        self.mask = mask
+        #: The column the warp computes (a value), its rows, and the rows
+        #: of every tensor upstream they need (`Cones.need`).
+        self.col = None
+        self.rows = (0, 0)
+        self.need: Dict[int, set] = {}
+        #: Operator columns held in registers, by the step that writes
+        #: them (`Cones.source`): row -> value.
+        self.columns: Dict[int, Dict[int, object]] = {}
+        #: The small operands' column, by `(tensor, row)`, for this column.
+        self.small: Dict[tuple, object] = {}
+        #: Entries read or computed at one contraction index.
+        self.here: Dict[tuple, object] = {}
+        #: The output's column at the warp's rows, as its steps add into it
+        #: (`_column`): row -> value, None for zero.
+        self.acc: Dict[int, object] = {}
+        #: Rows of a column a lane reads in one access (`own`): 16 bytes.
+        self.width = max(1, 16 // self.section.dtype.size())
+        #: Those reads, by `(tensor, first row, column)`, while their rows
+        #: are being used.
+        self.tiles: Dict[tuple, object] = {}
+
+    def claim(self, tensor, row) -> Optional[int]:
+        """The alignment, in bytes, of `width` rows of a column of
+        `tensor` from `row` -- or None where they are not one access: past
+        the column's box, or proving less than the access needs.  The base's
+        promise (`Symbol.linear_align_bytes`), the row's offset into the
+        column and the column's stride bound it."""
+        width = self.width
+        lower = int(tensor.bbox.lower()[0])
+        height = int(tensor.bbox.sizes()[0])
+        if width < 2 or (row - lower) % width or row + width > lower + height:
+            return None
+        elem = self.section.dtype.size()
+
+        def bound(nbytes):
+            return nbytes & -nbytes if nbytes else 1 << 20
+
+        claim = min(self.symbols[id(tensor)].linear_align_bytes(),
+                    bound((row - lower) * elem), bound(height * elem))
+        return claim if claim >= width * elem else None
+
+    def own(self, tensor, row, col):
+        """`(row, col)` of the lane's element's own `tensor`, from its
+        memory -- a lane's own value: `width` rows of the column at a time
+        where they are one aligned access (`claim`), an element where not."""
+        b = self.builder
+        source = _bound(b, self.symbols[id(tensor)])
+        lower = int(tensor.bbox.lower()[0])
+        first = row - (row - lower) % self.width
+        claim = self.claim(tensor, first)
+        if claim is None:
+            return b.load(source, _address(b, tensor, row, col),
+                          type_=self.fp, uniform=Uniformity.LANE, hint='e')
+        key = (id(tensor), first, col if isinstance(col, int) else 'col')
+        if key not in self.tiles:
+            self.tiles[key] = b.load(
+                source, _address(b, tensor, first, col),
+                type_=ScalarType(self.section.dtype, self.width),
+                align=claim, uniform=Uniformity.LANE, hint='e')
+        return b.extract(self.tiles[key], row - first, hint='e')
+
+    def entry(self, product, row):
+        """An operator product's operand at `row` of the column, or None
+        where it is zero: held, computed by the mixing step that writes it,
+        or read from the element's memory (`Cones.source`)."""
+        source = self.cones.source(product)
+        if source is None:
+            key = (id(product.second.tensor), row)
+            if key not in self.here:
+                self.here[key] = self.own(product.second.tensor, row,
+                                          self.col)
+            return self.here[key]
+        held = self.columns.get(id(source))
+        if held is not None:
+            return held.get(row)
+        if source.kind is not self.kinds.MIXING:
+            raise InternalError(f'{source.dest.alias} at row {row} read by '
+                                f'the lanes form before it holds it')
+        key = (id(source), row)
+        if key not in self.here:
+            self.here[key] = self.mixed(source, row)
+        return self.here[key]
+
+    def mixed(self, step, row):
+        """A mixing step's destination at `row` of the column, or None where
+        none of its products adds into the row: each product's row of the
+        element's operand times the column of its small one."""
+        b, fp = self.builder, self.fp
+        total = None
+        for p in step.products:
+            if not p.rows[0] <= row < p.rows[1]:
+                continue
+            part = None
+            for q in range(*p.depth):
+                key = (id(p.first.tensor), row, q)
+                if key not in self.here:
+                    self.here[key] = self.own(p.first.tensor, row, q)
+                g = self.here[key]
+                key = (id(p.second.tensor), q)
+                if key not in self.small:
+                    self.small[key] = self.own(p.second.tensor, q, self.col)
+                s = self.small[key]
+                part = (b.op('mul', fp, g, s, hint='t') if part is None
+                        else b.op('fma', fp, g, s, part, hint='t'))
+            part = self.windowed(part, p, step)
+            total = part if total is None else b.op('add', fp, total, part,
+                                                    hint='t')
+        return total
+
+    def windowed(self, value, product, step):
+        """`value`, or zero where the column is outside the product's
+        columns -- a product adding into a window of the step's."""
+        if product.cols == step.cols:
+            return value
+        b = self.builder
+        c0, c1 = product.cols
+        inside = b.op('and', BOOL, b.op('ge', BOOL, self.col, c0, hint='in'),
+                      b.op('lt', BOOL, self.col, c1, hint='in'), hint='in')
+        return b.op('select', self.fp, inside, value,
+                    b.const(0.0, self.fp), hint='w')
+
+    def materialized(self, product) -> bool:
+        """Whether an operator step writes the product's operand."""
+        source = self.cones.source(product)
+        return source is not None and source.kind is self.kinds.OPERATOR
+
+    def walk(self, step, rows, acc):
+        """`acc` -- row -> value, None for zero -- plus an operator step's
+        products at `rows` of the column, the operators' nonzeros literals.
+
+        A product whose operand an operator step computes runs alone: the
+        operand's needed rows into registers, the product, the registers
+        dropped.  The others run together by contraction index, so that an
+        index's entries -- a row of the element's operand, the entry a
+        mixing step computes from it -- are read once for all of them."""
+        b, fp = self.builder, self.fp
+        nonzeros = self.cones.nonzeros
+        # A walk reads the element's operands for itself: one walk's reads
+        # held through the next would be every row of them at once, which the
+        # IR would share otherwise (`load_cse`).  Not a fence of the schedule
+        # as well: a `__syncwarp()` under the warp's guard of its range has
+        # ptxas write the code out twice.
+        b.begin_operation(force=True)
+
+        def add(row, value, x, product):
+            if x is None:
+                return
+            x = self.windowed(x, product, step)
+            v = b.const(value, fp)
+            acc[row] = (b.op('mul', fp, v, x, hint='x') if acc.get(row) is None
+                        else b.op('fma', fp, v, x, acc[row], hint='x'))
+
+        held = [p for p in step.products if self.materialized(p)]
+        for p in held:
+            source = self.cones.source(p)
+            need = sorted(self.need.get(id(source), ()))
+            self.columns[id(source)] = self.walk(
+                source, need, {i: None for i in need})
+            column = self.columns[id(source)]
+            for i in rows:
+                for k, value in nonzeros[id(p)].get(i, ()):
+                    add(i, value, column.get(k), p)
+            del self.columns[id(source)]
+            b.begin_operation(force=True)
+        together: Dict[int, list] = {}
+        for p in step.products:
+            if any(p is h for h in held):
+                continue
+            for i in rows:
+                for k, value in nonzeros[id(p)].get(i, ()):
+                    together.setdefault(k, []).append((p, i, value))
+        tile = None
+        for k in sorted(together):
+            self.here = {}
+            if k // self.width != tile:
+                # A tile of rows read is held while its rows are used.
+                tile, self.tiles = k // self.width, {}
+            for p, i, value in together[k]:
+                add(i, value, self.entry(p, k), p)
+        self.here, self.tiles = {}, {}
+        return acc
+
+
+def _lane(trip, step) -> None:
+    """The lanes form's step into the output: its products added into the
+    column's registers (`_LaneTrip.acc`) at the warp's rows, a lane for its
+    own element (`_lanes`)."""
+    b, fp = trip.builder, trip.fp
+    rows = [i for i in range(*trip.rows) if step.rows[0] <= i < step.rows[1]]
+    if step.kind is trip.kinds.OPERATOR:
+        trip.acc = trip.walk(step, rows, trip.acc)
+        return
+    for i in rows:
+        trip.here = {}
+        part = trip.mixed(step, i)
+        if part is not None:
+            old = trip.acc.get(i)
+            trip.acc[i] = (part if old is None
+                           else b.op('add', fp, old, part, hint='q'))
+    trip.here = {}
+
+
+def _column(trip) -> None:
+    """The output's column at the warp's rows: the rows its steps write
+    read once where they accumulate -- every row where the first assigns
+    -- each step added in turn (`LOWERINGS`), and written back through the
+    lane's pointers under its mask."""
+    b, fp = trip.builder, trip.fp
+    cones = trip.cones
+    steps = cones.outputs
+    tensor = steps[0].dest
+    target = _bound(b, trip.symbols[id(tensor)])
+    lo, hi = cones.rows
+    rows = [i for i in range(*trip.rows) if lo <= i < hi]
+    if steps[0].assigns:
+        write = rows
+    else:
+        touched = set()
+        for step in steps:
+            for p in step.products:
+                if p.kind is trip.kinds.OPERATOR:
+                    touched |= {i for i in rows
+                                if cones.nonzeros[id(p)].get(i)}
+                else:
+                    touched |= {i for i in rows if p.rows[0] <= i < p.rows[1]}
+        write = sorted(touched)
+    trip.tiles = {}
+    trip.acc = {i: None if steps[0].assigns
+                else trip.own(tensor, i, trip.col) for i in write}
+    trip.tiles = {}
+    for step in steps:
+        LOWERINGS[step.lowering](trip, step)
+    width = trip.width
+    lower = int(tensor.bbox.lower()[0])
+    done = set()
+    for i in write:
+        if i in done:
+            continue
+        first = i - (i - lower) % width
+        tile = list(range(first, first + width))
+        claim = trip.claim(tensor, first)
+        if claim is not None and all(j in trip.acc for j in tile):
+            # A whole tile written: one access.
+            values = [trip.acc[j] if trip.acc[j] is not None
+                      else b.const(0.0, fp) for j in tile]
+            b.store(target, b.pack(ScalarType(trip.section.dtype, width),
+                                   *values, hint='q'),
+                    _address(b, tensor, first, trip.col),
+                    predicate=trip.mask, align=claim)
+            done.update(tile)
+            continue
+        value = trip.acc[i] if trip.acc[i] is not None else b.const(0.0, fp)
+        b.store(target, value, _address(b, tensor, i, trip.col),
+                predicate=trip.mask)
+        done.add(i)
+
+
+def _lanes(trip) -> None:
+    """A trip of the lanes form: warp `w` takes the output's columns of
+    class `w % classes`, one after another, at the rows of range
+    `w / classes`, each lane for its own element (`element_group.Lanes`).
+
+    The loop over a class's columns has constant bounds and the ranges
+    are guards that say what share of the threads takes them
+    (`lanes_active`), so that the emitter counts the average warp's
+    work (`analysis.pipeline.executed_flops`)."""
+    b = trip.builder
+    plan = trip.group.lanes
+    c0, c1 = trip.cones.cols
+    width = c1 - c0
+    classes = plan.classes
+    warp = b.thread_id('y')
+    kind = (b.op('rem', INDEX, warp, classes, hint='cls') if classes > 1
+            else 0)
+    part = (b.op('div', INDEX, warp, classes, hint='part')
+            if len(plan.ranges) > 1 else 0)
+    trips = -(-width // classes)
+
+    def range_body(rows):
+        trip.rows = rows
+        trip.need = trip.cones.need(range(*rows))
+        # Rolled: the columns could be written out, and what one reads of the
+        # element is read again by the next rather than held across all of
+        # them (`passes.licm`) -- by the compiler too, which would otherwise
+        # write the few trips out and overlap the columns (`unroll=1`).
+        with b.for_(0, trips, 1, hint='c', rolled=True, unroll=1) as loop:
+            col = _index(b, 'add', _index(b, 'add', b.op(
+                'mul', INDEX, loop.induction, classes, hint='p'), kind, 'p'),
+                c0, 'p')
+
+            def column():
+                trip.col = col
+                trip.small = {}
+                _column(trip)
+
+            if width % classes == 0:
+                column()
+            else:
+                with b.if_(b.op('lt', BOOL, col, c1, hint='in'),
+                           attrs=_lanes_active(width, classes * trips)):
+                    column()
+
+    if len(plan.ranges) == 1:
+        range_body(plan.ranges[0])
+        return
+    for n, rows in enumerate(plan.ranges):
+        with b.if_(b.op('eq', BOOL, part, n, hint='part'),
+                   attrs=_lanes_active(1, len(plan.ranges))):
+            range_body(rows)
+
+
 #: Each step's lowering (`element_group.Step.lowering`).
 LOWERINGS = {'fma': _fma, 'rows': _per_output,
-             'mma_sync': _matrix, 'dmma': _matrix}
+             'mma_sync': _matrix, 'dmma': _matrix, 'lane': _lane}
 
 
 class MultiElementSection(AbstractInstruction):
@@ -719,10 +1065,11 @@ class MultiElementSection(AbstractInstruction):
 
     `symbols` are the section's symbols of its inputs and outputs, by
     tensor (`id`); the operators come staged
-    (`MultiElementOperators.buffers`)."""
+    (`MultiElementOperators.buffers`) -- but in the lanes form, whose
+    operators are literals and which has none."""
 
     def __init__(self, context: Context, group, symbols: Dict[int, object],
-                 operators: MultiElementOperators):
+                 operators: Optional[MultiElementOperators]):
         super().__init__(context)
         self._group = group
         self._symbols = dict(symbols)
@@ -746,6 +1093,12 @@ class MultiElementSection(AbstractInstruction):
 
     def gen_ir(self, builder) -> None:
         section = self._group.section
+        if self._group.lanes is not None:
+            # The lanes form: nothing staged, a lane its element's
+            # (`_lanes`).
+            _lanes(_LaneTrip(builder, self._context, self._group,
+                             self._symbols))
+            return
         trip = _Trip(builder, self._context, self._group, self._symbols,
                      self._operators.buffers, self._operators.tables)
         elements = self._group.elements

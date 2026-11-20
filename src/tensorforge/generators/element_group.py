@@ -54,6 +54,15 @@ its window, zero elsewhere, padded to the instruction's tiles -- and
 hands D to its consumer's buffer, or to the output's (`results`), which
 each warp then adds into its element's output.
 
+The *lanes form* (`Options.multi_element_fma` `lanes`, `Lanes`) is the
+other arrangement of the FMA units: a lane an element rather than an
+output, a warp's lanes the group, and the block's warps each a share of
+the one output -- its columns of a class, at its range of rows.  Nothing
+is staged: each lane reads its own element through its own pointers, a
+mixing step's entries are computed where a product reads them, an
+operator step's column is held in registers while a product reads it, and
+the operators' nonzeros are literals.  Every step's lowering is `lane`.
+
 `plan` decides whether and how a section takes the layout: every product
 classified or none, E for the section, and each step's lowering -- the
 fill rule (`fill`), static so far, each refusal with its reason.
@@ -68,7 +77,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from tensorforge.common.basic_types import Addressing, Datatype
 
@@ -384,16 +393,24 @@ class GroupSection:
 class ElementGroup:
     """How a section takes the multi-element layout: E elements a block,
     one warp each, and the section as it runs (`GroupSection`, each step
-    with its lowering)."""
+    with its lowering) -- or, in the lanes form (`lanes`, a `Lanes`), E
+    elements on the lanes of a warp and `lanes.warps` warps that all take
+    them, each a share of the output."""
 
     elements: int
     section: GroupSection
     shared_bytes: int
+    lanes: Optional['Lanes'] = None
 
     @property
     def threads(self) -> int:
         """Lanes of one multiplication: a warp."""
         return 32
+
+    @property
+    def warps(self) -> int:
+        """The block's warps: one an element, or the lanes form's shares."""
+        return self.elements if self.lanes is None else self.lanes.warps
 
 
 def _operations(descrs: Sequence) -> list:
@@ -651,6 +668,10 @@ def _staged(section: GroupSection, sm: int) -> GroupSection:
 
     for step in section.steps:
         matrix = step.lowering in MATRIX_LOWERINGS
+        if step.lowering == 'lane':
+            # The lanes form stages nothing: its operators are literals, and
+            # each lane reads its own element where it is stored.
+            continue
         for p in step.products:
             t = p.first.tensor if p.kind is Kind.OPERATOR else None
             if t is None:
@@ -742,11 +763,12 @@ def _lowering(step: Step, dtype, context, sm: int, matrix: bool) -> str:
     return 'mma_sync' if dtype is Datatype.F32 else 'dmma'
 
 
-def lower(section: GroupSection, context,
-          matrix: bool = True) -> GroupSection:
+def lower(section: GroupSection, context, matrix: bool = True,
+          lanes: bool = False) -> GroupSection:
     """The section with each step's lowering for the context's target --
-    the FMA forms only, where `matrix` is off -- and the stages and result
-    buffers those lowerings read and write.  An `fma` step reads only its
+    the FMA forms only, where `matrix` is off; the lanes form's `lane` for
+    every step, where `lanes` is on -- and the stages and result buffers
+    those lowerings read and write.  An `fma` step reads only its
     operators' nonzeros (`nonzero_terms`) where they carry their numbers
     and `Options.skip_known_zeros` is on, as the per-element products do."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
@@ -754,7 +776,8 @@ def lower(section: GroupSection, context,
     sparse = context.get_user_options().skip_known_zeros
     steps = []
     for s in section.steps:
-        lowering = _lowering(s, section.dtype, context, sm, matrix)
+        lowering = ('lane' if lanes
+                    else _lowering(s, section.dtype, context, sm, matrix))
         steps.append(dataclasses.replace(
             s, lowering=lowering,
             terms=nonzero_terms(s) if sparse and lowering == 'fma'
@@ -790,13 +813,295 @@ def table_elements(section: GroupSection) -> int:
     return ELEMENTS[(min(fitting), section.dtype)]
 
 
+# -- the lanes form ---------------------------------------------------------- #
+
+#: The lanes form's group: a warp's lanes, an element each.
+LANE_ELEMENTS = 32
+
+#: The FMA form `Options.multi_element_fma` `auto` takes, by vendor: the
+#: warp form everywhere, until the measurements say otherwise.
+FMA_FORMS: Dict[str, str] = {}
+
+
+def fma_form(context) -> str:
+    """The FMA form a section takes on the context's target, `warp` or
+    `lanes` (`Options.multi_element_fma`)."""
+    asked = context.get_user_options().multi_element_fma
+    if asked != 'auto':
+        return asked
+    return FMA_FORMS.get(getattr(context.target.hw, 'vendor', None), 'warp')
+
+
+#: The lanes form's column classes: warp `w` of a group takes the output's
+#: columns `c0 + w % classes + classes * i`, one after another.
+LANE_CLASSES = 3
+
+#: Registers, in 32-bit words, the lanes form's plan lets a lane hold live
+#: by its estimate (`Lanes.registers`): the output is cut into more row
+#: ranges until each fits.  Short of the 255 a CUDA thread addresses, for
+#: the addresses and the compiler's own temporaries.
+LANE_REGISTERS = 168
+
+#: The most row ranges the lanes form cuts an output into.
+LANE_RANGES = 8
+
+#: The most warps a block of the lanes form has: a block of more caps what
+#: a thread may hold below the 255 registers (`__launch_bounds__` sizes it
+#: by the block), and the cut into ranges is exactly what was to keep it
+#: there.  The column classes give way first: they add warps, no room.
+LANE_WARPS = 8
+
+
+@dataclass(frozen=True)
+class Lanes:
+    """A section with its group's elements on the lanes of a warp
+    (`Options.multi_element_fma` `lanes`): E elements a group, a lane each,
+    and `warps` warps that all take the same E elements, each a share of
+    the one output, the last step's destination -- the columns of its
+    class (`classes`), one after another, over its row range (`ranges`).
+
+    What a warp computes for a column is its cone (`cone`): the output's
+    rows of its range, and of every tensor upstream the rows those read.
+    A mixing step's intermediate is not stored: where a product reads an
+    entry of it, the entry is computed from the element's own operands.
+    An operator step's intermediate is a column of registers, its needed
+    rows, for as long as the product that reads it runs.  The operators'
+    nonzeros are literals of the code, the description's numbers
+    (`operator_nonzeros`)."""
+
+    classes: int
+    ranges: Tuple[Range, ...]
+    #: The plan's estimate of the registers a lane holds live at the
+    #: costliest range, in 32-bit words.
+    registers: int
+
+    @property
+    def warps(self) -> int:
+        return self.classes * len(self.ranges)
+
+
+def operator_nonzeros(product: Product) -> Dict[int, List[Tuple[int, float]]]:
+    """An operator product's nonzeros in its window by row, `(k, value)`:
+    the pattern the operator's own (`Tensor.nonzero_pattern`), the values
+    the description's."""
+    import numpy as np
+    tensor = product.first.tensor
+    data = np.asarray(tensor.get_values())
+    pattern = tensor.nonzero_pattern
+    (r0, r1), (k0, k1) = product.rows, product.depth
+    return {i: [(k, float(data[i, k])) for k in range(k0, k1)
+                if pattern.is_nz((i, k))]
+            for i in range(r0, r1)}
+
+
+class Cones:
+    """What the lanes form asks of a section's output rows (`Lanes`): the
+    rows of every value they need, the work and the registers a column of
+    them takes -- over the operators' nonzeros, found once.
+
+    A value is what one step writes: an intermediate written again -- a
+    merged run's temporary, reused for every member -- is another value
+    each time, and a product reads the one the last step ahead of it wrote
+    (`source`).  So the values are keyed by the step that writes them."""
+
+    def __init__(self, section: GroupSection):
+        self.section = section
+        self.nonzeros = {id(p): operator_nonzeros(p)
+                         for s in section.steps for p in s.products
+                         if p.kind is Kind.OPERATOR}
+        #: The step whose destination a product reads (`operand`), by the
+        #: product's `id`: the last one ahead of it to write the tensor, or
+        #: None for an element's own operand read from memory.
+        self.sources: Dict[int, Optional[Step]] = {}
+        last: Dict[int, Step] = {}
+        for step in section.steps:
+            for p in step.products:
+                self.sources[id(p)] = last.get(id(self.operand(p).tensor))
+            last[id(step.dest)] = step
+
+    @staticmethod
+    def operand(product: Product):
+        """What a product reads at a row of its contraction: an operator
+        product's group operand, a mixing product's mixed one."""
+        return (product.second if product.kind is Kind.OPERATOR
+                else product.first)
+
+    def source(self, product: Product) -> Optional[Step]:
+        return self.sources[id(product)]
+
+    @property
+    def outputs(self) -> List[Step]:
+        """The steps that write the section's output, in order."""
+        output = self.section.steps[-1].dest
+        return [step for step in self.section.steps if step.dest is output]
+
+    @property
+    def rows(self) -> Range:
+        """The output's rows its steps write."""
+        return _union([step.rows for step in self.outputs])
+
+    @property
+    def cols(self) -> Range:
+        """The output's columns its steps write."""
+        return _union([step.cols for step in self.outputs])
+
+    def need(self, rows) -> Dict[int, Set[int]]:
+        """The rows of every value, by the `id` of the step that writes it,
+        the output needs at `rows`: an operator product's operand at the
+        contraction indices of its nonzeros in the rows it adds to, a mixing
+        product's at those rows."""
+        steps = self.section.steps
+        need: Dict[int, Set[int]] = {id(step): set(rows)
+                                     for step in self.outputs}
+        for step in reversed(steps):
+            mine = need.get(id(step), set())
+            for p in step.products:
+                source = self.source(p)
+                if source is None:
+                    continue
+                here = {i for i in mine if p.rows[0] <= i < p.rows[1]}
+                if p.kind is Kind.OPERATOR:
+                    nonzeros = self.nonzeros[id(p)]
+                    here = {k for i in here for k, _ in nonzeros.get(i, ())}
+                need.setdefault(id(source), set()).update(here)
+        return need
+
+    def work(self, rows) -> int:
+        """Multiply-adds a column of the output's `rows` takes a lane: each
+        operator product's nonzeros at the rows the cone needs, each mixing
+        product's contraction there."""
+        need = self.need(rows)
+        total = 0
+        for step in self.section.steps:
+            mine = need.get(id(step), set())
+            for p in step.products:
+                here = [i for i in mine if p.rows[0] <= i < p.rows[1]]
+                if p.kind is Kind.OPERATOR:
+                    nonzeros = self.nonzeros[id(p)]
+                    total += sum(len(nonzeros.get(i, ())) for i in here)
+                else:
+                    total += len(here) * (p.depth[1] - p.depth[0])
+        return total
+
+    def live(self, rows, tile: int = 1) -> int:
+        """The values a lane holds live for a column of the output's `rows`,
+        in elements: the rows it adds into, and at the costliest point
+        either a column some product reads materialized -- with what its own
+        products hold -- or what the walk over the computed entries holds:
+        each mixing product's column of its small operand and the rows of
+        the operand it mixes one read brings in (`tile`), which the
+        products share; and a few temporaries."""
+        need = self.need(rows)
+
+        def held(step, own):
+            materialized, small, row = 0, 0, 0
+            for p in step.products:
+                if p.kind is Kind.MIXING:
+                    small += p.depth[1] - p.depth[0]
+                    row = max(row, p.depth[1] - p.depth[0])
+                    continue
+                source = self.source(p)
+                if source is None:
+                    continue
+                if source.kind is Kind.OPERATOR:
+                    materialized = max(materialized, held(
+                        source, len(need.get(id(source), ()))))
+                    continue
+                small += sum(q.depth[1] - q.depth[0]
+                             for q in source.products)
+                row = max([row] + [q.depth[1] - q.depth[0]
+                                   for q in source.products])
+            return own + max(materialized, small + row * tile)
+
+        return max(held(step, len(rows)) for step in self.outputs) + 4
+
+    def ranges(self, count: int) -> Tuple[Range, ...]:
+        """The output's rows in `count` contiguous ranges: the costliest
+        range cut where its costlier part costs least (`work`), until there
+        are `count`."""
+        lo, hi = self.rows
+        ranges = [(lo, hi)]
+        while len(ranges) < count:
+            costs = [self.work(range(*r)) for r in ranges]
+            a, b = ranges.pop(costs.index(max(costs)))
+            if b - a < 2:
+                ranges.append((a, b))
+                break
+            cut = min(range(a + 1, b), key=lambda c: (max(
+                self.work(range(a, c)), self.work(range(c, b))), c))
+            ranges += [(a, cut), (cut, b)]
+            ranges.sort()
+        return tuple(ranges)
+
+
+def lanes_plan(section: GroupSection,
+               context) -> Tuple[Optional[Lanes], str]:
+    """The lanes form's plan for `section` (`Lanes`), or None and why not.
+
+    It takes a section with one output, the last step's destination, which
+    no other step reads; whose mixing products mix the element's own
+    operands and not an intermediate -- which a lane would have to hold
+    whole, every column of it -- and whose operators carry numbers, at
+    most `Options.inline_constants` nonzeros each.  An intermediate
+    written again is another value each time (`Cones`), and the steps
+    into the output -- a merged run's, one a member -- add into one column
+    of registers in turn.  The output is cut into as few row ranges as
+    keep the estimate of a lane's registers within `LANE_REGISTERS`, and
+    has as many column classes as `LANE_CLASSES` allows within `LANE_WARPS`
+    a block."""
+    if len(section.outputs) != 1:
+        return None, (f'the lanes form writes one output, not '
+                      f'{len(section.outputs)}')
+    most = context.get_user_options().inline_constants
+    for step in section.steps:
+        for p in step.products:
+            if p.kind is Kind.MIXING:
+                if p.first.tensor.is_tmp:
+                    return None, (f'a mixing product of {p.first.tensor.alias}'
+                                  f', which a lane would hold whole')
+                continue
+            tensor = p.first.tensor
+            if not tensor.has_values():
+                return None, (f'{tensor.alias} carries no numbers for the '
+                              f'lanes form\'s literals')
+    cones = Cones(section)
+    for step in section.steps:
+        for p in step.products:
+            if p.kind is Kind.MIXING:
+                continue
+            tensor = p.first.tensor
+            count = sum(len(v) for v in cones.nonzeros[id(p)].values())
+            if count > most:
+                return None, (f'{tensor.alias} has {count} nonzeros, more '
+                              f'than the {most} literals an operator may '
+                              f'take (`inline_constants`)')
+    size = 2 if section.dtype is Datatype.F64 else 1
+    # A lane reads its operands' rows 16 bytes at a time
+    # (`compute.multi_element._LaneTrip.own`).
+    tile = max(1, 16 // section.dtype.size())
+    lo, hi = cones.rows
+    classes = max(1, min(LANE_CLASSES, cones.cols[1] - cones.cols[0]))
+    live = None
+    for count in range(1, min(LANE_RANGES, hi - lo) + 1):
+        ranges = cones.ranges(count)
+        live = max(cones.live(range(*r), tile) for r in ranges) * size
+        if live <= LANE_REGISTERS:
+            return Lanes(max(1, min(classes, LANE_WARPS // count)), ranges,
+                         live), ''
+    return None, (f'a lane would hold {live} registers at {LANE_RANGES} row '
+                  f'ranges, more than the {LANE_REGISTERS} the lanes form '
+                  f'takes')
+
+
 def fill(section: GroupSection,
          context) -> Tuple[Optional[ElementGroup], str]:
     """The fill rule: the group's size for `section` on the context's
     target, or None and why not.
 
-    The size is the table's (`table_elements`) where the block holds it,
-    halved while it does not -- in shared memory, in threads -- and
+    The lanes form where it is asked for (`fma_form`) and the section
+    fits it (`lanes_plan`): a group of `LANE_ELEMENTS`, a lane each.
+    Otherwise the size is the table's (`table_elements`) where the block
+    holds it, halved while it does not -- in shared memory, in threads -- and
     `MIN_ELEMENTS` the last size tried.  Each step's lowering is the target's (`lower`), and
     where no group of the matrix tiling fits -- its padded stages and its
     outputs' result buffers take room the FMA forms do not -- the FMA forms'
@@ -814,6 +1119,12 @@ def fill(section: GroupSection,
     if int(options.stack_elements) > 1:
         return None, (f'a trip of {options.stack_elements} stacked elements '
                       f'is no element group')
+    if fma_form(context) == 'lanes':
+        lanes, _ = lanes_plan(section, context)
+        if lanes is not None:
+            return ElementGroup(LANE_ELEMENTS, lower(section, context,
+                                                     lanes=True), 0,
+                                lanes), ''
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
     candidates = [lower(section, context)]
     if tiled(candidates[0]):
@@ -846,9 +1157,12 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
     return group
 
 
-__all__ = ['Buffer', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
-           'GroupSection', 'Kind', 'LOWERING', 'MATRIX', 'MATRIX_LOWERINGS',
-           'MIN_ELEMENTS', 'Product', 'Role', 'SHARED_RESERVE',
-           'SMALL_EXTENT', 'Stage', 'Step', 'Terms', 'classify', 'fill',
-           'lower', 'matrix_enabled', 'matrix_shape', 'nonzero_terms', 'plan',
-           'shared_bytes', 'table_elements', 'tiled']
+__all__ = ['Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
+           'FMA_FORMS', 'GroupSection', 'Kind', 'LANE_CLASSES',
+           'LANE_ELEMENTS', 'LANE_RANGES', 'LANE_REGISTERS', 'LOWERING',
+           'Lanes', 'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'Product',
+           'Role', 'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step', 'Terms',
+           'classify', 'fill', 'fma_form', 'lanes_plan', 'lower',
+           'matrix_enabled', 'matrix_shape', 'nonzero_terms',
+           'operator_nonzeros', 'plan', 'shared_bytes', 'table_elements',
+           'tiled']

@@ -160,6 +160,18 @@ def parse_multi_element(text: str) -> str:
   return value
 
 
+#: What `Options.multi_element_fma` takes.
+MULTI_ELEMENT_FMA = ('auto', 'warp', 'lanes')
+
+
+def parse_multi_element_fma(text: str) -> str:
+  """`auto`, `warp` or `lanes` (`Options.multi_element_fma`)."""
+  value = str(text).strip().lower()
+  if value not in MULTI_ELEMENT_FMA:
+    raise ValueError(f'expected one of {MULTI_ELEMENT_FMA}, got {text!r}')
+  return value
+
+
 #: What `Options.carry_element_index` takes.
 CARRY_ENTRY = ('auto', 'always', 'never')
 
@@ -2350,6 +2362,21 @@ declare('multi_element',
             '`force` wherever the fill rule finds a plan; `auto` where it '
             'finds one measured to pay -- none yet, so `auto` is `off` for '
             'now.')
+
+declare('multi_element_fma',
+        default='auto',
+        env='TF_MULTI_ELEMENT_FMA',
+        parse=parse_multi_element_fma,
+        doc='The FMA form the multi-element layout (`multi_element`) runs a '
+            'section in.  `warp`: a warp an element and a lane an output, the '
+            'element\'s operands staged in shared memory (`fma`, `rows`), '
+            'where the matrix tiling does not take a step.  `lanes`: a lane '
+            'an element, every lane reading its own element through its own '
+            'pointers and the operators\' nonzeros as literals, the outputs '
+            'split over the warps the group\'s elements share (`lane`) -- '
+            'ahead of the matrix tiling, wherever the section fits it, and '
+            '`warp` where it does not.  `auto`: the target\'s rule, which is '
+            '`warp` everywhere until the measurements say otherwise.')
 
 declare('mma_prefetch',
         default=None,
