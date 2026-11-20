@@ -105,10 +105,45 @@ def _chain_description(order=6, precision='s', reuse=False):
     return d
 
 
+def _seissol(kernel):
+    """A kernel of the SeisSol suite as yateto sent it."""
+    def description(order=6, precision='s'):
+        import seissol_suite as fx
+        return fx.description(SYSTEM, f'{SYSTEM}-o{order}-{precision}',
+                              kernel)
+    return description
+
+
+def _direction_description(order=6, precision='s'):
+    """The volume's first direction alone, `Q += kDivM(0) (I star(0))`: an
+    accumulating operator step with rows the operator has no nonzero in."""
+    d = json.loads(json.dumps(_volume_description(order, precision)))
+    d['operations'] = d['operations'][:2]
+    return d
+
+
+def _columns_description(order=6, precision='s'):
+    """The volume with its second and third directions over their own
+    columns of `Q`, 0..5 and 3..9: one step whose products each add into a
+    window of the step's columns of its own."""
+    d = json.loads(json.dumps(_volume_description(order, precision)))
+    for n, (lo, hi) in ((3, (0, 5)), (5, (3, 9))):
+        op = d['operations'][n]
+        for view in (op['result'], op['args'][1]):
+            view['bbox'][0][1], view['bbox'][1][1] = lo, hi
+    return d
+
+
 DESCRIPTIONS = {
     'volume': _volume_description, 'chain': _chain_description,
+    'direction': _direction_description, 'columns': _columns_description,
     'reuse': lambda order, precision: _chain_description(order, precision,
-                                                         reuse=True)}
+                                                         reuse=True),
+    # The flux kernels the layout takes besides the volume: a mixing
+    # product, then two operator products, the first into an intermediate.
+    'localFlux': _seissol('gpu_localFlux[0]'),
+    'neighboringFlux': _seissol('gpu_neighboringFlux[0]'),
+    'localFluxAll': _seissol('gpu_localFluxAll')}
 
 
 def _descrs(shape='volume', order=6, precision='s'):
@@ -334,6 +369,179 @@ def test_an_operator_too_large_for_a_block_is_refused():
     assert group is None and 'streamed' in why
 
 
+# -- the operators' nonzeros (the sparse FMA form) ---------------------------- #
+
+def _fma_section(shape='volume', order=6, precision='s', **options):
+    section = eg.classify(_descrs(shape, order, precision))[0]
+    return eg.lower(section, _context('sm_90', precision, tensor_cores=False,
+                                      **options))
+
+
+def _nonzeros(product):
+    """`(row, k)` of the product's operator that are not zero, in its
+    window, from the numbers the description carries."""
+    import numpy as np
+    data = np.asarray(product.first.tensor.get_values())
+    (r0, r1), (k0, k1) = product.rows, product.depth
+    return {(i, k) for i in range(r0, r1) for k in range(k0, k1)
+            if data[i, k] != 0}
+
+
+@pytest.mark.parametrize('shape,order,precision', [
+    ('volume', 6, 's'), ('volume', 4, 'd'), ('chain', 6, 's'),
+    ('localFlux', 6, 'd'), ('localFluxAll', 4, 's')])
+def test_an_fma_step_walks_its_operators_nonzeros(shape, order, precision):
+    """Each operator step of the FMA form takes its terms: per product
+    exactly the operator's nonzeros in the product's window, each at its
+    cell of the operator's storage, the rows by how many nonzeros the
+    step's products have there, the most first."""
+    section = _fma_section(shape, order, precision)
+    steps = [s for s in section.steps if s.kind is eg.Kind.OPERATOR]
+    assert steps and all(s.lowering == 'fma' and s.terms is not None
+                         for s in steps)
+    for step in steps:
+        terms = step.terms
+        counts = {i: sum(terms.counts[p][s]
+                         for p in range(len(step.products)))
+                  for s, i in enumerate(terms.order)}
+        assert list(terms.order) == sorted(terms.order,
+                                           key=lambda i: (-counts[i], i))
+        for p, product in enumerate(step.products):
+            walked = []
+            at = 0
+            for s, i in enumerate(terms.order):
+                n = terms.counts[p][s]
+                walked += [(i, k) for k in terms.cols[p][at:at + n]]
+                at += n
+            assert at == len(terms.cols[p]) == len(terms.cells[p])
+            assert sorted(walked) == sorted(_nonzeros(product))
+            tensor = product.first.tensor
+            assert [tensor.bbox.lower()[0] + c % tensor.bbox.sizes()[0]
+                    for c in terms.cells[p]] == [i for i, _ in walked]
+            assert [tensor.bbox.lower()[1] + c // tensor.bbox.sizes()[0]
+                    for c in terms.cells[p]] == [k for _, k in walked]
+
+
+def test_an_accumulating_step_leaves_rows_without_terms_out():
+    """Adding nothing to a row of the output is not writing it -- the
+    volume's first direction alone, where `kDivM(0)` is zero in 18 of its
+    53 rows; assigning an intermediate writes its zeros -- the chain's
+    first, the same operator into `_chain0`."""
+    adds = _fma_section('direction', 6, 's').steps[-1]
+    nonzero = {i for p in adds.products for i, _ in _nonzeros(p)}
+    assert not adds.assigns and len(nonzero) == 53 - 18
+    assert sorted(adds.terms.order) == sorted(nonzero)
+    assigns = _fma_section('chain', 6, 's').steps[0]
+    assert assigns.assigns and assigns.terms.counts[0][-1] == 0
+    assert sorted(assigns.terms.order) == list(range(*assigns.rows))
+
+
+def test_the_terms_row_table():
+    """A row's data: the row, then each product's first nonzero in the
+    tables and its count; the products' nonzeros one after another."""
+    terms = eg.Terms(order=(5, 2), counts=((2, 1), (0, 3)),
+                     cols=((0, 3, 1), (4, 5, 6)), cells=((), ()))
+    assert terms.entries == 6 and terms.base(1) == 3 and terms.stride == 5
+    assert terms.rows_table() == (5, 0, 2, 3, 0, 2, 2, 1, 3, 3)
+    assert terms.volume == 2 * 6 + 2 * 5
+
+
+@pytest.mark.parametrize('options', [
+    {'skip_known_zeros': False}, {'tensor_cores': True}],
+    ids=['zeros-not-skipped', 'matrix'])
+def test_no_terms_without_the_fma_form_skipping_zeros(options):
+    """`skip_known_zeros` off keeps the operators' boxes, as stored, and the
+    matrix tiling reads its own stages."""
+    section = eg.classify(_volume())[0]
+    lowered = eg.lower(section, _context('sm_90', **{'tensor_cores': False,
+                                                      **options}))
+    assert all(s.terms is None for s in lowered.steps)
+
+
+def test_an_operator_without_numbers_is_read_whole(monkeypatch):
+    """Where the description gives no numbers for an operator, the step's
+    zeros are not known and it reads the operators as stored."""
+    descrs = _volume()
+    section = eg.classify(descrs)[0]
+    monkeypatch.setattr(section.steps[-1].products[1].first.tensor, 'data',
+                        None)
+    lowered = eg.lower(section, _context('sm_90', tensor_cores=False))
+    assert lowered.steps[-1].terms is None
+    assert [st.tensor.alias for st in lowered.stages] == [
+        f'kDivM({d})' for d in range(3)]
+
+
+@pytest.mark.parametrize('precision,sparse,dense', [
+    ('s', 15204, 26880), ('d', 30408, 47040)])
+def test_the_terms_take_less_room_than_the_operators(precision, sparse,
+                                                     dense):
+    """At o6 the volume's three operators: 1708 values, as many indices,
+    55 rows of row data -- in place of 3 x 35 columns of the boxes."""
+    size = _dtype(precision).size()
+    lowered = _fma_section(precision=precision)
+    assert lowered.stages == ()
+    assert eg.shared_bytes(lowered, 0) == sparse
+    dense_section = _fma_section(precision=precision, skip_known_zeros=False)
+    assert eg.shared_bytes(dense_section, 0) == dense
+    assert sum(st.volume for st in dense_section.stages) * size == dense
+
+
+def _executed(shape='volume', order=6, precision='s', **options):
+    from tensorforge.analysis import pipeline
+    gen = _generate(_descrs(shape, order, precision),
+                    _context('sm_90', precision, multi_element='force',
+                             tensor_cores=False, **options))
+    return pipeline.executed_flops(gen)
+
+
+def _section_flops(shape, order, precision, sparse):
+    """Flops a sparse (or dense) FMA section performs an element.  A step
+    over the operators' nonzeros: each nonzero once for each of the
+    product's columns, the products summed in one accumulator.  A step over
+    the windows (a mixing step, or an operator step without its terms):
+    each product's outputs over its contraction -- the first term a
+    multiplication where the contraction is written out
+    (`multi_element.UNROLL`), an FMA from zero where it is a loop -- and the
+    products' sums added.  A step that accumulates adds to what is
+    there."""
+    from tensorforge.backend.instructions.compute.multi_element import UNROLL
+    section = _fma_section(shape, order, precision,
+                           skip_known_zeros=sparse)
+    flops = 0
+    for step in section.steps:
+        height = step.rows[1] - step.rows[0]
+        width = step.cols[1] - step.cols[0]
+        written = height * width
+        if step.terms is not None:
+            flops += 2 * sum(len(_nonzeros(p)) * (p.cols[1] - p.cols[0])
+                             for p in step.products)
+            written = len(step.terms.order) * width
+        else:
+            for p in step.products:
+                depth = p.depth[1] - p.depth[0]
+                flops += ((p.rows[1] - p.rows[0]) * (p.cols[1] - p.cols[0])
+                          * (2 * depth - (depth <= UNROLL)))
+            flops += written * (len(step.products) - 1)
+        if not step.assigns:
+            flops += written
+    return flops
+
+
+@pytest.mark.parametrize('shape,order,precision', [
+    ('volume', 6, 's'), ('volume', 4, 'd'), ('chain', 6, 's'),
+    ('localFlux', 6, 'd'), ('neighboringFlux', 4, 's'), ('columns', 4, 'd')])
+def test_the_executed_flops_are_the_nonzeros(shape, order, precision):
+    """The emitter's count of the sparse form (`pipeline.executed_flops`):
+    every lane's term under a guard that says how many lanes take it, so
+    what the kernel performs is exactly the operators' nonzeros -- and the
+    dense form's is its windows'."""
+    assert _executed(shape, order, precision) == _section_flops(
+        shape, order, precision, True)
+    assert _executed(shape, order, precision,
+                     skip_known_zeros=False) == _section_flops(
+        shape, order, precision, False)
+
+
 def test_the_layout_is_cudas_on_nvidia():
     section = eg.classify(_volume())[0]
     group, why = eg.fill(section, _context('gfx942', backend='hip'))
@@ -396,6 +604,126 @@ def test_the_option_is_off_by_default():
     assert registry()['multi_element'].default == 'off'
 
 
+# -- the lanes form ----------------------------------------------------------- #
+
+LANES = {'multi_element': 'force', 'multi_element_fma': 'lanes'}
+
+
+@pytest.mark.parametrize('shape,order,precision,classes,ranges', [
+    ('volume', 4, 's', 3, ((1, 20),)), ('volume', 6, 's', 3, ((1, 56),)),
+    ('volume', 6, 'd', 2, ((1, 32), (32, 37), (37, 43), (43, 56))),
+    ('localFlux', 6, 'd', 3, ((0, 35), (35, 56))),
+    ('localFluxAll', 4, 'd', 3, ((0, 20),))])
+def test_the_lanes_form_cuts_the_output_until_a_lane_holds_it(
+        shape, order, precision, classes, ranges):
+    """As few row ranges as keep a lane's registers within the plan's
+    budget -- one in F32, more at o6 F64, each cut where the work of its
+    two parts is closest -- and three column classes where the block's
+    warps allow (`LANE_WARPS`)."""
+    section = eg.classify(_descrs(shape, order, precision))[0]
+    lanes, why = eg.lanes_plan(section, _context('sm_90', precision))
+    assert lanes is not None, why
+    assert lanes.classes == classes and lanes.ranges == ranges
+    assert lanes.warps == classes * len(ranges) <= eg.LANE_WARPS
+    assert lanes.registers <= eg.LANE_REGISTERS
+    size = 2 if precision == 'd' else 1
+    tile = 16 // (8 if precision == 'd' else 4)
+    cones = eg.Cones(section)
+    one = cones.live(range(*cones.rows), tile) * size
+    assert (one > eg.LANE_REGISTERS) is (len(ranges) > 1)
+
+
+def test_a_cone_reads_the_operands_rows_its_nonzeros_name():
+    """The rows each value's column needs, by the step that writes it: the
+    volume's first rows read the first contraction indices of each
+    direction's intermediate, the rows its own operator's nonzeros name."""
+    section = eg.classify(_volume(6, 's'))[0]
+    cones = eg.Cones(section)
+    need = cones.need(range(1, 20))
+    for p in section.steps[-1].products:
+        reads = {k for i in range(1, 20)
+                 for k, _ in cones.nonzeros[id(p)].get(i, ())}
+        assert cones.source(p).dest is p.second.tensor
+        assert need[id(cones.source(p))] == reads and max(reads) < 10
+    assert need[id(section.steps[-1])] == set(range(1, 20))
+
+
+def test_a_reused_intermediate_is_a_value_a_write():
+    """The reused temporary: each mixing product reads what the operator
+    step just ahead of it wrote, and the cones keep the two apart."""
+    section = eg.classify(_descrs('reuse'))[0]
+    cones = eg.Cones(section)
+    first, mix0, second, mix1 = section.steps
+    assert cones.source(mix0.products[0]) is first
+    assert cones.source(mix1.products[0]) is second
+    assert cones.source(first.products[0]) is None
+
+
+@pytest.mark.parametrize('change,why', [
+    ('chain', 'a mixing product of _chain0'),
+    ('literals', 'more than the 64 literals'),
+    ('numbers', 'carries no numbers')],
+    ids=['mixes-an-intermediate', 'too-many-literals', 'no-numbers'])
+def test_what_the_lanes_form_does_not_take_says_why(change, why,
+                                                    monkeypatch):
+    """A mixing product of an intermediate -- every column of it a lane
+    would hold -- operators beyond `inline_constants`, and an operator
+    without its numbers are the warp form's."""
+    options = {}
+    if change == 'chain':
+        section = eg.classify(_descrs('chain'))[0]
+    else:
+        section = eg.classify(_volume())[0]
+        if change == 'literals':
+            options['inline_constants'] = 64
+        else:
+            monkeypatch.setattr(section.steps[-1].products[0].first.tensor,
+                                'data', None)
+    lanes, reason = eg.lanes_plan(section, _context('sm_90', **options))
+    assert lanes is None and why in reason
+    group = eg.fill(section, _context('sm_90', **options, **LANES))[0]
+    assert group is not None and group.lanes is None
+
+
+@pytest.mark.parametrize('options,lanes', [
+    ({}, False), ({'multi_element_fma': 'warp'}, False),
+    ({'multi_element_fma': 'lanes'}, True),
+    ({'multi_element_fma': 'lanes', 'tensor_cores': True}, True)],
+    ids=['auto', 'warp', 'lanes', 'lanes-over-matrix'])
+def test_the_lanes_form_where_it_is_asked_for(options, lanes):
+    """`multi_element_fma`: `auto` is the warp form everywhere so far, and
+    `lanes` takes the lanes form ahead of the matrix tiling: a group of a
+    warp's lanes, each step `lane`, nothing staged."""
+    section = eg.classify(_volume())[0]
+    group = eg.fill(section, _context('sm_90', **options))[0]
+    assert (group.lanes is not None) is lanes
+    if lanes:
+        assert group.elements == eg.LANE_ELEMENTS == 32
+        assert group.warps == 3 and group.shared_bytes == 0
+        assert {s.lowering for s in group.section.steps} == {'lane'}
+        assert group.section.stages == () and group.section.results == ()
+
+
+def test_the_lane_group_loop():
+    """The lanes form's trip: the lane is the element, the group the
+    block's, its warps whatever their number."""
+    from tensorforge.backend.instructions.batch_loop import (BatchLoop,
+                                                             LoopMode, Trip)
+    from tensorforge.backend.pir.core import Uniformity
+    from tensorforge.common.exceptions import InternalError
+    loop = BatchLoop(context=_context(), section_index=0,
+                     mode=LoopMode.PERSISTENT, start='s', stride='t',
+                     region=[], group_size=32, trip=Trip.LANE_GROUP)
+    loop.set_mults_per_block(6)
+    assert loop._grouped() and loop.uniform_scope() is Uniformity.BLOCK
+    assert loop._group_start() == '32 * (blockIdx.x)'
+    assert 'lane_group(32)' in str(loop)
+    with pytest.raises(InternalError, match='work queue'):
+        BatchLoop(context=_context(), section_index=0,
+                  mode=LoopMode.LAUNCHCTRL, start='s', stride='t',
+                  region=[], group_size=32, trip=Trip.LANE_GROUP)
+
+
 # -- the kernel -------------------------------------------------------------- #
 
 def _kernel(arch='sm_90', precision='s', shape='volume', **options):
@@ -409,15 +737,21 @@ def test_a_block_is_one_group_of_warps():
     assert 'block 32x16x1' in kernel and '32 lanes x 16 per block' in kernel
 
 
-@pytest.mark.parametrize('options,prefix', [
-    ({}, 'b'), ({'tensor_cores': False}, 'k')], ids=['matrix', 'fma'])
-def test_the_operators_are_staged_once_ahead_of_the_loop(options, prefix):
-    """As the matrix tiling reads them (`b`, a window each) or as stored
-    for the FMA form (`k`), before the loop and behind one barrier."""
+@pytest.mark.parametrize('options,names', [
+    ({}, [f'bkDivM{d}' for d in range(3)]),
+    ({'tensor_cores': False}, ['vQ', 'lQ', 'rQ']),
+    ({'tensor_cores': False, 'skip_known_zeros': False},
+     [f'kkDivM{d}' for d in range(3)])],
+    ids=['matrix', 'fma', 'fma-dense'])
+def test_the_operators_are_staged_once_ahead_of_the_loop(options, names):
+    """As the matrix tiling reads them (`b`, a window each), as the sparse
+    FMA form does -- the step's nonzeros packed: values, contraction
+    indices and row data (`v`, `l`, `r`) -- or as stored for the FMA form
+    without them (`k`), before the loop and behind one barrier."""
     kernel = _kernel(multi_element='force', **options)
     loop = kernel.index('batchIdGroup0')
-    for d in range(3):
-        assert -1 < kernel.index(f'{prefix}kDivM{d}') < loop
+    for name in names:
+        assert -1 < kernel.index(name) < loop, name
     assert kernel[:loop].count('__syncthreads();') == 1
 
 
@@ -565,13 +899,135 @@ def test_the_barriers_stand_without_the_placement(shape, options, phases):
         assert max(stores) < upper, phase
 
 
-@pytest.mark.parametrize('shape', ['volume', 'chain'])
-def test_an_element_past_the_end_writes_nothing(shape):
-    """Every write of `Q` runs under the warp's element's mask."""
-    lines = _kernel(shape=shape, multi_element='force').splitlines()
+@pytest.mark.parametrize('shape,options', [
+    ('volume', {}), ('chain', {}), ('volume', LANES)],
+    ids=['volume', 'chain', 'volume-lanes'])
+def test_an_element_past_the_end_writes_nothing(shape, options):
+    """Every write of `Q` runs under the element's mask: the warp's, or in
+    the lanes form the lane's."""
+    lines = _kernel(shape=shape, **{'multi_element': 'force',
+                                    **options}).splitlines()
     writes = _stores(lines, r'glb_m\d+')
     assert writes and all(lines[i - 1].strip() == 'if (batchIdActive0) {'
                           for i in writes)
+
+
+@pytest.mark.parametrize('precision,warps', [('s', 3), ('d', 8)])
+def test_a_lanes_block_takes_a_group_on_its_lanes(precision, warps):
+    """The lanes form's kernel: a block of the plan's warps over a group of
+    32 elements, a lane each -- the group the block's, a trip apart by the
+    grid's groups -- no shared memory and no block barrier, the operators'
+    pointers never read: their nonzeros are literals."""
+    kernel = _kernel(precision=precision, **LANES)
+    assert f'block 32x{warps}x1, 0 B shared' in kernel
+    assert 'const auto batchIdLane0 = threadIdx.x;' in kernel
+    assert 'batchIdGroup0 = 32 * (blockIdx.x)' in kernel
+    assert 'batchIdGroup0 += (gridDim.x * 32)' in kernel
+    assert '__syncthreads' not in kernel
+    section = eg.classify(_volume(6, precision))[0]
+    operators = {t.alias for t in section.operators}
+    names = re.findall(r'//   (m\d+) \S+ \S+ none', kernel)
+    assert len(names) == len(operators) == 3
+    assert not any(re.search(rf'glb_{n}\[', kernel) for n in names)
+
+
+def test_a_lanes_walk_reads_the_element_for_itself():
+    """The rows of `I` a column reads, read in the column loop -- not ahead
+    of it, held across every column -- and by each walk again: the four
+    faces of `localFluxAll` read them four times, 16 bytes at a time, rather
+    than one face's reads held through the other three."""
+    kernel = _generate(_descrs('localFluxAll', 4, 's'),
+                       _context('sm_90', 's', **LANES)).get_kernel()
+    lines = kernel.splitlines()
+    loop = next(i for i, line in enumerate(lines)
+                if re.search(r'for \(int32_t v\d+_c = 0;', line))
+    reads = [i for i, line in enumerate(lines)
+             if re.search(r'VectorT<float, 4>\*\)&glb_m0\[', line)]
+    # I is 20 rows by 9 at o4: five tiles of four rows a column of it, and
+    # every face reads every row (its operator's contraction is the basis).
+    assert reads and min(reads) > loop
+    assert len(reads) == 4 * 5 * 9
+
+
+def _lanes_flops(shape, order, precision):
+    """Flops the lanes form performs an element: for every row range, a
+    column of its cone in every column of the output -- each mixing step's
+    entries at the rows the cone needs, each operator step's nonzeros
+    there, the first of a row a multiplication where the column starts
+    from zero, and the output's accumulated onto what it holds.  A term
+    whose operand row nothing writes -- a row of an intermediate no
+    nonzero or no mixing product reaches -- is a known zero and left
+    out; rows of one column that start with the same literal times the
+    same entry share that multiplication (the IR's common
+    subexpressions), and a start that multiplies by one is folded."""
+    section = eg.classify(_descrs(shape, order, precision))[0]
+    lanes = eg.lanes_plan(section, _context('sm_90', precision))[0]
+    cones = eg.Cones(section)
+    last = section.steps[-1]
+    width = last.cols[1] - last.cols[0]
+
+    def zero(step, row):
+        if step is None:
+            return False
+        if step.kind is eg.Kind.MIXING:
+            return not any(p.rows[0] <= row < p.rows[1]
+                           for p in step.products)
+        return not terms(step, row)
+
+    def live(step, row):
+        """The row's terms the walk adds, in the order it adds them."""
+        return sorted(((k, id(p), v) for p in step.products
+                       for k, v in cones.nonzeros[id(p)].get(row, ())
+                       if not zero(cones.source(p), k)),
+                      key=lambda term: term[0])
+
+    def terms(step, row):
+        return len(live(step, row))
+
+    total = 0
+    for rows in lanes.ranges:
+        need = cones.need(range(*rows))
+        for step in section.steps:
+            mine = need.get(id(step), set())
+            if step is last:
+                mine = {i for i in range(*rows)
+                        if step.rows[0] <= i < step.rows[1]}
+            starts = set()
+            for i in mine:
+                if step.kind is eg.Kind.MIXING:
+                    covering = [p for p in step.products
+                                if p.rows[0] <= i < p.rows[1]]
+                    total += width * (sum(2 * (p.depth[1] - p.depth[0]) - 1
+                                          for p in covering)
+                                      + max(0, len(covering) - 1))
+                    continue
+                added = live(step, i)
+                if not added:
+                    continue
+                if step is not last or step.assigns:
+                    # The first term a multiplication, shared by the rows
+                    # that start alike; the rest multiply-adds.
+                    starts.add(added[0][1:] + (added[0][0],))
+                    total += width * 2 * (len(added) - 1)
+                else:
+                    total += width * 2 * len(added)
+            # A first term that multiplies by one is the entry itself.
+            total += width * sum(1 for pid, value, k in starts
+                                 if value != 1.0)
+    return total
+
+
+@pytest.mark.parametrize('shape,order,precision', [
+    ('volume', 4, 's'), ('volume', 6, 'd'), ('localFlux', 6, 'd'),
+    ('neighboringFlux', 4, 's'), ('localFluxAll', 4, 's'),
+    ('localFluxAll', 6, 'd'), ('columns', 4, 'd')])
+def test_the_lanes_forms_flops_are_its_cones(shape, order, precision):
+    """The emitter's count of the lanes form: the column loop's trips and
+    each range's share of the warps (`lanes_active`), divided over the
+    warps an element has (`pipeline.executed_flops`) -- what every warp
+    computes of every element, the operators at their nonzeros."""
+    assert _executed(shape, order, precision, multi_element_fma='lanes') \
+        == _lanes_flops(shape, order, precision)
 
 
 @pytest.mark.parametrize('shape', ['volume', 'chain'])
@@ -620,6 +1076,114 @@ def test_the_section_computes_on_the_oracle(shape, options, precision,
         scale = max(abs(want[key]) for key in keys) or 1.0
         error = max(abs(got[key] - want[key]) for key in keys) / scale
         assert error <= tolerance, (alias, error)
+
+
+#: The oracle's seed for its fill of memory (`kernel_eval.Slot`).
+SEED = 29
+
+
+@pytest.mark.parametrize('shape,order,precision,options', [
+    ('volume', 4, 'd', {'tensor_cores': False}),
+    ('volume', 4, 's', {'tensor_cores': False, 'skip_known_zeros': False}),
+    ('reuse', 4, 's', {'tensor_cores': False}),
+    ('localFlux', 4, 'd', {'tensor_cores': False}),
+    ('neighboringFlux', 4, 's', {'tensor_cores': False,
+                                 'enable_sync_block_opt': False}),
+    ('localFluxAll', 4, 'd', {'tensor_cores': False}),
+    ('direction', 4, 's', {'tensor_cores': False}),
+    ('columns', 4, 'd', {'tensor_cores': False}),
+    ('volume', 4, 'd', LANES), ('volume', 4, 's', LANES),
+    ('localFlux', 4, 's', LANES), ('neighboringFlux', 4, 'd', LANES),
+    ('localFluxAll', 4, 's', LANES), ('columns', 4, 's', LANES),
+    ('direction', 4, 'd', LANES)],
+    ids=['volume-o4d', 'volume-o4s-dense', 'reuse-o4s', 'localFlux-o4d',
+         'neighboringFlux-o4s-own-barriers', 'localFluxAll-o4d',
+         'direction-o4s', 'columns-o4d', 'lanes-volume-o4d',
+         'lanes-volume-o4s', 'lanes-localFlux-o4s',
+         'lanes-neighboringFlux-o4d', 'lanes-localFluxAll-o4s',
+         'lanes-columns-o4s', 'lanes-direction-o4d'])
+def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
+                                                  options, monkeypatch):
+    """A group over itself and seven more elements on the host oracle: two
+    trips of the group, the second partial -- four warps over seven
+    elements, one warp masked, in the warp form; a warp's lanes over 39, 25
+    of them masked, in the lanes form -- every element's output against
+    NumPy, from the oracle's own fill of memory, the operators their
+    description's numbers; and no access to shared memory that no barrier
+    orders (`kernel_eval.Races`)."""
+    import numpy as np
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.reference import kernel_eval
+    lanes = options.get('multi_element_fma') == 'lanes'
+    if lanes:
+        group, count = eg.LANE_ELEMENTS, eg.LANE_ELEMENTS + 7
+    else:
+        group, count = 4, 7
+        monkeypatch.setattr(eg, 'ELEMENTS',
+                            {key: group for key in eg.ELEMENTS})
+        monkeypatch.setattr(eg, 'DEFAULT_ELEMENTS', group)
+    gen = _generate(_descrs(shape, order, precision),
+                    _context('sm_90', precision, **{'multi_element': 'force',
+                                                    **options}))
+    built = gen.built._element_group
+    assert built.elements == group and (built.lanes is not None) is lanes
+    tensors = {}
+    for outer in gen.descr_list:
+        for d in outer.operations():
+            for m in d.matrix_list():
+                t = getattr(m, 'tensor', m)
+                tensors.setdefault(t.alias, t)
+
+    def box(t):
+        return [(int(lo), int(hi)) for lo, hi in zip(t.bbox.lower(),
+                                                      t.bbox.upper())]
+
+    def memory(t, read):
+        """The tensor's box, element by element, as `read(element, slot)`
+        gives its storage slots (column by column over the box)."""
+        (r0, r1), (c0, c1) = box(t)
+        out = np.zeros((count, r1 - r0, c1 - c0))
+        for e in range(count):
+            for c in range(c1 - c0):
+                for r in range(r1 - r0):
+                    out[e, r, c] = read(e, r + c * (r1 - r0))
+        return out
+
+    fill = kernel_eval.Slot(SEED)
+    preset, inputs = {}, {}
+    for alias, t in tensors.items():
+        if t.is_tmp:
+            continue
+        if t.addressing.kind is Addressing.NONE:
+            preset[t.name] = [float(v) for v in t.storage_values()]
+            (r0, r1), (c0, c1) = box(t)
+            inputs[alias] = np.asarray(t.get_values())[None, r0:r1, c0:c1]
+        else:
+            inputs[alias] = memory(t, lambda e, s, t=t: fill.read(
+                f'{t.name}@{e}', s))
+    output = next(t for t in tensors.values() if not t.is_tmp
+                  and t.addressing.kind is not Addressing.NONE
+                  and any(d.writes().tensor is t for outer in gen.descr_list
+                          for d in outer.operations()))
+    lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
+    races = []
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        mem = kernel_eval.evaluate_wave(
+            gen.get_kernel(), lanes, seed=SEED, globals_only=True,
+            mults=mults, block=True, preset=preset, elements=count,
+            races=races)
+    assert not races, races[:3]
+    got = memory(output, lambda e, s: mem.get((f'{output.name}@{e}', s),
+                                              fill.read(f'{output.name}@{e}',
+                                                        s)))
+    want = _reference(_descrs(shape, order, precision))(
+        inputs, inputs[output.alias])
+    tolerance = 1e-12 if precision == 'd' else 1e-6
+    for e in range(count):
+        scale = np.abs(want[e]).max() or 1.0
+        error = np.abs(got[e] - want[e]).max() / scale
+        assert error <= tolerance, (e, error)
 
 
 def _reference(descrs):
@@ -676,14 +1240,55 @@ def _reference(descrs):
     return reference
 
 
-@pytest.mark.parametrize('shape,order,precision,options', [
+def _known_zeros(descrs):
+    """The harness's fill of each operator that carries its numbers, zero
+    where they are: a kernel that skips the known zeros reads only the rest,
+    and the reference has to multiply the same matrix.  Random numbers
+    elsewhere, as the harness draws them, so that a term read at another
+    cell than its own is a wrong number and not, by chance, an equal one.
+    The arrays are the operators' boxes."""
+    import numpy as np
+    from tensorforge.common.basic_types import Addressing
+    out = {}
+    for descr in descrs:
+        for op in descr.operations():
+            for sub in op.ops:
+                t = getattr(sub, 'tensor', None)
+                if (t is None or t.is_tmp or not t.has_values()
+                        or t.addressing.kind is not Addressing.NONE):
+                    continue
+                box = tuple(slice(int(lo), int(hi)) for lo, hi in
+                            zip(t.bbox.lower(), t.bbox.upper()))
+                mask = np.asarray(t.get_values())[box] != 0
+                out[t.alias] = lambda a, mask=mask: a * mask
+    return out
+
+
+GPU_CASES = [
     ('volume', 4, 's', {}), ('volume', 6, 's', {}), ('volume', 4, 'd', {}),
     ('volume', 6, 'd', {}),
     ('volume', 6, 's', {'enable_sync_block_opt': False}),
     ('volume', 6, 's', {'tensor_cores': False}),
-    ('chain', 6, 's', {}), ('chain', 6, 'd', {}), ('reuse', 6, 's', {})],
-    ids=['o4s', 'o6s', 'o4d', 'o6d', 'o6s-own-barriers', 'o6s-fma',
-         'chain-o6s', 'chain-o6d', 'reuse-o6s'])
+    ('volume', 6, 's', {'tensor_cores': False, 'skip_known_zeros': False}),
+    ('volume', 4, 'd', {'tensor_cores': False}),
+    ('volume', 6, 'd', {'tensor_cores': False,
+                        'enable_sync_block_opt': False}),
+    ('chain', 6, 's', {}), ('chain', 6, 'd', {}), ('reuse', 6, 's', {}),
+    ('chain', 6, 'd', {'tensor_cores': False}),
+    ('reuse', 6, 's', {'tensor_cores': False}),
+    ('localFlux', 6, 'd', {'tensor_cores': False}),
+    ('neighboringFlux', 4, 's', {'tensor_cores': False}),
+    ('localFluxAll', 6, 's', {'tensor_cores': False}),
+    ('direction', 6, 'd', {'tensor_cores': False}),
+    ('columns', 6, 's', {'tensor_cores': False})]
+
+
+@pytest.mark.parametrize('shape,order,precision,options', GPU_CASES, ids=[
+    'o4s', 'o6s', 'o4d', 'o6d', 'o6s-own-barriers', 'o6s-fma',
+    'o6s-fma-dense', 'o4d-fma', 'o6d-fma-own-barriers', 'chain-o6s',
+    'chain-o6d', 'reuse-o6s', 'chain-o6d-fma', 'reuse-o6s-fma',
+    'localFlux-o6d-fma', 'neighboringFlux-o4s-fma', 'localFluxAll-o6s-fma',
+    'direction-o6d-fma', 'columns-o6s-fma'])
 def test_the_section_computes_on_the_gpu(shape, order, precision, options,
                                          target, cache_root,
                                          tensorforge_include):
@@ -691,7 +1296,9 @@ def test_the_section_computes_on_the_gpu(shape, order, precision, options,
     in a partial group and gives a block of the persistent grid several
     trips -- the group's buffers rewritten while another warp of the block
     may still read the last trip's -- under the barriers the placement
-    derives and, once, under the instructions' own."""
+    derives and, once, under the instructions' own.  The operators are zero
+    where the description says (`_known_zeros`), as the sparse FMA form
+    takes them to be."""
     if target.backend != 'cuda':
         pytest.skip('the multi-element layout is CUDA\'s')
     from harness.runner import run_case
@@ -704,6 +1311,66 @@ def test_the_section_computes_on_the_gpu(shape, order, precision, options,
         DTYPE=_dtype(precision), BATCH=4099,
         TOL=(1e-12, 1e-12) if precision == 'd' else (1e-4, 1e-4),
         OPTIONS={'multi_element': 'force', **options},
+        INPUT_TRANSFORM=_known_zeros(_descrs(shape, order, precision)),
+        descr_list=lambda: _descrs(shape, order, precision),
+        reference=_reference(_descrs(shape, order, precision)))
+    result = run_case(case, target, cache_root, tensorforge_include)
+    assert result.passed, (result.max_abs_err, result.max_rel_err,
+                           result.detail)
+
+
+def _described(descrs):
+    """The harness's fill of each operator that carries its numbers, those
+    numbers: the lanes form takes them as literals, and its operators'
+    memory is never read."""
+    import numpy as np
+    from tensorforge.common.basic_types import Addressing
+    out = {}
+    for descr in descrs:
+        for op in descr.operations():
+            for sub in op.ops:
+                t = getattr(sub, 'tensor', None)
+                if (t is None or t.is_tmp or not t.has_values()
+                        or t.addressing.kind is not Addressing.NONE):
+                    continue
+                box = tuple(slice(int(lo), int(hi)) for lo, hi in
+                            zip(t.bbox.lower(), t.bbox.upper()))
+                values = np.asarray(t.get_values())[box]
+                out[t.alias] = lambda a, values=values: np.broadcast_to(
+                    values, a.shape)
+    return out
+
+
+LANE_CASES = [
+    ('volume', 4, 's'), ('volume', 6, 's'), ('volume', 4, 'd'),
+    ('volume', 6, 'd'), ('localFlux', 6, 'd'), ('neighboringFlux', 4, 's'),
+    ('localFluxAll', 6, 's'), ('localFluxAll', 6, 'd'), ('direction', 6, 'd'),
+    ('columns', 6, 's')]
+
+
+@pytest.mark.parametrize('shape,order,precision', LANE_CASES,
+                         ids=[f'{s}-o{o}{p}' for s, o, p in LANE_CASES])
+def test_the_lanes_form_computes_on_the_gpu(shape, order, precision, target,
+                                            cache_root, tensorforge_include):
+    """The lanes form built and run on the local GPU against NumPy, over a
+    batch whose last group of 32 is partial and which gives a block of the
+    persistent grid several trips; the operators the description's
+    numbers, which its literals are.  F32 is held to a tolerance of the
+    outputs' size, about 1e3: a sum of a hundred terms of that size rounds
+    to about 1e-3 in single precision, and an output near zero meets it
+    absolutely."""
+    if target.backend != 'cuda':
+        pytest.skip('the multi-element layout is CUDA\'s')
+    from harness.runner import run_case
+    group = eg.plan(_descrs(shape, order, precision),
+                    _context(target.arch, precision, **LANES))
+    assert group is not None and group.lanes is not None
+    case = types.SimpleNamespace(
+        NAME=f'multi_element_lanes_{shape}_o{order}{precision}',
+        DTYPE=_dtype(precision), BATCH=4099,
+        TOL=(1e-12, 1e-12) if precision == 'd' else (1e-4, 1e-2),
+        OPTIONS=dict(LANES),
+        INPUT_TRANSFORM=_described(_descrs(shape, order, precision)),
         descr_list=lambda: _descrs(shape, order, precision),
         reference=_reference(_descrs(shape, order, precision)))
     result = run_case(case, target, cache_root, tensorforge_include)

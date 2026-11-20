@@ -1438,8 +1438,10 @@ class Generator:
                          stack=self._stack,
                          wave_rows=self._group_wave_rows(group),
                          count_index=self._section.count_index,
-                         trip=(Trip.ELEMENT_GROUP if self._element_group
-                               else Trip.ELEMENT))
+                         trip=(Trip.ELEMENT if self._element_group is None
+                               else Trip.LANE_GROUP
+                               if self._element_group.lanes
+                               else Trip.ELEMENT_GROUP))
 
         self._section.stream = list(self._section.global_ir) + [loop]
 
@@ -1641,6 +1643,10 @@ class Generator:
     lexic = self._context.target.lexic
     offset = self._rotation(index)
     stride = f'({lexic.grid_dim_x} * {lexic.block_dim_y})'
+    if self._element_group is not None and self._element_group.lanes:
+      # The lanes form's group is on the lanes, and a block takes one a trip
+      # (`Trip.LANE_GROUP`).
+      stride = f'({lexic.grid_dim_x} * {self._element_group.elements})'
     if not offset:
       start = self._get_2d_block_id()
     else:
@@ -3203,6 +3209,10 @@ class Generator:
     as generated, the grid as the device and the element count allow."""
     launch = self._launch
     mults_per_block = launch.mults_per_block
+    if self._element_group is not None and self._element_group.lanes:
+      # The lanes form's block takes a group of elements a trip on its lanes,
+      # however many warps share it (`Trip.LANE_GROUP`).
+      mults_per_block = self._element_group.elements
     coop = launch.cooperative
     block_x, block_y, block_z = launch.block
     # What a multiplication takes on is a stack of elements
@@ -3900,7 +3910,8 @@ class Generator:
       planned = self._element_group.section
       section = element_group.lower(
           section, self._context, matrix=element_group.tiled(planned),
-          split=element_group.split(planned))
+          split=element_group.split(planned),
+          lanes=self._element_group.lanes is not None)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
@@ -3908,9 +3919,12 @@ class Generator:
     symbols = {id(t): self._scopes.get_symbol(t)
                for t in (list(section.operators) + list(section.outputs)
                          + [b.tensor for b in section.inputs])}
-    operators = MultiElementOperators(
-        self._context, group, [symbols[id(t)] for t in section.operators])
-    self._section.global_ir.append(operators)
+    operators = None
+    if group.lanes is None:
+      # The lanes form stages no operator: its nonzeros are literals.
+      operators = MultiElementOperators(
+          self._context, group, [symbols[id(t)] for t in section.operators])
+      self._section.global_ir.append(operators)
     self._section.ir.append(
         MultiElementSection(self._context, group, symbols, operators))
 
@@ -4223,8 +4237,9 @@ class Generator:
     fits = num_mults_per_block >= 1
     if self._element_group is not None:
       # One group a block, whatever the policy would hold: the group's
-      # barriers reach the block, and its staging is sized for E elements.
-      group = self._element_group.elements
+      # barriers reach the block, and its staging is sized for E elements --
+      # or, in the lanes form, the warps that share the group's elements.
+      group = self._element_group.warps
       size = self._context.fp_type.size()
       hw = self._context.target.hw
       return group, ((global_size + group * size_per_mult) * size

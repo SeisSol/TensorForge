@@ -8,7 +8,8 @@ element, and the batch loop hands it E consecutive elements a trip
 
 * `MultiElementOperators`, ahead of the loop: the section's batch-constant
   operators, copied once into the block's shared memory by every thread of
-  the block, as they are stored.
+  the block, as they are stored -- or only their nonzeros, packed, where a
+  step walks those (`element_group.Terms`).
 * `MultiElementSection`, the loop's body.  A trip:
 
   1. each warp copies its element's operands -- the group operands and the
@@ -27,7 +28,17 @@ its own window of the destination -- and the matrix tiling of an operator
 step (`mma_sync`, `dmma`; `_matrix`), which reads the same buffers: A from
 the group operand's (by ldmatrix in F32, where the buffer is pitched for
 it), B from the operator's stage, and D reaching its consumer's buffer, or
-the output through a result buffer.
+the output through a result buffer.  Where the operators' nonzeros are
+known, `fma` walks only those (`_sparse`): a lane executes the nonzeros of
+its output's row, the rows sorted so that a warp's lanes walk about as many
+each.
+
+The lanes form (`element_group.Lanes`) is lowered by `_lanes` instead: a
+lane its element, read and written through its own pointers -- 16 bytes of
+a column at a time where that is one aligned access -- the warps of the
+block each a share of the output, nothing staged and no barrier.  Every
+step's lowering there is `lane`, and a column is evaluated backwards from
+the output (`_LaneTrip`).
 
 The instructions place their barriers themselves, as every builder does:
 the block's barrier after the operators' copy, one at the head of each trip
@@ -52,7 +63,7 @@ from tensorforge.backend.instructions.abstract_instruction import \
 from tensorforge.backend.pir.core import (BOOL, INDEX, MemSpace,
                                           Participants, ScalarType,
                                           Uniformity)
-from tensorforge.common.basic_types import GeneralLexicon
+from tensorforge.common.basic_types import Datatype, GeneralLexicon
 from tensorforge.common.context import Context
 from tensorforge.common.exceptions import InternalError
 
@@ -117,11 +128,12 @@ class MultiElementOperators(AbstractInstruction):
     """The section's operators, copied into the block's shared memory once,
     ahead of the batch loop, as the section stages them
     (`element_group.Stage`): as stored, or as a matrix product's B -- its
-    window, zero elsewhere.  Every thread of the block a share of the
-    entries, then the block's barrier.
+    window, zero elsewhere -- and, for a step that walks its operators'
+    nonzeros (`element_group.Terms`), those nonzeros packed.  Every thread of
+    the block a share of the entries, then the block's barrier.
 
-    The copies are handed to the section (`buffers`, by tensor and window),
-    which reads them in every trip."""
+    The copies are handed to the section (`buffers`, by tensor and window;
+    `tables`, by a step's terms), which reads them in every trip."""
 
     def __init__(self, context: Context, group, symbols: Sequence):
         super().__init__(context)
@@ -129,9 +141,33 @@ class MultiElementOperators(AbstractInstruction):
         #: The operators' symbols, in the section's order of its operators.
         self.symbols = tuple(symbols)
         self.buffers: Optional[Dict[int, object]] = None
+        #: A sparse step's tables, by `id` of its terms: the values, the
+        #: contraction indices and the row data (`_pack`).
+        self.tables: Optional[Dict[int, tuple]] = None
+        #: The generated file's tables the packing copies from, by name
+        #: (`module_tables`).
+        self._module_tables: Dict[str, tuple] = {}
         self._is_ready = True
         for symbol in self.symbols:
             symbol.add_user(self)
+
+    def module_tables(self):
+        """The numbers this instruction reads by name at namespace scope:
+        the nonzeros' cells in the operators, their contraction indices, and
+        the row data (`_pack`), as `MultilinearInstruction.module_tables`
+        hands its own out."""
+        return dict(self._module_tables)
+
+    def _table(self, prefix: str, numbers) -> str:
+        """The name of a table of integers in the generated file, which says
+        which numbers it holds (`multilinear._module_table_name`)."""
+        from tensorforge.backend.instructions.compute.multilinear import \
+            _module_table_name
+        numbers = tuple(int(n) for n in numbers)
+        name = _module_table_name(prefix, Datatype.I32, numbers)
+        self._module_tables[name] = (Datatype.I32, numbers)
+        self._context.module_tables[name] = numbers
+        return name
 
     def uses(self):
         return self.symbols
@@ -169,8 +205,64 @@ class MultiElementOperators(AbstractInstruction):
                 self._fragments(builder, stage, source, shared, fp, tid,
                                 threads)
             buffers[(id(tensor), stage.window)] = shared
+        tables = {id(step.terms): self._pack(builder, step, symbols, tid,
+                                             threads)
+                  for step in section.steps if step.terms is not None}
         builder.barrier(Participants.BLOCK)
         self.buffers = buffers
+        self.tables = tables
+
+    def _pack(self, builder, step, symbols, tid, threads) -> tuple:
+        """A sparse step's tables in the block's shared memory
+        (`element_group.Terms`): the values, gathered from each operator's
+        memory at its nonzeros' cells -- the numbers the kernel is handed,
+        the pattern the description's -- and the contraction indices and the
+        row data, copied from the generated file's tables."""
+        b = builder
+        section = self._group.section
+        terms = step.terms
+        fp = ScalarType(section.dtype)
+
+        def shared(elem, length, hint):
+            return b.alloc(elem, (max(1, length),), MemSpace.SHARED,
+                           arena=GeneralLexicon.TOTAL_SHR_MEM,
+                           hint=_hint(hint, step.dest))
+
+        def copy(length, store):
+            with b.for_(tid, length, threads, hint='e',
+                        uniform=Uniformity.LANE) as loop:
+                store(loop.induction)
+
+        values = shared(section.dtype, terms.entries, 'v')
+        cols = shared(Datatype.I32, terms.entries, 'l')
+        rows = shared(Datatype.I32, len(terms.order) * terms.stride, 'r')
+        for p, product in enumerate(step.products):
+            cells = terms.cells[p]
+            if not cells:
+                continue
+            name = self._table('mec', cells)
+            source = _bound(b, symbols[id(product.first.tensor)])
+            base = terms.base(p)
+
+            def gather(e, name=name, source=source, base=base):
+                at = b.rawexpr(f'{name}[{{0}}]', e, type_=INDEX, pure=True,
+                               movable=True, hint='a')
+                b.store(values, b.load(source, at, type_=fp, hint='k'),
+                        _index(b, 'add', e, base, 'e'))
+            copy(len(cells), gather)
+        for buffer, numbers, prefix in (
+                (cols, [k for ks in terms.cols for k in ks], 'mek'),
+                (rows, terms.rows_table(), 'mer')):
+            if not numbers:
+                continue
+            name = self._table(prefix, numbers)
+
+            def fill(e, name=name, buffer=buffer):
+                b.store(buffer, b.rawexpr(f'{name}[{{0}}]', e, type_=INDEX,
+                                          pure=True, movable=True, hint='n'),
+                        e)
+            copy(len(numbers), fill)
+        return values, cols, rows
 
     @staticmethod
     def _fragments(builder, stage, source, shared, fp, tid, threads):
@@ -232,7 +324,8 @@ class _Trip:
     """What the lowerings of one trip share: the warp's element and its
     mask, the group's buffers, and how to read and write an operand."""
 
-    def __init__(self, builder, context, group, symbols, operators):
+    def __init__(self, builder, context, group, symbols, operators,
+                 tables=None):
         self.builder = builder
         self.context = context
         self.group = group
@@ -243,6 +336,8 @@ class _Trip:
                                group.elements, hint='slot')
         self.symbols = symbols
         self.operators = operators
+        #: A sparse step's tables, by its terms (`MultiElementOperators`).
+        self.tables = tables or {}
         self.buffers: Dict[int, object] = {}
         self.results: Dict[int, object] = {}
         # The warp's element's mask, which every write of an output runs
@@ -320,19 +415,48 @@ def _product(trip, product, row, col):
     return inner.result
 
 
+def _lanes_active(active: int, of: int) -> tuple:
+    """A guard's statement of how many of `of` lane slots take it, which the
+    emitter's flop count reads (`BuildMetrics.emitted_flops`)."""
+    return (('lanes_active', (active, of)),)
+
+
+def _chunks(trip, count: int, body) -> None:
+    """`body(o)` for the outputs `o < count`, a lane an output: the warp's
+    lanes in chunks, a loop of constant bounds over them -- which the
+    emitter counts the trips of, as it cannot a loop from the lane -- and
+    in the last chunk the lanes past the end held off."""
+    b = trip.builder
+    lanes = trip.group.threads
+    chunks = -(-count // lanes)
+    with b.for_(0, chunks, 1, hint='c') as loop:
+        o = b.op('add', INDEX, trip.lane,
+                 b.op('mul', INDEX, loop.induction, lanes, hint='o'),
+                 hint='o')
+        if count % lanes == 0:
+            body(o)
+            return
+        with b.if_(b.op('lt', BOOL, o, count, hint='in'),
+                   attrs=_lanes_active(count, chunks * lanes)):
+            body(o)
+
+
 def _per_output(trip, step) -> None:
     """The FMA forms: the warp of an element computes the element's outputs
     of the step, a lane an output, summing the step's products -- each only
-    in its own window of the destination, and reading nothing outside it."""
+    in its own window of the destination, and reading nothing outside it.
+    An operator product reads its operator as stored, every entry of its
+    window; a step whose operators' nonzeros are known walks those instead
+    (`_sparse`)."""
     b = trip.builder
     rows, cols = step.rows, step.cols
     height = rows[1] - rows[0]
-    with b.for_(trip.lane, height * (cols[1] - cols[0]),
-                trip.group.threads, hint='o',
-                uniform=Uniformity.LANE) as loop:
-        row = _index(b, 'add', b.op('rem', INDEX, loop.induction, height,
+    count = height * (cols[1] - cols[0])
+
+    def outputs(index):
+        row = _index(b, 'add', b.op('rem', INDEX, index, height,
                                     hint='i'), rows[0], 'i')
-        col = _index(b, 'add', b.op('div', INDEX, loop.induction, height,
+        col = _index(b, 'add', b.op('div', INDEX, index, height,
                                     hint='j'), cols[0], 'j')
         total = None
         for product in step.products:
@@ -350,7 +474,10 @@ def _per_output(trip, step) -> None:
                                 hint='in')
                     inside = edge if inside is None else b.op(
                         'and', BOOL, inside, edge, hint='in')
-                guard = b.if_else(inside, types=(trip.fp,))
+                window = ((product.rows[1] - product.rows[0])
+                          * (product.cols[1] - product.cols[0]))
+                guard = b.if_else(inside, types=(trip.fp,),
+                                  attrs=_lanes_active(window, count))
                 with guard.then():
                     guard.yield_(_product(trip, product, row, col))
                 with guard.otherwise():
@@ -359,6 +486,108 @@ def _per_output(trip, step) -> None:
             total = contrib if total is None else b.op(
                 'add', trip.fp, total, contrib, hint='q')
         trip.write(step, row, col, total)
+
+    _chunks(trip, count, outputs)
+
+
+def _sparse(trip, step) -> None:
+    """The `fma` form over the operators' nonzeros (`element_group.Terms`):
+    a lane an output, as `_per_output`, each product's operator read only
+    where it is not zero.
+
+    The lanes take the outputs in the terms' order -- output `o` is column
+    `o % width` of row `order[o / width]`, the rows sorted by how many
+    nonzeros they have -- a warp's chunk at a time, written out, since what
+    each chunk costs is its own.  For a product, a chunk walks as many steps
+    as the longest of its rows has nonzeros there, a loop of constant
+    bounds; step `t` adds the `t`-th of the lane's row, `value * G(k, col)`
+    with the value and the contraction index `k` from the step's tables,
+    and holds off the lanes whose row has fewer.  So a lane executes its
+    row's nonzeros and no more, and the guard says how many lanes take it
+    (`lanes_active`), which is what the emitter's count reads."""
+    b = trip.builder
+    section = trip.section
+    terms = step.terms
+    values, cols, info = trip.tables[id(terms)]
+    lanes = trip.group.threads
+    c0, c1 = step.cols
+    width = c1 - c0
+    count = len(terms.order) * width
+    fp = trip.fp
+    for first in range(0, count, lanes):
+        live = min(lanes, count - first)
+        o = _index(b, 'add', trip.lane, first, 'o')
+        # The chunk's lanes, as the terms' row and the column each takes.
+        mine = [divmod(first + lane, width) for lane in range(live)]
+
+        def chunk():
+            s = b.op('div', INDEX, o, width, hint='s')
+            col = _index(b, 'add', b.op('rem', INDEX, o, width, hint='j'),
+                         c0, 'j')
+            at = b.op('mul', INDEX, s, terms.stride, hint='r')
+            row = b.load(info, at, type_=INDEX, hint='i')
+            total = b.const(0.0, fp)
+            for p, product in enumerate(step.products):
+                p0, p1 = product.cols
+                held = [terms.counts[p][r] for r, j in mine
+                        if p0 <= c0 + j < p1]
+                steps = max(held, default=0)
+                if not steps:
+                    continue
+                first_term = b.load(info, _index(b, 'add', at, 1 + 2 * p,
+                                                 'r'), type_=INDEX, hint='f')
+                terms_here = b.load(info, _index(b, 'add', at, 2 + 2 * p,
+                                                 'r'), type_=INDEX, hint='n')
+                group = section.buffer(product.second.tensor)
+                source = trip.buffers[id(product.second.tensor)]
+                # The lane's column of the group operand, from its row 0:
+                # a term reads it at its contraction index.
+                base = _index(b, 'sub', trip.at(group, group.rows[0], col),
+                              group.rows[0], 'b')
+                inside = None
+                if (p0, p1) != (c0, c1):
+                    inside = b.op('and', BOOL,
+                                  b.op('ge', BOOL, col, p0, hint='in'),
+                                  b.op('lt', BOOL, col, p1, hint='in'),
+                                  hint='in')
+                with b.for_(0, steps, 1, inits=(total,), types=(fp,),
+                            unroll=True, hint='t') as walk:
+                    t = walk.induction
+                    held_here = b.op('lt', BOOL, t, terms_here, hint='in')
+                    if inside is not None:
+                        held_here = b.op('and', BOOL, held_here, inside,
+                                         hint='in')
+                    guard = b.if_else(held_here, types=(fp,),
+                                      attrs=_lanes_active(sum(held),
+                                                          steps * live))
+                    with guard.then():
+                        e = b.op('add', INDEX, first_term, t, hint='e')
+                        k = b.load(cols, e, type_=INDEX, hint='l')
+                        g = b.load(source, b.op('add', INDEX, base, k,
+                                                hint='a'),
+                                   type_=fp, hint='g')
+                        guard.yield_(b.op('fma', fp,
+                                          b.load(values, e, type_=fp,
+                                                 hint='k'),
+                                          g, walk.iter_args[0], hint='x'))
+                    with guard.otherwise():
+                        guard.yield_(walk.iter_args[0])
+                    walk.yield_(guard.result)
+                total = walk.result
+            trip.write(step, row, col, total)
+
+        if live < lanes:
+            with b.if_(b.op('lt', BOOL, o, count, hint='in'),
+                       attrs=_lanes_active(live, lanes)):
+                chunk()
+        else:
+            chunk()
+
+
+def _fma(trip, step) -> None:
+    """An operator step on the FMA units: over its operators' nonzeros where
+    they are known (`_sparse`), over their windows where not."""
+    (_sparse if step.terms is not None else _per_output)(trip, step)
 
 
 def _atom(lowering: str, shape, dtype):
@@ -574,9 +803,348 @@ def _matrix(trip, step) -> None:
         trip.write(step, row, col, total)
 
 
+class _LaneTrip:
+    """What the lanes form's lowering of a trip shares (`element_group.
+    Lanes`): the lane's element -- its own pointers and its mask, as the
+    traversal binds them, a lane each -- the column the warp computes and
+    the rows of its range, and what of the column it holds.
+
+    The section is evaluated backwards from the output, a column at a
+    time: an operator step's intermediate is computed into registers where
+    a product is about to read it (`walk`), a mixing step's entry where it
+    is read (`mixed`), and an element's own operand is read from its memory
+    (`entry`)."""
+
+    def __init__(self, builder, context, group, symbols):
+        from tensorforge.generators import element_group
+        self.kinds = element_group.Kind
+        self.builder = builder
+        self.context = context
+        self.group = group
+        self.section = group.section
+        self.fp = ScalarType(self.section.dtype)
+        self.symbols = symbols
+        self.cones = element_group.Cones(self.section)
+        # The lane's element's mask, a lane's own here.
+        mask, name = elementmask.active()
+        if mask is None and name is not None:
+            mask = builder.extern_value(name, BOOL, uniform=Uniformity.LANE,
+                                        hint='active')
+        self.mask = mask
+        #: The column the warp computes (a value), its rows, and the rows
+        #: of every tensor upstream they need (`Cones.need`).
+        self.col = None
+        self.rows = (0, 0)
+        self.need: Dict[int, set] = {}
+        #: Operator columns held in registers, by the step that writes
+        #: them (`Cones.source`): row -> value.
+        self.columns: Dict[int, Dict[int, object]] = {}
+        #: The small operands' column, by `(tensor, row)`, for this column.
+        self.small: Dict[tuple, object] = {}
+        #: Entries read or computed at one contraction index.
+        self.here: Dict[tuple, object] = {}
+        #: The output's column at the warp's rows, as its steps add into it
+        #: (`_column`): row -> value, None for zero.
+        self.acc: Dict[int, object] = {}
+        #: Rows of a column a lane reads in one access (`own`): 16 bytes.
+        self.width = max(1, 16 // self.section.dtype.size())
+        #: Those reads, by `(tensor, first row, column)`, while their rows
+        #: are being used.
+        self.tiles: Dict[tuple, object] = {}
+
+    def claim(self, tensor, row) -> Optional[int]:
+        """The alignment, in bytes, of `width` rows of a column of
+        `tensor` from `row` -- or None where they are not one access: past
+        the column's box, or proving less than the access needs.  The base's
+        promise (`Symbol.linear_align_bytes`), the row's offset into the
+        column and the column's stride bound it."""
+        width = self.width
+        lower = int(tensor.bbox.lower()[0])
+        height = int(tensor.bbox.sizes()[0])
+        if width < 2 or (row - lower) % width or row + width > lower + height:
+            return None
+        elem = self.section.dtype.size()
+
+        def bound(nbytes):
+            return nbytes & -nbytes if nbytes else 1 << 20
+
+        claim = min(self.symbols[id(tensor)].linear_align_bytes(),
+                    bound((row - lower) * elem), bound(height * elem))
+        return claim if claim >= width * elem else None
+
+    def own(self, tensor, row, col):
+        """`(row, col)` of the lane's element's own `tensor`, from its
+        memory -- a lane's own value: `width` rows of the column at a time
+        where they are one aligned access (`claim`), an element where not."""
+        b = self.builder
+        source = _bound(b, self.symbols[id(tensor)])
+        lower = int(tensor.bbox.lower()[0])
+        first = row - (row - lower) % self.width
+        claim = self.claim(tensor, first)
+        if claim is None:
+            return b.load(source, _address(b, tensor, row, col),
+                          type_=self.fp, uniform=Uniformity.LANE, hint='e')
+        key = (id(tensor), first, col if isinstance(col, int) else 'col')
+        if key not in self.tiles:
+            self.tiles[key] = b.load(
+                source, _address(b, tensor, first, col),
+                type_=ScalarType(self.section.dtype, self.width),
+                align=claim, uniform=Uniformity.LANE, hint='e')
+        return b.extract(self.tiles[key], row - first, hint='e')
+
+    def entry(self, product, row):
+        """An operator product's operand at `row` of the column, or None
+        where it is zero: held, computed by the mixing step that writes it,
+        or read from the element's memory (`Cones.source`)."""
+        source = self.cones.source(product)
+        if source is None:
+            key = (id(product.second.tensor), row)
+            if key not in self.here:
+                self.here[key] = self.own(product.second.tensor, row,
+                                          self.col)
+            return self.here[key]
+        held = self.columns.get(id(source))
+        if held is not None:
+            return held.get(row)
+        if source.kind is not self.kinds.MIXING:
+            raise InternalError(f'{source.dest.alias} at row {row} read by '
+                                f'the lanes form before it holds it')
+        key = (id(source), row)
+        if key not in self.here:
+            self.here[key] = self.mixed(source, row)
+        return self.here[key]
+
+    def mixed(self, step, row):
+        """A mixing step's destination at `row` of the column, or None where
+        none of its products adds into the row: each product's row of the
+        element's operand times the column of its small one."""
+        b, fp = self.builder, self.fp
+        total = None
+        for p in step.products:
+            if not p.rows[0] <= row < p.rows[1]:
+                continue
+            part = None
+            for q in range(*p.depth):
+                key = (id(p.first.tensor), row, q)
+                if key not in self.here:
+                    self.here[key] = self.own(p.first.tensor, row, q)
+                g = self.here[key]
+                key = (id(p.second.tensor), q)
+                if key not in self.small:
+                    self.small[key] = self.own(p.second.tensor, q, self.col)
+                s = self.small[key]
+                part = (b.op('mul', fp, g, s, hint='t') if part is None
+                        else b.op('fma', fp, g, s, part, hint='t'))
+            part = self.windowed(part, p, step)
+            total = part if total is None else b.op('add', fp, total, part,
+                                                    hint='t')
+        return total
+
+    def windowed(self, value, product, step):
+        """`value`, or zero where the column is outside the product's
+        columns -- a product adding into a window of the step's."""
+        if product.cols == step.cols:
+            return value
+        b = self.builder
+        c0, c1 = product.cols
+        inside = b.op('and', BOOL, b.op('ge', BOOL, self.col, c0, hint='in'),
+                      b.op('lt', BOOL, self.col, c1, hint='in'), hint='in')
+        return b.op('select', self.fp, inside, value,
+                    b.const(0.0, self.fp), hint='w')
+
+    def materialized(self, product) -> bool:
+        """Whether an operator step writes the product's operand."""
+        source = self.cones.source(product)
+        return source is not None and source.kind is self.kinds.OPERATOR
+
+    def walk(self, step, rows, acc):
+        """`acc` -- row -> value, None for zero -- plus an operator step's
+        products at `rows` of the column, the operators' nonzeros literals.
+
+        A product whose operand an operator step computes runs alone: the
+        operand's needed rows into registers, the product, the registers
+        dropped.  The others run together by contraction index, so that an
+        index's entries -- a row of the element's operand, the entry a
+        mixing step computes from it -- are read once for all of them."""
+        b, fp = self.builder, self.fp
+        nonzeros = self.cones.nonzeros
+        # A walk reads the element's operands for itself: one walk's reads
+        # held through the next would be every row of them at once, which the
+        # IR would share otherwise (`load_cse`).  Not a fence of the schedule
+        # as well: a `__syncwarp()` under the warp's guard of its range has
+        # ptxas write the code out twice.
+        b.begin_operation(force=True)
+
+        def add(row, value, x, product):
+            if x is None:
+                return
+            x = self.windowed(x, product, step)
+            v = b.const(value, fp)
+            acc[row] = (b.op('mul', fp, v, x, hint='x') if acc.get(row) is None
+                        else b.op('fma', fp, v, x, acc[row], hint='x'))
+
+        held = [p for p in step.products if self.materialized(p)]
+        for p in held:
+            source = self.cones.source(p)
+            need = sorted(self.need.get(id(source), ()))
+            self.columns[id(source)] = self.walk(
+                source, need, {i: None for i in need})
+            column = self.columns[id(source)]
+            for i in rows:
+                for k, value in nonzeros[id(p)].get(i, ()):
+                    add(i, value, column.get(k), p)
+            del self.columns[id(source)]
+            b.begin_operation(force=True)
+        together: Dict[int, list] = {}
+        for p in step.products:
+            if any(p is h for h in held):
+                continue
+            for i in rows:
+                for k, value in nonzeros[id(p)].get(i, ()):
+                    together.setdefault(k, []).append((p, i, value))
+        tile = None
+        for k in sorted(together):
+            self.here = {}
+            if k // self.width != tile:
+                # A tile of rows read is held while its rows are used.
+                tile, self.tiles = k // self.width, {}
+            for p, i, value in together[k]:
+                add(i, value, self.entry(p, k), p)
+        self.here, self.tiles = {}, {}
+        return acc
+
+
+def _lane(trip, step) -> None:
+    """The lanes form's step into the output: its products added into the
+    column's registers (`_LaneTrip.acc`) at the warp's rows, a lane for its
+    own element (`_lanes`)."""
+    b, fp = trip.builder, trip.fp
+    rows = [i for i in range(*trip.rows) if step.rows[0] <= i < step.rows[1]]
+    if step.kind is trip.kinds.OPERATOR:
+        trip.acc = trip.walk(step, rows, trip.acc)
+        return
+    for i in rows:
+        trip.here = {}
+        part = trip.mixed(step, i)
+        if part is not None:
+            old = trip.acc.get(i)
+            trip.acc[i] = (part if old is None
+                           else b.op('add', fp, old, part, hint='q'))
+    trip.here = {}
+
+
+def _column(trip) -> None:
+    """The output's column at the warp's rows: the rows its steps write
+    read once where they accumulate -- every row where the first assigns
+    -- each step added in turn (`LOWERINGS`), and written back through the
+    lane's pointers under its mask."""
+    b, fp = trip.builder, trip.fp
+    cones = trip.cones
+    steps = cones.outputs
+    tensor = steps[0].dest
+    target = _bound(b, trip.symbols[id(tensor)])
+    lo, hi = cones.rows
+    rows = [i for i in range(*trip.rows) if lo <= i < hi]
+    if steps[0].assigns:
+        write = rows
+    else:
+        touched = set()
+        for step in steps:
+            for p in step.products:
+                if p.kind is trip.kinds.OPERATOR:
+                    touched |= {i for i in rows
+                                if cones.nonzeros[id(p)].get(i)}
+                else:
+                    touched |= {i for i in rows if p.rows[0] <= i < p.rows[1]}
+        write = sorted(touched)
+    trip.tiles = {}
+    trip.acc = {i: None if steps[0].assigns
+                else trip.own(tensor, i, trip.col) for i in write}
+    trip.tiles = {}
+    for step in steps:
+        LOWERINGS[step.lowering](trip, step)
+    width = trip.width
+    lower = int(tensor.bbox.lower()[0])
+    done = set()
+    for i in write:
+        if i in done:
+            continue
+        first = i - (i - lower) % width
+        tile = list(range(first, first + width))
+        claim = trip.claim(tensor, first)
+        if claim is not None and all(j in trip.acc for j in tile):
+            # A whole tile written: one access.
+            values = [trip.acc[j] if trip.acc[j] is not None
+                      else b.const(0.0, fp) for j in tile]
+            b.store(target, b.pack(ScalarType(trip.section.dtype, width),
+                                   *values, hint='q'),
+                    _address(b, tensor, first, trip.col),
+                    predicate=trip.mask, align=claim)
+            done.update(tile)
+            continue
+        value = trip.acc[i] if trip.acc[i] is not None else b.const(0.0, fp)
+        b.store(target, value, _address(b, tensor, i, trip.col),
+                predicate=trip.mask)
+        done.add(i)
+
+
+def _lanes(trip) -> None:
+    """A trip of the lanes form: warp `w` takes the output's columns of
+    class `w % classes`, one after another, at the rows of range
+    `w / classes`, each lane for its own element (`element_group.Lanes`).
+
+    The loop over a class's columns has constant bounds and the ranges
+    are guards that say what share of the threads takes them
+    (`lanes_active`), so that the emitter counts the average warp's
+    work (`analysis.pipeline.executed_flops`)."""
+    b = trip.builder
+    plan = trip.group.lanes
+    c0, c1 = trip.cones.cols
+    width = c1 - c0
+    classes = plan.classes
+    warp = b.thread_id('y')
+    kind = (b.op('rem', INDEX, warp, classes, hint='cls') if classes > 1
+            else 0)
+    part = (b.op('div', INDEX, warp, classes, hint='part')
+            if len(plan.ranges) > 1 else 0)
+    trips = -(-width // classes)
+
+    def range_body(rows):
+        trip.rows = rows
+        trip.need = trip.cones.need(range(*rows))
+        # Rolled: the columns could be written out, and what one reads of the
+        # element is read again by the next rather than held across all of
+        # them (`passes.licm`) -- by the compiler too, which would otherwise
+        # write the few trips out and overlap the columns (`unroll=1`).
+        with b.for_(0, trips, 1, hint='c', rolled=True, unroll=1) as loop:
+            col = _index(b, 'add', _index(b, 'add', b.op(
+                'mul', INDEX, loop.induction, classes, hint='p'), kind, 'p'),
+                c0, 'p')
+
+            def column():
+                trip.col = col
+                trip.small = {}
+                _column(trip)
+
+            if width % classes == 0:
+                column()
+            else:
+                with b.if_(b.op('lt', BOOL, col, c1, hint='in'),
+                           attrs=_lanes_active(width, classes * trips)):
+                    column()
+
+    if len(plan.ranges) == 1:
+        range_body(plan.ranges[0])
+        return
+    for n, rows in enumerate(plan.ranges):
+        with b.if_(b.op('eq', BOOL, part, n, hint='part'),
+                   attrs=_lanes_active(1, len(plan.ranges))):
+            range_body(rows)
+
+
 #: Each step's lowering (`element_group.Step.lowering`).
-LOWERINGS = {'fma': _per_output, 'rows': _per_output,
-             'mma_sync': _matrix, 'dmma': _matrix}
+LOWERINGS = {'fma': _fma, 'rows': _per_output,
+             'mma_sync': _matrix, 'dmma': _matrix, 'lane': _lane}
 
 
 class MultiElementSection(AbstractInstruction):
@@ -584,10 +1152,11 @@ class MultiElementSection(AbstractInstruction):
 
     `symbols` are the section's symbols of its inputs and outputs, by
     tensor (`id`); the operators come staged
-    (`MultiElementOperators.buffers`)."""
+    (`MultiElementOperators.buffers`) -- but in the lanes form, whose
+    operators are literals and which has none."""
 
     def __init__(self, context: Context, group, symbols: Dict[int, object],
-                 operators: MultiElementOperators):
+                 operators: Optional[MultiElementOperators]):
         super().__init__(context)
         self._group = group
         self._symbols = dict(symbols)
@@ -611,8 +1180,14 @@ class MultiElementSection(AbstractInstruction):
 
     def gen_ir(self, builder) -> None:
         section = self._group.section
+        if self._group.lanes is not None:
+            # The lanes form: nothing staged, a lane its element's
+            # (`_lanes`).
+            _lanes(_LaneTrip(builder, self._context, self._group,
+                             self._symbols))
+            return
         trip = _Trip(builder, self._context, self._group, self._symbols,
-                     self._operators.buffers)
+                     self._operators.buffers, self._operators.tables)
         elements = self._group.elements
         for buffer in section.inputs + section.intermediates:
             trip.buffers[id(buffer.tensor)] = builder.alloc(
