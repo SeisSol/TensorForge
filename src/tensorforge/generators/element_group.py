@@ -36,15 +36,22 @@ lowering (`compute.multi_element`) has one form per kind of product.
 *Products*, by their operands (`Kind`):
 
 * `OPERATOR`: an operator times a group operand, `C = K x G`, contracting
-  the basis: the matrix tiling on `MATRIX_MAC`, the group's rows along M.
-  So far on the FMA units, a lane an output.
+  the basis: the matrix tiling on `MATRIX_MAC` (`mma_sync`, 3xTF32, for
+  F32; `dmma` for F64), the group's rows -- an element's quantities,
+  element after element -- along M, the operator's rows along N, the
+  contraction along K; or the FMA form, a lane an output, where the matrix
+  engines are off (`matrix_enabled`).
 * `MIXING`: a group operand times a small one, `C = G x S`, contracting
   the quantities: each element's rows mixed by its own operand, on the FMA
   units, a lane an output.
 
 Products into one destination with nothing between them that reads it
-are one `Step`, lowered together: the matrix engines keep D in registers
-across them, the FMA forms sum them per output.
+are one `Step`, lowered together: the matrix tiling concatenates them
+along K and keeps D in registers across them, the FMA forms sum them per
+output.  The matrix tiling reads each product's operator as a `Stage` --
+its window, zero elsewhere, padded to the instruction's tiles -- and
+hands D to its consumer's buffer, or to the output's (`results`), which
+each warp then adds into its element's output.
 
 `plan` decides whether and how a section takes the layout: every product
 classified or none, E for the section, and each step's lowering -- the
@@ -57,6 +64,7 @@ is yet -- so `auto` is `off` until the measurements say otherwise.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -86,6 +94,12 @@ MIN_ELEMENTS = 4
 #: Bytes of a block's shared memory left to the rest of the kernel -- the
 #: arena's own windows -- when the group's staging is sized.
 SHARED_RESERVE = 1024
+
+#: The layout's deployment switch for the matrix engines: an operator step
+#: is tiled on them where `Options.tensor_cores` asks for it, or where the
+#: option is not set and this is on.  On: the layout exists for them, and is
+#: off by default itself (`Options.multi_element`).
+MATRIX = True
 
 
 class Role(enum.Enum):
@@ -213,6 +227,32 @@ class Buffer:
 
 
 @dataclass(frozen=True)
+class Stage:
+    """A batch-constant operator in the block's shared memory, staged once a
+    block: as stored (`window` None), for the FMA forms, or as one matrix
+    product's B.
+
+    B is the product's window of the operator, transposed onto the
+    instruction's axes -- `B(k, n) = K(n0 + n, k0 + k)`, `k0` the window's
+    first column, `n0` the step's first row -- zero wherever the product
+    has no entry, `depth` rows of `ld` columns: the contraction padded to
+    the instruction's depth, the step's rows to its width and the row length
+    to a stride whose fragment reads meet no bank twice."""
+
+    tensor: object
+    window: Optional[Tuple[Range, Range]] = None
+    n0: int = 0
+    depth: int = 0
+    ld: int = 0
+
+    @property
+    def volume(self) -> int:
+        if self.window is None:
+            return int(self.tensor.storage_volume())
+        return self.depth * self.ld
+
+
+@dataclass(frozen=True)
 class GroupSection:
     """A section as the multi-element layout runs it (`classify`): its
     steps in order, the operators staged once, the element's operands
@@ -224,6 +264,10 @@ class GroupSection:
     intermediates: Tuple[Buffer, ...]
     outputs: Tuple[object, ...]
     dtype: Datatype
+    #: The operators as the block stages them (`Stage`), and the buffers the
+    #: matrix steps hand an output's D to (`lower`).
+    stages: Tuple[Stage, ...] = ()
+    results: Tuple[Buffer, ...] = ()
 
     @property
     def products(self) -> List[Product]:
@@ -243,6 +287,20 @@ class GroupSection:
             if b.tensor is tensor:
                 return b
         raise KeyError(tensor.alias)
+
+    def result(self, tensor) -> Buffer:
+        """The buffer a matrix step hands the output `tensor`'s D to."""
+        for b in self.results:
+            if b.tensor is tensor:
+                return b
+        raise KeyError(tensor.alias)
+
+    def stage(self, tensor, window=None) -> Stage:
+        """The staged form of an operator: as stored, or one window's B."""
+        for st in self.stages:
+            if st.tensor is tensor and st.window == window:
+                return st
+        raise KeyError((tensor.alias, window))
 
     def role(self, tensor) -> Role:
         if any(t is tensor for t in self.operators):
@@ -494,17 +552,114 @@ def _section(steps: Tuple[Step, ...], dtype) -> GroupSection:
         buffer = Buffer(tensor, role, _union(rows), _union(cols))
         (intermediates if role is Role.INTERMEDIATE else inputs).append(
             buffer)
-    return GroupSection(steps, tuple(operators), tuple(inputs),
-                        tuple(intermediates), tuple(outputs), dtype)
+    section = GroupSection(steps, tuple(operators), tuple(inputs),
+                           tuple(intermediates), tuple(outputs), dtype)
+    return _staged(section, 0)
+
+
+MATRIX_LOWERINGS = ('mma_sync', 'dmma')
+
+
+def matrix_shape(lowering: str, sm: int) -> Tuple[int, int, int]:
+    """`(m, n, k)` of the instruction a matrix step issues: `m16n8k8` over
+    TF32 halves for F32, and for F64 `m16n8k4` from sm_90 on, `m8n8k4`
+    before."""
+    if lowering == 'mma_sync':
+        return 16, 8, 8
+    return (16, 8, 4) if sm >= 90 else (8, 8, 4)
+
+
+def _round(value: int, step: int) -> int:
+    return -(-value // step) * step
+
+
+def _staged(section: GroupSection, sm: int) -> GroupSection:
+    """The section with its operators' stages and its outputs' result
+    buffers, for the steps' lowerings: an operator as stored where an FMA
+    form reads it, a B a window where a matrix step does."""
+    stages: List[Stage] = []
+    results: Dict[int, Tuple[object, List[Range], List[Range]]] = {}
+
+    def add(stage):
+        # By the tensor's identity: two operators alike in shape compare
+        # equal as tensors.
+        key = (id(stage.tensor), stage.window, stage.n0)
+        if not any((id(s.tensor), s.window, s.n0) == key for s in stages):
+            stages.append(stage)
+
+    for step in section.steps:
+        matrix = step.lowering in MATRIX_LOWERINGS
+        for p in step.products:
+            t = p.first.tensor if p.kind is Kind.OPERATOR else None
+            if t is None:
+                continue
+            if not matrix:
+                add(Stage(t))
+                continue
+            _, n, k = matrix_shape(step.lowering, sm)
+            width = _round(step.rows[1] - step.rows[0], n)
+            if section.dtype is Datatype.F64:
+                ld = width + 4
+            else:
+                ld = width + (8 if width % 32 in (0, 16) else 0)
+            add(Stage(t, (p.rows, p.depth), step.rows[0],
+                      _round(p.depth[1] - p.depth[0], k), ld))
+        if matrix and not step.dest.is_tmp:
+            entry = results.setdefault(id(step.dest), (step.dest, [], []))
+            entry[1].append(step.rows)
+            entry[2].append(step.cols)
+    return dataclasses.replace(
+        section, stages=tuple(stages),
+        results=tuple(Buffer(t, Role.GROUP, _union(r), _union(c))
+                      for t, r, c in results.values()))
+
+
+def matrix_enabled(context) -> bool:
+    """Whether operator steps are tiled on the matrix engines:
+    `Options.tensor_cores` where it is set, `MATRIX` where it is not."""
+    asked = context.get_user_options().tensor_cores
+    return MATRIX if asked is None else bool(asked)
+
+
+def _lowering(step: Step, dtype, context, sm: int, matrix: bool) -> str:
+    """A step's lowering on the context's target: an operator step on the
+    matrix engines where they are on (`matrix`, `matrix_enabled`) and the
+    target has them (sm_80 on) and its products share the step's columns --
+    an element's rows, which the tiling takes whole -- its kind's FMA form
+    elsewhere."""
+    if step.kind is not Kind.OPERATOR:
+        return LOWERING[step.kind]
+    if (not matrix or not matrix_enabled(context) or sm < 80
+            or any(p.cols != step.cols for p in step.products)):
+        return LOWERING[step.kind]
+    return 'mma_sync' if dtype is Datatype.F32 else 'dmma'
+
+
+def lower(section: GroupSection, context,
+          matrix: bool = True) -> GroupSection:
+    """The section with each step's lowering for the context's target --
+    the FMA forms only, where `matrix` is off -- and the stages and result
+    buffers those lowerings read and write."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    sm = nvidia.sm_of(context)
+    steps = tuple(dataclasses.replace(
+        s, lowering=_lowering(s, section.dtype, context, sm, matrix))
+        for s in section.steps)
+    return _staged(dataclasses.replace(section, steps=steps), sm)
+
+
+def tiled(section: GroupSection) -> bool:
+    """Whether a step of the section is lowered on the matrix engines."""
+    return any(s.lowering in MATRIX_LOWERINGS for s in section.steps)
 
 
 def shared_bytes(section: GroupSection, elements: int) -> int:
-    """Shared memory a group of `elements` takes: the operators as stored,
-    and each element's copy of every input and intermediate."""
+    """Shared memory a group of `elements` takes: the operators as staged,
+    and each element's copy of every input, intermediate and result."""
     size = section.dtype.size()
-    operators = sum(t.storage_volume() for t in section.operators)
-    per_element = sum(b.per_element
-                      for b in section.inputs + section.intermediates)
+    operators = sum(st.volume for st in section.stages)
+    per_element = sum(b.per_element for b in section.inputs
+                      + section.intermediates + section.results)
     return size * (operators + elements * per_element)
 
 
@@ -524,9 +679,11 @@ def fill(section: GroupSection,
     target, or None and why not.
 
     The size is the table's (`table_elements`) where the block holds it,
-    halved while it does not -- in shared memory, in threads -- down to
-    `MIN_ELEMENTS`.  Each step's lowering is its kind's so far
-    (`LOWERING`)."""
+    halved while it does not -- in shared memory, in threads -- and
+    `MIN_ELEMENTS` the last size tried.  Each step's lowering is the target's (`lower`), and
+    where no group of the matrix tiling fits -- its padded stages and its
+    outputs' result buffers take room the FMA forms do not -- the FMA forms'
+    (o6 F64 on sm_120's 99 kB).  The group carries the section lowered."""
     target = context.target
     hw = target.hw
     if getattr(hw, 'vendor', None) != 'nvidia' or target.backend != 'cuda':
@@ -540,15 +697,21 @@ def fill(section: GroupSection,
     if int(options.stack_elements) > 1:
         return None, (f'a trip of {options.stack_elements} stacked elements '
                       f'is no element group')
-    elements = table_elements(section)
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
-    while elements >= MIN_ELEMENTS:
-        need = shared_bytes(section, elements)
-        if need <= budget and 32 * elements <= hw.max_threads_per_block:
-            return ElementGroup(elements, section, need), ''
-        elements //= 2
+    candidates = [lower(section, context)]
+    if tiled(candidates[0]):
+        candidates.append(lower(section, context, matrix=False))
+    for lowered in candidates:
+        elements = table_elements(lowered)
+        while True:
+            need = shared_bytes(lowered, elements)
+            if need <= budget and 32 * elements <= hw.max_threads_per_block:
+                return ElementGroup(elements, lowered, need), ''
+            if elements <= MIN_ELEMENTS:
+                break
+            elements = max(MIN_ELEMENTS, elements // 2)
     return None, (f'the operators and a group of {MIN_ELEMENTS} take '
-                  f'{shared_bytes(section, MIN_ELEMENTS)} B of shared '
+                  f'{shared_bytes(candidates[-1], MIN_ELEMENTS)} B of shared '
                   f'memory, more than the {budget} B a block has: the '
                   f'operator needs to be streamed')
 
@@ -567,6 +730,8 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
 
 
 __all__ = ['Buffer', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
-           'GroupSection', 'Kind', 'LOWERING', 'MIN_ELEMENTS', 'Product',
-           'Role', 'SHARED_RESERVE', 'SMALL_EXTENT', 'Step', 'classify',
-           'fill', 'plan', 'shared_bytes', 'table_elements']
+           'GroupSection', 'Kind', 'LOWERING', 'MATRIX', 'MATRIX_LOWERINGS',
+           'MIN_ELEMENTS', 'Product', 'Role', 'SHARED_RESERVE',
+           'SMALL_EXTENT', 'Stage', 'Step', 'classify', 'fill', 'lower',
+           'matrix_enabled', 'matrix_shape', 'plan', 'shared_bytes',
+           'table_elements', 'tiled']

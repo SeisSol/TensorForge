@@ -251,23 +251,66 @@ def test_what_the_layout_does_not_take_says_why(change, why):
 
 # -- the fill rule ----------------------------------------------------------- #
 
-@pytest.mark.parametrize('shape,order,precision,arch,elements', [
-    ('volume', 6, 's', 'sm_90', 16), ('volume', 6, 'd', 'sm_90', 8),
-    ('volume', 6, 's', 'sm_120', 8), ('volume', 6, 'd', 'sm_120', 4),
-    ('volume', 4, 's', 'sm_90', 32), ('volume', 8, 's', 'sm_90', 7),
-    ('chain', 6, 's', 'sm_90', 16), ('chain', 6, 's', 'sm_120', 8)])
+@pytest.mark.parametrize('shape,order,precision,arch,elements,lowering', [
+    ('volume', 6, 's', 'sm_90', 16, 'mma_sync'),
+    ('volume', 6, 'd', 'sm_90', 8, 'dmma'),
+    ('volume', 6, 'd', 'sm_80', 4, 'dmma'),
+    ('volume', 6, 's', 'sm_120', 8, 'mma_sync'),
+    ('volume', 6, 'd', 'sm_120', 4, 'fma'),
+    ('volume', 4, 's', 'sm_90', 32, 'mma_sync'),
+    ('volume', 8, 's', 'sm_90', 4, 'mma_sync'),
+    ('chain', 6, 's', 'sm_90', 16, 'mma_sync'),
+    ('chain', 6, 's', 'sm_120', 8, 'mma_sync')])
 def test_the_group_is_the_tables_halved_until_it_fits(shape, order,
                                                       precision, arch,
-                                                      elements):
+                                                      elements, lowering):
     """The design's size for the basis and the precision, halved while the
-    operators and the group's buffers do not fit a block."""
+    operators and the group's buffers do not fit a block, the last size
+    tried the smallest; the matrix tiling where a group of it fits, the FMA
+    forms where none does (o6 F64 on sm_120's 99 kB)."""
     section = eg.classify(_descrs(shape, order, precision))[0]
     group, why = eg.fill(section, _context(arch, precision))
     assert group is not None, why
     assert group.elements == elements
-    assert group.shared_bytes == eg.shared_bytes(section, elements)
+    operator = next(s for s in group.section.steps
+                    if s.kind is eg.Kind.OPERATOR)
+    assert operator.lowering == lowering
+    assert group.shared_bytes == eg.shared_bytes(group.section, elements)
     assert group.shared_bytes <= (_context(arch, precision).target.hw
                                   .max_local_mem_size_per_block)
+
+
+@pytest.mark.parametrize('options,default,lowering', [
+    ({}, True, 'mma_sync'), ({}, False, 'fma'),
+    ({'tensor_cores': True}, False, 'mma_sync'),
+    ({'tensor_cores': False}, True, 'fma')],
+    ids=['default-on', 'default-off', 'asked-on', 'asked-off'])
+def test_the_matrix_engines_follow_the_switch(options, default, lowering,
+                                              monkeypatch):
+    """`Options.tensor_cores` where it is set, the layout's own `MATRIX`
+    where it is not; the mixing steps stay on the FMA units either way."""
+    monkeypatch.setattr(eg, 'MATRIX', default)
+    section = eg.classify(_volume())[0]
+    group = eg.fill(section, _context(**options))[0]
+    assert [s.lowering for s in group.section.steps] == ['rows'] * 3 + [
+        lowering]
+
+
+@pytest.mark.parametrize('precision,depth,ld', [('s', 40, 56), ('d', 36, 60)])
+def test_a_product_reads_its_window_of_the_operator(precision, depth, ld):
+    """Each operator product's B is its own window, the step's rows its
+    columns from the step's first: the contraction padded to the
+    instruction's depth, the row length to a stride that meets no bank
+    twice; the operators as stored are not staged where nothing reads
+    them."""
+    section = eg.classify(_volume(6, precision))[0]
+    group = eg.fill(section, _context('sm_90', precision))[0]
+    stages = group.section.stages
+    assert [(st.tensor.alias, st.window) for st in stages] == [
+        (f'kDivM({d})', ((1, 54 + d), (0, 35))) for d in range(3)]
+    assert {(st.n0, st.depth, st.ld) for st in stages} == {(1, depth, ld)}
+    assert [(b.tensor.alias, b.rows, b.cols) for b in group.section.results] \
+        == [('Q', (1, 56), (0, 9))]
 
 
 def test_an_operator_too_large_for_a_block_is_refused():
@@ -351,20 +394,40 @@ def test_a_block_is_one_group_of_warps():
     assert 'block 32x16x1' in kernel and '32 lanes x 16 per block' in kernel
 
 
-def test_the_operators_are_staged_once_ahead_of_the_loop():
-    kernel = _kernel(multi_element='force')
+@pytest.mark.parametrize('options,prefix', [
+    ({}, 'b'), ({'tensor_cores': False}, 'k')], ids=['matrix', 'fma'])
+def test_the_operators_are_staged_once_ahead_of_the_loop(options, prefix):
+    """As the matrix tiling reads them (`b`, a window each) or as stored
+    for the FMA form (`k`), before the loop and behind one barrier."""
+    kernel = _kernel(multi_element='force', **options)
     loop = kernel.index('batchIdGroup0')
-    for name in ('kkDivM0', 'kkDivM1', 'kkDivM2'):
-        assert -1 < kernel.index(name) < loop
+    for d in range(3):
+        assert -1 < kernel.index(f'{prefix}kDivM{d}') < loop
     assert kernel[:loop].count('__syncthreads();') == 1
 
 
-def test_the_group_takes_its_trips_together():
+@pytest.mark.parametrize('options,barriers', [
+    ({}, 5), ({'tensor_cores': False}, 4)], ids=['matrix', 'fma'])
+def test_the_group_takes_its_trips_together(options, barriers):
     """The traversal is the group's: every warp's element from the group's
-    first, the block's barriers around the staging."""
-    kernel = _kernel(multi_element='force')
+    first, the block's barriers around the staging -- and, with the matrix
+    tiling, one more between D's tiles and the outputs."""
+    kernel = _kernel(multi_element='force', **options)
     assert re.search(r'batchIdGroup0 \+ batchIdLane0', kernel)
-    assert kernel.count('__syncthreads();') == 4
+    assert kernel.count('__syncthreads();') == barriers
+
+
+@pytest.mark.parametrize('arch,precision,instruction,count', [
+    ('sm_90', 's', 'm16n8k8.row.col.f32.tf32.tf32.f32', 45),
+    ('sm_90', 'd', 'm16n8k4.row.col.f64.f64.f64.f64', 27),
+    ('sm_80', 'd', 'm8n8k4.row.col.f64.f64.f64.f64', 27)])
+def test_an_operator_step_is_tiled_on_the_matrix_engine(arch, precision,
+                                                        instruction, count):
+    """The volume's three operator products one product over K: every
+    step of K of each, three products of TF32 halves in F32, one in F64."""
+    kernel = _kernel(arch=arch, precision=precision, multi_element='force')
+    assert kernel.count('mma.sync.aligned.') == count
+    assert kernel.count('mma.sync.aligned.' + instruction) == count
 
 
 def _stores(lines, pattern):
@@ -389,28 +452,33 @@ def test_a_reused_intermediate_waits_for_its_readers():
     assert any(first < b < min(outputs) for b in barriers)
 
 
-@pytest.mark.parametrize('shape,staged,between', [
-    ('volume', r'_g(I|star\d)', r'_g_tmp\d'),
-    ('chain', r'_g(I|star\d)', r'_g_chain\d')])
-def test_the_barriers_stand_without_the_placement(shape, staged, between):
+STAGED = r'_g(I|star\d)'
+OUTPUT = r'glb_m\d+'
+
+
+@pytest.mark.parametrize('shape,options,phases', [
+    ('volume', {}, [STAGED, r'_g_tmp\d', r'_dQ', OUTPUT]),
+    ('volume', {'tensor_cores': False}, [STAGED, r'_g_tmp\d', OUTPUT]),
+    ('chain', {}, [STAGED, r'_g_chain\d', OUTPUT])],
+    ids=['volume-matrix', 'volume-fma', 'chain-matrix'])
+def test_the_barriers_stand_without_the_placement(shape, options, phases):
     """A build without the barrier optimization (`Options.
     enable_sync_block_opt`) keeps the instructions' own block barriers: one
-    after the operators' copy, ahead of the loop, and in the trip one ahead
-    of the staging, one between the staging and the intermediates, one
-    between those and the products into the output."""
+    after the operators' copy, ahead of the loop, and in the trip one
+    ahead of each phase whose stores another warp may still be reading --
+    the staging, the intermediates, the matrix tiling's D, the outputs."""
     kernel = _kernel(shape=shape, multi_element='force',
-                     enable_sync_block_opt=False)
+                     enable_sync_block_opt=False, **options)
     lines = kernel.splitlines()
     loop = next(i for i, line in enumerate(lines) if 'batchIdGroup0 <' in line)
     barriers = [i for i, line in enumerate(lines)
                 if line.strip() == '__syncthreads();']
-    staging = _stores(lines, staged)
-    middle = _stores(lines, between)
-    outputs = _stores(lines, r'glb_m\d+')
-    assert len(barriers) == 4 and barriers[0] < loop < barriers[1]
-    assert barriers[1] < min(staging) and max(staging) < barriers[2]
-    assert barriers[2] < min(middle) and max(middle) < barriers[3]
-    assert barriers[3] < min(outputs)
+    assert len(barriers) == len(phases) + 1 and barriers[0] < loop
+    for n, phase in enumerate(phases):
+        stores = _stores(lines, phase)
+        upper = barriers[n + 2] if n + 2 < len(barriers) else len(lines)
+        assert stores and barriers[n + 1] < min(stores), phase
+        assert max(stores) < upper, phase
 
 
 @pytest.mark.parametrize('shape', ['volume', 'chain'])
@@ -446,17 +514,22 @@ def _host():
     return mod
 
 
-@pytest.mark.parametrize('shape', ['volume', 'chain', 'reuse'])
+@pytest.mark.parametrize('shape,options', [
+    ('volume', {}), ('chain', {}), ('reuse', {}),
+    ('volume', {'tensor_cores': False})],
+    ids=['volume', 'chain', 'reuse', 'volume-fma'])
 @pytest.mark.parametrize('precision,tolerance', [('s', 1e-6), ('d', 1e-12)])
-def test_the_section_computes_on_the_oracle(shape, precision, tolerance):
+def test_the_section_computes_on_the_oracle(shape, options, precision,
+                                            tolerance):
     """The kernel run by the host interpreter against NumPy, normwise --
-    the section's real operators."""
+    the section's real operators, on sm_90: the matrix tiling, and once the
+    FMA forms."""
     host = _host()
     kernel = host.Kernel(DESCRIPTIONS[shape](6, precision), _dtype(precision),
                          'sm_90')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        got, _ = kernel.run({'multi_element': 'force'})
+        got, _ = kernel.run({'multi_element': 'force', **options})
     want = kernel.expected()
     for alias in {alias for alias, _ in want}:
         keys = [key for key in want if key[0] == alias]
@@ -520,11 +593,13 @@ def _reference(descrs):
 
 
 @pytest.mark.parametrize('shape,order,precision,options', [
-    ('volume', 4, 's', {}), ('volume', 6, 's', {}), ('volume', 6, 'd', {}),
+    ('volume', 4, 's', {}), ('volume', 6, 's', {}), ('volume', 4, 'd', {}),
+    ('volume', 6, 'd', {}),
     ('volume', 6, 's', {'enable_sync_block_opt': False}),
+    ('volume', 6, 's', {'tensor_cores': False}),
     ('chain', 6, 's', {}), ('chain', 6, 'd', {}), ('reuse', 6, 's', {})],
-    ids=['o4s', 'o6s', 'o6d', 'o6s-own-barriers', 'chain-o6s', 'chain-o6d',
-         'reuse-o6s'])
+    ids=['o4s', 'o6s', 'o4d', 'o6d', 'o6s-own-barriers', 'o6s-fma',
+         'chain-o6s', 'chain-o6d', 'reuse-o6s'])
 def test_the_section_computes_on_the_gpu(shape, order, precision, options,
                                          target, cache_root,
                                          tensorforge_include):
@@ -536,6 +611,9 @@ def test_the_section_computes_on_the_gpu(shape, order, precision, options,
     if target.backend != 'cuda':
         pytest.skip('the multi-element layout is CUDA\'s')
     from harness.runner import run_case
+    # The layout's, and not the default build a refused plan leaves.
+    assert eg.plan(_descrs(shape, order, precision), _context(
+        target.arch, precision, multi_element='force', **options)) is not None
     suffix = ''.join(f'_{k}{int(v)}' for k, v in sorted(options.items()))
     case = types.SimpleNamespace(
         NAME=f'multi_element_{shape}_o{order}{precision}{suffix}',

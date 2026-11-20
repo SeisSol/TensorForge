@@ -52,6 +52,7 @@ from tensorforge.backend.pir.core import (BOOL, INDEX, MemSpace,
                                           Uniformity)
 from tensorforge.common.basic_types import GeneralLexicon
 from tensorforge.common.context import Context
+from tensorforge.common.exceptions import InternalError
 
 #: The longest contraction a lowering writes out rather than loops over.
 UNROLL = 16
@@ -103,11 +104,13 @@ def _bound(builder, symbol):
 
 class MultiElementOperators(AbstractInstruction):
     """The section's operators, copied into the block's shared memory once,
-    ahead of the batch loop, as they are stored: every thread of the block
-    a share of the entries, then the block's barrier.
+    ahead of the batch loop, as the section stages them
+    (`element_group.Stage`): as stored, or as a matrix product's B -- its
+    window, zero elsewhere.  Every thread of the block a share of the
+    entries, then the block's barrier.
 
-    The copies are handed to the section (`buffers`, by tensor), which reads
-    them in every trip."""
+    The copies are handed to the section (`buffers`, by tensor and window),
+    which reads them in every trip."""
 
     def __init__(self, context: Context, group, symbols: Sequence):
         super().__init__(context)
@@ -133,21 +136,50 @@ class MultiElementOperators(AbstractInstruction):
                          builder.op('mul', INDEX, builder.thread_id('y'),
                                     self._group.threads, hint='w'),
                          hint='tid')
+        symbols = {id(t): s for t, s in zip(section.operators, self.symbols)}
         buffers = {}
-        for tensor, symbol in zip(section.operators, self.symbols):
-            volume = tensor.storage_volume()
-            shared = builder.alloc(section.dtype, (volume,), MemSpace.SHARED,
+        for stage in section.stages:
+            tensor = stage.tensor
+            shared = builder.alloc(section.dtype, (stage.volume,),
+                                   MemSpace.SHARED,
                                    arena=GeneralLexicon.TOTAL_SHR_MEM,
-                                   hint=_hint('k', tensor))
-            source = _bound(builder, symbol)
-            with builder.for_(tid, volume, threads, hint='i',
+                                   hint=_hint('k' if stage.window is None
+                                              else 'b', tensor))
+            source = _bound(builder, symbols[id(tensor)])
+            with builder.for_(tid, stage.volume, threads, hint='i',
                               uniform=Uniformity.LANE) as loop:
-                value = builder.load(source, loop.induction, type_=fp,
-                                     hint='k')
+                if stage.window is None:
+                    value = builder.load(source, loop.induction, type_=fp,
+                                         hint='k')
+                else:
+                    value = self._entry(builder, stage, source, fp,
+                                        loop.induction)
                 builder.store(shared, value, loop.induction)
-            buffers[id(tensor)] = shared
+            buffers[(id(tensor), stage.window)] = shared
         builder.barrier(Participants.BLOCK)
         self.buffers = buffers
+
+    @staticmethod
+    def _entry(builder, stage, source, fp, index):
+        """Entry `index` of a matrix product's B, `B(k, n)` at `k * ld + n`:
+        the operator's `(n0 + n, k0 + k)` inside the product's window, zero
+        outside it -- read from a clamped address, so that no lane reads past
+        the operator."""
+        b = builder
+        (r0, r1), (d0, d1) = stage.window
+        k = b.op('div', INDEX, index, stage.ld, hint='k')
+        n = b.op('rem', INDEX, index, stage.ld, hint='n')
+        row = _index(b, 'add', n, stage.n0, 'r')
+        col = _index(b, 'add', k, d0, 'c')
+        inside = b.op('and', BOOL, b.op('and', BOOL,
+                                        b.op('ge', BOOL, row, r0, hint='in'),
+                                        b.op('lt', BOOL, row, r1, hint='in'),
+                                        hint='in'),
+                      b.op('lt', BOOL, col, d1, hint='in'), hint='in')
+        at = b.op('select', INDEX, inside,
+                  _address(b, stage.tensor, row, col), 0, hint='a')
+        value = b.load(source, at, type_=fp, hint='k')
+        return b.op('select', fp, inside, value, b.const(0.0, fp), hint='k')
 
     def __str__(self) -> str:
         return (f'multi-element operators '
@@ -158,8 +190,9 @@ class _Trip:
     """What the lowerings of one trip share: the warp's element and its
     mask, the group's buffers, and how to read and write an operand."""
 
-    def __init__(self, builder, group, symbols, operators):
+    def __init__(self, builder, context, group, symbols, operators):
         self.builder = builder
+        self.context = context
         self.group = group
         self.section = group.section
         self.fp = ScalarType(self.section.dtype)
@@ -169,6 +202,7 @@ class _Trip:
         self.symbols = symbols
         self.operators = operators
         self.buffers: Dict[int, object] = {}
+        self.results: Dict[int, object] = {}
         # The warp's element's mask, which every write of an output runs
         # under.  The element group's traversal is text, and its mask a
         # name: the warp's own, since a warp is its element.
@@ -190,7 +224,7 @@ class _Trip:
         """`(row, col)` of an operand of a product: the staged operator, or
         the warp's element's rows of a buffer."""
         tensor = sub.tensor
-        staged = self.operators.get(id(tensor))
+        staged = self.operators.get((id(tensor), None))
         if staged is not None:
             return self.builder.load(staged,
                                      _address(self.builder, tensor, row,
@@ -285,8 +319,177 @@ def _per_output(trip, step) -> None:
         trip.write(step, row, col, total)
 
 
+def _atom(lowering: str, shape, dtype):
+    """The `nvidia.MMAInstr` a matrix step issues: of `shape`, over TF32
+    halves for `mma_sync`, in full for `dmma`."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    mode = (nvidia.MMAMode.TF32 if lowering == 'mma_sync'
+            else nvidia.MMAMode.DIRECT)
+    for atom in nvidia.INSTRS:
+        if ((atom.m, atom.n, atom.k) == tuple(shape) and atom.d is dtype
+                and atom.mode == mode):
+            return atom
+    raise InternalError(f'no {lowering} instruction of shape {shape} for '
+                        f'{dtype}')
+
+
+def _a_lane_cells(atom):
+    """`slot -> (row, column)` of lane 0's A registers, the rest of A's
+    layout a shift: lane `l` holds the cell `l / 4` rows and `l % 4`
+    columns past lane 0's (`nvidia.a_fragment_bits`), checked for every
+    lane and register rather than assumed."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    cells = nvidia._fragment_cells(atom)
+    first = {slot: cell for (slot, lane), cell in cells.items() if lane == 0}
+    for (slot, lane), (row, col) in cells.items():
+        row0, col0 = first[slot]
+        if (row, col) != (row0 + lane // 4, col0 + lane % 4):
+            raise InternalError(
+                f'the A layout of {atom.name} puts register {slot} of lane '
+                f'{lane} at {(row, col)}, which is not a shift of lane 0\'s')
+    return dict(sorted(first.items()))
+
+
+def _matrix(trip, step) -> None:
+    """The matrix tiling of an operator step on `MATRIX_MAC`.
+
+    The step's products are one product over the group: M the group's rows
+    -- `m = e * width + j`, element `e`'s column `j` of the destination,
+    element after element -- N the destination's rows, K each product's
+    contraction, the products one after another (`element_group.Step`).  A
+    is the group operand's buffer as it stands, row `m` of it an element's
+    column, the contraction contiguous; B the product's stage, zero outside
+    its window and in the padding.  A warp takes the tiles of D in turn, D
+    in registers across the products, and hands each to the destination's
+    buffer -- the intermediate's, or the output's result buffer, which each
+    warp then adds into its own element's output under its mask."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    from tensorforge.generators.element_group import matrix_shape
+    b = trip.builder
+    section = trip.section
+    fp = trip.fp
+    shape = matrix_shape(step.lowering, nvidia.sm_of(trip.context))
+    atom = _atom(step.lowering, shape, section.dtype)
+    m_, n_, k_ = shape
+    rows, cols = step.rows, step.cols
+    width = cols[1] - cols[0]
+    height = rows[1] - rows[0]
+    M = trip.group.elements * width
+    mtiles, ntiles = -(-M // m_), -(-height // n_)
+    a_cells = _a_lane_cells(atom)
+    d_cells = nvidia.d_lane_cells(atom)
+    kregs = k_ // 4
+    if step.dest.is_tmp:
+        dest = section.buffer(step.dest)
+        target = trip.buffers[id(step.dest)]
+    else:
+        dest = section.result(step.dest)
+        target = trip.results[id(step.dest)]
+    quad = b.op('div', INDEX, trip.lane, 4, hint='q')
+    inquad = b.op('rem', INDEX, trip.lane, 4, hint='q')
+
+    def rows_of(m, buffer, col_lo, row):
+        """The index in `buffer` of row `row` of the group's row `m`: element
+        `m / width`, the element's column `col_lo + m % width`."""
+        e = b.op('div', INDEX, m, width, hint='e')
+        j = _index(b, 'add', b.op('rem', INDEX, m, width, hint='j'),
+                   col_lo - buffer.cols[0], 'j')
+        base = b.op('mul', INDEX, e, buffer.per_element, hint='b')
+        return _index(b, 'add', base, _box_index(
+            b, row, j, (buffer.rows[0], 0),
+            buffer.rows[1] - buffer.rows[0]), 'a')
+
+    with b.for_(trip.slot, mtiles * ntiles, trip.group.elements, hint='t',
+                uniform=Uniformity.MULT) as tiles:
+        mt = b.op('div', INDEX, tiles.induction, ntiles, hint='mt')
+        nt = b.op('rem', INDEX, tiles.induction, ntiles, hint='nt')
+        m0 = b.op('mul', INDEX, mt, m_, hint='m')
+        n0 = b.op('mul', INDEX, nt, n_, hint='n')
+        accs = [b.declare(fp, hint='c', uniform=Uniformity.LANE)
+                for _ in d_cells]
+        # The lane's rows of A, the same for every product and step of K.
+        a_rows = {}
+        for slot, (r0, _) in a_cells.items():
+            if r0 not in a_rows:
+                m = b.op('add', INDEX, m0, _index(b, 'add', quad, r0, 'm'),
+                         hint='m')
+                live = (b.op('lt', BOOL, m, M, hint='in') if M % m_
+                        else None)
+                a_rows[r0] = (m, live)
+        for product in step.products:
+            group = section.buffer(product.second.tensor)
+            source = trip.buffers[id(product.second.tensor)]
+            stage = section.stage(product.first.tensor,
+                                  (product.rows, product.depth))
+            staged = trip.operators[(id(stage.tensor), stage.window)]
+            k_lo, k_hi = product.depth
+            depth = k_hi - k_lo
+            for kt in range(0, depth, k_):
+                a = []
+                for slot in range(len(a_cells)):
+                    r0, c0 = a_cells[slot]
+                    m, live = a_rows[r0]
+                    kk = _index(b, 'add', inquad, kt + c0, 'k')
+                    if kt + c0 + 4 > depth:
+                        deep = b.op('lt', BOOL, kk, depth, hint='in')
+                        live = deep if live is None else b.op(
+                            'and', BOOL, live, deep, hint='in')
+                    at = rows_of(m, group, cols[0],
+                                 _index(b, 'add', kk, k_lo, 'k'))
+                    if live is None:
+                        a.append(b.load(source, at, type_=fp, hint='a'))
+                        continue
+                    at = b.op('select', INDEX, live, at, 0, hint='a')
+                    value = b.load(source, at, type_=fp, hint='a')
+                    a.append(b.op('select', fp, live, value,
+                                  b.const(0.0, fp), hint='a'))
+                bb = []
+                for j in range(kregs):
+                    k = _index(b, 'add', inquad, kt + 4 * j, 'k')
+                    bb.append(b.load(staged, b.op(
+                        'add', INDEX, b.op('mul', INDEX, k, stage.ld,
+                                           hint='k'),
+                        b.op('add', INDEX, n0, quad, hint='n'), hint='a'),
+                        type_=fp, hint='b'))
+                for term, (fa, fb) in enumerate(atom.products(b, a, bb)):
+                    atom.asmcall(b, accs, fa, fb, accs, term=atom.term(term))
+        # D, to the destination's buffer: the cells of the group's rows and
+        # the step's rows, the padding's left out.
+        for slot, (r0, c0) in d_cells.items():
+            m = b.op('add', INDEX, m0, _index(b, 'add', quad, r0, 'm'),
+                     hint='m')
+            n = b.op('add', INDEX, n0, _index(b, 'add', b.op(
+                'mul', INDEX, inquad, 2, hint='n'), c0, 'n'), hint='n')
+            live = b.op('lt', BOOL, n, height, hint='in')
+            if M % m_:
+                live = b.op('and', BOOL, live,
+                            b.op('lt', BOOL, m, M, hint='in'), hint='in')
+            at = b.op('select', INDEX, live, rows_of(
+                m, dest, cols[0], _index(b, 'add', n, rows[0], 'i')), 0,
+                hint='a')
+            value = accs[slot]
+            if step.dest.is_tmp and not step.assigns:
+                value = b.op('add', fp, b.load(target, at, type_=fp,
+                                               hint='q'), value, hint='q')
+            b.store(target, value, at, predicate=live)
+    if step.dest.is_tmp:
+        return
+    # The output's D is in the result buffer, every warp's tiles of it: the
+    # block meets, and each warp adds its own element's into its output.
+    b.barrier(Participants.BLOCK)
+    with b.for_(trip.lane, height * width, trip.group.threads, hint='o',
+                uniform=Uniformity.LANE) as loop:
+        row = _index(b, 'add', b.op('rem', INDEX, loop.induction, height,
+                                    hint='i'), rows[0], 'i')
+        col = _index(b, 'add', b.op('div', INDEX, loop.induction, height,
+                                    hint='j'), cols[0], 'j')
+        total = b.load(target, trip.at(dest, row, col), type_=fp, hint='d')
+        trip.write(step, row, col, total)
+
+
 #: Each step's lowering (`element_group.Step.lowering`).
-LOWERINGS = {'fma': _per_output, 'rows': _per_output}
+LOWERINGS = {'fma': _per_output, 'rows': _per_output,
+             'mma_sync': _matrix, 'dmma': _matrix}
 
 
 class MultiElementSection(AbstractInstruction):
@@ -321,7 +524,7 @@ class MultiElementSection(AbstractInstruction):
 
     def gen_ir(self, builder) -> None:
         section = self._group.section
-        trip = _Trip(builder, self._group, self._symbols,
+        trip = _Trip(builder, self._context, self._group, self._symbols,
                      self._operators.buffers)
         elements = self._group.elements
         for buffer in section.inputs + section.intermediates:
@@ -329,6 +532,11 @@ class MultiElementSection(AbstractInstruction):
                 section.dtype, (elements * buffer.per_element,),
                 MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
                 hint=_hint('g', buffer.tensor))
+        for buffer in section.results:
+            trip.results[id(buffer.tensor)] = builder.alloc(
+                section.dtype, (elements * buffer.per_element,),
+                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
+                hint=_hint('d', buffer.tensor))
         # The block meets before any warp overwrites the group's buffers, so
         # that the last trip's reads of them are done.
         builder.barrier(Participants.BLOCK)
