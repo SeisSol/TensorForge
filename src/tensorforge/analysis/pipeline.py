@@ -365,6 +365,13 @@ def executed_flops(generator) -> Optional[int]:
     if not getattr(metrics, 'emitted_flops_exact', True):
         return None
     lanes = max(1, getattr(built, '_num_threads', 1) or 1)
+    group = getattr(built, '_element_group', None)
+    if getattr(group, 'lanes', None) is not None:
+        # The multi-element layout's lanes form: a lane is an element, and
+        # the warps of the block share the group's elements, each with its
+        # share of the work -- so an element's threads are the warps, and
+        # the count is the average warp's (`element_group.Lanes`).
+        lanes = group.warps
     # A build that stacks elements counts the whole stack, as everything
     # else here does (`of`), and is divided by it for the same reason.
     stack = max(1, int(getattr(built, '_stack', 1) or 1))
