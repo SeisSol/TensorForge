@@ -595,3 +595,191 @@ def test_the_window_grants_a_granule_the_transfer_can_use():
     writes wrongly."""
     from tensorforge.backend.instructions.memory import AbstractShrMemWrite
     assert AbstractShrMemWrite.transfer_granule(object()) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Through the generator: the windows and tiles a kernel is built with
+# --------------------------------------------------------------------------- #
+
+def test_a_symbol_reads_the_permutation_of_the_buffer_it_is_bound_to():
+    """The macro layer passes the symbol, not the value (`Symbol.load`): the
+    builder resolves it to the buffer the body bound it to and applies that
+    buffer's permutation.  Read off the symbol itself, the swizzle set at the
+    allocation would be applied to nothing -- the writes permuted, the reads
+    not."""
+    from tensorforge.backend.symbol import Symbol, SymbolType
+    b = builder()
+    tile = b.alloc(Datatype.F32, (64,), MemSpace.SHARED, hint='s1',
+                   swizzle=XorSwizzle(8))
+    sym = Symbol('s1', SymbolType.SharedMem, None)
+    sym.set_pir_buffer(b, tile)
+    b.load(sym, 56, hint='v')       # row 7, column 0: 56 ^ 7
+    b.load(sym, b.rawexpr('threadIdx.x', type_=INDEX, hint='a'), hint='w')
+    text = emitted(b.finish())
+    assert 's1[63]' in text and 's1[56]' not in text, text
+    assert '>> 3) & 7' in text, text
+
+
+def test_the_esimd_pointer_rewrite_takes_a_vector_cast_off_first():
+    """`copy_from` takes the address of the first element, and a vector-width
+    access arrives as a reinterpret cast (`EsimdEmitter._as_pointer`): split
+    at the subscript with the cast still on, it would dereference the pointer
+    and add the index to the value."""
+    from tensorforge.backend.pir.emit_esimd import EsimdEmitter
+    assert EsimdEmitter._as_pointer(
+        '*(tensorforge::VectorT<float, 4>*)&s1[i + 4]') == 's1 + (i + 4)'
+    assert EsimdEmitter._as_pointer('s1[j]') == 's1 + (j)'
+
+
+def _chain(rows, cols):
+    """`D = A (B C)` with the intermediate `B C` rows x cols: written from the
+    registers into a window (`StoreRegToShr`) that the second product reads
+    across the lanes, and `C`, 9 x cols, staged by its loader."""
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.helper import generate_tmp_matrix
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+
+    def mat(r, c, alias):
+        return SubTensor(Tensor([r, c], Addressing.STRIDED,
+                                BoundingBox([0, 0], [r, c]), alias=alias,
+                                datatype=Datatype.F32))
+    b, c = mat(rows, 9, 'B'), mat(9, cols, 'C')
+    tmp = SubTensor(generate_tmp_matrix(b, c))
+    return [GemmDescr(False, False, a=b, b=c, c=tmp),
+            GemmDescr(False, False, a=mat(rows, rows, 'A'), b=tmp,
+                      c=mat(rows, cols, 'D'), alpha=1.0, beta=0.0)]
+
+
+def _windows(monkeypatch, descrs, arch='sm_90', backend='cuda', **options):
+    """Every window the kernel stages, as `(writer, shape, through the IR,
+    permutation)`: the transfer that fills it, whether that transfer goes
+    through `store` (`_structured_copy`), and what `_swizzle` gave it."""
+    import contextlib
+    import io
+    import warnings
+    from tensorforge.backend.instructions.memory import AbstractShrMemWrite
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+    seen = []
+    granule = AbstractShrMemWrite._permute_granule
+    swizzle = AbstractShrMemWrite._swizzle
+
+    def permute_granule(self, writer=None):
+        self._through_ir = (writer is None
+                            or not hasattr(self, '_structured_copy')
+                            or self._structured_copy(writer))
+        return granule(self, writer)
+
+    def swizzled(self, need):
+        out = swizzle(self, need)
+        seen.append((type(self).__name__, tuple(self._dest.data_view.shape),
+                     getattr(self, '_through_ir', None), out))
+        return out
+    monkeypatch.setattr(AbstractShrMemWrite, '_permute_granule',
+                        permute_granule)
+    monkeypatch.setattr(AbstractShrMemWrite, '_swizzle', swizzled)
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        Generator(descrs, Context(arch=arch, backend=backend,
+                                  fp_type=Datatype.F32,
+                                  options=Options(**options))).generate()
+    return seen
+
+
+@pytest.mark.parametrize("rows,cols,width", [
+    (56, 13, 8),      # 728 = 8 * 91
+    (16, 16, 32),     # 256: 32, not the row width 16
+    (9, 9, None),     # 81 is odd: no swizzle
+])
+def test_a_generated_window_takes_the_volume_rule(rows, cols, width,
+                                                  monkeypatch):
+    """`Options.swizzle` `volume`: the intermediate's window, written through
+    the IR, is permuted as wide as the largest power of two that divides its
+    volume -- `_volume_swizzle` on the window the kernel is built with, not a
+    copy of the rule (`_window_width` above)."""
+    seen = _windows(monkeypatch, _chain(rows, cols), swizzle='volume')
+    (window,) = [w for w in seen
+                 if w[0] == 'StoreRegToShr' and w[1] == (rows, cols)]
+    assert window[2], seen
+    got = window[3]
+    assert (got.width if got is not None else None) == width, seen
+    assert got is None or got.granule == 1
+
+
+def test_a_window_its_loader_writes_as_text_is_not_permuted(monkeypatch):
+    """A raw write does not pass `store` and would not permute while every
+    read did: the loader's window -- `C`, 9 x 16, whose 144 elements the
+    volume rule would permute by 16 -- stays plain while its copy is text
+    (`AbstractShrMemWrite._permute_granule`)."""
+    seen = _windows(monkeypatch, _chain(16, 16), swizzle='volume')
+    text = [w for w in seen if not w[2]]
+    assert any(w[1] == (9, 16) for w in text), seen
+    assert all(w[3] is None for w in text), seen
+
+
+def test_an_explicit_simd_kernel_permutes_no_window(monkeypatch):
+    """Under the explicit-vector lowering a transfer is a `copy_from` over a
+    whole `simd`, which reads contiguous positions: no window is permuted,
+    whatever its volume -- the window the volume rule permutes by 8 on
+    CUDA among them."""
+    seen = _windows(monkeypatch, _chain(56, 13), arch='pvc', backend='esimd',
+                    swizzle='volume')
+    assert any(w[1] == (56, 13) for w in seen), seen
+    assert all(w[3] is None for w in seen), seen
+
+
+def _case(name):
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).parent / 'cases' / f'{name}.py'
+    spec = importlib.util.spec_from_file_location(f'_swizzle_{name}', path)
+    case = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(case)
+    return case
+
+
+@pytest.mark.parametrize("name,stacked", [
+    ('mma_fragment_ld_f32', False), ('mma_fragment_ld_f64', False),
+    ('mma_stack_mults_f32', True), ('mma_stack_mults_f64', True)])
+def test_the_matrix_path_tiles_carry_their_permutations(name, stacked,
+                                                        monkeypatch):
+    """NVIDIA's matrix path lays out its own tiles (`nvidia.matmul`, and
+    `_stacked` for multiplications stacked along N): the B tile permuted, and
+    the C tile over one pass of the banks -- 128 bytes, 32 floats or 16
+    doubles, so that the two precisions read the same pattern."""
+    import contextlib
+    import io
+    import warnings
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+    tiles, calls = [], []
+    alloc = IRBuilder.alloc
+
+    def recorded(self, *args, **kwargs):
+        value = alloc(self, *args, **kwargs)
+        if kwargs.get('hint') in ('btile', 'ctile'):
+            tiles.append((kwargs['hint'], value.type.swizzle,
+                          value.type.elem.size()))
+        return value
+    real = nvidia._stacked
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(IRBuilder, 'alloc', recorded)
+    monkeypatch.setattr(nvidia, '_stacked', counted)
+    case = _case(name)
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter('ignore')
+        Generator(case.descr_list(),
+                  Context(arch='sm_90', backend='cuda', fp_type=case.DTYPE,
+                          options=Options(**case.OPTIONS))).generate()
+    assert bool(calls) is stacked
+    assert {hint for hint, _, _ in tiles} == {'btile', 'ctile'}, tiles
+    for hint, swz, size in tiles:
+        assert swz is not None, (hint, tiles)
+        if hint == 'ctile':
+            assert swz.width * size == 128, tiles

@@ -92,6 +92,29 @@ def test_an_unreadable_guard_leaves_the_lanes_alone():
     assert bc._lanes_under(["someRuntimeFlag"]) == list(range(bc.LANES))
 
 
+def test_bounds_that_exclude_every_lane_leave_the_whole_wave():
+    """Bounds the tool can read may still leave no lane, as a guard of a
+    branch no lane takes does: the access is counted for the whole wave --
+    over-reported, as an unreadable guard is -- rather than for nobody, which
+    would leave it out of the census without a word."""
+    assert bc._lanes_under(["threadIdx.x < 4", "threadIdx.x >= 8"]) \
+        == list(range(bc.LANES))
+
+
+def test_a_guarded_access_counts_only_the_lanes_under_its_guard():
+    """The census reads the guards an access stands under (`accesses`): a
+    stride of two over the first half of the wave meets each bank once, the
+    same access over the whole wave twice."""
+    source = ("float* tile = &arena[0];\n"
+              "if (threadIdx.x < 16) {\n"
+              "  float x = tile[threadIdx.x * 2];\n"
+              "}\n"
+              "float y = tile[threadIdx.x * 2];\n")
+    got = [(len(lanes), bc.ways(bc._resolve(index, defs), base, width, lanes))
+           for _n, index, base, width, _k, defs, lanes in bc.accesses(source)]
+    assert got == [(16, 1), (32, 2)], got
+
+
 def test_a_vector_cast_is_recognized():
     """The spelling the emitter actually produces, not the one a `float4`
     would have."""
