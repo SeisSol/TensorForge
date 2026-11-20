@@ -2152,12 +2152,13 @@ class IRBuilder:
         return _IfHandle(self, cond, (), attrs)
 
     def if_else(self, cond: Operand, types: Sequence[Any],
-                layouts: Optional[Sequence[Optional[RegisterLayout]]] = None
-                ) -> '_IfHandle':
+                layouts: Optional[Sequence[Optional[RegisterLayout]]] = None,
+                attrs: Tuple = ()) -> '_IfHandle':
         """``layouts``, one per result, is how each is spread over the lanes,
         where the caller knows: the arms produce it, and nothing downstream
-        can derive it from the branch."""
-        return _IfHandle(self, cond, tuple(types), layouts=layouts)
+        can derive it from the branch.  ``attrs`` are the statement's, as
+        `if_` takes them: `lanes_active` for a guard of the lanes."""
+        return _IfHandle(self, cond, tuple(types), attrs, layouts=layouts)
 
     # -- transfers --------------------------------------------------------- #
 
@@ -3170,7 +3171,8 @@ class _IfHandle:
             for i, t in enumerate(self._types))
         regions = tuple(r for r in (self._then, self._else) if r is not None)
         self.builder.emit(Stmt(op=Op.IF, target=self.results, args=(self.cond,),
-                               regions=regions, pure=False, movable=False))
+                               regions=regions, pure=False, movable=False,
+                               attrs=self._attrs))
 
     @property
     def result(self) -> Value:

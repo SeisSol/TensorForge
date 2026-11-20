@@ -40,7 +40,8 @@ lowering (`compute.multi_element`) has one form per kind of product.
   F32; `dmma` for F64), the group's rows -- an element's quantities,
   element after element -- along M, the operator's rows along N, the
   contraction along K; or the FMA form, a lane an output, where the matrix
-  engines are off (`matrix_enabled`).
+  engines are off (`matrix_enabled`) -- over the operator's nonzeros alone
+  where it carries its numbers (`Terms`).
 * `MIXING`: a group operand times a small one, `C = G x S`, contracting
   the quantities: each element's rows mixed by its own operand, on the FMA
   units, a lane an output.
@@ -172,16 +173,76 @@ class Product:
 
 
 @dataclass(frozen=True)
+class Terms:
+    """An operator step's products by their operators' nonzeros: what the
+    sparse `fma` form walks (`compute.multi_element`) in place of the
+    operators' boxes.
+
+    `order` is the destination's rows in the order the lanes take them: by
+    how many nonzeros the step's products have in a row, the most first,
+    each row's columns side by side -- so that the lanes of a warp, about
+    four rows of their element's columns, walk rows of about one length.
+    An accumulating step leaves the rows without any out; an assigning one
+    keeps them, to write their zeros.  Per product, in the step's order:
+    `counts[p][s]` nonzeros at row `order[s]`, and over all of them, row
+    after row of `order`, their contraction indices `cols[p]` and their
+    cells in the operator's storage `cells[p]`."""
+
+    order: Tuple[int, ...]
+    counts: Tuple[Tuple[int, ...], ...]
+    cols: Tuple[Tuple[int, ...], ...]
+    cells: Tuple[Tuple[int, ...], ...]
+
+    @property
+    def entries(self) -> int:
+        """The nonzeros of all products: the tables' length."""
+        return sum(len(c) for c in self.cols)
+
+    def base(self, product: int) -> int:
+        """Where a product's nonzeros start in the tables."""
+        return sum(len(c) for c in self.cols[:product])
+
+    @property
+    def stride(self) -> int:
+        """Entries of a row's data: the row, then each product's first
+        nonzero and count."""
+        return 1 + 2 * len(self.counts)
+
+    def rows_table(self) -> Tuple[int, ...]:
+        """The row data, `stride` entries a row of `order`."""
+        firsts = []
+        for p, counts in enumerate(self.counts):
+            at, mine = self.base(p), []
+            for n in counts:
+                mine.append(at)
+                at += n
+            firsts.append(mine)
+        return tuple(x for s, row in enumerate(self.order)
+                     for x in (row, *(v for p in range(len(self.counts))
+                                      for v in (firsts[p][s],
+                                                self.counts[p][s]))))
+
+    @property
+    def volume(self) -> int:
+        """Elements of the block's arena the tables take: a value and an
+        index a nonzero, and the row data -- an index takes an element of
+        the arena's type whatever its own width (`pir.allocate`)."""
+        return 2 * self.entries + len(self.order) * self.stride
+
+
+@dataclass(frozen=True)
 class Step:
     """Products into one destination, lowered together (see the module).
 
     The first may assign; every other accumulates.  `rows` and `cols` are
     the union of the products' windows of the destination, each product
     adding only into its own.  `lowering` is the fill rule's: `fma` for an
-    operator product so far, `rows` for a mixing one."""
+    operator product so far, `rows` for a mixing one.  `terms` are the
+    operators' nonzeros where an `fma` step reads only those (`lower`)."""
 
     products: Tuple[Product, ...]
     lowering: str
+    terms: Optional[Terms] = None
 
     @property
     def kind(self) -> Kind:
@@ -314,7 +375,8 @@ class GroupSection:
         terms: two classifications of one section agree on it."""
         return tuple((s.kind, s.lowering, s.dest.alias, s.assigns,
                       tuple((p.first.tensor.alias, p.second.tensor.alias,
-                             p.rows, p.cols, p.depth) for p in s.products))
+                             p.rows, p.cols, p.depth) for p in s.products),
+                      s.terms)
                      for s in self.steps)
 
 
@@ -594,7 +656,10 @@ def _staged(section: GroupSection, sm: int) -> GroupSection:
             if t is None:
                 continue
             if not matrix:
-                add(Stage(t))
+                # A step that walks its operators' nonzeros reads those,
+                # packed by the block (`Terms`), and not the operators.
+                if step.terms is None:
+                    add(Stage(t))
                 continue
             _, n, k = matrix_shape(step.lowering, sm)
             width = _round(step.rows[1] - step.rows[0], n)
@@ -621,6 +686,48 @@ def matrix_enabled(context) -> bool:
     return MATRIX if asked is None else bool(asked)
 
 
+def _cell(tensor, row: int, col: int) -> int:
+    """The storage index of `(row, col)` of a dense operator stored column
+    by column over its bounding box -- what `compute.multi_element` reads
+    it at."""
+    lower = [int(x) for x in tensor.bbox.lower()]
+    return (row - lower[0]) + (col - lower[1]) * int(tensor.bbox.sizes()[0])
+
+
+def nonzero_terms(step: Step) -> Optional[Terms]:
+    """An operator step's products by their operators' nonzeros (`Terms`),
+    or None where an operator does not carry its numbers.
+
+    The pattern is the operator's own (`Tensor.nonzero_pattern`: its
+    numbers, intersected with what it stores) within the product's window;
+    the numbers a kernel multiplies by stay the ones in the operator's
+    memory.  The rows go in the order of their nonzeros over all the step's
+    products, the most first, ties by the row."""
+    per = []
+    for p in step.products:
+        tensor = p.first.tensor
+        if not tensor.has_values():
+            return None
+        pattern = tensor.nonzero_pattern
+        (r0, r1), (k0, k1) = p.rows, p.depth
+        per.append({i: [k for k in range(k0, k1) if pattern.is_nz((i, k))]
+                    for i in range(r0, r1)})
+    lo, hi = step.rows
+    count = {i: sum(len(rows.get(i, ())) for rows in per)
+             for i in range(lo, hi)}
+    order = tuple(sorted((i for i in range(lo, hi)
+                          if step.assigns or count[i]),
+                         key=lambda i: (-count[i], i)))
+    return Terms(
+        order,
+        tuple(tuple(len(rows.get(i, ())) for i in order) for rows in per),
+        tuple(tuple(k for i in order for k in rows.get(i, ()))
+              for rows in per),
+        tuple(tuple(_cell(p.first.tensor, i, k) for i in order
+                    for k in rows.get(i, ()))
+              for p, rows in zip(step.products, per)))
+
+
 def _lowering(step: Step, dtype, context, sm: int, matrix: bool) -> str:
     """A step's lowering on the context's target: an operator step on the
     matrix engines where they are on (`matrix`, `matrix_enabled`) and the
@@ -639,13 +746,20 @@ def lower(section: GroupSection, context,
           matrix: bool = True) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off -- and the stages and result
-    buffers those lowerings read and write."""
+    buffers those lowerings read and write.  An `fma` step reads only its
+    operators' nonzeros (`nonzero_terms`) where they carry their numbers
+    and `Options.skip_known_zeros` is on, as the per-element products do."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     sm = nvidia.sm_of(context)
-    steps = tuple(dataclasses.replace(
-        s, lowering=_lowering(s, section.dtype, context, sm, matrix))
-        for s in section.steps)
-    return _staged(dataclasses.replace(section, steps=steps), sm)
+    sparse = context.get_user_options().skip_known_zeros
+    steps = []
+    for s in section.steps:
+        lowering = _lowering(s, section.dtype, context, sm, matrix)
+        steps.append(dataclasses.replace(
+            s, lowering=lowering,
+            terms=nonzero_terms(s) if sparse and lowering == 'fma'
+            else None))
+    return _staged(dataclasses.replace(section, steps=tuple(steps)), sm)
 
 
 def tiled(section: GroupSection) -> bool:
@@ -654,10 +768,13 @@ def tiled(section: GroupSection) -> bool:
 
 
 def shared_bytes(section: GroupSection, elements: int) -> int:
-    """Shared memory a group of `elements` takes: the operators as staged,
-    and each element's copy of every input, intermediate and result."""
+    """Shared memory a group of `elements` takes: the operators as staged
+    -- their stages, and the terms of the steps that walk them -- and each
+    element's copy of every input, intermediate and result."""
     size = section.dtype.size()
-    operators = sum(st.volume for st in section.stages)
+    operators = (sum(st.volume for st in section.stages)
+                 + sum(s.terms.volume for s in section.steps
+                       if s.terms is not None))
     per_element = sum(b.per_element for b in section.inputs
                       + section.intermediates + section.results)
     return size * (operators + elements * per_element)
@@ -732,6 +849,6 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
 __all__ = ['Buffer', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
            'GroupSection', 'Kind', 'LOWERING', 'MATRIX', 'MATRIX_LOWERINGS',
            'MIN_ELEMENTS', 'Product', 'Role', 'SHARED_RESERVE',
-           'SMALL_EXTENT', 'Stage', 'Step', 'classify', 'fill', 'lower',
-           'matrix_enabled', 'matrix_shape', 'plan', 'shared_bytes',
-           'table_elements', 'tiled']
+           'SMALL_EXTENT', 'Stage', 'Step', 'Terms', 'classify', 'fill',
+           'lower', 'matrix_enabled', 'matrix_shape', 'nonzero_terms', 'plan',
+           'shared_bytes', 'table_elements', 'tiled']

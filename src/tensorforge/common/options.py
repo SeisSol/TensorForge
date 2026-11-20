@@ -2156,7 +2156,9 @@ declare('skip_known_zeros',
             'the numbers the description gives -- as SeisSol\'s global '
             'matrices do, and as yateto\'s own sparse kernels assume -- and a '
             'caller that fills it with anything else gets the products of '
-            'those numbers, not of its own.')
+            'those numbers, not of its own.  Under the multi-element layout '
+            '(`multi_element`), an operator step on the FMA units walks its '
+            'operators\' nonzeros alone (`element_group.Terms`).')
 
 declare('autotune',
         default='off',
