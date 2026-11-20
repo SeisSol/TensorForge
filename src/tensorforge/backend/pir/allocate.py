@@ -107,7 +107,12 @@ def _key(s: Stmt) -> Any:
 
 
 def _binds(s: Stmt) -> bool:
-    return any(isinstance(t.type, BufferType) for t in s.target)
+    """Whether `s` binds a window of an arena, whose accesses are its
+    window's.  Not a buffer of tensor memory: no arena holds it, and the
+    statement that allocates one (`Op.TMEM_ALLOC`) touches the shared slot
+    it hands the address through, which has to be occupied there."""
+    return any(isinstance(t.type, BufferType)
+               and t.type.space is not MemSpace.TMEM for t in s.target)
 
 
 def _loops(s: Stmt) -> bool:

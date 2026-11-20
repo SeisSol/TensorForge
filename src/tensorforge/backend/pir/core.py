@@ -67,6 +67,12 @@ class MemSpace(IntEnum):
     # what this enum is.  As one, it also earns the alias answer for free --
     # nothing reaches param space through a pointer into global.
     PARAM = 7
+    # NVIDIA's tensor memory (sm_100a): 128 lanes of 512 columns of 32 bits
+    # an SM, which a block allocates columns of (`Op.TMEM_ALLOC`) and the
+    # matrix engine keeps D in (tcgen05).  A space of its own: a thread
+    # reaches it through the engine's loads and stores alone, and nothing
+    # in shared or global memory aliases it.
+    TMEM = 8
 
     @classmethod
     def from_symbol_type(cls, stype: Any) -> 'MemSpace':
@@ -153,6 +159,15 @@ class XorSwizzle:
     width: int
     #: Elements that move together.  1 permutes single elements.
     granule: int = 1
+    #: Granules a row has as the selector counts rows, where that is not
+    #: `width`: None is `width`.  NVIDIA's shared-memory swizzles -- the
+    #: layout the tensor memory accelerator writes a box in, and wgmma and
+    #: tcgen05 read an operand in -- XOR the 16-byte chunk with the 128-byte
+    #: line, one, two or three bits of each for 32, 64 and 128 bytes: rows of
+    #: eight granules of 16 bytes, of which the first two, four or eight are
+    #: permuted (`engines.swizzle_form`).  At 128 bytes that is `width` 8 and
+    #: no `line` of its own, the form TensorForge's own swizzle already had.
+    line: Optional[int] = None
 
     def __post_init__(self):
         if self.width < 1 or self.width & (self.width - 1):
@@ -161,11 +176,25 @@ class XorSwizzle:
         if self.granule < 1 or self.granule & (self.granule - 1):
             raise IRError(f'swizzle granule must be a power of two, got '
                           f'{self.granule}')
+        if self.line is not None:
+            if (self.line < self.width or self.line & (self.line - 1)):
+                raise IRError(f'a swizzle row of {self.line} granules: a '
+                              f'power of two of at least the width '
+                              f'{self.width}')
+            if self.line == self.width:
+                # One form for one permutation, so that equal swizzles
+                # compare equal however they were spelled.
+                object.__setattr__(self, 'line', None)
+
+    @property
+    def span(self) -> int:
+        """Granules a row has, as the selector counts rows."""
+        return self.width if self.line is None else self.line
 
     def apply(self, index: int) -> int:
         """The permuted index, for tests and for constant folding."""
         g, r = divmod(index, self.granule)
-        return (g ^ ((g // self.width) % self.width)) * self.granule + r
+        return (g ^ ((g // self.span) % self.width)) * self.granule + r
 
     def admits(self, length: int) -> bool:
         """May an access of `length` adjacent elements be permuted as one?
@@ -179,8 +208,9 @@ class XorSwizzle:
                 or (length <= self.granule and self.granule % length == 0))
 
     def __repr__(self):
-        return (f'xor{self.width}' if self.granule == 1
-                else f'xor{self.width}g{self.granule}')
+        line = '' if self.line is None else f'l{self.line}'
+        return (f'xor{self.width}{line}' if self.granule == 1
+                else f'xor{self.width}g{self.granule}{line}')
 
 
 @dataclass(frozen=True)
@@ -275,7 +305,7 @@ TOKEN = TokenType()
 
 
 IRType = Union[ScalarType, BufferType, TokenType, 'SyncObjectType',
-               'ResourceType', 'TensorDescType']
+               'ResourceType', 'TensorDescType', 'MatrixDescType']
 
 BOOL = ScalarType(Datatype.BOOL)
 INDEX = ScalarType(Datatype.I32)
@@ -508,6 +538,10 @@ class Uniformity(IntEnum):
     GRID = 4        # same everywhere
 
 
+#: Warps in a warpgroup (`Participants.WARPGROUP`).
+WARPGROUP_WAVES = 4
+
+
 class Participants(Enum):
     """What a barrier covers in hardware, as opposed to who must arrive.
 
@@ -523,6 +557,11 @@ class Participants(Enum):
     """
 
     WAVE = 'wave'            # the hardware wave, whatever the multiplication is
+    # Four consecutive warps of the block, the first of them a multiple of
+    # four: what NVIDIA's `wgmma` instructions execute together (PTX ISA,
+    # "Asynchronous Warpgroup Level Matrix Multiply-Accumulate Instructions",
+    # sm_90a).  A collective of the matrix engine, not a barrier's.
+    WARPGROUP = 'warpgroup'
     MULT = 'mult'            # exactly the threads of one multiplication
     MULTGROUP = 'multgroup'  # the multiplications that share a wave
     BLOCK = 'block'
@@ -537,10 +576,20 @@ class Participants(Enum):
         parts of one multiplication only, and group-uniformity where it is
         narrower, because the wave then holds several and all of them have to
         arrive.
+
+        A warpgroup holds parts of one multiplication only where the
+        multiplication is a whole number of warpgroups: its threads start a
+        warpgroup and end one.  Anywhere else a warpgroup holds lanes of two
+        multiplications or of several, and only what the whole block agrees
+        on reaches all of them alike.
         """
         if self is Participants.WAVE:
             return (Uniformity.MULT if num_threads >= wave
                     else Uniformity.MULTGROUP)
+        if self is Participants.WARPGROUP:
+            return (Uniformity.MULT
+                    if num_threads % (WARPGROUP_WAVES * wave) == 0
+                    else Uniformity.BLOCK)
         return {Participants.MULT: Uniformity.MULT,
                 Participants.MULTGROUP: Uniformity.MULTGROUP,
                 Participants.BLOCK: Uniformity.BLOCK,
@@ -989,6 +1038,12 @@ class Op:
     # resource is, and named by the copy that goes through it (`desc`,
     # `pir.tensors`).
     TENSOR_DESC = 'tensor.desc'
+    # The descriptor NVIDIA's asynchronous matrix engines read an operand in
+    # shared memory through (`wgmma`, `tcgen05`): the buffer and the element
+    # its matrix starts at, and the layout the type states
+    # (`engines.MatrixDescType`).  Pure, as a resource is: it reads no
+    # memory, and the matrix op that goes through it declares the read.
+    MATRIX_DESC = 'matrix.desc'
     # Synchronization and ordering, each an entry of `engines.REGISTRY`,
     # which says what the passes may assume of it and how it is written.
     # `barrier` is the combined form: every participant of its object
@@ -1000,6 +1055,17 @@ class Op:
     FENCE = 'fence'                 # order the schedule, memory, or both
     WAIT_COUNTER = 'wait.counter'   # wait on a hardware completion counter
     SET_PRIORITY = 'set.priority'   # the wave's issue priority from here on
+    # Close what an asynchronous engine issued since its last commit into one
+    # group, which the engine's own completion counts: `wgmma.commit_group`,
+    # and tcgen05's commit onto an mbarrier.
+    COMMIT_GROUP = 'commit.group'
+    # Tensor memory (`MemSpace.TMEM`, tcgen05): columns allocated for the
+    # block and freed again, and a warp's loads and stores of its quarter of
+    # the lanes (`engines`).
+    TMEM_ALLOC = 'tmem.alloc'
+    TMEM_DEALLOC = 'tmem.dealloc'
+    TMEM_LD = 'tmem.ld'
+    TMEM_ST = 'tmem.st'
     # D = A * B + C on the fragments of a matrix engine, a collective of the
     # wave (`engines.MATRIX_ENGINES`): the fragments are values, D the
     # result -- or C itself, written in place, where the instruction

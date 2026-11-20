@@ -53,6 +53,15 @@ bytes t places past it -- is checked where the copy is written
 tile, `shape` rows of a `pitch` apart, through a descriptor
 (`Op.TENSOR_DESC`), issued once by the first wave of the lanes it is for
 (`leader`, `tdm_refusal`) and waited for on that wave's `tensorcnt`.
+NVIDIA's tensor memory accelerator (`tma`) copies a box of a tensor --
+two or three dimensions, the tensor's ends filled -- through a tensor map
+the launcher encodes and the kernel takes as a parameter (`TensorMap`),
+issued by one thread for the lanes the mbarrier it completes on is for,
+as the bulk copy is (`tma_refusal`), into shared memory in the layout of
+the map's swizzle, which is a TensorForge swizzle (`swizzle_form`); and it
+adds such a box back into the tensor (`tma_reduce`), one thread's, counted
+in that thread's bulk groups.  Which of these stages an operand's batch is
+the batch's stride's question (`staging_engine`).
 
 What this increment keeps, on purpose:
 
@@ -87,10 +96,11 @@ from enum import Enum
 from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
                     Optional, Sequence, Tuple)
 
-from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import RUNTIME, Addressing, Datatype
 
-from .core import (Access, Effect, IRError, MemSpace, Op, Participants, Stmt,
-                   Uniformity, Value, walk_stmts)
+from .core import (Access, BufferType, Effect, IRError, MemSpace, Op,
+                   Participants, Stmt, Uniformity, Value, XorSwizzle,
+                   walk_stmts)
 
 
 # --------------------------------------------------------------------------- #
@@ -143,11 +153,32 @@ class FenceKind(Enum):
     vISA's software fence, and a `__syncwarp()` where it stands for "ptxas
     moves no load across here".  `MEMORY` orders the memory accesses of the
     threads its scope holds.  `BOTH` is the two at once.
+
+    `REGISTERS` orders the accesses of the registers it names by the threads
+    against those of an asynchronous matrix engine (`engine`) that reads and
+    writes them, in the compiler's schedule and in the hardware:
+    `wgmma.fence`, ahead of a product whose accumulator or A fragment
+    anything else touched (PTX ISA, "wgmma.fence").  `PROXY` orders the
+    accesses of shared memory through the generic proxy -- an ordinary load
+    or store -- against those through the async proxy -- a bulk or tensor
+    copy, a matrix engine reading an operand through its descriptor
+    (`fence.proxy.async.shared::cta`, PTX ISA, "membar/fence", ISA 8.0,
+    sm_90).
+
+    `THREAD_SYNC` orders an asynchronous engine's operations (`engine`)
+    against the synchronization of the threads: those issued ahead of it
+    before the barrier or wait behind it (`side` 'before'), those behind it
+    after the barrier or wait ahead of it (`side` 'after') --
+    `tcgen05.fence::before_thread_sync` and `::after_thread_sync` (PTX ISA,
+    "tcgen05.fence", sm_100a).
     """
 
     SCHEDULE = 'schedule'
     MEMORY = 'memory'
     BOTH = 'both'
+    REGISTERS = 'registers'
+    PROXY = 'proxy'
+    THREAD_SYNC = 'thread_sync'
 
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +415,24 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    '`pir.buffers`): an offset past its size reads zero and '
                    'writes nothing, which is what a predicate becomes; its '
                    "waits stay the compiler's, as a load's do"),
+    TransferEngine('tma', (Op.COPY_ASYNC,), Completion.BARRIER,
+                   "the tensor memory accelerator's copy of a box of a tensor "
+                   '(`cp.async.bulk.tensor`) through a tensor map the '
+                   'launcher encodes (`TensorMap`), by one thread, into '
+                   'shared memory in the layout of the map\'s swizzle, '
+                   'completing on an mbarrier with the bytes of the box, '
+                   'sm_90 and newer'),
+    TransferEngine('tma_reduce', (Op.COPY_ASYNC,), Completion.COUNTER,
+                   "the tensor memory accelerator's reduction of a box of "
+                   'shared memory into the tensor of a map '
+                   '(`cp.reduce.async.bulk.tensor`, `.add`), by one thread, '
+                   'each closed into a bulk group of that thread\'s own and '
+                   'counted in its bulk groups, which count nothing else; '
+                   'its waits are written out (`cp.async.bulk.wait_group.'
+                   'read`), behind which the box may be written again, and '
+                   'a barrier behind the wait shows that to the other '
+                   'threads; sm_90 and newer',
+                   waited_on='bulk_group', one_to_one=True),
     TransferEngine('tdm', (Op.COPY_ASYNC,), Completion.COUNTER,
                    "gfx1250's tensor data mover (`tensor_load_to_lds`): a "
                    'tile of `shape` rows a `pitch` apart into the LDS, row '
@@ -625,6 +674,329 @@ class TensorDescType:
 
     def __repr__(self):
         return 'tdesc' if self.elem is None else f'tdesc<{self.elem}>'
+
+
+# --------------------------------------------------------------------------- #
+# Tensor maps: boxes through the tensor memory accelerator (`tma`)
+# --------------------------------------------------------------------------- #
+
+#: The ranks of a box TensorForge writes the copy for: PTX has `.1d` to
+#: `.5d` (PTX ISA, "cp.async.bulk.tensor"), the tiles here are two and
+#: three dimensions.
+TMA_RANKS = (2, 3)
+#: A box's extent along a dimension, at most; a tensor's extent, at most;
+#: and a stride of the tensor in bytes, below (CUDA's tensor map:
+#: `cuTensorMapEncodeTiled`'s boxDim, globalDim and globalStrides).
+TMA_BOX_LIMIT = 256
+TMA_DIM_LIMIT = 1 << 32
+TMA_STRIDE_LIMIT = 1 << 40
+#: Bytes a box starts on in shared memory, and the tensor's base address,
+#: its strides and a box's first element along its rows in global memory:
+#: the tensor map's rules, the last one the hardware's (an illegal
+#: instruction on the RTX 5070, `~/tf-probe/engines3b/probe`).
+TMA_SHARED_ALIGN = 128
+TMA_GLOBAL_ALIGN = 16
+#: What a box reads past the tensor's ends: zeros, or a NaN that the
+#: tensor core's FMA reads as zero (`CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE`,
+#: `..._NAN_REQUEST_ZERO_FMA`).
+TMA_FILLS = ('zero', 'nan')
+#: The elements a reduction of a box adds (PTX ISA, "cp.reduce.async.bulk.
+#: tensor": `.add` of the types of the map), of those a map spells.
+TMA_REDUCE_TYPES = (Datatype.F32, Datatype.I32, Datatype.U32)
+#: The elements a map spells, by the suffix of their name in the driver's
+#: `CUtensorMapDataType` (`CU_TENSOR_MAP_DATA_TYPE_FLOAT32`, ...), which
+#: `tensorforge::TensorMapElement` names for the launcher (`cuda_tma.h`).
+TMA_TYPES = {Datatype.F32: 'FLOAT32', Datatype.F64: 'FLOAT64',
+             Datatype.I32: 'INT32', Datatype.U32: 'UINT32',
+             Datatype.I64: 'INT64'}
+
+
+@dataclass(frozen=True)
+class TensorMap:
+    """A tensor map: what the tensor memory accelerator copies a box of a
+    tensor in global memory through (PTX ISA, "Tensor-map" and
+    "cp.async.bulk.tensor"; CUDA's `cuTensorMapEncodeTiled`).
+
+    128 bytes the driver encodes on the host and the kernel takes as a
+    parameter, in param space (`__grid_constant__`), by its address: so the
+    launcher encodes it from the pointer, the strides and the extents it is
+    handed (`kernel_params.TensorMapParam`, `tensorforge::tensorMapTiled`),
+    and a copy names it (`IRBuilder.copy_tma`).  This is its static half,
+    what the generator knows of it, under the parameter's `name`.
+
+    Outermost dimension first, as TensorForge's shapes are; PTX and the
+    driver count from the innermost one, and the lowering and the launcher
+    turn the order around.  `dims` are the tensor's extents, None where only
+    the launch knows one -- the batch's elements.  `strides` are the
+    elements from one index of a dimension to the next, for every dimension
+    but the innermost, whose elements are adjacent; None is dense, the
+    extents' products.  `box` is what a copy moves.  `swizzle`, 0 or 32, 64
+    or 128 bytes, is how the box lies in shared memory: NVIDIA's swizzle of
+    that span, which is TensorForge's `XorSwizzle` of `swizzle_form`, and
+    whose rows are the span apart (`pitch`).  `fill` is what a box reads past
+    the tensor's ends (`TMA_FILLS`).
+    """
+
+    name: str
+    elem: Any
+    dims: Tuple[Optional[int], ...]
+    box: Tuple[int, ...]
+    strides: Optional[Tuple[Optional[int], ...]] = None
+    swizzle: int = 0
+    fill: str = 'zero'
+
+    def __post_init__(self):
+        why = self._refusal()
+        if why is not None:
+            raise IRError(f'a tensor map {self.name!r}: {why}')
+
+    def _refusal(self) -> Optional[str]:
+        if not (isinstance(self.name, str) and self.name.isidentifier()):
+            return 'its name is no identifier'
+        if self.elem not in TMA_TYPES:
+            return f'of {self.elem}; a map spells {", ".join(map(str, TMA_TYPES))}'
+        dims, box = tuple(self.dims), tuple(self.box)
+        if len(dims) != len(box) or len(box) not in TMA_RANKS:
+            return (f'{len(dims)} extents and a box of {len(box)}; the '
+                    f'copies here are of {TMA_RANKS} dimensions')
+        for n in dims:
+            if n is not None and not (isinstance(n, int)
+                                      and 1 <= n <= TMA_DIM_LIMIT):
+                return f'an extent of {n!r}'
+        for n in box:
+            if not (isinstance(n, int) and 1 <= n <= TMA_BOX_LIMIT):
+                return f'a box extent of {n!r}, not 1 to {TMA_BOX_LIMIT}'
+        size = self.elem.size()
+        inner = box[-1] * size
+        if inner % 16:
+            return (f'a box row of {inner} bytes, which is no multiple of '
+                    f'16')
+        if self.swizzle not in SWIZZLE_BYTES:
+            return f'a swizzle of {self.swizzle!r}; there are {SWIZZLE_BYTES}'
+        if self.swizzle and inner > self.swizzle:
+            return (f'a box row of {inner} bytes, wider than its swizzle of '
+                    f'{self.swizzle}')
+        if self.fill not in TMA_FILLS:
+            return f'a fill of {self.fill!r}; there are {TMA_FILLS}'
+        if self.strides is None:
+            if any(n is None for n in dims[1:]):
+                return 'dense, with an inner extent only the launch knows'
+            return None
+        if len(self.strides) != len(dims) - 1:
+            return (f'{len(self.strides)} strides for {len(dims)} '
+                    f'dimensions; the innermost has none')
+        for n in self.strides:
+            if n is None:
+                continue
+            if not isinstance(n, int) or n < 1:
+                return f'a stride of {n!r}'
+            if (n * size) % TMA_GLOBAL_ALIGN or n * size >= TMA_STRIDE_LIMIT:
+                return (f'a stride of {n * size} bytes, no multiple of '
+                        f'{TMA_GLOBAL_ALIGN} below {TMA_STRIDE_LIMIT}')
+        return None
+
+    @property
+    def rank(self) -> int:
+        return len(self.box)
+
+    def element_strides(self) -> Tuple[Optional[int], ...]:
+        """Elements from one index of each dimension to the next, outermost
+        first, the innermost's 1; None where the launch binds one."""
+        if self.strides is not None:
+            return tuple(self.strides) + (1,)
+        out, step = [], 1
+        for n in reversed(self.dims):
+            out.append(step)
+            step = None if step is None or n is None else step * n
+        return tuple(reversed(out))
+
+    def box_bytes(self) -> int:
+        """The bytes of a box: what its copy announces on the mbarrier, the
+        elements past the tensor's ends included -- a box is filled whole."""
+        volume = 1
+        for n in self.box:
+            volume *= n
+        return volume * self.elem.size()
+
+    def rows(self) -> int:
+        """The rows of a box: every dimension but the innermost."""
+        rows = 1
+        for n in self.box[:-1]:
+            rows *= n
+        return rows
+
+    def pitch(self) -> int:
+        """Bytes from a row of a box to the next in shared memory: the
+        swizzle's span where there is one, a row narrower than it padded
+        to it (GB200's and the RTX 5070's reading); the row itself where
+        not."""
+        return self.swizzle or self.box[-1] * self.elem.size()
+
+    def shared_bytes(self) -> int:
+        """The bytes a box covers in shared memory, its padding included."""
+        return self.rows() * self.pitch()
+
+    def shared_index(self, *at: int) -> int:
+        """The element of the destination that element `at` of a box --
+        outermost first -- goes to, before the swizzle permutes it."""
+        row = 0
+        for n, i in zip(self.box[:-1], at[:-1]):
+            row = row * n + i
+        return row * (self.pitch() // self.elem.size()) + at[-1]
+
+    def __repr__(self):
+        dims = 'x'.join('?' if n is None else str(n) for n in self.dims)
+        box = 'x'.join(map(str, self.box))
+        swz = f', sw{self.swizzle}' if self.swizzle else ''
+        return f'tmap<{self.name}: {dims}x{self.elem}, box {box}{swz}>'
+
+
+def tma_refusal(copy: Stmt) -> Optional[str]:
+    """Why the tensor memory accelerator cannot copy `copy`, or None where
+    it can: a box into shared memory (`tma`), or a box of shared memory
+    added into the tensor (`tma_reduce`), the same rules for the side in
+    shared memory -- its source then -- and the coordinates on the side of
+    the tensor, its destination.  A reduction is issued by the thread its
+    predicate picks, as every thread would issue one otherwise, and adds
+    an element of `TMA_REDUCE_TYPES`.
+
+    The map (`map`) a `TensorMap`, a coordinate for each of its dimensions
+    (`copy_src_index`) -- the innermost one on `TMA_GLOBAL_ALIGN` bytes,
+    which the RTX 5070 refuses as an illegal instruction where it is not; a
+    value is the caller's to keep there -- and the mbarrier the copy
+    completes on (`object`);
+    the destination a buffer of shared memory of the map's element, laid
+    out as the map's swizzle lays the box out (`swizzle_form`, None without
+    one) and long enough for the box from where it starts; that start on
+    `TMA_SHARED_ALIGN` bytes where it is a number -- a value is the caller's
+    to keep there, as the buffer's placement is (`IRBuilder.copy_tma`) --
+    and the bytes the copy announces the box's.
+    """
+    tmap = copy.attr('map')
+    if not isinstance(tmap, TensorMap):
+        return 'it names no tensor map'
+    reduce = copy.attr('engine') == 'tma_reduce'
+    coords = copy.copy_dst_index if reduce else copy.copy_src_index
+    if len(coords) != tmap.rank:
+        return (f'{len(coords)} coordinates into a map of {tmap.rank} '
+                f'dimensions')
+    inner = coords[-1]
+    if (isinstance(inner, int) and not isinstance(inner, bool)
+            and (inner * tmap.elem.size()) % TMA_GLOBAL_ALIGN):
+        return (f'the box starts {inner * tmap.elem.size()} bytes into a row, '
+                f'off {TMA_GLOBAL_ALIGN}: an illegal instruction')
+    if reduce:
+        if copy.predicate is None:
+            return 'every thread would add the box: no thread issues it alone'
+        if tmap.elem not in TMA_REDUCE_TYPES:
+            return (f'a reduction of {tmap.elem}; it adds '
+                    f'{", ".join(map(str, TMA_REDUCE_TYPES))}')
+    elif copy.attr('object') is None:
+        return 'it names no mbarrier to complete on'
+    side = copy.copy_src if reduce else copy.copy_dst
+    t = getattr(side, 'type', None)
+    if not (isinstance(t, BufferType) and t.space == MemSpace.SHARED):
+        return (f'the box is {side!r} in shared memory, which is no buffer '
+                f'there')
+    elem = getattr(t.elem, 'base', t.elem)
+    if elem.size() != tmap.elem.size():
+        return f'a box of {tmap.elem} in a buffer of {elem}'
+    form = swizzle_form(tmap.swizzle, tmap.elem)
+    if t.swizzle != form:
+        return (f'the box lies as {form!r} in shared memory, and the buffer '
+                f'is laid out as {t.swizzle!r}')
+    index = copy.copy_src_index if reduce else copy.copy_dst_index
+    start = index[0] if len(index) == 1 else None
+    if len(index) != 1:
+        return 'the box in shared memory is not named by one index'
+    need = tmap.shared_bytes() // elem.size()
+    if isinstance(start, int) and not isinstance(start, bool):
+        if (start * elem.size()) % TMA_SHARED_ALIGN:
+            return (f'the box starts {start * elem.size()} bytes into the '
+                    f'buffer, off {TMA_SHARED_ALIGN}')
+        if start + need > t.volume:
+            return (f'the box covers {need} elements from {start}, past the '
+                    f'{t.volume} of the buffer')
+    elif need > t.volume:
+        return f'the box covers {need} elements, past the {t.volume} of the buffer'
+    if copy.attr('width') != tmap.box_bytes():
+        return (f'it announces {copy.attr("width")!r} bytes for a box of '
+                f'{tmap.box_bytes()}')
+    return None
+
+
+def tensor_map_refusal(addressing: Any, *, stride_bytes: Optional[int],
+                       alignment: int, row_bytes: int) -> Optional[str]:
+    """Why the batch of an operand addressed as `addressing` (an
+    `Addressing` or an `ElementAddressing`) cannot be read through a tensor
+    map, or None where it can.
+
+    A map states one stride from an element's data to the next, which the
+    launcher has to know when it encodes the map: the batch's own operand
+    (`NONE`, no stride at all), one at a stride from the last (`STRIDED`),
+    or one an index list names at a stride from the base (`INDEXED`, the
+    box's coordinate along the elements its entry).  An array of pointers
+    states none (`PTR_BASED`, `INDEXED_POINTER`): an element's data is
+    wherever its pointer says, and only the device reads the pointers.  A
+    stride bound at run time is not taken either, as the map could refuse
+    it once the generator has decided.  Every element's data starts on 16
+    bytes, which only the operand's promise says (`alignment`, `Tensor.
+    alignment`: the base and its offsets included), and so does each of
+    its rows (`row_bytes`) and the stride (`stride_bytes`, the stride in
+    bytes; None for the batch's operand).
+    """
+    kind = getattr(addressing, 'kind', addressing)
+    if kind in (Addressing.PTR_BASED, Addressing.INDEXED_POINTER):
+        return ("an element's data is reached through a pointer of its "
+                'own, at no stride from the last the launcher knows')
+    if kind not in (Addressing.NONE, Addressing.STRIDED, Addressing.INDEXED):
+        return f'an operand addressed as {kind} is no tensor in memory'
+    if getattr(addressing, 'stride', None) is RUNTIME:
+        return ('a stride bound at run time, which the map could refuse '
+                'after the kernel is generated')
+    if alignment % TMA_GLOBAL_ALIGN:
+        return (f'the operand promises {alignment} bytes of alignment; a '
+                f'map needs {TMA_GLOBAL_ALIGN}')
+    if row_bytes % TMA_GLOBAL_ALIGN:
+        return f'rows of {row_bytes} bytes, off {TMA_GLOBAL_ALIGN}'
+    if kind is not Addressing.NONE and (
+            stride_bytes is None or stride_bytes % TMA_GLOBAL_ALIGN
+            or stride_bytes >= TMA_STRIDE_LIMIT):
+        return (f'elements {stride_bytes} bytes apart, no multiple of '
+                f'{TMA_GLOBAL_ALIGN} below {TMA_STRIDE_LIMIT}')
+    return None
+
+
+def staging_engine(target: Any, addressing: Any, *,
+                   stride_bytes: Optional[int], alignment: int,
+                   row_bytes: int, window_bytes: int,
+                   contiguous: bool) -> Tuple[str, Tuple[str, ...]]:
+    """The engine that copies an element's window of an operand into shared
+    memory on `target`, and why each better one was not taken: a box through
+    a tensor map (`tma`) where the batch has one stride the launcher knows
+    (`tensor_map_refusal`); else the bulk copy of the window, one for each
+    element (`bulk`), where the window is one run of a multiple of 16 bytes
+    on 16 -- which an array of pointers does not keep from it; else the copy
+    of every lane's few bytes (`copy_engine`: `cp.async`, or AMD's)."""
+    why = []
+    if not (target is not None and target.tensor_maps()):
+        why.append('the target has no tensor maps')
+    else:
+        refusal = tensor_map_refusal(addressing, stride_bytes=stride_bytes,
+                                     alignment=alignment, row_bytes=row_bytes)
+        if refusal is None:
+            return 'tma', ()
+        why.append(refusal)
+    if not (target is not None and target.bulk_copy_path()):
+        why.append('the target has no bulk copy')
+    elif not contiguous:
+        why.append('the window is no one run of bytes')
+    elif window_bytes % 16 or alignment % 16:
+        why.append(f'a window of {window_bytes} bytes on {alignment}, off '
+                   f'16')
+    else:
+        return 'bulk', tuple(why)
+    return copy_engine(target), tuple(why)
 
 
 def element_of(type_: Any, base: Any) -> Any:
@@ -1119,9 +1491,74 @@ def _memory_fence(s: Stmt, env: Spelling) -> Lowered:
                   f'{env.family or "no target"}')
 
 
+def _register_fence(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.fence` (PTX ISA, "wgmma.fence", sm_90a), behind the operand
+    fence over the registers it orders: the threads' accesses of them ahead
+    of it, in the compiler's schedule and in the hardware, before any
+    product the warpgroup issues behind it reads or writes them."""
+    engine = s.attr('engine')
+    if engine != 'wgmma' or env.family != 'cuda':
+        raise IRError(f'a fence of the registers of {engine!r} on '
+                      f'{env.family or "no target"}: wgmma\'s, on CUDA')
+    _wgmma_available(env)
+    registers = [v for v in s.args if isinstance(v, Value)]
+    lines = (operand_fence(registers, env.name),) if registers else ()
+    return Lowered(lines + ('tensorforge::wgmmaFence();',))
+
+
+def _proxy_fence(s: Stmt, env: Spelling) -> Lowered:
+    """`fence.proxy.async.shared::cta` (PTX ISA, "membar/fence", ISA 8.0,
+    sm_90): what the threads of the block wrote to shared memory through the
+    generic proxy, visible to what reads it through the async proxy behind
+    it -- a matrix engine through a descriptor, a bulk or tensor copy --
+    and the other way round.  CUDA from sm_90 on."""
+    if env.family != 'cuda':
+        raise IRError(f'a fence of the async proxy on '
+                      f'{env.family or "no target"}: CUDA has one')
+    level = env.hw.sm_level() if env.hw is not None else None
+    if level is not None and level < 90:
+        raise IRError(f'a fence of the async proxy on {env.model}: sm_90 '
+                      f'and newer have one')
+    return Lowered(('tensorforge::fenceProxyAsync();',))
+
+
+def _check_fence(s: Stmt) -> List[str]:
+    """A fence of registers names the engine whose accesses it orders and
+    declares a read and a write of each register it names; no other fence
+    names an operand."""
+    kind = s.attr('kind')
+    registers = [v for v in s.args if isinstance(v, Value)]
+    if kind is FenceKind.THREAD_SYNC:
+        if s.attr('engine') != 'tcgen05' or s.attr('side') not in (
+                'before', 'after') or s.args:
+            return [f'{s.op}: a fence of the threads\' synchronization names '
+                    f'tcgen05, a side, before or after, and no operands']
+        return []
+    if kind is not FenceKind.REGISTERS:
+        return [f'{s.op}: a {getattr(kind, "value", kind)} fence names no '
+                f'operands'] if s.args else []
+    diag = []
+    if s.attr('engine') not in GROUP_ENGINES:
+        diag.append(f'{s.op}: a fence of the registers of '
+                    f'{s.attr("engine")!r}')
+    if len(registers) != len(s.args) or [a.base for a in s.accesses] != \
+            registers or any(a.space != MemSpace.REGISTER
+                             or a.kind != Effect.READ | Effect.WRITE
+                             for a in s.accesses):
+        diag.append(f'{s.op}: a fence of registers without a read and a '
+                    f'write of each')
+    return diag
+
+
 def _lower_fence(s: Stmt, env: Spelling) -> Lowered:
     kind = s.attr('kind')
     mask = s.attr('mask')
+    if kind is FenceKind.REGISTERS:
+        return _register_fence(s, env)
+    if kind is FenceKind.PROXY:
+        return _proxy_fence(s, env)
+    if kind is FenceKind.THREAD_SYNC:
+        return _thread_sync_fence(s, env)
     if env.family == 'esimd' and mask is not None and s.attr('group') is None:
         # vISA's fence bits say what it orders, whichever kind the fence
         # was asked for as (`Options.esimd_unroll_fence`).
@@ -1165,6 +1602,13 @@ def _lower_wait_counter_cuda(s: Stmt, env: Spelling) -> Lowered:
     """`cp.async.wait_group`: at most `count` commit groups in flight, as
     the copies' own wait spells it (`Lexic.wait_async`)."""
     counter, count = s.attr('counter'), s.attr('count')
+    if counter == 'wgmma':
+        return _wait_wgmma(s, env)
+    if counter == 'bulk_group':
+        # The thread's bulk groups, of which at most `count` may still be
+        # reading their boxes (`tma_reduce`; PTX ISA,
+        # "cp.async.bulk.wait_group": `.read`).
+        return Lowered((f'tensorforge::bulkWaitRead<{count}>();',))
     if counter != 'group' or env.lexic is None:
         raise IRError(f'no {counter} counter to wait on under CUDA')
     return Lowered((env.lexic.wait_async(count),))
@@ -1267,16 +1711,198 @@ def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
 # Matrix engines
 # --------------------------------------------------------------------------- #
 
+class Source(Enum):
+    """Where a matrix engine reads an operand from, or keeps D.
+
+    `REGISTER`: the fragment's registers, as every synchronous engine takes
+    them.  `SHARED`: shared memory, through one descriptor
+    (`MatrixDescType`, `Op.MATRIX_DESC`) -- wgmma's B always, its A where A
+    is not in registers -- whose read the matrix op declares, since the
+    descriptor reads nothing.  `TMEM`: NVIDIA's tensor memory (tcgen05), by
+    its address.
+    """
+
+    REGISTER = 'register'
+    SHARED = 'shared'
+    TMEM = 'tmem'
+
+
+#: The swizzles a matrix descriptor states, in bytes: the width of the rows
+#: of an atom of eight rows, whose 16-byte chunks are permuted by the row's
+#: place in the atom (`swizzled`) -- and 0 for none.
+SWIZZLE_BYTES = (0, 32, 64, 128)
+
+#: The formats of a matrix descriptor: wgmma's (sm_90a) and tcgen05's
+#: (sm_100a), which differ in a fixed field and in how a swizzle is
+#: numbered (`matrix_descriptor_bits`).
+DESC_FORMATS = ('wgmma', 'tcgen05')
+
+#: The swizzle field of each format, by the swizzle in bytes: wgmma's two
+#: bits from bit 62, tcgen05's three from bit 61 (PTX ISA, wgmma's "Matrix
+#: Descriptor Format" and tcgen05's "Shared Memory Descriptor").
+_SWIZZLE_FIELD = {'wgmma': ({0: 0, 128: 1, 64: 2, 32: 3}, 62),
+                  'tcgen05': ({0: 0, 128: 2, 64: 4, 32: 6}, 61)}
+
+
+@dataclass(frozen=True)
+class MatrixDescType:
+    """The type of a shared-memory matrix descriptor (`Op.MATRIX_DESC`):
+    the 64 bits NVIDIA's asynchronous matrix engines read an operand through,
+    where it starts and how it is laid out (PTX ISA, "Asynchronous
+    Warpgroup Level Matrix Shared Memory Layout" and its "Matrix Descriptor
+    Format"; tcgen05's "Shared Memory Descriptor").
+
+    The layout is a canonical one, K-major -- K contiguous in each row of M
+    or N -- and built of core matrices of eight rows of 16 bytes of K.
+    Without a swizzle a core matrix is 128 contiguous bytes, its rows 16
+    apart; `lbo`, the leading byte offset, is between the core matrices next
+    to each other along K, and `sbo`, the stride byte offset, between those
+    next to each other along M or N.  With a swizzle (`swizzle`: 32, 64 or
+    128 bytes) the eight rows of an atom are `swizzle` bytes each, K along
+    them, and their 16-byte chunks are permuted by the row's place in the
+    atom; `sbo` is between atoms along M or N, and `lbo` is not read for a
+    product whose K fits a row (16, its field 1, is what the prototypes
+    gave).  Which of the two offsets is which was settled on the hardware:
+    the swapped reading computed garbage on GH200 and on GB200
+    (`~/tf-probe/tcgen05`, `wg_selftest`, `gemm56`).
+
+    `elem` is the element the operand holds; `form` the engine whose format
+    the bits are in (`DESC_FORMATS`).  Like a resource, no part of what a
+    lane computes with: a 64-bit value every lane of the collective holds
+    alike.
+    """
+
+    elem: Any
+    swizzle: int = 0
+    lbo: int = 0
+    sbo: int = 0
+    form: str = 'wgmma'
+
+    def __post_init__(self):
+        if self.swizzle not in SWIZZLE_BYTES:
+            raise IRError(f'a matrix descriptor swizzles {self.swizzle!r} '
+                          f'bytes; there are {SWIZZLE_BYTES}')
+        if self.form not in DESC_FORMATS:
+            raise IRError(f'a matrix descriptor of the format {self.form!r}; '
+                          f'there are {DESC_FORMATS}')
+        for name in ('lbo', 'sbo'):
+            value = getattr(self, name)
+            if (not isinstance(value, int) or value < 0 or value % 16
+                    or value >> 4 >= 1 << 14):
+                raise IRError(f'a matrix descriptor with {name} {value!r}: a '
+                              f'multiple of 16 bytes below {16 << 14}')
+
+    def __repr__(self):
+        swz = f', sw{self.swizzle}' if self.swizzle else ''
+        return (f'mdesc<{self.elem}, {self.form}{swz}, lbo {self.lbo}, '
+                f'sbo {self.sbo}>')
+
+
+def matrix_descriptor_bits(desc: MatrixDescType) -> int:
+    """Every bit of a descriptor of `desc` but the start address, which the
+    device fills in from the operand's place (`tensorforge::
+    matrixDescriptor`, bits 0 to 13, the address in 16-byte units).
+
+    The leading and the stride byte offset in 16-byte units from bit 16 and
+    from bit 32, and the swizzle at the top (`_SWIZZLE_FIELD`); tcgen05's
+    format besides holds the constant 0b001 from bit 46.  The base offset,
+    bits 49 to 51, is zero: a swizzled operand starts on the alignment of
+    its atom (`swizzle_alignment`), where the pattern starts."""
+    field, shift = _SWIZZLE_FIELD[desc.form]
+    bits = (((desc.lbo >> 4) & 0x3FFF) << 16
+            | ((desc.sbo >> 4) & 0x3FFF) << 32
+            | field[desc.swizzle] << shift)
+    if desc.form == 'tcgen05':
+        bits |= 1 << 46
+    return bits
+
+
+def swizzle_alignment(swizzle: int) -> int:
+    """Bytes a swizzled operand starts on: the eight rows of its atom, over
+    which the permutation repeats -- 256, 512 and 1024 for 32, 64 and 128
+    bytes; 16 without a swizzle, the unit of the start address."""
+    return 8 * swizzle if swizzle else 16
+
+
+def swizzled(address: int, swizzle: int) -> int:
+    """`address` as a swizzle of `swizzle` bytes permutes it: the 16-byte
+    chunk -- bits 4 on -- XORed with the row of the atom -- bits 7 on --
+    one, two or three bits of each for 32, 64 and 128 bytes.  On the address
+    as the hardware forms it, so an operand starts on `swizzle_alignment`.
+    The same for a matrix engine reading through a descriptor and for a
+    tensor copy writing the tile."""
+    if not swizzle:
+        return address
+    bits = {32: 1, 64: 2, 128: 3}[swizzle]
+    return address ^ (((address >> 7) & ((1 << bits) - 1)) << 4)
+
+
+def swizzle_form(swizzle: int, elem: Any) -> Optional[XorSwizzle]:
+    """TensorForge's swizzle (`XorSwizzle`) that is NVIDIA's of `swizzle`
+    bytes over elements of `elem`, None for none: the 16-byte chunk a
+    granule, a row eight of them -- the 128-byte line -- and the first two,
+    four or eight permuted, by one, two or three bits of the line's number
+    (`swizzled`).  So a buffer of that swizzle is addressed, element by
+    element, where the tensor memory accelerator writes a box of that
+    swizzle and wgmma and tcgen05 read an operand of it -- placed on the
+    period (`swizzle_alignment`), since the hardware takes the bits from the
+    shared address itself (GB200's and the RTX 5070's reading).  At 128
+    bytes it is the swizzle TensorForge already had, `XorSwizzle(8, 16 /
+    size)`."""
+    if not swizzle:
+        return None
+    if swizzle not in SWIZZLE_BYTES:
+        raise IRError(f'a swizzle of {swizzle!r} bytes; there are '
+                      f'{SWIZZLE_BYTES}')
+    size = elem.size()
+    if size > 16 or 16 % size:
+        raise IRError(f'a swizzle of 16-byte chunks over elements of {size}')
+    return XorSwizzle(swizzle // 16, 16 // size, line=8)
+
+
+def swizzle_bytes(form: Optional[XorSwizzle], elem: Any) -> Optional[int]:
+    """The NVIDIA swizzle a buffer laid out as `form` is, in bytes -- 0 for
+    none -- or None where it is a permutation of TensorForge's own that no
+    copy or matrix engine of NVIDIA's reads (`swizzle_form`)."""
+    if form is None:
+        return 0
+    for swizzle in SWIZZLE_BYTES[1:]:
+        if form == swizzle_form(swizzle, elem):
+            return swizzle
+    return None
+
+
+def descriptor_offset(desc: MatrixDescType, row: int, k: int) -> int:
+    """Bytes past the start of an operand laid out as `desc` states where
+    its element (`row`, `k`) is -- `row` along M or N, `k` along K -- before
+    the swizzle, which the hardware applies to the address (`swizzled`)."""
+    kb = k * desc.elem.size()
+    if not desc.swizzle:
+        return ((row // 8) * desc.sbo + (kb // 16) * desc.lbo
+                + (row % 8) * 16 + kb % 16)
+    return (row // 8) * desc.sbo + (row % 8) * desc.swizzle + kb
+
+
 def asm_text(template: str, operands: Sequence[Tuple[str, Any]],
-             name: Callable) -> str:
+             name: Callable, volatile: bool = False,
+             clobbers: Sequence[str] = ()) -> str:
     """Inline assembly: `template`, then the outputs and the inputs of
     `operands` -- `(constraint, value)`, outputs first, which is how the
-    assembler numbers them -- each value spelled by `name`."""
+    assembler numbers them -- each value spelled by `name`.
+
+    `volatile` for an instruction whose order among the others of its kind
+    the compiler has to keep, and which it must neither fold nor drop: an
+    asynchronous one, whose effect the operands do not state.  `clobbers`,
+    where there are any, follow the inputs (`"memory"`)."""
     outs = ', '.join(f'"{c}"({name(v)})' for c, v in operands
                      if c.startswith(('=', '+')))
     ins = ', '.join(f'"{c}"({name(v)})' for c, v in operands
                     if not c.startswith(('=', '+')))
-    return f'asm({template}\n: {outs}\n: {ins}\n);'
+    head = 'asm volatile(' if volatile else 'asm('
+    if clobbers:
+        listed = ', '.join(f'"{c}"' for c in clobbers)
+        return f'{head}{template}\n: {outs}\n: {ins}\n: {listed}\n);'
+    return f'{head}{template}\n: {outs}\n: {ins}\n);'
 
 
 def fragments(s: Stmt) -> Tuple[Tuple[Any, ...], Tuple[Any, ...],
@@ -1350,6 +1976,12 @@ class MatrixEngine:
     told the flops of).  ``pipe`` is the category `analysis.pipeline`
     counts the issue under, a function of the statement where the price is
     one of the shape.  ``spell`` writes the statement.
+
+    ``completes`` is how the completion of a product is observed: on issue
+    for the synchronous engines, by group for wgmma -- closed by
+    `COMMIT_GROUP` and waited for by `WAIT_COUNTER` on the engine's counter
+    (`GROUP_ENGINES`).  ``sources`` are where it may take A, B and C from,
+    each a tuple of `Source`s.
     """
 
     name: str
@@ -1359,6 +1991,9 @@ class MatrixEngine:
     spell: Lowering
     doc: str = ''
     hazards: Tuple[Hazard, ...] = ()
+    completes: Completion = Completion.SYNC
+    sources: Tuple[Tuple['Source', ...], ...] = (
+        (Source.REGISTER,), (Source.REGISTER,), (Source.REGISTER,))
 
 
 def _matrix(s: Stmt) -> str:
@@ -1401,6 +2036,316 @@ def _lower_mfma(s: Stmt, env: Spelling) -> Lowered:
 
 def _other(s: Stmt) -> str:
     return 'other'
+
+
+def sources_of(s: Stmt) -> Tuple[Source, Source, Source]:
+    """Where a `MATRIX_MAC` takes A, B and C from: its `sources`, or the
+    registers where it states none -- every synchronous engine's."""
+    return s.attr('sources') or (Source.REGISTER,) * 3
+
+
+#: The PTX type of a `wgmma` operand, by what it holds.
+_WGMMA_TYPES = {Datatype.TF32: 'tf32', Datatype.F32: 'f32'}
+
+#: The macro nvcc defines compiling for sm_90a, and only then: not for the
+#: `compute_90` PTX that `-arch=sm_90a` builds besides, where ptxas refuses
+#: every wgmma instruction (CUDA 13.4).  The product is written inside it,
+#: and the fence, the commit and the wait trap outside it (`cuda.h`), so a
+#: build of either kind compiles and none runs a kernel without them.
+WGMMA_FEATURE = '__CUDA_ARCH_FEAT_SM90_ALL'
+
+#: The N a TF32 `wgmma` takes: 8 to 256 in steps of 8 (PTX ISA,
+#: "wgmma.mma_async", the shapes of `.tf32`).
+WGMMA_N = tuple(range(8, 257, 8))
+
+
+def wgmma_name(shape: Tuple[int, int, int],
+               types: Tuple[Any, Any, Any, Any]) -> str:
+    """The `wgmma.mma_async` instruction of `shape` (m, n, k) over `types`
+    (A, B, C, D): `.dtype.atype.btype` behind the shape (PTX ISA,
+    "wgmma.mma_async", ISA 8.0, sm_90a)."""
+    m, n, k = shape
+    a, b, _, d = types
+    return (f'wgmma.mma_async.sync.aligned.m{m}n{n}k{k}.'
+            f'{_WGMMA_TYPES[d]}.{_WGMMA_TYPES[a]}.{_WGMMA_TYPES[b]}')
+
+
+def wgmma_refusal(s: Stmt) -> Optional[str]:
+    """Why `s` is no `wgmma` this lowering writes, or None.
+
+    TF32 operands into an FP32 accumulator, which is what the F32 paths
+    multiply (3xTF32), at m64nNk8: N a multiple of 8 up to 256.  D is N / 2
+    registers a lane -- the warpgroup's 128 lanes hold the 64 x N tile --
+    and A, where it is in registers, four (64 x 8 over 128 lanes).  A
+    descriptor is one operand.  The one scalar operand is `scale-d`: 0
+    writes D = A * B, 1 adds to what D holds; a value of either, or the
+    literal.  TF32 is K-major in both operands, so there is no transpose to
+    state, and the immediate scales of A and B are 1."""
+    shape, types = s.attr('shape'), s.attr('types')
+    if tuple(types or ()) != (Datatype.TF32, Datatype.TF32, Datatype.F32,
+                              Datatype.F32):
+        return (f'a wgmma over {types!r}: TF32 operands into an FP32 '
+                f'accumulator are written here')
+    if not (isinstance(shape, tuple) and len(shape) == 3 and shape[0] == 64
+            and shape[1] in WGMMA_N and shape[2] == 8):
+        return f'a wgmma of shape {shape!r}: m64nNk8, N in 8, 16, ..., 256'
+    a, b, c = fragments(s)
+    src_a, src_b, src_c = sources_of(s)
+    if src_b is not Source.SHARED or src_c is not Source.REGISTER:
+        return 'a wgmma takes B from shared memory and keeps D in registers'
+    if len(c) != shape[1] // 2:
+        return (f'{len(c)} registers of D for N = {shape[1]}: a lane holds '
+                f'{shape[1] // 2}')
+    if src_a is Source.REGISTER and len(a) != 4:
+        return f'{len(a)} registers of A, where a lane holds four'
+    for name, frag, src in (('A', a, src_a), ('B', b, src_b)):
+        if src is Source.SHARED and not all(
+                isinstance(v, Value) and isinstance(v.type, MatrixDescType)
+                and v.type.form == 'wgmma' for v in frag):
+            return f"{name} through no descriptor of wgmma's format"
+    scalars = s.args[len(a) + len(b) + len(c):]
+    if s.attr('scalars') != ('scale_d',) or len(scalars) != 1 or (
+            not isinstance(scalars[0], Value) and scalars[0] not in (0, 1)):
+        return (f'scale-d is one operand, 0 or 1 or a value of either, not '
+                f'{scalars!r}')
+    # The hardware takes the descriptors and scale-d from uniform registers
+    # (`gdesc[UR]`, `UPT` in the SASS of sm_90a): one value for the whole
+    # warpgroup, which a value of each lane is not.
+    shared = [v for frag, src in zip((a, b), (src_a, src_b))
+              if src is Source.SHARED for v in frag]
+    for v in shared + list(scalars):
+        if isinstance(v, Value) and v.uniformity <= Uniformity.LANE:
+            return (f'{v!r} differs between the lanes, and the warpgroup '
+                    f'takes one of it')
+    # And D is the lane's own: every lane holds other elements of it.  An
+    # accumulator declared the same in every lane is one a pass may take
+    # for that, as one of `mma.sync`'s once was (`nvidia.matmul`).
+    for v in c:
+        if not isinstance(v, Value) or v.uniformity > Uniformity.LANE:
+            return (f'{v!r} is a register of D, which differs between the '
+                    f'lanes, and is declared as one they agree on')
+    return None
+
+
+def _wgmma_available(env: Spelling) -> None:
+    """Refuse a target that has no wgmma: on CUDA, sm_90a alone
+    (`Target.wgmma`).  Without a target -- an IR-level test -- it is
+    written as it would be for one."""
+    if env.family not in ('cuda', ''):
+        raise IRError(f'wgmma has no spelling on {env.family}')
+    has = getattr(env.target, 'wgmma', None)
+    if callable(has) and not has():
+        raise IRError(f'wgmma on {env.model or "this target"}: sm_90a is the '
+                      f'target that has it')
+
+
+def _lower_wgmma(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.mma_async` as inline PTX (PTX ISA, "wgmma.mma_async", ISA
+    8.0, sm_90a): D read and written in place under `"+f"`, at `%0` on; A
+    through its descriptor (`"l"`) or in four 32-bit registers (`"r"`); B
+    through its descriptor; `scale-d` the literal where it is one, and
+    where it is a value a predicate set from it.
+
+    Volatile: the instruction reads shared memory through its descriptors,
+    which no operand states, and it is one of a sequence -- the fence ahead
+    of it, the commit and the wait behind -- whose order the compiler has
+    to keep; an `asm` that is not volatile may be moved across the others,
+    or two identical ones folded into one (as nvcc does with `mma.sync`).
+    Inside the guard of the target that has it (`WGMMA_FEATURE`)."""
+    if not s.attr('in_place'):
+        raise IRError('wgmma accumulates into its D registers: a MATRIX_MAC '
+                      'of it is in place')
+    _wgmma_available(env)
+    why = wgmma_refusal(s)
+    if why is not None:
+        raise IRError(why)
+    a, b, c = fragments(s)
+    scale = s.args[len(a) + len(b) + len(c)]
+    shared_a = sources_of(s)[0] is Source.SHARED
+    operands = ([('+f', v) for v in c]
+                + [('l' if shared_a else 'r', v) for v in a]
+                + [('l', v) for v in b])
+
+    def group(count: int, first: int) -> str:
+        return '{' + ', '.join(f'%{i + first}' for i in range(count)) + '}'
+
+    d = group(len(c), 0)
+    a_text = f'%{len(c)}' if shared_a else group(len(a), len(c))
+    b_text = f'%{len(c) + len(a)}'
+    name = wgmma_name(s.attr('shape'), s.attr('types'))
+    flag = scale if isinstance(scale, Value) else None
+
+    def spell(v):
+        # "r" takes 32 bits, and a flag is one byte: widened, the asm
+        # operand is the register `setp` tests (nvcc refuses the byte).
+        text = env.name(v)
+        return (f'static_cast<uint32_t>({text})'
+                if flag is not None and v is flag else text)
+
+    if flag is not None:
+        operands.append(('r', scale))
+        template = (f'"{{\\n.reg .pred p;\\nsetp.ne.b32 p, '
+                    f'%{len(operands) - 1}, 0;\\n"\n'
+                    f'"{name} "\n'
+                    f'"{d}, {a_text}, {b_text}, p, 1, 1;\\n}}"')
+    else:
+        template = (f'"{name} "\n'
+                    f'"{d}, {a_text}, {b_text}, {int(scale)}, 1, 1;"')
+    return Lowered((f'#if defined({WGMMA_FEATURE})',
+                    asm_text(template, operands, spell, volatile=True),
+                    '#endif'))
+
+
+#: What the source of a product guards a tcgen05 instruction with: defined
+#: by `cuda.h` where nvcc compiles for a target that has them (sm_100a,
+#: sm_103a, and their families), and nowhere else -- not for the
+#: `compute_100` PTX that `-arch=sm_100a` builds besides.
+TCGEN05_FEATURE = 'TENSORFORGE_TCGEN05'
+
+#: The N a TF32 tcgen05.mma takes at M = 128 on one CTA: 16 to 256 in
+#: steps of 16 (PTX ISA, "tcgen05.mma", the valid shapes of `.kind::tf32`).
+TCGEN05_N = tuple(range(16, 257, 16))
+
+#: The columns of tensor memory a block may allocate: a power of two from
+#: 32 to 512 (PTX ISA, "tcgen05.alloc").
+TMEM_COLUMNS = (32, 64, 128, 256, 512)
+
+#: The lanes of tensor memory: one a row of an M = 128 product's D.
+TMEM_LANES = 128
+
+
+def tcgen05_idesc(shape: Tuple[int, int, int]) -> int:
+    """The instruction descriptor of a `kind::tf32` tcgen05.mma of `shape`
+    (PTX ISA, "tcgen05 Instruction descriptor"): D in FP32 (bits 4-5: 1), A
+    and B TF32 (bits 7-9 and 10-12: 2), both K-major (bits 15 and 16: 0),
+    N >> 3 from bit 17 and M >> 4 from bit 24.  GB200's reading
+    (`~/tf-probe/tcgen05/gemm56.cu`, `volume8.cu`)."""
+    m, n, _ = shape
+    return (1 << 4) | (2 << 7) | (2 << 10) | ((n >> 3) << 17) | ((m >> 4) << 24)
+
+
+def _is_tmem(v: Any) -> bool:
+    return (isinstance(v, Value) and isinstance(v.type, BufferType)
+            and v.type.space is MemSpace.TMEM)
+
+
+def tcgen05_refusal(s: Stmt) -> Optional[str]:
+    """Why `s` is no tcgen05.mma this lowering writes, or None.
+
+    TF32 operands into an FP32 accumulator at M = 128 on one CTA, N a
+    multiple of 16 up to 256, K = 8 (PTX ISA, "tcgen05.mma"): D the columns
+    `d_column` on of a tensor memory buffer, one row a lane; A one
+    descriptor of tcgen05's format, or from tensor memory (`a_column` on,
+    eight columns); B one descriptor.  The scalar operands are
+    `enable_input_d`, 0 writes D = A * B, 1 adds to D -- a value of
+    either, or the literal -- and `issue`, the value that picks the one
+    thread that issues it, which is the thread that commits it too
+    (`commit_group`): a product commits only what its own thread issued."""
+    shape, types = s.attr('shape'), s.attr('types')
+    if tuple(types or ()) != (Datatype.TF32, Datatype.TF32, Datatype.F32,
+                              Datatype.F32):
+        return (f'a tcgen05.mma over {types!r}: TF32 operands into an FP32 '
+                f'accumulator are written here')
+    if not (isinstance(shape, tuple) and len(shape) == 3 and shape[0] == 128
+            and shape[1] in TCGEN05_N and shape[2] == 8):
+        return (f'a tcgen05.mma of shape {shape!r}: m128nNk8, N in 16, 32, '
+                f'..., 256')
+    if s.attr('fragments') != (1, 1, 1):
+        return 'a tcgen05.mma takes one operand each of A, B and D'
+    (a,), (b,), (c,) = fragments(s)
+    src_a, src_b, src_c = sources_of(s)
+    if src_b is not Source.SHARED or src_c is not Source.TMEM:
+        return ('a tcgen05.mma takes B from shared memory and keeps D in '
+                'tensor memory')
+    for name, v, src in (('A', a, src_a), ('B', b, src_b)):
+        if src is Source.SHARED and not (
+                isinstance(v, Value) and isinstance(v.type, MatrixDescType)
+                and v.type.form == 'tcgen05'):
+            return f'{name} through {v!r}, no descriptor of tcgen05\'s format'
+    columns = {'d_column': (c, shape[1])}
+    if src_a is Source.TMEM:
+        columns['a_column'] = (a, shape[2])
+    for key, (buffer, width) in columns.items():
+        at = s.attr(key)
+        if not _is_tmem(buffer):
+            return f'{buffer!r} is no buffer of tensor memory'
+        if not isinstance(at, int) or at < 0 \
+                or at + width > buffer.type.shape[1]:
+            return (f'{key} {at!r} and {width} columns past the '
+                    f'{buffer.type.shape[1]} of {buffer}')
+    scalars = s.args[3:]
+    if s.attr('scalars') != ('enable_input_d', 'issue') or len(scalars) != 2:
+        return 'the scalars of a tcgen05.mma are enable_input_d and issue'
+    enable, issue = scalars
+    if not isinstance(enable, Value) and enable not in (0, 1):
+        return f'enable-input-d is 0 or 1 or a value of either, not {enable!r}'
+    if not isinstance(issue, Value):
+        return (f'issue is the value that picks the thread, not {issue!r}: '
+                f'every thread would issue it')
+    return None
+
+
+def _tcgen05_available(env: Spelling) -> None:
+    """Refuse a target that has no tcgen05: on CUDA, sm_100a
+    (`Target.tcgen05`).  Without a target it is written as for one."""
+    if env.family not in ('cuda', ''):
+        raise IRError(f'tcgen05 has no spelling on {env.family}')
+    has = getattr(env.target, 'tcgen05', None)
+    if callable(has) and not has():
+        raise IRError(f'tcgen05 on {env.model or "this target"}: sm_100a is '
+                      f'the target that has it')
+
+
+def _guarded(feature: str, lines: Sequence[str]) -> Tuple[str, ...]:
+    return (f'#if defined({feature})', *lines, '#endif')
+
+
+def _lower_tcgen05(s: Stmt, env: Spelling) -> Lowered:
+    """`tcgen05.mma.cta_group::1.kind::tf32` as inline PTX (PTX ISA,
+    "tcgen05.mma", ISA 8.6, sm_100a), issued by the one thread `issue`
+    picks, under a predicate inside the asm: D's address in tensor memory,
+    A through its descriptor (`"l"`) or at its address in tensor memory
+    (`[%1]`), B through its descriptor, the instruction descriptor an
+    immediate (`tcgen05_idesc`), `enable-input-d` the literal or a
+    predicate set from a value.  The flags are widened to the 32 bits "r"
+    takes.  Volatile and clobbering memory, as every tcgen05 instruction
+    here: what it reads and writes, no operand states.  Inside the guard of
+    the targets that have it (`TCGEN05_FEATURE`)."""
+    if not s.attr('in_place'):
+        raise IRError('tcgen05.mma accumulates into tensor memory: a '
+                      'MATRIX_MAC of it is in place')
+    _tcgen05_available(env)
+    why = tcgen05_refusal(s)
+    if why is not None:
+        raise IRError(why)
+    (a,), (b,), (c,) = fragments(s)
+    enable, issue = s.args[3:]
+    tmem_a = sources_of(s)[0] is Source.TMEM
+
+    def at(buffer, key):
+        column = s.attr(key)
+        return f'{env.name(buffer)} + {column}u' if column else env.name(buffer)
+
+    def flag(v):
+        return f'static_cast<uint32_t>({env.name(v)})'
+
+    operands = [('r', at(c, 'd_column')),
+                ('r', at(a, 'a_column')) if tmem_a else ('l', env.name(a)),
+                ('l', env.name(b)),
+                ('n', f'{tcgen05_idesc(s.attr("shape")):#010x}u'),
+                ('r', flag(issue))]
+    if isinstance(enable, Value):
+        operands.append(('r', flag(enable)))
+        head, predicate = 'setp.ne.b32 p, %5, 0;\\n', 'p'
+    else:
+        head, predicate = '', str(int(enable))
+    a_text = '[%1]' if tmem_a else '%1'
+    template = (f'"{{\\n.reg .pred e, p;\\nsetp.ne.b32 e, %4, 0;\\n{head}"\n'
+                f'"@e tcgen05.mma.cta_group::1.kind::tf32 [%0], {a_text}, %2, '
+                f'%3, {predicate};\\n}}"')
+    return Lowered(_guarded(TCGEN05_FEATURE, (asm_text(
+        template, operands, lambda x: x, volatile=True,
+        clobbers=('memory',)),)))
 
 
 #: The function the SPMD lowering's DPAS is written as
@@ -1463,7 +2408,39 @@ MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
                  "Intel's DPAS under the explicit vector (`xmx::dpas`): the "
                  'work-item issues it alone, the sub-group being its vector '
                  '(`primitives.intel`)'),
+    MatrixEngine('wgmma', Participants.WARPGROUP, True, _matrix,
+                 _lower_wgmma,
+                 "NVIDIA's asynchronous product of a warpgroup (sm_90a): A "
+                 'and B in shared memory through descriptors, A also in '
+                 'registers, D in registers, written in place; complete '
+                 'once a wait on its counter retires the group it was '
+                 'committed in (`COMMIT_GROUP`, `matrix_wait`)',
+                 completes=Completion.GROUP,
+                 sources=((Source.SHARED, Source.REGISTER), (Source.SHARED,),
+                          (Source.REGISTER,))),
+    # One thread issues it, the one `issue` picks: no collective executes
+    # it together.
+    MatrixEngine('tcgen05', None, True, _matrix, _lower_tcgen05,
+                 "NVIDIA's asynchronous product of the 5th generation tensor "
+                 'core (sm_100a): A and B in shared memory through '
+                 'descriptors, A also in tensor memory, D in tensor memory; '
+                 'issued by one thread, complete once the mbarrier its '
+                 'thread committed it to has moved on (`COMMIT_GROUP` onto '
+                 'an object, `WAIT_PHASE`)',
+                 completes=Completion.BARRIER,
+                 sources=((Source.SHARED, Source.TMEM), (Source.SHARED,),
+                          (Source.TMEM,))),
 )}
+
+#: The engines whose products complete by group, and the counter a wait for
+#: their groups is written on (`matrix_wait`): wgmma's own, which counts
+#: nothing else.
+GROUP_ENGINES = {'wgmma': 'wgmma'}
+
+#: The engines that commit their products (`COMMIT_GROUP`), by how a
+#: committed group completes: on the engine's counter, or onto the mbarrier
+#: the commit names, which a wait for its phase retires (`WAIT_PHASE`).
+COMMIT_ENGINES = {'wgmma': Completion.GROUP, 'tcgen05': Completion.BARRIER}
 
 
 def matrix_engine(s: Stmt) -> MatrixEngine:
@@ -1486,31 +2463,277 @@ def _matrix_pipe(s: Stmt) -> str:
 def _check_matrix_mac(s: Stmt) -> List[str]:
     """A `MATRIX_MAC` takes the registers its fragments count, and has a
     result unless it writes C in place -- which it then declares as a read
-    and a write of each of C's registers."""
+    and a write of each of C's registers.
+
+    An operand in shared memory is one descriptor (`MatrixDescType`), from
+    a source its engine takes it from, and the op declares a read of shared
+    memory for it, behind C's registers; an operand in registers is no
+    descriptor.  The operands behind the fragments are the ones `scalars`
+    names.  An engine that completes after the issue writes D in place."""
     diag = []
-    if s.attr('engine') not in MATRIX_ENGINES:
+    engine = MATRIX_ENGINES.get(s.attr('engine'))
+    if engine is None:
         diag.append(f'{s.op}: engine {s.attr("engine")!r} is none of '
                     f'{", ".join(sorted(MATRIX_ENGINES))}')
     counts = s.attr('fragments')
+    scalars = s.attr('scalars') or ()
     if (not isinstance(counts, tuple) or len(counts) != 3
-            or sum(counts) != len(s.args)):
+            or sum(counts) + len(scalars) != len(s.args)):
         diag.append(f'{s.op}: {len(s.args)} operands for the fragments '
-                    f'{counts!r}')
+                    f'{counts!r}' + (f' and {scalars!r}' if scalars else ''))
         return diag
+    shared = 0
+    for i, (name, frag, source) in enumerate(zip('ABC', fragments(s),
+                                                 sources_of(s))):
+        if engine is not None and source not in engine.sources[i]:
+            diag.append(f'{s.op}: {engine.name} takes no {name} from '
+                        f'{getattr(source, "value", source)}')
+        descs = [v for v in frag if isinstance(v, Value)
+                 and isinstance(v.type, MatrixDescType)]
+        if source is Source.SHARED:
+            shared += 1
+            if len(frag) != 1 or len(descs) != 1:
+                diag.append(f'{s.op}: {name} in shared memory is one '
+                            f'descriptor, not {len(frag)} operand(s)')
+        elif descs:
+            diag.append(f'{s.op}: {name} in {source.value} through a '
+                        f'descriptor')
     if s.attr('in_place'):
         if s.target:
             diag.append(f'{s.op}: in place, and a result besides')
         c = fragments(s)[2]
+        src_a, src_b, src_c = sources_of(s)
         want = [v for v in c if isinstance(v, Value)]
-        if [a.base for a in s.accesses] != want or any(
-                a.space != MemSpace.REGISTER
+        space_c = (MemSpace.TMEM if src_c is Source.TMEM
+                   else MemSpace.REGISTER)
+        regs = s.accesses[:len(want)]
+        if [a.base for a in regs] != want or any(
+                a.space != space_c
                 or a.kind != Effect.READ | Effect.WRITE
-                for a in s.accesses):
+                for a in regs):
             diag.append(f'{s.op}: in place without a read and a write of '
                         f'each register of C')
+        reads = s.accesses[len(want):]
+        spaces = [MemSpace.SHARED if src is Source.SHARED else MemSpace.TMEM
+                  for src in (src_a, src_b) if src is not Source.REGISTER]
+        if [a.space for a in reads] != spaces or any(
+                a.kind != Effect.READ for a in reads):
+            diag.append(f'{s.op}: {shared} operand(s) in shared memory and '
+                        f'{len(reads)} other access(es) declared, where each '
+                        f'is a read of the memory an operand is in')
+    elif engine is not None and engine.completes is not Completion.SYNC:
+        diag.append(f'{s.op}: {engine.name} completes behind its issue, and '
+                    f'writes D in place')
     elif len(s.target) != 1:
         diag.append(f'{s.op}: {len(s.target)} results, where D is one')
     return diag
+
+
+def _lower_commit_group_cuda(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.commit_group`: the products this warpgroup issued since its
+    last commit, one group (PTX ISA, "wgmma.commit_group", sm_90a).
+
+    tcgen05's: the products the thread `issue` picks issued, tracked by the
+    mbarrier the object is, which they arrive at once complete
+    (`tcgen05.commit.cta_group::1.mbarrier::arrive::one`, PTX ISA,
+    "tcgen05.commit", sm_100a) -- written by every thread, which notes on
+    its cursor that a phase is pending, and issued by that one
+    (`tensorforge::tcgen05Commit`)."""
+    engine = s.attr('engine')
+    if engine == 'wgmma':
+        _wgmma_available(env)
+        return Lowered(('tensorforge::wgmmaCommit();',))
+    if engine == 'tcgen05':
+        _tcgen05_available(env)
+        _spelled_mbarrier(s, env, object_value(s))
+        return Lowered((f'tensorforge::tcgen05Commit('
+                        f'{env.name(object_value(s))}, '
+                        f'{env.name(s.args[0])});',))
+    raise IRError(f'no group of {engine!r} to commit under CUDA')
+
+
+def _lower_commit_group_other(s: Stmt, env: Spelling) -> Lowered:
+    raise IRError(f'no group of {s.attr("engine")!r} to commit on '
+                  f'{env.family or "no target"}')
+
+
+def _check_commit_group(s: Stmt) -> List[str]:
+    """A commit names an engine whose products complete by group: on its
+    counter, with no object and no operand (wgmma), or onto an mbarrier,
+    the object, with the value picking the thread that issued them
+    (tcgen05)."""
+    engine = s.attr('engine')
+    if engine not in COMMIT_ENGINES:
+        return [f'{s.op}: {engine!r} commits no groups; '
+                f'{", ".join(sorted(COMMIT_ENGINES))} do']
+    obj = object_of(s)
+    if COMMIT_ENGINES[engine] is Completion.BARRIER:
+        if obj is None or obj.kind is not SyncKind.MBARRIER \
+                or object_value(s) is None:
+            return [f'{s.op}: {engine} commits onto an mbarrier the body '
+                    f'set up, not {obj!r}']
+        if len(s.args) != 1 or not isinstance(s.args[0], Value):
+            return [f'{s.op}: {engine} commits what the thread one value '
+                    f'picks issued']
+    elif obj is not None or s.args:
+        return [f'{s.op}: {engine} commits onto its counter, with no object '
+                f'and no operand']
+    return []
+
+
+#: The constraint an operand fence names a register with, by its element:
+#: a TF32 fragment is a 32-bit integer register (`tensorforge::tf32`).
+_REGISTER_CONSTRAINTS = {Datatype.F32: 'f', Datatype.F64: 'd',
+                         Datatype.TF32: 'r', Datatype.I32: 'r'}
+
+
+def operand_fence(registers: Sequence[Value], name: Callable) -> str:
+    """An empty `asm volatile` that reads and writes `registers`, so that
+    the compiler keeps every other access of them on the side of it where
+    it stands.  The fence, the commit and the wait of an asynchronous
+    engine are volatile statements, which the compiler keeps in order, but
+    they name no register: without this a read of D could be scheduled
+    ahead of the wait that makes it valid, or a write of D behind the fence
+    that orders it before the product."""
+    operands = []
+    for v in registers:
+        base = getattr(getattr(v, 'type', None), 'base', None)
+        letter = _REGISTER_CONSTRAINTS.get(base)
+        if letter is None:
+            raise IRError(f'an operand fence over {v!r}, whose register '
+                          f'class is not known')
+        operands.append(f'"+{letter}"({name(v)})')
+    return f'asm volatile("" : {", ".join(operands)} :: "memory");'
+
+
+def _no_tmem(s: Stmt, env: Spelling) -> Lowered:
+    raise IRError(f'{s.op}: no tensor memory on {env.family or "no target"}')
+
+
+def _check_tmem(s: Stmt) -> List[str]:
+    """The tensor memory ops: a power of two of columns from 32 to 512, and
+    the buffer each names in tensor memory."""
+    diag = []
+    if s.op in (Op.TMEM_ALLOC, Op.TMEM_DEALLOC):
+        if s.attr('columns') not in TMEM_COLUMNS:
+            diag.append(f'{s.op}: {s.attr("columns")!r} columns, where a '
+                        f'block allocates one of {TMEM_COLUMNS}')
+    buffer = s.target[0] if s.op == Op.TMEM_ALLOC else (
+        s.args[0] if s.args else None)
+    if not _is_tmem(buffer):
+        diag.append(f'{s.op}: {buffer!r} is no buffer of tensor memory')
+    if s.op in (Op.TMEM_LD, Op.TMEM_ST):
+        count = len(s.target) if s.op == Op.TMEM_LD else len(s.args) - 1
+        if count not in TMEM_COUNTS:
+            diag.append(f'{s.op}: {count} columns a thread, where the '
+                        f'instruction moves one of {TMEM_COUNTS}')
+    return diag
+
+
+#: The columns a thread loads or stores at once (`.32x32b.x{N}`, PTX ISA,
+#: "tcgen05.ld" and "tcgen05.st").
+TMEM_COUNTS = (1, 2, 4, 8, 16, 32, 64, 128)
+
+
+def _lower_tmem_alloc(s: Stmt, env: Spelling) -> Lowered:
+    """`columns` columns of tensor memory for the block, allocated by its
+    first warp into the shared slot the operand is, given up for others to
+    allocate behind it, and handed to every thread through the slot behind
+    a block barrier between the engine's fences (`tensorforge::tmemAlloc`;
+    PTX ISA, "tcgen05.alloc", "tcgen05.relinquish_alloc_permit")."""
+    _tcgen05_available(env)
+    return Lowered(result=f'tensorforge::tmemAlloc<{s.attr("columns")}>('
+                          f'&{env.name(s.args[0])}[0])')
+
+
+def _lower_tmem_dealloc(s: Stmt, env: Spelling) -> Lowered:
+    """The columns freed by the first warp, behind a block barrier between
+    the engine's fences, so that no thread reads them again
+    (`tensorforge::tmemDealloc`; PTX ISA, "tcgen05.dealloc")."""
+    _tcgen05_available(env)
+    return Lowered((f'tensorforge::tmemDealloc<{s.attr("columns")}>('
+                    f'{env.name(s.args[0])});',))
+
+
+def _tmem_address(s: Stmt, env: Spelling) -> str:
+    """The warp's quarter of the lanes, from `column` on: a warp reaches
+    the lanes 32 (w % 4) to 32 (w % 4) + 31 alone (PTX ISA, "Tensor
+    Memory": "Access restrictions")."""
+    return (f'tensorforge::tmemWarpAddress({env.name(s.args[0])}, '
+            f'{s.attr("column")}u)')
+
+
+def _lower_tmem_ld(s: Stmt, env: Spelling) -> Lowered:
+    """`tcgen05.ld.sync.aligned.32x32b.x{N}.b32` and the wait for it (PTX
+    ISA, "tcgen05.ld", "tcgen05.wait"): thread t of a warp the lane 32 (w
+    % 4) + t of the buffer, N columns from `column` on, into its N
+    results -- declared here, as FP32."""
+    _tcgen05_available(env)
+    names = [env.name(v) for v in s.target]
+    count = len(names)
+    if count not in TMEM_COUNTS:
+        raise IRError(f'a load of {count} columns of tensor memory a thread; '
+                      f'the instruction moves one of {TMEM_COUNTS}')
+    regs = '{' + ', '.join(f'%{i}' for i in range(count)) + '}'
+    template = (f'"tcgen05.ld.sync.aligned.32x32b.x{count}.b32 {regs}, '
+                f'[%{count}];"')
+    operands = [('=f', n) for n in names] + [('r', _tmem_address(s, env))]
+    return Lowered(tuple(f'float {n}{{}};' for n in names)
+                   + _guarded(TCGEN05_FEATURE, (asm_text(
+                       template, operands, lambda x: x, volatile=True),))
+                   + ('tensorforge::tmemWaitLd();',))
+
+
+def _lower_tmem_st(s: Stmt, env: Spelling) -> Lowered:
+    """`tcgen05.st.sync.aligned.32x32b.x{N}.b32` and the wait for it: thread
+    t of a warp the lane 32 (w % 4) + t, N columns from `column` on."""
+    _tcgen05_available(env)
+    values = s.args[1:]
+    count = len(values)
+    if count not in TMEM_COUNTS:
+        raise IRError(f'a store of {count} columns of tensor memory a '
+                      f'thread; the instruction moves one of {TMEM_COUNTS}')
+    regs = '{' + ', '.join(f'%{i + 1}' for i in range(count)) + '}'
+    template = (f'"tcgen05.st.sync.aligned.32x32b.x{count}.b32 [%0], '
+                f'{regs};"')
+    operands = ([('r', _tmem_address(s, env))]
+                + [('f', env.name(v)) for v in values])
+    return Lowered(_guarded(TCGEN05_FEATURE, (asm_text(
+        template, operands, lambda x: x, volatile=True,
+        clobbers=('memory',)),)) + ('tensorforge::tmemWaitSt();',))
+
+
+def _thread_sync_fence(s: Stmt, env: Spelling) -> Lowered:
+    """`tcgen05.fence::before_thread_sync` or `::after_thread_sync` (PTX
+    ISA, "tcgen05.fence", sm_100a): the engine's operations ahead of it
+    before the barrier or wait behind it, or those behind it after the one
+    ahead of it."""
+    if s.attr('engine') != 'tcgen05' or env.family != 'cuda':
+        raise IRError(f'a fence of {s.attr("engine")!r} and the threads\' '
+                      f'synchronization on {env.family or "no target"}: '
+                      f'tcgen05\'s, on CUDA')
+    _tcgen05_available(env)
+    side = {'before': 'Before', 'after': 'After'}.get(s.attr('side'))
+    if side is None:
+        raise IRError(f'a fence on the side {s.attr("side")!r} of a '
+                      f'synchronization')
+    return Lowered((f'tensorforge::tcgen05Fence{side}();',))
+
+
+def _wait_wgmma(s: Stmt, env: Spelling) -> Lowered:
+    """`wgmma.wait_group N` (PTX ISA, "wgmma.wait_group", sm_90a): at most
+    `count` of this warpgroup's groups still in flight; then the operand
+    fence over the registers the wait names, so that none of their reads
+    moves ahead of it (`operand_fence`)."""
+    count = s.attr('count')
+    if not isinstance(count, int) or count < 0:
+        raise IRError(f'a wait for at most {count!r} groups of wgmma')
+    _wgmma_available(env)
+    lines = (f'tensorforge::wgmmaWait<{count}>();',)
+    registers = [v for v in s.args if isinstance(v, Value)]
+    if registers:
+        lines += (operand_fence(registers, env.name),)
+    return Lowered(lines)
 
 
 def pipe_of(s: Stmt) -> str:
@@ -1568,10 +2791,13 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
                                Slot('scope', (SyncScope,), False),
                                Slot('mask', _INT, False),
                                Slot('group', (tuple,), False),
-                               Slot('wall', (bool,), False)),
+                               Slot('wall', (bool,), False),
+                               Slot('engine', (str,), False),
+                               Slot('side', (str,), False)),
            results=(), effect=Effect.UNKNOWN, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
-           units=1, pipe='other', lower={'*': _lower_fence}),
+           units=1, pipe='other', lower={'*': _lower_fence},
+           check=_check_fence),
     OpSpec(Op.WAIT_COUNTER, operands=(Slot('counter', (str,)),
                                       Slot('count', _INT),
                                       Slot('engine', (str,), False)),
@@ -1588,6 +2814,52 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            results=(), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_set_priority}),
+    # Close what an asynchronous engine issued since its last commit into
+    # one group, which a wait on the engine's counter retires
+    # (`GROUP_ENGINES`, `matrix_wait`).  Pinned: which products a group
+    # holds is where it stands.  Asynchronous, as an issue is: nothing of
+    # it may be predicated away, and DCE keeps it.
+    OpSpec(Op.COMMIT_GROUP, operands=(Slot('engine', (str,)),
+                                      Slot('object', (SyncObjectType, Value),
+                                           False)),
+           results=(), effect=Effect.ASYNC, movable=False,
+           completes=Completion.GROUP, retires=None, settles=False,
+           units=1, pipe='sync',
+           lower={'cuda': _lower_commit_group_cuda,
+                  '': _lower_commit_group_cuda,
+                  '*': _lower_commit_group_other},
+           check=_check_commit_group),
+    # Tensor memory for the block (tcgen05): its columns allocated by the
+    # first warp and handed to every thread through a shared slot behind a
+    # block barrier -- which the passes see, as they see a barrier -- and
+    # freed the same way; a warp's loads and stores of its quarter of the
+    # lanes, collectives of the warp, pinned.
+    OpSpec(Op.TMEM_ALLOC, operands=(Slot('columns', _INT),),
+           results=('tmem',), effect=Effect.BARRIER | Effect.WRITE,
+           movable=False, completes=Completion.SYNC, retires=None,
+           settles=True, units=1, pipe='barrier',
+           lower={'cuda': _lower_tmem_alloc, '': _lower_tmem_alloc,
+                  '*': _no_tmem},
+           arrival=Uniformity.BLOCK, check=_check_tmem),
+    OpSpec(Op.TMEM_DEALLOC, operands=(Slot('columns', _INT),),
+           results=(), effect=Effect.BARRIER | Effect.WRITE,
+           movable=False, completes=Completion.SYNC, retires=None,
+           settles=True, units=1, pipe='barrier',
+           lower={'cuda': _lower_tmem_dealloc, '': _lower_tmem_dealloc,
+                  '*': _no_tmem},
+           arrival=Uniformity.BLOCK, check=_check_tmem),
+    OpSpec(Op.TMEM_LD, operands=(Slot('column', _INT),),
+           results=('values',), effect=Effect.READ, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=1, pipe='other',
+           lower={'cuda': _lower_tmem_ld, '': _lower_tmem_ld,
+                  '*': _no_tmem}, check=_check_tmem),
+    OpSpec(Op.TMEM_ST, operands=(Slot('column', _INT),),
+           results=(), effect=Effect.WRITE, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=1, pipe='other',
+           lower={'cuda': _lower_tmem_st, '': _lower_tmem_st,
+                  '*': _no_tmem}, check=_check_tmem),
     # D = A * B + C on a matrix engine (`MATRIX_ENGINES`).  The fragments
     # are values -- the operands, A's registers, B's, then C's -- and D the
     # result, or C itself where the instruction writes it in place
@@ -1610,7 +2882,11 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
                                     Slot('term', (tuple,), False),
                                     Slot('modifiers', (tuple,), False),
                                     Slot('collective', (Participants,),
-                                         False)),
+                                         False),
+                                    Slot('sources', (tuple,), False),
+                                    Slot('scalars', (tuple,), False),
+                                    Slot('a_column', _INT, False),
+                                    Slot('d_column', _INT, False)),
            results=('d',), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe=_matrix_pipe, lower={'*': _lower_matrix_mac},
@@ -1688,11 +2964,35 @@ def effect_of(op: str, attrs: Tuple = ()) -> Effect:
     orders nobody else's (`wait_phase`, `wait_counter`)."""
     if op == Op.FENCE and dict(attrs).get('wall') is False:
         return Effect.NONE
+    if op == Op.MATRIX_MAC and _matrix_effect(attrs) is not None:
+        return _matrix_effect(attrs)
     if op == Op.MATRIX_MAC and dict(attrs).get('in_place'):
         return Effect.WRITE
     if _retires_copies(op, attrs):
         return Effect.READ | Effect.WRITE | Effect.ASYNC
     return REGISTRY[op].effect
+
+
+def _matrix_effect(attrs: Tuple) -> Optional[Effect]:
+    """The effect of a matrix op that reads an operand in shared memory, or
+    whose engine completes behind the issue: the write of D in place, the
+    read, and `ASYNC` -- which keeps it out of a predicated region and out
+    of DCE's reach, as it does an asynchronous copy.  None for any other,
+    whose effect is the one it always had."""
+    a = dict(attrs)
+    engine = MATRIX_ENGINES.get(a.get('engine'))
+    asynchronous = (engine is not None
+                    and engine.completes is not Completion.SYNC)
+    shared = any(src in (Source.SHARED, Source.TMEM)
+                 for src in (a.get('sources') or ())[:2])
+    if not asynchronous and not shared:
+        return None
+    effect = Effect.WRITE if a.get('in_place') else Effect.NONE
+    if shared:
+        effect |= Effect.READ
+    if asynchronous:
+        effect |= Effect.ASYNC
+    return effect
 
 
 def completes_on_barrier(s: Stmt) -> bool:
@@ -1837,11 +3137,18 @@ def sync_init_value(obj: Value, storage: Value, *, leader: str,
 def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
                mask: Optional[int] = None,
                group: Optional[Tuple[int, int, int]] = None,
-               wall: bool = True) -> Stmt:
+               wall: bool = True, engine: Optional[str] = None,
+               registers: Sequence[Value] = (),
+               side: Optional[str] = None) -> Stmt:
     """A fence of `kind`.  `scope` is whose memory a memory fence orders
     (the block's where None), `mask` the backend's own scheduling mask (AMD
     `sched_barrier`, vISA's fence bits), and `group` an AMD scheduling group
     -- mask, size, id -- rather than a wall.
+
+    A fence of registers (`FenceKind.REGISTERS`) names the `engine` whose
+    accesses it orders and the `registers` it orders them for, which it
+    declares as read and written: the accumulators and the A fragments a
+    product behind it reads, where something else touched them.
 
     Not a `wall`: a fence of the schedule placed where the passes are done,
     for the device compiler alone -- pinned, and no effect the emitter keeps
@@ -1860,14 +3167,24 @@ def fence_stmt(kind: FenceKind, *, scope: Optional[SyncScope] = None,
         attrs += (('group', tuple(int(x) for x in group)),)
     if not wall:
         attrs += (('wall', False),)
-    return _stmt(Op.FENCE, attrs)
+    if engine is not None:
+        attrs += (('engine', engine),)
+    if side is not None:
+        attrs += (('side', side),)
+    registers = tuple(registers)
+    if registers and kind is not FenceKind.REGISTERS:
+        raise IRError(f'a {kind.value} fence names no registers')
+    accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER, v)
+                     for v in registers)
+    return _stmt(Op.FENCE, attrs, args=registers, accesses=accesses)
 
 
 def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
                  accesses: Optional[Tuple[Access, ...]] = None,
                  engine: Optional[str] = None) -> Stmt:
     """Wait until at most `count` operations are outstanding on `counter`
-    (`group`, `vmcnt`, `lgkmcnt`, `asynccnt`, `tensorcnt`).
+    (`group`, `vmcnt`, `lgkmcnt`, `asynccnt`, `tensorcnt`; `bulk_group`, a
+    thread's bulk groups, which its reductions of boxes are closed into).
 
     Without `tokens` it writes what the transfers it retires wrote, and
     which those are is the counter's to know, not the statement's: so any
@@ -1890,6 +3207,95 @@ def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
                            None),)
     return _stmt(Op.WAIT_COUNTER, attrs, args=tuple(tokens),
                  accesses=tuple(accesses))
+
+
+def commit_group(engine: str, obj: Optional[Value] = None,
+                 issue: Optional[Value] = None) -> Stmt:
+    """Close what `engine` issued since its last commit into one group
+    (`COMMIT_ENGINES`): `wgmma.commit_group`; tcgen05's onto the mbarrier
+    `obj` (`IRBuilder.bulk_channel`), what the thread `issue` picks issued.
+    Pinned and asynchronous; the object named in `object`, as a bulk copy
+    names it."""
+    if engine not in COMMIT_ENGINES:
+        raise IRError(f'{engine!r} commits no groups; '
+                      f'{", ".join(sorted(COMMIT_ENGINES))} do')
+    attrs = (('engine', engine),)
+    args = ()
+    if COMMIT_ENGINES[engine] is Completion.BARRIER:
+        if obj is None or issue is None:
+            raise IRError(f'{engine} commits onto an mbarrier, what the '
+                          f'thread `issue` picks issued')
+        attrs += (('object', obj),)
+        args = (issue,)
+    elif obj is not None or issue is not None:
+        raise IRError(f'{engine} commits onto its counter')
+    return _stmt(Op.COMMIT_GROUP, attrs, args=args)
+
+
+def tmem_alloc(tmem: Value, slot: Value, columns: int) -> Stmt:
+    """Allocate `columns` columns of tensor memory as the buffer `tmem`,
+    through the shared slot `slot` (`_lower_tmem_alloc`): it writes and
+    reads the slot, and is a barrier of the block."""
+    if columns not in TMEM_COLUMNS:
+        raise IRError(f'{columns} columns of tensor memory; a block '
+                      f'allocates one of {TMEM_COLUMNS}')
+    return _stmt(Op.TMEM_ALLOC, (('columns', int(columns)),), args=(slot,),
+                 target=(tmem,),
+                 accesses=(Access(Effect.READ | Effect.WRITE, MemSpace.SHARED,
+                                  slot),))
+
+
+def tmem_dealloc(tmem: Value) -> Stmt:
+    """Free the columns of `tmem`: a write of the buffer, so that no access
+    of it moves behind, and a barrier of the block."""
+    return _stmt(Op.TMEM_DEALLOC, (('columns', int(tmem.type.shape[1])),),
+                 args=(tmem,),
+                 accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))
+
+
+def tmem_ld(tmem: Value, column: int, targets: Sequence[Value]) -> Stmt:
+    """A warp's load of `len(targets)` columns of its quarter of `tmem`'s
+    lanes, from `column` on, into `targets`."""
+    return _stmt(Op.TMEM_LD, (('column', int(column)),), args=(tmem,),
+                 target=tuple(targets),
+                 accesses=(Access(Effect.READ, MemSpace.TMEM, tmem),))
+
+
+def tmem_st(tmem: Value, column: int, values: Sequence[Any]) -> Stmt:
+    """A warp's store of `values` to its quarter of `tmem`'s lanes, one
+    column each from `column` on."""
+    return _stmt(Op.TMEM_ST, (('column', int(column)),),
+                 args=(tmem,) + tuple(values),
+                 accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))
+
+
+def matrix_wait(engine: str, count: int, registers: Sequence[Value] = (),
+                reads: Sequence[Any] = ()) -> Stmt:
+    """Wait until at most `count` of the groups `engine` committed are in
+    flight (`wgmma.wait_group`), on the engine's own counter
+    (`GROUP_ENGINES`).
+
+    What the products of the retired groups wrote is valid behind it, and
+    what they read may be written again: the `registers` -- their D, and
+    their A where it is in registers -- which it names and declares as read
+    and written, and the shared buffers `reads`, read through their
+    descriptors, which it declares as read.  Pinned, as the products and
+    the commit are: its count is the caller's, a fact about where the
+    groups stand."""
+    counter = GROUP_ENGINES.get(engine)
+    if counter is None:
+        raise IRError(f'{engine!r} commits no groups to wait for; '
+                      f'{", ".join(sorted(GROUP_ENGINES))} do')
+    if int(count) < 0:
+        raise IRError(f'a wait for at most {count} groups')
+    registers = tuple(registers)
+    accesses = (tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER, v)
+                      for v in registers)
+                + tuple(Access(Effect.READ, MemSpace.SHARED, b)
+                        for b in reads))
+    return _stmt(Op.WAIT_COUNTER, (('counter', counter),
+                                   ('count', int(count))),
+                 args=registers, accesses=accesses)
 
 
 def set_priority(level: int, waves: Optional[str] = None) -> Stmt:
@@ -1926,4 +3332,17 @@ __all__ = [
     'MATRIX_ENGINES', 'MatrixEngine', 'asm_text', 'fragments',
     'matrix_engine', 'mma_sync_name', 'pipe_of',
     'MFMA_MODIFIERS', 'mfma_category', 'DPAS_SPMD',
+    'Source', 'MatrixDescType', 'SWIZZLE_BYTES', 'DESC_FORMATS',
+    'matrix_descriptor_bits', 'swizzle_alignment', 'swizzled',
+    'descriptor_offset', 'sources_of', 'WGMMA_FEATURE', 'WGMMA_N',
+    'wgmma_name', 'wgmma_refusal', 'GROUP_ENGINES', 'operand_fence',
+    'commit_group', 'matrix_wait',
+    'COMMIT_ENGINES', 'TCGEN05_FEATURE', 'TCGEN05_N', 'TMEM_COLUMNS',
+    'TMEM_COUNTS', 'TMEM_LANES', 'tcgen05_idesc', 'tcgen05_refusal',
+    'tmem_alloc', 'tmem_dealloc', 'tmem_ld', 'tmem_st',
+    'TMA_BOX_LIMIT', 'TMA_DIM_LIMIT', 'TMA_FILLS', 'TMA_GLOBAL_ALIGN',
+    'TMA_RANKS', 'TMA_SHARED_ALIGN', 'TMA_STRIDE_LIMIT', 'TMA_TYPES',
+    'TMA_REDUCE_TYPES', 'TensorMap', 'staging_engine', 'swizzle_bytes',
+    'swizzle_form',
+    'tensor_map_refusal', 'tma_refusal',
 ]

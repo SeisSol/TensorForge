@@ -27,7 +27,7 @@ from tensorforge.common.operation import Operation
 from . import block_reads, engines
 from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants, Qual, ScalarType, Stmt, TokenType, Uniformity,
-                   Value, def_use, walk_stmts)
+                   Value, def_use, retires, walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
@@ -320,6 +320,9 @@ class Emitter:
         #: Whether the body issues tensor copies (`_decide_async`), whose
         #: counter a full drain waits on as well.
         self._tensor_copies = False
+        #: Whether the body adds boxes into tensors (`tma_reduce`), whose
+        #: bulk groups a full drain waits on as well.
+        self._reductions = False
         #: The vectors the block reads of the body define (`block_reads`),
         #: by value id: the name each is spelled by.
         self._blocks: Dict[int, str] = {}
@@ -528,9 +531,10 @@ class Emitter:
             return _text_category(text, 'other'), []
         if op == Op.RAWBLOCK:
             return 'branch', []
-        if op in (Op.RESOURCE, Op.TENSOR_DESC):
+        if op in (Op.RESOURCE, Op.TENSOR_DESC, Op.MATRIX_DESC):
             # A buffer resource is an address computed once, as a pointer
-            # binding's is, and so are a tensor descriptor's words.
+            # binding's is, and so are a tensor descriptor's words and a
+            # matrix descriptor's.
             return 'int', []
         if engines.spec_of(op) is not None:
             return engines.pipe_of(s), []
@@ -603,6 +607,15 @@ class Emitter:
             if lex is not None:
                 return lex.get_fptype(t.base.ctype(), t.length)
             return f'{t.base.ctype()}{t.length}'
+        if isinstance(t, BufferType) and t.space is MemSpace.TMEM:
+            # Tensor memory is reached by its address alone, 32 bits of lane
+            # and column (`Op.TMEM_ALLOC`); CUDA's on sm_100a.
+            lex = self._lexic()
+            spelled = None if lex is None else lex.tmem_address_type()
+            if spelled is None:
+                raise IRError('tensor memory on a target without it '
+                              '(`Target.tcgen05`)')
+            return spelled
         if isinstance(t, BufferType):
             # A buffer *declaration* renders its element type and puts the
             # extent in the declarator -- `float r0[36]`, which `Op.ALLOC`
@@ -642,6 +655,13 @@ class Emitter:
             if spelled is None:
                 raise IRError('a tensor descriptor on a target without the '
                               'tensor data mover (`Target.tensor_copies`)')
+            return spelled
+        if isinstance(t, engines.MatrixDescType):
+            lex = self._lexic()
+            spelled = None if lex is None else lex.matrix_descriptor_type()
+            if spelled is None:
+                raise IRError('a matrix descriptor on a target without '
+                              'shared-memory matrix operands')
             return spelled
         raise IRError(f'cannot render type {t!r}')
 
@@ -863,7 +883,27 @@ class Emitter:
         self._bulk_cursors = tuple(sorted({self.name(c.attr('object'))
                                            for c in copies
                                            if c.counter == 'bulk'}))
-        copies = [c for c in copies if c.counter != 'bulk']
+        # A box through a tensor map is one of them, and has no fallback:
+        # the map is the launcher's, encoded for the copy, so a target
+        # without the accelerator or a copy it cannot write is refused.
+        for c in copies:
+            if c.attr('engine') not in ('tma', 'tma_reduce'):
+                continue
+            target = self._target()
+            if target is None or not target.tensor_maps():
+                raise IRError('a copy through a tensor map on a target '
+                              'without the tensor memory accelerator '
+                              '(`Target.tensor_maps`)')
+            why = engines.tma_refusal(c)
+            if why is not None:
+                raise IRError(f'a copy through a tensor map cannot be '
+                              f'issued: {why}')
+        # A reduction of a box is one thread's, counted in its own bulk
+        # groups, which nothing else counts.
+        self._reductions = any(c.attr('engine') == 'tma_reduce'
+                               for c in copies)
+        copies = [c for c in copies if c.counter != 'bulk'
+                  and c.attr('engine') != 'tma_reduce']
         # Nor is a tensor copy: one instruction a wave over a whole tile,
         # counted on a counter nothing else counts -- and refused where it
         # cannot be issued rather than lowered as loads and stores, which a
@@ -1644,10 +1684,11 @@ class Emitter:
             return
 
         if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None
-                and s.attr('engine') != 'tdm'):
+                and s.attr('engine') not in ('tdm', 'tma_reduce')
+                and retires(s)):
             # The wait for copies the body writes as loads and stores
             # (`_decide_async`): nothing of theirs is in flight.  A tensor
-            # copy is never one of them.
+            # copy is never one of them, nor a reduction of a box.
             return
 
         if engines.spec_of(op) is not None:
@@ -1725,6 +1766,21 @@ class Emitter:
             if text is None:
                 raise IRError('a buffer resource on a target without buffer '
                               'instructions (`Target.buffer_resources`)')
+            self.declare(s.target[0], text, s)
+            return
+
+        if op == Op.MATRIX_DESC:
+            # The layout's bits, and the start address the device adds from
+            # where the allocator placed the buffer.
+            lex = self._lexic()
+            buffer = s.args[0]
+            address = self.address(buffer, s.args[1:])
+            text = None if lex is None else lex.matrix_descriptor(
+                f'&{self.base_name(buffer)}[{address}]',
+                engines.matrix_descriptor_bits(s.target[0].type))
+            if text is None:
+                raise IRError('a matrix descriptor on a target without '
+                              'shared-memory matrix operands')
             self.declare(s.target[0], text, s)
             return
 
@@ -1885,6 +1941,28 @@ class Emitter:
             w(text)
             return
 
+        if op == Op.COPY_ASYNC and s.attr('engine') == 'tma':
+            # The box through its map, the parameter's address; the
+            # coordinates innermost first, as PTX counts them.
+            coords = ', '.join(self.operand(c)
+                               for c in reversed(s.copy_src_index))
+            w(f'tensorforge::tmaLoad({self.name(s.attr("object"))}, '
+              f'&{self.base_name(s.copy_dst)}'
+              f'[{self.address(s.copy_dst, s.copy_dst_index)}], '
+              f'&{s.attr("map").name}, {self._copy_bytes(s)}, {coords});')
+            return
+
+        if op == Op.COPY_ASYNC and s.attr('engine') == 'tma_reduce':
+            # The box of shared memory added into the tensor of its map,
+            # the coordinates innermost first; under the predicate of the
+            # thread that issues it, which `_emit_stmt` wrote around this.
+            coords = ', '.join(self.operand(c)
+                               for c in reversed(s.copy_dst_index))
+            w(f'tensorforge::tmaReduceAdd(&{s.attr("map").name}, '
+              f'&{self.base_name(s.copy_src)}'
+              f'[{self.address(s.copy_src, s.copy_src_index)}], {coords});')
+            return
+
         if op == Op.COPY_ASYNC:
             dst_b = self.base_name(s.copy_dst)
             src_b = self.base_name(s.copy_src)
@@ -1975,6 +2053,12 @@ class Emitter:
                 # And on the tensor copies' counter, which counts them alone.
                 texts += list(engines.lower(
                     engines.wait_counter('tensorcnt', 0),
+                    self._target()).lines)
+            if cls == 'all' and self._reductions:
+                # And on the thread's bulk groups, where boxes it added into
+                # a tensor may still be read.
+                texts += list(engines.lower(
+                    engines.wait_counter('bulk_group', 0),
                     self._target()).lines)
             # A full drain waits on every cursor of the body as well: one
             # with nothing in flight returns at once.  The wait for a bulk

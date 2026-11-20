@@ -184,7 +184,7 @@ def test_an_engine_it_does_not_know_is_refused():
     b = IRBuilder(fptype=Datatype.F32)
     c = b.declare(hint='c')
     with pytest.raises(IRError, match='engine'):
-        b.matrix_mac('wgmma', (64, 8, 8), (Datatype.TF32,) * 4, [], [], [c])
+        b.matrix_mac('unknown', (64, 8, 8), (Datatype.TF32,) * 4, [], [], [c])
 
 
 def test_the_op_verifies():

@@ -610,6 +610,207 @@ __device__ __forceinline__ void bulk_wait(BulkCursor &cursor) {
 #endif
 }
 
+/// A shared-memory matrix descriptor (`Op.MATRIX_DESC`): what wgmma reads an
+/// operand in shared memory through.  `layout` holds every field but the
+/// start address -- the leading and the stride byte offset, the swizzle, the
+/// fixed bits of a format (`engines.matrix_descriptor_bits`) -- and the
+/// address goes in here, in 16-byte units, bits 0 to 13 (PTX ISA, wgmma's
+/// "Matrix Descriptor Format").  It is the operand's address in the shared
+/// window, so a buffer is described wherever the allocator placed it.
+__device__ __forceinline__ uint64_t matrixDescriptor(const void *operand,
+                                                     uint64_t layout) {
+  return layout |
+         ((static_cast<uint64_t>(__cvta_generic_to_shared(operand)) >> 4) &
+          0x3FFFull);
+}
+
+/// The fence, the commit and the wait of wgmma (PTX ISA, "wgmma.fence",
+/// "wgmma.commit_group", "wgmma.wait_group"; sm_90a).  The products
+/// themselves are written where they are issued, inside the guard nvcc
+/// defines for sm_90a alone (`engines.WGMMA_FEATURE`): `-arch=sm_90a` builds
+/// the source for `compute_90` as well, where ptxas refuses them.  These
+/// three trap there instead, as the bulk copy does below sm_90, so that a
+/// kernel whose products the guard left out never runs to the end.
+///
+/// The fence orders what the warpgroup wrote to the registers a product
+/// behind it reads -- its accumulator, its A in registers -- before that
+/// product; the commit closes the products issued since the last one into a
+/// group; the wait lets at most `Pending` groups stay in flight, and the
+/// registers of the others are valid behind it.  Each is executed by every
+/// thread of the warpgroup alike.
+__device__ __forceinline__ void wgmmaFence() {
+#if defined(__CUDA_ARCH_FEAT_SM90_ALL)
+  asm volatile("wgmma.fence.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void wgmmaCommit() {
+#if defined(__CUDA_ARCH_FEAT_SM90_ALL)
+  asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+template <int Pending> __device__ __forceinline__ void wgmmaWait() {
+#if defined(__CUDA_ARCH_FEAT_SM90_ALL)
+  asm volatile("wgmma.wait_group.sync.aligned %0;" ::"n"(Pending) : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// What the threads wrote to shared memory as ordinary stores, visible to
+/// what reads it through the async proxy behind this -- a product reading
+/// an operand through its descriptor, a bulk or a tensor copy -- and what
+/// they read, ordered before what that proxy writes there
+/// (`fence.proxy.async.shared::cta`, PTX ISA 8.0, sm_90).
+__device__ __forceinline__ void fenceProxyAsync() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The targets that have tcgen05 and tensor memory (sm_100a, sm_103a, and
+/// their families): the source of a product writes its instructions inside
+/// this guard (`engines.TCGEN05_FEATURE`), since `-arch=sm_100a` builds the
+/// source for `compute_100` as well, where ptxas refuses them; the helpers
+/// below trap outside it.
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) ||                                     \
+    defined(__CUDA_ARCH_FEAT_SM103_ALL) ||                                     \
+    (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                                 \
+     (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000 ||                                 \
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030))
+#define TENSORFORGE_TCGEN05 1
+#endif
+
+/// The warp of the block a thread is in, by its linear index: what the
+/// allocation of tensor memory and a warp's quarter of its lanes go by.
+__device__ __forceinline__ uint32_t tmemWarp() {
+  return (threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) /
+         32u;
+}
+
+/// `Columns` columns of tensor memory for the block (PTX ISA,
+/// "tcgen05.alloc", "tcgen05.relinquish_alloc_permit"; sm_100a): allocated by
+/// the first warp into the shared slot, the permit given up, and the address
+/// read back from the slot by every thread behind a block barrier between the
+/// engine's fences -- the allocation writes the slot through the engine.
+/// `Columns` is a power of two from 32 to 512.
+template <int Columns>
+__device__ __forceinline__ uint32_t tmemAlloc(void *slot) {
+#if defined(TENSORFORGE_TCGEN05)
+  if (tmemWarp() == 0) {
+    asm volatile(
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
+            "r"(bulk_shared_address(slot)),
+        "n"(Columns)
+        : "memory");
+    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;" ::
+                     : "memory");
+  }
+  asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+  __syncthreads();
+  asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+  return *static_cast<volatile uint32_t *>(slot);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+  return 0;
+#else
+  return 0;
+#endif
+}
+
+/// The columns freed again by the first warp, once every thread of the block
+/// is done with them: a block barrier between the engine's fences, then
+/// `tcgen05.dealloc` (PTX ISA, "tcgen05.dealloc").  A block frees what it
+/// allocated before it exits.
+template <int Columns>
+__device__ __forceinline__ void tmemDealloc(uint32_t tmem) {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+  __syncthreads();
+  asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+  if (tmemWarp() == 0) {
+    asm volatile(
+        "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(tmem),
+        "n"(Columns)
+        : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The address of the warp's quarter of the lanes of `tmem`, from `column`
+/// on: warp w of its warpgroup reaches the lanes 32 (w % 4) to 32 (w % 4) + 31
+/// alone, the lane in the upper half of the address (PTX ISA, "Tensor
+/// Memory").
+__device__ __forceinline__ uint32_t tmemWarpAddress(uint32_t tmem,
+                                                    uint32_t column) {
+  return tmem + ((32u * (tmemWarp() % 4u)) << 16) + column;
+}
+
+/// The waits for a warp's loads from tensor memory and its stores to it
+/// (PTX ISA, "tcgen05.wait"): what was loaded is valid behind the first, what
+/// was stored is in tensor memory behind the second.
+__device__ __forceinline__ void tmemWaitLd() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void tmemWaitSt() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The engine's operations ahead of this before the barrier or wait behind
+/// it, and those behind it after the barrier or wait ahead of it (PTX ISA,
+/// "tcgen05.fence").
+__device__ __forceinline__ void tcgen05FenceBefore() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void tcgen05FenceAfter() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The products the thread `issue` picks issued since its last commit,
+/// tracked by the cursor's mbarrier, which they arrive at once complete (PTX
+/// ISA, "tcgen05.commit"): issued by that thread alone -- a commit tracks the
+/// operations its own thread issued -- and noted by every thread on its
+/// cursor, so that `bulk_wait` waits for the phase.
+__device__ __forceinline__ void tcgen05Commit(BulkCursor &cursor, bool issue) {
+#if defined(TENSORFORGE_TCGEN05)
+  if (issue) {
+    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+                 "cluster.b64 [%0];" ::"r"(bulk_shared_address(cursor.barrier))
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  cursor.pending = true;
+}
+
 /// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
 ///
 /// A typedef and not a wrapper struct, and the reason is the constraint

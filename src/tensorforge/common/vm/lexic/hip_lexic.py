@@ -402,6 +402,18 @@ class HipLexic(CudaLexic):
       return super().tensor_descriptor_type()
     return 'tensorforge::TensorDescriptor'
 
+  # NVIDIA's shared-memory matrix descriptors are CUDA's alone: HIP spells
+  # none of the instructions that read one, on either vendor's part.
+
+  def matrix_descriptor_type(self):
+    return None
+
+  def matrix_descriptor(self, address, layout):
+    return None
+
+  def tmem_address_type(self):
+    return None
+
   def tensor_descriptor(self, dst, src, rows, cols, pitch, *, datatype):
     if self._underlying_hardware != 'amd':
       return super().tensor_descriptor(dst, src, rows, cols, pitch,

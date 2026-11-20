@@ -360,3 +360,83 @@ class HostOnlyParam(KernelParam):
 
     def argument(self, lexic=None) -> Optional[str]:
         return self.name if lexic is None else None
+
+
+@dataclass(frozen=True)
+class TensorMapParam(KernelParam):
+    """A tensor map the kernel takes and the launcher encodes
+    (`engines.TensorMap`): what a copy of the tensor memory accelerator
+    reads a box of a tensor through.
+
+    In param space, `__grid_constant__`, as the copies take its address --
+    without it CUDA would copy the 128 bytes into per-thread memory first.
+    No part of the interface: a caller passes the operand's pointer as it
+    always did, and the launcher encodes the map from it
+    (`tensorforge::tensorMapTiled`, `cuda_tma.h`) into a local it hands the
+    kernel.  `base` is the launcher's expression of the tensor's first
+    element -- the operand's pointer past its offsets -- and `dims` and
+    `strides` the extents and strides of the map as the launcher spells
+    them, outermost first: numbers where the generator knows them, an
+    expression where the launch does (the batch's elements, a stride bound
+    at run time) (`of`).
+    """
+
+    tmap: object = None
+    base: str = ''
+    dims: tuple = ()
+    strides: tuple = ()
+
+    @classmethod
+    def of(cls, tmap, base: str, dims=None, strides=None) -> 'TensorMapParam':
+        """The parameter of `tmap` over the tensor at `base`, `dims` and
+        `strides` mapping a dimension the map leaves to the launch (None in
+        `TensorMap.dims`, `element_strides`) to its expression."""
+        dims, strides = dict(dims or {}), dict(strides or {})
+        extents = []
+        for k, n in enumerate(tmap.dims):
+            if n is None and k not in dims:
+                raise ValueError(f'{tmap.name}: dimension {k} is the '
+                                 f"launch's, and no expression is given")
+            extents.append(str(dims[k]) if n is None else str(n))
+        steps = []
+        for k, n in enumerate(tmap.element_strides()[:-1]):
+            if n is None and k not in strides:
+                raise ValueError(f'{tmap.name}: the stride of dimension {k} '
+                                 f"is the launch's, and no expression is "
+                                 f'given')
+            steps.append(str(strides[k]) if n is None else str(n))
+        return cls(tmap.name, 'CUtensorMap', MemSpace.PARAM, readonly=True,
+                   tmap=tmap, base=base, dims=tuple(extents),
+                   strides=tuple(steps))
+
+    def declaration(self, lexic, with_default: bool = False,
+                    host: bool = False) -> Optional[str]:
+        if host:
+            return None
+        storage = lexic.storage_class(MemSpace.PARAM)
+        storage = f'{storage} ' if storage else ''
+        return f'{storage}const CUtensorMap {self.name}'
+
+    @staticmethod
+    def _size(text: str) -> str:
+        """An extent or a stride as the encoder takes it: a number as a
+        literal of its type, an expression cast to it."""
+        return (f'{text}ull' if text.isdigit()
+                else f'static_cast<unsigned long long>({text})')
+
+    def binding(self, lexic) -> Optional[str]:
+        """The map, encoded into a local the kernel is handed.  Not `const`:
+        a cooperative launch hands the arguments over by address
+        (`argsPtrs`), as a `void *`."""
+        tmap = self.tmap
+        dims = ', '.join(self._size(d) for d in self.dims)
+        strides = ', '.join(self._size(d) for d in self.strides)
+        box = ', '.join(f'{n}u' for n in tmap.box)
+        nan = ', true' if tmap.fill == 'nan' else ''
+        return (f'CUtensorMap {self.name}Arg = '
+                f'tensorforge::tensorMapTiled<{tmap.elem.ctype()}, '
+                f'{tmap.rank}>({self.base}, {{{dims}}}, {{{strides}}}, '
+                f'{{{box}}}, {tmap.swizzle}{nan});')
+
+    def argument(self, lexic=None) -> Optional[str]:
+        return None if lexic is None else f'{self.name}Arg'

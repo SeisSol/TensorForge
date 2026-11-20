@@ -114,6 +114,12 @@ class Compiler:
         return None
 
 
+def _arch_specific(arch: str) -> bool:
+    """`sm_90a`, `sm_100a`: an NVIDIA part's arch-specific target."""
+    return (arch.startswith('sm_') and arch.endswith('a')
+            and arch[len('sm_'):-1].isdigit())
+
+
 @dataclass(frozen=True)
 class Nvcc(Compiler):
     blocks_from_registers: bool = True
@@ -123,6 +129,14 @@ class Nvcc(Compiler):
         return ['-std=c++17', '--expt-relaxed-constexpr']
 
     def target_flags(self, arch):
+        """`-arch=sm_90` for a part; for its arch-specific target (`sm_90a`)
+        the build of that target alone.  `-arch=sm_90a` compiles the source
+        for `compute_90` as well, the PTX a driver would JIT for another
+        part, and ptxas refuses there every instruction only `sm_90a` has --
+        wgmma, and tcgen05 on `sm_100a` (nvcc 13.4, 2026-11-20)."""
+        if _arch_specific(arch):
+            level = arch[len('sm_'):-1]
+            return [f'-gencode=arch=compute_{level}a,code=sm_{level}a']
         return [f'-arch={arch}']
 
     def report_flags(self):
@@ -133,11 +147,13 @@ class Nvcc(Compiler):
     ARCH_SPECIFIC = ('sm_90', 'sm_100', 'sm_101', 'sm_120')
 
     def report_build(self, compiler, src, out_dir, arch, include):
+        flags = self.target_flags(arch)
         if not arch.endswith('a') and arch in self.ARCH_SPECIFIC:
-            arch += 'a'
+            # A cubin is the one target, so `-arch` builds no PTX besides.
+            flags = [f'-arch={arch}a']
         product = os.path.join(out_dir, 'k.cubin')
         return ([compiler, '-cubin', *self.language_flags(),
-                 *self.report_flags(), *self.target_flags(arch),
+                 *self.report_flags(), *flags,
                  '-I', include, '-o', product, src], product)
 
     def register_blocks(self, registers, threads, hw):
