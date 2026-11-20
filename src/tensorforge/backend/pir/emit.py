@@ -604,6 +604,15 @@ class Emitter:
             if lex is not None:
                 return lex.get_fptype(t.base.ctype(), t.length)
             return f'{t.base.ctype()}{t.length}'
+        if isinstance(t, BufferType) and t.space is MemSpace.TMEM:
+            # Tensor memory is reached by its address alone, 32 bits of lane
+            # and column (`Op.TMEM_ALLOC`); CUDA's on sm_100a.
+            lex = self._lexic()
+            spelled = None if lex is None else lex.tmem_address_type()
+            if spelled is None:
+                raise IRError('tensor memory on a target without it '
+                              '(`Target.tcgen05`)')
+            return spelled
         if isinstance(t, BufferType):
             # A buffer *declaration* renders its element type and puts the
             # extent in the declarator -- `float r0[36]`, which `Op.ALLOC`

@@ -190,6 +190,9 @@ class CudaLexic(Lexic):
     # (`cuda.h`); the rest is a constant of the layout.
     return f'tensorforge::matrixDescriptor({address}, {layout:#018x}ull)'
 
+  def tmem_address_type(self):
+    return 'uint32_t'
+
   def wait_async(self, prior):
     return f'__pipeline_wait_prior({prior});'
 

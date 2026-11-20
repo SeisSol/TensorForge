@@ -441,6 +441,62 @@ def _wgmma_statement(stmt: str) -> Optional[_Wgmma]:
 #: 3 32-byte).
 _WGMMA_SWIZZLE = {0: 0, 1: 128, 2: 64, 3: 32}
 
+#: The swizzle tcgen05's descriptor states in its three top bits (PTX ISA,
+#: "tcgen05 Shared Memory Descriptor": 0 none, 2 128-byte, 4 64-byte, 6
+#: 32-byte); 1, the 128-byte one with 32-byte atoms, is not modeled.
+_TC_SWIZZLE = {0: 0, 2: 128, 4: 64, 6: 32}
+
+#: Tensor memory (`MemSpace.TMEM`): `uint32_t t = tensorforge::tmemAlloc<C>
+#: (&slot[0]);`, the free, the waits and the fences of the engine (`cuda.h`).
+_TMEM_ALLOC = re.compile(
+    r'^(?:const\s+)?uint32_t\s+(?P<name>\w+)\s*=\s*tensorforge::tmemAlloc\s*<'
+    r'\s*(?P<cols>\d+)\s*>\s*\(\s*&\s*(?P<slot>\w+)\s*\[\s*0\s*\]\s*\)$')
+_TMEM_DEALLOC = re.compile(
+    r'^tensorforge::tmemDealloc\s*<\s*(?P<cols>\d+)\s*>\s*\((?P<tmem>.+)\)$')
+_TC_QUIET = re.compile(r'^tensorforge::(?:tmemWaitLd|tmemWaitSt|'
+                       r'tcgen05FenceBefore|tcgen05FenceAfter)\s*\(\s*\)$')
+_TC_COMMIT = re.compile(
+    r'^tensorforge::tcgen05Commit\s*\(\s*(?P<cursor>\w+)\s*,(?P<issue>.+)\)$')
+#: The product and the loads and stores of tensor memory, as the engines'
+#: lowerings write them inside their asm.
+_TC_MMA = re.compile(
+    r'@e\s+tcgen05\.mma\.cta_group::1\.kind::tf32\s+\[%(?P<d>\d+)\]\s*,\s*'
+    r'(?P<a>\[%\d+\]|%\d+)\s*,\s*%(?P<b>\d+)\s*,\s*%(?P<i>\d+)\s*,\s*'
+    r'(?P<en>[01p])\s*;')
+_TMEM_LDST = re.compile(
+    r'tcgen05\.(?P<op>ld|st)\.sync\.aligned\.32x32b\.x(?P<n>\d+)\.b32\s+'
+    r'(?P<ops>[^;]*);')
+
+#: Columns of a lane of tensor memory, which addresses it here as
+#: `lane * TMEM_ROW + column`.
+_TMEM_ROW = 512
+
+
+def _asm_operands(stmt: str):
+    """An inline asm statement's template, with its escapes as the
+    assembler reads them, and the expressions of its outputs and of its
+    inputs; None where `stmt` is no asm."""
+    head = re.match(r'^asm\s*(?:volatile\s*)?\(', stmt)
+    if head is None or not stmt.endswith(')'):
+        return None
+    parts = _top_level(stmt[head.end():-1], ':')
+    if len(parts) not in (3, 4):
+        raise Abort(f'asm without outputs and inputs: {stmt!r}')
+    template = ''.join(re.findall(r'"([^"]*)"', parts[0])).replace('\\n', '\n')
+    lists = []
+    for text in parts[1:3]:
+        exprs = []
+        for operand in _top_level(text, ','):
+            if not operand.strip():
+                continue
+            om = re.match(r'^\s*"(?P<con>[^"]*)"\s*\((?P<expr>.*)\)\s*$',
+                          operand, re.S)
+            if om is None:
+                raise Abort(f'asm operand {operand!r}')
+            exprs.append(om.group('expr').strip())
+        lists.append(tuple(exprs))
+    return template, lists[0], lists[1]
+
 
 class _Cursor(NamedTuple):
     """A lane's `tensorforge::BulkCursor`: which one, whether this lane
@@ -1247,6 +1303,8 @@ def _py(expr: str) -> str:
     # `tensorforge::fma(a, b, c)`, the vector FMA CUDA's lexic names so that
     # sm_100 can pair it.  The same `a * b + c` the infix spelling computes.
     e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
+    # The address of a warp's quarter of tensor memory's lanes (`cuda.h`).
+    e = re.sub(r'\btensorforge::tmemWarpAddress\s*\(', 'TMEMADDR(', e)
     # The standard library's functions, which the environment holds by their
     # own names.
     e = re.sub(r'\bstd::(?=\w+\s*\()', '', e)
@@ -1457,6 +1515,10 @@ class Interp:
         self.env['BUFLOAD'] = _buffer_load
         self.env['VEC'] = lambda *xs: Vec(xs)
         self.env['FMA'] = lambda a, b, c: a * b + c
+        # `tensorforge::tmemWarpAddress`: the lane 32 (w % 4) of the warp w
+        # this thread is in, in the address's upper half.
+        self.env['TMEMADDR'] = lambda base, column: (
+            int(base) + ((32 * ((self.lane // 32) % 4)) << 16) + int(column))
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
         for fn in ('min', 'max', 'abs'):
             self.env[fn] = __builtins__[fn] if isinstance(__builtins__, dict) \
@@ -1725,7 +1787,7 @@ class Interp:
 
     @staticmethod
     def _descriptor_operand(lanes, text: str, rows: int, k: int,
-                            what: str, stmt: str):
+                            what: str, stmt: str, form: str = 'wgmma'):
         """The `rows` x `k` operand the descriptor `text` names, as the
         warpgroup's lanes hold it -- alike, or the instruction has none to
         read -- from shared memory, by the canonical K-major layout its bits
@@ -1740,7 +1802,12 @@ class Interp:
         element is four bytes, a TF32 operand read as the instruction reads
         it (`_tf32`), at the address its slot has with the buffer at 0 --
         the operand is placed on its atom.  Returns the matrix and the
-        slots read, for the check where the product is retired."""
+        slots read, for the check where the product is retired.
+
+        tcgen05's format (`form`) the same but for its fixed bits -- 0b001
+        from bit 46, the leading offset relative (bit 52 clear) -- and its
+        swizzle, three bits from bit 61 ("tcgen05 Shared Memory
+        Descriptor")."""
         descs = [it.ev(text) for it in lanes.values()]
         first = descs[0]
         if not isinstance(first, _MatrixDesc):
@@ -1753,9 +1820,19 @@ class Interp:
         layout = first.layout
         lbo = ((layout >> 16) & 0x3FFF) << 4
         sbo = ((layout >> 32) & 0x3FFF) << 4
-        swizzle = _WGMMA_SWIZZLE[(layout >> 62) & 3]
+        if form == 'tcgen05':
+            swizzle = _TC_SWIZZLE.get((layout >> 61) & 7)
+            if swizzle is None or (layout >> 46) & 7 != 1 \
+                    or (layout >> 52) & 1:
+                raise Abort(f'tcgen05 {what}: a descriptor of a form not '
+                            f'modeled: {stmt!r}')
+        else:
+            swizzle = _WGMMA_SWIZZLE[(layout >> 62) & 3]
+            if (layout >> 46) & 7:
+                raise Abort(f'wgmma {what}: a descriptor of tcgen05\'s '
+                            f'format: {stmt!r}')
         if (layout >> 49) & 7 or layout & 0x3FFF:
-            raise Abort(f'wgmma {what}: a descriptor with a base offset or '
+            raise Abort(f'{form} {what}: a descriptor with a base offset or '
                         f'an address in its layout: {stmt!r}')
         bits = {0: 0, 32: 1, 64: 2, 128: 3}[swizzle]
         size = 4
@@ -1865,6 +1942,179 @@ class Interp:
             self._store_register(reg, _InFlight(text))
             written.append(reg)
         self.wg_open.append((tuple(written), a_regs, reads, stmt))
+
+    def _tc_state(self) -> Dict:
+        """What tcgen05 has in flight in the block: the products issued and
+        not committed (`open`), those committed onto each cursor's mbarrier
+        and not landed (`bound`), and the value each cell of tensor memory a
+        product in flight writes will hold, with how many write it."""
+        state = getattr(self.mem, 'tc_state', None)
+        if state is None:
+            state = {'open': [], 'bound': {}, 'overlay': {}, 'writers': {}}
+            self.mem.tc_state = state
+        return state
+
+    def _tmem_cell(self, lane: int, column: int, stmt: str, what: str):
+        columns = getattr(self.mem, 'tmem_columns', None)
+        if columns is None or not 0 <= lane < 128 or not 0 <= column < columns:
+            raise Abort(f'{what} of tensor memory at lane {lane}, column '
+                        f'{column}, outside what the block allocated '
+                        f'({columns} columns): {stmt!r}')
+        return lane * _TMEM_ROW + column
+
+    def _tcgen05_asm(self, stmt: str) -> None:
+        """A tcgen05 instruction written as inline asm: the product, or a
+        warp's load or store of tensor memory."""
+        template, outs, ins = _asm_operands(stmt)
+        mm = _TC_MMA.search(template)
+        if mm:
+            self._tcgen05_mma(mm, template, ins, stmt)
+            return
+        ls = _TMEM_LDST.search(template)
+        if ls:
+            self._tmem_ldst(ls, outs, ins, stmt)
+            return
+        raise Abort(f'tcgen05 instruction not modeled: {stmt!r}')
+
+    def _tcgen05_mma(self, mm, template: str, ins, stmt: str) -> None:
+        """One `tcgen05.mma.cta_group::1.kind::tf32`, issued by the thread
+        whose predicate `e` holds, for the block.
+
+        The instruction descriptor as PTX states it ("tcgen05 Instruction
+        descriptor"): D's format FP32 (bits 4-5: 1), A's and B's TF32 (bits
+        7-9 and 10-12: 2), both K-major (bits 15 and 16 clear), N >> 3
+        from bit 17 and M >> 4 from bit 24 -- M = 128 modeled, row r of D
+        lane r of tensor memory, its column j the column `d + j` ("Data path
+        layout": M = 128, one CTA).  A through its descriptor
+        (`_descriptor_operand`, tcgen05's format) or from tensor memory,
+        lane r its row, K along the columns; B through its descriptor, its
+        N rows of K.  `enable-input-d` 0 makes D = A * B.
+
+        Nothing is written here: the product is noted as in flight, and its
+        cells of tensor memory hold its values from the wait for the phase
+        of the mbarrier its commit named on (`_tc_land`)."""
+        setp = re.search(r'setp\.ne\.b32\s+e\s*,\s*%(\d+)\s*,\s*0\s*;',
+                         template)
+        if setp is None:
+            raise Abort(f'tcgen05.mma issued by no predicate modeled: '
+                        f'{stmt!r}')
+        if not bool(self.ev(ins[int(setp.group(1))])):
+            return
+        idesc = int(self.ev(ins[int(mm.group('i'))]))
+        n = ((idesc >> 17) & 0x3F) << 3
+        m = ((idesc >> 24) & 0x1F) << 4
+        if ((idesc >> 4) & 3, (idesc >> 7) & 7, (idesc >> 10) & 7,
+                (idesc >> 15) & 3, m) != (1, 2, 2, 0, 128) or n % 16:
+            raise Abort(f'tcgen05.mma of an instruction descriptor not '
+                        f'modeled ({idesc:#x}): {stmt!r}')
+        k = 8
+        d_address = int(self.ev(ins[int(mm.group('d'))]))
+        if d_address >> 16:
+            raise Abort(f'tcgen05.mma with D from lane {d_address >> 16}, '
+                        f'where an M = 128 product starts at lane 0: '
+                        f'{stmt!r}')
+        d_column = d_address & 0xFFFF
+        state = self._tc_state()
+        reads = []
+        a_text = mm.group('a')
+        if a_text.startswith('['):
+            a_address = int(self.ev(ins[int(a_text[2:-1])]))
+            A = [[0.0] * k for _ in range(m)]
+            for r in range(m):
+                for x in range(k):
+                    cell = self._tmem_cell(r + (a_address >> 16),
+                                           (a_address & 0xFFFF) + x, stmt,
+                                           'A')
+                    if cell in state['overlay']:
+                        raise Abort(f'tcgen05.mma reads A from tensor memory '
+                                    f'a product in flight writes: {stmt!r}')
+                    value = self.mem.read('tmem', cell)
+                    reads.append(('tmem', cell, value))
+                    A[r][x] = _tf32(value)
+        else:
+            A, got = self._descriptor_operand(
+                {0: self}, ins[int(a_text[1:])], m, k, 'A', stmt, 'tcgen05')
+            reads += got
+        B, got = self._descriptor_operand(
+            {0: self}, ins[int(mm.group('b'))], n, k, 'B', stmt, 'tcgen05')
+        reads += got
+        en = mm.group('en')
+        if en == 'p':
+            pset = re.search(r'setp\.ne\.b32\s+p\s*,\s*%(\d+)\s*,\s*0\s*;',
+                             template)
+            if pset is None:
+                raise Abort(f'enable-input-d set by nothing modeled: '
+                            f'{stmt!r}')
+            enable = bool(self.ev(ins[int(pset.group(1))]))
+        else:
+            enable = en == '1'
+        writes = []
+        for r in range(m):
+            for c in range(n):
+                cell = self._tmem_cell(r, d_column + c, stmt, 'D')
+                value = sum(A[r][x] * B[c][x] for x in range(k))
+                if enable:
+                    # What D holds: the value of a product in flight that
+                    # writes it -- products accumulate in their order --,
+                    # tensor memory's otherwise.
+                    value += (state['overlay'][cell]
+                              if cell in state['overlay']
+                              else self.mem.read('tmem', cell))
+                state['overlay'][cell] = value
+                state['writers'][cell] = state['writers'].get(cell, 0) + 1
+                writes.append(cell)
+        state['open'].append((tuple(writes), tuple(reads), stmt))
+
+    def _tc_land(self, cursor: str) -> None:
+        """The products committed onto `cursor`'s mbarrier, landed: the
+        values of the cells no product still in flight writes go to tensor
+        memory, and what each read is checked unchanged -- a write of an
+        operand ahead of the wait is a race with the engine."""
+        state = getattr(self.mem, 'tc_state', None)
+        if state is None:
+            return
+        for writes, reads, issued in state['bound'].pop(cursor, []):
+            for base, slot, value in reads:
+                if not _same(self.mem.read(base, slot), value):
+                    raise Abort(f'{base}[{slot}] written while the tcgen05 '
+                                f'product reading it is in flight: {issued!r}')
+            for cell in writes:
+                state['writers'][cell] -= 1
+                if not state['writers'][cell]:
+                    del state['writers'][cell]
+                    self.mem.write('tmem', cell, state['overlay'].pop(cell))
+
+    def _tmem_ldst(self, ls, outs, ins, stmt: str) -> None:
+        """A warp's `tcgen05.ld` or `tcgen05.st` of `.32x32b.x{N}`: thread t
+        of warp w the lane 32 (w % 4) + t, N columns from the address's on
+        -- the address's lane the warp's quarter, which is all it reaches
+        ("Tensor Memory", "Access restrictions").  A cell a product in
+        flight writes is neither read nor written."""
+        count = int(ls.group('n'))
+        load = ls.group('op') == 'ld'
+        address = int(self.ev(ins[-1] if load else ins[0]))
+        quarter = 32 * ((self.lane // 32) % 4)
+        if address >> 16 != quarter:
+            raise Abort(f'warp {self.lane // 32} reaches the lanes '
+                        f'{quarter} on, not {address >> 16}: {stmt!r}')
+        state = self._tc_state()
+        lane = quarter + self.lane % 32
+        exprs = outs if load else ins[1:]
+        if len(exprs) != count:
+            raise Abort(f'tcgen05.{ls.group("op")} of {count} columns with '
+                        f'{len(exprs)} operands: {stmt!r}')
+        for i, text in enumerate(exprs):
+            cell = self._tmem_cell(lane, (address & 0xFFFF) + i, stmt,
+                                   ls.group('op'))
+            if cell in state['overlay']:
+                raise Abort(f'tensor memory at lane {lane}, column '
+                            f'{(address & 0xFFFF) + i} reached while a '
+                            f'product writes it: {stmt!r}')
+            if load:
+                self._store_register(self._register(text),
+                                     self.mem.read('tmem', cell))
+            else:
+                self.mem.write('tmem', cell, self.ev(text))
 
     def _wgmma_wait(self, pending: int, stmt: str) -> None:
         """`wgmma.wait_group N` for this lane: every group but the `N` most
@@ -2170,6 +2420,39 @@ class Interp:
         if wg is not None:
             self._wgmma(wg, stmt)
             return
+        if re.match(r'^asm\b', stmt) and 'tcgen05.' in stmt:
+            self._tcgen05_asm(stmt)
+            return
+        ta = _TMEM_ALLOC.match(stmt)
+        if ta:
+            # The columns from lane 0 and column 0 on: an address is the
+            # lane in its upper half and the column in its lower.
+            slot = self.ev(ta.group('slot'))
+            if isinstance(slot, Ptr):
+                slot[0] = 0
+            self.env[ta.group('name')] = 0
+            self.mem.tmem_columns = int(ta.group('cols'))
+            return
+        td = _TMEM_DEALLOC.match(stmt)
+        if td:
+            state = self._tc_state()
+            if state['open'] or any(state['bound'].values()) \
+                    or state['overlay']:
+                raise Abort(f'tensor memory freed with products in flight: '
+                            f'{stmt!r}')
+            return
+        if _TC_QUIET.match(stmt):
+            return
+        tc = _TC_COMMIT.match(stmt)
+        if tc:
+            # The products the issuing thread issued, onto the cursor's
+            # mbarrier: they land at the wait for its phase (`bulk_wait`).
+            if bool(self.ev(tc.group('issue'))):
+                state = self._tc_state()
+                state['bound'].setdefault(tc.group('cursor'), []).extend(
+                    state['open'])
+                state['open'] = []
+            return
         md = _MATRIX_DESC.match(stmt)
         if md:
             start = self.ev(md.group('buf'))
@@ -2235,6 +2518,7 @@ class Interp:
             cursor = self.env.get(bw.group('cursor'))
             if not isinstance(cursor, _Cursor):
                 raise Abort(f'bulk wait on an unarmed cursor: {stmt!r}')
+            self._tc_land(bw.group('cursor'))
             cursor.barrier[0]
             tracker = self.mem.tracker
             if tracker is not None:

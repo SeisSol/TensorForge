@@ -675,6 +675,142 @@ __device__ __forceinline__ void fenceProxyAsync() {
 #endif
 }
 
+/// The targets that have tcgen05 and tensor memory (sm_100a, sm_103a, and
+/// their families): the source of a product writes its instructions inside
+/// this guard (`engines.TCGEN05_FEATURE`), since `-arch=sm_100a` builds the
+/// source for `compute_100` as well, where ptxas refuses them; the helpers
+/// below trap outside it.
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) ||                                     \
+    defined(__CUDA_ARCH_FEAT_SM103_ALL) ||                                     \
+    (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                                 \
+     (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000 ||                                 \
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030))
+#define TENSORFORGE_TCGEN05 1
+#endif
+
+/// The warp of the block a thread is in, by its linear index: what the
+/// allocation of tensor memory and a warp's quarter of its lanes go by.
+__device__ __forceinline__ uint32_t tmemWarp() {
+  return (threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) /
+         32u;
+}
+
+/// `Columns` columns of tensor memory for the block (PTX ISA,
+/// "tcgen05.alloc", "tcgen05.relinquish_alloc_permit"; sm_100a): allocated by
+/// the first warp into the shared slot, the permit given up, and the address
+/// read back from the slot by every thread behind a block barrier between the
+/// engine's fences -- the allocation writes the slot through the engine.
+/// `Columns` is a power of two from 32 to 512.
+template <int Columns>
+__device__ __forceinline__ uint32_t tmemAlloc(void *slot) {
+#if defined(TENSORFORGE_TCGEN05)
+  if (tmemWarp() == 0) {
+    asm volatile(
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
+            "r"(bulk_shared_address(slot)),
+        "n"(Columns)
+        : "memory");
+    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;" ::
+                     : "memory");
+  }
+  asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+  __syncthreads();
+  asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+  return *static_cast<volatile uint32_t *>(slot);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+  return 0;
+#else
+  return 0;
+#endif
+}
+
+/// The columns freed again by the first warp, once every thread of the block
+/// is done with them: a block barrier between the engine's fences, then
+/// `tcgen05.dealloc` (PTX ISA, "tcgen05.dealloc").  A block frees what it
+/// allocated before it exits.
+template <int Columns>
+__device__ __forceinline__ void tmemDealloc(uint32_t tmem) {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+  __syncthreads();
+  asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+  if (tmemWarp() == 0) {
+    asm volatile(
+        "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(tmem),
+        "n"(Columns)
+        : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The address of the warp's quarter of the lanes of `tmem`, from `column`
+/// on: warp w of its warpgroup reaches the lanes 32 (w % 4) to 32 (w % 4) + 31
+/// alone, the lane in the upper half of the address (PTX ISA, "Tensor
+/// Memory").
+__device__ __forceinline__ uint32_t tmemWarpAddress(uint32_t tmem,
+                                                    uint32_t column) {
+  return tmem + ((32u * (tmemWarp() % 4u)) << 16) + column;
+}
+
+/// The waits for a warp's loads from tensor memory and its stores to it
+/// (PTX ISA, "tcgen05.wait"): what was loaded is valid behind the first, what
+/// was stored is in tensor memory behind the second.
+__device__ __forceinline__ void tmemWaitLd() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void tmemWaitSt() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The engine's operations ahead of this before the barrier or wait behind
+/// it, and those behind it after the barrier or wait ahead of it (PTX ISA,
+/// "tcgen05.fence").
+__device__ __forceinline__ void tcgen05FenceBefore() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void tcgen05FenceAfter() {
+#if defined(TENSORFORGE_TCGEN05)
+  asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The products the thread `issue` picks issued since its last commit,
+/// tracked by the cursor's mbarrier, which they arrive at once complete (PTX
+/// ISA, "tcgen05.commit"): issued by that thread alone -- a commit tracks the
+/// operations its own thread issued -- and noted by every thread on its
+/// cursor, so that `bulk_wait` waits for the phase.
+__device__ __forceinline__ void tcgen05Commit(BulkCursor &cursor, bool issue) {
+#if defined(TENSORFORGE_TCGEN05)
+  if (issue) {
+    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+                 "cluster.b64 [%0];" ::"r"(bulk_shared_address(cursor.barrier))
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  cursor.pending = true;
+}
+
 /// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
 ///
 /// A typedef and not a wrapper struct, and the reason is the constraint

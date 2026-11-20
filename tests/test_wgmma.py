@@ -657,6 +657,19 @@ def test_a_product_this_lowering_does_not_write_is_refused(change, why):
         engines.lower(s, _ctx().target, name=str)
 
 
+def test_a_descriptor_of_tcgen05s_format_is_refused():
+    """The formats differ in their fixed bits and how a swizzle is
+    numbered: a product reads only its own engine's."""
+    _, (s,) = _product(CASES['ss8'])
+    b = IRBuilder(fptype=Datatype.F32, context=_ctx())
+    sa = b.alloc(Datatype.F32, (512,), MemSpace.SHARED, hint='s', extern='s',
+                 arena='blk', offset=0)
+    tc = b.matrix_desc(sa, 0, desc=dataclasses.replace(PLAIN, form='tcgen05'))
+    bad = _broken(s, args=(tc,) + s.args[1:])
+    with pytest.raises(IRError, match="wgmma's format"):
+        engines.lower(bad, _ctx().target, name=str)
+
+
 def test_a_scale_that_is_neither_bit_is_refused():
     _, (s,) = _product(CASES['ss8'])
     s = _broken(s, args=s.args[:-1] + (2,))
@@ -982,14 +995,37 @@ def _nvcc():
     return found
 
 
+#: The first CUDA release that builds each arch-specific target: an older
+#: toolkit refuses it ("Unsupported gpu architecture"), as x-wing0's CUDA
+#: 12.4 refuses sm_100a.
+ARCH_RELEASE = {'sm_90a': (12, 0), 'sm_100a': (12, 8)}
+
+
+def _nvcc_builds(arch):
+    """The toolkit's nvcc, or a skip where it builds no `arch`: the base
+    target missing from `nvcc --list-gpu-code`, or a release older than the
+    one that brought the arch-specific target (`ARCH_RELEASE`)."""
+    nvcc = _nvcc()
+    listed = subprocess.run([nvcc, '--list-gpu-code'], capture_output=True,
+                            text=True, timeout=60).stdout.split()
+    found = re.search(r'release (\d+)\.(\d+)', subprocess.run(
+        [nvcc, '--version'], capture_output=True, text=True,
+        timeout=60).stdout)
+    release = (int(found.group(1)), int(found.group(2))) if found else (0, 0)
+    if (arch.rstrip('af') not in listed
+            or release < ARCH_RELEASE.get(arch, (0, 0))):
+        pytest.skip(f'nvcc {release[0]}.{release[1]} builds no {arch}')
+    return nvcc
+
+
 def _build(case, tmp_path, flags, product='cubin'):
     ctx, body, arena = _wgmma_body(case)
     src = tmp_path / 'wgmma.cu'
     src.write_text(_cuda_source(case, _emit(body, ctx), arena))
     nvcc = toolchain.COMPILERS['cuda']
     out = tmp_path / ('k.cubin' if product == 'cubin' else 'wgmma')
-    cmd = [_nvcc(), *nvcc.language_flags(), *flags, '-I', str(INCLUDE),
-           '-o', str(out), str(src)]
+    cmd = [_nvcc_builds('sm_90a'), *nvcc.language_flags(), *flags,
+           '-I', str(INCLUDE), '-o', str(out), str(src)]
     if product == 'cubin':
         cmd.insert(1, '-cubin')
     run = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -1065,7 +1101,8 @@ def test_compiled_for_sm90a_the_ptx_issues_what_the_body_states(name,
     src.write_text(_cuda_source(case, _emit(body, ctx), arena))
     nvcc = toolchain.COMPILERS['cuda']
     out = tmp_path / 'k.ptx'
-    run = subprocess.run([_nvcc(), '-ptx', *nvcc.language_flags(),
+    run = subprocess.run([_nvcc_builds('sm_90a'), '-ptx',
+                          *nvcc.language_flags(),
                           *nvcc.target_flags('sm_90a'), '-I', str(INCLUDE),
                           '-o', str(out), str(src)],
                          capture_output=True, text=True, timeout=600)

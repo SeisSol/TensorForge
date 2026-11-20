@@ -411,6 +411,9 @@ class HipLexic(CudaLexic):
   def matrix_descriptor(self, address, layout):
     return None
 
+  def tmem_address_type(self):
+    return None
+
   def tensor_descriptor(self, dst, src, rows, cols, pitch, *, datatype):
     if self._underlying_hardware != 'amd':
       return super().tensor_descriptor(dst, src, rows, cols, pitch,

@@ -519,6 +519,11 @@ class Lexic(ABC):
   def matrix_descriptor(self, address, layout):
     return None
 
+  def tmem_address_type(self):
+    """What a buffer of tensor memory is held as, its address (`MemSpace.
+    TMEM`); None where the target has none."""
+    return None
+
   # --- atomic accumulation --------------------------------------------------
   # Declared here so that every backend answers through one interface, the one
   # the single call site uses.  Declared per backend, the interfaces drift

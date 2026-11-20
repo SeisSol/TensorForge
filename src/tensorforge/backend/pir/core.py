@@ -67,6 +67,12 @@ class MemSpace(IntEnum):
     # what this enum is.  As one, it also earns the alias answer for free --
     # nothing reaches param space through a pointer into global.
     PARAM = 7
+    # NVIDIA's tensor memory (sm_100a): 128 lanes of 512 columns of 32 bits
+    # an SM, which a block allocates columns of (`Op.TMEM_ALLOC`) and the
+    # matrix engine keeps D in (tcgen05).  A space of its own: a thread
+    # reaches it through the engine's loads and stores alone, and nothing
+    # in shared or global memory aliases it.
+    TMEM = 8
 
     @classmethod
     def from_symbol_type(cls, stype: Any) -> 'MemSpace':
@@ -1026,8 +1032,16 @@ class Op:
     WAIT_COUNTER = 'wait.counter'   # wait on a hardware completion counter
     SET_PRIORITY = 'set.priority'   # the wave's issue priority from here on
     # Close what an asynchronous engine issued since its last commit into one
-    # group, which the engine's own completion counts: `wgmma.commit_group`.
+    # group, which the engine's own completion counts: `wgmma.commit_group`,
+    # and tcgen05's commit onto an mbarrier.
     COMMIT_GROUP = 'commit.group'
+    # Tensor memory (`MemSpace.TMEM`, tcgen05): columns allocated for the
+    # block and freed again, and a warp's loads and stores of its quarter of
+    # the lanes (`engines`).
+    TMEM_ALLOC = 'tmem.alloc'
+    TMEM_DEALLOC = 'tmem.dealloc'
+    TMEM_LD = 'tmem.ld'
+    TMEM_ST = 'tmem.st'
     # D = A * B + C on the fragments of a matrix engine, a collective of the
     # wave (`engines.MATRIX_ENGINES`): the fragments are values, D the
     # result -- or C itself, written in place, where the instruction

@@ -857,6 +857,14 @@ class Target:
         return (self.backend == 'cuda' and self.arch_specific()
                 and self.hw.sm_level() == 90)
 
+    def tcgen05(self) -> bool:
+        """Whether a product may go to tcgen05, the 5th generation tensor
+        core with tensor memory (`engines.MATRIX_ENGINES['tcgen05']`): CUDA
+        on sm_100a.  Plain sm_100 has none of it in its PTX, and sm_120 has
+        none at all."""
+        return (self.backend == 'cuda' and self.arch_specific()
+                and self.hw.sm_level() == 100)
+
     def tensor_copies(self) -> bool:
         """Whether a window may go into the LDS as one tile by gfx12.5's
         tensor data mover (`tensor_load_to_lds`, engine `tdm`): HIP on

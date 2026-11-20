@@ -746,7 +746,8 @@ class IRBuilder:
                    term: Optional[Tuple[int, int]] = None,
                    modifiers: Tuple = (),
                    sources: Optional[Tuple] = None,
-                   scalars: Sequence[Tuple[str, Operand]] = ()):
+                   scalars: Sequence[Tuple[str, Operand]] = (),
+                   extra: Tuple = ()):
         """D = A * B + C on the matrix engine `engine`
         (`engines.MATRIX_ENGINES`): the registers of the fragments as
         values, A's, B's and C's in the order the instruction takes them,
@@ -783,6 +784,9 @@ class IRBuilder:
         behind the fragments, as `(name, operand)` pairs -- wgmma's
         `scale_d`.  An engine that completes behind the issue (wgmma) is in
         place, and its statement is asynchronous (`engines.effect_of`).
+        D in tensor memory (tcgen05) is a buffer, read and written as one;
+        A there is read as one.  `extra` are attributes of the engine's own
+        (`a_column`, `d_column`).
         """
         found = engines.MATRIX_ENGINES.get(engine)
         if found is None:
@@ -808,8 +812,20 @@ class IRBuilder:
             attrs += (('sources', tuple(sources)),)
         if scalars:
             attrs += (('scalars', tuple(n for n, _ in scalars)),)
+        attrs += tuple(extra)
         movable = engines.movable_of(Op.MATRIX_MAC, attrs)
         effect = engines.effect_of(Op.MATRIX_MAC, attrs)
+        if result is None and tuple(sources or ())[2:] == (
+                engines.Source.TMEM,):
+            # D in tensor memory: the buffer read and written as a whole,
+            # no register named.
+            accesses = tuple(Access(Effect.READ | Effect.WRITE,
+                                    MemSpace.TMEM, base=w) for w in c)
+            accesses += self._descriptor_reads((a, b, c), sources)
+            return self._emit_op(Op.MATRIX_MAC, (), a + b + c + tuple(
+                                     v for _, v in scalars), pure=False,
+                                 movable=movable, effect=effect,
+                                 accesses=accesses, attrs=attrs)
         if result is None:
             for w in c:
                 self._require_addressable(w, 'matrix.mac')
@@ -835,7 +851,12 @@ class IRBuilder:
         descriptors among `operands` (A's, B's, C's), by `sources`: one a
         descriptor, of the buffer it was made over (`matrix_desc`)."""
         reads = ()
-        for frag, source in zip(operands, sources):
+        for i, (frag, source) in enumerate(zip(operands, sources)):
+            if source is engines.Source.TMEM and i < 2:
+                # A in tensor memory, read where it is.
+                reads += tuple(Access(Effect.READ, MemSpace.TMEM, v)
+                               for v in frag)
+                continue
             if source is not engines.Source.SHARED:
                 continue
             for v in frag:
@@ -914,17 +935,88 @@ class IRBuilder:
             raise IRError(why)
         return s
 
-    def commit_group(self, engine: str) -> Stmt:
-        """Close what `engine` issued since its last commit into one group
-        (`engines.commit_group`)."""
-        return self.emit(engines.commit_group(engine))
+    def tcgen05(self, n: int, a: Operand, b: Operand, d: Value, *,
+                issue: Value, enable_input_d: Operand = 1,
+                a_column: int = 0, d_column: int = 0) -> Stmt:
+        """One `tcgen05.mma` of m128nNk8, TF32 into FP32
+        (`engines.tcgen05_refusal`): D the columns `d_column` on of the
+        tensor memory buffer `d`; `a` a descriptor of tcgen05's format
+        (`matrix_desc`) or a tensor memory buffer, its columns `a_column`
+        on; `b` a descriptor.  Issued by the one thread `issue` picks,
+        which commits it too (`commit_group`); `enable_input_d` 0 writes D
+        = A * B, 1 adds to D.  Complete once the mbarrier it is committed to
+        has moved on (`matrix_wait`)."""
+        tmem_a = isinstance(a, Value) and isinstance(a.type, BufferType) \
+            and a.type.space == MemSpace.TMEM
+        sources = (engines.Source.TMEM if tmem_a else engines.Source.SHARED,
+                   engines.Source.SHARED, engines.Source.TMEM)
+        extra = ((('a_column', int(a_column)),) if tmem_a else ()) + (
+            ('d_column', int(d_column)),)
+        s = self.matrix_mac(
+            'tcgen05', (128, int(n), 8),
+            (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
+            (a,), (b,), (d,), sources=sources,
+            scalars=(('enable_input_d', enable_input_d), ('issue', issue)),
+            extra=extra)
+        why = engines.tcgen05_refusal(s)
+        if why is not None:
+            raise IRError(why)
+        return s
 
-    def matrix_wait(self, engine: str, count: int,
+    def tmem_alloc(self, columns: int, hint: str = 'tmem') -> Value:
+        """`columns` columns of tensor memory for the block, 128 lanes of
+        them (`engines.tmem_alloc`): a buffer in `MemSpace.TMEM` held as its
+        address, through a shared slot of this body's.  A barrier of the
+        block: every thread reaches it."""
+        slot = self.alloc(Datatype.I32, (1,), MemSpace.SHARED,
+                          hint=f'{hint}Slot')
+        tmem = self.value(BufferType(Datatype.F32,
+                                     (engines.TMEM_LANES, int(columns)),
+                                     MemSpace.TMEM), hint=hint)
+        self.emit(engines.tmem_alloc(tmem, slot, columns))
+        return tmem
+
+    def tmem_dealloc(self, tmem: Value) -> Stmt:
+        """Free the columns of `tmem` (`engines.tmem_dealloc`)."""
+        return self.emit(engines.tmem_dealloc(tmem))
+
+    def tmem_ld(self, tmem: Value, column: int, count: int,
+                hint: str = 'tm') -> List[Value]:
+        """A warp's load of `count` columns of its quarter of `tmem`'s
+        lanes from `column` on (`engines.tmem_ld`): each thread its lane's,
+        values of its own."""
+        targets = [self.value(ScalarType(Datatype.F32), hint=hint,
+                              uniform=Uniformity.LANE) for _ in range(count)]
+        self.emit(engines.tmem_ld(tmem, column, targets))
+        return targets
+
+    def tmem_st(self, tmem: Value, column: int,
+                values: Sequence[Operand]) -> Stmt:
+        """A warp's store of `values` to its quarter of `tmem`'s lanes, one
+        column each from `column` on (`engines.tmem_st`)."""
+        return self.emit(engines.tmem_st(tmem, column, values))
+
+    def commit_group(self, engine: str, object: Optional[Value] = None,
+                     issue: Optional[Value] = None) -> Stmt:
+        """Close what `engine` issued since its last commit into one group
+        (`engines.commit_group`): onto the mbarrier `object` for tcgen05,
+        what the thread `issue` picks issued."""
+        return self.emit(engines.commit_group(engine, object, issue))
+
+    def matrix_wait(self, engine: str, count: int = 0,
                     registers: Sequence[Value] = (),
-                    reads: Sequence[Value] = ()) -> Stmt:
+                    reads: Sequence[Value] = (),
+                    object: Optional[Value] = None,
+                    tmem: Sequence[Value] = ()) -> Stmt:
         """Wait until at most `count` groups of `engine` are in flight
         (`engines.matrix_wait`): `registers` are valid behind it, and the
-        buffers of the descriptors `reads` may be written again."""
+        buffers of the descriptors `reads` may be written again.
+
+        tcgen05's products complete on the mbarrier `object` they were
+        committed to: the wait for its phase (`engines.wait_phase`), which
+        makes valid what they wrote in `tmem` -- declared read and written
+        -- and declares their operands read, the descriptors' buffers and
+        a tensor memory A among `tmem`."""
         buffers = []
         for v in reads:
             buffer = self._desc_buffers.get(v.id) if isinstance(v, Value) \
@@ -934,6 +1026,15 @@ class IRBuilder:
                               f'this body made')
             if all(buffer is not x for x in buffers):
                 buffers.append(buffer)
+        if engines.COMMIT_ENGINES.get(engine) is engines.Completion.BARRIER:
+            if object is None or count:
+                raise IRError(f'{engine}\'s products are waited for on the '
+                              f'mbarrier they were committed to, all of them')
+            accesses = (tuple(Access(Effect.READ | Effect.WRITE,
+                                     MemSpace.TMEM, v) for v in tmem)
+                        + tuple(Access(Effect.READ, MemSpace.SHARED, x)
+                                for x in buffers))
+            return self.emit(engines.wait_phase(object, (), accesses))
         return self.emit(engines.matrix_wait(engine, count, registers,
                                              buffers))
 
@@ -2176,7 +2277,8 @@ class IRBuilder:
               mask: Optional[int] = None,
               group: Optional[Tuple[int, int, int]] = None,
               wall: bool = True, engine: Optional[str] = None,
-              registers: Sequence[Value] = ()) -> Stmt:
+              registers: Sequence[Value] = (),
+              side: Optional[str] = None) -> Stmt:
         """A fence of the schedule, of memory, or of both
         (`engines.fence_stmt`).
 
@@ -2192,7 +2294,7 @@ class IRBuilder:
         return self.emit(engines.fence_stmt(kind, scope=scope, mask=mask,
                                             group=group, wall=wall,
                                             engine=engine,
-                                            registers=registers))
+                                            registers=registers, side=side))
 
     def wait_counter(self, counter: str, count: int) -> Stmt:
         """Wait until at most ``count`` operations are outstanding on the
