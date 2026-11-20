@@ -53,6 +53,15 @@ bytes t places past it -- is checked where the copy is written
 tile, `shape` rows of a `pitch` apart, through a descriptor
 (`Op.TENSOR_DESC`), issued once by the first wave of the lanes it is for
 (`leader`, `tdm_refusal`) and waited for on that wave's `tensorcnt`.
+NVIDIA's tensor memory accelerator (`tma`) copies a box of a tensor --
+two or three dimensions, the tensor's ends filled -- through a tensor map
+the launcher encodes and the kernel takes as a parameter (`TensorMap`),
+issued by one thread for the lanes the mbarrier it completes on is for,
+as the bulk copy is (`tma_refusal`), into shared memory in the layout of
+the map's swizzle, which is a TensorForge swizzle (`swizzle_form`); and it
+adds such a box back into the tensor (`tma_reduce`), one thread's, counted
+in that thread's bulk groups.  Which of these stages an operand's batch is
+the batch's stride's question (`staging_engine`).
 
 What this increment keeps, on purpose:
 
@@ -87,10 +96,11 @@ from enum import Enum
 from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
                     Optional, Sequence, Tuple)
 
-from tensorforge.common.basic_types import Datatype
+from tensorforge.common.basic_types import RUNTIME, Addressing, Datatype
 
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op,
-                   Participants, Stmt, Uniformity, Value, walk_stmts)
+                   Participants, Stmt, Uniformity, Value, XorSwizzle,
+                   walk_stmts)
 
 
 # --------------------------------------------------------------------------- #
@@ -405,6 +415,24 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    '`pir.buffers`): an offset past its size reads zero and '
                    'writes nothing, which is what a predicate becomes; its '
                    "waits stay the compiler's, as a load's do"),
+    TransferEngine('tma', (Op.COPY_ASYNC,), Completion.BARRIER,
+                   "the tensor memory accelerator's copy of a box of a tensor "
+                   '(`cp.async.bulk.tensor`) through a tensor map the '
+                   'launcher encodes (`TensorMap`), by one thread, into '
+                   'shared memory in the layout of the map\'s swizzle, '
+                   'completing on an mbarrier with the bytes of the box, '
+                   'sm_90 and newer'),
+    TransferEngine('tma_reduce', (Op.COPY_ASYNC,), Completion.COUNTER,
+                   "the tensor memory accelerator's reduction of a box of "
+                   'shared memory into the tensor of a map '
+                   '(`cp.reduce.async.bulk.tensor`, `.add`), by one thread, '
+                   'each closed into a bulk group of that thread\'s own and '
+                   'counted in its bulk groups, which count nothing else; '
+                   'its waits are written out (`cp.async.bulk.wait_group.'
+                   'read`), behind which the box may be written again, and '
+                   'a barrier behind the wait shows that to the other '
+                   'threads; sm_90 and newer',
+                   waited_on='bulk_group', one_to_one=True),
     TransferEngine('tdm', (Op.COPY_ASYNC,), Completion.COUNTER,
                    "gfx1250's tensor data mover (`tensor_load_to_lds`): a "
                    'tile of `shape` rows a `pitch` apart into the LDS, row '
@@ -646,6 +674,329 @@ class TensorDescType:
 
     def __repr__(self):
         return 'tdesc' if self.elem is None else f'tdesc<{self.elem}>'
+
+
+# --------------------------------------------------------------------------- #
+# Tensor maps: boxes through the tensor memory accelerator (`tma`)
+# --------------------------------------------------------------------------- #
+
+#: The ranks of a box TensorForge writes the copy for: PTX has `.1d` to
+#: `.5d` (PTX ISA, "cp.async.bulk.tensor"), the tiles here are two and
+#: three dimensions.
+TMA_RANKS = (2, 3)
+#: A box's extent along a dimension, at most; a tensor's extent, at most;
+#: and a stride of the tensor in bytes, below (CUDA's tensor map:
+#: `cuTensorMapEncodeTiled`'s boxDim, globalDim and globalStrides).
+TMA_BOX_LIMIT = 256
+TMA_DIM_LIMIT = 1 << 32
+TMA_STRIDE_LIMIT = 1 << 40
+#: Bytes a box starts on in shared memory, and the tensor's base address,
+#: its strides and a box's first element along its rows in global memory:
+#: the tensor map's rules, the last one the hardware's (an illegal
+#: instruction on the RTX 5070, `~/tf-probe/engines3b/probe`).
+TMA_SHARED_ALIGN = 128
+TMA_GLOBAL_ALIGN = 16
+#: What a box reads past the tensor's ends: zeros, or a NaN that the
+#: tensor core's FMA reads as zero (`CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE`,
+#: `..._NAN_REQUEST_ZERO_FMA`).
+TMA_FILLS = ('zero', 'nan')
+#: The elements a reduction of a box adds (PTX ISA, "cp.reduce.async.bulk.
+#: tensor": `.add` of the types of the map), of those a map spells.
+TMA_REDUCE_TYPES = (Datatype.F32, Datatype.I32, Datatype.U32)
+#: The elements a map spells, by the suffix of their name in the driver's
+#: `CUtensorMapDataType` (`CU_TENSOR_MAP_DATA_TYPE_FLOAT32`, ...), which
+#: `tensorforge::TensorMapElement` names for the launcher (`cuda_tma.h`).
+TMA_TYPES = {Datatype.F32: 'FLOAT32', Datatype.F64: 'FLOAT64',
+             Datatype.I32: 'INT32', Datatype.U32: 'UINT32',
+             Datatype.I64: 'INT64'}
+
+
+@dataclass(frozen=True)
+class TensorMap:
+    """A tensor map: what the tensor memory accelerator copies a box of a
+    tensor in global memory through (PTX ISA, "Tensor-map" and
+    "cp.async.bulk.tensor"; CUDA's `cuTensorMapEncodeTiled`).
+
+    128 bytes the driver encodes on the host and the kernel takes as a
+    parameter, in param space (`__grid_constant__`), by its address: so the
+    launcher encodes it from the pointer, the strides and the extents it is
+    handed (`kernel_params.TensorMapParam`, `tensorforge::tensorMapTiled`),
+    and a copy names it (`IRBuilder.copy_tma`).  This is its static half,
+    what the generator knows of it, under the parameter's `name`.
+
+    Outermost dimension first, as TensorForge's shapes are; PTX and the
+    driver count from the innermost one, and the lowering and the launcher
+    turn the order around.  `dims` are the tensor's extents, None where only
+    the launch knows one -- the batch's elements.  `strides` are the
+    elements from one index of a dimension to the next, for every dimension
+    but the innermost, whose elements are adjacent; None is dense, the
+    extents' products.  `box` is what a copy moves.  `swizzle`, 0 or 32, 64
+    or 128 bytes, is how the box lies in shared memory: NVIDIA's swizzle of
+    that span, which is TensorForge's `XorSwizzle` of `swizzle_form`, and
+    whose rows are the span apart (`pitch`).  `fill` is what a box reads past
+    the tensor's ends (`TMA_FILLS`).
+    """
+
+    name: str
+    elem: Any
+    dims: Tuple[Optional[int], ...]
+    box: Tuple[int, ...]
+    strides: Optional[Tuple[Optional[int], ...]] = None
+    swizzle: int = 0
+    fill: str = 'zero'
+
+    def __post_init__(self):
+        why = self._refusal()
+        if why is not None:
+            raise IRError(f'a tensor map {self.name!r}: {why}')
+
+    def _refusal(self) -> Optional[str]:
+        if not (isinstance(self.name, str) and self.name.isidentifier()):
+            return 'its name is no identifier'
+        if self.elem not in TMA_TYPES:
+            return f'of {self.elem}; a map spells {", ".join(map(str, TMA_TYPES))}'
+        dims, box = tuple(self.dims), tuple(self.box)
+        if len(dims) != len(box) or len(box) not in TMA_RANKS:
+            return (f'{len(dims)} extents and a box of {len(box)}; the '
+                    f'copies here are of {TMA_RANKS} dimensions')
+        for n in dims:
+            if n is not None and not (isinstance(n, int)
+                                      and 1 <= n <= TMA_DIM_LIMIT):
+                return f'an extent of {n!r}'
+        for n in box:
+            if not (isinstance(n, int) and 1 <= n <= TMA_BOX_LIMIT):
+                return f'a box extent of {n!r}, not 1 to {TMA_BOX_LIMIT}'
+        size = self.elem.size()
+        inner = box[-1] * size
+        if inner % 16:
+            return (f'a box row of {inner} bytes, which is no multiple of '
+                    f'16')
+        if self.swizzle not in SWIZZLE_BYTES:
+            return f'a swizzle of {self.swizzle!r}; there are {SWIZZLE_BYTES}'
+        if self.swizzle and inner > self.swizzle:
+            return (f'a box row of {inner} bytes, wider than its swizzle of '
+                    f'{self.swizzle}')
+        if self.fill not in TMA_FILLS:
+            return f'a fill of {self.fill!r}; there are {TMA_FILLS}'
+        if self.strides is None:
+            if any(n is None for n in dims[1:]):
+                return 'dense, with an inner extent only the launch knows'
+            return None
+        if len(self.strides) != len(dims) - 1:
+            return (f'{len(self.strides)} strides for {len(dims)} '
+                    f'dimensions; the innermost has none')
+        for n in self.strides:
+            if n is None:
+                continue
+            if not isinstance(n, int) or n < 1:
+                return f'a stride of {n!r}'
+            if (n * size) % TMA_GLOBAL_ALIGN or n * size >= TMA_STRIDE_LIMIT:
+                return (f'a stride of {n * size} bytes, no multiple of '
+                        f'{TMA_GLOBAL_ALIGN} below {TMA_STRIDE_LIMIT}')
+        return None
+
+    @property
+    def rank(self) -> int:
+        return len(self.box)
+
+    def element_strides(self) -> Tuple[Optional[int], ...]:
+        """Elements from one index of each dimension to the next, outermost
+        first, the innermost's 1; None where the launch binds one."""
+        if self.strides is not None:
+            return tuple(self.strides) + (1,)
+        out, step = [], 1
+        for n in reversed(self.dims):
+            out.append(step)
+            step = None if step is None or n is None else step * n
+        return tuple(reversed(out))
+
+    def box_bytes(self) -> int:
+        """The bytes of a box: what its copy announces on the mbarrier, the
+        elements past the tensor's ends included -- a box is filled whole."""
+        volume = 1
+        for n in self.box:
+            volume *= n
+        return volume * self.elem.size()
+
+    def rows(self) -> int:
+        """The rows of a box: every dimension but the innermost."""
+        rows = 1
+        for n in self.box[:-1]:
+            rows *= n
+        return rows
+
+    def pitch(self) -> int:
+        """Bytes from a row of a box to the next in shared memory: the
+        swizzle's span where there is one, a row narrower than it padded
+        to it (GB200's and the RTX 5070's reading); the row itself where
+        not."""
+        return self.swizzle or self.box[-1] * self.elem.size()
+
+    def shared_bytes(self) -> int:
+        """The bytes a box covers in shared memory, its padding included."""
+        return self.rows() * self.pitch()
+
+    def shared_index(self, *at: int) -> int:
+        """The element of the destination that element `at` of a box --
+        outermost first -- goes to, before the swizzle permutes it."""
+        row = 0
+        for n, i in zip(self.box[:-1], at[:-1]):
+            row = row * n + i
+        return row * (self.pitch() // self.elem.size()) + at[-1]
+
+    def __repr__(self):
+        dims = 'x'.join('?' if n is None else str(n) for n in self.dims)
+        box = 'x'.join(map(str, self.box))
+        swz = f', sw{self.swizzle}' if self.swizzle else ''
+        return f'tmap<{self.name}: {dims}x{self.elem}, box {box}{swz}>'
+
+
+def tma_refusal(copy: Stmt) -> Optional[str]:
+    """Why the tensor memory accelerator cannot copy `copy`, or None where
+    it can: a box into shared memory (`tma`), or a box of shared memory
+    added into the tensor (`tma_reduce`), the same rules for the side in
+    shared memory -- its source then -- and the coordinates on the side of
+    the tensor, its destination.  A reduction is issued by the thread its
+    predicate picks, as every thread would issue one otherwise, and adds
+    an element of `TMA_REDUCE_TYPES`.
+
+    The map (`map`) a `TensorMap`, a coordinate for each of its dimensions
+    (`copy_src_index`) -- the innermost one on `TMA_GLOBAL_ALIGN` bytes,
+    which the RTX 5070 refuses as an illegal instruction where it is not; a
+    value is the caller's to keep there -- and the mbarrier the copy
+    completes on (`object`);
+    the destination a buffer of shared memory of the map's element, laid
+    out as the map's swizzle lays the box out (`swizzle_form`, None without
+    one) and long enough for the box from where it starts; that start on
+    `TMA_SHARED_ALIGN` bytes where it is a number -- a value is the caller's
+    to keep there, as the buffer's placement is (`IRBuilder.copy_tma`) --
+    and the bytes the copy announces the box's.
+    """
+    tmap = copy.attr('map')
+    if not isinstance(tmap, TensorMap):
+        return 'it names no tensor map'
+    reduce = copy.attr('engine') == 'tma_reduce'
+    coords = copy.copy_dst_index if reduce else copy.copy_src_index
+    if len(coords) != tmap.rank:
+        return (f'{len(coords)} coordinates into a map of {tmap.rank} '
+                f'dimensions')
+    inner = coords[-1]
+    if (isinstance(inner, int) and not isinstance(inner, bool)
+            and (inner * tmap.elem.size()) % TMA_GLOBAL_ALIGN):
+        return (f'the box starts {inner * tmap.elem.size()} bytes into a row, '
+                f'off {TMA_GLOBAL_ALIGN}: an illegal instruction')
+    if reduce:
+        if copy.predicate is None:
+            return 'every thread would add the box: no thread issues it alone'
+        if tmap.elem not in TMA_REDUCE_TYPES:
+            return (f'a reduction of {tmap.elem}; it adds '
+                    f'{", ".join(map(str, TMA_REDUCE_TYPES))}')
+    elif copy.attr('object') is None:
+        return 'it names no mbarrier to complete on'
+    side = copy.copy_src if reduce else copy.copy_dst
+    t = getattr(side, 'type', None)
+    if not (isinstance(t, BufferType) and t.space == MemSpace.SHARED):
+        return (f'the box is {side!r} in shared memory, which is no buffer '
+                f'there')
+    elem = getattr(t.elem, 'base', t.elem)
+    if elem.size() != tmap.elem.size():
+        return f'a box of {tmap.elem} in a buffer of {elem}'
+    form = swizzle_form(tmap.swizzle, tmap.elem)
+    if t.swizzle != form:
+        return (f'the box lies as {form!r} in shared memory, and the buffer '
+                f'is laid out as {t.swizzle!r}')
+    index = copy.copy_src_index if reduce else copy.copy_dst_index
+    start = index[0] if len(index) == 1 else None
+    if len(index) != 1:
+        return 'the box in shared memory is not named by one index'
+    need = tmap.shared_bytes() // elem.size()
+    if isinstance(start, int) and not isinstance(start, bool):
+        if (start * elem.size()) % TMA_SHARED_ALIGN:
+            return (f'the box starts {start * elem.size()} bytes into the '
+                    f'buffer, off {TMA_SHARED_ALIGN}')
+        if start + need > t.volume:
+            return (f'the box covers {need} elements from {start}, past the '
+                    f'{t.volume} of the buffer')
+    elif need > t.volume:
+        return f'the box covers {need} elements, past the {t.volume} of the buffer'
+    if copy.attr('width') != tmap.box_bytes():
+        return (f'it announces {copy.attr("width")!r} bytes for a box of '
+                f'{tmap.box_bytes()}')
+    return None
+
+
+def tensor_map_refusal(addressing: Any, *, stride_bytes: Optional[int],
+                       alignment: int, row_bytes: int) -> Optional[str]:
+    """Why the batch of an operand addressed as `addressing` (an
+    `Addressing` or an `ElementAddressing`) cannot be read through a tensor
+    map, or None where it can.
+
+    A map states one stride from an element's data to the next, which the
+    launcher has to know when it encodes the map: the batch's own operand
+    (`NONE`, no stride at all), one at a stride from the last (`STRIDED`),
+    or one an index list names at a stride from the base (`INDEXED`, the
+    box's coordinate along the elements its entry).  An array of pointers
+    states none (`PTR_BASED`, `INDEXED_POINTER`): an element's data is
+    wherever its pointer says, and only the device reads the pointers.  A
+    stride bound at run time is not taken either, as the map could refuse
+    it once the generator has decided.  Every element's data starts on 16
+    bytes, which only the operand's promise says (`alignment`, `Tensor.
+    alignment`: the base and its offsets included), and so does each of
+    its rows (`row_bytes`) and the stride (`stride_bytes`, the stride in
+    bytes; None for the batch's operand).
+    """
+    kind = getattr(addressing, 'kind', addressing)
+    if kind in (Addressing.PTR_BASED, Addressing.INDEXED_POINTER):
+        return ("an element's data is reached through a pointer of its "
+                'own, at no stride from the last the launcher knows')
+    if kind not in (Addressing.NONE, Addressing.STRIDED, Addressing.INDEXED):
+        return f'an operand addressed as {kind} is no tensor in memory'
+    if getattr(addressing, 'stride', None) is RUNTIME:
+        return ('a stride bound at run time, which the map could refuse '
+                'after the kernel is generated')
+    if alignment % TMA_GLOBAL_ALIGN:
+        return (f'the operand promises {alignment} bytes of alignment; a '
+                f'map needs {TMA_GLOBAL_ALIGN}')
+    if row_bytes % TMA_GLOBAL_ALIGN:
+        return f'rows of {row_bytes} bytes, off {TMA_GLOBAL_ALIGN}'
+    if kind is not Addressing.NONE and (
+            stride_bytes is None or stride_bytes % TMA_GLOBAL_ALIGN
+            or stride_bytes >= TMA_STRIDE_LIMIT):
+        return (f'elements {stride_bytes} bytes apart, no multiple of '
+                f'{TMA_GLOBAL_ALIGN} below {TMA_STRIDE_LIMIT}')
+    return None
+
+
+def staging_engine(target: Any, addressing: Any, *,
+                   stride_bytes: Optional[int], alignment: int,
+                   row_bytes: int, window_bytes: int,
+                   contiguous: bool) -> Tuple[str, Tuple[str, ...]]:
+    """The engine that copies an element's window of an operand into shared
+    memory on `target`, and why each better one was not taken: a box through
+    a tensor map (`tma`) where the batch has one stride the launcher knows
+    (`tensor_map_refusal`); else the bulk copy of the window, one for each
+    element (`bulk`), where the window is one run of a multiple of 16 bytes
+    on 16 -- which an array of pointers does not keep from it; else the copy
+    of every lane's few bytes (`copy_engine`: `cp.async`, or AMD's)."""
+    why = []
+    if not (target is not None and target.tensor_maps()):
+        why.append('the target has no tensor maps')
+    else:
+        refusal = tensor_map_refusal(addressing, stride_bytes=stride_bytes,
+                                     alignment=alignment, row_bytes=row_bytes)
+        if refusal is None:
+            return 'tma', ()
+        why.append(refusal)
+    if not (target is not None and target.bulk_copy_path()):
+        why.append('the target has no bulk copy')
+    elif not contiguous:
+        why.append('the window is no one run of bytes')
+    elif window_bytes % 16 or alignment % 16:
+        why.append(f'a window of {window_bytes} bytes on {alignment}, off '
+                   f'16')
+    else:
+        return 'bulk', tuple(why)
+    return copy_engine(target), tuple(why)
 
 
 def element_of(type_: Any, base: Any) -> Any:
@@ -1253,6 +1604,11 @@ def _lower_wait_counter_cuda(s: Stmt, env: Spelling) -> Lowered:
     counter, count = s.attr('counter'), s.attr('count')
     if counter == 'wgmma':
         return _wait_wgmma(s, env)
+    if counter == 'bulk_group':
+        # The thread's bulk groups, of which at most `count` may still be
+        # reading their boxes (`tma_reduce`; PTX ISA,
+        # "cp.async.bulk.wait_group": `.read`).
+        return Lowered((f'tensorforge::bulkWaitRead<{count}>();',))
     if counter != 'group' or env.lexic is None:
         raise IRError(f'no {counter} counter to wait on under CUDA')
     return Lowered((env.lexic.wait_async(count),))
@@ -1479,6 +1835,41 @@ def swizzled(address: int, swizzle: int) -> int:
         return address
     bits = {32: 1, 64: 2, 128: 3}[swizzle]
     return address ^ (((address >> 7) & ((1 << bits) - 1)) << 4)
+
+
+def swizzle_form(swizzle: int, elem: Any) -> Optional[XorSwizzle]:
+    """TensorForge's swizzle (`XorSwizzle`) that is NVIDIA's of `swizzle`
+    bytes over elements of `elem`, None for none: the 16-byte chunk a
+    granule, a row eight of them -- the 128-byte line -- and the first two,
+    four or eight permuted, by one, two or three bits of the line's number
+    (`swizzled`).  So a buffer of that swizzle is addressed, element by
+    element, where the tensor memory accelerator writes a box of that
+    swizzle and wgmma and tcgen05 read an operand of it -- placed on the
+    period (`swizzle_alignment`), since the hardware takes the bits from the
+    shared address itself (GB200's and the RTX 5070's reading).  At 128
+    bytes it is the swizzle TensorForge already had, `XorSwizzle(8, 16 /
+    size)`."""
+    if not swizzle:
+        return None
+    if swizzle not in SWIZZLE_BYTES:
+        raise IRError(f'a swizzle of {swizzle!r} bytes; there are '
+                      f'{SWIZZLE_BYTES}')
+    size = elem.size()
+    if size > 16 or 16 % size:
+        raise IRError(f'a swizzle of 16-byte chunks over elements of {size}')
+    return XorSwizzle(swizzle // 16, 16 // size, line=8)
+
+
+def swizzle_bytes(form: Optional[XorSwizzle], elem: Any) -> Optional[int]:
+    """The NVIDIA swizzle a buffer laid out as `form` is, in bytes -- 0 for
+    none -- or None where it is a permutation of TensorForge's own that no
+    copy or matrix engine of NVIDIA's reads (`swizzle_form`)."""
+    if form is None:
+        return 0
+    for swizzle in SWIZZLE_BYTES[1:]:
+        if form == swizzle_form(swizzle, elem):
+            return swizzle
+    return None
 
 
 def descriptor_offset(desc: MatrixDescType, row: int, k: int) -> int:
@@ -2792,7 +3183,8 @@ def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
                  accesses: Optional[Tuple[Access, ...]] = None,
                  engine: Optional[str] = None) -> Stmt:
     """Wait until at most `count` operations are outstanding on `counter`
-    (`group`, `vmcnt`, `lgkmcnt`, `asynccnt`, `tensorcnt`).
+    (`group`, `vmcnt`, `lgkmcnt`, `asynccnt`, `tensorcnt`; `bulk_group`, a
+    thread's bulk groups, which its reductions of boxes are closed into).
 
     Without `tokens` it writes what the transfers it retires wrote, and
     which those are is the counter's to know, not the statement's: so any
@@ -2948,4 +3340,9 @@ __all__ = [
     'COMMIT_ENGINES', 'TCGEN05_FEATURE', 'TCGEN05_N', 'TMEM_COLUMNS',
     'TMEM_COUNTS', 'TMEM_LANES', 'tcgen05_idesc', 'tcgen05_refusal',
     'tmem_alloc', 'tmem_dealloc', 'tmem_ld', 'tmem_st',
+    'TMA_BOX_LIMIT', 'TMA_DIM_LIMIT', 'TMA_FILLS', 'TMA_GLOBAL_ALIGN',
+    'TMA_RANKS', 'TMA_SHARED_ALIGN', 'TMA_STRIDE_LIMIT', 'TMA_TYPES',
+    'TMA_REDUCE_TYPES', 'TensorMap', 'staging_engine', 'swizzle_bytes',
+    'swizzle_form',
+    'tensor_map_refusal', 'tma_refusal',
 ]

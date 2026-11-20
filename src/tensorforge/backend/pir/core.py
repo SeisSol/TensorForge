@@ -159,6 +159,15 @@ class XorSwizzle:
     width: int
     #: Elements that move together.  1 permutes single elements.
     granule: int = 1
+    #: Granules a row has as the selector counts rows, where that is not
+    #: `width`: None is `width`.  NVIDIA's shared-memory swizzles -- the
+    #: layout the tensor memory accelerator writes a box in, and wgmma and
+    #: tcgen05 read an operand in -- XOR the 16-byte chunk with the 128-byte
+    #: line, one, two or three bits of each for 32, 64 and 128 bytes: rows of
+    #: eight granules of 16 bytes, of which the first two, four or eight are
+    #: permuted (`engines.swizzle_form`).  At 128 bytes that is `width` 8 and
+    #: no `line` of its own, the form TensorForge's own swizzle already had.
+    line: Optional[int] = None
 
     def __post_init__(self):
         if self.width < 1 or self.width & (self.width - 1):
@@ -167,11 +176,25 @@ class XorSwizzle:
         if self.granule < 1 or self.granule & (self.granule - 1):
             raise IRError(f'swizzle granule must be a power of two, got '
                           f'{self.granule}')
+        if self.line is not None:
+            if (self.line < self.width or self.line & (self.line - 1)):
+                raise IRError(f'a swizzle row of {self.line} granules: a '
+                              f'power of two of at least the width '
+                              f'{self.width}')
+            if self.line == self.width:
+                # One form for one permutation, so that equal swizzles
+                # compare equal however they were spelled.
+                object.__setattr__(self, 'line', None)
+
+    @property
+    def span(self) -> int:
+        """Granules a row has, as the selector counts rows."""
+        return self.width if self.line is None else self.line
 
     def apply(self, index: int) -> int:
         """The permuted index, for tests and for constant folding."""
         g, r = divmod(index, self.granule)
-        return (g ^ ((g // self.width) % self.width)) * self.granule + r
+        return (g ^ ((g // self.span) % self.width)) * self.granule + r
 
     def admits(self, length: int) -> bool:
         """May an access of `length` adjacent elements be permuted as one?
@@ -185,8 +208,9 @@ class XorSwizzle:
                 or (length <= self.granule and self.granule % length == 0))
 
     def __repr__(self):
-        return (f'xor{self.width}' if self.granule == 1
-                else f'xor{self.width}g{self.granule}')
+        line = '' if self.line is None else f'l{self.line}'
+        return (f'xor{self.width}{line}' if self.granule == 1
+                else f'xor{self.width}g{self.granule}{line}')
 
 
 @dataclass(frozen=True)

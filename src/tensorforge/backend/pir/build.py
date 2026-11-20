@@ -892,6 +892,15 @@ class IRBuilder:
         if elem.size() != desc.elem.size():
             raise IRError(f'a descriptor of {desc.elem} over a buffer of '
                           f'{elem}')
+        form = buffer.type.swizzle
+        if form is not None and form != engines.swizzle_form(desc.swizzle,
+                                                             elem):
+            # A buffer TensorForge addresses through a swizzle of its own is
+            # read by the engine in the descriptor's: they have to be one.
+            # Without one the layout is the caller's, staged by hand.
+            raise IRError(f'a matrix descriptor swizzled by {desc.swizzle} '
+                          f'bytes over {buffer}, which is laid out as '
+                          f'{form!r}')
         if desc.swizzle:
             align = engines.swizzle_alignment(desc.swizzle) // elem.size()
             producer = self._producer(buffer)
@@ -1580,7 +1589,7 @@ class IRBuilder:
         # position inside the granule -- come through untouched, which is what
         # keeps a granule contiguous.
         gbits = swz.granule.bit_length() - 1
-        bits = swz.width.bit_length() - 1
+        bits = swz.span.bit_length() - 1
         row = self.op('shr', INDEX, index, gbits + bits, hint='sw')
         sel = self.op('bitand', INDEX, row, swz.width - 1, hint='sw')
         if gbits:
@@ -2053,6 +2062,131 @@ class IRBuilder:
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
         self._token_engine[tok.id] = 'tdm'
+        return tok
+
+    def copy_tma(self, dst: Value, src: Any, tmap: 'engines.TensorMap',
+                 coords: Sequence[Operand], *, barrier: Value,
+                 dst_index: Operand = 0, hint: str = 'tma') -> Value:
+        """Issue one copy of a box of the tensor `tmap` describes through
+        the tensor memory accelerator (`tma`), into the shared buffer `dst`
+        from element `dst_index` on; returns its token.
+
+        `src` is the global buffer the map is over -- what the copy reads, to
+        every pass -- and `coords` are the box's first element in the map's
+        dimensions, outermost first; a box that reaches past the tensor's
+        ends is filled (`TensorMap.fill`).  The box lies in `dst` row after
+        row, `TensorMap.pitch` bytes apart, permuted by the map's swizzle,
+        which is `dst`'s own (`engines.swizzle_form`): so every load of the
+        box addresses it as TensorForge addresses any swizzled buffer, and
+        `TensorMap.shared_index` is where an element of it is.
+
+        A bulk copy to every pass: one thread issues it -- the leader of
+        `barrier`, the mbarrier of `bulk_channel` -- the bytes of the box
+        announced on it, and its wait is the wait for the barrier's phase
+        (`wait`).  The buffer starts on the swizzle's period, where the
+        hardware's permutation, which it takes from the shared address,
+        is the buffer's; on 128 bytes without one.  A start that is a value
+        is the caller's to keep on 128 bytes.  What the copy cannot do is
+        refused here (`engines.tma_refusal`).
+        """
+        if not isinstance(tmap, engines.TensorMap):
+            raise IRError(f'a tensor copy through {tmap!r}, which is no '
+                          f'tensor map')
+        if not (isinstance(dst, Value) and isinstance(dst.type, BufferType)):
+            raise IRError(f'a tensor copy into {dst!r}, which is no buffer')
+        elem = getattr(dst.type.elem, 'base', dst.type.elem)
+        align = max(engines.TMA_SHARED_ALIGN,
+                    engines.swizzle_alignment(tmap.swizzle)) // elem.size()
+        producer = self._producer(dst)
+        placed = producer.attr('place_align') if producer else None
+        if not placed or placed % align:
+            raise IRError(f'a tensor copy into {dst}, which is not placed on '
+                          f'{align} elements')
+        dst_space = self._space_of(dst)
+        src_space = self._space_of(src)
+        accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
+                    Access(Effect.WRITE, dst_space, self.alias_root(dst)))
+        tok = self.value(TokenType(engines.completes_of('tma')), hint=hint)
+        attrs = (('ndst', 1), ('elems', tmap.box_bytes() // elem.size()),
+                 ('engine', 'tma'), ('completes', engines.completes_of('tma')),
+                 ('object', barrier), ('width', tmap.box_bytes()),
+                 ('shape', tuple(tmap.box)), ('map', tmap))
+        s = self._emit_op(Op.COPY_ASYNC, (tok,),
+                          (dst, src, dst_index) + tuple(coords),
+                          pure=False, movable=True,
+                          effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                          accesses=accesses, attrs=attrs)
+        why = engines.tma_refusal(s)
+        if why is not None:
+            raise IRError(f'the tensor memory accelerator cannot copy into '
+                          f'{dst}: {why}')
+        self._token_accesses[tok.id] = accesses
+        self._token_results[tok.id] = ()
+        self._token_bulk[tok.id] = barrier
+        return tok
+
+    def reduce_tma(self, dst: Any, src: Value, tmap: 'engines.TensorMap',
+                   coords: Sequence[Operand], *, issue: Value,
+                   src_index: Operand = 0, hint: str = 'tr') -> Value:
+        """Add the box of shared memory in `src`, from element `src_index`
+        on, into the tensor `tmap` describes, from `coords` on -- outermost
+        first, what lies past the tensor's ends left out -- through the
+        tensor memory accelerator (`tma_reduce`); returns its token.
+
+        `dst` is the global buffer the map is over, what the reduction
+        writes to every pass.  The box lies in `src` as a copy through the
+        map would leave it (`copy_tma`): rows `TensorMap.pitch` bytes
+        apart, permuted by the map's swizzle, `src`'s own -- so the threads
+        that write it address it as any buffer -- and the buffer is placed
+        as a copy's destination is.  What the threads wrote to it they
+        fence for the accelerator, which reads through another proxy
+        (`FenceKind.PROXY`), ahead of the barrier that shows it to the
+        thread `issue` picks, which issues the reduction and closes it into
+        a bulk group of its own.  Its wait (`wait`) is that thread's wait on
+        its bulk groups (`engines.wait_counter`), every thread's statement
+        and a wait for nothing in the others; behind it `src` may be written
+        again, and a barrier behind the wait shows that to the others.
+        What the accelerator cannot do is refused here (`engines.
+        tma_refusal`).
+        """
+        if not isinstance(tmap, engines.TensorMap):
+            raise IRError(f'a tensor reduction through {tmap!r}, which is no '
+                          f'tensor map')
+        if not (isinstance(src, Value) and isinstance(src.type, BufferType)):
+            raise IRError(f'a tensor reduction of {src!r}, which is no '
+                          f'buffer')
+        elem = getattr(src.type.elem, 'base', src.type.elem)
+        align = max(engines.TMA_SHARED_ALIGN,
+                    engines.swizzle_alignment(tmap.swizzle)) // elem.size()
+        producer = self._producer(src)
+        placed = producer.attr('place_align') if producer else None
+        if not placed or placed % align:
+            raise IRError(f'a tensor reduction of {src}, which is not placed '
+                          f'on {align} elements')
+        accesses = (Access(Effect.READ, self._space_of(src),
+                           self.alias_root(src)),
+                    Access(Effect.WRITE, self._space_of(dst),
+                           self.alias_root(dst)))
+        tok = self.value(TokenType(engines.completes_of('tma_reduce')),
+                         hint=hint)
+        attrs = (('ndst', tmap.rank),
+                 ('elems', tmap.box_bytes() // elem.size()),
+                 ('engine', 'tma_reduce'),
+                 ('completes', engines.completes_of('tma_reduce')),
+                 ('width', tmap.box_bytes()), ('shape', tuple(tmap.box)),
+                 ('map', tmap), ('reduce', 'add'))
+        s = self._emit_op(Op.COPY_ASYNC, (tok,),
+                          (dst, src) + tuple(coords) + (src_index,),
+                          pure=False, movable=True, predicate=issue,
+                          effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                          accesses=accesses, attrs=attrs)
+        why = engines.tma_refusal(s)
+        if why is not None:
+            raise IRError(f'the tensor memory accelerator cannot add the box '
+                          f'of {src}: {why}')
+        self._token_accesses[tok.id] = accesses
+        self._token_results[tok.id] = ()
+        self._token_engine[tok.id] = 'tma_reduce'
         return tok
 
     def load_async(self, base: Any, *indices: Operand, type_=None,

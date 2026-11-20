@@ -841,6 +841,16 @@ class Target:
         level = self.hw.sm_level()
         return level is not None and level >= 90
 
+    def tensor_maps(self) -> bool:
+        """Whether a box of a tensor may go into shared memory through a
+        tensor map, by the tensor memory accelerator (`cp.async.bulk.
+        tensor`, engine `tma`): CUDA from sm_90 on, as the bulk copy -- the
+        consumer Blackwell parts included, which have the accelerator
+        without wgmma or tcgen05.  The map is a kernel parameter the
+        launcher encodes through the driver (`kernel_params.
+        TensorMapParam`)."""
+        return self.bulk_copy_path()
+
     def arch_specific(self) -> bool:
         """Whether the target is an NVIDIA part's arch-specific one
         (`sm_90a`, `sm_100a`): the instructions only that target has may be

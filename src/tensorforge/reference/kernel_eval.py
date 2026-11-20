@@ -512,6 +512,63 @@ class _Cursor(NamedTuple):
     barrier: Optional['Ptr'] = None
 
 
+class TensorMapArg(NamedTuple):
+    """A tensor map the kernel is handed (`engines.TensorMap`): what a copy
+    of the tensor memory accelerator reads a box through, passed as a
+    parameter by value (`evaluate_wave`'s `scalars`, under the map's name).
+
+    The tensor is the global array `buffer` from element `offset` on, of
+    elements of `size` bytes; `dims` its extents and `strides` the elements
+    from one index of each dimension to the next, outermost first, the
+    innermost's 1 included; `box` the extents of a box; `swizzle` the bytes
+    of NVIDIA's swizzle the box lies in in shared memory, 0 for none; `nan`
+    whether what a box reads past the tensor's ends is NaN rather than
+    zero.  `of` builds one from the map's static half."""
+    buffer: str
+    dims: Tuple[int, ...]
+    strides: Tuple[int, ...]
+    box: Tuple[int, ...]
+    swizzle: int = 0
+    size: int = 4
+    offset: int = 0
+    nan: bool = False
+
+    @classmethod
+    def of(cls, tmap: Any, buffer: str, offset: int = 0,
+           dims: Optional[Sequence[int]] = None,
+           strides: Optional[Sequence[int]] = None) -> 'TensorMapArg':
+        """The map `tmap` (`engines.TensorMap`) over `buffer`, the extents
+        and strides the launch binds given where the map leaves them."""
+        dims = tuple(tmap.dims if dims is None else dims)
+        strides = tuple(tmap.element_strides() if strides is None
+                        else strides)
+        if any(n is None for n in dims + strides):
+            raise ValueError(f'{tmap.name}: an extent or a stride the launch '
+                             f'binds is not given')
+        return cls(buffer, dims, strides, tuple(tmap.box), tmap.swizzle,
+                   tmap.elem.size(), offset, tmap.fill == 'nan')
+
+
+#: A box copied through a tensor map (`tensorforge::tmaLoad`, `cuda_tma.h`):
+#: the cursor whose leader issues it, the destination's element, the map,
+#: the bytes announced, the coordinates innermost first.
+_TMA_LOAD = re.compile(
+    r'^tensorforge::tmaLoad\s*\(\s*(?P<cursor>\w+)\s*,'
+    r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
+    r'\s*&\s*(?P<map>\w+)\s*,\s*(?P<bytes>\d+)\s*,(?P<coords>.+)\)$')
+
+
+#: A box of shared memory added into the tensor of a map
+#: (`tensorforge::tmaReduceAdd`): the map, the box's first element, the
+#: coordinates innermost first; and the issuing thread's wait on its bulk
+#: groups (`tensorforge::bulkWaitRead`).
+_TMA_REDUCE = re.compile(
+    r'^tensorforge::tmaReduceAdd\s*\(\s*&\s*(?P<map>\w+)\s*,'
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,(?P<coords>.+)\)$')
+_BULK_WAIT_READ = re.compile(
+    r'^tensorforge::bulkWaitRead\s*<\s*(?P<pending>\d+)\s*>\s*\(\s*\)$')
+
+
 #: Scalar type -> bytes, for turning a copy's byte count into element slots.
 #: The interpreter's memory is untyped, so the width has to come from the
 #: declaration of the pointer being written.
@@ -774,6 +831,11 @@ class Races:
         #: (cursor, lane) -> when that lane last waited on the cursor.
         self._bulk_flight: Dict[int, Tuple[str, int]] = {}
         self._landed: Dict[Tuple[str, int], int] = {}
+        #: slot -> the lane whose reduction of a box still reads it, and
+        #: lane -> the slots each of its bulk groups reads, oldest first
+        #: (`reduce_issue`, `reduce_wait`).
+        self._reduce_flight: Dict[int, int] = {}
+        self._bulk_groups: Dict[int, List[set]] = {}
         #: named barrier -> lane -> when it arrived without waiting.
         self._arrived: Dict[int, Dict[int, int]] = {}
         #: Set while an LDS-DMA copy writes: the wave it counts in -- for
@@ -913,6 +975,29 @@ class Races:
                     self._writes[slot] = (lane, self.time)
                     self._reads.pop(slot, None)
 
+    def reduce_issue(self, lane: int, slots) -> None:
+        """`lane` issued a reduction of the box in `slots`, closed into a
+        bulk group of its own: the accelerator reads them until the lane
+        waits for the group (`reduce_wait`), and a write before is a race,
+        whatever barrier stands between."""
+        group = set(slots)
+        self._bulk_groups.setdefault(lane, []).append(group)
+        for slot in group:
+            self._reduce_flight[slot] = lane
+
+    def reduce_wait(self, lane: int, pending: int) -> None:
+        """`lane` waited until at most `pending` of its bulk groups read on:
+        the others' boxes are read, as if by the lane now -- so a write by
+        another lane is ordered behind it by a barrier, as on the hardware."""
+        groups = self._bulk_groups.get(lane, [])
+        cut = max(0, len(groups) - pending)
+        for group in groups[:cut]:
+            for slot in group:
+                if self._reduce_flight.get(slot) == lane:
+                    del self._reduce_flight[slot]
+                self._reads.setdefault(slot, {})[lane] = self.time
+        self._bulk_groups[lane] = groups[cut:]
+
     def bulk_wait(self, lane: int, cursor: str) -> None:
         """`lane` waited on `cursor`: what the bulk copies through it wrote
         so far is visible to it."""
@@ -957,6 +1042,9 @@ class Races:
         self._reads.setdefault(slot, {})[self.lane] = self.time
 
     def write(self, slot: int) -> None:
+        if slot in self._reduce_flight:
+            # Over a box the accelerator may still be reading.
+            self._report('FLIGHT', slot, self._reduce_flight[slot])
         landing = self._bulk_flight.pop(slot, None)
         if landing is not None and self._landed.get(
                 (landing[0], self.lane), -1) <= landing[1]:
@@ -2382,6 +2470,133 @@ class Interp:
             if tracker is not None:
                 tracker.dma = None
 
+    def _box(self, tmap: 'TensorMapArg', coords: List[int], start: int,
+             width: int, stmt: str):
+        """The elements of a box at `coords` (outermost first) whose shared
+        bytes start at `start`: for each, where it is in the tensor -- None
+        past an end -- and its slot in shared memory, the arena counted in
+        elements of `width` bytes (`_tma_load`)."""
+        rank = len(tmap.box)
+        if len(coords) != rank:
+            raise Abort(f'{len(coords)} coordinates into a map of {rank} '
+                        f'dimensions: {stmt!r}')
+        if (coords[-1] * tmap.size) % 16:
+            raise Abort(f'a box starting {coords[-1] * tmap.size} bytes into '
+                        f'a row, off 16: an illegal instruction: {stmt!r}')
+        if start % 128:
+            raise Abort(f'a box starting {start} bytes into shared memory, '
+                        f'off 128: {stmt!r}')
+        bits = {0: 0, 32: 1, 64: 2, 128: 3}[tmap.swizzle]
+        pitch = tmap.swizzle or tmap.box[-1] * width
+        volume = 1
+        for n in tmap.box:
+            volume *= n
+        for k in range(volume):
+            at, rest = [], k
+            for n in reversed(tmap.box):
+                at.append(rest % n)
+                rest //= n
+            at.reverse()
+            where = [c + i for c, i in zip(coords, at)]
+            inside = all(0 <= w < n for w, n in zip(where, tmap.dims))
+            row = k // tmap.box[-1]
+            address = start + row * pitch + at[-1] * width
+            address ^= ((address >> 7) & ((1 << bits) - 1)) << 4
+            yield (sum(w * t for w, t in zip(where, tmap.strides))
+                   if inside else None), address // width
+
+    def _tma_reduce(self, tr, stmt: str) -> None:
+        """A box of shared memory added into the tensor of a map (PTX ISA,
+        "cp.reduce.async.bulk.tensor", `.add`), by the lane that reaches it
+        -- the one its guard picks -- in the layout a copy through the map
+        leaves (`_box`), what lies past the tensor's ends left out.  Added
+        here; the box is read until that lane's wait on its bulk groups
+        retires the reduction (`Races.reduce_issue`)."""
+        tmap = self.env.get(tr.group('map'))
+        if not isinstance(tmap, TensorMapArg):
+            raise Abort(f'a reduction through {tr.group("map")!r}, which is '
+                        f'no tensor map the kernel is handed: {stmt!r}')
+        src = self.env.get(tr.group('src'))
+        if not isinstance(src, Ptr):
+            raise Abort(f'tensor reduction of an unknown buffer: {stmt!r}')
+        width = self.widths.get(tr.group('src'))
+        if width != tmap.size:
+            raise Abort(f'a box of {tmap.size}-byte elements in '
+                        f'{tr.group("src")!r}, whose element size is '
+                        f'{width!r}: {stmt!r}')
+        coords = [int(self.ev(c)) for c in _top_level(tr.group('coords'),
+                                                      ',')][::-1]
+        start = (src.off + int(self.ev(tr.group('si')))) * width
+        dst = Ptr(self.mem, tmap.buffer, tmap.offset)
+        arena = Ptr(self.mem, src.base)
+        slots = []
+        for at, slot in list(self._box(tmap, coords, start, width, stmt)):
+            value = arena[slot]
+            slots.append(slot)
+            if at is not None:
+                dst[at] = dst[at] + value
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.reduce_issue(tracker.lane, slots)
+
+    def _tma_load(self, tl, stmt: str) -> None:
+        """A box through a tensor map, by the leader of the cursor for the
+        lanes it is for, as a bulk copy (PTX ISA, "cp.async.bulk.tensor",
+        `.tile`): the box's element `(i...)` -- outermost first -- is the
+        tensor's at the coordinates plus `i`, or the fill where that lies
+        past an end; in shared memory the box's rows lie one after the
+        other, a swizzled box's each the swizzle's span long, and each
+        address's 16-byte chunk is XORed with its 128-byte line, one, two or
+        three bits for a swizzle of 32, 64 or 128 bytes -- the address in
+        shared memory, with the arena at 0.  So a box starts on 128 bytes,
+        which is checked, and a box placed off the swizzle's period lands
+        where the hardware puts it, which is not where a buffer of the
+        swizzle reads it.  In flight until the wait for the cursor's phase
+        (`Races.bulk_wait`); the bytes announced are the whole box's, or
+        the phase would never complete; and the box starts on 16 bytes
+        along its rows, which the hardware otherwise refuses."""
+        cursor = self.env.get(tl.group('cursor'))
+        if not isinstance(cursor, _Cursor):
+            raise Abort(f'tensor map copy through an unarmed cursor: '
+                        f'{stmt!r}')
+        if not cursor.leader:
+            return
+        tmap = self.env.get(tl.group('map'))
+        if not isinstance(tmap, TensorMapArg):
+            raise Abort(f'a copy through {tl.group("map")!r}, which is no '
+                        f'tensor map the kernel is handed: {stmt!r}')
+        dst = self.env.get(tl.group('dst'))
+        if not isinstance(dst, Ptr):
+            raise Abort(f'tensor map copy into an unknown buffer: {stmt!r}')
+        width = self.widths.get(tl.group('dst'))
+        if width != tmap.size:
+            raise Abort(f'a box of {tmap.size}-byte elements into '
+                        f'{tl.group("dst")!r}, whose element size is '
+                        f'{width!r}: {stmt!r}')
+        coords = [int(self.ev(c)) for c in _top_level(tl.group('coords'),
+                                                      ',')][::-1]
+        volume = 1
+        for n in tmap.box:
+            volume *= n
+        if int(tl.group('bytes')) != volume * tmap.size:
+            raise Abort(f'{tl.group("bytes")} bytes announced for a box of '
+                        f'{volume * tmap.size}: the phase would not '
+                        f'complete: {stmt!r}')
+        start = (dst.off + int(self.ev(tl.group('di')))) * width
+        placed = list(self._box(tmap, coords, start, width, stmt))
+        src = Ptr(self.mem, tmap.buffer, tmap.offset)
+        arena = Ptr(self.mem, dst.base)
+        fill = float('nan') if tmap.nan else 0.0
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.bulk = cursor.name
+        try:
+            for at, slot in placed:
+                arena[slot] = fill if at is None else src[at]
+        finally:
+            if tracker is not None:
+                tracker.bulk = None
+
     def _bulk_copy(self, bc, stmt: str) -> None:
         """The copy through a bulk cursor: the leader moves the bytes for the
         whole multiplication, every other lane only notes it."""
@@ -2508,6 +2723,20 @@ class Interp:
             if cursor.leader:
                 barrier[0] = 1.0
             self.env[cursor.name] = cursor
+            return
+        tm = _TMA_LOAD.match(stmt)
+        if tm:
+            self._tma_load(tm, stmt)
+            return
+        tr = _TMA_REDUCE.match(stmt)
+        if tr:
+            self._tma_reduce(tr, stmt)
+            return
+        bw = _BULK_WAIT_READ.match(stmt)
+        if bw:
+            tracker = self.mem.tracker
+            if tracker is not None:
+                tracker.reduce_wait(tracker.lane, int(bw.group('pending')))
             return
         bc = _BULK_COPY.match(stmt)
         if bc:
