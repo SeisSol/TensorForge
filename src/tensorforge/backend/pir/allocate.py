@@ -16,6 +16,17 @@ occupied at the same time as.  The other is the block's, for what every
 multiplication of a block reads -- an operator preloaded once, a staged
 member of a merged run -- written ahead of everything that reads it and read
 to the end, so it is laid out back to back, in the order it is allocated.
+Unless the caller asks for the block's buffers to share bytes as the
+multiplication's do (`share_block`): a block that runs phases one after
+another -- the multi-element layout's chained sections, where an order's
+buffer is dead once the next order has read it -- holds buffers the one
+answer of liveness lays over each other.  The block's threads reach a
+statement at different times, so two of its buffers on the same bytes are
+safe only where a block barrier stands between the last access of the one
+and the first of the other; placing the barriers behind this pass sees the
+bytes the buffers share and fences such a write (`pir.barriers`: "write
+after read ... another's that the allocation placed on the same bytes"), so
+the caller asks for the sharing only where that placement runs.
 
 When a buffer is occupied is liveness over the body, with one thing the body
 cannot say by itself: where a value of a buffer *ends*.  A write does not, in
@@ -132,13 +143,15 @@ def _bits(mask: int):
 
 
 class _Liveness:
-    """Occupancy of the multiplication's buffers, as bit masks."""
+    """Occupancy of the buffers of the arenas placed by it -- the
+    multiplication's, and the block's where they share bytes too -- as bit
+    masks."""
 
     def __init__(self, buffers: Dict[Any, _Buffer], value_key: Dict[int, Any],
-                 single: set):
+                 single: set, arenas: Tuple[str, ...] = (MULT,)):
         self.bit = {}
         for b in buffers.values():
-            if b.arena == MULT:
+            if b.arena in arenas:
                 self.bit[b.key] = len(self.bit)
         self.value_key = value_key
         self.single = single
@@ -349,7 +362,8 @@ def _aligned(n: int, align: int) -> int:
 
 def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
              align: int = 1, block_align: int = 1,
-             report: Optional[List[str]] = None, unit: int = 0
+             report: Optional[List[str]] = None, unit: int = 0,
+             share_block: bool = False
              ) -> Tuple[Tuple[Stmt, ...], Layout]:
     """`body` with every unplaced shared buffer at an offset, and where the
     arenas end.
@@ -359,22 +373,28 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
     ``block_align`` the block's, both in elements -- a window may ask for more
     (`place_align`).  ``unit`` is the arena's element in bytes, which a
     buffer of a wider element takes several of (`_units`); 0 counts every
-    buffer in its own elements.
+    buffer in its own elements.  ``share_block`` places the block's buffers
+    by occupancy as well, as the multiplication's: asked for only where the
+    barriers are placed behind this pass, which fence a write over bytes
+    another buffer was read from (see the module).
     """
     buffers, value_key, single = _collect(
         body, arenas, {MULT: max(1, align), BLOCK: max(1, block_align)}, unit)
     offsets: Dict[Any, int] = {}
+    tracked = (MULT, BLOCK) if share_block else (MULT,)
 
-    # The block's, back to back in the order allocated.
+    # The block's, back to back in the order allocated -- unless they share
+    # bytes as the multiplication's do.
     end_block = 0
-    for b in sorted((b for b in buffers.values() if b.arena == BLOCK),
+    for b in sorted((b for b in buffers.values()
+                     if b.arena == BLOCK and not share_block),
                     key=lambda b: b.index):
         at = _aligned(end_block, b.align)
         offsets[b.key] = at
         end_block = at + b.size
 
-    # The multiplication's, by occupancy.
-    live = _Liveness(buffers, value_key, single)
+    # The multiplication's, by occupancy -- and the block's where asked.
+    live = _Liveness(buffers, value_key, single, tracked)
     live.begin(body)
     live.recording = True
     live.backward(body, 0)
@@ -383,18 +403,34 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
     # (`IRBuilder.bulk_channel`) -- is occupied together with every other,
     # whatever its accesses say.
     for b in buffers.values():
-        if b.arena == MULT and any(w.attr('lifetime') == 'body'
-                                   for w in b.windows):
+        if b.arena in tracked and any(w.attr('lifetime') == 'body'
+                                      for w in b.windows):
             bit = live.bit[b.key]
             live.touched |= 1 << bit
             live.neighbors[bit] = live.everything
             for n in range(len(live.neighbors)):
                 live.neighbors[n] |= 1 << bit
-    mult = [b for b in buffers.values() if b.arena == MULT]
-    by_bit = {live.bit[b.key]: b for b in mult}
+    end_mult = _by_occupancy([b for b in buffers.values() if b.arena == MULT],
+                             live, offsets)
+    if share_block:
+        end_block = _by_occupancy(
+            [b for b in buffers.values() if b.arena == BLOCK], live, offsets)
+
+    out = _place(body, value_key, offsets, buffers, unit)
+    return out, Layout(end_mult, end_block, offsets)
+
+
+def _by_occupancy(arena: Sequence[_Buffer], live: _Liveness,
+                  offsets: Dict[Any, int]) -> int:
+    """Offsets for the buffers of one arena from their occupancy (`live`):
+    the largest first, each at the lowest offset clear of every buffer of
+    the arena it is occupied together with -- those of the other arena are
+    elsewhere -- and one nothing touches at 0, taking no room.  The arena's
+    end."""
+    by_bit = {live.bit[b.key]: b for b in arena}
     placed: Dict[int, int] = {}
-    end_mult = 0
-    for b in sorted(mult, key=lambda b: (-b.size, b.index)):
+    end = 0
+    for b in sorted(arena, key=lambda b: (-b.size, b.index)):
         bit = live.bit[b.key]
         if not live.touched >> bit & 1:
             offsets[b.key] = 0
@@ -409,10 +445,8 @@ def allocate(body: Tuple[Stmt, ...], *, arenas: Mapping[str, str],
             at = max(at, _aligned(hi, b.align))
         placed[bit] = at
         offsets[b.key] = at
-        end_mult = max(end_mult, at + b.size)
-
-    out = _place(body, value_key, offsets, buffers, unit)
-    return out, Layout(end_mult, end_block, offsets)
+        end = max(end, at + b.size)
+    return end
 
 
 def _offset_of(s: Stmt, base: int, buffer: _Buffer, unit: int = 0):

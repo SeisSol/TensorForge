@@ -2501,7 +2501,8 @@ class Generator:
         arenas={obj.name: allocate.MULT,
                 GeneralLexicon.TOTAL_SHR_MEM: allocate.BLOCK},
         align=self._shared_align(), block_align=self._shared_align(),
-        unit=self._context.fp_type.size())
+        unit=self._context.fp_type.size(),
+        share_block=self._share_block_buffers())
     unfenced: List[str] = []
     body = AbstractInstruction.optimized_body(
         self._context, self._names,
@@ -2632,6 +2633,17 @@ class Generator:
       if isinstance(instr, ShrMemAlloc):
         instr.gen_ir(builder)
     return tuple(builder.finish()) + tuple(body)
+
+  def _share_block_buffers(self) -> bool:
+    """Whether the block's shared buffers may share bytes by occupancy, as
+    the multiplication's do (`Options.share_block_buffers`,
+    `pir.allocate`): only where the barriers are placed behind the
+    allocator (`enable_sync_block_opt`), which fences a write over the bytes
+    another buffer was read from.  Without that pass the builders' barriers
+    stand where they put them, and they know buffers, not bytes."""
+    options = self._context.get_user_options()
+    return bool(options.share_block_buffers
+                and options.enable_sync_block_opt)
 
   def _barriers(self, section, report=None) -> 'pir.PlaceBarriers':
     """Where the multiplication's threads meet in `section` (`pir.barriers`).

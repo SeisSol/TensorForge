@@ -1156,6 +1156,36 @@ GROUPS = {
              '            at = max(at, hi)', 1)),
         ('the block\'s buffers laid over each other',
          sub(ALLOC, '        end_block = at + b.size', '        end_block = at', 1)),
+        ('the block\'s buffers share bytes without being asked',
+         sub(ALLOC, '    tracked = (MULT, BLOCK) if share_block else (MULT,)\n',
+             '    share_block = True\n    tracked = (MULT, BLOCK)\n', 1)),
+        ('the block\'s buffers shared with no occupancy of their own',
+         sub(ALLOC, '    live = _Liveness(buffers, value_key, single, tracked)',
+             '    live = _Liveness(buffers, value_key, single)', 1)),
+        ('a block buffer held for the body shares bytes',
+         sub(ALLOC, "        if b.arena in tracked and any(w.attr('lifetime') == 'body'",
+             "        if b.arena == MULT and any(w.attr('lifetime') == 'body'", 1)),
+        ('the block\'s arena ends where nothing shared it',
+         sub(ALLOC, '        end_block = _by_occupancy(',
+             '        _by_occupancy(', 1)),
+    ]),
+
+    # The block's buffers sharing bytes by occupancy (`share_block_buffers`):
+    # asked for, only with the barrier placement behind the allocator, which
+    # fences a write over the bytes a dead buffer was read from.
+    'blockshare': ('tests/test_block_buffer_sharing.py tests/test_pir_allocate.py', [
+        ('the option never reaches the allocator',
+         sub(GEN, '        share_block=self._share_block_buffers())',
+             '        share_block=False)', 1)),
+        ('the pass drops what it was asked',
+         sub(PIPE, '                                        share_block=self._share_block)',
+             '                                        share_block=False)', 1)),
+        ('shared without the barrier placement that fences the bytes',
+         sub(GEN, '    return bool(options.share_block_buffers\n                and options.enable_sync_block_opt)',
+             '    return bool(options.share_block_buffers)', 1)),
+        ('a write over bytes another buffer was read from left unfenced',
+         sub(BARRIERS, '                if _overlap(ext, rext):',
+             '                if ext == rext:', 1)),
     ]),
 
     # A transfer issued ahead of where its builder wrote it.
