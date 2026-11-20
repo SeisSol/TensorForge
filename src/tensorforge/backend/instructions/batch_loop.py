@@ -71,6 +71,12 @@ class Trip(Enum):
     #: block of more than the group -- is an error rather than a per-row
     #: loop.
     ELEMENT_GROUP = 'element_group'
+    #: The same group on the lanes of a warp instead, the multi-element
+    #: layout's lanes form (`element_group.Lanes`): a lane an element, and
+    #: every warp of the block takes all E of them, each its share of the
+    #: work.  The group starts at `E * blockIdx.x`; what a loop cannot take
+    #: is what `ELEMENT_GROUP` cannot.
+    LANE_GROUP = 'lane_group'
 
 
 class BatchLoop(AbstractInstruction):
@@ -152,7 +158,7 @@ class BatchLoop(AbstractInstruction):
         self._wave_rows = int(wave_rows)
         #: What a trip hands the block (`Trip`).
         self._trip = trip
-        if trip is Trip.ELEMENT_GROUP:
+        if trip in (Trip.ELEMENT_GROUP, Trip.LANE_GROUP):
             why = ('a work queue hands out elements, not groups'
                    if mode is LoopMode.LAUNCHCTRL else
                    f'a trip of {self._stack} stacked elements is no group'
@@ -211,7 +217,7 @@ class BatchLoop(AbstractInstruction):
         may hold several groups -- and the loop is then uniform per group,
         which `uniform_scope` says, rather than per block.
         """
-        if self._trip is Trip.ELEMENT_GROUP:
+        if self._trip in (Trip.ELEMENT_GROUP, Trip.LANE_GROUP):
             # Checked where the loop was made and its block sized.
             return True
         return (self._group_size > 1
@@ -229,13 +235,20 @@ class BatchLoop(AbstractInstruction):
         return f'{GeneralLexicon.BATCH_ID_NAME}Active{self._section_index}'
 
     def _group_start(self) -> str:
-        """The leader's element index: the row rounded down to its group."""
+        """The leader's element index: the row rounded down to its group --
+        or, where the group is on the lanes, the block's group."""
         lexic = self._context.target.lexic
+        if self._trip is Trip.LANE_GROUP:
+            return f'{self._group_size} * ({lexic.block_idx_x})'
         row = f'({lexic.thread_idx_y} - {self._lane()})'
         return f'{row} + {lexic.block_dim_y} * ({lexic.block_idx_x})'
 
     def _declare_lane(self, writer) -> None:
         lexic = self._context.target.lexic
+        if self._trip is Trip.LANE_GROUP:
+            # A lane an element: the lanes are the group.
+            writer(f'const auto {self._lane()} = {lexic.thread_idx_x};')
+            return
         writer(f'const auto {self._lane()} = '
                f'{lexic.thread_idx_y} % {self._group_size};')
 
@@ -305,7 +318,7 @@ class BatchLoop(AbstractInstruction):
         needs the mask off the body and onto the accesses it guards, which is
         what an unguarded body would have to mean.
         """
-        if self._mults_per_block == 1 or (
+        if self._mults_per_block == 1 or self._trip is Trip.LANE_GROUP or (
                 self._grouped() and self._mults_per_block == self._group_size):
             return Uniformity.BLOCK
         if self._grouped():
@@ -1245,6 +1258,7 @@ class BatchLoop(AbstractInstruction):
         arrive.
         """
         if (self._mults_per_block is not None
+                and self._trip is not Trip.LANE_GROUP
                 and self._mults_per_block % self._group_size):
             raise InternalError(
                 f'a block of {self._mults_per_block} multiplications does not '
@@ -1422,7 +1436,8 @@ class BatchLoop(AbstractInstruction):
 
     def __str__(self) -> str:
         trip = (f'{self._trip.value}({self._group_size}) '
-                if self._trip is Trip.ELEMENT_GROUP else '')
+                if self._trip in (Trip.ELEMENT_GROUP, Trip.LANE_GROUP)
+                else '')
         return (f'batchloop.{self._mode.value} {trip}'
                 f'[{self._num_elements()}] '
                 f'uniform={self.uniform_scope().name.lower()} '

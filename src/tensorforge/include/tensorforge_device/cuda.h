@@ -652,5 +652,36 @@ __device__ __forceinline__ void splitFloatTF32(tf32 &upper, tf32 &lower,
   lower = __float_as_uint(value - __uint_as_float(upper));
 }
 
+/// Four 8x8 matrices of 16-bit elements from shared memory, as `ldmatrix
+/// .x4` loads them (PTX ISA, "Warp-level matrix load instruction:
+/// ldmatrix"): lane `l` names the 16-byte row `l % 8` of matrix `l / 8`, and
+/// register `i` of lane `t` receives the 32-bit word `t % 4` of row `t / 4`
+/// of matrix `i`.  Over 32-bit elements the two halves of a word stay
+/// together, so rows of four floats land as the TF32 `m16n8k8` A fragment
+/// reads them where the four matrices are the tile's rows 0-7 and 8-15 at
+/// columns 0-3, then at 4-7 -- the multi-element section's matrix tiling
+/// (`compute.multi_element`).  `base + index` is the lane's row in shared
+/// memory, 16-byte aligned.
+///
+/// `volatile` and no memory clobber: the read must not move across the
+/// block's barriers, and nothing else is ordered against it.
+__device__ __forceinline__ void ldmatrixX4(float &r0, float &r1, float &r2,
+                                           float &r3, const float *base,
+                                           int index) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+  uint32_t x0, x1, x2, x3;
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, "
+               "[%4];\n"
+               : "=r"(x0), "=r"(x1), "=r"(x2), "=r"(x3)
+               : "r"(at));
+  r0 = __uint_as_float(x0);
+  r1 = __uint_as_float(x1);
+  r2 = __uint_as_float(x2);
+  r3 = __uint_as_float(x3);
+#endif
+}
+
 } // namespace tensorforge
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_CUDA_H_

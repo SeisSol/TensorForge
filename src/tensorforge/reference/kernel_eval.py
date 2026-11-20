@@ -203,6 +203,14 @@ _SPLIT_TF32 = re.compile(
     r'^tensorforge::splitFloatTF32\s*\(\s*(?P<upper>\w+)\s*,\s*(?P<lower>\w+)'
     r'\s*,\s*(?P<value>.+)\)$')
 
+#: `tensorforge::ldmatrixX4(r0, r1, r2, r3, base, index)` (`cuda.h`): four
+#: 8x8 matrices of a warp's rows in shared memory, written through
+#: references.
+_LDMATRIX = re.compile(
+    r'^tensorforge::ldmatrixX4\s*\(\s*(?P<r0>\w+)\s*,\s*(?P<r1>\w+)\s*,'
+    r'\s*(?P<r2>\w+)\s*,\s*(?P<r3>\w+)\s*,\s*(?P<base>\w+)\s*,'
+    r'\s*(?P<index>.+)\)$')
+
 #: The name of `mma.sync` as NVIDIA's path issues it (`MMAInstr`): the
 #: shape, and the types of D, A, B and C.
 _MMA_NAME = re.compile(
@@ -1063,7 +1071,9 @@ def _same(a, b) -> bool:
 def _py(expr: str) -> str:
     """Translate a C expression into a Python one."""
     e = expr
-    e = re.sub(r'\b(\d+)_i32\b', r'\1', e)
+    # `base.h`'s integer literals: `0_i64` is the null a pointer table holds
+    # for a masked element (`compute.multi_element`).
+    e = re.sub(r'\b(\d+)_i(?:32|64)\b', r'\1', e)
     # A float literal's suffix, and only a literal's: a name may end in a
     # digit and an `f` as well -- a table named by its numbers' digest,
     # `tf_ellw_..c0f` -- which a rule on the last digit alone cut short.
@@ -1554,6 +1564,38 @@ class Interp:
             else:
                 raise Abort(f'mma.sync writes {text!r}')
 
+    def _ldmatrix(self, lm, stmt: str) -> None:
+        """One `ldmatrixX4`, for the warp this lane is in: once per statement
+        and warp, from the rows its lanes name.
+
+        Modeled from PTX's statement of the instruction ("Warp-level matrix
+        load instruction: ldmatrix") rather than from what it is used for:
+        lane `l` names the 16-byte row `l % 8` of matrix `l / 8`, four
+        floats from `base + index`, and register `i` of lane `t` is the
+        32-bit word `t % 4` of row `t / 4` of matrix `i`.  The instruction
+        is `.aligned`: a warp that is not whole at it aborts."""
+        run = self.lockstep
+        if run is None:
+            raise Abort(f'ldmatrix outside a lockstep run: {stmt!r}')
+        warp = self.lane // 32
+        key = ('ldmatrix', warp, stmt)
+        rows = run.wave_cache.get(key)
+        if rows is None:
+            lanes = {it.lane % 32: it for it in run.current
+                     if it.lane // 32 == warp}
+            if len(lanes) != 32:
+                raise Abort(f'ldmatrix with {len(lanes)} lanes of the warp '
+                            f'taking part')
+            rows = {}
+            for l, it in lanes.items():
+                base = it.ev(lm.group('base'))
+                at = int(it.ev(lm.group('index')))
+                rows[l] = [base[at + w] for w in range(4)]
+            run.wave_cache[key] = rows
+        t = self.lane % 32
+        for i in range(4):
+            self.env[lm.group(f'r{i}')] = rows[8 * i + t // 4][t % 4]
+
     def ev(self, expr: str):
         self.budget -= 1
         if self.budget < 0:
@@ -1829,6 +1871,10 @@ class Interp:
         mma = _mma_statement(stmt)
         if mma is not None:
             self._mma(mma, stmt)
+            return
+        lm = _LDMATRIX.match(stmt)
+        if lm:
+            self._ldmatrix(lm, stmt)
             return
         sp = _SPLIT_TF32.match(stmt)
         if sp:
