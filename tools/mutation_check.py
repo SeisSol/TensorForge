@@ -4254,12 +4254,13 @@ GROUPS = {
     ]),
     # The multi-element layout (`generators.element_group`, `compute.
     # multi_element`, `Trip.ELEMENT_GROUP`): the classification and its
-    # steps, the fill rule, the option, the loop's group, and the lowering --
-    # its staging, its own barriers (a build without the barrier
-    # optimization), its masks, each product's window, its contractions.
-    # Three shapes: the volume, a chain with the star at the end, and a
-    # reused intermediate.  The numbers are the host oracle's and the local
-    # GPU's.
+    # steps, the fill rule, the option, the loop's group, and the lowerings
+    # -- the FMA forms and the matrix tiling: the staging and the operators'
+    # stages, the instructions' own barriers (a build without the barrier
+    # optimization), the masks, each product's window, the contractions, D's
+    # way to its buffer and to the output.  Three shapes: the volume, a chain
+    # with the star at the end, and a reused intermediate.  The numbers are
+    # the host oracle's and the local GPU's.
     'multielement': ('tests/test_multi_element.py', [
         ('a product adding outside its window',
          sub(ME_SECTION, '            if (product.rows, product.cols) == (rows, cols):\n',
@@ -4328,6 +4329,42 @@ GROUPS = {
              '        if False:\n', 1)),
         ('the group\'s traversal one element a trip',
          sub(GEN, '      return self._element_group.elements\n', '      return 1\n', 1)),
+        # The matrix tiling of operator steps.
+        ('a product\'s B reaching past its window',
+         sub(ME_SECTION, "                                        b.op('lt', BOOL, row, r1, hint='in'),\n",
+             "                                        b.op('lt', BOOL, row, r1 + 2, hint='in'),\n", 1)),
+        ('B read at another stride than staged',
+         sub(ME_SECTION, "                        'add', INDEX, b.op('mul', INDEX, k, stage.ld,\n",
+             "                        'add', INDEX, b.op('mul', INDEX, k, stage.ld - 4,\n", 1)),
+        ('one product of a step tiled',
+         sub(ME_SECTION, '        for product in step.products:\n'
+                         '            group = section.buffer(product.second.tensor)\n',
+             '        for product in step.products[:1]:\n'
+             '            group = section.buffer(product.second.tensor)\n', 1)),
+        ('a TF32 product left out',
+         sub(ME_SECTION, '                for term, (fa, fb) in enumerate(atom.products(b, a, bb)):\n',
+             '                for term, (fa, fb) in enumerate(atom.products(b, a, bb)[:1]):\n', 1)),
+        ('D written past the step\'s rows',
+         sub(ME_SECTION, "            live = b.op('lt', BOOL, n, height, hint='in')\n",
+             "            live = b.op('lt', BOOL, n, height + 8, hint='in')\n", 1)),
+        ('D added into an intermediate the step assigns',
+         sub(ME_SECTION, '            if step.dest.is_tmp and not step.assigns:\n',
+             '            if step.dest.is_tmp:\n', 1)),
+        ('the outputs written before every warp\'s tiles are in',
+         sub(ME_SECTION, '    b.barrier(Participants.BLOCK)\n'
+                         "    with b.for_(trip.lane, height * width, trip.group.threads, hint='o',\n",
+             "    with b.for_(trip.lane, height * width, trip.group.threads, hint='o',\n", 1)),
+        ('an F64 step at sm_80\'s shape on sm_90',
+         sub(ME_GROUP, '    return (16, 8, 4) if sm >= 90 else (8, 8, 4)\n',
+             '    return (8, 8, 4)\n', 1)),
+        ('the matrix switch ignored',
+         sub(ME_GROUP, '    return MATRIX if asked is None else bool(asked)\n',
+             '    return MATRIX\n', 1)),
+        ('the FMA forms not tried where no tiling fits',
+         sub(ME_GROUP, '    if tiled(candidates[0]):\n', '    if False:\n', 1)),
+        ('the halving stepping over the smallest group',
+         sub(ME_GROUP, '            elements = max(MIN_ELEMENTS, elements // 2)\n',
+             '            elements = elements // 2\n', 1)),
     ]),
 }
 
