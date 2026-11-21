@@ -583,6 +583,152 @@ def _per_output(trip, step) -> None:
     _chunks(trip, count, outputs)
 
 
+def _mix(trip, steps) -> None:
+    """Mixing steps of one group operand, block-wide (`element_group`'s
+    `mix`): `X_d = G S_d` for each step `d` -- `G` the group operand, `S_d`
+    an element's small operand, SeisSol's star for each direction -- a
+    thread a row `m = e * width + p` of the products as the matrix tiling
+    numbers the group's rows (`_matrix`): element `e`'s column `p`.
+
+    A thread holds column `p` of every step's `S_d` in registers -- the
+    star's 27 numbers -- and computes 16 bytes of rows of its column of
+    every `X_d` at a time: `G`'s rows read 16 bytes for each `q` of the
+    contraction, where its pitch allows (`element_group._pitched`), and each
+    `X_d`'s written in one access where the consumer's pitch does -- rows of
+    the group 16 bytes times an odd number apart, eight threads' rows on
+    eight bank groups.  Rows past the window are written zero: the
+    destination's padding, which the tiling's padded K reads.  The block's
+    threads past the group's rows take more of them: `sets` threads a row,
+    each every `sets`-th group of rows."""
+    b, fp = trip.builder, trip.fp
+    section, group = trip.section, trip.group
+    lead = steps[0].products[0]
+    source = section.buffer(lead.first.tensor)
+    rows, cols, depth = lead.rows, lead.cols, lead.depth
+    width = cols[1] - cols[0]
+    height = rows[1] - rows[0]
+    threads = group.threads * group.elements
+    count = group.elements * width
+    sets = threads // count
+    vec = 16 // section.dtype.size()
+    blocks = -(-height // vec)
+    rounds = -(-blocks // sets)
+    vector = ScalarType(section.dtype, vec)
+
+    def fits(buffer, first):
+        # A block's rows one 16-byte access: aligned, and inside the column
+        # -- past the window only into its padding.
+        lo = first - buffer.rows[0]
+        return (vec > 1 and buffer.pitch % vec == 0 and lo % vec == 0
+                and lo + blocks * vec <= buffer.pitch
+                and (rows[1] == buffer.rows[1] or height % vec == 0))
+
+    tid = _index(b, 'add', b.op('mul', INDEX, b.thread_id('y'),
+                                group.threads, hint='t'), trip.lane, 't')
+    m = b.op('rem', INDEX, tid, count, hint='m')
+    lot = b.op('div', INDEX, tid, count, hint='s')
+    e = b.op('div', INDEX, m, width, hint='e')
+    col = _index(b, 'add', b.op('rem', INDEX, m, width, hint='p'), cols[0],
+                 'p')
+
+    def index(buffer, row, column):
+        # Element `e`'s `(row, column)` of `buffer`.
+        base = b.op('mul', INDEX, e, buffer.per_element, hint='b')
+        return _index(b, 'add', base, _box_index(
+            b, row, column, (buffer.rows[0], buffer.cols[0]), buffer.pitch),
+            'a')
+
+    with b.if_(b.op('lt', BOOL, lot, sets, hint='in'),
+               attrs=_lanes_active(sets * count, threads)):
+        # The thread's column of every step's small operand.
+        numbers = []
+        for step in steps:
+            small = section.buffer(step.products[0].second.tensor)
+            numbers.append([b.load(trip.buffers[id(small.tensor)],
+                                   index(small, q, col), type_=fp, hint='s')
+                            for q in range(*depth)])
+        loads, stores = fits(source, rows[0]), [
+            fits(section.buffer(step.dest), rows[0]) for step in steps]
+        last = height - (blocks - 1) * vec
+
+        def block(g):
+            first = b.op('mul', INDEX, g, vec, hint='l')
+            # Which of the block's rows are the window's: all but in the
+            # last block, where `last` are.
+            live = [None if v < last else b.op(
+                'lt', BOOL, first, height - v, hint='in')
+                for v in range(vec)]
+            acc = [[None] * vec for _ in steps]
+            row = _index(b, 'add', first, rows[0], 'l')
+            for k, q in enumerate(range(*depth)):
+                at = index(source, row, q)
+                if loads:
+                    x = b.load(trip.buffers[id(source.tensor)], at,
+                               type_=vector, align=16, hint='x')
+                    xs = [b.extract(x, v, hint='x') for v in range(vec)]
+                else:
+                    xs = []
+                    for v in range(vec):
+                        cell = _index(b, 'add', at, v, 'a')
+                        if live[v] is not None:
+                            cell = b.op('select', INDEX, live[v], cell, at,
+                                        hint='a')
+                        xs.append(b.load(trip.buffers[id(source.tensor)],
+                                         cell, type_=fp, hint='x'))
+                for d in range(len(steps)):
+                    w = numbers[d][k]
+                    for v in range(vec):
+                        acc[d][v] = (b.op('mul', fp, w, xs[v], hint='y')
+                                     if acc[d][v] is None else
+                                     b.op('fma', fp, w, xs[v], acc[d][v],
+                                          hint='y'))
+            for d, step in enumerate(steps):
+                dest = section.buffer(step.dest)
+                target = trip.buffers[id(step.dest)]
+                at = index(dest, row, col)
+                values = [acc[d][v] if live[v] is None else b.op(
+                    'select', fp, live[v], acc[d][v], b.const(0.0, fp),
+                    hint='y') for v in range(vec)]
+                if stores[d]:
+                    b.store(target, b.pack(vector, *values, hint='y'), at,
+                            align=16)
+                    continue
+                for v in range(vec):
+                    b.store(target, values[v], _index(b, 'add', at, v, 'a'),
+                            predicate=live[v])
+
+        with b.for_(0, rounds, 1, hint='g') as loop:
+            g = _index(b, 'add', b.op('mul', INDEX, loop.induction, sets,
+                                      hint='g'), lot, 'g')
+            if blocks % sets == 0:
+                block(g)
+            else:
+                with b.if_(b.op('lt', BOOL, g, blocks, hint='in'),
+                           attrs=_lanes_active(blocks, rounds * sets)):
+                    block(g)
+
+
+def _units(steps) -> list:
+    """The section's steps as they are lowered: a run of `mix` steps of one
+    group operand and window together (`_mix`) -- none reading what another
+    writes -- every other step alone."""
+    def key(step):
+        p = step.products[0]
+        return (id(p.first.tensor), p.rows, p.cols, p.depth)
+
+    units: list = []
+    for step in steps:
+        run = units[-1] if units else None
+        if (step.lowering == 'mix' and run and run[0].lowering == 'mix'
+                and key(run[0]) == key(step)
+                and not any(id(t) in {id(s.dest) for s in run}
+                            for t in step.reads())):
+            run.append(step)
+        else:
+            units.append([step])
+    return units
+
+
 def _sparse(trip, step) -> None:
     """The `fma` form over the operators' nonzeros (`element_group.Terms`):
     a lane an output, as `_per_output`, each product's operator read only
@@ -1612,6 +1758,7 @@ def _chained(builder, context, group, symbols) -> list:
 
 #: Each step's lowering (`element_group.Step.lowering`).
 LOWERINGS = {'fma': _fma, 'rows': _per_output,
+             'mix': lambda trip, step: _mix(trip, [step]),
              'mma_sync': _matrix, 'dmma': _matrix, 'lane': _lane}
 
 
@@ -1719,7 +1866,7 @@ class MultiElementSection(AbstractInstruction):
         tokens = []
         for buffer, symbol in zip(section.inputs, self._inputs):
             tokens += self._stage(trip, buffer, symbol)
-        for buffer in section.inputs + section.intermediates:
+        for buffer in section.intermediates:
             if buffer.pitch > buffer.height:
                 self._pad(trip, buffer)
         if tokens:
@@ -1727,38 +1874,51 @@ class MultiElementSection(AbstractInstruction):
         for tensor in section.pointer_tables:
             trip.publish(tensor)
         # What was written and read since the block last met: a step that
-        # reads what is written, or writes what is written or read, waits.
+        # reads what is written, or writes what is written or read, waits --
+        # a run of `mix` steps as one (`_units`).
         written = {id(b.tensor) for b in section.inputs}
         read = set()
-        for step in section.steps:
-            reads = {id(t) for t in step.reads()}
-            if written & reads or id(step.dest) in written | read:
+        for unit in _units(section.steps):
+            reads = {id(t) for step in unit for t in step.reads()}
+            dests = {id(step.dest) for step in unit}
+            if written & reads or dests & (written | read):
                 builder.barrier(Participants.BLOCK)
                 written, read = set(), set()
-            LOWERINGS[step.lowering](trip, step)
-            written.add(id(step.dest))
+            if unit[0].lowering == 'mix':
+                _mix(trip, unit)
+            else:
+                LOWERINGS[unit[0].lowering](trip, unit[0])
+            written |= dests
             read |= reads
 
     def _stage(self, trip, buffer, symbol) -> list:
         """The warp's element's box of an operand, from its own memory into
-        the group's buffer; their tokens, where the copies are asynchronous.
+        the group's buffer -- over its pitch where it has one: the lanes
+        write consecutive cells, where a column's padding would leave a gap,
+        and two lanes of a warp a bank.  Their tokens, where the copies are
+        asynchronous.
 
         A dense operand where the target's copies are
         (`element_group.async_staging`) goes by asynchronous copies
         (`IRBuilder.copy_async`), a cell a lane a hop, every hop issued
         before the trip waits for any, so that `pir.wrap` can take them a
-        trip ahead.  The last hop's lanes past the box stand outside a guard
-        block, as a loader's ragged tail does: a copy predicated itself is
-        one the pass does not take either.  Otherwise by loads and stores,
-        and a sparse operand's cells read through its table
+        trip ahead.  A cell of the padding copies its column's first row:
+        a number, which the zeros of B's padding take out of the tiling's
+        padded steps of K (`_matrix`) and `mix` reads past and leaves out
+        -- a zero stored there would be a second writer of the buffer, which
+        the pass does not take a trip ahead.  The last hop's lanes past the
+        box stand outside a guard block, as a loader's ragged tail does: a
+        copy predicated itself is one the pass does not take either.
+        Otherwise by loads and stores, the padding written zero in the same
+        pass, and a sparse operand's cells read through its table
         (`_sparse_read`)."""
         from tensorforge.generators.element_group import async_staging
         b = trip.builder
         source = _bound(b, symbol)
-        height = buffer.height
+        height, pitch = buffer.height, buffer.pitch
         width = buffer.cols[1] - buffer.cols[0]
         if buffer.tensor.is_dense() and async_staging(self._context):
-            total = height * width
+            total = pitch * width
             lanes = trip.group.threads
             tokens = []
             for hop in range(0, total, lanes):
@@ -1767,32 +1927,50 @@ class MultiElementSection(AbstractInstruction):
                          else b.if_(b.op('lt', BOOL, index, total,
                                          hint='in')))
                 with guard:
-                    row = _index(b, 'add', b.op('rem', INDEX, index, height,
-                                                hint='r'), buffer.rows[0], 'r')
-                    col = _index(b, 'add', b.op('div', INDEX, index, height,
+                    r = b.op('rem', INDEX, index, pitch, hint='r')
+                    row = _index(b, 'add', r, buffer.rows[0], 'r')
+                    col = _index(b, 'add', b.op('div', INDEX, index, pitch,
                                                 hint='c'), buffer.cols[0], 'c')
+                    # A cell of the padding copies its column's first row,
+                    # and is never zeroed: B's padding is zero, and `mix`
+                    # selects zero past the rows, so the number reaches no
+                    # result.  Even an Inf or a NaN there could only reach
+                    # its own element's row, whose data is bad already.
+                    read = row if pitch == height else _index(b, 'add', b.op(
+                        'select', INDEX, b.op('lt', BOOL, r, height,
+                                              hint='in'), r, 0, hint='r'),
+                        buffer.rows[0], 'r')
                     tokens.append(b.copy_async(
                         trip.buffers[id(buffer.tensor)], source,
                         dst_index=(trip.at(buffer, row, col),),
-                        src_index=(_address(b, buffer.tensor, row, col),),
+                        src_index=(_address(b, buffer.tensor, read, col),),
                         elems=1, threads=lanes))
             return tokens
-        with b.for_(trip.lane, height * width, trip.group.threads,
+        with b.for_(trip.lane, pitch * width, trip.group.threads,
                     hint='j', uniform=Uniformity.LANE) as loop:
-            row = _index(b, 'add', b.op('rem', INDEX, loop.induction,
-                                        height, hint='r'),
-                         buffer.rows[0], 'r')
+            r = b.op('rem', INDEX, loop.induction, pitch, hint='r')
+            row = _index(b, 'add', r, buffer.rows[0], 'r')
             col = _index(b, 'add', b.op('div', INDEX, loop.induction,
-                                        height, hint='c'),
+                                        pitch, hint='c'),
                          buffer.cols[0], 'c')
+            # A cell of the padding reads the column's first row, and writes
+            # a zero.
+            inside = (None if pitch == height else
+                      b.op('lt', BOOL, r, height, hint='in'))
+            read = row if inside is None else _index(b, 'add', b.op(
+                'select', INDEX, inside, r, 0, hint='r'), buffer.rows[0],
+                'r')
             if buffer.tensor.is_dense():
-                value = b.load(source, _address(b, buffer.tensor, row, col),
+                value = b.load(source, _address(b, buffer.tensor, read, col),
                                type_=trip.fp, hint='s')
             else:
                 value = _sparse_read(b, self._context, self._tables, source,
                                      buffer.tensor,
-                                     _address(b, buffer.tensor, row, col),
+                                     _address(b, buffer.tensor, read, col),
                                      trip.fp)
+            if inside is not None:
+                value = b.op('select', trip.fp, inside, value,
+                             b.const(0.0, trip.fp), hint='s')
             b.store(trip.buffers[id(buffer.tensor)], value,
                     trip.at(buffer, row, col))
         return []
@@ -1800,8 +1978,9 @@ class MultiElementSection(AbstractInstruction):
     @staticmethod
     def _pad(trip, buffer) -> None:
         """Zeros past the rows of every column of the warp's element, where
-        the buffer has a pitch (`element_group.Buffer`): what the matrix
-        tiling's padded steps of K read, to multiply zeros."""
+        an intermediate's buffer has a pitch (`element_group.Buffer`): what
+        the matrix tiling's padded steps of K read, to multiply zeros.  An
+        input's are staged (`_stage`)."""
         b = trip.builder
         pad = buffer.pitch - buffer.height
         width = buffer.cols[1] - buffer.cols[0]

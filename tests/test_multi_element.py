@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import importlib.util
 import io
 import json
@@ -440,12 +441,76 @@ def test_the_halving_tries_the_smallest_group_last(monkeypatch):
 def test_the_matrix_engines_follow_the_switch(options, default, lowering,
                                               monkeypatch):
     """`Options.tensor_cores` where it is set, the layout's own `MATRIX`
-    where it is not; the mixing steps stay on the FMA units either way."""
+    where it is not; the mixing steps stay on the FMA units either way --
+    block-wide beside the tiling (`mix`), a warp an element beside the FMA
+    form (`rows`)."""
     monkeypatch.setattr(eg, 'MATRIX', default)
     section = eg.classify(_volume())[0]
     group = eg.fill(section, _context(**options))[0]
-    assert [s.lowering for s in group.section.steps] == ['rows'] * 3 + [
+    mixing = 'mix' if lowering == 'mma_sync' else 'rows'
+    assert [s.lowering for s in group.section.steps] == [mixing] * 3 + [
         lowering]
+
+
+@pytest.mark.parametrize('arch,precision,source,vector', [
+    ('sm_120', 's', 36, 4), ('sm_90', 's', 36, 4), ('sm_90', 'd', 38, 2)])
+def test_the_star_step_beside_the_tiling_is_block_wide(arch, precision,
+                                                      source, vector):
+    """The tiling's star step (`mix`, `multi_element._mix`): a thread a row
+    of A -- an element's column, 72 rows for sm_120's eight elements at o6,
+    three threads of the block's 256 a row, each every third group of
+    rows -- its
+    27 star numbers read once, the group operand 16 bytes of a column at a
+    time and the three directions in one pass.  The group operand's pitch
+    an odd number of 16 bytes; the consumer's buffers as the tiling has
+    them, written 16 bytes at a time where their pitch allows (F32's 44),
+    an element at a time where it does not (F64's 35, unpitched)."""
+    context = _context(arch, precision, multi_element='force')
+    group = eg.plan(_descrs('volume', 6, precision), context)
+    section = group.section
+    assert [s.lowering for s in section.steps][:3] == ['mix'] * 3
+    assert section.buffer(section.steps[0].products[0].first.tensor).pitch \
+        == source
+    tiled = eg.lower(eg.classify(_descrs('volume', 6, precision))[0],
+                     context)
+    plain = dataclasses.replace(tiled, steps=tuple(
+        dataclasses.replace(s, lowering='rows') if s.lowering == 'mix'
+        else s for s in tiled.steps))
+    assert [b.pitch for b in section.intermediates] == [
+        b.pitch for b in eg._pitched(plain).intermediates]
+    kernel = _generate(_descrs('volume', 6, precision), context).get_kernel()
+    rows = group.elements * 9
+    assert f'% {rows};' in kernel and f'/ {rows};' in kernel
+    # The threads' guard where it stands, or ahead of the loop, where it
+    # does not change from trip to trip.
+    assert re.search(rf'< {32 * group.elements // rows}(\) {{|;)', kernel)
+    vec = re.escape(f'tensorforge::VectorT<{_dtype(precision).ctype()}, '
+                    f'{vector}>')
+    gi = re.findall(rf'= \*\({vec}\*\)&v\d+_gI\[', kernel)
+    assert len(gi) == 9
+    stores = re.findall(rf'\*\({vec}\*\)&v\d+_g_tmp\d\[[^]]*\] = ', kernel)
+    assert len(stores) == (3 if precision == 's' else 0)
+    star = re.findall(r'= v\d+_gstar\d\[v\d+_a\];', kernel)
+    assert len(star) == 27
+
+
+@pytest.mark.parametrize('arch,backend,options', [
+    ('sm_120', 'cuda', {'tensor_cores': False}), ('gfx942', 'hip', {}),
+    ('pvc', 'oneapi', {})])
+def test_the_star_step_without_the_tiling_is_a_warp_an_element(
+        arch, backend, options):
+    """Without the matrix tiling -- the FMA form on NVIDIA, the warp form
+    elsewhere -- the mixing steps keep the `rows` form, and the group
+    operand its box's rows."""
+    group = eg.plan(_descrs('volume', 4, 's'), _context(
+        arch, 's', backend=backend, multi_element='force', **options))
+    if group is None:
+        pytest.skip(f'{arch}: no group')
+    section = group.section
+    assert {s.lowering for s in section.steps if s.kind is eg.Kind.MIXING} \
+        == {'rows'}
+    source = section.buffer(section.steps[0].products[0].first.tensor)
+    assert source.pitch == source.height
 
 
 @pytest.mark.parametrize('precision,depth,k,regs', [('s', 40, 8, 4),
@@ -1578,20 +1643,23 @@ def test_an_operator_step_is_tiled_on_the_matrix_engine(arch, precision,
 
 
 @pytest.mark.parametrize('shape,precision,pitched,count', [
-    ('volume', 's', {'_tmp0': 44, '_tmp2': 44, '_tmp4': 44}, 15),
-    ('volume', 'd', {}, 0),
+    ('volume', 's', {'I': 36, '_tmp0': 44, '_tmp2': 44, '_tmp4': 44}, 15),
+    ('volume', 'd', {'I': 38}, 0),
     ('chain', 's', {'I': 44}, 10)])
 def test_f32_a_fragments_come_by_ldmatrix(shape, precision, pitched, count):
     """In F32 a matrix step reads A by ldmatrix, a load of four 8x8 matrices
     a warp, so the buffers it reads have a pitch: rows of 16 bytes, four
     floats more than a multiple of eight, long enough for every padded step
-    of K; F64 reads A lane by lane."""
+    of K; F64 reads A lane by lane.  The star step's group operand has one
+    as well (`mix`), which it reads 16 bytes at a time: every pitch an odd
+    number of 16 bytes."""
     section = eg.classify(_descrs(shape, 6, precision))[0]
     group = eg.fill(section, _context('sm_90', precision))[0]
     got = {b.tensor.alias: b.pitch for b in group.section.inputs
            + group.section.intermediates if b.stride}
     assert got == pitched
-    assert all(pitch % 8 == 4 for pitch in got.values())
+    size = _dtype(precision).size()
+    assert all(pitch * size % 32 == 16 for pitch in got.values())
     kernel = _kernel(precision=precision, shape=shape,
                      multi_element='force')
     assert kernel.count('tensorforge::ldmatrixX4(') == count
@@ -1969,6 +2037,42 @@ def test_sm_80s_shape_computes_on_the_oracle(shape):
         assert error <= 1e-12, (alias, error)
 
 
+def test_a_number_in_the_padding_reaches_no_result(monkeypatch):
+    """A pitched input's padding holds copies of its column's first row
+    (`MultiElementSection._stage`), never zeroed, since B's padding is.
+    The chain's I is the tiling's A, read by ldmatrix over K padded past
+    its 35 rows, in a buffer of 44 rows a column: with a large number in
+    its first row, and so in every column's padding, the outputs still
+    agree with NumPy."""
+    from tensorforge.reference import kernel_eval
+    plan = eg.plan(_descrs('chain', 6, 's'),
+                   _context('sm_90', 's', multi_element='force'))
+    staged = {b.tensor.alias: b for b in plan.section.inputs}['I']
+    assert staged.pitch > staged.height
+    host = _host()
+    kernel = host.Kernel(DESCRIPTIONS['chain'](6, 's'), _dtype('s'), 'sm_90')
+    base = kernel._name('I') + '@0'
+    first = {slot for slot, cell in host._slots(kernel.tensors['I']).items()
+             if cell[0] == 0}
+    read = kernel_eval.Slot.read
+
+    def sentinel(self, name, index):
+        if name == base and int(index) in first:
+            self.data.setdefault((name, int(index)), 1e15)
+        return read(self, name, index)
+    monkeypatch.setattr(kernel_eval.Slot, 'read', sentinel)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got, _ = kernel.run({'multi_element': 'force'})
+    want = kernel.expected()
+    assert max(abs(want[key]) for key in want) > 1e15
+    for alias in {alias for alias, _ in want}:
+        keys = [key for key in want if key[0] == alias]
+        scale = max(abs(want[key]) for key in keys)
+        error = max(abs(got[key] - want[key]) for key in keys) / scale
+        assert error <= 1e-6, (alias, error)
+
+
 #: The oracle's seed for its fill of memory (`kernel_eval.Slot`).
 SEED = 29
 
@@ -2321,7 +2425,10 @@ GPU_CASES = [
     ('direction', 6, 'd', {'tensor_cores': False}),
     ('columns', 6, 's', {'tensor_cores': False}),
     ('volume', 4, 's', TWO_STAGES), ('chain', 6, 's', TWO_STAGES),
-    ('sparse-star', 6, 'd', {'tensor_cores': False})]
+    ('sparse-star', 6, 'd', {'tensor_cores': False}),
+    ('localFlux', 6, 's', {}), ('neighboringFlux', 4, 'd', {}),
+    ('localFluxAll', 4, 'd', {}), ('sparse-star', 6, 's', {}),
+    ('direction', 4, 's', {})]
 
 
 @pytest.mark.parametrize('shape,order,precision,options', GPU_CASES, ids=[
@@ -2330,7 +2437,9 @@ GPU_CASES = [
     'chain-o6d', 'reuse-o6s', 'chain-o6d-fma', 'reuse-o6s-fma',
     'localFlux-o6d-fma', 'neighboringFlux-o4s-fma', 'localFluxAll-o6s-fma',
     'direction-o6d-fma', 'columns-o6s-fma', 'o4s-two-stages',
-    'chain-o6s-two-stages', 'sparse-star-o6d-fma'])
+    'chain-o6s-two-stages', 'sparse-star-o6d-fma', 'localFlux-o6s',
+    'neighboringFlux-o4d', 'localFluxAll-o4d', 'sparse-star-o6s',
+    'direction-o4s'])
 def test_the_section_computes_on_the_gpu(shape, order, precision, options,
                                          target, cache_root,
                                          tensorforge_include):

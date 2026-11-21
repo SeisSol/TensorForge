@@ -114,6 +114,10 @@ DEFAULT_ELEMENTS = 16
 #: too few elements to pay for the staging.
 MIN_ELEMENTS = 4
 
+#: A warp's lanes in the warp form (`ElementGroup.threads`): the `mix` form
+#: takes an element's columns a thread each, at most as many.
+WARP_LANES = 32
+
 #: Bytes of a block's shared memory left to the rest of the kernel -- the
 #: arena's own windows -- when the group's staging is sized.
 SHARED_RESERVE = 1024
@@ -323,7 +327,8 @@ class Buffer:
 
     `stride` is how far one column starts from the next where a reader
     wants more than the box's rows -- the matrix tiling's ldmatrix, whose
-    rows are 16 bytes (`_pitched`); `pitch` is the distance either way.
+    rows are 16 bytes, and the `mix` form, which reads a column 16 bytes at
+    a time (`_pitched`); `pitch` is the distance either way.
     The elements past the rows are padding, zero."""
 
     tensor: object
@@ -529,9 +534,9 @@ class ElementGroup:
 
     @property
     def threads(self) -> int:
-        """A warp's lanes: 32, or in the lanes form the group's elements, a
-        lane each (`lane_elements`)."""
-        return self.elements if self.lanes is not None else 32
+        """A warp's lanes: `WARP_LANES`, or in the lanes form the group's
+        elements, a lane each (`lane_elements`)."""
+        return self.elements if self.lanes is not None else WARP_LANES
 
     @property
     def warps(self) -> int:
@@ -928,9 +933,18 @@ def _pitched(section: GroupSection) -> GroupSection:
     from the next (four more than a multiple of eight floats), which puts a
     fragment's eight rows on eight different bank groups.  Long enough for
     every step of K a product reads, the padding zero, so that the padded
-    end of the contraction multiplies zeros."""
+    end of the contraction multiplies zeros.  The same for the group operand
+    a `mix` step reads 16 bytes of a column at a time, its rows in whole
+    units of them."""
     need: Dict[int, int] = {}
+    unit = 16 // section.dtype.size()
     for step in section.steps:
+        if step.lowering == 'mix':
+            buffer = section.buffer(step.products[0].first.tensor)
+            need[id(buffer.tensor)] = max(
+                need.get(id(buffer.tensor), buffer.height),
+                _round(buffer.height, unit))
+            continue
         if step.lowering != 'mma_sync':
             continue
         _, _, k = matrix_shape(step.lowering, 0)
@@ -945,7 +959,10 @@ def _pitched(section: GroupSection) -> GroupSection:
         n = need.get(id(buffer.tensor))
         if n is None:
             return buffer
-        return dataclasses.replace(buffer, stride=n + (4 - n % 8) % 8)
+        # The least pitch from `n` on that is an odd number of 16 bytes.
+        n = _round(n, unit)
+        return dataclasses.replace(
+            buffer, stride=n + (unit if (n // unit) % 2 == 0 else 0))
 
     return dataclasses.replace(
         section, inputs=tuple(map(pitched, section.inputs)),
@@ -1040,6 +1057,10 @@ def lower(section: GroupSection, context, matrix: bool = True,
             s, lowering=lowering,
             terms=nonzero_terms(s) if sparse and lowering == 'fma'
             else None))
+    if any(s.lowering in MATRIX_LOWERINGS for s in steps):
+        # The matrix tiling's mixing steps block-wide, a thread a row of A.
+        steps = [dataclasses.replace(s, lowering='mix')
+                 if _mixes(s, section) else s for s in steps]
     staged = _staged(dataclasses.replace(section, steps=tuple(steps)), sm,
                      split)
     return _pitched(dataclasses.replace(
@@ -1072,6 +1093,26 @@ def second_stages(section: GroupSection, context) -> int:
             and options.enable_sync_block_opt and async_staging(context)):
         return 0
     return min(int(options.move_distance), len(section.inputs))
+
+
+def _mixes(step: Step, section: GroupSection) -> bool:
+    """Whether a mixing step takes the `mix` form (`compute.multi_element.
+    _mix`): one product, over the step's window, of a group operand's
+    buffer and an element's small operand's, assigned to an intermediate --
+    the star step the matrix tiling reads its A from -- whose columns a
+    block's warp holds a thread each of."""
+    if step.kind is not Kind.MIXING or len(step.products) != 1:
+        return False
+    p = step.products[0]
+    if ((p.rows, p.cols) != (step.rows, step.cols) or not step.assigns
+            or not step.dest.is_tmp):
+        return False
+    try:
+        small = section.buffer(p.second.tensor)
+        section.buffer(p.first.tensor)
+    except KeyError:
+        return False
+    return small.role is Role.SMALL and p.cols[1] - p.cols[0] <= WARP_LANES
 
 
 def tiled(section: GroupSection) -> bool:
