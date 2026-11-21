@@ -332,16 +332,21 @@ def test_every_element_of_two_trips_on_the_oracle(shape, arch, options,
     _two_trips(shape, arch, monkeypatch, **options)
 
 
-def test_every_slot_handed_over_again_on_the_oracle(monkeypatch):
+@pytest.mark.parametrize('shape', ['volume', 'chain'])
+def test_every_slot_handed_over_again_on_the_oracle(shape, monkeypatch):
     """Five trips of a group of four over nineteen elements, through a ring
     of three: the fourth and fifth take their slots back from the element
     warps, which every lane of a warp read before the warp's first lane gave
-    it back -- the producer's copies over it otherwise race with them.  And
-    shared memory nothing wrote reads NaN, as the hardware's may: the
+    it back -- the producer's copies over it otherwise race with them.  The
+    chain's last step reads the slot's star matrices behind the element
+    warps' last barrier, so only the warp's own orders its lanes' reads
+    ahead of the first lane's arrival; the volume's last read of the slot
+    stands before a barrier of the role, which orders it anyway.  And shared
+    memory nothing wrote reads NaN, as the hardware's may: the volume's
     intermediates' padding, which the matrix tiling's padded steps of K read
     and nothing but the element warps' zeros writes, carries it into every
     product where they were not."""
-    _two_trips('volume', 'sm_90', monkeypatch, count=19, poison=True)
+    _two_trips(shape, 'sm_90', monkeypatch, count=19, poison=True)
 
 
 def test_a_slots_padding_is_zero_on_the_oracle(monkeypatch):

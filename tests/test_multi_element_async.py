@@ -407,6 +407,21 @@ def test_every_element_of_two_trips_on_the_oracle(shape, arch, monkeypatch):
     _two_trips(shape, arch, monkeypatch)
 
 
+@pytest.mark.parametrize('arch,streamed', [
+    ('sm_90a', False), ('sm_90a', True), ('sm_100a', False),
+    ('sm_100a', True)], ids=['wgmma', 'wgmma-ring', 'tcgen05',
+                             'tcgen05-ring'])
+def test_every_element_of_two_trips_with_own_barriers_on_the_oracle(
+        arch, streamed, monkeypatch):
+    """As above, built without the barrier placement
+    (`Options.enable_sync_block_opt` off): the lowering's own barriers are
+    then all there is -- tcgen05's between D's stage and every element
+    warp's share of it, wgmma's behind each chunk of the ring -- where the
+    placement would otherwise put back one the lowering forgot."""
+    _two_trips('volume', arch, monkeypatch, streamed=streamed,
+               enable_sync_block_opt=False)
+
+
 @pytest.mark.parametrize('pending', [1, 2])
 @pytest.mark.parametrize('shape', ['volume', 'chain', 'reuse', 'assign',
                                    'window'])
@@ -425,11 +440,19 @@ def test_the_pipelined_steps_over_two_trips_on_the_oracle(shape,
     _two_trips(shape, 'sm_90a', monkeypatch, wgmma_pending=1)
 
 
-def _two_trips(shape, arch, monkeypatch, streamed=False, **options):
+def test_d_past_the_second_warps_lanes_on_the_oracle(monkeypatch):
+    """A group of eight, 72 rows of D: tcgen05's tensor memory holds row
+    `m` in lane `m` of the four warps a warp's 32 lanes, so the rows past
+    64 are the third warp's to load -- every element against NumPy, the
+    eighth's rows 63..71 among them."""
+    _two_trips('volume', 'sm_100a', monkeypatch, group=8, count=8)
+
+
+def _two_trips(shape, arch, monkeypatch, streamed=False, group=4, count=7,
+               **options):
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
-    group, count = 4, 7
     monkeypatch.setattr(eg, 'ELEMENTS', {key: group for key in eg.ELEMENTS})
     monkeypatch.setattr(eg, 'DEFAULT_ELEMENTS', group)
     if streamed:
