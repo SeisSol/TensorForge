@@ -861,8 +861,9 @@ def test_the_loop_takes_the_group_or_says_why():
 
 
 @pytest.mark.parametrize('value', ['off', 'auto'])
-def test_only_force_takes_the_layout(value):
-    """`off` never, and `auto` nowhere until a measurement says where."""
+def test_force_takes_the_layout_where_off_and_auto_do_not(value):
+    """`off` never, and `auto` not on CUDA, where nothing has measured it
+    to pay yet (`AUTO_LANES`)."""
     assert eg.plan(_volume(), _context(multi_element=value)) is None
     assert eg.plan(_volume(), _context(multi_element='force')) is not None
 
@@ -951,6 +952,100 @@ def test_a_range_costs_its_cone_and_ends_where_a_lane_no_longer_holds_it():
         assert ends == list(range(a + 1, last + 1))
         assert cones.live(range(a, last), 2) <= 84
         assert last == hi or cones.live(range(a, last + 1), 2) > 84
+
+
+# -- `auto` ------------------------------------------------------------------ #
+
+AUTO = {'multi_element': 'auto'}
+
+
+def _pvc(precision='s', **options):
+    return _context('pvc', precision, backend='oneapi', **options)
+
+
+@pytest.mark.parametrize('shape,order', [
+    ('volume', 4), ('volume', 6), ('sparse-star', 6), ('localFlux', 4),
+    ('localFlux', 6), ('neighboringFlux', 6), ('localFluxAll', 4),
+    ('localFluxAll', 6)])
+def test_auto_takes_the_lanes_form_at_f32_on_intel(shape, order):
+    """`auto` on PVC: the lanes form of an F32 section whose plan holds the
+    output in one row range (`AUTO_LANES`) -- the volume, with its stars
+    dense or stored sparse, and the flux kernels -- the group `force`
+    takes in the lanes form."""
+    group = eg.plan(_descrs(shape, order, 's'), _pvc(**AUTO))
+    assert group is not None and group.lanes is not None
+    assert len(group.lanes.ranges) == 1
+    forced = eg.plan(_descrs(shape, order, 's'), _pvc(**LANES))
+    assert (group.elements, group.lanes) == (forced.elements, forced.lanes)
+    assert {s.lowering for s in group.section.steps} == {'lane'}
+
+
+@pytest.mark.parametrize('order', [4, 6])
+def test_auto_takes_no_f64_section_yet(order):
+    """At F64 the lanes form lost on PVC under the plans measured so far:
+    `auto` takes none, though the lanes form plans one."""
+    section = eg.classify(_volume(order, 'd'))[0]
+    assert eg.lanes_plan(section, _pvc('d', **AUTO))[0] is not None
+    lanes, why = eg.auto_takes(section, _pvc('d', **AUTO))
+    assert lanes is None and 'no F64 section on intel' in why
+    assert eg.plan(_volume(order, 'd'), _pvc('d', **AUTO)) is None
+
+
+@pytest.mark.parametrize('backend,arch', [
+    ('cuda', 'sm_90'), ('cuda', 'sm_120'), ('hip', 'gfx942'),
+    ('hip', 'gfx1150'), ('esimd', 'pvc')])
+def test_auto_takes_nothing_but_intel_under_spmd(backend, arch):
+    """Not on CUDA or HIP, which nothing has measured yet, and not under
+    the explicit vector, which the layout is not written for (`TARGETS`)."""
+    context = _context(arch, 's', backend=backend, **AUTO)
+    assert eg.plan(_volume(4, 's'), context) is None
+    if backend != 'esimd':
+        section = eg.classify(_volume(4, 's'))[0]
+        assert 'no F32 section on' in eg.auto_takes(section, context)[1]
+
+
+def test_auto_takes_one_row_range(monkeypatch):
+    """Where the plan cuts the output into ranges -- here at a budget that
+    holds no o6 volume in one -- `auto` takes nothing: each range computes
+    again the rows of the intermediate the other needs too."""
+    monkeypatch.setattr(eg, 'LANE_REGISTERS', 120)
+    section = eg.classify(_volume(6, 's'))[0]
+    lanes = eg.lanes_plan(section, _pvc(**AUTO))[0]
+    assert lanes is not None and len(lanes.ranges) == 2
+    taken, why = eg.auto_takes(section, _pvc(**AUTO))
+    assert taken is None and '2 row ranges' in why
+    assert eg.plan(_volume(6, 's'), _pvc(**AUTO)) is None
+
+
+@pytest.mark.parametrize('fma,taken', [
+    ('auto', True), ('lanes', True), ('warp', False)])
+def test_auto_is_the_lanes_form_and_warp_declines_it(fma, taken):
+    """`auto`'s form is its rule's, the lanes form, whatever
+    `multi_element_fma` says short of `warp`, which declines it; `force`
+    keeps the option's own form, the warp form for `auto` on Intel."""
+    group = eg.plan(_volume(4, 's'), _pvc(multi_element='auto',
+                                          multi_element_fma=fma))
+    assert (group is not None) is taken
+    assert group is None or group.lanes is not None
+    forced = eg.plan(_volume(4, 's'), _pvc(multi_element='force',
+                                           multi_element_fma=fma))
+    assert (forced.lanes is not None) is (fma == 'lanes')
+
+
+def test_a_kernel_auto_takes_is_neither_cut_nor_reassociated():
+    """The generator keeps its gates for `auto` as for `force`: fission,
+    `auto` on Intel under SPMD, builds no probe of the list to decide its
+    cuts by -- the layout plans the kernel's one section whole -- and the
+    operator product put first (`reassociate_products`, asked for here) is
+    the order the lanes form refuses."""
+    for shape, order in (('localFluxAll', 6), ('localFlux', 4)):
+        gen = _generate(_descrs(shape, order, 's'), _pvc(
+            fission='auto', reassociate_products=True, **AUTO))
+        assert gen._fission_pieces == 0
+        built = gen.built
+        assert built._element_group is not None
+        assert built._element_group.lanes is not None
+        assert len(built._sections) == 1
 
 
 def test_a_cone_reads_the_operands_rows_its_nonzeros_name():

@@ -2373,8 +2373,10 @@ declare('multi_element',
             'their operands side by side in shared memory and the '
             'batch-constant operator once for the block.  `off` never; '
             '`force` wherever the fill rule finds a plan; `auto` where it '
-            'finds one measured to pay -- none yet, so `auto` is `off` for '
-            'now.')
+            'finds one measured to pay (`element_group.auto_takes`): so far '
+            'the lanes form (`multi_element_fma`) on Intel under SPMD at '
+            'F32, where its plan holds the output in one row range '
+            '(`element_group.AUTO_LANES`) -- and nothing elsewhere.')
 
 declare('multi_element_fma',
         default='auto',
@@ -2390,7 +2392,9 @@ declare('multi_element_fma',
             'split over the warps the group\'s elements share (`lane`) -- '
             'ahead of the matrix tiling, wherever the section fits it, and '
             '`warp` where it does not.  `auto`: the target\'s rule, which is '
-            '`warp` everywhere until the measurements say otherwise.')
+            '`warp` everywhere until the measurements say otherwise.  Under '
+            '`multi_element` `auto` the form is that rule\'s, the lanes '
+            'form, and `warp` declines it.')
 
 declare('multi_element_values',
         default='auto',

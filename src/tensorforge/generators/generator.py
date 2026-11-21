@@ -1562,7 +1562,7 @@ class Generator:
     hw = self._context.target.hw
     if getattr(opts, 'fission', 0) != 'auto':
       return
-    if opts.multi_element == 'force':
+    if opts.multi_element in ('force', 'auto'):
       # The multi-element layout plans the kernel's one section whole
       # (`element_group.plan`), and a piece would be a section of its own.
       flat = [op for descr in self._descr_list for op in descr.operations()]
@@ -3389,10 +3389,14 @@ class Generator:
     as yateto writes it (`element_group.plan`): then it is not reassociated
     (`Options.reassociate_products`).  The rewrite puts the operator product
     first and mixes its intermediate after it, which a lane would hold
-    whole -- the order the lanes form refuses, and AMD's default."""
+    whole -- the order the lanes form refuses, and AMD's default.  Under
+    `force` where the lanes form is asked for, and under `auto`, whose rule
+    takes the lanes form (`element_group.auto_takes`)."""
     options = context.get_user_options()
-    if (options.multi_element != 'force'
-        or element_group.fma_form(context) != 'lanes'):
+    if options.multi_element == 'force':
+      if element_group.fma_form(context) != 'lanes':
+        return False
+    elif options.multi_element != 'auto':
       return False
     flat = [op for descr in self._descr_list for op in descr.operations()]
     group = element_group.plan(flat, context)

@@ -80,8 +80,9 @@ classified or none, E for the section, and each step's lowering -- the
 fill rule (`fill`), static so far, each refusal with its reason.
 
 `multi_element` is off by default.  `force` takes the layout wherever the
-rule finds a plan; `auto` where it finds one measured to pay, which nothing
-is yet -- so `auto` is `off` until the measurements say otherwise.
+rule finds a plan; `auto` where it finds one measured to pay
+(`auto_takes`): so far the lanes form on Intel at F32, where its plan holds
+the output in one row range (`AUTO_LANES`).
 """
 
 from __future__ import annotations
@@ -1415,15 +1416,15 @@ def lanes_plan(section: GroupSection,
                   f'here')
 
 
-def fill(section: GroupSection,
-         context) -> Tuple[Optional[ElementGroup], str]:
+def fill(section: GroupSection, context,
+         form: Optional[str] = None) -> Tuple[Optional[ElementGroup], str]:
     """The fill rule: the group's size for `section` on the context's
     target, or None and why not.
 
     Only on the targets the layout is written for (`TARGETS`).  The lanes
-    form where it is asked for (`fma_form`) and the section fits it
-    (`lanes_plan`): a group of a warp's lanes (`lane_elements`), an element
-    each.
+    form where it is asked for -- `form`, else the option's (`fma_form`) --
+    and the section fits it (`lanes_plan`): a group of a warp's lanes
+    (`lane_elements`), an element each.
     Otherwise the size is the table's (`table_elements`) where the block
     holds it, halved while it does not -- in shared memory, in threads --
     and `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
@@ -1446,7 +1447,7 @@ def fill(section: GroupSection,
     if int(options.stack_elements) > 1:
         return None, (f'a trip of {options.stack_elements} stacked elements '
                       f'is no element group')
-    if fma_form(context) == 'lanes':
+    if (form or fma_form(context)) == 'lanes':
         lanes, _ = lanes_plan(section, context)
         if lanes is not None:
             return ElementGroup(lane_elements(context),
@@ -1486,28 +1487,75 @@ def fill(section: GroupSection,
                   f'operator needs to be streamed')
 
 
+#: Where `Options.multi_element` `auto` takes the layout, by vendor: the
+#: element types of the sections it takes, in the lanes form, where its plan
+#: holds the output in one row range (`auto_takes`).  Measured on PVC (Max
+#: 1550, SNG2 563442 and 563448; the lanes form against the per-element
+#: kernel, the time an element): at F32 the volume -41 % at o4 and o6 (-46
+#: and -35 % with the stars stored sparse, as SeisSol's GPU builds store
+#: them), localFlux[0] -4 and -21 %, neighboringFlux[0] -1 and -16 %,
+#: localFluxAll -45 % at o4 -- and +281 % at o6, where it spilled before
+#: each walk took an anchor of its own; at F64 the o6 volume +44 % and the
+#: fluxes +12 to +20 % under the plans before the ranges were cut for the
+#: least work.  Elsewhere nothing, until the measurements say otherwise.
+AUTO_LANES: Dict[str, Tuple[Datatype, ...]] = {'intel': (Datatype.F32,)}
+
+
+def auto_takes(section: GroupSection,
+               context) -> Tuple[Optional[Lanes], str]:
+    """The lanes form's plan of `section` where `Options.multi_element`
+    `auto` takes it on the context's target, or None and why not: where
+    the target's vendor takes the section's element type (`AUTO_LANES`),
+    the lanes form is not declined (`Options.multi_element_fma` `warp`),
+    and the plan holds the output in one row range -- where it cuts more,
+    each range computes again the rows of a value the others need too,
+    which nothing has measured to pay yet."""
+    vendor = getattr(context.target.hw, 'vendor', None)
+    if section.dtype not in AUTO_LANES.get(vendor, ()):
+        return None, (f'`auto` takes no {section.dtype.name} section on '
+                      f'{vendor} (`AUTO_LANES`)')
+    if context.get_user_options().multi_element_fma == 'warp':
+        return None, ('`auto` takes the lanes form, and the warp form is '
+                      'asked for')
+    lanes, why = lanes_plan(section, context)
+    if lanes is None:
+        return None, why
+    if len(lanes.ranges) > 1:
+        return None, (f'the lanes form cuts the output into '
+                      f'{len(lanes.ranges)} row ranges; `auto` takes one')
+    return lanes, ''
+
+
 def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
     """The section's multi-element plan, or None: where
     `Options.multi_element` is `force`, every product classifies and the
-    fill rule finds a group.  `auto` takes none yet."""
-    if context.get_user_options().multi_element != 'force':
+    fill rule finds a group; where `auto`, the lanes form's group where
+    `auto_takes` takes the section."""
+    mode = context.get_user_options().multi_element
+    if mode not in ('force', 'auto'):
         return None
     section, _ = classify(descrs)
     if section is None:
         return None
+    if mode == 'auto':
+        if auto_takes(section, context)[0] is None:
+            return None
+        group, _ = fill(section, context, form='lanes')
+        return group
     group, _ = fill(section, context)
     return group
 
 
-__all__ = ['Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
-           'FMA_FORMS', 'GroupSection', 'Kind', 'LANE_ANCHORS',
-           'LANE_CLASSES', 'LANE_COLUMNS', 'LANE_RANGES', 'LANE_REGISTERS',
-           'LANE_VALUES', 'LANE_WARPS', 'LOWERING', 'Lanes', 'MATRIX',
-           'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES', 'Product',
-           'Role', 'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step',
-           'TARGETS', 'Terms', 'async_staging', 'classify', 'fill',
-           'fma_form', 'lane_anchors', 'lane_columns', 'lane_elements',
-           'lane_grf', 'lane_literals', 'lane_registers', 'lane_values',
-           'lanes_plan', 'lower', 'matrix_enabled', 'matrix_shape',
-           'nonzero_terms', 'operator_nonzeros', 'plan', 'second_stages',
-           'shared_bytes', 'split', 'table_elements', 'tiled']
+__all__ = ['AUTO_LANES', 'Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS',
+           'ElementGroup', 'FMA_FORMS', 'GroupSection', 'Kind',
+           'LANE_ANCHORS', 'LANE_CLASSES', 'LANE_COLUMNS', 'LANE_RANGES',
+           'LANE_REGISTERS', 'LANE_VALUES', 'LANE_WARPS', 'LOWERING', 'Lanes',
+           'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
+           'Product', 'Role', 'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage',
+           'Step', 'TARGETS', 'Terms', 'async_staging', 'auto_takes',
+           'classify', 'fill', 'fma_form', 'lane_anchors', 'lane_columns',
+           'lane_elements', 'lane_grf', 'lane_literals', 'lane_registers',
+           'lane_values', 'lanes_plan', 'lower', 'matrix_enabled',
+           'matrix_shape', 'nonzero_terms', 'operator_nonzeros', 'plan',
+           'second_stages', 'shared_bytes', 'split', 'table_elements',
+           'tiled']
