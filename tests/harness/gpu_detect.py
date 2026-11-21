@@ -129,7 +129,11 @@ def detect_intel() -> List[DetectedGPU]:
     not "whatever follows the last ``]``" -- that is empty.  Every device is
     listed once per backend that sees it, so one backend is counted: Level
     Zero where it lists any GPU, OpenCL otherwise (a node whose DRM cards
-    the user may not open still shows its GPUs through OpenCL).
+    the user may not open still shows its GPUs through OpenCL).  Under
+    ``ONEAPI_DEVICE_SELECTOR`` the line has no ``[backend:N]`` -- sycl-ls
+    lists only the devices the selector leaves, without their ids, after a
+    note that it did -- and a device's index is its place among those, which
+    is the index the runtime gives it under the same selector.
     """
     # sycl-ls loads every adapter first, which can take longer than the five
     # seconds `_run` allows by default.
@@ -148,7 +152,7 @@ def detect_intel() -> List[DetectedGPU]:
 
     by_backend: dict = {}
     for line in out.splitlines():
-        m = re.match(r"\s*\[(\w+):gpu\]\[[^\]]*\]\s*(.*)$", line)
+        m = re.match(r"\s*\[(\w+):gpu\](?:\[[^\]]*\])?\s*(.*)$", line)
         if m is None or "Intel" not in m.group(2):
             continue
         text = re.sub(r"\s*\[[^\]]*\]\s*$", "", m.group(2))

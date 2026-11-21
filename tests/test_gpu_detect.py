@@ -20,6 +20,15 @@ BOTH = """\
 [opencl:gpu][opencl:0] Intel(R) OpenCL Graphics, Intel(R) Data Center GPU Max 1550 OpenCL 3.0 NEO  [23.22.26516.25]
 """
 
+# SNG2's sycl-ls under ONEAPI_DEVICE_SELECTOR=level_zero:0, as the PVC jobs
+# run their tests (job 562196): the selected device alone, without its id.
+FILTERED = """\
+INFO: Output filtered by ONEAPI_DEVICE_SELECTOR environment variable, which is set to level_zero:0.
+To see device ids, use the --ignore-device-selectors CLI option.
+
+[level_zero:gpu] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Data Center GPU Max 1550 12.60.7 [1.3.27642]
+"""
+
 
 def _detect(monkeypatch, text):
     monkeypatch.setattr(gpu_detect, "_run", lambda cmd, timeout=5.0: text)
@@ -40,3 +49,9 @@ def test_a_device_seen_by_two_backends_is_one_gpu(monkeypatch):
 
 def test_no_gpu_lines_is_no_gpu(monkeypatch):
     assert _detect(monkeypatch, OPENCL_ONLY.splitlines()[0] + "\n") == []
+
+
+def test_a_device_selector_leaves_the_selected_device(monkeypatch):
+    gpus = _detect(monkeypatch, FILTERED)
+    assert [(g.arch, g.index) for g in gpus] == [("pvc", 0)]
+    assert gpus[0].name.startswith("Intel(R) Data Center GPU Max 1550")
