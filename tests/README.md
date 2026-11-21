@@ -139,7 +139,7 @@ Optional module-level knobs the harness recognizes:
 | `NAME`            | `str`              | required; becomes the pytest parametrize ID                                                         |
 | `DTYPE`           | `Datatype`         | required; selects the kernel float type                                                             |
 | `BATCH`           | `int`              | batch size (default 8)                                                                              |
-| `TOL`             | `(rtol, atol)`     | NumPy `allclose` tolerances                                                                         |
+| `TOL`             | `(rtol, atol)`     | NumPy `allclose` tolerances; or a function of the expected array that returns them                  |
 | `descr_list()`    | `-> List[Descr]`   | required; the description sequence the generator consumes                                           |
 | `reference(...)`  | `-> np.ndarray`    | optional; per-case NumPy oracle, otherwise auto-derived for single-MultilinearDescr cases           |
 | `INPUT_TRANSFORM` | `Dict[str, fn]`    | optional; per-input domain shaping, applied before both kernel and reference see the values         |

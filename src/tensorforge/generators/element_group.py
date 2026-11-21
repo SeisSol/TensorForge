@@ -144,6 +144,8 @@ class Role(enum.Enum):
     GROUP = 'group'
     SMALL = 'small'
     INTERMEDIATE = 'intermediate'
+    #: A scalar factor of a scaled copy, passed by value (`Kind.SCALE`).
+    SCALAR = 'scalar'
 
 
 class Kind(enum.Enum):
@@ -151,6 +153,10 @@ class Kind(enum.Enum):
 
     OPERATOR = 'operator'
     MIXING = 'mixing'
+    #: `dest (+)= first`, or `dest (+)= first * s` with `s` a scalar factor
+    #: (`second`, None for a plain copy): elementwise, on the window of
+    #: `first`.
+    SCALE = 'scale'
 
 
 Range = Tuple[int, int]
@@ -199,6 +205,12 @@ class Product:
     def group(self):
         """The group operand: what the product's rows run over."""
         return self.second if self.kind is Kind.OPERATOR else self.first
+
+    @property
+    def operands(self) -> Tuple:
+        """The views the product reads: both, or a plain copy's one."""
+        return tuple(sub for sub in (self.first, self.second)
+                     if sub is not None)
 
     @property
     def other(self):
@@ -299,8 +311,7 @@ class Step:
         return _union([p.cols for p in self.products])
 
     def reads(self) -> List:
-        return [t for p in self.products
-                for t in (p.first.tensor, p.second.tensor)]
+        return [sub.tensor for p in self.products for sub in p.operands]
 
 
 @dataclass(frozen=True)
@@ -372,6 +383,17 @@ class Stage:
 
 
 @dataclass(frozen=True)
+class Phase:
+    """A phase of a chained section (`GroupSection.phases`): its mixing
+    and operator steps into one output of the element (`main`, none in a
+    phase of copies alone), and the scaled copies (`scales`) that read that
+    output -- or, without `main`, what no step writes."""
+
+    main: Tuple['Step', ...]
+    scales: Tuple['Step', ...]
+
+
+@dataclass(frozen=True)
 class GroupSection:
     """A section as the multi-element layout runs it (`classify`): its
     steps in order, the operators staged once, the element's operands
@@ -388,6 +410,54 @@ class GroupSection:
     #: How many of the inputs, in the order a trip stages them, take a
     #: second stage: those `pir.wrap` may copy a trip ahead (`lower`).
     doubled: int = 0
+    #: The scaled copies' factors, scalars passed by value (`Kind.SCALE`).
+    scalars: Tuple[object, ...] = ()
+
+    @property
+    def chained(self) -> bool:
+        """Whether the section reads back an output it wrote, or copies one
+        scaled: phases one after another (`phases`), each reading what the
+        ones before it wrote -- SeisSol's derivative, an order a phase."""
+        written = {id(s.dest) for s in self.steps if not s.dest.is_tmp}
+        return any(s.kind is Kind.SCALE for s in self.steps) or any(
+            id(t) in written for s in self.steps for t in s.reads())
+
+    def phases(self) -> Tuple['Phase', ...]:
+        """The section as its phases run (`Phase`): a phase of the scaled
+        copies of what no step writes first, where there are such; then each
+        run of steps into an output of the element -- the mixing steps and
+        the operator steps that read them -- with the scaled copies of that
+        output after it.  An output is whole when its phase ends: a later
+        phase reads it from where it was written."""
+        first, runs, run = [], [], []
+        outputs: Dict[int, int] = {}
+        for step in self.steps:
+            if step.kind is Kind.SCALE:
+                continue
+            run.append(step)
+            if not step.dest.is_tmp:
+                outputs[id(step.dest)] = len(runs)
+                runs.append([tuple(run), []])
+                run = []
+        if run:
+            runs.append([tuple(run), []])
+        for step in self.steps:
+            if step.kind is not Kind.SCALE:
+                continue
+            source = id(step.products[0].first.tensor)
+            if source in outputs:
+                runs[outputs[source]][1].append(step)
+            else:
+                first.append(step)
+        phases = [Phase((), tuple(first))] if first else []
+        return tuple(phases + [Phase(main, tuple(scales))
+                               for main, scales in runs])
+
+    def phase_section(self, phase: 'Phase') -> 'GroupSection':
+        """The section of one phase's mixing and operator steps, into its
+        one output."""
+        return dataclasses.replace(self, steps=phase.main,
+                                   outputs=(phase.main[-1].dest,))
 
     @property
     def products(self) -> List[Product]:
@@ -436,7 +506,9 @@ class GroupSection:
         """What the section's lowering depends on, in the description's
         terms: two classifications of one section agree on it."""
         return tuple((s.kind, s.lowering, s.dest.alias, s.assigns,
-                      tuple((p.first.tensor.alias, p.second.tensor.alias,
+                      tuple((p.first.tensor.alias,
+                             None if p.second is None
+                             else p.second.tensor.alias,
                              p.rows, p.cols, p.depth) for p in s.products),
                       s.terms)
                      for s in self.steps)
@@ -494,6 +566,20 @@ def _whole(sub) -> bool:
             == tuple(int(x) for x in box.upper()))
 
 
+def _scaled(op) -> Optional[Tuple[object, object]]:
+    """A scaled copy -- `dest (+)= src`, or `dest (+)= src * s` with `s` a
+    scalar -- as `(src, s)`, `s` None for a plain copy; else None."""
+    target = [list(t) for t in op.target]
+    permute = [list(p) for p in op.permute]
+    if len(op.ops) == 1 and target == [[0, 1]] and permute == [[0, 1]]:
+        return op.ops[0], None
+    if (len(op.ops) == 2 and target == [[0, 1], []]
+            and permute == [[0, 1], []]
+            and len(op.ops[1].bbox.lower()) == 0):
+        return op.ops[0], op.ops[1]
+    return None
+
+
 def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
     """The section of `descrs` as the multi-element layout runs it, or None
     and why not -- every product classified, or none."""
@@ -512,12 +598,63 @@ def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
         return None
 
     products: List[Product] = []
+    # Assignments of a window of an element's tensor: a chained section's
+    # (SeisSol's derivatives, an order's rows of its buffer) -- what the
+    # rest holds nothing reads -- and refused in any other.
+    windows: List[str] = []
     for n, op in enumerate(ops):
         if not isinstance(op, MultilinearDescr):
             return None, (f'operation {n} is a {type(op).__name__}, which '
                           f'the layout does not lower yet')
         if op.guarded():
             return None, f'operation {n} is guarded'
+        scaled = _scaled(op)
+        if scaled is not None:
+            first, scalar = scaled
+            for sub in (first, op.dest):
+                t = sub.tensor
+                if len(sub.bbox.lower()) != 2:
+                    return None, f'{t.alias} is no matrix'
+                if t.is_tmp or _addressed(t) is not None:
+                    return None, (f'operation {n} copies {first.tensor.alias}'
+                                  f' into {op.dest.tensor.alias}: a scaled '
+                                  f'copy is of an element\'s own matrices')
+                if not t.is_dense():
+                    return None, f'{t.alias} is stored sparse'
+                if getattr(t, 'storage_order', None) is not None:
+                    return None, f'{t.alias} is stored in an order of its own'
+                if getattr(sub, 'sliced', False):
+                    return None, f'{t.alias} is read or written as a slice'
+                if dtype is None:
+                    dtype = t.datatype
+                elif t.datatype is not dtype:
+                    return None, 'the operands are of more than one type'
+            if scalar is not None and (
+                    scalar.tensor.addressing is not Addressing.SCALAR
+                    and not scalar.tensor.has_values()):
+                return None, (f'operation {n} scales by '
+                              f'{scalar.tensor.alias}, which is no scalar '
+                              f'the kernel is handed or holds')
+            rows, cols = _range(first, 0), _range(first, 1)
+            dest_rows, dest_cols = _range(op.dest, 0), _range(op.dest, 1)
+            if cols != dest_cols or not _covers(dest_rows, rows) or (
+                    not op.add and rows != dest_rows):
+                return None, (f'operation {n} copies a window of '
+                              f'{first.tensor.alias} onto another of '
+                              f'{op.dest.tensor.alias}')
+            why = (claim(first.tensor, Role.GROUP)
+                   or claim(op.dest.tensor, Role.GROUP)
+                   or (scalar is not None
+                       and claim(scalar.tensor, Role.SCALAR)))
+            if why:
+                return None, why
+            if not op.add and not _whole(op.dest):
+                windows.append(f'operation {n} assigns a window of '
+                               f'{op.dest.tensor.alias}, whose rest it would '
+                               f'have to zero')
+            products.append(Product(op, Kind.SCALE, first, scalar, op.dest,
+                                    op.add))
+            continue
         if len(op.ops) != 2:
             return None, (f'operation {n} is not a product of two matrices '
                           f'(a scaled product, or another arity)')
@@ -585,24 +722,45 @@ def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
             if why:
                 return None, why
             if not op.add and not _whole(op.dest):
-                return None, (f'operation {n} assigns a window of '
-                              f'{dest.alias}, whose rest it would have to '
-                              f'zero')
+                windows.append(f'operation {n} assigns a window of '
+                               f'{dest.alias}, whose rest it would have to '
+                               f'zero')
         products.append(Product(op, kind, first, second, op.dest, op.add))
 
-    # An element's own tensor is read or written in the section, not both.
-    written = {id(p.dest.tensor) for p in products}
-    for p in products:
-        for sub in (p.first, p.second):
+    # An element's own tensor the section writes and reads: every write
+    # ahead of every read, and read only where written -- an output read back
+    # whole by a later phase (`GroupSection.phases`), the order before as
+    # SeisSol's derivative reads it.
+    writes: Dict[int, List[int]] = {}
+    spans_of: Dict[int, List[Tuple[Range, Range]]] = {}
+    for n, p in enumerate(products):
+        if not p.dest.tensor.is_tmp:
+            writes.setdefault(id(p.dest.tensor), []).append(n)
+            spans_of.setdefault(id(p.dest.tensor), []).append(
+                (_range(p.dest, 0), _range(p.dest, 1)))
+    rereads = False
+    for n, p in enumerate(products):
+        for sub in p.operands:
             t = sub.tensor
-            if not t.is_tmp and id(t) in written:
+            if t.is_tmp or id(t) not in writes:
+                continue
+            if max(writes[id(t)]) > n:
                 return None, (f'{t.alias} is written and read in the '
-                              f'section')
+                              f'section, read before its last write')
+            rows, cols = _range(sub, 0), _range(sub, 1)
+            if not any(_covers(r, rows) and _covers(c, cols)
+                       for r, c in spans_of[id(t)]):
+                return None, (f'operation {n} reads {t.alias} where '
+                              f'nothing wrote it')
+            rereads = True
+    chained = rereads or any(p.kind is Kind.SCALE for p in products)
+    if windows and not chained:
+        return None, windows[0]
     # Intermediates: assigned before anything reads or adds to them, and
     # read only where written.
     assigned: Dict[int, List[Tuple[Range, Range]]] = {}
     for n, p in enumerate(products):
-        for sub in (p.first, p.second):
+        for sub in p.operands:
             t = sub.tensor
             if not t.is_tmp:
                 continue
@@ -626,7 +784,7 @@ def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
 
 
 #: Each kind's lowering, so far.
-LOWERING = {Kind.OPERATOR: 'fma', Kind.MIXING: 'rows'}
+LOWERING = {Kind.OPERATOR: 'fma', Kind.MIXING: 'rows', Kind.SCALE: 'scale'}
 
 
 def _steps(products: Sequence[Product]) -> Tuple[Step, ...]:
@@ -642,15 +800,17 @@ def _steps(products: Sequence[Product]) -> Tuple[Step, ...]:
         out.append(Step(tuple(members), LOWERING[members[0].kind]))
 
     for p in products:
-        reads = {id(p.first.tensor), id(p.second.tensor)}
+        reads = {id(sub.tensor) for sub in p.operands}
         dest = id(p.dest.tensor)
         for members in list(open_steps):
-            read_by = {id(t) for m in members
-                       for t in (m.first.tensor, m.second.tensor)}
+            read_by = {id(sub.tensor) for m in members for sub in m.operands}
             if id(members[0].dest.tensor) in reads or dest in read_by:
                 close(members)
         into = [m for m in open_steps if id(m[0].dest.tensor) == dest]
-        if into and p.add and p.kind is into[0][0].kind:
+        # A scaled copy is a step of its own: a chained section's phases take
+        # each where what it copies is whole (`GroupSection.phases`).
+        if (into and p.add and p.kind is into[0][0].kind
+                and p.kind is not Kind.SCALE):
             into[0].append(p)
             continue
         for members in into:
@@ -662,7 +822,7 @@ def _steps(products: Sequence[Product]) -> Tuple[Step, ...]:
 
 
 def _section(steps: Tuple[Step, ...], dtype) -> GroupSection:
-    operators, outputs = [], []
+    operators, outputs, scalars = [], [], []
     boxes: Dict[int, Tuple[object, Role, List[Range], List[Range]]] = {}
 
     def keep(tensor, role, sub):
@@ -671,6 +831,14 @@ def _section(steps: Tuple[Step, ...], dtype) -> GroupSection:
         entry[3].append(_range(sub, 1))
 
     for p in (p for s in steps for p in s.products):
+        if p.kind is Kind.SCALE:
+            keep(p.first.tensor, Role.GROUP, p.first)
+            if p.second is not None and not any(
+                    t is p.second.tensor for t in scalars):
+                scalars.append(p.second.tensor)
+            if not any(o is p.dest.tensor for o in outputs):
+                outputs.append(p.dest.tensor)
+            continue
         for sub in (p.first, p.second):
             t = sub.tensor
             if t.is_tmp:
@@ -692,7 +860,8 @@ def _section(steps: Tuple[Step, ...], dtype) -> GroupSection:
         (intermediates if role is Role.INTERMEDIATE else inputs).append(
             buffer)
     section = GroupSection(steps, tuple(operators), tuple(inputs),
-                           tuple(intermediates), tuple(outputs), dtype)
+                           tuple(intermediates), tuple(outputs), dtype,
+                           scalars=tuple(scalars))
     return _staged(section, 0)
 
 
@@ -1167,9 +1336,16 @@ class Lanes:
     #: than one only where they divide the class's columns, and every class
     #: has as many (`lanes_plan`).
     columns: int = 1
+    #: A chained section's plans, a phase each (`GroupSection.phases`), None
+    #: for a phase of copies alone: one warp takes every phase, all of its
+    #: columns, so that a lane reads back what it wrote -- the output of the
+    #: phase before, whose every column the next phase's columns read.
+    phases: Tuple[Optional['Lanes'], ...] = ()
 
     @property
     def warps(self) -> int:
+        if self.phases:
+            return 1
         return self.classes * len(self.ranges)
 
 
@@ -1392,7 +1568,43 @@ class Cones:
 
 def lanes_plan(section: GroupSection,
                context) -> Tuple[Optional[Lanes], str]:
-    """The lanes form's plan for `section` (`Lanes`), or None and why not.
+    """The lanes form's plan for `section` (`Lanes`), or None and why not:
+    a chained section's a phase at a time (`_chained_plan`), any other's
+    whole (`_lanes_plan`)."""
+    if section.chained:
+        return _chained_plan(section, context)
+    return _lanes_plan(section, context)
+
+
+def _chained_plan(section: GroupSection,
+                  context) -> Tuple[Optional[Lanes], str]:
+    """The lanes form's plan of a chained section: every phase's own
+    (`_lanes_plan`), each in one warp -- one class of all the output's
+    columns, one range of its rows -- so that a column of a phase reads what
+    the same lane wrote in the phases before, with no barrier between.  A
+    phase that holds no warp's share alone the form does not take yet."""
+    plans: List[Optional[Lanes]] = []
+    for phase in section.phases():
+        if not phase.main:
+            plans.append(None)
+            continue
+        plan, why = _lanes_plan(section.phase_section(phase), context,
+                                one_warp=True)
+        if plan is None:
+            return None, (f'the phase into {phase.main[-1].dest.alias}: '
+                          f'{why}')
+        plans.append(plan)
+    taken = [p for p in plans if p is not None]
+    if not taken:
+        return None, 'a chained section of copies alone'
+    return Lanes(1, taken[0].ranges, max(p.registers for p in taken), 1,
+                 tuple(plans)), ''
+
+
+def _lanes_plan(section: GroupSection, context,
+                one_warp: bool = False) -> Tuple[Optional[Lanes], str]:
+    """The lanes form's plan of a section of one output (`Lanes`), or
+    None and why not; where `one_warp`, in one class and one range or none.
 
     It takes a section with one output, the last step's destination, which
     no other step reads; whose mixing products mix the element's own
@@ -1443,11 +1655,14 @@ def lanes_plan(section: GroupSection,
     width = cones.cols[1] - cones.cols[0]
     classes = max(1, min(LANE_CLASSES, width))
     budget = lane_registers(context, lane_elements(context))
+    if one_warp:
+        classes = 1
     # The most columns a pass takes first, each at as few row ranges as
     # hold it; a pass of several only where they divide the class's
     # columns and every class has as many.
-    for columns in range(lane_columns(context), 0, -1):
-        for count in range(1, min(LANE_RANGES, hi - lo) + 1):
+    for columns in range(1 if one_warp else lane_columns(context), 0, -1):
+        for count in range(1, 2 if one_warp else
+                           min(LANE_RANGES, hi - lo) + 1):
             kinds = max(1, min(classes, LANE_WARPS // count))
             trips = -(-width // kinds)
             if columns > 1 and (trips % columns or width % kinds):
@@ -1457,7 +1672,7 @@ def lanes_plan(section: GroupSection,
                 live = max(cones.live(range(*r), tile, columns)
                            for r in ranges) * size
                 return Lanes(kinds, ranges, live, columns), ''
-    count = min(LANE_RANGES, hi - lo)
+    count = 1 if one_warp else min(LANE_RANGES, hi - lo)
     live = max(cones.live(range(*r), tile) for r in cones.ranges(
         count, None, tile)) * size
     return None, (f'a lane would hold {live} registers at {count} row '
@@ -1497,11 +1712,19 @@ def fill(section: GroupSection, context,
         return None, (f'a trip of {options.stack_elements} stacked elements '
                       f'is no element group')
     if (form or fma_form(context)) == 'lanes':
-        lanes, _ = lanes_plan(section, context)
+        lanes, why = lanes_plan(section, context)
         if lanes is not None:
             return ElementGroup(lane_elements(context),
                                 lower(section, context, lanes=True), 0,
                                 lanes), ''
+        if section.chained:
+            return None, why
+    if section.chained:
+        # The warp form stages an element's operands ahead of its steps and
+        # writes an output's tiles whole: neither reads back an output, nor
+        # leaves the rest of an assigned window as it is.
+        return None, ('a chained section is the lanes form\'s alone (its '
+                      'phases one after another, `GroupSection.phases`)')
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
     # The matrix tiling, with B in TF32 halves where that costs no group
     # size -- the halves take twice B's room -- then the FMA forms.
@@ -1560,6 +1783,9 @@ def auto_takes(section: GroupSection,
     each range computes again the rows of a value the others need too,
     which nothing has measured to pay yet."""
     vendor = getattr(context.target.hw, 'vendor', None)
+    if section.chained:
+        return None, ('`auto` takes no chained section: none is measured '
+                      'yet')
     if section.dtype not in AUTO_LANES.get(vendor, ()):
         return None, (f'`auto` takes no {section.dtype.name} section on '
                       f'{vendor} (`AUTO_LANES`)')

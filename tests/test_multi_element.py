@@ -193,7 +193,10 @@ DESCRIPTIONS = {
     # product, then two operator products, the first into an intermediate.
     'localFlux': _seissol('gpu_localFlux[0]'),
     'neighboringFlux': _seissol('gpu_neighboringFlux[0]'),
-    'localFluxAll': _seissol('gpu_localFluxAll')}
+    'localFluxAll': _seissol('gpu_localFluxAll'),
+    # A chained section: the time derivative, an order a phase, each reading
+    # the order before back, and the time integral its scaled sum.
+    'derivative': _seissol('gpu_derivative')}
 
 
 def _descrs(shape='volume', order=6, precision='s'):
@@ -1050,6 +1053,194 @@ def test_the_lanes_form_is_compiled_without_packed_fp32_on_cdna(
     assert kernel.count('__attribute__((target(') == int(off)
 
 
+# -- a chained section: the derivative --------------------------------------- #
+
+@pytest.mark.parametrize('order,precision', [(4, 's'), (6, 'd')])
+def test_the_derivative_is_a_chained_section(order, precision):
+    """SeisSol's time derivative classifies whole: the time integral and the
+    zeroth derivative copies of `Q` (`Kind.SCALE`), then an order a phase --
+    the volume's three mixing steps and one operator step into `dQ(d)`, of
+    the order before read back -- each with the time integral's scaled sum
+    of it after (`GroupSection.phases`); the factors are the kernel's
+    scalars, an order's rows of its derivative a window of the buffer."""
+    section, why = eg.classify(_descrs('derivative', order, precision))
+    assert section is not None, why
+    assert section.chained
+    assert [t.alias for t in section.scalars] == [
+        f'power({d})' for d in range(order)]
+    phases = section.phases()
+    assert len(phases) == order
+    copies = phases[0]
+    assert not copies.main and sorted(s.dest.alias for s in copies.scales) \
+        == ['I', 'dQ(0)']
+    assert all(s.products[0].first.tensor.alias == 'Q' for s in copies.scales)
+    for d, phase in enumerate(phases[1:], 1):
+        kinds = [s.kind for s in phase.main]
+        assert kinds == [eg.Kind.MIXING] * 3 + [eg.Kind.OPERATOR]
+        assert phase.main[-1].dest.alias == f'dQ({d})'
+        read = 'Q' if d == 1 else f'dQ({d - 1})'
+        assert all(s.products[0].first.tensor.alias == read
+                   for s in phase.main[:3])
+        (taylor,) = phase.scales
+        p = taylor.products[0]
+        assert (taylor.dest.alias, p.first.tensor.alias, p.add) == (
+            'I', f'dQ({d})', True)
+        assert p.second.tensor.alias == f'power({d})'
+    assert not eg.classify(_volume())[0].chained
+
+
+def _derivative_changed(change, order=4, precision='s'):
+    """The derivative's description with one thing changed: `early`, the
+    first mixing product of the second order read before the last product
+    into the first; `unwritten`, the time integral's sum of the first order
+    a row past what the order wrote; `window`, the time integral's first
+    copy onto other rows than it copies."""
+    d = json.loads(json.dumps(DESCRIPTIONS['derivative'](order, precision)))
+    ops = d['operations']
+    if change == 'early':
+        reads = next(n for n, op in enumerate(ops)
+                     if any(a['name'] == 'dQ(1)' for a in op['args'])
+                     and op['result']['name'].startswith('_tmp'))
+        ops.insert(reads - 3, ops.pop(reads))
+    elif change == 'unwritten':
+        op = next(op for op in ops if op['result']['name'] == 'I'
+                  and op['args'][0]['name'] == 'dQ(1)')
+        op['args'][0]['bbox'][1][0] += 1
+    else:
+        first = ops[0]
+        first['result']['bbox'][0][0] += 1
+    from tensorforge.frontend.yateto import DescriptionReader
+    return DescriptionReader(None, {}).read(d)[0]
+
+
+@pytest.mark.parametrize('change,why', [
+    ('early', 'read before its last write'),
+    ('unwritten', 'reads dQ(1) where nothing wrote it'),
+    ('window', 'copies a window of Q onto another')])
+def test_a_chained_section_reads_an_output_whole(change, why):
+    """An output read back is read after its last write and where it was
+    written; a scaled copy copies its window onto the same rows."""
+    section, reason = eg.classify(_derivative_changed(change))
+    assert section is None and why in reason
+
+
+def test_a_window_assigned_outside_a_chain_is_refused():
+    """Assigning a window of an element's tensor, the rest left as it is,
+    only a chained section's phases do -- what reads the rest is a later
+    phase's business there; the volume with its first product assigning a
+    window of `Q` is refused, as it was."""
+    d = json.loads(json.dumps(DESCRIPTIONS['volume'](4, 's')))
+    op = d['operations'][1]
+    op.setdefault('linear', {})['add'] = False
+    from tensorforge.frontend.yateto import DescriptionReader
+    section, reason = eg.classify(DescriptionReader(None, {}).read(d)[0])
+    assert section is None and 'whose rest it would have to zero' in reason
+
+
+def test_a_chained_section_is_the_lanes_forms_alone():
+    """The warp form stages an element's operands ahead of its steps and
+    writes an output's tiles whole: a chained section is the lanes form's;
+    `auto` takes none, none measured yet."""
+    section = eg.classify(_descrs('derivative', 4, 's'))[0]
+    for arch, backend in (('sm_90', 'cuda'), ('pvc', 'oneapi')):
+        group, why = eg.fill(section, _context(arch, 's', backend=backend,
+                                               multi_element='force'))
+        assert group is None and 'the lanes form\'s alone' in why
+    taken, why = eg.auto_takes(section, _context('pvc', 's', backend='oneapi',
+                                                multi_element='auto'))
+    assert taken is None and 'chained' in why
+    assert eg.plan(_descrs('derivative', 4, 's'), _context(
+        'pvc', 's', backend='oneapi', multi_element='auto')) is None
+
+
+@pytest.mark.parametrize('arch,backend,precision', [
+    ('sm_90', 'cuda', 's'), ('pvc', 'oneapi', 's'), ('gfx942', 'hip', 'd')])
+def test_the_lanes_form_takes_the_derivative_a_phase_a_warp(arch, backend,
+                                                            precision):
+    """One warp takes every phase -- every column of an order, at one range
+    of its rows -- so that a lane reads back the order before as it wrote
+    it, no barrier between; the copies a pass of their own, and each order's
+    scaled sum into the time integral in its column pass, of the registers
+    that hold the order's column (`_chained`)."""
+    context = _context(arch, precision, backend=backend, **LANES)
+    group = eg.plan(_descrs('derivative', 6, precision), context)
+    assert group is not None and group.lanes is not None
+    plans = group.lanes.phases
+    assert group.lanes.warps == 1 and plans[0] is None
+    rows = [(0, 35), (0, 20), (0, 10), (0, 4), (0, 1)]
+    assert [(p.classes, p.ranges) for p in plans[1:]] == [
+        (1, (r,)) for r in rows]
+    kernel = _generate(_descrs('derivative', 6, precision),
+                       context).get_kernel()
+    loops = re.findall(r'for \(int32_t v\d+_c = 0; v\d+_c < (\d+);', kernel)
+    assert loops == ['9'] * 6
+    # The integral's sum takes an order's column from the registers that
+    # computed it: the last order, which no later order reads, is only
+    # written; the order before it is read back by the last.
+    dests = re.findall(r'//   (m\d+)\[i,j\](?:@\S+)? \+?= ', kernel)
+    orders = [m for m in dict.fromkeys(dests) if m != dests[-1]]
+    assert len(orders) == 6
+    last, before = orders[-1], orders[-2]
+    assert re.search(rf'glb_{last}\[[^]]*\] = ', kernel)
+    assert not re.search(rf'= [^;]*glb_{last}\[', kernel)
+    assert re.search(rf'= [^;]*glb_{before}\[', kernel)
+
+
+@pytest.mark.parametrize('order,precision,arch,values', [
+    (4, 's', 'sm_90', None), (4, 'd', 'gfx942', None),
+    (4, 's', 'gfx1150', None), (6, 's', 'sm_90', None),
+    (4, 's', 'sm_90', 'memory'), (4, 'd', 'gfx942', 'table')])
+def test_the_derivative_computes_on_the_oracle(order, precision, arch,
+                                               values):
+    """The lanes form's derivative on the host oracle, over a group and seven
+    elements more -- a trip and a partial one -- every output against NumPy:
+    the time integral and each order's derivative, the rows of a buffer past
+    its order's window as the oracle filled them; the operators' numbers
+    literals, read from their memory or from a table."""
+    import numpy as np
+    backend = 'cuda' if arch.startswith('sm_') else 'hip'
+    options = {'multi_element_values': values} if values else {}
+    context = _context(arch, precision, backend=backend, **LANES, **options)
+    count = eg.lane_elements(context) + 7
+    descrs = _descrs('derivative', order, precision)
+    tensors, inputs, scalars, after = _on_the_oracle(
+        _generate(descrs, context), count)
+    assert sorted(scalars) == [f'power({d})' for d in range(order)]
+    want = _reference_all(descrs)(inputs, scalars)
+    assert sorted(want) == sorted(['I'] + [f'dQ({d})' for d in range(order)])
+    tolerance = 1e-12 if precision == 'd' else 1e-6
+    for alias in want:
+        got = after(tensors[alias])
+        for e in range(count):
+            scale = np.abs(want[alias][e]).max() or 1.0
+            error = np.abs(got[e] - want[alias][e]).max() / scale
+            assert error <= tolerance, (alias, e, error)
+
+
+@pytest.mark.parametrize('order,precision', [
+    (4, 's'), (6, 's'), (4, 'd'), (6, 'd')])
+def test_the_derivative_computes_on_the_gpu(order, precision, target,
+                                            cache_root, tensorforge_include):
+    """The lanes form's derivative built and run on the local GPU against
+    NumPy, over a batch whose last group is partial and which gives a block
+    of the persistent grid several trips: the time integral, which sums
+    every order, and the last order's derivative, the chain's end."""
+    from harness.runner import run_case
+    if (target.backend, target.vendor) not in eg.TARGETS:
+        pytest.skip(f'the layout is not written for {target.backend} on '
+                    f'{target.vendor}')
+    group = eg.plan(_descrs('derivative', order, precision),
+                    _context(target.arch, precision, backend=target.backend,
+                             **LANES))
+    assert group is not None and group.lanes is not None
+    assert group.lanes.phases
+    for output in ('I', f'dQ({order - 1})'):
+        result = run_case(_derivative_case(order, precision, output, LANES),
+                          target, cache_root, tensorforge_include)
+        assert result.passed, (output, result.max_abs_err,
+                               result.max_rel_err, result.detail)
+
+
 # -- `auto` ------------------------------------------------------------------ #
 
 AUTO = {'multi_element': 'auto'}
@@ -1844,7 +2035,6 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
     orders (`kernel_eval.Races`)."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
-    from tensorforge.reference import kernel_eval
     options = dict(options)
     arch = options.pop('arch', 'sm_90')
     columns = options.pop('columns', None)
@@ -1867,6 +2057,32 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
     gen = _generate(_descrs(shape, order, precision), context)
     built = gen.built._element_group
     assert built.elements == group and (built.lanes is not None) is lanes
+    tensors, inputs, _, after = _on_the_oracle(gen, count)
+    output = next(t for t in tensors.values() if not t.is_tmp
+                  and t.addressing.kind is not Addressing.NONE
+                  and any(d.writes().tensor is t for outer in gen.descr_list
+                          for d in outer.operations()))
+    got = after(output)
+    want = _reference(_descrs(shape, order, precision))(
+        inputs, inputs[output.alias])
+    tolerance = 1e-12 if precision == 'd' else 1e-6
+    for e in range(count):
+        scale = np.abs(want[e]).max() or 1.0
+        error = np.abs(got[e] - want[e]).max() / scale
+        assert error <= tolerance, (e, error)
+
+
+def _on_the_oracle(gen, count):
+    """`gen`'s kernel run on the host oracle over `count` elements, from the
+    oracle's own fill of memory, the operators their description's numbers,
+    and no access to shared memory that no barrier orders
+    (`kernel_eval.Races`): `(tensors, inputs, scalars, after)` -- the
+    description's tensors by alias; each one's box but an intermediate's,
+    element by element, as the kernel finds it; the scalar factors' values;
+    and `after(t)`, a tensor's box as the kernel leaves it."""
+    import numpy as np
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.reference import kernel_eval
     tensors = {}
     for outer in gen.descr_list:
         for d in outer.operations():
@@ -1895,21 +2111,20 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
         return out
 
     fill = kernel_eval.Slot(SEED)
-    preset, inputs = {}, {}
+    preset, inputs, scalars = {}, {}, {}
     for alias, t in tensors.items():
         if t.is_tmp:
             continue
-        if t.addressing.kind is Addressing.NONE:
+        if not t.bbox.lower():
+            # A scalar passed by value: the oracle's fill of its one slot.
+            scalars[alias] = fill.read(t.name, 0)
+        elif t.addressing.kind is Addressing.NONE:
             preset[t.name] = [float(v) for v in t.storage_values()]
             (r0, r1), (c0, c1) = box(t)
             inputs[alias] = np.asarray(t.get_values())[None, r0:r1, c0:c1]
         else:
             inputs[alias] = memory(t, lambda e, s, t=t: fill.read(
                 f'{t.name}@{e}', s))
-    output = next(t for t in tensors.values() if not t.is_tmp
-                  and t.addressing.kind is not Addressing.NONE
-                  and any(d.writes().tensor is t for outer in gen.descr_list
-                          for d in outer.operations()))
     lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
     races = []
     with warnings.catch_warnings():
@@ -1919,16 +2134,12 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
             mults=mults, block=True, preset=preset, elements=count,
             races=races)
     assert not races, races[:3]
-    got = memory(output, lambda e, s: mem.get((f'{output.name}@{e}', s),
-                                              fill.read(f'{output.name}@{e}',
-                                                        s)))
-    want = _reference(_descrs(shape, order, precision))(
-        inputs, inputs[output.alias])
-    tolerance = 1e-12 if precision == 'd' else 1e-6
-    for e in range(count):
-        scale = np.abs(want[e]).max() or 1.0
-        error = np.abs(got[e] - want[e]).max() / scale
-        assert error <= tolerance, (e, error)
+
+    def after(t):
+        return memory(t, lambda e, s: mem.get((f'{t.name}@{e}', s),
+                                              fill.read(f'{t.name}@{e}', s)))
+
+    return tensors, inputs, scalars, after
 
 
 def _reference(descrs):
@@ -1981,6 +2192,67 @@ def _reference(descrs):
         lo = tuple(int(x) for x in output.bbox.lower())
         hi = tuple(int(x) for x in output.bbox.upper())
         return full[output.alias][:, lo[0]:hi[0], lo[1]:hi[1]]
+
+    return reference
+
+
+def _reference_all(descrs):
+    """NumPy over a description of several outputs -- a chained section,
+    its scaled copies too -- every element at once, in double precision:
+    `reference(inputs, scalars)` is each element output's box after the
+    description, from its box in `inputs` where nothing writes it.  The
+    scalars are the factors' values by alias."""
+    import numpy as np
+    ops = [op for d in descrs for op in d.operations()]
+
+    def reference(inputs, scalars):
+        full = {}
+
+        def whole(tensor):
+            if tensor.alias not in full:
+                lo = tuple(int(x) for x in tensor.bbox.lower())
+                hi = tuple(int(x) for x in tensor.bbox.upper())
+                data = np.asarray(inputs[tensor.alias], dtype=np.float64)
+                out = np.zeros((data.shape[0],) + tuple(hi))
+                out[:, lo[0]:hi[0], lo[1]:hi[1]] = data
+                full[tensor.alias] = out
+            return full[tensor.alias]
+
+        written = []
+        for op in ops:
+            scaled = eg._scaled(op)
+            if scaled is not None:
+                src, factor = scaled
+                (r0, c0), (r1, c1) = src.bbox.lower(), src.bbox.upper()
+                value = whole(src.tensor)[:, r0:r1, c0:c1] * (
+                    1.0 if factor is None else scalars[factor.tensor.alias])
+            else:
+                a, b = op.ops
+                (r0, k0), (r1, k1) = a.bbox.lower(), a.bbox.upper()
+                c0, c1 = b.bbox.lower()[1], b.bbox.upper()[1]
+                value = np.einsum('...ik,...kj->...ij',
+                                  whole(a.tensor)[:, r0:r1, k0:k1],
+                                  whole(b.tensor)[:, k0:k1, c0:c1])
+            dest = op.dest.tensor
+            if dest.is_tmp and not op.add:
+                full[dest.alias] = np.zeros(
+                    (value.shape[0],) + tuple(int(x) for x in
+                                              dest.bbox.upper()))
+            target = full[dest.alias] if dest.is_tmp else whole(dest)
+            if not dest.is_tmp and dest.alias not in written:
+                written.append(dest.alias)
+            if op.add:
+                target[:, r0:r1, c0:c1] += value
+            else:
+                target[:, r0:r1, c0:c1] = value
+        out = {}
+        for alias in written:
+            tensor = next(op.dest.tensor for op in ops
+                          if op.dest.tensor.alias == alias)
+            lo = tuple(int(x) for x in tensor.bbox.lower())
+            hi = tuple(int(x) for x in tensor.bbox.upper())
+            out[alias] = full[alias][:, lo[0]:hi[0], lo[1]:hi[1]]
+        return out
 
     return reference
 
@@ -2114,6 +2386,51 @@ def _described(descrs):
                     values, a.shape)
     out.update(_stored_only(descrs))
     return out
+
+
+def _derivative_case(order, precision, output, options, batch=4099,
+                     name='multi_element_lanes'):
+    """The harness's case of the derivative, compared at `output` -- the
+    time integral or an order's derivative: the factors the driver's 0.5
+    (`driver_emit.collect_operands`), an output nothing gives the kernel
+    zero, as the driver hands it over.  The rows grow by orders of magnitude
+    from an order to the next, up to 1e9 at o6, and a row's rounding with
+    them: each row is held to its size over the batch, 1e-5 of it in F32
+    and 1e-13 in F64 -- the GPUs' worst is 2e-7 and 6e-16."""
+    import numpy as np
+    descrs = _descrs('derivative', order, precision)
+    outputs, scalars = {}, {}
+    for descr in descrs:
+        for op in descr.operations():
+            scaled = eg._scaled(op)
+            if scaled is not None and scaled[1] is not None:
+                t = scaled[1].tensor
+                scalars[t.alias] = (
+                    float(np.asarray(t.get_values()).reshape(-1)[0])
+                    if t.has_values() else 0.5)
+            if not op.dest.tensor.is_tmp:
+                outputs.setdefault(op.dest.tensor.alias, op.dest.tensor)
+    every = _reference_all(descrs)
+
+    def reference(inputs, dest_in):
+        given = dict(inputs)
+        for alias, t in outputs.items():
+            if alias not in given:
+                given[alias] = np.zeros((len(dest_in),) + tuple(
+                    int(hi) - int(lo) for lo, hi in zip(t.bbox.lower(),
+                                                        t.bbox.upper())))
+        return every(given, scalars)[output]
+
+    def tolerance(expected):
+        rows = np.abs(expected).max(axis=(0, 2), keepdims=True)
+        return 0.0, rows * (1e-13 if precision == 'd' else 1e-5)
+
+    return types.SimpleNamespace(
+        NAME=f'{name}_derivative_o{order}{precision}', DTYPE=_dtype(precision),
+        BATCH=batch, OUTPUT=output, TOL=tolerance,
+        OPTIONS=dict(options), INPUT_TRANSFORM=_described(descrs),
+        descr_list=lambda: _descrs('derivative', order, precision),
+        reference=reference)
 
 
 LANE_CASES = [

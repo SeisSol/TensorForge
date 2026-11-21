@@ -3960,7 +3960,9 @@ class Generator:
     group = dataclasses.replace(self._element_group, section=section)
     symbols = {id(t): self._scopes.get_symbol(t)
                for t in (list(section.operators) + list(section.outputs)
-                         + [b.tensor for b in section.inputs])}
+                         + [b.tensor for b in section.inputs]
+                         + [t for t in section.scalars
+                            if not t.has_values()])}
     operators = None
     if group.lanes is None:
       # The lanes form stages no operator: its nonzeros are literals.
