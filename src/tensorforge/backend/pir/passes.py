@@ -379,6 +379,10 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         why = engines.transfer_engine_refusal(s)
         if why is not None:
             diag.append(why)
+        # ... with a cache policy its engine takes
+        why = engines.cache_refusal(s)
+        if why is not None:
+            diag.append(why)
 
         # -- op-specific --------------------------------------------------- #
         if s.op == Op.IF:

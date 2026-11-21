@@ -4945,7 +4945,7 @@ GROUPS = {
     'pircons': ('tests/test_matrix_transfers.py tests/test_copy_fill.py '
                 'tests/test_wrap_ahead.py tests/test_relayout.py '
                 'tests/test_transfer_engines.py tests/test_block2d.py '
-                'tests/test_wmma.py '
+                'tests/test_wmma.py tests/test_cache_policies.py '
                 'tests/test_multi_element.py::test_ldmatrix_is_a_declared_read_of_its_buffer', [
         ('the rows of a matrix on the lane bits of its words',
          sub(ENGINES, '    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))\n',
@@ -5200,6 +5200,42 @@ GROUPS = {
         ("RDNA's WMMA spelled as gfx1250's",
          sub(ENGINES, "def _lower_wmma(s: Stmt, env: Spelling) -> Lowered:\n    return _wmma_call(s, env, gfx1250=False)\n",
              "def _lower_wmma(s: Stmt, env: Spelling) -> Lowered:\n    return _wmma_call(s, env, gfx1250=True)\n", 1)),
+        # Cache policies on transfers (`engines.CACHE_POLICIES`): the kinds of
+        # hint as they were, L2's through a policy, a box under one.
+        ('an L2 policy spelled as the L1 bypass',
+         sub(Path('src/tensorforge/common/vm/lexic/cuda_lexic.py'),
+             "      evict = self._l2_evict(nontemporal)\n      if evict is not None:\n        return f'tensorforge::ldL2",
+             "      evict = self._l2_evict(nontemporal)\n      if False:\n        return f'tensorforge::ldL2", 1)),
+        ('an L2 policy before sm_80',
+         sub(ENGINES, '                and level is not None and level >= self.sm\n',
+             '                and level is not None\n', 1)),
+        ('an L2 policy on a wide value',
+         sub(ENGINES, '                and length == 1 and datatype in L2_HINT_TYPES)\n',
+             '                and datatype in L2_HINT_TYPES)\n', 1)),
+        ('a bare request taken as streaming',
+         sub(ENGINES, "    return 'cg' if request is True else request\n",
+             "    return 'cs' if request is True else request\n", 1)),
+        ('a request for no policy of a load taken',
+         sub(ENGINES, "    if policy is None or not {'scalar', 'vector'} & set(policy.engines):\n",
+             '    if False:\n', 1)),
+        ("the verifier not asking a transfer's cache policy",
+         sub(PASSES, '        why = engines.cache_refusal(s)\n        if why is not None:\n            diag.append(why)\n',
+             '', 1)),
+        ('a policy of another engine taken',
+         sub(ENGINES, "    if engine not in policy.engines:\n        return (f'{s.op} through {engine} with the cache policy",
+             "    if False:\n        return (f'{s.op} through {engine} with the cache policy", 1)),
+        ("a box's policy left off its copy",
+         sub(EMIT, "            evict = engines.l2_evict_of(s.attr('cache'))\n",
+             '            evict = None\n', 1)),
+        ("the oracle's box without its policy's template",
+         sub(ORACLE, r"    r'^tensorforge::tmaLoad\s*(?:<\s*[\w:]+\s*>\s*)?\(\s*(?P<cursor>\w+)\s*,'" + "\n",
+             r"    r'^tensorforge::tmaLoad\s*\(\s*(?P<cursor>\w+)\s*,'" + "\n", 1)),
+        ("createpolicy's priorities swapped",
+         sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'),
+             '  if constexpr (P == L2Evict::Last) {\n',
+             '  if constexpr (P == L2Evict::First) {\n', 1)),
+        ('a store under a policy passed over by the oracle',
+         sub(ORACLE, '        sl = _STORE_L2.match(stmt)\n', '        sl = None\n', 1)),
     ]),
     # An `if` whose first arm writes nothing: the writer leaves that arm out,
     # its head with it, and the second is written under the negated

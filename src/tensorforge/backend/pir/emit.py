@@ -1949,7 +1949,12 @@ class Emitter:
             # coordinates innermost first, as PTX counts them.
             coords = ', '.join(self.operand(c)
                                for c in reversed(s.copy_src_index))
-            w(f'tensorforge::tmaLoad({self.name(s.attr("object"))}, '
+            # A cache policy is the copy's `.L2::cache_hint`, its policy
+            # the template's (`engines.CACHE_POLICIES`).
+            evict = engines.l2_evict_of(s.attr('cache'))
+            policy = (f'<tensorforge::L2Evict::{evict}>' if evict is not None
+                      else '')
+            w(f'tensorforge::tmaLoad{policy}({self.name(s.attr("object"))}, '
               f'&{self.base_name(s.copy_dst)}'
               f'[{self.address(s.copy_dst, s.copy_dst_index)}], '
               f'&{s.attr("map").name}, {self._copy_bytes(s)}, {coords});')

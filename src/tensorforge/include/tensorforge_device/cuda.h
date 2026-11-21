@@ -543,6 +543,83 @@ __device__ __forceinline__ void copyAsyncFill(void *dst, const void *src,
 #endif
 }
 
+/// The priority L2 gives the lines an access touches through a cache policy
+/// (`engines.CACHE_POLICIES`, `evict_first` and `evict_last`).
+enum class L2Evict { First, Last };
+
+/// A cache policy of priority `P` for every line an access touches: the
+/// 64-bit operand `.L2::cache_hint` takes (PTX ISA, "createpolicy":
+/// `.fractional`, a fraction of 1.0; sm_80 and newer).  Not volatile: two
+/// of the same policy are one value, which the compiler keeps once.
+template <L2Evict P> __device__ __forceinline__ uint64_t l2Policy() {
+  uint64_t policy = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  if constexpr (P == L2Evict::Last) {
+    asm("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(policy));
+  } else {
+    asm("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(policy));
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return policy;
+}
+
+/// A load from global memory under the cache policy `P` (PTX ISA, "ld":
+/// `.L2::cache_hint`; sm_80 and newer).  The "memory" clobber keeps it in
+/// its place among the other accesses, as a load the compiler knows is.
+template <L2Evict P> __device__ __forceinline__ float ldL2(const float *at) {
+  float value = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm("ld.global.L2::cache_hint.f32 %0, [%1], %2;"
+      : "=f"(value)
+      : "l"(__cvta_generic_to_global(at)), "l"(l2Policy<P>())
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return value;
+}
+
+template <L2Evict P> __device__ __forceinline__ double ldL2(const double *at) {
+  double value = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm("ld.global.L2::cache_hint.f64 %0, [%1], %2;"
+      : "=d"(value)
+      : "l"(__cvta_generic_to_global(at)), "l"(l2Policy<P>())
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return value;
+}
+
+/// A store to global memory under the cache policy `P` (PTX ISA, "st":
+/// `.L2::cache_hint`; sm_80 and newer).
+template <L2Evict P>
+__device__ __forceinline__ void stL2(float *at, float value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm volatile("st.global.L2::cache_hint.f32 [%0], %1, %2;" ::"l"(
+                   __cvta_generic_to_global(at)),
+               "f"(value), "l"(l2Policy<P>())
+               : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+template <L2Evict P>
+__device__ __forceinline__ void stL2(double *at, double value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm volatile("st.global.L2::cache_hint.f64 [%0], %1, %2;" ::"l"(
+                   __cvta_generic_to_global(at)),
+               "d"(value), "l"(l2Policy<P>())
+               : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// A window copied into shared memory by the tensor memory accelerator: one
 /// `cp.async.bulk` for the whole window, issued by one thread of the
 /// multiplication and completing on an mbarrier in shared memory, where

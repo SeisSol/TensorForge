@@ -97,7 +97,8 @@ class Case:
     `origins` entry on and waiting for the cursor's phase, and has every
     thread read its elements of the box from `sa` -- as TensorForge reads a
     buffer of the map's swizzle -- and store them, box after box, to `m0`.
-    `computed` makes the coordinates values rather than literals."""
+    `computed` makes the coordinates values rather than literals; `cache`
+    is the copies' cache policy (`engines.CACHE_POLICIES`)."""
     dims: tuple
     box: tuple
     origins: tuple
@@ -105,6 +106,7 @@ class Case:
     fill: str = 'zero'
     strides: tuple = None
     computed: bool = False
+    cache: str = None
 
     @property
     def tmap(self):
@@ -164,7 +166,8 @@ def _body(case: Case, ctx=None, place=None):
             b.barrier('block')
         coords = [b.op('add', INDEX, b.thread_id('y'), c) if case.computed
                   else c for c in origin]
-        b.wait(b.copy_tma(sa, src, tmap, coords, barrier=cursor))
+        b.wait(b.copy_tma(sa, src, tmap, coords, barrier=cursor,
+                          cache=case.cache))
         for j in range((case.volume + 127) // 128):
             k = b.op('add', INDEX, lane, 128 * j) if j else lane
             at = b.op('add', INDEX,

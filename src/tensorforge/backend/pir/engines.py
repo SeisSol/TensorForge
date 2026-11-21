@@ -1536,6 +1536,93 @@ def engine_of(s: Stmt) -> Optional[str]:
     return 'scalar' if length is None else 'vector'
 
 
+#: The element types an access through an L2 policy is spelled for
+#: (`tensorforge::ldL2`, `stL2`): the scalars of a kernel's data.
+L2_HINT_TYPES = (Datatype.F32, Datatype.F64)
+
+
+@dataclass(frozen=True)
+class CachePolicy:
+    """What the caches are told about the lines a transfer touches: a
+    transfer's `cache`, which moves the same numbers whatever it says.
+
+    `l1` is what L1 does with the lines -- `allocate`s them (the default),
+    `bypass`es them (cached at L2 alone) or keeps them to `evict_first` --
+    and `l2` what L2 does: `normal`, `evict_first` or `evict_last`.
+    `engines` are the transfer engines that take it (`engine_of`).
+    `l2_evict` names the priority of the policy operand an access takes
+    through `.L2::cache_hint`, made by `createpolicy`
+    (`tensorforge::L2Evict`), on CUDA from sm `sm` on -- None for a policy
+    spelled as a cache operator of the instruction itself."""
+
+    name: str
+    l1: str
+    l2: str
+    engines: Tuple[str, ...]
+    sm: int = 0
+    l2_evict: Optional[str] = None
+    doc: str = ''
+
+    def spelled_on(self, target: Any, datatype: Any, length: int = 1) -> bool:
+        """Whether `target` spells this policy on an access of `length` x
+        `datatype`.  A cache operator wherever the target has the hint for
+        that type (`Target.nontemporal`); a policy operand on CUDA from its
+        sm on, on one element of `L2_HINT_TYPES` -- elsewhere the access is
+        written plainly, which costs the policy and nothing else."""
+        if self.l2_evict is None:
+            return bool(target.nontemporal(datatype, length))
+        sm_level = getattr(getattr(target, 'hw', None), 'sm_level', None)
+        level = sm_level() if callable(sm_level) else None
+        return (getattr(target, 'backend', None) == 'cuda'
+                and level is not None and level >= self.sm
+                and length == 1 and datatype in L2_HINT_TYPES)
+
+
+CACHE_POLICIES: Dict[str, CachePolicy] = {p.name: p for p in (
+    CachePolicy(
+        'ca', 'allocate', 'normal', ('cp_async',),
+        doc='cached at every level: `cp.async.ca`, a copy of four or eight '
+            'bytes (PTX ISA, "cp.async": `.ca`), as a load without a hint '
+            'is cached'),
+    CachePolicy(
+        'cg', 'bypass', 'normal', ('scalar', 'vector', 'cp_async'),
+        doc='the L1 bypass, cached at L2 alone: `ld.global.cg` and '
+            '`st.global.cg` (`__ldcg`, `__stcg`; PTX ISA, "Cache '
+            'Operators"), `cp.async.cg` of sixteen bytes; on AMD the '
+            'nontemporal builtins'),
+    CachePolicy(
+        'cs', 'evict_first', 'evict_first', ('scalar', 'vector'),
+        doc='streamed, evicted first at every level: `ld.global.cs` and '
+            '`st.global.cs` (`__ldcs`, `__stcs`; PTX ISA, "Cache '
+            'Operators"); on AMD the nontemporal builtins'),
+    CachePolicy(
+        'evict_first', 'allocate', 'evict_first',
+        ('scalar', 'vector', 'tma'), sm=80, l2_evict='First',
+        doc='evicted first from L2: the policy `createpolicy.fractional.'
+            'L2::evict_first` makes of every line (PTX ISA, "createpolicy"; '
+            'sm_80), taken by `ld.global.L2::cache_hint` and `st.global.'
+            'L2::cache_hint` (PTX ISA, "ld", "st"; `tensorforge::ldL2`, '
+            '`stL2`) and by a box through a tensor map (PTX ISA, '
+            '"cp.async.bulk.tensor": `.L2::cache_hint`; `tmaLoad<P>`)'),
+    CachePolicy(
+        'evict_last', 'allocate', 'evict_last',
+        ('scalar', 'vector', 'tma'), sm=80, l2_evict='Last',
+        doc='evicted last from L2: the same through `createpolicy.'
+            'fractional.L2::evict_last` -- for what every block reads '
+            'again, an operator'),
+)}
+
+
+def requested_policy(request: Any) -> Optional[str]:
+    """The cache policy an access's request (`nontemporal`) names: the
+    kind `hints.cache_hint` gives (`'cg'`, `'cs'`), a policy of
+    `CACHE_POLICIES` by name, or a bare True, which asks for the L1 bypass
+    (`CudaLexic._hint_kind`); None for no request."""
+    if not request:
+        return None
+    return 'cg' if request is True else request
+
+
 def copy_cache(engine: str, width: Optional[int]) -> Optional[str]:
     """The cache policy a copy's width gives it: sixteen bytes of `cp.async`
     lower to `cp.async.cg` and go past L1, four and eight to `cp.async.ca`
@@ -1553,18 +1640,52 @@ UNRESOLVED = object()
 
 def cache_policy(request: Any, target: Any, datatype: Any,
                  length: int = 1) -> Any:
-    """The cache hint an access that asks for `request` (`hints.cache_hint`:
-    `'cg'`, `'cs'`, or False) gets on `target`, for an access of `length` x
-    `datatype`: the request where the target spells it for that type
-    (`Target.nontemporal`), None where it does not -- and `UNRESOLVED`
-    without a target, for the emitter to ask the one it lowers for."""
-    if not request:
+    """The cache policy (`CACHE_POLICIES`) a load or store that asks for
+    `request` (`requested_policy`) gets on `target`, for an access of
+    `length` x `datatype`: the policy where the target spells it for that
+    type (`CachePolicy.spelled_on`), None where it does not -- and
+    `UNRESOLVED` without a target, for the emitter to ask the one it lowers
+    for.  A request for no policy a load or store takes is refused."""
+    name = requested_policy(request)
+    if name is None:
         return None
+    policy = CACHE_POLICIES.get(name)
+    if policy is None or not {'scalar', 'vector'} & set(policy.engines):
+        raise IRError(f'a load or store asking for the cache policy '
+                      f'{request!r}; they take '
+                      + ', '.join(p.name for p in CACHE_POLICIES.values()
+                                  if 'scalar' in p.engines))
     if target is None:
         return UNRESOLVED
-    if datatype is None or not target.nontemporal(datatype, length):
+    if datatype is None or not policy.spelled_on(target, datatype, length):
         return None
-    return request
+    return name
+
+
+def l2_evict_of(cache: Any) -> Optional[str]:
+    """The priority of the policy operand an access with the cache policy
+    `cache` takes (`CachePolicy.l2_evict`): `tensorforge::L2Evict`'s
+    enumerator, or None for a policy without one."""
+    policy = CACHE_POLICIES.get(cache) if isinstance(cache, str) else None
+    return policy.l2_evict if policy is not None else None
+
+
+def cache_refusal(s: Stmt) -> Optional[str]:
+    """Why the cache policy a transfer states (`cache`) is none it takes,
+    or None: a policy of `CACHE_POLICIES` its engine takes
+    (`CachePolicy.engines`, `engine_of`)."""
+    cache = s.attr('cache')
+    if cache is None or s.op not in TRANSFER_OPS:
+        return None
+    policy = CACHE_POLICIES.get(cache) if isinstance(cache, str) else None
+    if policy is None:
+        return (f'{s.op} with the cache policy {cache!r}, which is none; '
+                f'there are {", ".join(CACHE_POLICIES)}')
+    engine = engine_of(s)
+    if engine not in policy.engines:
+        return (f'{s.op} through {engine} with the cache policy {cache}, '
+                f'which {", ".join(policy.engines)} take')
+    return None
 
 
 #: The attributes of an access that are global memory's alone, which a pass
@@ -4108,6 +4229,8 @@ __all__ = [
     'Lowered', 'kept_facts',
     'OpSpec', 'TRANSFER_ENGINES', 'TransferEngine', 'UNRESOLVED',
     'cache_policy', 'completes_of', 'completes_on_barrier',
+    'CACHE_POLICIES', 'CachePolicy', 'L2_HINT_TYPES', 'cache_refusal',
+    'l2_evict_of', 'requested_policy',
     'copy_cache', 'copy_engine',
     'counter_of', 'element_of', 'engine_of', 'lane_linear', 'lane_prefix',
     'lds_dma_refusal', 'mbarrier', 'movable_of', 'object_value',

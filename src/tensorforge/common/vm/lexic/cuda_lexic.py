@@ -289,14 +289,29 @@ class CudaLexic(Lexic):
     declared beside `__ldcg`/`__stcg`, over the same types."""
     return 'cs' if nontemporal == 'cs' else 'cg'
 
+  @staticmethod
+  def _l2_evict(nontemporal):
+    """The priority of the L2 policy an access with the cache policy
+    `nontemporal` is spelled through (`engines.CACHE_POLICIES`:
+    `tensorforge::ldL2`, `stL2`), or None for a cache operator."""
+    from tensorforge.backend.pir.engines import l2_evict_of
+    return l2_evict_of(nontemporal)
+
   def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):
     if nontemporal:
+      evict = self._l2_evict(nontemporal)
+      if evict is not None:
+        return (f'tensorforge::stL2<tensorforge::L2Evict::{evict}>'
+                f'(&{lhs}, {rhs});')
       return f'__st{self._hint_kind(nontemporal)}(&{lhs}, {rhs});'
     else:
       return f'{lhs} = {rhs};'
 
   def glb_load(self, rhs, *, datatype, length=1, nontemporal=False):
     if nontemporal:
+      evict = self._l2_evict(nontemporal)
+      if evict is not None:
+        return f'tensorforge::ldL2<tensorforge::L2Evict::{evict}>(&{rhs})'
       return f'__ld{self._hint_kind(nontemporal)}(&{rhs})'
     else:
       return f'{rhs}'

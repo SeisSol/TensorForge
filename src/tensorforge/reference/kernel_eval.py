@@ -570,11 +570,32 @@ class TensorMapArg(NamedTuple):
 
 #: A box copied through a tensor map (`tensorforge::tmaLoad`, `cuda_tma.h`):
 #: the cursor whose leader issues it, the destination's element, the map,
-#: the bytes announced, the coordinates innermost first.
+#: the bytes announced, the coordinates innermost first.  A cache policy
+#: (`tmaLoad<L2Evict::...>`) tells L2 what to keep, and moves the same box.
 _TMA_LOAD = re.compile(
-    r'^tensorforge::tmaLoad\s*\(\s*(?P<cursor>\w+)\s*,'
+    r'^tensorforge::tmaLoad\s*(?:<\s*[\w:]+\s*>\s*)?\(\s*(?P<cursor>\w+)\s*,'
     r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
     r'\s*&\s*(?P<map>\w+)\s*,\s*(?P<bytes>\d+)\s*,(?P<coords>.+)\)$')
+
+
+#: A store under an L2 policy (`tensorforge::stL2<P>(&x, v)`, `cuda.h`):
+#: the element after the `&`, then the value.
+_STORE_L2 = re.compile(
+    r'^tensorforge::stL2\s*<\s*[\w:]+\s*>\s*\(\s*&(?P<rest>.*)\)$')
+
+
+def _first_operand(text: str) -> Tuple[str, str]:
+    """`text` split at its first comma outside brackets: a call's first
+    operand and the rest."""
+    depth = 0
+    for at, ch in enumerate(text):
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            return text[:at].strip(), text[at + 1:].strip()
+    raise Abort(f'a store under a cache policy without its value: {text!r}')
 
 
 #: A box of shared memory added into the tensor of a map
@@ -1395,6 +1416,9 @@ def _py(expr: str) -> str:
                lambda m: (f'BUFLOAD({m.group(2) or 1}, '
                           f'{_BUFFER_ELEMENT.get(m.group(1), 0)}, '), e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
+    # A load under an L2 policy (`tensorforge::ldL2<P>`): a policy, never a
+    # value.
+    e = re.sub(r'\btensorforge::ldL2\s*<\s*[\w:]+\s*>\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__builtin_nontemporal_load\s*\(\s*&', 'DEREF(', e)
     # `readlane(v, L)` reads lane `L`'s copy of `v`, and `broadcast<Block,
@@ -2732,6 +2756,12 @@ class Interp:
                 tracker.bulk = None
 
     def assign(self, stmt: str) -> None:
+        sl = _STORE_L2.match(stmt)
+        if sl:
+            # A store under an L2 policy is the assignment it hints.
+            lhs, rhs = _first_operand(sl.group('rest'))
+            self.assign(f'{lhs} = {rhs}')
+            return
         mma = _mma_statement(stmt)
         if mma is not None:
             self._mma(mma, stmt)

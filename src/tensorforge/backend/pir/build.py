@@ -1797,6 +1797,11 @@ class IRBuilder:
 
         ``shift`` is added to the index after the swizzle -- see `_shifted`.
 
+        ``nontemporal`` asks for a cache policy (`engines.requested_policy`):
+        the kind `hints.cache_hint` gives, or a policy of
+        `engines.CACHE_POLICIES` by name -- `evict_first`, `evict_last` --
+        which the target spells where it can (`_transfer`).
+
         A load is where a distribution *enters* the IR: every later layout is
         derived from one of these or from an explicit relayout, so dropping it
         here leaves the whole chain untracked --- and the vendor emitters
@@ -2273,7 +2278,8 @@ class IRBuilder:
 
     def copy_tma(self, dst: Value, src: Any, tmap: 'engines.TensorMap',
                  coords: Sequence[Operand], *, barrier: Value,
-                 dst_index: Operand = 0, hint: str = 'tma') -> Value:
+                 dst_index: Operand = 0, hint: str = 'tma',
+                 cache: Optional[str] = None) -> Value:
         """Issue one copy of a box of the tensor `tmap` describes through
         the tensor memory accelerator (`tma`), into the shared buffer `dst`
         from element `dst_index` on; returns its token.
@@ -2295,6 +2301,10 @@ class IRBuilder:
         is the buffer's; on 128 bytes without one.  A start that is a value
         is the caller's to keep on 128 bytes.  What the copy cannot do is
         refused here (`engines.tma_refusal`).
+
+        `cache` is the cache policy the box's lines get in L2
+        (`engines.CACHE_POLICIES`, `evict_first` or `evict_last`), through
+        the copy's `.L2::cache_hint`; None for none.
         """
         if not isinstance(tmap, engines.TensorMap):
             raise IRError(f'a tensor copy through {tmap!r}, which is no '
@@ -2318,12 +2328,14 @@ class IRBuilder:
                  ('engine', 'tma'), ('completes', engines.completes_of('tma')),
                  ('object', barrier), ('width', tmap.box_bytes()),
                  ('shape', tuple(tmap.box)), ('map', tmap))
+        if cache is not None:
+            attrs += (('cache', cache),)
         s = self._emit_op(Op.COPY_ASYNC, (tok,),
                           (dst, src, dst_index) + tuple(coords),
                           pure=False, movable=True,
                           effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                           accesses=accesses, attrs=attrs)
-        why = engines.tma_refusal(s)
+        why = engines.tma_refusal(s) or engines.cache_refusal(s)
         if why is not None:
             raise IRError(f'the tensor memory accelerator cannot copy into '
                           f'{dst}: {why}')
