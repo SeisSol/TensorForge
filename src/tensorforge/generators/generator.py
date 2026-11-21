@@ -3109,10 +3109,15 @@ class Generator:
         self._context.kernel_bodies = tuple(s.body for s in sections)
         try:
           for section in sections:
+            # What each section lays down, for `fission='auto'`
+            # (`BuildMetrics.section_code_units`).
+            before = self._metrics.code_units or 0
             with writer.AnonymousScope():
               AbstractInstruction._emit_shared_body(
                   self._context, writer, section.body, self._metrics,
                   self._num_threads)
+            self._metrics.record_section_code(
+                (self._metrics.code_units or 0) - before)
         finally:
           self._context.kernel_bodies = None
 
@@ -3162,16 +3167,20 @@ class Generator:
     runs, and slower -- the batch loop keeps its body resident only if the
     cache holds it, and otherwise fetches the difference again on every
     iteration.  The tuning scorer is what acts on it (`tuning.static_score`).
+    A kernel cut into pieces (`Options.fission`) runs one piece's loop at a
+    time, so its largest piece is what has to fit.
     """
     import warnings
     from tensorforge.analysis.icache import (ICacheBudgetWarning, code_bytes,
                                              icache_excess)
     hw = self._context.target.hw
-    excess = icache_excess(self._metrics.code_units, hw)
+    pieces = self._metrics.section_code_units or []
+    units = max(pieces) if len(pieces) > 1 else self._metrics.code_units
+    excess = icache_excess(units, hw)
     if excess:
       warnings.warn(
           f'{self._base_kernel_name}: about '
-          f'{code_bytes(self._metrics.code_units, hw)} '
+          f'{code_bytes(units, hw)} '
           f'B of code against an instruction cache of {hw.icache_size} B on '
           f'{hw.model}; the batch loop fetches the difference again on every '
           f'iteration.  Rolling a reduction (`k_roll`, `k_unroll_max`), '
