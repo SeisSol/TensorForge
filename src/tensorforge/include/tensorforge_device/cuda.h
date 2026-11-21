@@ -865,7 +865,8 @@ __device__ __forceinline__ void splitFloatTF32(tf32 &upper, tf32 &lower,
 /// memory, 16-byte aligned.
 ///
 /// `volatile` and no memory clobber: the read must not move across the
-/// block's barriers, and nothing else is ordered against it.
+/// block's barriers, and nothing else is ordered against it.  A device
+/// without the instruction traps (`engines.MATRIX_TRANSFER_SM`).
 __device__ __forceinline__ void ldmatrixX4(float &r0, float &r1, float &r2,
                                            float &r3, const float *base,
                                            int index) {
@@ -881,6 +882,96 @@ __device__ __forceinline__ void ldmatrixX4(float &r0, float &r1, float &r2,
   r1 = __uint_as_float(x1);
   r2 = __uint_as_float(x2);
   r3 = __uint_as_float(x3);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// One 8x8 matrix, as `ldmatrixX4` loads four (`.x1`): lanes 0-7 name its
+/// rows -- the others' addresses are not read -- and lane `t` receives the
+/// word `t % 4` of row `t / 4`.
+__device__ __forceinline__ void ldmatrixX1(float &r0, const float *base,
+                                           int index) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+  uint32_t x0;
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];\n"
+               : "=r"(x0)
+               : "r"(at));
+  r0 = __uint_as_float(x0);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// Two 8x8 matrices (`.x2`): lanes 0-15 name their rows.
+__device__ __forceinline__ void ldmatrixX2(float &r0, float &r1,
+                                           const float *base, int index) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+  uint32_t x0, x1;
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+               : "=r"(x0), "=r"(x1)
+               : "r"(at));
+  r0 = __uint_as_float(x0);
+  r1 = __uint_as_float(x1);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The registers of a warp into 8x8 matrices of 16-bit elements in shared
+/// memory, as `stmatrix` stores them (PTX ISA, "Warp-level matrix store
+/// instruction: stmatrix", sm_90): `ldmatrixX4` the other way round -- lane
+/// `l` names the 16-byte row `l % 8` of matrix `l / 8`, and register `i` of
+/// lane `t` is the 32-bit word `t % 4` of row `t / 4` of matrix `i`; `.x1`
+/// and `.x2` take the rows lanes 0-7 and 0-15 name.
+///
+/// `volatile` and a memory clobber: the store writes memory no operand
+/// names, so a read of it behind the store must not be answered from before
+/// it, nor a write ahead of it moved behind.  A device without the
+/// instruction traps.
+__device__ __forceinline__ void stmatrixX1(float *base, int index, float r0) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile(
+      "stmatrix.sync.aligned.m8n8.x1.shared.b16 [%0], {%1};\n" ::"r"(at),
+      "r"(__float_as_uint(r0))
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void stmatrixX2(float *base, int index, float r0,
+                                           float r1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile(
+      "stmatrix.sync.aligned.m8n8.x2.shared.b16 [%0], {%1,%2};\n" ::"r"(at),
+      "r"(__float_as_uint(r0)), "r"(__float_as_uint(r1))
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void stmatrixX4(float *base, int index, float r0,
+                                           float r1, float r2, float r3) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], "
+               "{%1,%2,%3,%4};\n" ::"r"(at),
+               "r"(__float_as_uint(r0)), "r"(__float_as_uint(r1)),
+               "r"(__float_as_uint(r2)), "r"(__float_as_uint(r3))
+               : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
 #endif
 }
 

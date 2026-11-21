@@ -4887,9 +4887,11 @@ GROUPS = {
         ('A read by lanes where ldmatrix could',
          sub(ME_SECTION, "    ldmatrix = step.lowering == 'mma_sync' and all(\n",
              "    ldmatrix = False and all(\n", 1)),
-        ('the read of ldmatrix not declared',
-         sub(ME_SECTION, "                                        hints=('a',) * 4, reads=(source,)))\n",
-             "                                        hints=('a',) * 4, reads=()))\n", 1)),
+        ('ldmatrix stating another placement of its matrices',
+         sub(ME_SECTION, "                                           origins=[a_cells[slot] for slot\n"
+                         "                                                    in sorted(a_cells)],\n",
+             "                                           origins=[a_cells[slot] for slot\n"
+             "                                                    in (0, 2, 1, 3)],\n", 1)),
         ('the padding left as it was',
          sub(ME_SECTION, '            if buffer.pitch > buffer.height:\n',
              '            if False:\n', 1)),
@@ -4925,6 +4927,107 @@ GROUPS = {
         ('an assigning step\'s cells added into the output',
          sub(ME_SECTION, '                    atomic=not step.assigns)\n',
              '                    atomic=True)\n', 1)),
+    ]),
+    # The consolidation of the engines layer (`pir/engines.py`).  Matrix
+    # transfers: ldmatrix and stmatrix as transfer engines (`Op.MATRIX_LOAD`,
+    # `Op.MATRIX_STORE`) -- the fragment layout they carry, what the
+    # verifier holds them to, the text and the targets, the figures, the
+    # builder, the oracle's model, and the helpers in `cuda.h`, the last
+    # two caught on the local GPU (sm_90 or newer).
+    'pircons': ('tests/test_matrix_transfers.py '
+                'tests/test_multi_element.py::test_ldmatrix_is_a_declared_read_of_its_buffer', [
+        ('the rows of a matrix on the lane bits of its words',
+         sub(ENGINES, '    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))\n',
+             '    rows = (tuple(Bit(Place.LANE, 1 << k) for k in range(3))\n', 1)),
+        ('a placement off the sums of its steps taken',
+         sub(ENGINES, '        if at != want:\n            return None\n',
+             '        if False:\n            return None\n', 1)),
+        ('a gap of rows between the matrices taken',
+         sub(ENGINES, '    if any(r != MATRIX_ROWS << k for k, (r, _) in enumerate(down)) or any(\n',
+             '    if any(r % MATRIX_ROWS for k, (r, _) in enumerate(down)) or any(\n', 1)),
+        ('a count the instruction lacks accepted',
+         sub(ENGINES, "    if count not in MATRIX_TRANSFER_COUNTS:\n        return (f'{count!r} matrices;",
+             "    if False:\n        return (f'{count!r} matrices;", 1)),
+        ('a predicated transfer accepted',
+         sub(ENGINES, "    if s.predicate is not None:\n        return ('every lane of the warp takes part",
+             "    if False:\n        return ('every lane of the warp takes part", 1)),
+        ('a register of 64 bits accepted',
+         sub(ENGINES, '                and callable(size) and size() == 4):\n',
+             '                and callable(size)):\n', 1)),
+        ('a store held to the read of a load',
+         sub(ENGINES, '    kind = Effect.READ if s.op == Op.MATRIX_LOAD else Effect.WRITE\n',
+             '    kind = Effect.READ\n', 1)),
+        ('stmatrix on the architecture of ldmatrix',
+         sub(ENGINES, "MATRIX_TRANSFER_SM = {'ldmatrix': 75, 'stmatrix': 90}\n",
+             "MATRIX_TRANSFER_SM = {'ldmatrix': 75, 'stmatrix': 75}\n", 1)),
+        ('ldmatrix written for every backend',
+         sub(ENGINES, "                  '': _lower_matrix_transfer, '*': _no_matrix_transfer},\n",
+             "                  '': _lower_matrix_transfer, '*': _lower_matrix_transfer},\n", 1)),
+        ('the registers of a load not declared',
+         sub(ENGINES, "        return Lowered(tuple(f'{v.type.base.ctype()} {n}{{}};'\n"
+                      "                             for v, n in zip(registers, names))\n"
+                      "                       + (f'tensorforge::ldmatrixX{count}('\n",
+             "        return Lowered((f'tensorforge::ldmatrixX{count}('\n", 1)),
+        ('the registers of a store ahead of its row',
+         sub(ENGINES, "    return Lowered((f'tensorforge::stmatrixX{count}({where}, '\n"
+                      "                    f'{\", \".join(names)});',))\n",
+             "    return Lowered((f'tensorforge::stmatrixX{count}({\", \".join(names)}, '\n"
+             "                    f'{where});',))\n", 1)),
+        ('a load of integers written for the float helpers',
+         sub(ENGINES, "        if v.type.base != Datatype.F32:\n            raise IRError(f'{s.attr(\"engine\")} of",
+             "        if False:\n            raise IRError(f'{s.attr(\"engine\")} of", 1)),
+        ('ldmatrix counted as code',
+         sub(ENGINES, '           units=0, pipe=_matrix_transfer_pipe,\n',
+             '           units=1, pipe=_matrix_transfer_pipe,\n', 1)),
+        ('stmatrix counted as no issue',
+         sub(ENGINES, "    return 'shared.store' if s.op == Op.MATRIX_STORE else None\n",
+             '    return None\n', 1)),
+        ('the cover counting every engine op as one',
+         sub(TRANSFERS, '            n += units_of(s)\n', '            n += 1\n', 1)),
+        ('the read of ldmatrix declared as a write',
+         sub(BUILD, '        access = Access(Effect.READ, self._space_of(base),\n'
+                    '                        self.alias_root(base))\n'
+                    '        self._emit_transfer(engines.matrix_load(',
+             '        access = Access(Effect.WRITE, self._space_of(base),\n'
+             '                        self.alias_root(base))\n'
+             '        self._emit_transfer(engines.matrix_load(', 1)),
+        ('a transfer the instruction is not built unrefused',
+         sub(BUILD, '        why = engines.matrix_transfer_refusal(s)\n        if why is not None:\n',
+             '        why = engines.matrix_transfer_refusal(s)\n        if False:\n', 1)),
+        ('the fragment layout of a placement dropped',
+         sub(BUILD, '        return self._swizzled(base, index), layout\n',
+             '        return self._swizzled(base, index), None\n', 1)),
+        ('a row of a swizzled buffer not permuted',
+         sub(BUILD, '        return self._swizzled(base, index), layout\n',
+             '        return index, layout\n', 1)),
+        ('a permutation that splits a row taken',
+         sub(BUILD, '        self._check_width(base, engines.MATRIX_ROW_BYTES // elem.size())\n',
+             '', 1)),
+        ('the oracle loading a row of the wrong lanes',
+         sub(ORACLE, '            self.env[parts[i]] = rows[8 * i + t // 4][t % 4]\n',
+             '            self.env[parts[i]] = rows[8 * i + t % 8][t % 4]\n', 1)),
+        ('the oracle storing a word of the wrong lane',
+         sub(ORACLE, '            base[at + w] = lanes[4 * r + w].ev(parts[2 + i])\n',
+             '            base[at + w] = lanes[4 * w + r].ev(parts[2 + i])\n', 1)),
+        ('the oracle taking a warp that is not whole',
+         sub(ORACLE, "        if len(lanes) != 32:\n            raise Abort(f'{what} with",
+             "        if False:\n            raise Abort(f'{what} with", 1)),
+        ('the helper of two matrices loading one',
+         sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'),
+             '  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\\n"\n',
+             '  asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0,%1}, [%2];\\n"\n', 1)),
+        ('the helper of four stores storing a register twice',
+         sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'),
+             '               "r"(__float_as_uint(r2)), "r"(__float_as_uint(r3))\n'
+             '               : "memory");\n',
+             '               "r"(__float_as_uint(r1)), "r"(__float_as_uint(r3))\n'
+             '               : "memory");\n', 1)),
+        ('the store helper trapping on sm_90',
+         sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'),
+             '__device__ __forceinline__ void stmatrixX1(float *base, int index, float r0) {\n'
+             '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n',
+             '__device__ __forceinline__ void stmatrixX1(float *base, int index, float r0) {\n'
+             '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000\n', 1)),
     ]),
 }
 

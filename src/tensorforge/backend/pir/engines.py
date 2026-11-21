@@ -61,7 +61,12 @@ as the bulk copy is (`tma_refusal`), into shared memory in the layout of
 the map's swizzle, which is a TensorForge swizzle (`swizzle_form`); and it
 adds such a box back into the tensor (`tma_reduce`), one thread's, counted
 in that thread's bulk groups.  Which of these stages an operand's batch is
-the batch's stride's question (`staging_engine`).
+the batch's stride's question (`staging_engine`).  NVIDIA's `ldmatrix` and
+`stmatrix` move a warp's 8x8 matrices between shared memory and the
+registers of its lanes as one collective (`Op.MATRIX_LOAD`,
+`Op.MATRIX_STORE`): each lane names a row, holds a word of every matrix,
+and the op carries where that puts each element of the tile the matrices
+lie in (`matrix_transfer_bits`).
 
 What this increment keeps, on purpose:
 
@@ -442,6 +447,16 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    'else; its waits are written out, and a barrier behind '
                    'the wait shows the tile to the other waves',
                    waited_on='tensorcnt', one_to_one=True),
+    TransferEngine('ldmatrix', (Op.MATRIX_LOAD,), Completion.SYNC,
+                   "NVIDIA's ldmatrix (sm_75 on): one, two or four 8x8 "
+                   'matrices of 16-byte rows from shared memory into the '
+                   'registers of a warp, as one collective of it -- each '
+                   'lane names a row and holds a word of every matrix, '
+                   'where the fragment layout puts it '
+                   '(`matrix_transfer_bits`)'),
+    TransferEngine('stmatrix', (Op.MATRIX_STORE,), Completion.SYNC,
+                   "NVIDIA's stmatrix (sm_90 on): ldmatrix the other way "
+                   "round, a warp's registers into the rows its lanes name"),
 )}
 
 #: The class `asyncmem` counts a transfer in, by the kind of completion its
@@ -997,6 +1012,131 @@ def staging_engine(target: Any, addressing: Any, *,
     else:
         return 'bulk', tuple(why)
     return copy_engine(target), tuple(why)
+
+
+# --------------------------------------------------------------------------- #
+# Matrix transfers: a warp's 8x8 matrices between shared memory and registers
+# --------------------------------------------------------------------------- #
+
+#: The matrices one transfer moves (`.x1`, `.x2`, `.x4`), each eight rows of
+#: 16 bytes -- PTX's `.m8n8` of 16-bit elements (`MATRIX_TRANSFER_SHAPE`),
+#: four of 32 bits a row (PTX ISA, "Warp-level matrix load instruction:
+#: ldmatrix" and "Warp-level matrix store instruction: stmatrix").
+MATRIX_TRANSFER_COUNTS = (1, 2, 4)
+MATRIX_TRANSFER_SHAPE = (8, 8)
+MATRIX_ROWS = 8
+MATRIX_ROW_BYTES = 16
+
+#: The first architecture each is on: ldmatrix's `.m8n8` from sm_75 (PTX ISA
+#: 6.5), stmatrix's from sm_90 (PTX ISA 7.8).
+MATRIX_TRANSFER_SM = {'ldmatrix': 75, 'stmatrix': 90}
+
+#: The op of each, by its engine.
+MATRIX_TRANSFER_OPS = {'ldmatrix': Op.MATRIX_LOAD, 'stmatrix': Op.MATRIX_STORE}
+
+
+def matrix_transfer_bits(origins: Sequence[Tuple[int, int]]) -> Any:
+    """The fragment layout of a matrix transfer of 32-bit elements -- a
+    `BitLayout` over the rows and the columns of the tile its matrices lie
+    in -- or None where that is no layout of bits.  `origins` is the element
+    of the tile each matrix starts at, (row, column): matrix `i`, the one
+    whose rows lanes `8 i` to `8 i + 7` name.
+
+    What the instruction states (PTX ISA, "ldmatrix", "stmatrix"): lane `t`
+    holds in register `i` the 32-bit word `t % 4` of row `t / 4` of matrix
+    `i`.  Over 32-bit elements a word is one, so a matrix's row is the lane's
+    bits 2 to 4 and its element the lane's bits 0 and 1, and the matrix is
+    the register: a bit of the register's number for each bit of the tile
+    past a matrix's eight rows or four columns.  That takes a placement in
+    which each bit of a matrix's number moves it by one such bit -- `origins`
+    the sums of the steps of their numbers' bits -- and the steps along each
+    axis fill its bits from the matrix's own up.  `((0, 0), (8, 0), (0, 4),
+    (8, 4))` is the A fragment of `mma.sync`'s m16n8k8 over TF32
+    (`nvidia.a_fragment_bits`).
+    """
+    from tensorforge.backend.instructions.compute.bitlayout import (
+        Bit, BitLayout, Place)
+    origins = tuple(tuple(o) for o in origins)
+    count = len(origins)
+    if count not in MATRIX_TRANSFER_COUNTS or origins[0] != (0, 0):
+        return None
+    steps = [origins[1 << b] for b in range((count - 1).bit_length())]
+    for i, at in enumerate(origins):
+        want = tuple(sum(step[axis] for b, step in enumerate(steps)
+                         if i >> b & 1) for axis in (0, 1))
+        if at != want:
+            return None
+    words = MATRIX_ROW_BYTES // 4
+    down = sorted((r, b) for b, (r, c) in enumerate(steps) if c == 0 and r)
+    across = sorted((c, b) for b, (r, c) in enumerate(steps) if r == 0 and c)
+    if len(down) + len(across) != len(steps):
+        return None
+    if any(r != MATRIX_ROWS << k for k, (r, _) in enumerate(down)) or any(
+            c != words << k for k, (c, _) in enumerate(across)):
+        return None
+    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))
+            + tuple(Bit(Place.SLOT, 1 << b) for _, b in down))
+    cols = (tuple(Bit(Place.LANE, 1 << k) for k in range(2))
+            + tuple(Bit(Place.SLOT, 1 << b) for _, b in across))
+    return BitLayout((rows, cols))
+
+
+def matrix_registers(s: Stmt) -> Tuple[Any, ...]:
+    """The registers of a matrix transfer: what a load defines, what a store
+    reads (its operands behind the base and the index)."""
+    return tuple(s.target) if s.op == Op.MATRIX_LOAD else tuple(s.args[2:])
+
+
+def matrix_transfer_refusal(s: Stmt) -> Optional[str]:
+    """Why `s` is no matrix transfer this lowering writes, or None.
+
+    The engine's own op -- ldmatrix loads, stmatrix stores -- of one, two or
+    four matrices of `MATRIX_TRANSFER_SHAPE`, a register of each, and each
+    register an element of 32 bits: a word of a row, which the transposing
+    form (`.trans`) and the 16-bit elements would split, and neither is
+    built.  Every lane of the warp takes part (`.aligned`), so there is no
+    predicate; the operands are the buffer and the lane's row in it, which
+    the op declares as one read or one write of shared memory; a layout it
+    carries is one of bits (`matrix_transfer_bits`).
+    """
+    engine = s.attr('engine')
+    if MATRIX_TRANSFER_OPS.get(engine) != s.op:
+        return (f'{s.op} through {engine!r}: ldmatrix loads and stmatrix '
+                f'stores')
+    count = s.attr('count')
+    if count not in MATRIX_TRANSFER_COUNTS:
+        return (f'{count!r} matrices; the instruction moves one of '
+                f'{MATRIX_TRANSFER_COUNTS}')
+    if s.attr('shape') != MATRIX_TRANSFER_SHAPE:
+        return (f'matrices of {s.attr("shape")!r}; the instruction moves '
+                f'{MATRIX_TRANSFER_SHAPE} of 16-bit elements')
+    registers = matrix_registers(s)
+    want = 2 if s.op == Op.MATRIX_LOAD else 2 + count
+    if len(s.args) != want or len(registers) != count:
+        return f'{len(registers)} registers for {count} matrices'
+    for v in registers:
+        t = getattr(v, 'type', None)
+        size = getattr(getattr(t, 'base', None), 'size', None)
+        if not (isinstance(v, Value) and getattr(t, 'length', 0) is None
+                and callable(size) and size() == 4):
+            return (f'{v!r} is no register of a 32-bit element, a word of a '
+                    f'row of a matrix')
+    if s.predicate is not None:
+        return ('every lane of the warp takes part (`.aligned`): a predicate '
+                'would leave lanes out')
+    kind = Effect.READ if s.op == Op.MATRIX_LOAD else Effect.WRITE
+    if len(s.accesses) != 1 or s.accesses[0].kind != kind or \
+            s.accesses[0].space != MemSpace.SHARED:
+        return (f'{s.op} declares {s.accesses!r}, where it is one '
+                f'{"read" if kind == Effect.READ else "write"} of shared '
+                f'memory')
+    layout = s.attr('layout')
+    if layout is not None:
+        from tensorforge.backend.instructions.compute.bitlayout import (
+            BitLayout)
+        if not isinstance(layout, BitLayout):
+            return f'a fragment layout of {layout!r}, which is no BitLayout'
+    return None
 
 
 def element_of(type_: Any, base: Any) -> Any:
@@ -1705,6 +1845,69 @@ def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
                 'blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) '
                 f'/ warpSize) & 1) {{ {text} }}')
     return Lowered((text,))
+
+
+# --------------------------------------------------------------------------- #
+# Matrix transfers
+# --------------------------------------------------------------------------- #
+
+def _matrix_transfer_available(s: Stmt, env: Spelling) -> None:
+    """Refuse a CUDA target older than the architecture the engine is on
+    (`MATRIX_TRANSFER_SM`); every other backend has no lowering at all
+    (`_no_matrix_transfer`).  Without a target it is written as for one."""
+    engine = s.attr('engine')
+    sm_level = getattr(env.hw, 'sm_level', None)
+    level = sm_level() if callable(sm_level) else None
+    floor = MATRIX_TRANSFER_SM.get(engine, 0)
+    if level is not None and level < floor:
+        raise IRError(f'{engine} on {env.model}: sm_{floor} and newer have '
+                      f'it')
+
+
+def _lower_matrix_transfer(s: Stmt, env: Spelling) -> Lowered:
+    """A matrix transfer as `cuda.h` writes it: `tensorforge::ldmatrixX{n}(
+    r0, ..., base, index)`, the registers declared ahead of it and written
+    through references, and `tensorforge::stmatrixX{n}(base, index, r0,
+    ...)` -- the lane's row `base + index`, 16 bytes on 16.  The helpers
+    move floats."""
+    _matrix_transfer_available(s, env)
+    why = matrix_transfer_refusal(s)
+    if why is not None:
+        raise IRError(why)
+    registers = matrix_registers(s)
+    for v in registers:
+        if v.type.base != Datatype.F32:
+            raise IRError(f'{s.attr("engine")} of {v.type.base}: the '
+                          f'helpers move floats (`cuda.h`)')
+    names = [env.name(v) for v in registers]
+    where = f'{env.name(s.args[0])}, {env.name(s.args[1])}'
+    count = s.attr('count')
+    if s.op == Op.MATRIX_LOAD:
+        return Lowered(tuple(f'{v.type.base.ctype()} {n}{{}};'
+                             for v, n in zip(registers, names))
+                       + (f'tensorforge::ldmatrixX{count}('
+                          f'{", ".join(names)}, {where});',))
+    return Lowered((f'tensorforge::stmatrixX{count}({where}, '
+                    f'{", ".join(names)});',))
+
+
+def _no_matrix_transfer(s: Stmt, env: Spelling) -> Lowered:
+    raise IRError(f'{s.attr("engine")} has no spelling on '
+                  f'{env.family or "no target"}: it is NVIDIA\'s, on CUDA')
+
+
+def _check_matrix_transfer(s: Stmt) -> List[str]:
+    why = matrix_transfer_refusal(s)
+    return [] if why is None else [f'{s.op}: {why}']
+
+
+def _matrix_transfer_pipe(s: Stmt) -> Optional[str]:
+    """The issue category of a matrix transfer: a store of shared memory for
+    stmatrix.  ldmatrix counts as nothing -- as the call it was written as
+    before it was an op, which the emitter took for one that lays no code
+    down (`emit._NO_CODE`) -- so that no figure of a kernel that loads its
+    fragments by it moves; it is one issue of the shared memory pipe."""
+    return 'shared.store' if s.op == Op.MATRIX_STORE else None
 
 
 # --------------------------------------------------------------------------- #
@@ -2743,6 +2946,14 @@ def pipe_of(s: Stmt) -> str:
     return pipe(s) if callable(pipe) else pipe
 
 
+def units_of(s: Stmt) -> int:
+    """What `s`, a statement without regions that lays code down, adds to
+    the code count in the emitter's units: its entry's `units` for an engine
+    op (`OpSpec.units`), one for any other (`transfers.executed`)."""
+    spec = REGISTRY.get(s.op)
+    return 1 if spec is None else spec.units
+
+
 # --------------------------------------------------------------------------- #
 # The entries
 # --------------------------------------------------------------------------- #
@@ -2750,6 +2961,9 @@ def pipe_of(s: Stmt) -> str:
 _OBJECT = Slot('object', (SyncObjectType, Value))
 _SYNC = Effect.BARRIER
 _INT = (int,)
+_MATRIX_TRANSFER_SLOTS = (Slot('engine', (str,)), Slot('shape', (tuple,)),
+                          Slot('count', _INT), Slot('width', _INT, False),
+                          Slot('layout', (object,), False))
 
 REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     # Every participant arrives and waits: the combined form, which the
@@ -2860,6 +3074,29 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            units=1, pipe='other',
            lower={'cuda': _lower_tmem_st, '': _lower_tmem_st,
                   '*': _no_tmem}, check=_check_tmem),
+    # A warp's matrices between shared memory and its registers, one
+    # collective transfer (`TRANSFER_ENGINES`: ldmatrix, stmatrix): a read or
+    # a write of the buffer whose rows the lanes name, declared as one, and
+    # pinned where it stands -- every lane of the warp takes part.  The
+    # slots: the engine, the shape of a matrix as PTX names it, how many
+    # (`count`), the bytes a lane holds (`width`), and the fragment layout
+    # over the tile the matrices lie in, where the producer states one
+    # (`matrix_transfer_bits`).  ldmatrix adds no code (`units`) and no issue
+    # (`_matrix_transfer_pipe`), as the call it was before it was an op.
+    OpSpec(Op.MATRIX_LOAD, operands=_MATRIX_TRANSFER_SLOTS,
+           results=('registers',), effect=Effect.READ, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=0, pipe=_matrix_transfer_pipe,
+           lower={'cuda': _lower_matrix_transfer,
+                  '': _lower_matrix_transfer, '*': _no_matrix_transfer},
+           check=_check_matrix_transfer),
+    OpSpec(Op.MATRIX_STORE, operands=_MATRIX_TRANSFER_SLOTS,
+           results=(), effect=Effect.WRITE, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=1, pipe=_matrix_transfer_pipe,
+           lower={'cuda': _lower_matrix_transfer,
+                  '': _lower_matrix_transfer, '*': _no_matrix_transfer},
+           check=_check_matrix_transfer),
     # D = A * B + C on a matrix engine (`MATRIX_ENGINES`).  The fragments
     # are values -- the operands, A's registers, B's, then C's -- and D the
     # result, or C itself where the instruction writes it in place
@@ -3269,6 +3506,34 @@ def tmem_st(tmem: Value, column: int, values: Sequence[Any]) -> Stmt:
                  accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))
 
 
+def _matrix_transfer_attrs(engine: str, count: int, layout: Any) -> Tuple:
+    attrs = (('engine', engine), ('shape', MATRIX_TRANSFER_SHAPE),
+             ('count', int(count)), ('width', 4 * int(count)))
+    return attrs + ((('layout', layout),) if layout is not None else ())
+
+
+def matrix_load(base: Any, index: Any, registers: Sequence[Value], *,
+                access: Access, layout: Any = None) -> Stmt:
+    """`len(registers)` matrices into `registers` by ldmatrix, from the rows
+    the lanes name at `base + index`: one read of the buffer, `access`
+    (`IRBuilder.matrix_load`); `layout` the fragment layout over the tile
+    the matrices lie in, where the caller states one."""
+    return _stmt(Op.MATRIX_LOAD,
+                 _matrix_transfer_attrs('ldmatrix', len(registers), layout),
+                 args=(base, index), target=tuple(registers),
+                 accesses=(access,))
+
+
+def matrix_store(base: Any, index: Any, registers: Sequence[Any], *,
+                 access: Access, layout: Any = None) -> Stmt:
+    """`registers` into `len(registers)` matrices by stmatrix, the rows the
+    lanes name at `base + index`: one write of the buffer, `access`
+    (`IRBuilder.matrix_store`)."""
+    return _stmt(Op.MATRIX_STORE,
+                 _matrix_transfer_attrs('stmatrix', len(registers), layout),
+                 args=(base, index) + tuple(registers), accesses=(access,))
+
+
 def matrix_wait(engine: str, count: int, registers: Sequence[Value] = (),
                 reads: Sequence[Any] = ()) -> Stmt:
     """Wait until at most `count` of the groups `engine` committed are in
@@ -3345,4 +3610,8 @@ __all__ = [
     'TMA_REDUCE_TYPES', 'TensorMap', 'staging_engine', 'swizzle_bytes',
     'swizzle_form',
     'tensor_map_refusal', 'tma_refusal',
+    'MATRIX_ROWS', 'MATRIX_ROW_BYTES', 'MATRIX_TRANSFER_COUNTS',
+    'MATRIX_TRANSFER_OPS', 'MATRIX_TRANSFER_SHAPE', 'MATRIX_TRANSFER_SM',
+    'matrix_load', 'matrix_registers', 'matrix_store',
+    'matrix_transfer_bits', 'matrix_transfer_refusal', 'units_of',
 ]

@@ -650,8 +650,8 @@ class IRBuilder:
                              accesses=accesses, attrs=(('callee', callee),))
 
     def split_op(self, name: str, types: Sequence, *args: Operand,
-                 hints: Sequence[str] = (), attrs: Tuple = (),
-                 reads: Sequence[Any] = ()) -> Tuple[Value, ...]:
+                 hints: Sequence[str] = (), attrs: Tuple = ()
+                 ) -> Tuple[Value, ...]:
         """A pure operation with more than one result.
 
         `splitFloatTF32(uint32_t &upper, uint32_t &lower, float value)` is a
@@ -672,23 +672,10 @@ class IRBuilder:
         prints.  `_cse_key` reads `attrs`, so two different callees still hash
         apart.
 
-        `reads` names the shared buffers an operation reads through its
-        arguments -- `ldmatrixX4`, which loads a warp's fragments from the
-        rows its lanes name.  Then it is no pure function of its arguments:
-        it is declared a read of each, pinned where it stands, and every pass
-        orders it against the buffers' writes as it orders a load; and its
-        results are the lanes' own.
+        An operation that reads memory through its arguments is none of
+        these: ldmatrix, which once was one, is a transfer of its own
+        (`matrix_load`).
         """
-        if reads:
-            vs = tuple(self.value(t, hint=h, uniform=Uniformity.LANE)
-                       for t, h in zip(types, list(hints) + [''] * len(types)))
-            accesses = tuple(Access(Effect.READ, self._space_of(r),
-                                    self.alias_root(r)) for r in reads)
-            self._emit_op(Op.SPLIT, vs, tuple(args), pure=False,
-                          movable=False, effect=Effect.READ,
-                          accesses=accesses,
-                          attrs=(('callee', name),) + tuple(attrs))
-            return vs
         vs = tuple(self.value(t, hint=h)
                    for t, h in zip(types, list(hints) + [''] * len(types)))
         self._emit_op(Op.SPLIT, vs, tuple(args), pure=True,
@@ -1024,6 +1011,72 @@ class IRBuilder:
         """A warp's store of `values` to its quarter of `tmem`'s lanes, one
         column each from `column` on (`engines.tmem_st`)."""
         return self.emit(engines.tmem_st(tmem, column, values))
+
+    def _matrix_rows(self, base: Any, index: Operand,
+                     origins: Optional[Sequence[Tuple[int, int]]]):
+        """The lane's row of a matrix transfer, in `base` as it is
+        addressed, and the layout `origins` gives the fragments: a row is 16
+        bytes that move as one, permuted as one where the buffer is
+        swizzled (`_check_width`); a placement that is no layout of bits is
+        refused rather than carried untracked."""
+        elem = base_elem(base) or self._fptype
+        self._check_width(base, engines.MATRIX_ROW_BYTES // elem.size())
+        layout = None
+        if origins is not None:
+            layout = engines.matrix_transfer_bits(origins)
+            if layout is None:
+                raise IRError(f'matrices at {tuple(origins)!r}: no layout of '
+                              f'bits places them (`engines.'
+                              f'matrix_transfer_bits`)')
+        return self._swizzled(base, index), layout
+
+    def matrix_load(self, base: Any, index: Operand, *, count: int = 4,
+                    type_=None, origins: Optional[Sequence] = None,
+                    hint: str = 'frag') -> Tuple[Value, ...]:
+        """`count` 8x8 matrices from the shared buffer `base` into registers
+        of the warp, by ldmatrix (`engines.matrix_load`): lane `l` names row
+        `l % 8` of matrix `l / 8` at `base + index`, and holds in register
+        `i` the word `l % 4` of row `l / 4` of matrix `i` -- an element of
+        32 bits, of `type_` (the buffer's where None).  `origins`, the
+        element of the tile the caller reads that each matrix starts at,
+        gives the op its fragment layout (`engines.matrix_transfer_bits`).
+
+        A read of the buffer, declared, and pinned where it stands, as the
+        warp's collective: every pass orders it against the buffer's writes
+        as it orders a load, and the registers are the lanes' own."""
+        if type_ is None:
+            type_ = ScalarType(base_elem(base) or self._fptype)
+        index, layout = self._matrix_rows(base, index, origins)
+        registers = tuple(self.value(type_, hint=hint,
+                                     uniform=Uniformity.LANE)
+                          for _ in range(count))
+        access = Access(Effect.READ, self._space_of(base),
+                        self.alias_root(base))
+        self._emit_transfer(engines.matrix_load(
+            base, index, registers, access=access, layout=layout))
+        return registers
+
+    def _emit_transfer(self, s: Stmt) -> Stmt:
+        """`s`, a matrix transfer, refused here where the instruction is not
+        what it states (`engines.matrix_transfer_refusal`)."""
+        why = engines.matrix_transfer_refusal(s)
+        if why is not None:
+            raise IRError(why)
+        return self.emit(s)
+
+    def matrix_store(self, base: Any, index: Operand,
+                     registers: Sequence[Value], *,
+                     origins: Optional[Sequence] = None) -> Stmt:
+        """`registers` into `len(registers)` 8x8 matrices of the shared
+        buffer `base`, by stmatrix (`engines.matrix_store`): ldmatrix the
+        other way round -- lane `l` names row `l % 8` of matrix `l / 8` at
+        `base + index`, and its register `i` is the word `l % 4` of row
+        `l / 4` of matrix `i`.  A write of the buffer, declared and pinned."""
+        index, layout = self._matrix_rows(base, index, origins)
+        access = Access(Effect.WRITE, self._space_of(base),
+                        self.alias_root(base))
+        return self._emit_transfer(engines.matrix_store(
+            base, index, registers, access=access, layout=layout))
 
     def commit_group(self, engine: str, object: Optional[Value] = None,
                      issue: Optional[Value] = None) -> Stmt:

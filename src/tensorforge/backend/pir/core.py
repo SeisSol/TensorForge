@@ -1066,6 +1066,15 @@ class Op:
     TMEM_DEALLOC = 'tmem.dealloc'
     TMEM_LD = 'tmem.ld'
     TMEM_ST = 'tmem.st'
+    # A warp's matrices between shared memory and the registers of its lanes,
+    # as one collective transfer (`engines.TRANSFER_ENGINES`: NVIDIA's
+    # `ldmatrix` and `stmatrix`): each lane names the row of one matrix, and
+    # holds a word of every matrix in a register of its own, where the
+    # instruction's fragment layout puts it (`engines.matrix_transfer_bits`).
+    # A load defines the registers; a store reads them,
+    # `args = (base, index, *registers)`.
+    MATRIX_LOAD = 'matrix.load'
+    MATRIX_STORE = 'matrix.store'
     # D = A * B + C on the fragments of a matrix engine, a collective of the
     # wave (`engines.MATRIX_ENGINES`): the fragments are values, D the
     # result -- or C itself, written in place, where the instruction

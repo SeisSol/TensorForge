@@ -203,13 +203,14 @@ _SPLIT_TF32 = re.compile(
     r'^tensorforge::splitFloatTF32\s*\(\s*(?P<upper>\w+)\s*,\s*(?P<lower>\w+)'
     r'\s*,\s*(?P<value>.+)\)$')
 
-#: `tensorforge::ldmatrixX4(r0, r1, r2, r3, base, index)` (`cuda.h`): four
-#: 8x8 matrices of a warp's rows in shared memory, written through
-#: references.
+#: `tensorforge::ldmatrixX{n}(r0, ..., base, index)` (`cuda.h`): `n` (1, 2
+#: or 4) 8x8 matrices of a warp's rows in shared memory, written through
+#: references; `tensorforge::stmatrixX{n}(base, index, r0, ...)`, the
+#: registers into the rows (`engines.matrix_load`, `matrix_store`).
 _LDMATRIX = re.compile(
-    r'^tensorforge::ldmatrixX4\s*\(\s*(?P<r0>\w+)\s*,\s*(?P<r1>\w+)\s*,'
-    r'\s*(?P<r2>\w+)\s*,\s*(?P<r3>\w+)\s*,\s*(?P<base>\w+)\s*,'
-    r'\s*(?P<index>.+)\)$')
+    r'^tensorforge::ldmatrixX(?P<count>[124])\s*\((?P<args>.+)\)$')
+_STMATRIX = re.compile(
+    r'^tensorforge::stmatrixX(?P<count>[124])\s*\((?P<args>.+)\)$')
 
 #: The name of `mma.sync` as NVIDIA's path issues it (`MMAInstr`): the
 #: shape, and the types of D, A, B and C.
@@ -2238,37 +2239,74 @@ class Interp:
                         del self.wg_writers[reg]
                         self._store_register(reg, self.wg_pending.pop(reg))
 
+    def _matrix_operands(self, m, stmt: str, what: str):
+        """`(count, parts, lanes)` of a matrix transfer: how many matrices,
+        its operands split at the top level, and the lanes of this lane's
+        warp by their place in it -- all 32, as the instruction is
+        `.aligned`: a warp that is not whole at it aborts."""
+        run = self.lockstep
+        if run is None:
+            raise Abort(f'{what} outside a lockstep run: {stmt!r}')
+        count = int(m.group('count'))
+        parts = [p.strip() for p in _top_level(m.group('args'), ',')]
+        if len(parts) != count + 2:
+            raise Abort(f'{what} of {count} matrices with {len(parts)} '
+                        f'operands: {stmt!r}')
+        warp = self.lane // 32
+        lanes = {it.lane % 32: it for it in run.current
+                 if it.lane // 32 == warp}
+        if len(lanes) != 32:
+            raise Abort(f'{what} with {len(lanes)} lanes of the warp taking '
+                        f'part')
+        return count, parts, lanes
+
     def _ldmatrix(self, lm, stmt: str) -> None:
-        """One `ldmatrixX4`, for the warp this lane is in: once per statement
-        and warp, from the rows its lanes name.
+        """One `ldmatrixX{n}`, for the warp this lane is in: once per
+        statement and warp, from the rows its lanes name.
 
         Modeled from PTX's statement of the instruction ("Warp-level matrix
         load instruction: ldmatrix") rather than from what it is used for:
         lane `l` names the 16-byte row `l % 8` of matrix `l / 8`, four
-        floats from `base + index`, and register `i` of lane `t` is the
-        32-bit word `t % 4` of row `t / 4` of matrix `i`.  The instruction
-        is `.aligned`: a warp that is not whole at it aborts."""
+        floats from `base + index` -- the first `8 n` lanes, whose rows the
+        `n` matrices are -- and register `i` of lane `t` is the 32-bit word
+        `t % 4` of row `t / 4` of matrix `i`."""
+        count, parts, lanes = self._matrix_operands(lm, stmt, 'ldmatrix')
         run = self.lockstep
-        if run is None:
-            raise Abort(f'ldmatrix outside a lockstep run: {stmt!r}')
-        warp = self.lane // 32
-        key = ('ldmatrix', warp, stmt)
+        key = ('ldmatrix', self.lane // 32, stmt)
         rows = run.wave_cache.get(key)
         if rows is None:
-            lanes = {it.lane % 32: it for it in run.current
-                     if it.lane // 32 == warp}
-            if len(lanes) != 32:
-                raise Abort(f'ldmatrix with {len(lanes)} lanes of the warp '
-                            f'taking part')
             rows = {}
             for l, it in lanes.items():
-                base = it.ev(lm.group('base'))
-                at = int(it.ev(lm.group('index')))
+                if l >= 8 * count:
+                    continue
+                base = it.ev(parts[count])
+                at = int(it.ev(parts[count + 1]))
                 rows[l] = [base[at + w] for w in range(4)]
             run.wave_cache[key] = rows
         t = self.lane % 32
-        for i in range(4):
-            self.env[lm.group(f'r{i}')] = rows[8 * i + t // 4][t % 4]
+        for i in range(count):
+            self.env[parts[i]] = rows[8 * i + t // 4][t % 4]
+
+    def _stmatrix(self, sm, stmt: str) -> None:
+        """One `stmatrixX{n}`: the row this lane names, of the matrices the
+        first `8 n` lanes name the rows of -- lane `l` row `l % 8` of matrix
+        `l / 8`, at `base + index` -- from the registers of the lanes that
+        hold it: word `w` of row `r` of matrix `i` is register `i` of lane
+        `4 r + w`.
+
+        `_ldmatrix` the other way round, from PTX's statement ("Warp-level
+        matrix store instruction: stmatrix").  Each lane writes the row it
+        names, so that the race check sees every write as the lane's whose
+        address it went to."""
+        count, parts, lanes = self._matrix_operands(sm, stmt, 'stmatrix')
+        l = self.lane % 32
+        if l >= 8 * count:
+            return
+        i, r = divmod(l, 8)
+        base = self.ev(parts[0])
+        at = int(self.ev(parts[1]))
+        for w in range(4):
+            base[at + w] = lanes[4 * r + w].ev(parts[2 + i])
 
     def ev(self, expr: str):
         self.budget -= 1
@@ -2736,6 +2774,10 @@ class Interp:
         lm = _LDMATRIX.match(stmt)
         if lm:
             self._ldmatrix(lm, stmt)
+            return
+        sm = _STMATRIX.match(stmt)
+        if sm:
+            self._stmatrix(sm, stmt)
             return
         sp = _SPLIT_TF32.match(stmt)
         if sp:

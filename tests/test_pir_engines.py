@@ -58,7 +58,8 @@ def test_every_engine_op_is_a_name_pir_knows():
     assert set(engines.REGISTRY) == {
         Op.BARRIER, Op.SYNC_INIT, Op.ARRIVE, Op.WAIT_PHASE, Op.FENCE,
         Op.WAIT_COUNTER, Op.SET_PRIORITY, Op.COMMIT_GROUP, Op.MATRIX_MAC,
-        Op.TMEM_ALLOC, Op.TMEM_DEALLOC, Op.TMEM_LD, Op.TMEM_ST}
+        Op.TMEM_ALLOC, Op.TMEM_DEALLOC, Op.TMEM_LD, Op.TMEM_ST,
+        Op.MATRIX_LOAD, Op.MATRIX_STORE}
     for name, spec in engines.REGISTRY.items():
         assert name in Op.KNOWN and spec.name == name
         assert '*' in spec.lower
@@ -705,7 +706,7 @@ def test_every_transfer_engine_completes_one_way_and_is_counted_by_it():
     completes: commit groups, a counter, a barrier."""
     assert set(engines.TRANSFER_ENGINES) == {
         'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load', 'buffer', 'async_lds',
-        'tdm', 'tma', 'tma_reduce'}
+        'tdm', 'tma', 'tma_reduce', 'ldmatrix', 'stmatrix'}
     assert engines.counter_of('cp_async') == 'copy'
     assert engines.counter_of('lds_dma') == 'load'
     assert engines.counter_of('load') == 'load'
