@@ -134,13 +134,18 @@ def _columns_description(order=6, precision='s'):
     return d
 
 
-def _assign_description(order=6, precision='s'):
+def _assign_description(order=6, precision='s', first=None):
     """The volume's last direction alone, assigning all of `Q`: `T = I
     star(2)`, then `Q = kDivM(2) T` over `Q`'s box -- an operator step
-    that stores its D where the volume's add theirs."""
+    that stores its D where the volume's add theirs; `Q` stored from row
+    `first` to its last basis function where it is given, so that a
+    column's last row is the next one's first stored cell but one."""
     d = json.loads(json.dumps(_volume_description(order, precision)))
     box = next(t for t in d['tensors'] if t['name'] == 'Q')['storage']
     rows = [box['start'][0], box['start'][0] + box['sizes'][0]]
+    if first is not None:
+        rows = [first, order * (order + 1) * (order + 2) // 6]
+        box['start'][0], box['sizes'][0] = first, rows[1] - first
     mixing, operator = d['operations'][-2:]
     depth = operator['args'][0]['bbox'][1][1]
     operator['result']['bbox'] = [[rows[0], 0], [rows[1], 9]]
@@ -151,13 +156,15 @@ def _assign_description(order=6, precision='s'):
 
 
 def _window_description(order=6, precision='s'):
-    """The volume with its first direction's product cut to rows 1..41 of
+    """The volume with its first direction's product cut to rows 1..39 of
     `Q`, where its operator has nonzeros further down: in the step's rows,
-    outside the product's window, a B that must stay zero there."""
+    outside the product's window, a B that must stay zero there -- inside
+    a tile the stage keeps (rows 33..40 on the grid from row 1), so that the
+    tile's rows past the window are stored and multiplied."""
     d = json.loads(json.dumps(_volume_description(order, precision)))
     operator = d['operations'][1]
     for view in (operator['result'], operator['args'][0]):
-        view['bbox'][1][0] = 41
+        view['bbox'][1][0] = 39
     return d
 
 
@@ -167,6 +174,8 @@ DESCRIPTIONS = {
     'reuse': lambda order, precision: _chain_description(order, precision,
                                                          reuse=True),
     'assign': _assign_description, 'window': _window_description,
+    'assign-low': lambda order, precision: _assign_description(
+        order, precision, first=1),
     # The flux kernels the layout takes besides the volume: a mixing
     # product, then two operator products, the first into an intermediate.
     'localFlux': _seissol('gpu_localFlux[0]'),
@@ -321,14 +330,14 @@ def test_what_the_layout_does_not_take_says_why(change, why):
 
 @pytest.mark.parametrize('shape,order,precision,arch,elements,lowering', [
     ('volume', 6, 's', 'sm_90', 16, 'mma_sync'),
-    ('volume', 6, 'd', 'sm_90', 8, 'dmma'),
+    ('volume', 6, 'd', 'sm_90', 16, 'dmma'),
     ('volume', 6, 'd', 'sm_80', 8, 'dmma'),
     ('volume', 6, 's', 'sm_120', 8, 'mma_sync'),
     ('volume', 6, 'd', 'sm_120', 4, 'dmma'),
     ('volume', 4, 's', 'sm_90', 32, 'mma_sync'),
     ('volume', 4, 'd', 'sm_120', 16, 'dmma'),
     ('volume', 8, 's', 'sm_90', 7, 'mma_sync'),
-    ('volume', 8, 's', 'sm_80', 7, 'fma'),
+    ('volume', 8, 's', 'sm_80', 4, 'mma_sync'),
     ('chain', 6, 's', 'sm_90', 16, 'mma_sync'),
     ('chain', 6, 's', 'sm_120', 8, 'mma_sync')])
 def test_the_group_is_the_tables_halved_until_it_fits(shape, order,
@@ -336,8 +345,9 @@ def test_the_group_is_the_tables_halved_until_it_fits(shape, order,
                                                       elements, lowering):
     """The design's size for the basis and the precision, halved while the
     operators and the group's buffers do not fit a block, the last size
-    tried the smallest; the matrix tiling where a group of it fits, the FMA
-    forms where none does (o8 F32 on sm_80's 164 kB)."""
+    tried the smallest; the matrix tiling where a group of it fits, even
+    the smallest -- o8 F32 on sm_80's 164 kB, its B tiles of zeros left
+    out (`Stage.tiles`)."""
     section = eg.classify(_descrs(shape, order, precision))[0]
     group, why = eg.fill(section, _context(arch, precision))
     assert group is not None, why
@@ -400,7 +410,7 @@ def test_a_product_reads_its_window_of_the_operator(precision, depth, k, regs):
 
 
 @pytest.mark.parametrize('order,arch,elements,split', [
-    (6, 'sm_90', 16, True), (6, 'sm_120', 8, False), (4, 'sm_120', 16, True)])
+    (6, 'sm_90', 16, True), (6, 'sm_120', 8, True), (4, 'sm_120', 16, True)])
 def test_b_comes_split_where_it_costs_no_group_size(order, arch, elements,
                                                     split):
     """The halves take twice B's room: the fill rule takes them at the
@@ -826,18 +836,21 @@ def test_a_matrix_step_writes_its_output_from_the_accumulators(
     """A lane's cells of D go into the output from its registers, each
     through its row's element's pointer (`eQ_*`, read from the block's
     table `pQ`): one reduction a cell where the step accumulates, a store
-    where it assigns, no buffer and no barrier between.  A section whose
-    matrix steps write intermediates only keeps no table."""
+    where it assigns -- for each tile of D the walk holds, its M tiles
+    together and its slots -- no buffer and no barrier between.  A section
+    whose matrix steps write intermediates only keeps no table."""
     section = eg.classify(_descrs(shape, 6, precision))[0]
     group = eg.fill(section, _context(arch, precision))[0]
     tables = [t.alias for t in group.section.pointer_tables]
     assert tables == (['Q'] if adds or stores else [])
     lines = _kernel(arch=arch, precision=precision, shape=shape,
                     multi_element='force').splitlines()
+    held = sum(units.group * units.slots for step, units in _walks(
+        shape, precision=precision, arch=arch) if not step.dest.is_tmp)
     reductions = [line for line in lines if 'red.global.add.' in line]
     assert len(reductions) == len([r for r in reductions if '&eQ_' in r])
-    assert len(reductions) == adds
-    assert len(_stores(lines, r'eQ_\d+')) == adds + stores
+    assert len(reductions) == adds * held
+    assert len(_stores(lines, r'eQ_\d+')) == (adds + stores) * held
     assert any('_pQ[' in line for line in lines) is bool(tables)
 
 
@@ -862,15 +875,15 @@ def test_the_staging_is_copied_a_trip_ahead():
 
 
 @pytest.mark.parametrize('order,precision,arch,elements,doubled', [
-    (6, 's', 'sm_90', 16, 4), (6, 'd', 'sm_90', 8, 4),
-    (8, 's', 'sm_90', 7, 0), (6, 's', 'sm_120', 8, 0),
+    (6, 's', 'sm_90', 16, 4), (6, 'd', 'sm_90', 16, 0),
+    (8, 's', 'sm_90', 7, 4), (6, 's', 'sm_120', 8, 4),
     (4, 's', 'sm_120', 16, 4)])
 def test_a_second_stage_where_it_costs_no_group_size(order, precision, arch,
                                                      elements, doubled):
     """`enable_multibuffer` and a `move_distance` over the volume's four
     inputs: each takes a second stage where the group keeps its size,
     copied a trip ahead into the stage the trip does not read; where the
-    stage would cost the group -- o8 F32 on sm_90, from 7 to 4 -- the
+    stage would cost the group -- o6 F64 on sm_90, from 16 to 8 -- the
     group keeps its size and the inputs one stage, the trip's own barrier
     ahead of their copies keeping them in the trip."""
     section = eg.classify(_volume(order, precision))[0]
@@ -894,28 +907,193 @@ def test_a_second_stage_where_it_costs_no_group_size(order, precision, arch,
                    for line in lines[loop:first])
 
 
-@pytest.mark.parametrize('arch,precision,instruction,count', [
-    ('sm_90', 's', 'm16n8k8.row.col.f32.tf32.tf32.f32', 45),
-    ('sm_90', 'd', 'm16n8k4.row.col.f64.f64.f64.f64', 27),
-    ('sm_80', 'd', 'm8n8k4.row.col.f64.f64.f64.f64', 27)])
+def _walks(shape='volume', order=6, precision='s', arch='sm_90'):
+    """The plan's matrix steps, each with how its tiles of D go to the
+    block's warps (`element_group.tile_units`)."""
+    group = eg.plan(_descrs(shape, order, precision),
+                    _context(arch, precision, multi_element='force'))
+    return [(step, eg.tile_units(group.section, step, group.elements,
+                                 int(arch[3:])))
+            for step in group.section.steps
+            if step.lowering in eg.MATRIX_LOWERINGS]
+
+
+@pytest.mark.parametrize('arch,precision,instruction,terms', [
+    ('sm_90', 's', 'm16n8k8.row.col.f32.tf32.tf32.f32', 3),
+    ('sm_90', 'd', 'm16n8k4.row.col.f64.f64.f64.f64', 1),
+    ('sm_80', 'd', 'm8n8k4.row.col.f64.f64.f64.f64', 1)])
 def test_an_operator_step_is_tiled_on_the_matrix_engine(arch, precision,
-                                                        instruction, count):
-    """The volume's three operator products one product over K: every
-    step of K of each, three products of TF32 halves in F32, one in F64."""
+                                                        instruction, terms):
+    """The volume's three operator products one product over K, walked a
+    kept tile of B at a time (`element_group.TileUnits`): the walk's body
+    a product each, the MMAs of every M tile it takes together and every
+    slot in it -- three products of TF32 halves in F32, one in F64."""
+    (step, units), = _walks(precision=precision, arch=arch)
+    count = len(step.products) * units.group * units.slots * terms
     kernel = _kernel(arch=arch, precision=precision, multi_element='force')
     assert kernel.count('mma.sync.aligned.') == count
     assert kernel.count('mma.sync.aligned.' + instruction) == count
+    if terms == 3:
+        # A split once an M tile and k-block, for every slot -- B comes
+        # split, from the stages' copy, one split each.
+        assert kernel.count('tensorforge::splitFloatTF32(') == len(
+            step.products) * (1 + units.group * 4)
 
 
-@pytest.mark.parametrize('shape,precision,pitched,count', [
-    ('volume', 's', {'_tmp0': 44, '_tmp2': 44, '_tmp4': 44}, 15),
-    ('volume', 'd', {}, 0),
-    ('chain', 's', {'I': 44}, 10)])
-def test_f32_a_fragments_come_by_ldmatrix(shape, precision, pitched, count):
+@pytest.mark.parametrize('order,precision,kept,tiles', [
+    (6, 's', 71, 105), (6, 'd', 112, 189), (8, 's', 285, 495)])
+def test_a_tile_of_zeros_is_neither_stored_nor_multiplied(order, precision,
+                                                          kept, tiles):
+    """B's tiles where the operator has no entry in the product's window
+    are left out of its stage (`Stage.tiles`), and the walk's entries
+    (`TileUnits.entries`) list each stored tile of a unit's slots once, at
+    the place it is stored; with `skip_known_zeros` off, every tile."""
+    def stages(**options):
+        group = eg.plan(_descrs('volume', order, precision), _context(
+            'sm_90', precision, multi_element='force', **options))
+        step = next(s for s in group.section.steps
+                    if s.lowering in eg.MATRIX_LOWERINGS)
+        return [group.section.stage(p.first.tensor, (p.rows, p.depth))
+                for p in step.products]
+    staged = stages()
+    assert sum(len(st.tiles) for st in staged) == kept
+    assert sum((st.depth // st.k) * (st.width // 8) for st in staged) \
+        == tiles
+    (_, units), = _walks(order=order, precision=precision)
+    for p, stage in enumerate(staged):
+        listed = {(kt, nt, place)
+                  for (_, _, nts), walked in zip(units.units, units.entries)
+                  for kt, places in walked[p]
+                  for nt, place in zip(nts, places) if place >= 0}
+        assert sorted((kt, nt) for kt, nt, _ in listed) == sorted(
+            stage.tiles)
+        assert all(stage.tiles[place] == (kt, nt)
+                   for kt, nt, place in listed)
+    assert sum(len(st.tiles) for st in stages(skip_known_zeros=False)) \
+        == tiles
+
+
+@pytest.mark.parametrize('order,window,aligned', [(6, 71, 72),
+                                                  (8, 285, 281)])
+def test_the_grid_of_b_starts_at_the_window_or_a_tile(order, window,
+                                                      aligned):
+    """The tiles of the volume's operator step kept on its two grids
+    (`kept_tiles`): N from the step's first row, as the volume stages them,
+    and from that rounded down to a tile, where a consumer's K tiles have
+    to meet a producer's N tiles -- neither fewer everywhere."""
+    step = next(s for s in eg.classify(_volume(order, 's'))[0].steps
+                if s.kind is eg.Kind.OPERATOR)
+
+    def kept(n0):
+        return sum(len(eg.kept_tiles(p, n0, 8, -(-(p.depth[1] - p.depth[0])
+                                                 // 8) * 8,
+                                     -(-(step.rows[1] - n0) // 8) * 8))
+                   for p in step.products)
+    assert step.rows[0] % 8
+    assert kept(step.rows[0]) == window
+    assert kept(step.rows[0] - step.rows[0] % 8) == aligned
+
+
+@pytest.mark.parametrize('order,precision,arch', [
+    (6, 's', 'sm_90'), (6, 'd', 'sm_90'), (8, 's', 'sm_90'),
+    (6, 's', 'sm_120'), (4, 's', 'sm_120'), (6, 'd', 'sm_80')])
+def test_the_units_hold_every_tile_of_d_once(order, precision, arch):
+    """A matrix step's tiles of D over the block's warps, fixed at
+    generation (`tile_units`): every M tile with every kept tile of B in
+    exactly one unit -- a tile of D in several, its entries shared out,
+    only where the step adds into its output (split K) -- every unit one
+    warp's; a unit's M tiles walked a group at a time."""
+    group = eg.plan(_descrs('volume', order, precision),
+                    _context(arch, precision, multi_element='force'))
+    step = next(s for s in group.section.steps
+                if s.lowering in eg.MATRIX_LOWERINGS)
+    units = eg.tile_units(group.section, step, group.elements,
+                          int(arch[3:]))
+    stages = [group.section.stage(p.first.tensor, (p.rows, p.depth))
+              for p in step.products]
+    m, _, _ = eg.matrix_shape(step.lowering, int(arch[3:]))
+    mtiles = -(-group.elements * (step.cols[1] - step.cols[0]) // m)
+    walked = sorted(
+        (mt, nt, p, kt)
+        for (lo, hi, nts), listed in zip(units.units, units.entries)
+        for p, entries in enumerate(listed) for kt, places in entries
+        for nt, place in zip(nts, places) if place >= 0
+        for mt in range(lo, hi))
+    assert walked == sorted((mt, nt, p, kt) for p, st in enumerate(stages)
+                            for kt, nt in st.tiles for mt in range(mtiles))
+    if step.dest.is_tmp or step.assigns:
+        held = [(mt, nt) for lo, hi, nts in units.units
+                for mt in range(lo, hi) for nt in nts if nt >= 0]
+        assert len(held) == len(set(held))
+    assert len(units.warps) == group.elements
+    assert sorted(u for taken in units.warps for u in taken) == list(
+        range(len(units.units)))
+    if any(not taken for taken in units.warps):
+        # Spread: no warp takes a second unit while another has none.
+        assert all(len(taken) <= 1 for taken in units.warps)
+    assert all(len(nts) == units.slots for _, _, nts in units.units)
+    assert 1 <= units.group <= max(hi - lo for lo, hi, _ in units.units)
+
+
+def test_the_walk_in_slots_computes_on_the_oracle(monkeypatch):
+    """A warp's N tiles in several slots (`TILE_SLOTS`, one by default),
+    which o6 F32 on sm_90 takes three of where it may: A kept over the
+    slots, a slot's tile multiplied where it holds one -- the walk that
+    tests each slot's stored tile against -1."""
+    monkeypatch.setattr(eg, 'TILE_SLOTS', 3)
+    (_, units), = _walks()
+    assert units.slots > 1 and any(
+        place < 0 for walked in units.entries for entries in walked
+        for _, places in entries for place in places)
+    for alias, error in _oracle_errors('volume', 's', 'sm_90', {}).items():
+        assert error <= 1e-6, (alias, error)
+
+
+@pytest.mark.parametrize('shape', ['volume', 'assign-low'])
+def test_a_grid_aligned_to_the_tiles_computes_on_the_oracle(shape,
+                                                            monkeypatch):
+    """B's N grid from the tile below the step's first row (`_staged`'s
+    `aligned`): the steps' rows start at 1, so a tile's first row is no
+    row of the step, and the walk leaves it out of D -- nothing is written
+    outside the output's stored cells, where `Q` is stored from row 1
+    (`assign-low`) as where it is not."""
+    from tensorforge.reference import kernel_eval
+    staged = eg._staged
+    monkeypatch.setattr(eg, '_staged', lambda *args, **options: staged(
+        *args, **{**options, 'aligned': True}))
+    group = eg.plan(_descrs(shape, 6, 's'), _context(multi_element='force'))
+    assert {st.n0 for st in group.section.stages if st.window} == {0}
+    host = _host()
+    kernel = host.Kernel(DESCRIPTIONS[shape](6, 's'), _dtype('s'), 'sm_90')
+    base = kernel._name('Q') + '@0'
+    stored = set(host._slots(kernel.tensors['Q']))
+    written, write = set(), kernel_eval.Slot.write
+
+    def record(self, name, index, value):
+        if name == base:
+            written.add(int(index))
+        return write(self, name, index, value)
+    monkeypatch.setattr(kernel_eval.Slot, 'write', record)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got, _ = kernel.run({'multi_element': 'force'})
+    want = kernel.expected()
+    assert written and written <= stored, sorted(written - stored)
+    scale = max(abs(v) for v in want.values())
+    assert max(abs(got[key] - want[key]) for key in want) <= 1e-6 * scale
+
+
+@pytest.mark.parametrize('shape,precision,pitched,ldmatrix', [
+    ('volume', 's', {'_tmp0': 44, '_tmp2': 44, '_tmp4': 44}, True),
+    ('volume', 'd', {}, False),
+    ('chain', 's', {'I': 44}, True)])
+def test_f32_a_fragments_come_by_ldmatrix(shape, precision, pitched,
+                                          ldmatrix):
     """In F32 a matrix step reads A by ldmatrix, a load of four 8x8 matrices
-    a warp, so the buffers it reads have a pitch: rows of 16 bytes, four
-    floats more than a multiple of eight, long enough for every padded step
-    of K; F64 reads A lane by lane."""
+    a warp -- in the walk's body, once for each M tile it takes together --
+    so the buffers it reads have a pitch: rows of 16 bytes, four floats
+    more than a multiple of eight, long enough for every padded step of K;
+    F64 reads A lane by lane."""
     section = eg.classify(_descrs(shape, 6, precision))[0]
     group = eg.fill(section, _context('sm_90', precision))[0]
     got = {b.tensor.alias: b.pitch for b in group.section.inputs
@@ -924,7 +1102,10 @@ def test_f32_a_fragments_come_by_ldmatrix(shape, precision, pitched, count):
     assert all(pitch % 8 == 4 for pitch in got.values())
     kernel = _kernel(precision=precision, shape=shape,
                      multi_element='force')
-    assert kernel.count('tensorforge::ldmatrixX4(') == count
+    count = sum(len(step.products) * units.group
+                for step, units in _walks(shape, precision=precision))
+    assert kernel.count('tensorforge::ldmatrixX4(') == (
+        count if ldmatrix else 0)
 
 
 def test_the_padding_is_zero_before_the_tiling_reads_it():
@@ -965,7 +1146,8 @@ def test_ldmatrix_is_a_declared_read_of_its_buffer():
              for st in walk_stmts(section.body)
              if st.op == Op.SPLIT
              and st.attr('callee') == 'tensorforge::ldmatrixX4']
-    assert len(loads) == 15
+    (step, units), = _walks()
+    assert len(loads) == len(step.products) * units.group
     for st in loads:
         assert not st.pure and not st.movable
         assert [(a.kind, a.space) for a in st.accesses] == [

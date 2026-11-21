@@ -327,10 +327,19 @@ class Stage:
     has no entry, the contraction padded to `depth` (a multiple of the
     instruction's `k`) and the step's rows to `width` (of its n, 8).  It is
     stored in the order the instruction's fragments are read: tile after
-    tile of `k` x 8, K outer, and in a tile lane after lane, each lane's
-    registers of B side by side (`regs`) -- one load a lane and fragment.
-    `split` stores each value as its two TF32 halves, the upper ones first,
-    which the 3xTF32 products then read prepared (`fill`)."""
+    tile of `k` x 8, and in a tile lane after lane, each lane's registers
+    of B side by side (`regs`) -- one load a lane and fragment.  `split`
+    stores each value as its two TF32 halves, the upper ones first, which
+    the 3xTF32 products then read prepared (`fill`).
+
+    The tiles are those of `tiles`, `(kt, nt)` on the stage's grid -- K
+    from the window's first column in steps of `k`, N from `n0` in steps
+    of 8 -- in the order stored: only those where the operator has an entry
+    in the window of a product the stage serves (`kept_tiles`), so that a
+    tile of zeros is neither stored nor multiplied.  `n0` is the grid's
+    origin: the step's first row, or that rounded down to a tile
+    (`_staged`'s `aligned`), where a consumer's tiles have to line up with
+    another step's."""
 
     tensor: object
     window: Optional[Tuple[Range, Range]] = None
@@ -339,6 +348,7 @@ class Stage:
     width: int = 0
     k: int = 0
     split: bool = False
+    tiles: Tuple[Tuple[int, int], ...] = ()
 
     @property
     def regs(self) -> int:
@@ -349,7 +359,15 @@ class Stage:
     def volume(self) -> int:
         if self.window is None:
             return int(self.tensor.storage_volume())
-        return self.depth * self.width * (2 if self.split else 1)
+        return len(self.tiles) * self.k * 8 * (2 if self.split else 1)
+
+    def tile(self, kt: int, nt: int) -> int:
+        """Where B's tile `(kt, nt)` is stored, in tiles, or -1 where the
+        stage leaves it out: a tile of zeros."""
+        try:
+            return self.tiles.index((kt, nt))
+        except ValueError:
+            return -1
 
 
 @dataclass(frozen=True)
@@ -686,11 +704,14 @@ def _round(value: int, step: int) -> int:
     return -(-value // step) * step
 
 
-def _staged(section: GroupSection, sm: int,
-            split: bool = False) -> GroupSection:
+def _staged(section: GroupSection, sm: int, split: bool = False,
+            sparse: bool = True, aligned: bool = False) -> GroupSection:
     """The section with its operators' stages, for the steps' lowerings:
     an operator as stored where an FMA form reads it, a B a window where a
-    matrix step does -- in TF32 halves where `split` asks."""
+    matrix step does -- in TF32 halves where `split` asks, its tiles of
+    zeros left out where `sparse` lets the operator's pattern say which
+    (`kept_tiles`), its N grid from the step's first row or, `aligned`,
+    from that rounded down to a tile."""
     stages: List[Stage] = []
 
     def add(stage):
@@ -717,11 +738,186 @@ def _staged(section: GroupSection, sm: int,
                     add(Stage(t))
                 continue
             _, n, k = matrix_shape(step.lowering, sm)
-            add(Stage(t, (p.rows, p.depth), step.rows[0],
-                      _round(p.depth[1] - p.depth[0], k),
-                      _round(step.rows[1] - step.rows[0], n), k,
-                      split and step.lowering == 'mma_sync'))
+            n0 = step.rows[0] - (step.rows[0] % n if aligned else 0)
+            depth = _round(p.depth[1] - p.depth[0], k)
+            width = _round(step.rows[1] - n0, n)
+            add(Stage(t, (p.rows, p.depth), n0, depth, width, k,
+                      split and step.lowering == 'mma_sync',
+                      tuple(sorted(kept_tiles(p, n0, k, depth, width,
+                                              sparse)))))
     return dataclasses.replace(section, stages=tuple(stages))
+
+
+def kept_tiles(product: Product, n0: int, k: int, depth: int, width: int,
+               sparse: bool = True) -> Set[Tuple[int, int]]:
+    """The tiles of a matrix product's B, `(kt, nt)` -- `k` x 8, on the
+    grid from the window's first column and from `n0` -- where its
+    operator has an entry inside the product's window
+    (`Tensor.nonzero_pattern`): all of them where `sparse` is off
+    (`Options.skip_known_zeros`) or the pattern says nothing."""
+    tiles = {(kt, nt) for kt in range(depth // k) for nt in range(width // 8)}
+    pattern = getattr(product.first.tensor, 'nonzero_pattern', None)
+    if not sparse or pattern is None:
+        return tiles
+    (r0, r1), (k0, k1) = product.rows, product.depth
+    return {((kk - k0) // k, (i - n0) // 8) for i in range(r0, r1)
+            for kk in range(k0, k1) if pattern.is_nz((i, kk))}
+
+
+#: What the walk's balance weighs a unit by (`tile_units`): an MMA over TF32
+#: halves is three, an A tile read for a k-block and split two, a B tile one.
+TILE_COSTS = {'mma_sync': (3, 2, 1), 'dmma': (1, 1, 1)}
+
+#: The accumulator registers a lane gives a group's tiles of D at most
+#: (`tile_units`): the slots times the M tiles walked together, times a
+#: tile's registers.
+TILE_REGISTERS = 32
+
+#: What a unit costs a warp besides its tiles (`tile_units`), in the units
+#: of `TILE_COSTS`: reading it from the tables and starting its walk.
+TILE_UNIT = 4
+
+#: The most N tiles a warp holds for a unit (`tile_units`), or None for as
+#: many as pay.  A second slot keeps A over the slots, but each slot's
+#: tiles then stand under a test of their own, which on sm_120 cost more
+#: than the A reads they save (o6 F32: 6.55 ms with three slots, 4.50 ms
+#: with one).
+TILE_SLOTS: Optional[int] = 1
+
+#: The least an entry of the walk takes (`tile_units`), in the units of
+#: `TILE_COSTS`: its A and B in flight and a tile's three products one
+#: after another, which the M tiles walked together hide.
+TILE_LATENCY = 12
+
+#: Into how many parts a set's entries may go (`tile_units`), each its own
+#: unit, where the step adds into its output: the heaviest N tiles' walks
+#: shared by two or more warps.  Each part adds its D on its own, a
+#: reduction a cell, which on sm_120 cost more than the balance gained
+#: (o6 F32: 4.98 ms split four ways, 4.47 ms whole).
+TILE_SPLIT = 1
+
+
+@dataclass(frozen=True)
+class TileUnits:
+    """A matrix step's tiles of D over the block's warps (`tile_units`).
+
+    A unit is a range of M tiles, `(first, last)`, and the N tiles of the
+    `slots` a warp holds for it, -1 in a slot left empty.  `warps[w]` are
+    the units warp `w` takes, in turn, and a warp walks a unit's M tiles
+    `group` at a time: D of the group's M tiles and the slots' N tiles in
+    registers, A read once an M tile and k-block and kept over the slots,
+    B once a slot and k-block and kept over the M tiles.  `entries`, by
+    unit and product, are what the walk reads: a k-block of the product's
+    B and, a slot each, its stored tile there (`Stage.tile`) -- -1 for a
+    tile of zeros -- only the k-blocks where a slot has one."""
+
+    slots: int
+    group: int
+    units: Tuple[Tuple[int, int, Tuple[int, ...]], ...]
+    warps: Tuple[Tuple[int, ...], ...]
+    entries: Tuple[Tuple[Tuple[Tuple[int, Tuple[int, ...]], ...], ...], ...]
+
+
+def tile_units(section: GroupSection, step: Step, warps: int,
+               sm: int) -> TileUnits:
+    """How a matrix step's tiles of D go to the block's `warps`, fixed at
+    generation (`TileUnits`): the N tiles in sets of `slots`, each set a
+    warp's, the heaviest tiles spread first; the M tiles in parts; where
+    the step adds into its output, a set's entries -- its kept k-blocks,
+    product after product -- in parts as well, each part's D added on its
+    own (split K); the units -- a set, an M part and a part of its entries
+    -- to the warps the costliest first (LPT), by their MMAs, the A tiles
+    they read and the B tiles (`TILE_COSTS`), an entry at least its
+    latency (`TILE_LATENCY`).  Of every form, the one whose busiest warp
+    walks the fewest entries, then costs least."""
+    m_, n_, _ = matrix_shape(step.lowering, sm)
+    mtiles = -(-(warps * (step.cols[1] - step.cols[0])) // m_)
+    stages = [section.stage(p.first.tensor, (p.rows, p.depth))
+              for p in step.products]
+    ntiles = stages[0].width // n_
+    blocks = [range(st.depth // st.k) for st in stages]
+    mma, a_read, b_read = TILE_COSTS[step.lowering]
+    regs = m_ * n_ // 32 * (2 if section.dtype is Datatype.F64 else 1)
+    # Two warps may hold one tile of D only where each adds its share into
+    # the output (`red.global.add`): a store or an intermediate's
+    # read-modify-write would race.
+    split = not step.dest.is_tmp and not step.assigns
+
+    def walk(nset):
+        """A set's entries, `(product, kt)`, where a slot keeps a tile."""
+        return [(p, kt) for p, (st, ks) in enumerate(zip(stages, blocks))
+                for kt in ks if any(st.tile(kt, nt) >= 0 for nt in nset)]
+
+    def tiles(nset, part):
+        return sum(stages[p].tile(kt, nt) >= 0 for p, kt in part
+                   for nt in nset)
+
+    def cost(lo, hi, nset, part, group):
+        # Each M group walks the part's entries: at least the latency of
+        # one, which the group's M tiles share, else its MMAs; its A tiles
+        # and its B tiles besides.
+        held, total = tiles(nset, part), 0
+        for first in range(lo, hi, group):
+            m = min(group, hi - first)
+            total += (max(TILE_LATENCY * len(part), mma * m * held)
+                      + a_read * m * len(part) + b_read * held)
+        return total
+
+    best = None
+    for slots in range(1, min(ntiles, TILE_SLOTS or ntiles) + 1):
+        sets: List[List[int]] = [[] for _ in range(-(-ntiles // slots))]
+        weight = [len(walk([nt])) for nt in range(ntiles)]
+        for nt in sorted(range(ntiles), key=lambda nt: (-weight[nt], nt)):
+            min((s for s in sets if len(s) < slots),
+                key=lambda s: (sum(weight[x] for x in s), len(s))).append(nt)
+        # As many M parts as the warps take whole sets of, and finer, down
+        # to an M tile a part: more units than warps let the largest-first
+        # assignment even the warps out.
+        for count in range(max(1, min(mtiles, warps // len(sets))),
+                           mtiles + 1):
+            bounds = [mtiles * i // count for i in range(count + 1)]
+            parts = [(lo, hi) for lo, hi in zip(bounds, bounds[1:])
+                     if lo < hi]
+            group = max(1, min(max(hi - lo for lo, hi in parts),
+                               TILE_REGISTERS // (slots * regs)))
+            for pieces in range(1, (TILE_SPLIT if split else 1) + 1):
+                units = []
+                for nset in sets:
+                    entries = walk(nset)
+                    cuts = min(pieces, len(entries)) or 1
+                    for c in range(cuts):
+                        part = entries[len(entries) * c // cuts:
+                                       len(entries) * (c + 1) // cuts]
+                        units += [(lo, hi, tuple(sorted(nset)) + (-1,) * (
+                            slots - len(nset)), tuple(part))
+                            for lo, hi in parts]
+                costs = [cost(lo, hi, [nt for nt in nts if nt >= 0], part,
+                              group) + TILE_UNIT
+                         for lo, hi, nts, part in units]
+                load, assign = [0] * warps, [[] for _ in range(warps)]
+                for u in sorted(range(len(units)),
+                                key=lambda u: (-costs[u], u)):
+                    w = min(range(warps), key=lambda w: (load[w], w))
+                    load[w] += costs[u]
+                    assign[w].append(u)
+                # The walks a warp takes -- an entry for each M group of
+                # its units -- first: each waits on its own loads and
+                # products, where the group's M tiles share the wait.
+                walks = max(sum(-(-(units[u][1] - units[u][0]) // group)
+                                * len(units[u][3]) for u in taken)
+                            for taken in assign)
+                if best is None or (walks, max(load)) < best[0]:
+                    best = ((walks, max(load)), slots, group, units, assign)
+    _, slots, group, units, assign = best
+    entries = tuple(
+        tuple(tuple((kt, tuple(st.tile(kt, nt) if nt >= 0 else -1
+                               for nt in nset))
+                    for q, kt in part if q == p)
+              for p, st in enumerate(stages))
+        for _, _, nset, part in units)
+    return TileUnits(slots, group,
+                     tuple((lo, hi, nset) for lo, hi, nset, _ in units),
+                     tuple(tuple(a) for a in assign), entries)
 
 
 def _pitched(section: GroupSection) -> GroupSection:
@@ -842,7 +1038,7 @@ def lower(section: GroupSection, context, matrix: bool = True,
             terms=nonzero_terms(s) if sparse and lowering == 'fma'
             else None))
     staged = _staged(dataclasses.replace(section, steps=tuple(steps)), sm,
-                     split)
+                     split, sparse)
     return _pitched(dataclasses.replace(
         staged, doubled=second_stages(staged, context)
         if double and not lanes else 0))
@@ -1269,8 +1465,10 @@ __all__ = ['Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
            'LANE_ELEMENTS', 'LANE_RANGES', 'LANE_REGISTERS', 'LOWERING',
            'Lanes', 'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS',
            'POINTER_BYTES', 'Product', 'Role', 'SHARED_RESERVE',
-           'SMALL_EXTENT', 'Stage', 'Step', 'Terms', 'classify',
-           'fill', 'fma_form', 'lanes_plan', 'lower',
-           'matrix_enabled', 'matrix_shape', 'nonzero_terms',
-           'operator_nonzeros', 'plan', 'second_stages', 'shared_bytes',
-           'split', 'table_elements', 'tiled']
+           'SMALL_EXTENT', 'Stage', 'Step', 'TILE_COSTS', 'TILE_REGISTERS',
+           'TILE_LATENCY', 'TILE_SLOTS', 'TILE_SPLIT', 'TILE_UNIT',
+           'Terms', 'TileUnits', 'classify', 'fill', 'fma_form',
+           'kept_tiles', 'lanes_plan', 'lower', 'matrix_enabled',
+           'matrix_shape', 'nonzero_terms', 'operator_nonzeros', 'plan',
+           'second_stages', 'shared_bytes', 'split', 'table_elements',
+           'tile_units', 'tiled']

@@ -4850,13 +4850,13 @@ GROUPS = {
          sub(ME_SECTION, "                b.op('lt', BOOL, row, r1, hint='in'), hint='in'),\n",
              "                b.op('lt', BOOL, row, r1 + 2, hint='in'), hint='in'),\n", 1)),
         ('B read from another lane\'s fragment',
-         sub(ME_SECTION, "                    32, hint='f'), trip.lane, hint='f'), stage.regs,\n",
-             "                    32, hint='f'), quad, hint='f'), stage.regs,\n", 1)),
+         sub(ME_SECTION, "            'mul', INDEX, place, 32, hint='f'), trip.lane, hint='f'),\n",
+             "            'mul', INDEX, place, 32, hint='f'), quad, hint='f'),\n", 1)),
         ('one product of a step tiled',
-         sub(ME_SECTION, '        for product in step.products:\n'
-                         '            group = section.buffer(product.second.tensor)\n',
-             '        for product in step.products[:1]:\n'
-             '            group = section.buffer(product.second.tensor)\n', 1)),
+         sub(ME_SECTION, '            for p, product in enumerate(step.products):\n'
+                         '                buffer = section.buffer(product.second.tensor)\n',
+             '            for p, product in enumerate(step.products[:1]):\n'
+             '                buffer = section.buffer(product.second.tensor)\n', 1)),
         ('a TF32 product left out',
          sub(ME_SECTION, '                for term, (fa, fb) in enumerate(products):\n',
              '                for term, (fa, fb) in enumerate(products[:1]):\n', 1)),
@@ -4888,8 +4888,8 @@ GROUPS = {
          sub(ME_SECTION, "    ldmatrix = step.lowering == 'mma_sync' and all(\n",
              "    ldmatrix = False and all(\n", 1)),
         ('the read of ldmatrix not declared',
-         sub(ME_SECTION, "                                        hints=('a',) * 4, reads=(source,)))\n",
-             "                                        hints=('a',) * 4, reads=()))\n", 1)),
+         sub(ME_SECTION, "                                   reads=(source,)))\n",
+             "                                   reads=()))\n", 1)),
         ('the padding left as it was',
          sub(ME_SECTION, '            if buffer.pitch > buffer.height:\n',
              '            if False:\n', 1)),
@@ -4897,10 +4897,10 @@ GROUPS = {
          sub(ME_GROUP, '        return dataclasses.replace(buffer, stride=n + (4 - n % 8) % 8)\n',
              '        return dataclasses.replace(buffer, stride=n + 1)\n', 1)),
         ('the TF32 halves of B paired wrong',
-         sub(ME_SECTION, '                    halves = [(nvidia._as_tf32(b, regs[j]),\n'
-                         '                               nvidia._as_tf32(b, regs[kregs + j]))\n',
-             '                    halves = [(nvidia._as_tf32(b, regs[kregs + j]),\n'
-             '                               nvidia._as_tf32(b, regs[j]))\n', 1)),
+         sub(ME_SECTION, '            return None, [(nvidia._as_tf32(b, regs[j]),\n'
+                         '                           nvidia._as_tf32(b, regs[kregs + j]))\n',
+             '            return None, [(nvidia._as_tf32(b, regs[kregs + j]),\n'
+             '                           nvidia._as_tf32(b, regs[j]))\n', 1)),
         ('the unsplit B not tried where the halves cost a group',
          sub(ME_GROUP, '    elif split(tilings[0]):\n', '    elif False:\n', 1)),
         # D into the output from the accumulators, through the pointer tables.
@@ -4948,6 +4948,30 @@ GROUPS = {
         ('the plan\'s stage not the one the section is lowered with',
          sub(GEN, '          double=planned.doubled > 0)\n',
              '          double=True)\n', 1)),
+        # The matrix tiling's kept tiles of B and its walk over units: a
+        # warp's N tiles in slots, its M tiles in groups (`TileUnits`).
+        ('a tile of zeros kept',
+         sub(ME_GROUP, '    if not sparse or pattern is None:\n', '    if True:\n', 1)),
+        ('a stored tile\'s B written to the next N tile',
+         sub(ME_SECTION, "        nts = self._table('mbn', [nt for _, nt in stage.tiles])\n",
+             "        nts = self._table('mbn', [nt + 1 for _, nt in stage.tiles])\n", 1)),
+        ('a slot\'s tile read where it holds zeros',
+         sub(ME_SECTION, "                              b.if_(b.op('ge', BOOL, place, 0, hint='in'))):\n",
+             "                              b.if_(b.op('ge', BOOL, place, -1, hint='in'))):\n", 1)),
+        ('a group\'s M tile past its unit kept',
+         sub(ME_SECTION, "                            'lt', BOOL, mq, hi, hint='in'), b.op(\n",
+             "                            'lt', BOOL, mq, b.op('add', INDEX, hi, 1, hint='g'), hint='in'), b.op(\n", 1)),
+        ('A split again for every slot',
+         sub(ME_SECTION, '                    halves = ([nvidia.tfconvert(b, x) for x in a]\n',
+             '                    halves = (None and [nvidia.tfconvert(b, x) for x in a]\n', 1)),
+        ('a warp walking no unit',
+         sub(ME_SECTION, "    with b.for_(read(t_warp, w, 'u'), read(t_warp, _index(b, 'add', w, 1,\n",
+             "    with b.for_(read(t_warp, _index(b, 'add', w, 1, 'u'), 'u'), read(t_warp, _index(b, 'add', w, 1,\n", 1)),
+        ('every unit to the first warp',
+         sub(ME_GROUP, '            w = min(range(warps), key=lambda w: (load[w], w))\n',
+             '            w = 0\n', 1)),
+        ('the grid\'s rows below the step written',
+         sub(ME_SECTION, '            if shift:\n', '            if False:\n', 1)),
     ]),
 }
 
