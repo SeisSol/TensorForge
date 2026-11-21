@@ -64,9 +64,12 @@ class CudaLexic(Lexic):
 
   def get_launch_code(self, func_name, grid, block, stream, func_params, shmem, coop):
     if coop:
+      # The C API's form, which every CUDA takes: CUDA 12's template takes
+      # `const T *func`, which nvcc 12's front end does not deduce from a
+      # kernel (CUDA 13's takes `T *`).
       return f"""
   auto args = tensorforge::argsPtrs({func_params});
-  cudaLaunchCooperativeKernel({func_name}, {grid}, {block}, args.data(), {shmem}, {stream});
+  cudaLaunchCooperativeKernel(reinterpret_cast<const void *>(&{func_name}), {grid}, {block}, args.data(), {shmem}, {stream});
 """
     else:
       return f"{func_name}<<<{grid},{block},{shmem},{stream}>>>({func_params})"
