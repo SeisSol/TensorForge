@@ -5491,13 +5491,13 @@ GROUPS = {
              '            if False:\n'
              '                b.store(target, zero, _index(\n', 1)),
         ('A\'s halves taken where they cost the group',
-         sub(ME_GROUP, '                   for n in range(most, -1, -1)\n',
-             '                   for n in [most]\n', 1)),
+         sub(ME_GROUP, '                for n in range(most, -1, -1)\n',
+             '                for n in [most]\n', 1)),
         ('B\'s halves preferred to A\'s',
-         sub(ME_GROUP, '                   for n in range(most, -1, -1)\n'
-                       '                   for t in tilings if t.doubled == doubled]\n',
-             '                   for t in tilings if t.doubled == doubled\n'
-             '                   for n in range(most, -1, -1)]\n', 1)),
+         sub(ME_GROUP, '                for n in range(most, -1, -1)\n'
+                       '                for t in lowerings if t.doubled == doubled]\n',
+             '                for t in lowerings if t.doubled == doubled\n'
+             '                for n in range(most, -1, -1)]\n', 1)),
         ('the room without the lower halves',
          sub(ME_GROUP, '    per_element = sum(b.room for b in section.inputs\n',
              '    per_element = sum(b.per_element for b in section.inputs\n', 1)),
@@ -5517,8 +5517,8 @@ GROUPS = {
         ('A\'s halves on by default',
          sub(ME_GROUP, 'HALVES = False\n', 'HALVES = True\n', 1)),
         ('A\'s halves taken with the switch off',
-         sub(ME_GROUP, '        most = len(halvable(tilings[0])) if HALVES else 0\n',
-             '        most = len(halvable(tilings[0]))\n', 1)),
+         sub(ME_GROUP, '        if (HALVES and tiled(lowerings[0])\n',
+             '        if (tiled(lowerings[0])\n', 1)),
     ]),
     # The consolidation of the engines layer (`pir/engines.py`).  Matrix
     # transfers: ldmatrix and stmatrix as transfer engines (`Op.MATRIX_LOAD`,
