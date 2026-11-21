@@ -5431,9 +5431,13 @@ GROUPS = {
         ('a block\'s rows held off a block early',
          sub(ME_SECTION, "                'lt', BOOL, first, height - v, hint='in')\n",
              "                'lt', BOOL, first, height - v - vec, hint='in')\n", 1)),
+        # The copies of a trip, where pitched inputs go: an input has a
+        # pitch only where the matrix tiling reads it, on NVIDIA from sm_80
+        # on, where every dense input is copied by cp.async, and a group
+        # operand is dense -- the loads and stores never stage one.
         ('a pitched input staged over its box\'s rows',
-         sub(ME_SECTION, '        with b.for_(trip.lane, pitch * width, trip.group.threads,\n',
-             '        with b.for_(trip.lane, height * width, trip.group.threads,\n', 1)),
+         sub(ME_SECTION, '            total = pitch * width\n',
+             '            total = height * width\n', 1)),
         # The matrix tiling's kept tiles of B and its walk over units: a
         # warp's N tiles in slots, its M tiles in groups (`TileUnits`).
         ('a tile of zeros kept',
@@ -5447,9 +5451,14 @@ GROUPS = {
         ('a group\'s M tile past its unit kept',
          sub(ME_SECTION, "                            'lt', BOOL, mq, hi, hint='in'), b.op(\n",
              "                            'lt', BOOL, mq, b.op('add', INDEX, hi, 1, hint='g'), hint='in'), b.op(\n", 1)),
-        ('A split again for every slot',
-         sub(ME_SECTION, '                    halves = ([nvidia.tfconvert(b, x) for x in a]\n',
-             '                    halves = (None and [nvidia.tfconvert(b, x) for x in a]\n', 1)),
+        # Not 'A split again for every slot' (`halves` None, so that each
+        # slot's products split A themselves): the same values, and with one
+        # slot a warp, the default, the same code -- a cost no test of the
+        # numbers can see.  The split's reuse that changes values instead: an
+        # M tile of the group multiplied with another's A.
+        ('every M tile of a group multiplied with the first one\'s A',
+         sub(ME_SECTION, '                                    else halves[q])\n',
+             '                                    else halves[0])\n', 1)),
         ('a warp walking no unit',
          sub(ME_SECTION, "    with b.for_(read(t_warp, w, 'u'), read(t_warp, _index(b, 'add', w, 1,\n",
              "    with b.for_(read(t_warp, _index(b, 'add', w, 1, 'u'), 'u'), read(t_warp, _index(b, 'add', w, 1,\n", 1)),
@@ -5458,6 +5467,58 @@ GROUPS = {
              '            w = 0\n', 1)),
         ('the grid\'s rows below the step written',
          sub(ME_SECTION, '            if shift:\n', '            if False:\n', 1)),
+        # A in TF32 halves (`element_group.Buffer.halves`): the star step
+        # writes both halves of each value, the tiling reads both; the rule
+        # that picks the buffers, the fill rule's order, the room.
+        ('A in halves read as values and split again',
+         sub(ME_SECTION, '                    if buffer.halves:\n'
+                         '                        # A as its producer split it',
+             '                    if False:\n'
+             '                        # A as its producer split it', 1)),
+        ('A\'s lower halves read from the upper block',
+         sub(ME_SECTION, '                        lower = buffer.half_offset(trip.group.elements)\n',
+             '                        lower = 0\n', 1)),
+        ('the star step\'s lower halves stored over the upper',
+         sub(ME_SECTION, "                              (_index(b, 'add', at,\n"
+                         "                                      dest.half_offset(group.elements), 'a'),\n",
+             '                              (at,\n', 1)),
+        ('the upper halves stored as the values',
+         sub(ME_SECTION, '                    writes = [(at, [_as_float(b, u) for u, _ in split]),\n',
+             '                    writes = [(at, values),\n', 1)),
+        ('the lower halves\' padding left unwritten',
+         sub(ME_SECTION, '            if buffer.halves:\n'
+                         '                b.store(target, zero, _index(\n',
+             '            if False:\n'
+             '                b.store(target, zero, _index(\n', 1)),
+        ('A\'s halves taken where they cost the group',
+         sub(ME_GROUP, '                   for n in range(most, -1, -1)\n',
+             '                   for n in [most]\n', 1)),
+        ('B\'s halves preferred to A\'s',
+         sub(ME_GROUP, '                   for n in range(most, -1, -1)\n'
+                       '                   for t in tilings if t.doubled == doubled]\n',
+             '                   for t in tilings if t.doubled == doubled\n'
+             '                   for n in range(most, -1, -1)]\n', 1)),
+        ('the room without the lower halves',
+         sub(ME_GROUP, '    per_element = sum(b.room for b in section.inputs\n',
+             '    per_element = sum(b.per_element for b in section.inputs\n', 1)),
+        ('the lower halves an element\'s box past the upper',
+         sub(ME_GROUP, '        return elements * self.per_element\n',
+             '        return self.per_element\n', 1)),
+        ('A in halves where the tiling writes it',
+         sub(ME_GROUP, "             and writers.get(id(b.tensor)) == {'mix'}]\n",
+             '             and bool(writers.get(id(b.tensor)))]\n', 1)),
+        ('the buffers in halves the least read first',
+         sub(ME_GROUP, '    found = [(-reads[id(b.tensor)], n, b)\n',
+             '    found = [(reads[id(b.tensor)], n, b)\n', 1)),
+        ('the section lowered without the plan\'s halves',
+         sub(GEN, '          halves=element_group.halves(planned))\n',
+             '          halves=0)\n', 1)),
+        # The layout's switch for them (`HALVES`), off by default.
+        ('A\'s halves on by default',
+         sub(ME_GROUP, 'HALVES = False\n', 'HALVES = True\n', 1)),
+        ('A\'s halves taken with the switch off',
+         sub(ME_GROUP, '        most = len(halvable(tilings[0])) if HALVES else 0\n',
+             '        most = len(halvable(tilings[0]))\n', 1)),
     ]),
     # The consolidation of the engines layer (`pir/engines.py`).  Matrix
     # transfers: ldmatrix and stmatrix as transfer engines (`Op.MATRIX_LOAD`,

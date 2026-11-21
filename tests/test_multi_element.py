@@ -26,6 +26,7 @@ import dataclasses
 import importlib.util
 import io
 import json
+import math
 import re
 import types
 import warnings
@@ -478,8 +479,10 @@ def test_the_star_step_beside_the_tiling_is_block_wide(arch, precision,
     27 star numbers read once, the group operand 16 bytes of a column at a
     time and the three directions in one pass.  The group operand's pitch
     an odd number of 16 bytes; the consumer's buffers as the tiling has
-    them, written 16 bytes at a time where their pitch allows (F32's 44),
-    an element at a time where it does not (F64's 35, unpitched)."""
+    them, written 16 bytes at a time where their pitch allows (F32's 44) --
+    both TF32 halves of each value where the tiling reads them so
+    (`Buffer.halves`) -- an element at a time where it does not (F64's 35,
+    unpitched)."""
     context = _context(arch, precision, multi_element='force')
     group = eg.plan(_descrs('volume', 6, precision), context)
     section = group.section
@@ -504,7 +507,8 @@ def test_the_star_step_beside_the_tiling_is_block_wide(arch, precision,
     gi = re.findall(rf'= \*\({vec}\*\)&v\d+_gI\[', kernel)
     assert len(gi) == 9
     stores = re.findall(rf'\*\({vec}\*\)&v\d+_g_tmp\d\[[^]]*\] = ', kernel)
-    assert len(stores) == (3 if precision == 's' else 0)
+    assert len(stores) == (3 + eg.halves(section) if precision == 's'
+                           else 0)
     star = re.findall(r'= v\d+_gstar\d\[v\d+_a\];', kernel)
     assert len(star) == 27
 
@@ -546,16 +550,24 @@ def test_a_product_reads_its_window_of_the_operator(precision, depth, k, regs):
         == {(1, depth, 56, k, regs)}
 
 
-@pytest.mark.parametrize('order,arch,elements,split', [
-    (6, 'sm_90', 16, True), (6, 'sm_120', 8, True), (4, 'sm_120', 16, True)])
+@pytest.mark.parametrize('order,arch,elements,switch,split,halves', [
+    (6, 'sm_90', 16, False, True, 0), (6, 'sm_120', 8, False, True, 0),
+    (4, 'sm_120', 16, False, True, 0), (6, 'sm_90', 16, True, True, 3),
+    (6, 'sm_120', 8, True, False, 2), (4, 'sm_120', 16, True, True, 3)])
 def test_b_comes_split_where_it_costs_no_group_size(order, arch, elements,
-                                                    split):
+                                                    switch, split, halves,
+                                                    monkeypatch):
     """The halves take twice B's room: the fill rule takes them at the
-    largest group that fits either way, and only where they fit there."""
+    largest group that fits either way, and only where they fit there --
+    after A's (`Buffer.halves`) where the layout's switch takes those
+    (`HALVES`), which spare the walk more splits: on sm_120 at o6 two of
+    A's buffers then take the room B's halves would."""
+    monkeypatch.setattr(eg, 'HALVES', switch)
     section = eg.classify(_volume(order, 's'))[0]
     group = eg.fill(section, _context(arch))[0]
     assert group.elements == elements
     assert eg.split(group.section) is split
+    assert eg.halves(group.section) == halves
 
 
 def test_an_operator_too_large_for_a_block_is_refused():
@@ -1696,7 +1708,8 @@ def _walks(shape='volume', order=6, precision='s', arch='sm_90'):
     ('sm_90', 'd', 'm16n8k4.row.col.f64.f64.f64.f64', 1),
     ('sm_80', 'd', 'm8n8k4.row.col.f64.f64.f64.f64', 1)])
 def test_an_operator_step_is_tiled_on_the_matrix_engine(arch, precision,
-                                                        instruction, terms):
+                                                        instruction, terms,
+                                                        monkeypatch):
     """The volume's three operator products one product over K, walked a
     kept tile of B at a time (`element_group.TileUnits`): the walk's body
     a product each, the MMAs of every M tile it takes together and every
@@ -1711,6 +1724,25 @@ def test_an_operator_step_is_tiled_on_the_matrix_engine(arch, precision,
         # split, from the stages' copy, one split each.
         assert kernel.count('tensorforge::splitFloatTF32(') == len(
             step.products) * (1 + units.group * 4)
+        # With A in TF32 halves (`HALVES`, `Buffer.halves`), A comes split
+        # from the star step, which splits each value it writes once --
+        # four rows of a column a pass, each direction whose buffer holds
+        # the halves, all three here: the walk splits nothing.
+        _halves_on(monkeypatch)
+        section = eg.plan(_volume(6, precision), _context(
+            arch, precision, multi_element='force')).section
+        halved = {b.tensor.alias for b in section.intermediates if b.halves}
+        held = [p for p in step.products
+                if p.second.tensor.alias in halved]
+        assert eg.split(section) and len(held) == len(step.products)
+        split = _kernel(arch=arch, precision=precision,
+                        multi_element='force')
+        assert split.count('tensorforge::splitFloatTF32(') == len(
+            step.products) + 4 * len(held)
+        lines = split.splitlines()
+        first = min(i for i, line in enumerate(lines)
+                    if 'tensorforge::ldmatrixX4(' in line)
+        assert not any('splitFloatTF32(' in line for line in lines[first:])
 
 
 @pytest.mark.parametrize('order,precision,kept,tiles', [
@@ -1852,6 +1884,7 @@ def test_a_grid_aligned_to_the_tiles_computes_on_the_oracle(shape,
         got, _ = kernel.run({'multi_element': 'force'})
     want = kernel.expected()
     assert written and written <= stored, sorted(written - stored)
+    assert all(math.isfinite(got[key]) for key in want)
     scale = max(abs(v) for v in want.values())
     assert max(abs(got[key] - want[key]) for key in want) <= 1e-6 * scale
 
@@ -1863,12 +1896,13 @@ def test_a_grid_aligned_to_the_tiles_computes_on_the_oracle(shape,
 def test_f32_a_fragments_come_by_ldmatrix(shape, precision, pitched,
                                           ldmatrix):
     """In F32 a matrix step reads A by ldmatrix, a load of four 8x8 matrices
-    a warp -- in the walk's body, once for each M tile it takes together --
-    so the buffers it reads have a pitch: rows of 16 bytes, four floats
-    more than a multiple of eight, long enough for every padded step of K;
-    F64 reads A lane by lane.  The star step's group operand has one as
-    well (`mix`), which it reads 16 bytes at a time: every pitch an odd
-    number of 16 bytes."""
+    a warp -- in the walk's body, once for each M tile it takes together,
+    twice where A's buffer holds its TF32 halves (`Buffer.halves`), once
+    each half -- so the buffers it reads have a pitch: rows of 16 bytes,
+    four floats more than a multiple of eight, long enough for every
+    padded step of K; F64 reads A lane by lane.  The star step's group
+    operand has one as well (`mix`), which it reads 16 bytes at a time:
+    every pitch an odd number of 16 bytes."""
     section = eg.classify(_descrs(shape, 6, precision))[0]
     group = eg.fill(section, _context('sm_90', precision))[0]
     got = {b.tensor.alias: b.pitch for b in group.section.inputs
@@ -1878,8 +1912,11 @@ def test_f32_a_fragments_come_by_ldmatrix(shape, precision, pitched,
     assert all(pitch * size % 32 == 16 for pitch in got.values())
     kernel = _kernel(precision=precision, shape=shape,
                      multi_element='force')
-    count = sum(len(step.products) * units.group
-                for step, units in _walks(shape, precision=precision))
+    halved = {b.tensor.alias for b in group.section.intermediates
+              if b.halves}
+    count = sum(units.group * (1 + (p.second.tensor.alias in halved))
+                for step, units in _walks(shape, precision=precision)
+                for p in step.products)
     assert kernel.count('tensorforge::ldmatrixX4(') == (
         count if ldmatrix else 0)
 
@@ -1912,20 +1949,25 @@ def test_the_barrier_placement_sees_the_ldmatrix_reads():
                if line.strip() == '__syncthreads();')
 
 
-def test_ldmatrix_is_a_declared_read_of_its_buffer():
+@pytest.mark.parametrize('halves', [False, True],
+                         ids=['split-at-read', 'halves'])
+def test_ldmatrix_is_a_declared_read_of_its_buffer(halves, monkeypatch):
     """Every pass orders ldmatrix by what it says it reads: each load of
     four matrices (`Op.MATRIX_LOAD`) is a read of the buffer its lanes
     name, in shared memory, and no pure function a pass may move or merge;
     and its fragments are where the instruction that reads them takes A
-    (`engines.matrix_transfer_bits`, `nvidia.a_fragment_bits`)."""
+    (`engines.matrix_transfer_bits`, `nvidia.a_fragment_bits`) -- both
+    halves' loads of each A tile where its buffers hold them (`HALVES`)."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     from tensorforge.backend.pir.core import Effect, MemSpace, Op, walk_stmts
+    monkeypatch.setattr(eg, 'HALVES', halves)
     gen = _generate(_volume(6, 's'), _context(multi_element='force'))
     loads = [st for section in gen.built._sections
              for st in walk_stmts(section.body)
              if st.op == Op.MATRIX_LOAD and st.attr('engine') == 'ldmatrix']
     (step, units), = _walks()
-    assert len(loads) == len(step.products) * units.group
+    assert eg.halves(gen.built._element_group.section) == 3 * halves
+    assert len(loads) == (1 + halves) * len(step.products) * units.group
     atom = next(a for a in nvidia.INSTRS if (a.m, a.n, a.k) == (16, 8, 8)
                 and a.mode == nvidia.MMAMode.TF32)
     for st in loads:
@@ -1934,6 +1976,157 @@ def test_ldmatrix_is_a_declared_read_of_its_buffer():
             (Effect.READ, MemSpace.SHARED)]
         assert st.attr('count') == 4
         assert st.attr('layout') == nvidia.a_fragment_bits(atom)
+
+
+# -- A in TF32 halves (`Buffer.halves`) -------------------------------------- #
+#
+# Off by default (`element_group.HALVES`): the tests of the halves turn the
+# layout's switch on.
+
+@pytest.mark.parametrize('arch', ['sm_90', 'sm_120'])
+def test_a_is_split_at_its_read_by_default(arch):
+    """The layout's switch for A's halves is off (`HALVES`): the plans
+    split A where the tiling reads it, as before the halves -- though the
+    rule still names the buffers that could hold them (`halvable`)."""
+    assert eg.HALVES is False
+    group = eg.plan(_volume(6, 's'), _context(arch, multi_element='force'))
+    assert eg.halves(group.section) == 0
+    assert len(eg.halvable(group.section)) == 3
+
+
+@pytest.mark.parametrize('shape,precision,arch,options,halved', [
+    ('volume', 's', 'sm_90', {}, ['_tmp0', '_tmp2', '_tmp4']),
+    ('volume', 's', 'sm_120', {}, ['_tmp2', '_tmp4']),
+    ('localFlux', 's', 'sm_90', {}, ['_tmp0']),
+    ('chain', 's', 'sm_90', {}, []), ('volume', 'd', 'sm_90', {}, []),
+    ('volume', 's', 'sm_90', {'tensor_cores': False}, [])],
+    ids=['volume', 'volume-sm120', 'localFlux', 'chain', 'volume-f64',
+         'volume-fma'])
+def test_a_comes_in_halves_from_the_star_step(shape, precision, arch,
+                                              options, halved, monkeypatch):
+    """A in its TF32 halves (`Buffer.halves`) where the star step (`mix`)
+    writes it and the 3xTF32 tiling alone reads it, as A: the volume's
+    three intermediates where the group has the room for all three -- on
+    sm_120's 99 kB two, those whose readers keep the most tiles of B --
+    and localFlux's first; not localFlux's second, which the tiling
+    writes, nor the chain's I, an input its copies stage, nor the chain's
+    intermediates; nothing in F64 or in the FMA forms."""
+    _halves_on(monkeypatch)
+    group = eg.plan(_descrs(shape, 6, precision), _context(
+        arch, precision, multi_element='force', **options))
+    section = group.section
+    assert [b.tensor.alias for b in section.intermediates if b.halves] \
+        == halved
+    assert eg.halves(section) == len(halved)
+    assert not any(b.halves for b in section.inputs)
+    kept = {p.second.tensor.alias: len(section.stage(
+        p.first.tensor, (p.rows, p.depth)).tiles)
+        for s in section.steps if s.lowering == 'mma_sync'
+        for p in s.products}
+    rest = [b.tensor.alias for b in eg.halvable(section) if not b.halves]
+    assert all(kept[h] >= kept[r] for h in halved for r in rest)
+
+
+def test_a_buffers_lower_halves_follow_the_groups_upper_ones(monkeypatch):
+    """A buffer of A's halves keeps the box of an element where the values'
+    would be, for the upper halves, and the lower ones in the same layout
+    after the whole group's upper ones (`half_offset`): the rows of each
+    half meet the banks as the values' did, eight rows of a fragment on
+    eight bank groups across an element's end too.  An element takes twice
+    its box (`room`), which the group's shared memory counts."""
+    _halves_on(monkeypatch)
+    context = _context('sm_90', 's')
+    section = eg.classify(_volume(6, 's'))[0]
+    group = eg.fill(section, context)[0]
+    elements = group.elements
+    held = [b for b in group.section.intermediates if b.halves]
+    assert len(held) == 3
+    for b in held:
+        assert (b.pitch, b.per_element, b.room) == (44, 9 * 44, 2 * 9 * 44)
+        assert b.half_offset(elements) == elements * 9 * 44
+        for half in (0, b.half_offset(elements)):
+            for m0 in range(0, 9 * elements - 7, 8):
+                groups = {(half + (m // 9) * b.per_element
+                           + (m % 9) * b.pitch) // 4 % 8
+                          for m in range(m0, m0 + 8)}
+                assert len(groups) == 8, (b.tensor.alias, half, m0)
+    whole = eg.lower(section, context, split=True)
+    assert eg.halves(whole) == 0
+    assert eg.shared_bytes(group.section, elements) - eg.shared_bytes(
+        whole, elements) == 4 * elements * 9 * 44 * len(held)
+
+
+@pytest.mark.parametrize('halves', [False, True],
+                         ids=['split-at-read', 'halves'])
+@pytest.mark.parametrize('order,precision,arch', [
+    (6, 's', 'sm_90'), (6, 's', 'sm_120'), (4, 's', 'sm_120'),
+    (6, 'd', 'sm_90')])
+def test_the_plans_room_is_the_kernels(order, precision, arch, halves,
+                                       monkeypatch):
+    """The shared memory the fill rule sizes the group by (`shared_bytes`)
+    is what the kernel's launch takes: every buffer at its room, both
+    halves of each that holds A's (`HALVES`)."""
+    monkeypatch.setattr(eg, 'HALVES', halves)
+    context = _context(arch, precision, multi_element='force')
+    group = eg.plan(_volume(order, precision), context)
+    kernel = _generate(_volume(order, precision), context).get_kernel()
+    launched = re.search(r'launch: [^,]*, (\d+) B shared', kernel)
+    assert int(launched.group(1)) == group.shared_bytes
+
+
+@pytest.mark.parametrize('count', [0, 1, 2, 3])
+def test_a_in_halves_costs_no_group_size(count, monkeypatch):
+    """The fill rule takes A's halves in as many buffers as fit at the
+    largest group that fits at all, and never a smaller group for them:
+    o6 F32 on sm_90, the block's room what the group of 16 takes with
+    `count` of them and B whole -- where a group of 8 would hold all three
+    and B's halves -- is a group of 16 with `count`."""
+    _halves_on(monkeypatch)
+    section = eg.classify(_volume(6, 's'))[0]
+    context = _context('sm_90', 's')
+    need = eg.shared_bytes(eg.lower(section, context, halves=count), 16)
+    assert eg.shared_bytes(eg.lower(section, context, split=True,
+                                    halves=3), 8) <= need
+    room = context.target.hw.max_local_mem_size_per_block
+    monkeypatch.setattr(eg, 'SHARED_RESERVE', room - need)
+    group, why = eg.fill(section, context)
+    assert group is not None, why
+    assert (group.elements, eg.halves(group.section),
+            eg.split(group.section)) == (16, count, False)
+
+
+def test_the_star_step_writes_both_halves_and_their_padding(monkeypatch):
+    """Where A's buffers hold its halves the star step splits each value it
+    writes as the tiling would (`splitFloatTF32`) and stores both halves,
+    16 bytes at a time: the upper where the value would be, the lower the
+    group's upper halves further on.  Each trip writes the padding of both
+    blocks zero, ahead of the barrier the tiling waits behind."""
+    _halves_on(monkeypatch)
+    options = {'multi_element': 'force', 'enable_sync_block_opt': False}
+    group = eg.plan(_volume(6, 's'), _context(**options))
+    held = [b for b in group.section.intermediates if b.halves]
+    assert len(held) == 3
+    lines = _kernel(**options).splitlines()
+    barriers = [i for i, line in enumerate(lines)
+                if line.strip() == '__syncthreads();']
+    first_read = min(i for i, line in enumerate(lines)
+                     if 'tensorforge::ldmatrixX4(' in line)
+    ahead = max(b for b in barriers if b < first_read)
+    vec = re.escape('tensorforge::VectorT<float, 4>')
+    for b in held:
+        name = re.sub(r'\W', '', b.tensor.alias)
+        offset = b.half_offset(group.elements)
+        stores = [i for i, line in enumerate(lines)
+                  if re.search(rf'\*\({vec}\*\)&v\d+_g{name}\[', line)]
+        assert len(stores) == 2 and max(stores) < first_read, name
+        zeros = _stores(lines, rf'_g{name}', zeros=True)
+        assert len(zeros) == 2 and max(zeros) < ahead, name
+        assert sum(f' + {offset})] = 0.0f;' in lines[i] for i in zeros) == 1
+        assert any(line.endswith(f' + {offset};')
+                   for line in lines[:first_read]), name
+    # B's stages split once each, the star step each value it writes.
+    assert sum('tensorforge::splitFloatTF32(' in line
+               for line in lines[:first_read]) == 3 + 4 * len(held)
 
 
 def _stores(lines, pattern, zeros=False):
@@ -2224,7 +2417,8 @@ def _host():
 
 def _oracle_errors(shape, precision, arch, options):
     """The kernel run by the host interpreter against NumPy: each output's
-    error, normwise."""
+    error, normwise -- infinite where a cell of it is no finite number,
+    which Python's `max` would pass over unless it came first."""
     host = _host()
     kernel = host.Kernel(DESCRIPTIONS[shape](6, precision), _dtype(precision),
                          arch)
@@ -2236,6 +2430,9 @@ def _oracle_errors(shape, precision, arch, options):
     for alias in {alias for alias, _ in want}:
         keys = [key for key in want if key[0] == alias]
         scale = max(abs(want[key]) for key in keys) or 1.0
+        if not all(math.isfinite(got[key]) for key in keys):
+            errors[alias] = math.inf
+            continue
         errors[alias] = max(abs(got[key] - want[key]) for key in keys) / scale
     return errors
 
@@ -2292,11 +2489,87 @@ def test_a_number_in_the_padding_reaches_no_result(monkeypatch):
         got, _ = kernel.run({'multi_element': 'force'})
     want = kernel.expected()
     assert max(abs(want[key]) for key in want) > 1e15
+    assert all(math.isfinite(got[key]) for key in want)
     for alias in {alias for alias, _ in want}:
         keys = [key for key in want if key[0] == alias]
         scale = max(abs(want[key]) for key in keys)
         error = max(abs(got[key] - want[key]) for key in keys) / scale
         assert error <= 1e-6, (alias, error)
+
+
+def _oracle_outputs(shape, precision, arch, options, order=6):
+    """The kernel run by the host interpreter, and NumPy's numbers: each
+    output cell's, by key."""
+    host = _host()
+    kernel = host.Kernel(DESCRIPTIONS[shape](order, precision),
+                         _dtype(precision), arch)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got, _ = kernel.run({'multi_element': 'force', **options})
+    return got, kernel.expected()
+
+
+def _halves_on(monkeypatch):
+    """The layout's switch for A in TF32 halves on (`element_group.HALVES`,
+    off by default): the fill rule takes them where the group has the
+    room."""
+    monkeypatch.setattr(eg, 'HALVES', True)
+
+
+def _no_halves(monkeypatch):
+    """The switch off: every plan splits A where the tiling reads it."""
+    monkeypatch.setattr(eg, 'HALVES', False)
+
+
+@pytest.mark.parametrize('shape,arch,halves', [
+    ('volume', 'sm_90', 3), ('volume', 'sm_120', 2), ('window', 'sm_90', 3),
+    ('window', 'sm_120', 2), ('assign', 'sm_90', 1),
+    ('localFlux', 'sm_90', 1)])
+def test_a_in_halves_gives_d_bit_for_bit(shape, arch, halves, monkeypatch):
+    """F32 on the host oracle: the kernel with A in its TF32 halves where
+    the plan takes them (`Buffer.halves`) gives NumPy's numbers, and every
+    output bit for bit as the kernel without them -- the star step splits
+    each value as the tiling would at its read, and the products take the
+    same halves in the same order."""
+    _halves_on(monkeypatch)
+    context = _context(arch, 's', multi_element='force')
+    assert eg.halves(eg.plan(_descrs(shape, 6, 's'), context).section) \
+        == halves
+    got, want = _oracle_outputs(shape, 's', arch, {})
+    _no_halves(monkeypatch)
+    assert eg.halves(eg.plan(_descrs(shape, 6, 's'), context).section) == 0
+    plain, _ = _oracle_outputs(shape, 's', arch, {})
+    assert all(math.isfinite(got[key]) for key in want)
+    assert [key for key in want if got[key] != plain[key]] == []
+    scale = max(abs(v) for v in want.values())
+    assert max(abs(got[key] - want[key]) for key in want) <= 1e-6 * scale
+
+
+def test_the_trip_reads_no_shared_memory_it_did_not_write(monkeypatch):
+    """Every cell of the group's shared memory a trip reads was written
+    first -- A's lower halves and the padding of both their blocks among
+    them: on the host oracle a read of a slot nothing wrote reads NaN, and
+    the volume, its three A buffers in halves, still gives NumPy's numbers,
+    every one of them finite."""
+    from tensorforge.reference import kernel_eval
+    _halves_on(monkeypatch)
+    context = _context('sm_90', 's', multi_element='force')
+    assert eg.halves(eg.plan(_volume(4, 's'), context).section) == 3
+    read = kernel_eval.Slot.read
+    unwritten = set()
+
+    def sentinel(self, base, index):
+        if (base == kernel_eval.Races.SHARED
+                and (base, int(index)) not in self.data):
+            unwritten.add(int(index))
+            return math.nan
+        return read(self, base, index)
+    monkeypatch.setattr(kernel_eval.Slot, 'read', sentinel)
+    got, want = _oracle_outputs('volume', 's', 'sm_90', {}, order=4)
+    assert not unwritten, sorted(unwritten)[:8]
+    assert all(math.isfinite(got[key]) for key in want)
+    scale = max(abs(v) for v in want.values())
+    assert max(abs(got[key] - want[key]) for key in want) <= 1e-6 * scale
 
 
 #: The oracle's seed for its fill of memory (`kernel_eval.Slot`).
@@ -2337,7 +2610,9 @@ SEED = 29
     ('sparse-star', 4, 's', LANES),
     ('sparse-star', 4, 'd', {**LANES, 'arch': 'gfx942'}),
     ('plConvertToModal', 4, 's', {**LANES, 'columns': 3}),
-    ('plConvertToModal', 6, 'd', {**LANES, 'columns': 3, 'arch': 'gfx942'})],
+    ('plConvertToModal', 6, 'd', {**LANES, 'columns': 3, 'arch': 'gfx942'}),
+    ('volume', 4, 's', {'halves': True}),
+    ('volume', 4, 's', {'arch': 'sm_120', 'halves': True})],
     ids=['volume-o4d', 'volume-o4s-dense', 'reuse-o4s', 'localFlux-o4d',
          'neighboringFlux-o4s-own-barriers', 'localFluxAll-o4d',
          'direction-o4s', 'columns-o4d', 'lanes-volume-o4d',
@@ -2354,7 +2629,8 @@ SEED = 29
          'gfx942-lanes-localFluxAll-o4s-columns', 'sparse-star-o4d',
          'gfx942-sparse-star-o4s', 'lanes-sparse-star-o4s',
          'gfx942-lanes-sparse-star-o4d', 'lanes-plConvertToModal-o4s-columns',
-         'gfx942-lanes-plConvertToModal-o6d-columns'])
+         'gfx942-lanes-plConvertToModal-o6d-columns',
+         'matrix-volume-o4s-halves', 'matrix-volume-o4s-sm120-halves'])
 def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
                                                   options, monkeypatch):
     """A group over itself and seven more elements on the host oracle: two
@@ -2365,11 +2641,15 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
     nonzeros literals or read from memory -- every element's output against
     NumPy, from the oracle's own fill of memory, the operators their
     description's numbers; and no access to shared memory that no barrier
-    orders (`kernel_eval.Races`)."""
+    orders (`kernel_eval.Races`) -- also with A in TF32 halves (`halves`,
+    the layout's switch, `HALVES`)."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     options = dict(options)
     arch = options.pop('arch', 'sm_90')
+    halves = options.pop('halves', False)
+    if halves:
+        _halves_on(monkeypatch)
     columns = options.pop('columns', None)
     if columns is not None:
         for vendor in ('nvidia', 'amd'):
@@ -2390,6 +2670,7 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
     gen = _generate(_descrs(shape, order, precision), context)
     built = gen.built._element_group
     assert built.elements == group and (built.lanes is not None) is lanes
+    assert (eg.halves(built.section) > 0) is halves
     tensors, inputs, _, after = _on_the_oracle(gen, count)
     output = next(t for t in tensors.values() if not t.is_tmp
                   and t.addressing.kind is not Addressing.NONE
@@ -2701,6 +2982,53 @@ def test_the_section_computes_on_the_gpu(shape, order, precision, options,
     result = run_case(case, target, cache_root, tensorforge_include)
     assert result.passed, (result.max_abs_err, result.max_rel_err,
                            result.detail)
+
+
+@pytest.mark.parametrize('order', [4, 6])
+def test_a_in_halves_gives_d_bit_for_bit_on_the_gpu(order, target,
+                                                    cache_root,
+                                                    tensorforge_include,
+                                                    monkeypatch):
+    """The volume in F32 built for the local GPU with A in its TF32 halves
+    where the plan takes them -- on a part of 99 kB a block all three
+    buffers at o4, two at o6 -- and without them, and run over the same
+    elements, its operators the description's numbers: every output bit
+    for bit the same."""
+    import numpy as np
+    from harness import driver_emit
+    from harness.runner import execute
+    if target.backend != 'cuda':
+        pytest.skip('the matrix tiling is NVIDIA\'s')
+
+    def build():
+        return _generate(_volume(order, 's'), _context(
+            target.arch, 's', multi_element='force'))
+    _halves_on(monkeypatch)
+    builds = [build()]
+    if not eg.halves(builds[0].built._element_group.section):
+        pytest.skip(f'{target.arch}: no room for A\'s halves at o{order}')
+    _no_halves(monkeypatch)
+    builds.append(build())
+    assert eg.halves(builds[1].built._element_group.section) == 0
+    batch = 4099
+    rng = np.random.default_rng(13)
+    inputs = {}
+    for op in driver_emit.collect_operands(builds[0]):
+        if op.is_scalar or not op.is_source:
+            continue
+        key = op.alias or op.kernel_name
+        if op.values is not None:
+            inputs[key] = np.asarray(op.values, dtype=np.float32).reshape(
+                op.shape, order='F')[None]
+            continue
+        rows = 1 if op.addressing == 'none' else batch
+        inputs[key] = rng.standard_normal((rows, *op.shape)).astype(
+            np.float32)
+    got, want = (execute(gen, target, cache_root, tensorforge_include,
+                         batch, inputs) for gen in builds)
+    assert set(got) == set(want)
+    for name in want:
+        assert np.array_equal(got[name], want[name]), name
 
 
 def _described(descrs):

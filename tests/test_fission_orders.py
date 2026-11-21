@@ -159,7 +159,10 @@ def _oracle_errors(descrs, numbers, want):
         name = ops[alias].kernel_name
         got = np.array([mem[(name, i)] for i in range(w.size)]
                        ).reshape(w.shape, order='F')
-        errors[alias] = float(np.abs(got - w).max())
+        # NaN where a cell is no number, which the callers' `max` over the
+        # outputs would pass over unless it came first: infinite instead.
+        error = float(np.abs(got - w).max())
+        errors[alias] = error if np.isfinite(error) else float('inf')
     return errors
 
 

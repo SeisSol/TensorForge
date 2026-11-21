@@ -4545,10 +4545,17 @@ class Generator:
           lanes=self._element_group.lanes is not None, engine=engine,
           streamed=element_group.streamed(planned),
           double=planned.doubled > 0, ring=planned.ring,
-          registers=planned.registers)
+          registers=planned.registers,
+          halves=element_group.halves(planned))
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
+    # The buffers the plan sized with A's TF32 halves, and no others.
+    halved = [[b.tensor.alias for b in s.intermediates if b.halves]
+              for s in (section, self._element_group.section)]
+    if halved[0] != halved[1]:
+      raise InternalError(f'a multi-element section holds A in halves in '
+                          f'{halved[0]}, its plan in {halved[1]}')
     group = dataclasses.replace(self._element_group, section=section)
     symbols = {id(t): self._scopes.get_symbol(t)
                for t in (list(section.operators) + list(section.outputs)

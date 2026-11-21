@@ -55,6 +55,10 @@ hands D to its consumer's buffer, or adds it into the output straight
 from the accumulators: a tile's rows are several elements', so each warp
 shares its element's pointer to the output with the block
 (`pointer_tables`), and a lane adds each of its cells through its row's.
+In F32 both operands can come in the TF32 halves its 3xTF32 products
+multiply, split once rather than at every read where the group has the
+room: B as staged (`Stage.split`), A as the star step writes it
+(`Buffer.halves`) where the layout's switch takes that (`HALVES`, off).
 
 The *lanes form* (`Options.multi_element_fma` `lanes`, `Lanes`) is the
 other arrangement of the FMA units: a lane an element rather than an
@@ -131,6 +135,17 @@ POINTER_BYTES = 8
 #: option is not set and this is on.  On: the layout exists for them, and is
 #: off by default itself (`Options.multi_element`).
 MATRIX = True
+
+#: The layout's switch for A in TF32 halves (`Buffer.halves`): the fill rule
+#: takes them, where the group has the room, only where this is on.  Off: on
+#: GH200 they cost the 3xTF32 tiling 12.6 % at o6 F32 and 3.8 % at o8 against
+#: the split at every read (11-21).  The walk reads A again for every N tile it
+#: keeps, so the halves read it twice as often from shared memory, the HMMAs
+#: waiting on ldmatrix where a split hid its latency, and their room shrinks
+#: L1 to 22 kB; the FP32 split they spare is cheap there.  On sm_120 they were
+#: even.  Kept for what reads A split from shared memory itself (wgmma,
+#: tcgen05) and for A held in registers across a warp's N tiles, read once.
+HALVES = False
 
 #: The targets the layout is written for: a backend, and the vendor it runs
 #: on there.  SYCL is DPC++ under SPMD on Intel, whose kernels state their
@@ -329,13 +344,24 @@ class Buffer:
     wants more than the box's rows -- the matrix tiling's ldmatrix, whose
     rows are 16 bytes, and the `mix` form, which reads a column 16 bytes at
     a time (`_pitched`); `pitch` is the distance either way.
-    The elements past the rows are padding, zero."""
+    The elements past the rows are padding, zero.
+
+    `halves`: the buffer holds each value as the two TF32 halves the 3xTF32
+    tiling multiplies, split once by the step that writes it rather than by
+    the tiling at every read (`_halved`).  The upper halves are laid out as
+    the values would be, the lower ones the same way after the whole
+    group's upper ones (`half_offset`): each half's rows of a group lie on
+    the banks as the values' would, across elements too -- a block per
+    element instead would set the next element's rows a block further
+    along, which in a fragment's eight rows over an element's end meets a
+    bank group twice."""
 
     tensor: object
     role: Role
     rows: Range
     cols: Range
     stride: int = 0
+    halves: bool = False
 
     @property
     def height(self) -> int:
@@ -347,7 +373,21 @@ class Buffer:
 
     @property
     def per_element(self) -> int:
+        """How far one element's box starts from the next's: its columns
+        over the pitch -- of the upper halves, where the buffer holds
+        `halves`."""
         return self.pitch * (self.cols[1] - self.cols[0])
+
+    @property
+    def room(self) -> int:
+        """What an element takes of the group's buffer: its box, and as
+        much again for the lower halves where the buffer holds them."""
+        return self.per_element * (2 if self.halves else 1)
+
+    def half_offset(self, elements: int) -> int:
+        """Where a cell's lower TF32 half is from its upper one, in a group
+        of `elements`: past the upper halves of the whole group."""
+        return elements * self.per_element
 
 
 @dataclass(frozen=True)
@@ -1272,6 +1312,54 @@ def _pitched(section: GroupSection) -> GroupSection:
         intermediates=tuple(map(pitched, section.intermediates)))
 
 
+def halvable(section: GroupSection) -> List[Buffer]:
+    """The buffers the 3xTF32 tiling can read A from in TF32 halves, as the
+    step that writes them splits it (`Buffer.halves`): F32 intermediates
+    that only `mix` steps write and only `mma_sync` steps read, as A, by
+    ldmatrix (pitched, `_pitched`).  An input keeps the split at its use:
+    its copies cannot split.  So do F64, the FMA forms and the lanes form,
+    which read no halves.  The buffers whose readers keep the most tiles of
+    B first: a reader reads A once an M tile and k-block it keeps a tile
+    at, and each such read is a split the halves spare."""
+    if section.dtype is not Datatype.F32:
+        return []
+    reads: Dict[int, int] = {}
+    for step in section.steps:
+        for p in step.products:
+            for sub in p.operands:
+                t = sub.tensor
+                if not t.is_tmp:
+                    continue
+                if (step.lowering != 'mma_sync' or sub is not p.second
+                        or p.first.tensor is t):
+                    reads[id(t)] = -1
+                elif reads.get(id(t), 0) >= 0:
+                    reads[id(t)] = reads.get(id(t), 0) + len(
+                        section.stage(p.first.tensor,
+                                      (p.rows, p.depth)).tiles)
+    writers: Dict[int, Set[str]] = {}
+    for step in section.steps:
+        writers.setdefault(id(step.dest), set()).add(step.lowering)
+    found = [(-reads[id(b.tensor)], n, b)
+             for n, b in enumerate(section.intermediates)
+             if b.stride and reads.get(id(b.tensor), -1) > 0
+             and writers.get(id(b.tensor)) == {'mix'}]
+    return [b for _, _, b in sorted(found, key=lambda x: x[:2])]
+
+
+def _halved(section: GroupSection, count: int) -> GroupSection:
+    """The section with A in TF32 halves in the first `count` buffers that
+    can hold it so (`halvable`): their `mix` steps write both halves of
+    every value, and the tiling reads both and splits nothing.  The halves
+    take twice the buffer's room, which `fill` weighs."""
+    chosen = {id(b.tensor) for b in halvable(section)[:count]}
+    if not chosen:
+        return section
+    return dataclasses.replace(section, intermediates=tuple(
+        dataclasses.replace(b, halves=True) if id(b.tensor) in chosen else b
+        for b in section.intermediates))
+
+
 def matrix_enabled(context) -> bool:
     """Whether operator steps are tiled on the matrix engines:
     `Options.tensor_cores` where it is set, `MATRIX` where it is not."""
@@ -1384,16 +1472,17 @@ def lower(section: GroupSection, context, matrix: bool = True,
           split: bool = False, lanes: bool = False,
           engine: Optional[str] = None, streamed: bool = False,
           double: bool = True, ring: int = 0,
-          registers: int = 0) -> GroupSection:
+          registers: int = 0, halves: int = 0) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
     B in TF32 halves where `split` asks, B streamed through a ring where
     `streamed` does, the inputs a trip ahead in a second stage where the
     options take them there (`second_stages`) and `double` does not
-    decline it.  An `fma` step reads only its operators' nonzeros
-    (`nonzero_terms`) where they carry their numbers and
-    `Options.skip_known_zeros` is on, as the per-element products do.
+    decline it, and A in TF32 halves in as many as `halves` of the
+    buffers that can hold it so (`_halved`).  An `fma` step reads only its
+    operators' nonzeros (`nonzero_terms`) where they carry their numbers
+    and `Options.skip_known_zeros` is on, as the per-element products do.
     `engine` holds F32 to mma_sync where it says so (`_lowering`).  `ring`
     slots of a ring a producer warp fills the inputs through, in place of
     the second stage, where the section takes one (`producer_refusal`).
@@ -1426,9 +1515,9 @@ def lower(section: GroupSection, context, matrix: bool = True,
                 ringed, ring=int(ring), doubled=0,
                 registers=int(registers)
                 if context.target.register_budgets() else 0)
-    return dataclasses.replace(
+    return _halved(dataclasses.replace(
         pitched, doubled=second_stages(staged, context)
-        if double and not lanes else 0)
+        if double and not lanes else 0), halves)
 
 
 def async_staging(context) -> bool:
@@ -1627,18 +1716,25 @@ def split(section: GroupSection) -> bool:
     return any(st.split for st in section.stages)
 
 
+def halves(section: GroupSection) -> int:
+    """How many of the section's buffers hold A in TF32 halves
+    (`Buffer.halves`, `_halved`)."""
+    return sum(b.halves for b in section.intermediates)
+
+
 def shared_bytes(section: GroupSection, elements: int) -> int:
     """Shared memory a group of `elements` takes: the operators as staged
     -- their stages, the rings B streams through, and the terms of the
     steps that walk them -- each element's copy of every input and
-    intermediate, its second copy of every input staged a trip ahead
+    intermediate, both halves where one holds them (`Buffer.room`), its
+    second copy of every input staged a trip ahead
     (`GroupSection.doubled`), and its entry in every pointer table."""
     size = section.dtype.size()
     operators = (sum(st.volume for st in section.stages)
                  + sum(s.terms.volume for s in section.steps
                        if s.terms is not None)
                  + ring_volume(section))
-    per_element = sum(b.per_element for b in section.inputs
+    per_element = sum(b.room for b in section.inputs
                       + section.intermediates
                       + section.inputs[:section.doubled])
     if section.ring:
@@ -2248,11 +2344,12 @@ def fill(section: GroupSection, context,
     Otherwise the size is the table's (`table_elements`) where the block
     holds it, halved while it does not -- in shared memory, in threads --
     and `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
-    target's (`lower`): the matrix tiling, its inputs in a second stage and
-    B in TF32 halves at the sizes where those fit, the second stage first;
-    where no group of the tiling fits -- its padded stages take room the
-    FMA forms do not -- the FMA forms'.  The group carries the section
-    lowered."""
+    target's (`lower`): the matrix tiling, its inputs in a second stage, A
+    in TF32 halves in as many of its buffers as fit (where `HALVES` is
+    on), and B in TF32 halves, at the sizes where those fit, in that order
+    of preference; where no group of the tiling fits -- its padded stages
+    take room the FMA forms do not -- the FMA forms'.  The group carries
+    the section lowered."""
     target = context.target
     hw = target.hw
     if (target.backend, getattr(hw, 'vendor', None)) not in TARGETS:
@@ -2309,6 +2406,21 @@ def fill(section: GroupSection, context,
                             split=split(t), engine=engine,
                             streamed=streamed(t), double=False)
                       for t in lowerings if t.doubled]
+        # Each tiling on mma_sync again with A in TF32 halves (`_halved`)
+        # where the layout's switch takes them (`HALVES`), in as many of its
+        # buffers as fit first -- the walk reads an A tile for every tile of
+        # B it keeps an M group over, so a buffer's halves spare many more
+        # splits than B's -- and at each count B's halves first; the second
+        # stage, where the options ask for it, before either.
+        if (HALVES and tiled(lowerings[0])
+                and not asynchronous(lowerings[0])):
+            most = len(halvable(lowerings[0]))
+            lowerings[:] = [
+                _halved(t, n)
+                for doubled in sorted({t.doubled for t in lowerings},
+                                      reverse=True)
+                for n in range(most, -1, -1)
+                for t in lowerings if t.doubled == doubled]
         # Ahead of all of them, the first through a producer's ring, the
         # deepest that fits first: the producer's trips run ahead of the
         # element warps' (`producer_refusal`).
@@ -2414,7 +2526,8 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
 
 __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup', 'FMA_FORMS',
-           'GroupSection', 'Kind', 'LANE_ANCHORS', 'LANE_CLASSES',
+           'GroupSection', 'HALVES', 'Kind', 'LANE_ANCHORS',
+           'LANE_CLASSES',
            'LANE_COLUMNS', 'LANE_FEATURES', 'LANE_LITERALS', 'LANE_RANGES',
            'LANE_REGISTERS', 'LANE_VALUES', 'LANE_WARPS', 'LOWERING', 'Lanes',
            'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
@@ -2423,7 +2536,8 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'TILE_COSTS', 'TILE_LATENCY', 'TILE_REGISTERS', 'TILE_SLOTS',
            'TILE_SPLIT', 'TILE_UNIT', 'Terms', 'TileUnits', 'WARPGROUP_WARPS',
            'async_staging', 'asynchronous', 'auto_takes', 'classify',
-           'engine_elements', 'fill', 'fma_form', 'kept_tiles',
+           'engine_elements', 'fill', 'fma_form', 'halvable', 'halves',
+           'kept_tiles',
            'lane_anchors', 'lane_columns', 'lane_elements', 'lane_features',
            'lane_grf', 'lane_literal_cap', 'lane_literals', 'lane_registers',
            'lane_values', 'lanes_plan', 'lower', 'matrix_enabled',
