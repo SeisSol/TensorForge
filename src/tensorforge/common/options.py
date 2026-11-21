@@ -2071,7 +2071,7 @@ declare('fission_cut',
             'experiment (fused local step, 2026-11-20).')
 
 declare('preload_by_section',
-        default=False,
+        default=True,
         parse=parse_bool,
         doc='Where a kernel is built in several sections (`Options.fission`, '
             'a block barrier of its own), stage in each section\'s prologue '
@@ -2079,8 +2079,16 @@ declare('preload_by_section',
             'whether its block streams the operators that do not fit '
             '(`Options.stream_shards`) from those alone -- rather than from '
             'every operand of the kernel, which stages in every piece the '
-            'same first operators, read there or not.  An experiment (fused '
-            'local step, 2026-11-20).')
+            'same first operators, read there or not.  On by default: a '
+            'section that stages an operand it does not read stages it as '
+            'it is stored when that section is built, and a later section '
+            'that reads it may still pack it, which is how the host then '
+            'lays it out.  SeisSol\'s elastic order-6 local step in single '
+            'precision, cut in three on gfx1150, staged its volume\'s '
+            '`kDivM` in the two derivative pieces at the 2240 cells of the '
+            'box, from buffers the volume\'s runs packing had left at 838 '
+            'to 994: a memory access fault past the end.  0 is the old '
+            'staging, for comparison.')
 
 declare('min_blocks_per_sm',
         default=1,

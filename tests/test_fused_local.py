@@ -164,11 +164,13 @@ def _launch_shared(**options):
 
 
 def test_each_piece_stages_its_own_operators():
-    """On AMD, where the operators are staged by default: every piece of
-    the kernel stages both `A` and `D` -- the first does not read `D`, the
-    second not `A` -- unless each stages what it reads."""
-    whole = _launch_shared()
-    by_section = _launch_shared(preload_by_section=True)
+    """On AMD, where the operators are staged by default: with the old
+    staging (`preload_by_section=0`) every piece of the kernel stages both
+    `A` and `D` -- the first does not read `D`, the second not `A`; by
+    default each stages what it reads, and the launch takes the larger
+    piece's shared memory rather than both operators'."""
+    whole = _launch_shared(preload_by_section=False)
+    by_section = _launch_shared()
     one = 32 * 32 * DTYPE.size()
     assert whole >= 2 * one
     assert by_section < whole
@@ -216,3 +218,79 @@ def test_staged_by_section_on_the_host_oracle():
         got = np.array([mem[(name, i)] for i in range(w.size)]
                        ).reshape(w.shape, order='F')
         assert np.abs(got - w).max() < 1e-3 * np.abs(w).max(), alias
+
+
+def _banded(n, alias, seed):
+    """An `n` by `n` operator with its numbers known and a band of them
+    nonzero: what the reading section packs (`pack_operands`)."""
+    import numpy as np
+    vals = np.zeros((n, n))
+    rng = np.random.default_rng(seed)
+    for c in range(n):
+        hi = min(n - 1, c + 5)
+        vals[c:hi + 1, c] = rng.uniform(0.5, 1.5, size=hi + 1 - c)
+    return SubTensor(Tensor([n, n], Addressing.NONE, BoundingBox([0, 0], [n, n]),
+                            alias=alias, datatype=DTYPE, data=vals))
+
+
+def _staged_twice(**options):
+    """The two-operator chain with banded operators on gfx1150, where the
+    operators are staged by default and packed where they are read, cut
+    between them: the kernel source, and the binding names of the two
+    operators."""
+    a, d = _banded(32, 'A', 1), _banded(32, 'D', 2)
+    b, c = _t(32, 9, 'B'), _t(9, 9, 'C')
+    descrs = []
+    for n, op in enumerate((a, a, d)):
+        t = SubTensor(generate_tmp_matrix(b, c))
+        descrs += [GemmDescr(trans_a=False, trans_b=False, a=b, b=c, c=t),
+                   GemmDescr(trans_a=False, trans_b=False, a=op, b=t,
+                             c=_t(32, 9, f'X{n}'), alpha=1.0, beta=0.0)]
+    gen = Generator(descrs, Context(
+        arch='gfx1150', backend='hip', fp_type=DTYPE,
+        options=Options(fission=2, fission_cut='operators',
+                        merge_variants=False, **options)))
+    gen.generate()
+    scope = gen.built._scopes.get_global_scope().values()
+    names = {s.obj.alias: s.name for s in scope
+             if getattr(s.obj, 'alias', None) in ('A', 'D')}
+    return gen, gen.get_kernel(), names, d.tensor
+
+
+def test_a_piece_stages_no_operand_it_does_not_read():
+    """The regression: staged in the piece that does not read it, `D` was
+    copied as it was stored when that piece was built -- the box -- and the
+    piece that reads it packed it after, which is how the host lays it out:
+    the copy read past the end of the packed buffer (gfx1150, SeisSol's
+    order-6 local step cut in three: a memory access fault).  By default
+    each piece stages only what it reads."""
+    gen, src, names, d = _staged_twice()
+    assert len(gen.built._sections) == 2
+    assert src.count(f'ptr_glb_{names["D"]} =') == 1
+    assert src.count(f'ptr_glb_{names["A"]} =') == 1
+    # The operator the second piece reads is packed: fewer cells stored
+    # than its box holds -- which the first piece, built before, cannot know.
+    assert d.storage_volume() < 32 * 32
+
+
+def test_the_old_staging_copies_it_in_both_pieces():
+    """The comparison, `preload_by_section=0`: both pieces stage both, and
+    the first copies `D` at the cells it held when the first piece was
+    built -- more than the packing the second piece then gave it leaves in
+    the buffer."""
+    from tensorforge.backend.instructions.builders import loader_builder
+    copies = []
+    real = loader_builder.GlobalLoaderBuilder.build
+
+    def build(self, src):
+        copies.append((getattr(src.obj, 'alias', None),
+                       int(src.obj.storage_volume())))
+        return real(self, src)
+    loader_builder.GlobalLoaderBuilder.build = build
+    try:
+        gen, src, names, d = _staged_twice(preload_by_section=False)
+    finally:
+        loader_builder.GlobalLoaderBuilder.build = real
+    assert src.count(f'ptr_glb_{names["D"]} =') == 2
+    staged = [cells for alias, cells in copies if alias == 'D']
+    assert max(staged) > d.storage_volume()
