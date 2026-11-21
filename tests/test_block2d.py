@@ -182,7 +182,7 @@ def test_a_2d_block_is_one_load_of_the_lanes_share(rows, cols, transpose,
     assert s.target == (v,)
     assert v.type == ScalarType(F32, count)
     assert v.layout == RegisterLayout((LaneAxis(16),))
-    assert s.attr('engine') == 'block' and s.attr('shape') == (rows, cols)
+    assert s.attr('engine') == 'block2d' and s.attr('shape') == (rows, cols)
     assert s.attr('pitch') == 256 and s.attr('surface') == (256, 64)
     assert s.attr('transpose') is transpose and s.attr('vnni') is False
     assert s.attr('width') == 4 * (count or 1)
@@ -195,11 +195,18 @@ def test_a_2d_block_is_one_load_of_the_lanes_share(rows, cols, transpose,
 
 
 def test_a_window_or_a_run_is_no_2d_block():
-    """The same `load` with `engine='block'`, told apart by the pitch."""
+    """A `load` of a block as well, through the other engine (`block`):
+    a 2D block is `block2d`'s, a registered transfer engine as both are."""
     from test_block_reads import _body, _shared_reads
     out = block_reads.block_reads(_body(_shared_reads))
     heads = [s for s in out if block_reads.is_block(s)]
     assert heads and not any(block_reads.is_block2d(s) for s in heads)
+    assert {s.attr('engine') for s in heads} == {'block'}
+    from tensorforge.backend.pir import engines
+    for name in ('block', 'block2d'):
+        assert engines.TRANSFER_ENGINES[name].ops == (Op.LOAD,)
+        assert engines.TRANSFER_ENGINES[name].completes is \
+            engines.Completion.SYNC
 
 
 def test_the_planners_leave_a_2d_block_alone():

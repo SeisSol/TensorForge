@@ -462,6 +462,19 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    'else; its waits are written out, and a barrier behind '
                    'the wait shows the tile to the other waves',
                    waited_on='tensorcnt', one_to_one=True),
+    TransferEngine('block', (Op.LOAD,), Completion.SYNC,
+                   'a block message read as one: a window of shared memory '
+                   'under the explicit vector (`slmLoad`), or a run of reads '
+                   'of one buffer at consecutive offsets, a sub-group block '
+                   'read under SPMD -- into a vector its reads become the '
+                   'parts of (`block_reads`)'),
+    TransferEngine('block2d', (Op.LOAD,), Completion.SYNC,
+                   "Intel's LSC 2D block read (PVC): `shape` rows x columns "
+                   'of a surface `pitch` bytes a row apart, handed to a '
+                   'sub-group of 16 a column a lane, or transposed a row a '
+                   'lane (`transpose`; `vnni` for 8- and 16-bit data, not '
+                   'built), in one message (`block_reads.load_block2d`, '
+                   '`block2d_refusal`)'),
     TransferEngine('ldmatrix', (Op.MATRIX_LOAD,), Completion.SYNC,
                    "NVIDIA's ldmatrix (sm_75 on): one, two or four 8x8 "
                    'matrices of 16-byte rows from shared memory into the '
@@ -504,6 +517,29 @@ def one_to_one(engine: Optional[str]) -> bool:
     may count (`TransferEngine.one_to_one`)."""
     found = TRANSFER_ENGINES.get(engine) if engine is not None else None
     return found is not None and found.one_to_one
+
+
+#: The ops whose `engine` names a transfer engine (`TRANSFER_ENGINES`):
+#: the others that say an engine name a matrix engine or the one a fence,
+#: a wait or a commit orders.
+TRANSFER_OPS = (Op.LOAD, Op.STORE, Op.COPY_ASYNC, Op.LOAD_ASYNC,
+                Op.MATRIX_LOAD, Op.MATRIX_STORE)
+
+
+def transfer_engine_refusal(s: Stmt) -> Optional[str]:
+    """Why the engine a transfer names is none it goes through, or None: a
+    transfer that names one names a registered engine whose ops are its own
+    (`TRANSFER_ENGINES`)."""
+    engine = s.attr('engine')
+    if engine is None or s.op not in TRANSFER_OPS:
+        return None
+    found = TRANSFER_ENGINES.get(engine)
+    if found is None:
+        return (f'{s.op} through {engine!r}, which is no transfer engine; '
+                f'there are {", ".join(sorted(TRANSFER_ENGINES))}')
+    if s.op not in found.ops:
+        return f'{s.op} through {engine}, which moves {", ".join(found.ops)}'
+    return None
 
 
 def fill_of(engine: Optional[str]) -> Optional[str]:
@@ -4037,7 +4073,7 @@ __all__ = [
     'MATRIX_TRANSFER_OPS', 'MATRIX_TRANSFER_SHAPE', 'MATRIX_TRANSFER_SM',
     'matrix_load', 'matrix_registers', 'matrix_store',
     'matrix_transfer_bits', 'matrix_transfer_refusal', 'units_of',
-    'fill_of', 'fill_refusal',
+    'fill_of', 'fill_refusal', 'TRANSFER_OPS', 'transfer_engine_refusal',
     'AMD_FAMILIES', 'RELAYOUT_FORMS', 'RELAYOUT_STRATEGIES', 'RelayoutStrategy',
     'relabel_order', 'relabeling', 'relayout', 'relayout_callee',
     'relayout_refusal',

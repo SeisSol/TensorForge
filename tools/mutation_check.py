@@ -3909,7 +3909,7 @@ GROUPS = {
                      '                         builder.alias_root(base)),),\n',
              '        accesses=(),\n', 1)),
         ('every block read a 2D block',
-         sub(BLOCKS, "    return is_block(s) and s.attr('pitch') is not None\n",
+         sub(BLOCKS, "    return s.op == Op.LOAD and s.attr('engine') == 'block2d'\n",
              '    return is_block(s)\n', 1)),
         ('the block\'s width and height swapped',
          sub(BLOCKS, "    return cols, rows, (cols if s.attr('transpose') else rows)\n",
@@ -4944,6 +4944,7 @@ GROUPS = {
     # solver, the shuffle and the oracle's reading of it.
     'pircons': ('tests/test_matrix_transfers.py tests/test_copy_fill.py '
                 'tests/test_wrap_ahead.py tests/test_relayout.py '
+                'tests/test_transfer_engines.py tests/test_block2d.py '
                 'tests/test_multi_element.py::test_ldmatrix_is_a_declared_read_of_its_buffer', [
         ('the rows of a matrix on the lane bits of its words',
          sub(ENGINES, '    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))\n',
@@ -5153,6 +5154,19 @@ GROUPS = {
         ("the oracle's gather taking one level of parentheses",
          sub(ORACLE, r"               r'\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)'," + "\n",
              r"               r'\s*([^()]*(?:\([^()]*\)[^()]*)*)\)'," + "\n", 1)),
+        # The block reads in the transfer registry (`block`, `block2d`), and
+        # every transfer held to a registered engine of its op.
+        ('a transfer through no engine accepted',
+         sub(ENGINES, '    found = TRANSFER_ENGINES.get(engine)\n    if found is None:\n',
+             '    found = TRANSFER_ENGINES.get(engine)\n    if False:\n', 1)),
+        ('a transfer through an engine of another op accepted',
+         sub(ENGINES, '    if s.op not in found.ops:\n        return f', '    if False:\n        return f', 1)),
+        ('the verifier not asking the engine of a transfer',
+         sub(PASSES, '        why = engines.transfer_engine_refusal(s)\n        if why is not None:\n            diag.append(why)\n',
+             '', 1)),
+        ('a 2D block read through the block messages',
+         sub(BLOCKS, "        attrs=(('engine', 'block2d'), ('shape', (rows, cols)),\n",
+             "        attrs=(('engine', 'block'), ('shape', (rows, cols)),\n", 1)),
     ]),
     # An `if` whose first arm writes nothing: the writer leaves that arm out,
     # its head with it, and the second is written under the negated

@@ -32,8 +32,9 @@ code they counted, and the decisions taken on those counts, stay what they
 were.  The vectors it defines are numbered apart from every value (`_ids`),
 so that nothing built after it is renumbered either.
 
-A **2D block** is the same statement over a surface: a `load` with
-`engine='block'`, the block's `shape` (rows, columns), the surface's `pitch`
+A **2D block** is the same statement over a surface, through an engine of
+its own: a `load` with `engine='block2d'` (`engines.TRANSFER_ENGINES`), the
+block's `shape` (rows, columns), the surface's `pitch`
 and extent (`surface`), and `transpose` / `vnni`.  It is one LSC 2D block
 message, which hands every lane of a sub-group of 16 one column of the
 block, or one row where it transposes; `load_block2d` builds one.  Nothing
@@ -218,7 +219,7 @@ def _single_read(x: Stmt) -> bool:
     read already, such as a 2D block, whose arguments are no index."""
     return (x.op == Op.LOAD and x.predicate is None and bool(x.target)
             and bool(x.args) and is_buffer(x.args[0])
-            and x.attr('engine') != 'block')
+            and x.attr('engine') not in BLOCK_ENGINES)
 
 
 # --------------------------------------------------------------------------- #
@@ -773,9 +774,14 @@ def block_reads(body: Tuple[Stmt, ...], *, windows: bool = True,
     return visit(body)[0]
 
 
+#: The engines of a read that serves several (`engines.TRANSFER_ENGINES`):
+#: a window's or a run's block message, and a 2D block.
+BLOCK_ENGINES = ('block', 'block2d')
+
+
 def is_block(s: Stmt) -> bool:
-    """The read of a window or a run (`block_reads`)."""
-    return s.op == Op.LOAD and s.attr('engine') == 'block'
+    """The read of a window, a run or a 2D block (`block_reads`)."""
+    return s.op == Op.LOAD and s.attr('engine') in BLOCK_ENGINES
 
 
 def is_part(s: Stmt) -> bool:
@@ -957,7 +963,7 @@ def load_block2d(builder, base: Any, x: Any, y: Any, *, rows: int,
         movable=True, effect=Effect.READ,
         accesses=(Access(Effect.READ, MemSpace.GLOBAL,
                          builder.alias_root(base)),),
-        attrs=(('engine', 'block'), ('shape', (rows, cols)),
+        attrs=(('engine', 'block2d'), ('shape', (rows, cols)),
                ('pitch', pitch), ('surface', (width, height)),
                ('transpose', bool(transpose)), ('vnni', bool(vnni)),
                ('width', count * elem.size()))))
@@ -965,9 +971,10 @@ def load_block2d(builder, base: Any, x: Any, y: Any, *, rows: int,
 
 
 def is_block2d(s: Stmt) -> bool:
-    """A 2D block read (`load_block2d`): a block read over a surface, told
-    from a run -- whose shape is two-dimensional as well -- by its pitch."""
-    return is_block(s) and s.attr('pitch') is not None
+    """A 2D block read (`load_block2d`): a block read over a surface, through
+    an engine of its own (`block2d`) -- a run's shape is two-dimensional as
+    well."""
+    return s.op == Op.LOAD and s.attr('engine') == 'block2d'
 
 
 def block2d_geometry(s: Stmt) -> Tuple[int, int, int]:

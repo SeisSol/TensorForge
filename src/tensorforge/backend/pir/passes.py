@@ -375,6 +375,11 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                     f'level; the threads that took another path never arrive '
                     f'(deadlock, not a wrong answer)')
 
+        # -- a transfer goes through an engine of its op ------------------ #
+        why = engines.transfer_engine_refusal(s)
+        if why is not None:
+            diag.append(why)
+
         # -- op-specific --------------------------------------------------- #
         if s.op == Op.IF:
             if not 1 <= len(s.regions) <= 2:
