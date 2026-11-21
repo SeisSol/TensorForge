@@ -429,31 +429,34 @@ class GroupSection:
 
     def phases(self) -> Tuple['Phase', ...]:
         """The section as its phases run (`Phase`): a phase of the scaled
-        copies of what no step writes first, where there are such; then each
-        run of steps into an output of the element -- the mixing steps and
-        the operator steps that read them -- with the scaled copies of that
-        output after it.  An output is whole when its phase ends: a later
-        phase reads it from where it was written."""
-        first, runs, run = [], [], []
-        outputs: Dict[int, int] = {}
+        copies that come after no other step's write of what they read or
+        write, first, where there are such; then each run of steps into an
+        output of the element -- the mixing steps and the operator steps
+        that read them -- with the scaled copies after it that read or add
+        to what it, or a copy after it, wrote: SeisSol's Taylor sum of an
+        order, a kernel's `Q += P` after the product into `Q`.  An output is
+        whole when its phase ends: a later phase reads it from where it was
+        written."""
+        first: List['Step'] = []
+        runs: List[List] = []
+        run: List['Step'] = []
+        # The phase that last wrote each tensor of the element: -1 the
+        # copies' own, else a run's (`runs`).
+        writer: Dict[int, int] = {}
         for step in self.steps:
             if step.kind is Kind.SCALE:
+                at = max((writer.get(id(t), -1) for t in (
+                    step.products[0].first.tensor, step.dest)), default=-1)
+                (first if at < 0 else runs[at][1]).append(step)
+                writer[id(step.dest)] = at
                 continue
             run.append(step)
             if not step.dest.is_tmp:
-                outputs[id(step.dest)] = len(runs)
+                writer[id(step.dest)] = len(runs)
                 runs.append([tuple(run), []])
                 run = []
         if run:
             runs.append([tuple(run), []])
-        for step in self.steps:
-            if step.kind is not Kind.SCALE:
-                continue
-            source = id(step.products[0].first.tensor)
-            if source in outputs:
-                runs[outputs[source]][1].append(step)
-            else:
-                first.append(step)
         phases = [Phase((), tuple(first))] if first else []
         return tuple(phases + [Phase(main, tuple(scales))
                                for main, scales in runs])

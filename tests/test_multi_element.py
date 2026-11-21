@@ -197,7 +197,9 @@ DESCRIPTIONS = {
     'localFluxAll': _seissol('gpu_localFluxAll'),
     # A chained section: the time derivative, an order a phase, each reading
     # the order before back, and the time integral its scaled sum.
-    'derivative': _seissol('gpu_derivative')}
+    'derivative': _seissol('gpu_derivative'),
+    # Another: a product into the output, then a copy added to it.
+    'plConvertToNodal': _seissol('gpu_plConvertToNodal')}
 
 
 def _descrs(shape='volume', order=6, precision='s'):
@@ -1154,6 +1156,19 @@ def test_the_derivative_is_a_chained_section(order, precision):
     assert not eg.classify(_volume())[0].chained
 
 
+def test_a_copy_added_after_a_product_runs_after_it():
+    """`Q = M P` then `Q += R` (SeisSol's `plConvertToNodal`): the copy adds
+    to what the product wrote, so it runs in the product's phase, after it
+    -- in the copies' own phase ahead of it, the product's assignment would
+    overwrite what it added."""
+    section, why = eg.classify(_descrs('plConvertToNodal', 4, 's'))
+    assert section is not None and section.chained, why
+    (phase,) = section.phases()
+    assert [s.kind for s in phase.main] == [eg.Kind.OPERATOR]
+    (copy,) = phase.scales
+    assert copy.dest is phase.main[0].dest and copy.products[0].add
+
+
 def _derivative_changed(change, order=4, precision='s'):
     """The derivative's description with one thing changed: `early`, the
     first mixing product of the second order read before the last product
@@ -1251,28 +1266,36 @@ def test_the_lanes_form_takes_the_derivative_a_phase_a_warp(arch, backend,
     assert re.search(rf'= [^;]*glb_{before}\[', kernel)
 
 
-@pytest.mark.parametrize('order,precision,arch,values', [
-    (4, 's', 'sm_90', None), (4, 'd', 'gfx942', None),
-    (4, 's', 'gfx1150', None), (6, 's', 'sm_90', None),
-    (4, 's', 'sm_90', 'memory'), (4, 'd', 'gfx942', 'table')])
-def test_the_derivative_computes_on_the_oracle(order, precision, arch,
-                                               values):
+@pytest.mark.parametrize('shape,order,precision,arch,values', [
+    ('derivative', 4, 's', 'sm_90', None),
+    ('derivative', 4, 'd', 'gfx942', None),
+    ('derivative', 4, 's', 'gfx1150', None),
+    ('derivative', 6, 's', 'sm_90', None),
+    ('derivative', 4, 's', 'sm_90', 'memory'),
+    ('derivative', 4, 'd', 'gfx942', 'table'),
+    ('plConvertToNodal', 4, 's', 'sm_90', None),
+    ('plConvertToNodal', 6, 'd', 'gfx942', None)])
+def test_the_derivative_computes_on_the_oracle(shape, order, precision,
+                                               arch, values):
     """The lanes form's derivative on the host oracle, over a group and seven
     elements more -- a trip and a partial one -- every output against NumPy:
     the time integral and each order's derivative, the rows of a buffer past
     its order's window as the oracle filled them; the operators' numbers
-    literals, read from their memory or from a table."""
+    literals, read from their memory or from a table.  And a copy added to
+    a product's output after it (`plConvertToNodal`)."""
     import numpy as np
     backend = 'cuda' if arch.startswith('sm_') else 'hip'
     options = {'multi_element_values': values} if values else {}
     context = _context(arch, precision, backend=backend, **LANES, **options)
     count = eg.lane_elements(context) + 7
-    descrs = _descrs('derivative', order, precision)
+    descrs = _descrs(shape, order, precision)
     tensors, inputs, scalars, after = _on_the_oracle(
         _generate(descrs, context), count)
-    assert sorted(scalars) == [f'power({d})' for d in range(order)]
     want = _reference_all(descrs)(inputs, scalars)
-    assert sorted(want) == sorted(['I'] + [f'dQ({d})' for d in range(order)])
+    if shape == 'derivative':
+        assert sorted(scalars) == [f'power({d})' for d in range(order)]
+        assert sorted(want) == sorted(
+            ['I'] + [f'dQ({d})' for d in range(order)])
     tolerance = 1e-12 if precision == 'd' else 1e-6
     for alias in want:
         got = after(tensors[alias])
