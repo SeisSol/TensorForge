@@ -714,11 +714,18 @@ def test_compiled_for_sm90_a_store_is_one_stsm(name, tmp_path):
 
 @pytest.mark.parametrize('name', ['load-x2-cols', 'store-x4-a'])
 def test_the_ptx_issues_what_the_body_states(name, tmp_path):
+    """One instruction of the body's count, its registers one each: a
+    helper that named one register twice would move one row twice and
+    another never, which only a GPU of sm_90 would otherwise show."""
     case = CASES[name]
     ptx = _build(case, tmp_path, 'sm_90', product='ptx').read_text()
     verb = 'ldmatrix' if case.kind == 'load' else 'stmatrix'
     assert re.findall(rf'{verb}\.sync\.aligned\.m8n8\.x(\d)\.shared\.b16',
                       ptx) == [str(case.count)]
+    (registers,) = re.findall(rf'{verb}\.sync\.aligned\.m8n8\.x\d\.shared'
+                              r'\.b16[^{]*\{([^}]*)\}', ptx)
+    names = [r.strip() for r in registers.split(',')]
+    assert len(names) == case.count == len(set(names))
     assert 'trap;' not in ptx
 
 

@@ -52,6 +52,7 @@ def test_a_buffer_states_its_request():
      "it is for a shared buffer's copies"),
     (MemSpace.SHARED, (1, -1), 'a count of transfers'),
     (MemSpace.SHARED, (1, True), 'a count of transfers'),
+    (MemSpace.SHARED, (1, 1.5), 'a count of transfers'),
     (MemSpace.SHARED, (1,), '(stages, distance)'),
 ])
 def test_a_request_wrap_does_not_build_is_refused(space, ahead, why):

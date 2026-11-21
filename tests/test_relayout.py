@@ -283,6 +283,23 @@ def test_a_gap_that_moves_elements_between_lanes_is_no_relabel():
     assert engines.relabel_order(a, a) == (0, 1, 2, 3)
 
 
+def test_a_gap_of_lanes_alone_is_no_relabel():
+    """Two lane bits of A's rows swapped: every element in the register it
+    was in, and in another lane -- an exchange between lanes, however equal
+    the registers; renaming the rows (`relabeling`) closes it."""
+    from tensorforge.backend.instructions.compute.bitlayout import (BitLayout,
+                                                                    Place)
+    a = nvidia.a_fragment_bits(_atom(16, 8, 8, nvidia.MMAMode.TF32))
+    rows = list(a.axes[0])
+    i, j = [k for k, bit in enumerate(rows) if bit.place is Place.LANE][:2]
+    rows[i], rows[j] = rows[j], rows[i]
+    swapped = BitLayout((tuple(rows),) + tuple(a.axes[1:]))
+    assert engines.relabel_order(a, swapped) is None
+    relabel, order = engines.relabeling(a, swapped)
+    assert order == (0, 1, 2, 3)
+    assert [relabel[0](1 << i), relabel[0](1 << j)] == [1 << j, 1 << i]
+
+
 def _relabel_body():
     b = IRBuilder(fptype=F64)
     regs = [b.declare(ScalarType(F64), hint='c') for _ in range(4)]
