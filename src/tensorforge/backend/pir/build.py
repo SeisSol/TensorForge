@@ -2949,11 +2949,18 @@ class IRBuilder:
             # body it sits in.
             if extern is None:
                 raise IRError('decl_expr needs `extern`; see below')
+            # Where the caller states the text reads memory -- a flag word,
+            # read out of the array the launch is handed -- that is kept
+            # beside the statement, which stays pure (nothing this kernel
+            # writes), for what orders the launch against the grid before it
+            # (`pir.griddep`).
+            stated = ((('text_reads', space),)
+                      if space is not None and kind & Effect.READ else ())
             self._emit_op(Op.RAWEXPR, (v,), tuple(args), pure=True,
                           movable=True, effect=Effect.NONE, accesses=(),
                           text=text,
                           attrs=(('decl', decl), ('extern', extern),
-                                 ('escapes', True)) + tuple(attrs))
+                                 ('escapes', True)) + tuple(attrs) + stated)
             return v
         if extern is None:
             raise IRError(

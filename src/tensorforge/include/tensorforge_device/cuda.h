@@ -5,6 +5,7 @@
 #define SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_CUDA_H_
 
 #include <type_traits>
+#include <utility>
 
 #include "base.h"
 
@@ -672,6 +673,45 @@ __device__ __forceinline__ void fenceProxyAsync() {
   asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 #elif defined(__CUDA_ARCH__)
   __trap();
+#endif
+}
+
+/// Programmatic Dependent Launch (`Options.programmatic_launch`): wait until
+/// the grid this one was launched as the programmatic dependent of has
+/// completed and its memory is visible (`griddepcontrol.wait`, PTX ISA 7.8,
+/// sm_90).  Returns at once where the launch named no such dependency, and is
+/// nothing below sm_90, where no launch can name one.
+__device__ __forceinline__ void gridDependencyWait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+
+/// The launch of `kernel` as the programmatic dependent of the work ahead of
+/// it on `stream` (`cudaLaunchAttributeProgrammaticStreamSerialization`): its
+/// blocks may be scheduled as the blocks of the grid before exit, and every
+/// thread waits for that grid in `gridDependencyWait`.  A stream capture keeps
+/// the dependency as a programmatic edge of the graph.  Without the attribute
+/// in the runtime, the ordinary launch.
+template <typename... Params, typename... Args>
+inline cudaError_t launchProgrammatic(void (*kernel)(Params...), dim3 grid,
+                                      dim3 block, std::size_t shared,
+                                      cudaStream_t stream, Args &&...args) {
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12000
+  cudaLaunchConfig_t config = {};
+  config.gridDim = grid;
+  config.blockDim = block;
+  config.dynamicSmemBytes = shared;
+  config.stream = stream;
+  cudaLaunchAttribute attribute[1];
+  attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attribute[0].val.programmaticStreamSerializationAllowed = 1;
+  config.attrs = attribute;
+  config.numAttrs = 1;
+  return cudaLaunchKernelEx(&config, kernel, std::forward<Args>(args)...);
+#else
+  kernel<<<grid, block, shared, stream>>>(std::forward<Args>(args)...);
+  return cudaGetLastError();
 #endif
 }
 

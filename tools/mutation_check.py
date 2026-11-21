@@ -84,6 +84,9 @@ ROWS = Path('src/tensorforge/backend/pir/rows.py')
 STACKING = Path('src/tensorforge/generators/stacking.py')
 ME_SECTION = Path('src/tensorforge/backend/instructions/compute/multi_element.py')
 ME_GROUP = Path('src/tensorforge/generators/element_group.py')
+GRIDDEP = Path('src/tensorforge/backend/pir/griddep.py')
+CUDA_LEXIC = Path('src/tensorforge/common/vm/lexic/cuda_lexic.py')
+CUDA_H = Path('src/tensorforge/include/tensorforge_device/cuda.h')
 BATCHLOOP = Path('src/tensorforge/backend/instructions/batch_loop.py')
 TUNING = Path('src/tensorforge/generators/tuning.py')
 BOUND = Path('src/tensorforge/analysis/pipeline.py')
@@ -4925,6 +4928,68 @@ GROUPS = {
         ('an assigning step\'s cells added into the output',
          sub(ME_SECTION, '                    atomic=not step.assigns)\n',
              '                    atomic=True)\n', 1)),
+    ]),
+    # Programmatic Dependent Launch (`Options.programmatic_launch`): the wait
+    # for the grid launched ahead, where it stands (`pir.griddep`), the
+    # launch, and the targets and launches it is for.
+    'pdl': ('tests/test_programmatic_launch.py', [
+        ('the wait behind the first access it is for',
+         sub(GRIDDEP, '            return body[:i] + (engines.grid_wait(),) + body[i:], True\n',
+             '            return body[:i + 1] + (engines.grid_wait(),) + body[i + 1:], True\n', 1)),
+        ('an operand the kernel writes read ahead of the wait',
+         sub(GRIDDEP, '    if id(tensor) in writes:\n        return False\n', '', 1)),
+        ('every operand read ahead of the wait',
+         sub(GRIDDEP, "    return bool(getattr(tensor, 'time_invariant', False))\n",
+             '    return True\n', 1)),
+        ('the caller\'s statement of an invariant operand ignored',
+         sub(GRIDDEP, "    return bool(getattr(tensor, 'time_invariant', False))\n",
+             '    return False\n', 1)),
+        ('opaque text read as touching nothing',
+         sub(GRIDDEP, '    if collect_effect((s,)) & Effect.UNKNOWN:\n        return True\n', '', 1)),
+        ('an access of no operand read as free',
+         sub(GRIDDEP, '        if not tensors or not all(free(t, writes) for t in tensors):\n',
+             '        if tensors and not all(free(t, writes) for t in tensors):\n', 1)),
+        ('an access in an unknown space read as free',
+         sub(GRIDDEP, '_SPACES = (MemSpace.GLOBAL, MemSpace.UNKNOWN)\n',
+             '_SPACES = (MemSpace.GLOBAL,)\n', 1)),
+        ('shared memory read as another kernel\'s',
+         sub(GRIDDEP, '        if a.space not in _SPACES:\n            continue\n', '', 1)),
+        ('the wait written as nothing on CUDA',
+         sub(ENGINES, "    return Lowered(('tensorforge::gridDependencyWait();',))\n",
+             '    return Lowered()\n', 1)),
+        ('the oracle not reading the wait',
+         sub(ORACLE, "    r'|tensorforge::gridDependencyWait'\n", '', 1)),
+        ('no wait placed',
+         sub(GEN, '    if not self._programmatic():\n      return\n    from tensorforge.backend.pir import griddep\n',
+             '    return\n    from tensorforge.backend.pir import griddep\n', 1)),
+        ('the ordinary launch for a programmatic kernel',
+         sub(GEN, '      if self._programmatic():\n        call_site = lexic.get_programmatic_launch_code(\n',
+             '      if False:\n        call_site = lexic.get_programmatic_launch_code(\n', 1)),
+        ('a programmatic launch below sm_90',
+         sub(GEN, '    if nvidia.sm_of(self._context) < 90:\n      return False\n    return not self._launch.cooperative\n',
+             '    return not self._launch.cooperative\n', 1)),
+        ('a programmatic launch off CUDA',
+         sub(GEN, "    if (target.backend != 'cuda'\n        or getattr(target.hw, 'vendor', None) != 'nvidia'):\n      return False\n",
+             '', 1)),
+        ('a cooperative kernel launched programmatically',
+         sub(GEN, '    return not self._launch.cooperative\n', '    return True\n', 1)),
+        ('the launch spelled without its function',
+         sub(CUDA_LEXIC, '    return (f"tensorforge::launchProgrammatic({func_name}, {grid}, {block}, "\n',
+             '    return (f"{func_name}<<<{grid}, {block}, "\n', 1)),
+        ('the wait compiled out on sm_90',
+         sub(CUDA_H, '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n  asm volatile("griddepcontrol.wait;"',
+             '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000\n  asm volatile("griddepcontrol.wait;"', 1)),
+        ('a flag word read ahead of the wait',
+         sub(GRIDDEP, "    if any(x.attr('text_reads') in _SPACES for x in walk_stmts((s,))):\n        return True\n",
+             '', 1)),
+        ('the read a text states left unrecorded',
+         sub(BUILD, "            stated = ((('text_reads', space),)\n"
+                    "                      if space is not None and kind & Effect.READ else ())\n",
+             '            stated = ()\n', 1)),
+        ('the runtime\'s launch helper launching plainly',
+         sub(CUDA_H, '  return cudaLaunchKernelEx(&config, kernel, std::forward<Args>(args)...);\n',
+             '  kernel<<<grid, block, shared, stream>>>(std::forward<Args>(args)...);\n'
+             '  return cudaGetLastError();\n', 1)),
     ]),
 }
 

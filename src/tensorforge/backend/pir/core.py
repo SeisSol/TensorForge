@@ -1055,6 +1055,7 @@ class Op:
     FENCE = 'fence'                 # order the schedule, memory, or both
     WAIT_COUNTER = 'wait.counter'   # wait on a hardware completion counter
     SET_PRIORITY = 'set.priority'   # the wave's issue priority from here on
+    GRID_WAIT = 'grid.wait'         # wait for the grid launched ahead (PDL)
     # Close what an asynchronous engine issued since its last commit into one
     # group, which the engine's own completion counts: `wgmma.commit_group`,
     # and tcgen05's commit onto an mbarrier.

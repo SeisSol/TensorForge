@@ -71,6 +71,14 @@ class CudaLexic(Lexic):
     else:
       return f"{func_name}<<<{grid},{block},{shmem},{stream}>>>({func_params})"
 
+  def get_programmatic_launch_code(self, func_name, grid, block, stream,
+                                   func_params, shmem):
+    """The launch as the programmatic dependent of the work ahead of it on
+    the stream (`Options.programmatic_launch`; `tensorforge::
+    launchProgrammatic` in `cuda.h`)."""
+    return (f"tensorforge::launchProgrammatic({func_name}, {grid}, {block}, "
+            f"{shmem}, {stream}, {func_params})")
+
   def declare_shared_memory(self, name, precision, size=None):
     return f'auto* {name} = reinterpret_cast<{precision}*>({GeneralLexicon.TOTAL_SHR_MEM}Ptr)'
 

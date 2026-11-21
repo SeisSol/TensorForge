@@ -1516,12 +1516,46 @@ class Generator:
     self._settle_module_operands()
     self._launch = self._make_launch_config()
     self._attach_small()
+    self._place_grid_wait()
     self._generate_kernel()
     self._append_small_kernel()
     self._generate_launcher()
     self._generate_header()
 
     self._resolve_identity(pinned)
+
+  def _programmatic(self) -> bool:
+    """Whether the kernel is launched as the programmatic dependent of the
+    work ahead of it on the stream (`Options.programmatic_launch`): asked for,
+    on CUDA, sm_90 and newer, and not launched cooperatively -- a grid barrier
+    keeps the cooperative launch."""
+    if not getattr(self._context.get_user_options(), 'programmatic_launch',
+                   False):
+      return False
+    target = self._context.target
+    if (target.backend != 'cuda'
+        or getattr(target.hw, 'vendor', None) != 'nvidia'):
+      return False
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    if nvidia.sm_of(self._context) < 90:
+      return False
+    return not self._launch.cooperative
+
+  def _place_grid_wait(self) -> None:
+    """Under a programmatic launch (`_programmatic`): the wait for the grid
+    launched ahead, in the first section whose body touches anything an
+    earlier kernel may write, ahead of the statement that does
+    (`pir.griddep`).  Behind every pass, and the sections run one after the
+    other, so one wait covers the kernel."""
+    if not self._programmatic():
+      return
+    from tensorforge.backend.pir import griddep
+    writes = griddep.written(section.body for section in self._sections)
+    for section in self._sections:
+      body, placed = griddep.place_wait(section.body, writes)
+      if placed:
+        section.body = body
+        return
 
   def _verify_section(self, stream, index: int) -> None:
     """Structural check over one section, immediately before emitting it.
@@ -3340,13 +3374,19 @@ class Generator:
 
       args = self._generate_kernel_base_args(writer)
       args = ', '.join(args)
-      call_site = lexic.get_launch_code(func_name=kernel_name,
-                                        grid='grid',
-                                        block='block',
-                                        stream='stream',
-                                        func_params=args,
-                                        shmem='config.sharedMemBytes',
-                                        coop=coop)
+      if self._programmatic():
+        call_site = lexic.get_programmatic_launch_code(
+            func_name=kernel_name, grid='grid', block='block',
+            stream='stream', func_params=args,
+            shmem='config.sharedMemBytes')
+      else:
+        call_site = lexic.get_launch_code(func_name=kernel_name,
+                                          grid='grid',
+                                          block='block',
+                                          stream='stream',
+                                          func_params=args,
+                                          shmem='config.sharedMemBytes',
+                                          coop=coop)
       writer(f'{call_site};')
       writer('CHECK_ERR;')
     self._launcher = writer.get_src()

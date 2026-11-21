@@ -156,3 +156,15 @@ def test_what_the_caller_asked_stands_in_the_small_kernel(monkeypatch):
     gen, _ = _dispatching(monkeypatch, enable_wrap_loads=True)
     small = gen.built._small._context.get_user_options()
     assert small.enable_wrap_loads and not small.enable_move_loads
+
+
+def test_a_programmatic_launch_launches_both_kernels_so(monkeypatch):
+    """`Options.programmatic_launch` is the caller's, and the small kernel is
+    built from the caller's options: each kernel waits for the grid ahead of
+    it, and each launcher launches its own kernel as that grid's dependent."""
+    gen, _ = _dispatching(monkeypatch, programmatic_launch=True)
+    assert gen.built._small is not None
+    kernel, launcher = gen.get_kernel(), gen.get_launcher()
+    assert kernel.count('tensorforge::gridDependencyWait();') == 2
+    assert launcher.count('tensorforge::launchProgrammatic(') == 2
+    assert '<<<' not in launcher

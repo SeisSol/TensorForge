@@ -1889,6 +1889,37 @@ declare('resident_grid',
             'the elements are visited in, which on a two-stack GPU decides '
             'whether looping costs anything at all.')
 
+declare('programmatic_launch',
+        default=False,
+        parse=parse_bool,
+        env='TF_PROGRAMMATIC_LAUNCH',
+        doc='Launch the kernel as the programmatic dependent of the work ahead '
+            'of it on the stream (Programmatic Dependent Launch, CUDA, sm_90 '
+            'and newer): `cudaLaunchKernelEx` with '
+            '`cudaLaunchAttributeProgrammaticStreamSerialization`, and in the '
+            'kernel `griddepcontrol.wait` ahead of the first access of '
+            'anything an earlier kernel may write (`pir.griddep`).  Its blocks '
+            'start as the blocks of the grid before exit, and what they do '
+            'ahead of the wait -- the launch, the address arithmetic, the '
+            'operators staged into shared memory -- overlaps that grid\'s '
+            'tail.  Ahead of the wait a kernel reads only what no kernel of '
+            'the run writes: the batch-constant operators and the operands '
+            'the caller states unchanged over the run (yateto\'s `temporal: '
+            'invariant`); without such a statement the wait comes at the '
+            'kernel\'s entry, after the arithmetic that touches no memory.  No '
+            'explicit trigger: a grid\'s dependents are launched as its blocks '
+            'exit, which kept every measured chain at least as fast as plain '
+            'launches, where a trigger at entry did not.\n'
+            'Measured on SeisSol\'s chain of 17 launches (volume, four local '
+            'fluxes, four neighbor fluxes in three slices each): 5 to 16 % '
+            'faster at 2048 to 10000 elements a launch, 1 to 3 % at 30000, '
+            'below 1 % from 100000; on GH200 a plain launch leaves 1.0 to 1.8 '
+            'us between two kernels, on GB200 0.3 us.  It composes with CUDA '
+            'graphs, which keep the dependency as a programmatic edge.  Off '
+            'by default: SeisSol has to launch with it, and a target below '
+            'sm_90, a backend other than CUDA, and a kernel launched '
+            'cooperatively (a grid barrier) are built as without it.')
+
 declare('batch_parts',
         rule=lambda target: 2 if target.sycl else 1,
         parse=parse_int,

@@ -1707,6 +1707,17 @@ def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
     return Lowered((text,))
 
 
+def _lower_grid_wait(s: Stmt, env: Spelling) -> Lowered:
+    """The wait for the grid this one was launched as the programmatic
+    dependent of (`griddepcontrol.wait`, sm_90; `tensorforge::
+    gridDependencyWait`, which is nothing below sm_90), on CUDA; nothing
+    elsewhere -- no other target launches so (`Options.programmatic_launch`,
+    `pir.griddep`)."""
+    if env.family not in ('cuda', ''):
+        return Lowered()
+    return Lowered(('tensorforge::gridDependencyWait();',))
+
+
 # --------------------------------------------------------------------------- #
 # Matrix engines
 # --------------------------------------------------------------------------- #
@@ -2814,6 +2825,15 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            results=(), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_set_priority}),
+    # Wait for the grid launched ahead of this one (Programmatic Dependent
+    # Launch): behind it, what that grid wrote is visible.  No rendezvous --
+    # each thread waits for the other grid alone -- so it settles nothing of
+    # this block's; a wall for every pass, as opaque text is, and pinned
+    # (`pir.griddep` places it at a body's level, behind every pass).
+    OpSpec(Op.GRID_WAIT, operands=(), results=(), effect=Effect.UNKNOWN,
+           movable=False, completes=Completion.SYNC, retires=None,
+           settles=False, units=1, pipe='sync',
+           lower={'*': _lower_grid_wait}),
     # Close what an asynchronous engine issued since its last commit into
     # one group, which a wait on the engine's counter retires
     # (`GROUP_ENGINES`, `matrix_wait`).  Pinned: which products a group
@@ -3312,6 +3332,11 @@ def set_priority(level: int, waves: Optional[str] = None) -> Stmt:
     return _stmt(Op.SET_PRIORITY, attrs)
 
 
+def grid_wait() -> Stmt:
+    """The wait for the grid launched ahead of this one (`Op.GRID_WAIT`)."""
+    return _stmt(Op.GRID_WAIT)
+
+
 __all__ = [
     'Completion', 'DERIVED', 'FenceKind', 'GLOBAL_POLICY', 'Hazard',
     'Lowered', 'kept_facts',
@@ -3323,7 +3348,7 @@ __all__ = [
     'one_to_one', 'sync_init_value', 'waited_on', 'width_of',
     'PRIORITY_WAVES', 'REGISTRY', 'Slot', 'Spelling', 'SyncKind',
     'SyncObjectType', 'SyncScope', 'arrival_of', 'arrive', 'barrier',
-    'effect_of', 'family', 'fence_stmt', 'lower', 'object_demand',
+    'effect_of', 'family', 'fence_stmt', 'grid_wait', 'lower', 'object_demand',
     'object_of', 'objects', 'set_priority', 'settles', 'spec_of',
     'sync_init', 'sync_object', 'verify_engine', 'wait_counter',
     'wait_phase', 'ResourceType',
