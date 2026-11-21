@@ -4828,13 +4828,13 @@ GROUPS = {
          sub(ME_SECTION, '            b.store(target, held(value, fp), _address(b, tensor, i, col),\n'
                          '                    predicate=trip.mask)\n',
              '            b.store(target, held(value, fp), _address(b, tensor, i, col))\n', 1)),
-        # Both of a walk's boundaries -- at its start, and after a product of
-        # a held column -- through the builder: either alone keeps the walks'
-        # reads apart in every shape the tests have.
-        ('a walk sharing the last walk\'s reads',
-         sub(Path('src/tensorforge/backend/pir/build.py'),
-             "        if force or getattr(self.context, 'reread_per_operation', False):\n",
-             "        if getattr(self.context, 'reread_per_operation', False):\n", 1)),
+        # Not 'a walk sharing the last walk's reads' (`begin_operation`'s
+        # `force` dropped, both of a walk's boundaries -- at its start, and
+        # after a product of a held column -- with it): every lanes kernel
+        # the tests build comes out the same but for its values' numbers on
+        # sm_90, gfx942 and PVC -- a walk's reads are its own already
+        # (`_LaneTrip.own`'s tiles, the walk's anchor) -- so no test can tell
+        # it; it was missed since milestone 2.
         ('the columns\' loop not rolled',
          sub(ME_SECTION, "        with b.for_(0, passes, 1, hint='c', rolled=True, unroll=1) as loop:\n",
              "        with b.for_(0, passes, 1, hint='c', unroll=1) as loop:\n", 1)),
@@ -5001,9 +5001,12 @@ GROUPS = {
          sub(ME_GROUP, "TARGETS = (('cuda', 'nvidia'), ('hip', 'amd'), ('oneapi', 'intel'))\n",
              "TARGETS = (('cuda', 'nvidia'), ('hip', 'amd'), ('oneapi', 'intel'),\n"
              "           ('esimd', 'intel'), ('acpp', 'intel'))\n", 1)),
+        # Not `if True`: `nvidia.sm_of` floors a model it does not know at
+        # sm_75, short of the tiling's sm_80, so the guard's condition alone
+        # changes no kernel; what it keeps off another vendor is a number.
         ('the matrix tiling off NVIDIA',
          sub(ME_GROUP, "          if getattr(context.target.hw, 'vendor', None) == 'nvidia' else 0)\n",
-             "          if True else 0)\n", 1)),
+             "          if getattr(context.target.hw, 'vendor', None) == 'nvidia' else 80)\n", 1)),
         ('the lanes form\'s group a CUDA warp everywhere',
          sub(ME_GROUP, '    return int(context.target.hw.vec_unit_length)\n', '    return 32\n', 1)),
         ('the lanes form\'s warp of 32 lanes whatever its group',

@@ -199,7 +199,10 @@ DESCRIPTIONS = {
     # the order before back, and the time integral its scaled sum.
     'derivative': _seissol('gpu_derivative'),
     # Another: a product into the output, then a copy added to it.
-    'plConvertToNodal': _seissol('gpu_plConvertToNodal')}
+    'plConvertToNodal': _seissol('gpu_plConvertToNodal'),
+    # An operator product of the element's own operand, read from its memory
+    # (`_LaneTrip.entry`), the output's rows in three ranges.
+    'plConvertToModal': _seissol('gpu_plConvertToModal')}
 
 
 def _descrs(shape='volume', order=6, precision='s'):
@@ -980,6 +983,18 @@ def test_the_lanes_form_cuts_the_output_until_a_lane_holds_it(
     cones = eg.Cones(section)
     one = cones.live(range(*cones.rows), tile) * size
     assert (one > eg.LANE_REGISTERS) is (len(ranges) > 1)
+
+
+def test_the_column_classes_share_the_blocks_warps(monkeypatch):
+    """Classes times ranges are at most the block's warps (`LANE_WARPS`):
+    at four warps the o6 F64 volume's two row ranges take two column
+    classes, not the three a range alone would."""
+    monkeypatch.setattr(eg, 'LANE_WARPS', 4)
+    section = eg.classify(_descrs('volume', 6, 'd'))[0]
+    lanes, why = eg.lanes_plan(section, _context('sm_90', 'd'))
+    assert lanes is not None, why
+    assert (lanes.classes, len(lanes.ranges)) == (2, 2)
+    assert lanes.warps <= eg.LANE_WARPS
 
 
 @pytest.mark.parametrize('shape', ['volume', 'localFlux'])
@@ -2132,7 +2147,9 @@ SEED = 29
     ('sparse-star', 4, 'd', {'tensor_cores': False}),
     ('sparse-star', 4, 's', {'arch': 'gfx942'}),
     ('sparse-star', 4, 's', LANES),
-    ('sparse-star', 4, 'd', {**LANES, 'arch': 'gfx942'})],
+    ('sparse-star', 4, 'd', {**LANES, 'arch': 'gfx942'}),
+    ('plConvertToModal', 4, 's', {**LANES, 'columns': 3}),
+    ('plConvertToModal', 6, 'd', {**LANES, 'columns': 3, 'arch': 'gfx942'})],
     ids=['volume-o4d', 'volume-o4s-dense', 'reuse-o4s', 'localFlux-o4d',
          'neighboringFlux-o4s-own-barriers', 'localFluxAll-o4d',
          'direction-o4s', 'columns-o4d', 'lanes-volume-o4d',
@@ -2148,7 +2165,8 @@ SEED = 29
          'gfx942-lanes-localFlux-o4d-table', 'lanes-volume-o4d-columns',
          'gfx942-lanes-localFluxAll-o4s-columns', 'sparse-star-o4d',
          'gfx942-sparse-star-o4s', 'lanes-sparse-star-o4s',
-         'gfx942-lanes-sparse-star-o4d'])
+         'gfx942-lanes-sparse-star-o4d', 'lanes-plConvertToModal-o4s-columns',
+         'gfx942-lanes-plConvertToModal-o6d-columns'])
 def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
                                                   options, monkeypatch):
     """A group over itself and seven more elements on the host oracle: two
