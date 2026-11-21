@@ -34,12 +34,13 @@ of the step, a lane an output, each product of the step adding only into
 its own window of the destination -- and the matrix tiling of an operator
 step (`mma_sync`, `dmma`; `_matrix`), which reads the same buffers: A from
 the group operand's (by ldmatrix in F32, where the buffer is pitched for
-it), B from the operator's stage, and D reaching its consumer's buffer, or
-the output from the accumulators: one reduction a cell (`red.global.add`),
-a store where the step assigns.  Where the operators' nonzeros are known,
-`fma` walks only those (`_sparse`): a lane executes the nonzeros of its
-output's row, the rows sorted so that a warp's lanes walk about as many
-each.
+it -- both TF32 halves where the star step wrote them,
+`element_group.Buffer.halves`), B from the operator's stage, and D
+reaching its consumer's buffer, or the output from the accumulators: one
+reduction a cell (`red.global.add`), a store where the step assigns.
+Where the operators' nonzeros are known, `fma` walks only those
+(`_sparse`): a lane executes the nonzeros of its output's row, the rows
+sorted so that a warp's lanes walk about as many each.
 
 The lanes form (`element_group.Lanes`) is lowered by `_lanes` instead: a
 lane its element, read and written through its own pointers -- 16 bytes of
@@ -605,9 +606,12 @@ def _mix(trip, steps) -> None:
     `X_d`'s written in one access where the consumer's pitch does -- rows of
     the group 16 bytes times an odd number apart, eight threads' rows on
     eight bank groups.  Rows past the window are written zero: the
-    destination's padding, which the tiling's padded K reads.  The block's
-    threads past the group's rows take more of them: `sets` threads a row,
-    each every `sets`-th group of rows."""
+    destination's padding, which the tiling's padded K reads.  Where the
+    tiling reads a destination in TF32 halves (`element_group.Buffer.
+    halves`), each value is split as the tiling would split it, and both
+    halves are written, each 16 bytes at a time where the pitch allows.
+    The block's threads past the group's rows take more of them: `sets`
+    threads a row, each every `sets`-th group of rows."""
     b, fp = trip.builder, trip.fp
     section, group = trip.section, trip.group
     lead = steps[0].products[0]
@@ -697,13 +701,29 @@ def _mix(trip, steps) -> None:
                 values = [acc[d][v] if live[v] is None else b.op(
                     'select', fp, live[v], acc[d][v], b.const(0.0, fp),
                     hint='y') for v in range(vec)]
-                if stores[d]:
-                    b.store(target, b.pack(vector, *values, hint='y'), at,
-                            align=16)
-                    continue
-                for v in range(vec):
-                    b.store(target, values[v], _index(b, 'add', at, v, 'a'),
-                            predicate=live[v])
+                writes = [(at, values)]
+                if dest.halves:
+                    # The tiling reads the destination split
+                    # (`element_group.Buffer.halves`): each value's TF32
+                    # halves, the upper at its cell and the lower past the
+                    # group's upper ones -- the split the tiling would make
+                    # at every read of the value, made once.
+                    from tensorforge.backend.instructions.compute.primitives \
+                        import nvidia
+                    split = nvidia.tfconvert(b, values)
+                    writes = [(at, [_as_float(b, u) for u, _ in split]),
+                              (_index(b, 'add', at,
+                                      dest.half_offset(group.elements), 'a'),
+                               [_as_float(b, l) for _, l in split])]
+                for cell, data in writes:
+                    if stores[d]:
+                        b.store(target, b.pack(vector, *data, hint='y'),
+                                cell, align=16)
+                        continue
+                    for v in range(vec):
+                        b.store(target, data[v],
+                                _index(b, 'add', cell, v, 'a'),
+                                predicate=live[v])
 
         with b.for_(0, rounds, 1, hint='g') as loop:
             g = _index(b, 'add', b.op('mul', INDEX, loop.induction, sets,
@@ -876,8 +896,10 @@ def _matrix(trip, step) -> None:
     element after element -- N the destination's rows, K each product's
     contraction, the products one after another (`element_group.Step`).  A
     is the group operand's buffer as it stands, row `m` of it an element's
-    column, the contraction contiguous; B the product's stage, zero outside
-    its window and in the padding.  A warp takes the tiles of D in turn, D
+    column, the contraction contiguous -- in F32 its values' TF32 halves
+    where its producer wrote those (`element_group.Buffer.halves`), else
+    split here; B the product's stage, zero outside its window and in the
+    padding, split there or here.  A warp takes the tiles of D in turn, D
     in registers across the products, and hands each to the destination:
     the intermediate's buffer, or the output, straight from the
     accumulators -- a lane's cells through the pointers of their rows'
@@ -912,6 +934,10 @@ def _matrix(trip, step) -> None:
     # four registers are A's in the instruction's order (`ldmatrixX4`).
     ldmatrix = step.lowering == 'mma_sync' and all(
         section.buffer(p.second.tensor).stride for p in step.products)
+    if not ldmatrix and any(section.buffer(p.second.tensor).halves
+                            for p in step.products):
+        raise InternalError(f'{step.dest.alias}: A held in TF32 halves '
+                            f'where it is read lane by lane')
     if ldmatrix:
         if [a_cells[slot] for slot in sorted(a_cells)] != [
                 (0, 0), (8, 0), (0, 4), (8, 4)]:
@@ -973,19 +999,21 @@ def _matrix(trip, step) -> None:
         return _index(b, 'add', b.op('mul', INDEX, index, scale, hint=hint),
                       offset, hint)
 
-    def a_tile(mt, buffer, source, kt, k_lo, depth):
+    def a_tile(mt, buffer, source, kt, k_lo, depth, offset=0):
         """A's registers of M tile `mt` at K `kt` of a product: by ldmatrix
         -- the padding and the clamped rows past the group read numbers,
-        zeros or rows whose D is not written -- or lane by lane, zero past
-        the group and past the product's depth."""
+        zeros or rows whose D is not written -- from the cells `offset`
+        further on where that is given (a buffer's lower TF32 halves), or
+        lane by lane, zero past the group and past the product's depth."""
         m0 = b.op('mul', INDEX, mt, m_, hint='m')
         if ldmatrix:
             lm = b.op('add', INDEX, m0, lrow, hint='m')
             if M % m_:
                 lm = b.op('select', INDEX, b.op('lt', BOOL, lm, M, hint='in'),
                           lm, 0, hint='m')
-            at = rows_of(lm, buffer, cols[0], _index(b, 'add', b.op(
-                'add', INDEX, lcol, kt, hint='k'), k_lo, 'k'))
+            at = _index(b, 'add', rows_of(lm, buffer, cols[0], _index(
+                b, 'add', b.op('add', INDEX, lcol, kt, hint='k'), k_lo,
+                'k')), offset, 'a')
             return list(b.matrix_load(source, at, count=4, type_=fp,
                                       origins=[a_cells[slot] for slot
                                                in sorted(a_cells)],
@@ -1118,8 +1146,22 @@ def _matrix(trip, step) -> None:
                               hint='k')
                     a = [a_tile(mt, buffer, source, kt, k_lo, depth)
                          for mt in mts]
-                    halves = ([nvidia.tfconvert(b, x) for x in a]
-                              if atom.mode == nvidia.MMAMode.TF32 else None)
+                    if buffer.halves:
+                        # A as its producer split it (`element_group.
+                        # Buffer.halves`): the upper halves where the values
+                        # would be, the lower ones from their block, as the
+                        # instruction's operands -- nothing converted.
+                        lower = buffer.half_offset(trip.group.elements)
+                        halves = [[(nvidia._as_tf32(b, u),
+                                    nvidia._as_tf32(b, l))
+                                   for u, l in zip(x, a_tile(
+                                       mt, buffer, source, kt, k_lo, depth,
+                                       lower))]
+                                  for mt, x in zip(mts, a)]
+                    else:
+                        halves = ([nvidia.tfconvert(b, x) for x in a]
+                                  if atom.mode == nvidia.MMAMode.TF32
+                                  else None)
                     for s in range(slots):
                         place = read(t_tile, at_(e, slots, s, 'o'), 'o')
                         # A slot's tile where it holds one: always, with
@@ -1940,7 +1982,7 @@ class MultiElementSection(AbstractInstruction):
         elements = self._group.elements
         for buffer in section.inputs + section.intermediates:
             trip.buffers[id(buffer.tensor)] = builder.alloc(
-                section.dtype, (elements * buffer.per_element,),
+                section.dtype, (elements * buffer.room,),
                 MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
                 hint=_hint('g', buffer.tensor))
         # A pointer table's entries on 8 bytes, in the arena's elements.
@@ -2082,19 +2124,26 @@ class MultiElementSection(AbstractInstruction):
     def _pad(trip, buffer) -> None:
         """Zeros past the rows of every column of the warp's element, where
         an intermediate's buffer has a pitch (`element_group.Buffer`): what
-        the matrix tiling's padded steps of K read, to multiply zeros.  An
-        input's are staged (`_stage`)."""
+        the matrix tiling's padded steps of K read, to multiply zeros -- of
+        both TF32 halves, where the buffer holds them.  An input's are
+        staged (`_stage`)."""
         b = trip.builder
         pad = buffer.pitch - buffer.height
         width = buffer.cols[1] - buffer.cols[0]
+        target = trip.buffers[id(buffer.tensor)]
         with b.for_(trip.lane, pad * width, trip.group.threads, hint='z',
                     uniform=Uniformity.LANE) as loop:
             row = _index(b, 'add', b.op('rem', INDEX, loop.induction, pad,
                                         hint='r'), buffer.rows[1], 'r')
             col = _index(b, 'add', b.op('div', INDEX, loop.induction, pad,
                                         hint='c'), buffer.cols[0], 'c')
-            b.store(trip.buffers[id(buffer.tensor)], b.const(0.0, trip.fp),
-                    trip.at(buffer, row, col))
+            zero = b.const(0.0, trip.fp)
+            at = trip.at(buffer, row, col)
+            b.store(target, zero, at)
+            if buffer.halves:
+                b.store(target, zero, _index(
+                    b, 'add', at, buffer.half_offset(trip.group.elements),
+                    'a'))
 
     def __str__(self) -> str:
         section = self._group.section
