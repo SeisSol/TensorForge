@@ -266,6 +266,14 @@ class Lexic(ABC):
     lanes form, `element_group.lane_anchors`)."""
     return None
 
+  def chained_zero(self, value: str):
+    """A zero the compiler cannot see through, formed after `value` -- a
+    lane's value it reads -- or None where the backend needs none: an
+    anchor that orders the reads formed of it after the arithmetic that
+    makes `value` (the multi-element layout's lanes form,
+    `compute.multi_element`)."""
+    return None
+
   def opaque_value(self, value: str):
     """`value` as the compiler cannot see it come from: what keeps the
     arithmetic that makes it where it stands, ahead of a guarded use the

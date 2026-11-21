@@ -1380,6 +1380,8 @@ def _py(expr: str) -> str:
     # `opaqueZero()`, the zero an `asm volatile` hands over so that an
     # address is formed where it is read (`hip.h`): zero.
     e = re.sub(r'\btensorforge::opaqueZero\s*\(\s*\)', '0', e)
+    # `opaqueZeroAfter(x)`: zero as well, after `x` (`hip.h`).
+    e = re.sub(r'\btensorforge::opaqueZeroAfter\s*\(\s*\w+\s*\)', '0', e)
     # `opaque(x)`, `x` an `asm volatile` hands back unchanged (`hip.h`).
     e = re.sub(r'\btensorforge::opaque\s*\(', '(', e)
     # `bufferLoad<T, N>(r, i, keep)`: `N` elements of `T` through the

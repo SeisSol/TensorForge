@@ -544,6 +544,18 @@ template <typename T> __device__ __forceinline__ T opaque(T x) {
   return x;
 }
 
+/// Zero, as `opaqueZero` hands it over, and after `x`: the empty `asm volatile`
+/// reads `x`, so that an address formed of it is formed after the arithmetic
+/// that makes `x`.  The multi-element lanes form reads each tile of an
+/// element's rows at such an anchor, of the arithmetic of the tile before
+/// (`Lexic.chained_zero`): instruction selection otherwise puts every read of a
+/// walk ahead of its FMAs, and none of the scheduler's fences moves them back.
+template <typename T> __device__ __forceinline__ int opaqueZeroAfter(T x) {
+  int zero = 0;
+  asm volatile("" : "+s"(zero) : "v"(x));
+  return zero;
+}
+
 /// The row share as an instruction of its own: every lane of a 16-lane row
 /// gets lane `Row`'s value.  Any trivially copyable value -- `dpp` moves it
 /// in 64-bit units where the target can, so a float pair or a `double` is one

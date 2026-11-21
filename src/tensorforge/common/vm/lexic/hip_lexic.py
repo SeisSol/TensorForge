@@ -243,6 +243,17 @@ class HipLexic(CudaLexic):
     # nothing hoists, merges or folds.
     return 'tensorforge::opaqueZero()'
 
+  def chained_zero(self, value):
+    if self._underlying_hardware != 'amd':
+      return super().chained_zero(value)
+    # An empty `asm volatile` that reads `value` and writes the zero
+    # (`hip.h`): AMDGPU's instruction selection puts every read of a block
+    # ahead of its FMAs, which no scheduling barrier undoes; a read whose
+    # address is formed of this comes after `value`.  The lanes form's flux
+    # kernels so: localFlux[0] o6 F32 on gfx1150 from 964 B of spill to none
+    # at 194 VGPRs, localFluxAll o4 F64 from 5.3 kB to 0.2 kB.
+    return f'tensorforge::opaqueZeroAfter({value})'
+
   def opaque_value(self, value):
     if self._underlying_hardware != 'amd':
       return super().opaque_value(value)

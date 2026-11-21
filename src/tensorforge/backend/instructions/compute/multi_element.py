@@ -936,6 +936,17 @@ class _LaneTrip:
         self.anchor = None
         self.anchor_seed = None
         self.anchor_count = 0
+        #: Where a walk holds a column an operator step computes -- the flux
+        #: kernels' faces -- each tile of rows it reads is read at an anchor
+        #: of the arithmetic before it, as the target spells one
+        #: (`Lexic.chained_zero`, `rechain`), and `last` the arithmetic's
+        #: latest value.  Not where no column is held: the volume took 60
+        #: VGPRs more at o4 on gfx942 with its tiles chained.
+        held = any(self.materialized(p) for step in self.section.steps
+                   for p in step.products)
+        self.chain = (context.target.lexic.chained_zero('{0}') if held
+                      else None)
+        self.last = None
         #: The `table` form's numbers, in the order the column multiplies by
         #: them, by table: name -> numbers (`module_tables`); the table of
         #: the range being written and its block of a warp's width read last.
@@ -1047,6 +1058,20 @@ class _LaneTrip:
         if self.anchor is None:
             return index
         return _index(self.builder, 'add', index, self.anchor, 'a')
+
+    def rechain(self) -> None:
+        """A new anchor for the next tile of rows the walk reads, formed after
+        the arithmetic so far (`chain`, `last`): the AMDGPU backend's
+        instruction selection otherwise puts every read of a block ahead of
+        its FMAs -- the walk's rows all at once -- and no scheduling barrier
+        moves them back."""
+        if self.chain is None or self.last is None or self.anchor is None:
+            return
+        # The zero is the same in every lane; the IR sees it as varying as
+        # the value it is formed after, which is what its addresses are.
+        self.anchor = self.builder.rawexpr(
+            self.chain, self.last, type_=INDEX, hint='anc', pure=False,
+            movable=False)
 
     def reanchor(self) -> None:
         """A new anchor for what follows (`element_group.lane_anchors`): a
@@ -1239,6 +1264,7 @@ class _LaneTrip:
             acc[(row, j)] = (b.op('mul', fp, v, x, hint='x') if old is None
                              else b.op('fma', fp, v, x, old, hint='x',
                                        attrs=self.fma_attrs))
+            self.last = acc[(row, j)]
 
         def each(product, i, k, value, operand):
             """The number `(i, k)` of `product`, once, into every column's
@@ -1278,7 +1304,10 @@ class _LaneTrip:
         for k in sorted(together):
             self.here = {}
             if k // self.width != tile:
-                # A tile of rows read is held while its rows are used.
+                # A tile of rows read is held while its rows are used, and
+                # read after the tile before is computed (`rechain`).
+                if tile is not None:
+                    self.rechain()
                 tile, self.tiles = k // self.width, {}
             for p, i, value in together[k]:
                 each(p, i, k, value, lambda j, p=p, k=k: self.entry(p, k))

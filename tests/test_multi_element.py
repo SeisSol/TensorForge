@@ -811,7 +811,10 @@ def test_the_lanes_form_anchors_its_reads_to_the_walk(backend, arch,
         if spelled is None:
             assert not anchors
             continue
-        assert all(i > loop and spelled in lines[i]
+        # The walk's anchors, and on AMD a held walk's tiles' after the
+        # arithmetic before them (`chained_zero`).
+        assert all(i > loop and (spelled in lines[i]
+                                 or 'tensorforge::opaqueZeroAfter(' in lines[i])
                    for i in anchors.values())
         # Read at an anchor, or at an index formed of one.
         of = dict(re.findall(r'(v\d+_a) = [^;]*\b(v\d+_anc)\b', kernel))
@@ -988,6 +991,41 @@ def test_the_lanes_form_holds_what_it_writes_on_amd(shape, arch, backend,
         assert not passed and 'tensorforge::opaque(' not in kernel
         return
     assert {name for name, _ in passed} == set(stores)
+
+
+@pytest.mark.parametrize('shape,arch,backend,precision,chained', [
+    ('localFlux', 'gfx942', 'hip', 's', True),
+    ('localFluxAll', 'gfx1150', 'hip', 'd', True),
+    ('volume', 'gfx942', 'hip', 's', False),
+    ('localFlux', 'sm_90', 'cuda', 's', False),
+    ('localFlux', 'pvc', 'oneapi', 's', False)])
+def test_the_lanes_form_reads_a_tile_after_the_one_before_on_amd(
+        shape, arch, backend, precision, chained):
+    """On AMD, where a walk holds a column an operator step computes, each
+    tile of the element's rows after a walk's first is read at an anchor
+    formed after the arithmetic before it (`chained_zero`): instruction
+    selection puts a block's reads ahead of its FMAs otherwise.  The
+    anchor reads the latest product of the walk; the reads of the tile go
+    through it.  Not the volume, whose sums are not held; not off AMD."""
+    kernel = _generate(_descrs(shape, 4, precision), _context(
+        arch, precision, backend=backend, **LANES)).get_kernel()
+    lines = kernel.splitlines()
+    after = [(i, m.group(1), m.group(2)) for i, line in enumerate(lines)
+             for m in [re.search(r'(v\d+_anc) = tensorforge::opaqueZeroAfter'
+                                 r'\((v\d+_\w+)\);', line)] if m]
+    if not chained:
+        assert not after and 'opaqueZeroAfter' not in kernel
+        return
+    assert after
+    for i, name, value in after:
+        # Formed after a product the walk has made, ...
+        made = next(j for j, line in enumerate(lines)
+                    if re.search(rf'\b{value} = ', line))
+        assert made < i and value.endswith('_x')
+        # ... and read through by the element's rows that follow it.
+        reads = [line for line in lines[i + 1:i + 40] if 'glb_m0[' in line]
+        assert reads and any(name in line or re.search(r'v\d+_a\]', line)
+                             for line in reads)
 
 
 @pytest.mark.parametrize('arch,backend,precision,form,off', [
