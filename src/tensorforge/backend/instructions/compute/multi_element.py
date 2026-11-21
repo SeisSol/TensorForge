@@ -18,7 +18,12 @@ element, and the batch loop hands it E consecutive elements a trip
      copies (`cp.async`) that `pir.wrap` takes a trip ahead where it can:
      the first `Options.move_distance` of them, into a second stage where
      `Options.enable_multibuffer` asks and the plan has the room
-     (`element_group.second_stages`);
+     (`element_group.second_stages`).  Or, where the plan has a ring
+     (`GroupSection.ring`, `Options.element_producer`), a producer warp
+     behind the element warps fills its slots trips ahead -- a bulk copy a
+     column where the copy takes the box, its lanes' loads otherwise --
+     and the element warps, a role of their own, take each slot as its
+     bytes land and give it back once done (`MultiElementSection._ring`);
   2. the section's steps run in order, each by its lowering (`LOWERINGS`),
      reading the staged operators and the group's buffers, writing an
      intermediate's buffer or the section's output;
@@ -128,6 +133,53 @@ def _as_float(builder, half):
     return builder.rawexpr('__uint_as_float({0})', half,
                            type_=ScalarType(Datatype.F32), hint='h',
                            pure=True, movable=True)
+
+
+#: The first of the two named barriers of a block's roles (`IRBuilder.roles`):
+#: the last two of the sixteen, apart from the ids the multiplications take
+#: from 1 on.
+ROLE_BARRIER = 14
+
+
+def _role_split(builder, context, group):
+    """The block in its two roles (`IRBuilder.roles`): the producer's
+    warps behind the element warps, and theirs, each meeting on a named
+    barrier of its own -- one id a role, which every thread computes as its
+    role's."""
+    from tensorforge.backend.pir.build import Role
+    lexic = context.target.lexic
+    elements = group.elements
+    ident = f'({ROLE_BARRIER} + ({lexic.thread_idx_y} >= {elements}))'
+    return builder.roles(
+        builder.op('ge', BOOL, builder.thread_id('y'), elements,
+                   hint='producer'),
+        Role('producer', group.threads * group.producers, ident),
+        Role('elements', group.threads * elements, ident))
+
+
+def _element_pointer(builder, context, symbol, element, dtype):
+    """Element `element`'s pointer to the operand of `symbol`, as the batch
+    traversal binds a warp's own (`GetElementPtr._element_address`): what
+    a producer's lane copies its element from."""
+    import types
+    from tensorforge.backend.instructions.ptr_manip import GetElementPtr
+    from tensorforge.common.helper import get_extra_offset_name
+    bound = _bound(builder, symbol)
+    if not isinstance(getattr(bound, 'type', None), BufferType):
+        raise InternalError(f'{symbol.name}: no pointer bound in the body to '
+                            f'read another element\'s like')
+    # The kernel's parameter, whose name is the operand's: the symbol in
+    # scope here is the warp's binding of it.
+    param = types.SimpleNamespace(name=symbol.obj.name, obj=symbol.obj)
+    address = GetElementPtr(context, param, None)._element_address(
+        '{0}', f' + {get_extra_offset_name(param)}',
+        symbol.obj.storage_volume())
+    ctype = dtype.ctype()
+    name = f'{_hint("e", symbol.obj)}_{builder.next_index()}'
+    return builder.decl_expr(f'const {ctype} *const {name}', address,
+                             bound.type, symbol, args=(element,),
+                             kind=Effect.READ, space=MemSpace.GLOBAL,
+                             hint=name, extern=name)
 
 
 def _bound(builder, symbol):
@@ -244,9 +296,66 @@ class MultiElementOperators(AbstractInstruction):
         #: allocation gives up the block's permit to allocate again -- and
         #: freed behind the loop (`MultiElementRelease`).
         self.tmem = None
+        #: The ring a producer fills the inputs through (`IRBuilder.
+        #: mbarrier_ring`), where the plan has one, and by input the identity
+        #: of its slots' windows (`GroupSection.ring`).
+        self.ring = None
+        self.ring_slots: Dict[int, object] = {}
         self._is_ready = True
         for symbol in self.symbols:
             symbol.add_user(self)
+
+    def _budgets(self, builder) -> None:
+        """The registers the producer's warpgroup gives the element warps
+        (`element_group.register_budgets`): lowered first, behind the
+        block's barrier raised -- a raise waits until the pool holds what it
+        asks for -- each by the warpgroups of its role, whole, as the
+        collective is (`engines.register_budget`)."""
+        from tensorforge.backend.pir import engines
+        from tensorforge.generators.element_group import register_budgets
+        budgets = register_budgets(self._group)
+        if budgets is None:
+            return
+        _, mine, theirs = budgets
+        warp = builder.thread_id('y')
+        elements = self._group.elements
+        with builder.if_(builder.op('ge', BOOL, warp, elements,
+                                    hint='producer')):
+            builder.emit(engines.register_budget(mine, 'dec'))
+        builder.barrier(Participants.BLOCK)
+        with builder.if_(builder.op('lt', BOOL, warp, elements,
+                                    hint='elements')):
+            builder.emit(engines.register_budget(theirs, 'inc'))
+
+    def _ring(self, builder, tid, threads) -> None:
+        """The producer's ring, its slots' windows of every input zeroed:
+        the copies write a box's rows, and the pitch past them is what the
+        matrix tiling's padded steps read, zeros (`element_group.Buffer`).
+        A slot's full side counts the producer's arrival, its empty side
+        one of each element warp's."""
+        section = self._group.section
+        elements = self._group.elements
+        fp = ScalarType(section.dtype)
+        self.ring = builder.mbarrier_ring(
+            'me', section.ring, full=1, empty=elements,
+            leader='threadIdx.x == 0 && threadIdx.y == 0',
+            arena=GeneralLexicon.TOTAL_SHR_MEM)
+        if self.ring is None:
+            raise InternalError('a producer\'s ring in a body without an '
+                                'arena for its mbarriers')
+        for buffer in section.inputs:
+            key = self.ring_slots[id(buffer.tensor)] = object()
+            for slot in range(section.ring):
+                window = builder.alloc(
+                    section.dtype, (elements * buffer.per_element,),
+                    MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
+                    hint=_hint('r', buffer.tensor), stages=section.ring,
+                    stage=slot, identity=key, lifetime='body', handed=True)
+                with builder.for_(tid, elements * buffer.per_element,
+                                  threads, hint='z',
+                                  uniform=Uniformity.LANE) as loop:
+                    builder.store(window, builder.const(0.0, fp),
+                                  loop.induction)
 
     def module_tables(self):
         """The numbers this instruction reads by name at namespace scope:
@@ -267,7 +376,8 @@ class MultiElementOperators(AbstractInstruction):
     def gen_ir(self, builder) -> None:
         section = self._group.section
         fp = ScalarType(section.dtype)
-        threads = self._group.threads * self._group.elements
+        # Every warp of the block, a producer's included.
+        threads = self._group.threads * self._group.warps
         tid = builder.op('add', INDEX, builder.thread_id('x'),
                          builder.op('mul', INDEX, builder.thread_id('y'),
                                     self._group.threads, hint='w'),
@@ -304,6 +414,8 @@ class MultiElementOperators(AbstractInstruction):
         tables = {id(step.terms): self._pack(builder, step, symbols, tid,
                                              threads)
                   for step in section.steps if step.terms is not None}
+        if section.ring:
+            self._ring(builder, tid, threads)
         columns = tmem_columns(section)
         # Its slot is the block's: the block's first warp writes the address
         # there, and every warp -- an element each, with a window of its own
@@ -318,6 +430,7 @@ class MultiElementOperators(AbstractInstruction):
             from tensorforge.backend.pir.engines import FenceKind
             builder.fence(FenceKind.PROXY)
         builder.barrier(Participants.BLOCK)
+        self._budgets(builder)
         self.buffers = buffers
         self.tables = tables
 
@@ -501,6 +614,9 @@ class _Trip:
         #: The block's tensor memory, where a step is tcgen05's
         #: (`MultiElementOperators.tmem`).
         self.tmem = None
+        #: Whom the lowerings' barriers meet: the block, or the element
+        #: warps' role where a producer fills the inputs (`_ring`).
+        self.meet = Participants.BLOCK
         self.buffers: Dict[int, object] = {}
         #: The block's pointer tables, by output (`publish`).
         self.pointers: Dict[int, object] = {}
@@ -1543,7 +1659,7 @@ def _wgmma(trip, step) -> None:
         if copy is not None:
             copy(0)
             b.fence(FenceKind.PROXY)
-            b.barrier(Participants.BLOCK)
+            b.barrier(trip.meet)
         first = True
         for i, piece in enumerate(pieces):
             product, stage = piece.product, piece.stage
@@ -1581,7 +1697,7 @@ def _wgmma(trip, step) -> None:
                 copy(i + 1)
             b.matrix_wait('wgmma', 0, registers=registers, reads=reads)
             b.fence(FenceKind.PROXY)
-            b.barrier(Participants.BLOCK)
+            b.barrier(trip.meet)
         if flight:
             _wgmma_retire(b, flight, 0, accs)
         # D: register `i` of the lane is row `16 w + g + 8 ((i % 4) / 2)`,
@@ -1659,7 +1775,7 @@ def _tcgen05(trip, step) -> None:
     # The block's one mbarrier, which every warp waits on: in the block's
     # arena, not in a warp's window of the multiplications'.
     cursor = b.bulk_channel('tcmma', 'threadIdx.x == 0 && threadIdx.y == 0',
-                            participants=Participants.BLOCK,
+                            participants=trip.meet,
                             arena=GeneralLexicon.TOTAL_SHR_MEM)
     if cursor is None:
         raise InternalError('a tcgen05 step in a body without an arena for '
@@ -1676,7 +1792,7 @@ def _tcgen05(trip, step) -> None:
     if copy is not None:
         copy(0)
         b.fence(FenceKind.PROXY)
-        b.barrier(Participants.BLOCK)
+        b.barrier(trip.meet)
     first = True
     upper_at = n
     for i, piece in enumerate(pieces):
@@ -1687,7 +1803,7 @@ def _tcgen05(trip, step) -> None:
             _tcgen05_a(trip, product, stage, tmem, upper_at, holds, row,
                        live)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
-            b.barrier(Participants.BLOCK)
+            b.barrier(trip.meet)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
         reads = []
         for kt in range(0, piece.rows, k_):
@@ -1705,7 +1821,7 @@ def _tcgen05(trip, step) -> None:
         b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
         if copy is not None:
             b.fence(FenceKind.PROXY)
-            b.barrier(Participants.BLOCK)
+            b.barrier(trip.meet)
     write = _d_writer(trip, step)
     with b.if_(holds):
         # The step's rows of D, to the next eight, in widths the load has:
@@ -2570,6 +2686,9 @@ class MultiElementSection(AbstractInstruction):
         trip.table = lambda prefix, numbers: _module_table(self, prefix,
                                                            numbers)
         trip.tmem = self._operators.tmem
+        if section.ring:
+            self._ring(trip)
+            return
         elements = self._group.elements
         for buffer in section.inputs + section.intermediates:
             trip.buffers[id(buffer.tensor)] = builder.alloc(
@@ -2626,6 +2745,176 @@ class MultiElementSection(AbstractInstruction):
                 LOWERINGS[unit[0].lowering](trip, unit[0])
             written |= dests
             read |= reads
+
+    def _ring(self, trip) -> None:
+        """A trip with the inputs through the producer's ring: the block in
+        two roles (`IRBuilder.roles`) -- the producer's warp behind the
+        element warps, and theirs -- which meet on the ring's barriers alone
+        and each on a named barrier of its own.
+
+        The trip's slot and the parity of its round are the trip's count's
+        (`IRBuilder.ring_round`), which both roles read off the group's first
+        element: the block's trips are its blocks' in turn.  The slot's
+        windows are the inputs' buffers for the trip (`MultiElementOperators.
+        ring_slots`); the intermediates and the pointer tables stay the
+        element warps', a trip each."""
+        from tensorforge.backend.instructions.batch_loop import (
+            BatchLoop, GROUP_KEY, MASK_KEY)
+        b = trip.builder
+        section = self._group.section
+        elements = self._group.elements
+        ring = self._operators.ring
+        bound = BatchLoop.indices_in(b)
+        if not bound or GROUP_KEY not in bound:
+            raise InternalError('a producer\'s trip outside the element '
+                                'group\'s loop')
+        group = bound[GROUP_KEY]
+        block = b.extern_value('blockIdx.x', INDEX, uniform=Uniformity.BLOCK,
+                               hint='bid')
+        grid = b.extern_value('gridDim.x', INDEX, uniform=Uniformity.GRID,
+                              hint='grid')
+        count = b.op('div', INDEX, b.op('sub', INDEX, b.op(
+            'div', INDEX, group, elements, hint='k'), block, hint='k'),
+            grid, hint='k')
+        slot, parity = b.ring_round(ring, count)
+        for buffer in section.inputs:
+            trip.buffers[id(buffer.tensor)] = b.alloc(
+                section.dtype, (elements * buffer.per_element,),
+                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
+                hint=_hint('r', buffer.tensor), stages=section.ring,
+                stage=slot, identity=self._operators.ring_slots[
+                    id(buffer.tensor)], handed=True)
+        for buffer in section.intermediates:
+            trip.buffers[id(buffer.tensor)] = b.alloc(
+                section.dtype, (elements * buffer.per_element,),
+                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
+                hint=_hint('g', buffer.tensor))
+        unit = max(1, WORD.base.size() // self._context.fp_type.size())
+        for tensor in section.pointer_tables:
+            trip.pointers[id(tensor)] = b.alloc(
+                Datatype.I64, (elements,), MemSpace.SHARED,
+                arena=GeneralLexicon.TOTAL_SHR_MEM, hint=_hint('p', tensor),
+                place_align=unit if unit > 1 else None)
+        trip.meet = Participants.ROLE
+        roles = _role_split(b, self._context, self._group)
+        with roles.then():
+            self._produce(trip, ring, slot, parity, group, bound[MASK_KEY])
+        with roles.otherwise():
+            self._consume(trip, ring, slot, parity)
+
+    def _produce(self, trip, ring, slot, parity, group, active_of) -> None:
+        """The producer's trip: the slot back from the element warps' last
+        round of it, then lane `e` takes element `e` of the group -- the
+        group's first where `e` is none of the batch, so that every copy
+        reads an element's memory and the slot's bytes stay what its full
+        side announces -- a bulk copy a column of an input the copy takes
+        (`element_group.bulk_input`), its own loads of the others; the warp
+        meets, and its first lane announces the bytes on the full side, the
+        copies' tokens with them."""
+        from tensorforge.backend.pir.build import RingSlot
+        from tensorforge.backend.pir.core import SIZE
+        from tensorforge.generators.element_group import (bulk_input,
+                                                          bulk_rows)
+        b = trip.builder
+        section = self._group.section
+        elements = self._group.elements
+        lane = trip.lane
+        windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
+        b.ring_wait(ring, 'empty', slot, b.op('sub', INDEX, 1, parity,
+                                              hint='free'), writes=windows)
+        # The producer's first warp: where the producer is a warpgroup
+        # (`element_group.register_budgets`), the others keep its trips and
+        # do nothing else.
+        first_warp = b.op('eq', BOOL, b.thread_id('y'), elements,
+                          hint='pw')
+        mine = b.op('and', BOOL, first_warp,
+                    b.op('lt', BOOL, lane, elements, hint='mine'),
+                    hint='mine')
+        element = b.op('add', SIZE, group, lane, hint='e')
+        source = b.op('select', SIZE, active_of(b, element), element, group,
+                      hint='e')
+        tokens, nbytes = [], 0
+        for buffer, symbol in zip(section.inputs, self._inputs):
+            window = trip.buffers[id(buffer.tensor)]
+            pointer = _element_pointer(b, self._context, symbol, source,
+                                       section.dtype)
+            base = b.op('mul', INDEX, lane, buffer.per_element, hint='b')
+            width = buffer.cols[1] - buffer.cols[0]
+            if bulk_input(buffer):
+                rows = bulk_rows(buffer)
+                for c in range(width):
+                    tokens.append(b.copy_bulk(
+                        window, pointer, barrier=RingSlot(ring, slot),
+                        dst_index=(_index(b, 'add', base, c * buffer.pitch,
+                                          'd'),),
+                        src_index=(_address(b, buffer.tensor,
+                                            buffer.rows[0],
+                                            buffer.cols[0] + c),),
+                        elems=rows, predicate=mine))
+                nbytes += elements * width * rows * section.dtype.size()
+                continue
+            with b.if_(mine):
+                # Unrolled, so that the lane's loads are in flight together:
+                # the producer's trip is a latency, which the ring's slots
+                # hide only where it keeps up.
+                with b.for_(0, buffer.height * width, 1, hint='j',
+                            uniform=Uniformity.LANE, unroll=True) as loop:
+                    row = _index(b, 'add', b.op('rem', INDEX, loop.induction,
+                                                buffer.height, hint='r'),
+                                 buffer.rows[0], 'r')
+                    col = _index(b, 'add', b.op('div', INDEX, loop.induction,
+                                                buffer.height, hint='c'),
+                                 buffer.cols[0], 'c')
+                    value = b.load(pointer, _address(b, buffer.tensor, row,
+                                                     col),
+                                   type_=trip.fp, hint='s')
+                    b.store(window, value, _index(b, 'add', base, _box_index(
+                        b, row, col, (buffer.rows[0], buffer.cols[0]),
+                        buffer.pitch), 'd'))
+        # The lanes' stores ahead of the first lane's arrival, which hands
+        # them over with the copies' bytes.
+        b.barrier(Participants.WAVE)
+        b.ring_arrive(ring, 'full', slot, b.op('and', BOOL, first_warp,
+                                               b.op('eq', BOOL, lane, 0),
+                                               hint='first'),
+                      tx=nbytes, tokens=tokens)
+
+    def _consume(self, trip, ring, slot, parity) -> None:
+        """The element warps' trip: the slot as its bytes land, the steps
+        as without the ring -- meeting on their role's barrier, the inputs
+        already the slot's -- and each warp's first lane gives the slot
+        back behind the warp's barrier, done with it."""
+        b = trip.builder
+        section = self._group.section
+        windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
+        b.ring_wait(ring, 'full', slot, parity, writes=windows)
+        if not self._context.get_user_options().enable_sync_block_opt:
+            # Nothing places the role's barriers: the last trip's reads of
+            # the intermediates and the pointer tables are met here, as the
+            # block's barrier meets them without the ring.
+            b.barrier(trip.meet)
+        for tensor in section.pointer_tables:
+            trip.publish(tensor)
+        # The steps as without the ring (`gen_ir`), a run of `mix` steps as
+        # one (`_units`) -- `mix` takes the element warps' threads, a row of
+        # A each -- meeting on the role's barrier; the inputs are the slot's,
+        # which its full side showed every element warp.
+        written, read = set(), set()
+        for unit in _units(section.steps):
+            reads = {id(t) for step in unit for t in step.reads()}
+            dests = {id(step.dest) for step in unit}
+            if written & reads or dests & (written | read):
+                b.barrier(trip.meet)
+                written, read = set(), set()
+            if unit[0].lowering == 'mix':
+                _mix(trip, unit)
+            else:
+                LOWERINGS[unit[0].lowering](trip, unit[0])
+            written |= dests
+            read |= reads
+        b.barrier(Participants.WAVE)
+        b.ring_arrive(ring, 'empty', slot, b.op('eq', BOOL, trip.lane, 0,
+                                                hint='first'))
 
     def _stage(self, trip, buffer, symbol) -> list:
         """The warp's element's box of an operand, from its own memory into

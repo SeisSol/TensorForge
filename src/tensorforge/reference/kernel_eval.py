@@ -489,6 +489,11 @@ _WGMMA_SWIZZLE = {0: 0, 1: 128, 2: 64, 3: 32}
 #: 32-byte); 1, the 128-byte one with 32-byte atoms, is not modeled.
 _TC_SWIZZLE = {0: 0, 2: 128, 4: 64, 6: 32}
 
+#: A warpgroup's registers from here on (`engines.register_budget`).
+_REGISTER_BUDGET = re.compile(
+    r'^asm\s+volatile\s*\(\s*"setmaxnreg\.(?:inc|dec)\.sync\.aligned\.u32 '
+    r'\d+;"\s*:::\s*"memory"\s*\)$')
+
 #: Tensor memory (`MemSpace.TMEM`): `uint32_t t = tensorforge::tmemAlloc<C>
 #: (&slot[0]);`, the free, the waits and the fences of the engine (`cuda.h`).
 _TMEM_ALLOC = re.compile(
@@ -3091,6 +3096,10 @@ class Interp:
             return
         if re.match(r'^asm\b', stmt) and 'tcgen05.' in stmt:
             self._tcgen05_asm(stmt)
+            return
+        if _REGISTER_BUDGET.match(stmt):
+            # A warpgroup's registers (`setmaxnreg`): where values are held
+            # is no value's.
             return
         ta = _TMEM_ALLOC.match(stmt)
         if ta:

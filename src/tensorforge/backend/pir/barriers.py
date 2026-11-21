@@ -651,6 +651,17 @@ def own_buffers(body: Sequence[Stmt]) -> FrozenSet[int]:
         and s.attr('lifetime') == 'body')
 
 
+def handed_buffers(body: Sequence[Stmt]) -> FrozenSet[int]:
+    """The windows of a ring's slots, by value id (`IRBuilder.alloc`'s
+    `handed`): a producer writes them and its consumers read them, and the
+    ring's barriers hand them over -- in both directions, a slot's full
+    side and its empty one (`mbarrier_ring`).  No barrier of the block's
+    stands in for those, and none is placed."""
+    return frozenset(
+        s.target[0].id for s in walk_stmts(body)
+        if s.op == Op.ALLOC and s.target and s.attr('handed'))
+
+
 def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
                    make_barrier: Callable[[bool, bool], Stmt],
                    arrival: Uniformity,
@@ -671,7 +682,7 @@ def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
             identity[s.target[0].id] = ('o', id(s.attr('identity')))
     work = _Pass(arena.extents(body), identity,
                  {('o', id(h)) for h in handoff}, make_barrier, arrival,
-                 own_buffers(body))
+                 own_buffers(body) | handed_buffers(body))
     out, _, unfenced = work.place(tuple(body), _State.empty(), Uniformity.GRID)
     if report is not None and unfenced:
         report.append(f'{len(unfenced)} access(es) to shared memory meet an '

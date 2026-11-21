@@ -1571,7 +1571,8 @@ class IRBuilder:
               lifetime: Optional[str] = None,
               permutable: Optional[int] = None,
               own: bool = False,
-              ahead: Optional[Tuple[int, int]] = None) -> Value:
+              ahead: Optional[Tuple[int, int]] = None,
+              handed: bool = False) -> Value:
         """Request a buffer *symbolically*.
 
         No offset and no address: for registers the compiler assigns those,
@@ -1595,7 +1596,10 @@ class IRBuilder:
         one may be applied at all -- what `banks.propose` decides from, once
         the body exists.  `own`: every lane reads only what it wrote itself
         there, which together with the `'body'` lifetime owes no barrier
-        (`barriers.own_buffers`).
+        (`barriers.own_buffers`).  `handed`: the window is a ring's slot
+        (`mbarrier_ring`), which the ring's barriers hand from one role to
+        the other -- no barrier placement stands in for them
+        (`barriers.handed_buffers`).
 
         `ahead` is the buffer's own request of the transfer into it, `(stages,
         distance)`, which `pir.wrap` honors in place of the pass's: the
@@ -1626,6 +1630,8 @@ class IRBuilder:
                 attrs = attrs + (('lifetime', lifetime),)
             if own:
                 attrs = attrs + (('own', True),)
+            if handed:
+                attrs = attrs + (('handed', True),)
         elif arena is not None:
             attrs = (('arena', arena), ('offset', offset))
         if extern is not None:
@@ -2210,7 +2216,10 @@ class IRBuilder:
             hint=f'{window}_bulk')
         b.emit(engines.sync_init_value(obj, barrier, leader=leader,
                                        extern=f'{window}_bulk'))
-        b.barrier(participants, threads=threads)
+        # Set up ahead of the roles of a block, for one of them: the block's
+        # barrier shows the arming to its threads (`roles`).
+        b.barrier(Participants.BLOCK if who is Participants.ROLE
+                  else participants, threads=threads)
         self._prologue += list(b.finish())
 
         def undo():

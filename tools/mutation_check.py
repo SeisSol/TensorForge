@@ -1494,7 +1494,8 @@ GROUPS = {
          sub(BUILD, '        body = tuple(self._prologue) + tuple(self._stack[0].body)',
              '        body = tuple(self._stack[0].body)', 1)),
         ('no barrier behind the arming',
-         sub(BUILD, '        b.barrier(participants, threads=threads)\n'
+         sub(BUILD, '        b.barrier(Participants.BLOCK if who is Participants.ROLE\n'
+                    '                  else participants, threads=threads)\n'
                     '        self._prologue += list(b.finish())',
              '        self._prologue += list(b.finish())', 1)),
         ('the barrier sharing bytes with what the body holds after',
@@ -4757,8 +4758,8 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            columns, arena=GeneralLexicon.TOTAL_SHR_MEM) if columns else None\n',
              '            columns) if columns else None\n', 1)),
         ("the products' mbarrier a warp's own",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                            participants=Participants.BLOCK,\n                            arena=GeneralLexicon.TOTAL_SHR_MEM)\n',
-             '                            participants=Participants.BLOCK)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                            participants=trip.meet,\n                            arena=GeneralLexicon.TOTAL_SHR_MEM)\n',
+             '                            participants=trip.meet)\n', 1)),
         ('the tensor memory never freed',
          sub(Path('src/tensorforge/generators/generator.py'), '        self._section.post_ir.append(MultiElementRelease(self._context,\n                                                         operators))\n',
              '        pass\n', 1)),
@@ -4824,7 +4825,7 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n',
              '                          a_column=(upper_at, lower_at)[ia] + kt)\n', 1)),
         ("no barrier behind wgmma's chunk",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            b.fence(FenceKind.PROXY)\n            b.barrier(Participants.BLOCK)\n        if flight:',
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            b.fence(FenceKind.PROXY)\n            b.barrier(trip.meet)\n        if flight:',
              '            b.fence(FenceKind.PROXY)\n        if flight:', 1)),
     ]),
     # The multi-element layout (`generators.element_group`, `compute.
@@ -4853,8 +4854,8 @@ GROUPS = {
          sub(ME_SECTION, '            if written & reads or dests & (written | read):\n',
              '            if written & reads:\n', 1)),
         ('the operators read before the block has copied them',
-         sub(ME_SECTION, '        builder.barrier(Participants.BLOCK)\n        self.buffers = buffers\n',
-             '        self.buffers = buffers\n', 1)),
+         sub(ME_SECTION, '        builder.barrier(Participants.BLOCK)\n        self._budgets(builder)\n',
+             '        self._budgets(builder)\n', 1)),
         ('a trip\'s staging written over the last trip\'s reads',
          sub(ME_SECTION, '            builder.barrier(Participants.BLOCK)\n'
                          '        tokens = []\n',
@@ -5070,7 +5071,7 @@ GROUPS = {
          sub(OPTIONS, "declare('multi_element',\n        default='off',\n",
              "declare('multi_element',\n        default='force',\n", 1)),
         ('a block of more than the group',
-         sub(BATCHLOOP, '        if self._trip is Trip.ELEMENT_GROUP and mults != self._group_size:\n',
+         sub(BATCHLOOP, '        if (self._trip is Trip.ELEMENT_GROUP\n                and mults != self._group_size + self._producer_rows):\n',
              '        if False:\n', 1)),
         ('the group\'s traversal one element a trip',
          sub(GEN, '      return self._element_group.elements\n', '      return 1\n', 1)),
@@ -5179,8 +5180,8 @@ GROUPS = {
          sub(ME_SECTION, '                or second_stages(section, self._context) > section.doubled):\n',
              '                or False):\n', 1)),
         ('the plan\'s stage not the one the section is lowered with',
-         sub(GEN, '          double=planned.doubled > 0)\n',
-             '          double=True)\n', 1)),
+         sub(GEN, '          double=planned.doubled > 0, ring=planned.ring,\n',
+             '          double=True, ring=planned.ring,\n', 1)),
         # Milestone 3, SYCL (DPC++ SPMD) and HIP: the targets, the matrix
         # tiling NVIDIA's, the lanes form's warp, budget and register file, its
         # numbers' source and its anchors, and what the generator keeps from
@@ -5856,6 +5857,49 @@ GROUPS = {
         ('the sections after the cut in the first kernel',
          sub(GEN, '      if section.launch_cut and i + 1 < len(self._sections):\n        groups.append([])\n',
              '', 1)),
+    ]),
+    # The multi-element layout's producer (`Options.element_producer`): the
+    # ring's protocol as the section writes it, the roles, the producer's
+    # copies and the traversal it shares with the element warps.  The host
+    # oracle's numbers, races and waits.
+    'producer': ('tests/test_element_producer.py', [
+        ('the producer waiting for its consumers\' parity',
+         sub(ME_SECTION, "        b.ring_wait(ring, 'empty', slot, b.op('sub', INDEX, 1, parity,\n",
+             "        b.ring_wait(ring, 'empty', slot, b.op('add', INDEX, 0, parity,\n", 1)),
+        ('the slot\'s bytes announced short',
+         sub(ME_SECTION, '                nbytes += elements * width * rows * section.dtype.size()\n',
+             '                nbytes += elements * width * (rows - 4) * section.dtype.size()\n', 1)),
+        ('a slot given back by the first lane alone',
+         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_arrive(ring, 'empty', slot,",
+             "        b.ring_arrive(ring, 'empty', slot,", 1)),
+        ('the bytes announced ahead of the lanes\' stores',
+         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_arrive(ring, 'full', slot,",
+             "        b.ring_arrive(ring, 'full', slot,", 1)),
+        ('a slot free once one element warp is done',
+         sub(ME_SECTION, "            'me', section.ring, full=1, empty=elements,\n",
+             "            'me', section.ring, full=1, empty=1,\n", 1)),
+        ('every trip in the first slot',
+         sub(ME_SECTION, "                hint=_hint('r', buffer.tensor), stages=section.ring,\n                stage=slot, identity",
+             "                hint=_hint('r', buffer.tensor), stages=section.ring,\n                stage=0, identity", 1)),
+        ('the producer\'s rows starting a group of their own',
+         sub(Path('src/tensorforge/backend/instructions/batch_loop.py'),
+             "            start = f'{self._group_size} * ({lexic.block_idx_x})'\n",
+             "            pass\n", 1)),
+        ('the traversal striding the block\'s rows',
+         sub(GEN, "      stride = f'({lexic.grid_dim_x} * {self._element_group.elements})'\n    if not offset:",
+             "      stride = f'({lexic.grid_dim_x} * {lexic.block_dim_y})'\n    if not offset:", 1)),
+        ('a column copied without its rounding',
+         sub(ME_GROUP, '    return -(-buffer.height // 4) * 4\n',
+             '    return buffer.height\n', 1)),
+        ('the element warps meeting the block',
+         sub(ME_SECTION, '        trip.meet = Participants.ROLE\n',
+             '        trip.meet = Participants.BLOCK\n', 1)),
+        ('the slot zeroed nowhere',
+         sub(ME_SECTION, "                    builder.store(window, builder.const(0.0, fp),\n                                  loop.induction)\n",
+             "                    pass\n", 1)),
+        ('the copies\' column a pitch apart in the source too',
+         sub(ME_SECTION, "                        dst_index=(_index(b, 'add', base, c * buffer.pitch,\n",
+             "                        dst_index=(_index(b, 'add', base, c * (buffer.pitch + 4),\n", 1)),
     ]),
 }
 

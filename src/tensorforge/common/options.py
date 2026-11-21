@@ -2517,6 +2517,29 @@ declare('multi_element_fma',
             '`multi_element` `auto` the form is that rule\'s, the lanes '
             'form, and `warp` declines it.')
 
+declare('element_producer',
+        default=False,
+        env='TF_ELEMENT_PRODUCER',
+        doc='A producer warp fills the multi-element layout\'s inputs '
+            '(`multi_element`, `generators.element_group`): through a ring '
+            'of slots, its trips ahead of the element warps\', a bulk copy a '
+            'column where the copy takes the box and its lanes\' loads '
+            'otherwise, the slots handed over on mbarriers -- in place of '
+            'each warp staging its own element.  CUDA from sm_90 on, F32; '
+            'where the plan cannot take it (`element_group.'
+            'producer_refusal`), the warps stage as before.')
+
+declare('element_registers',
+        default=0,
+        env='TF_ELEMENT_REGISTERS',
+        doc='The registers a thread of the multi-element layout\'s producer '
+            'keeps (`element_producer`), its warpgroup giving the rest to '
+            'the element warps (`setmaxnreg`, `element_group.'
+            'register_budgets`): a multiple of eight from 24, the kernel\'s '
+            'entry fixed (`__maxnreg__`) and the producer a warpgroup.  0 '
+            'moves nothing.  On sm_90a and sm_100a; a search parameter, as '
+            'registers moved were a loss on the kernels measured so far.')
+
 declare('multi_element_values',
         default='auto',
         env='TF_MULTI_ELEMENT_VALUES',
