@@ -15,7 +15,10 @@ hardware's address function, the map and what it refuses, the copy and what
 it refuses, the text, the host oracle (`reference.kernel_eval`) on boxes of
 every form, the parameter's surfaces, the build with the SASS and the PTX
 read back, and on a GPU of sm_90 or newer the boxes copied and read back,
-the map encoded by the launcher's code.
+the map encoded by the launcher's code.  What only those boxes showed is
+checked without a GPU as well: the arguments the map's encoding hands the
+driver, its encoder replaced by a recorder, and the coordinates of a copy,
+read off the PTX.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import math
+import os
 import re
 import shutil
 import struct
@@ -1135,3 +1139,206 @@ def test_gpu_the_boxes_are_added_where_the_tensor_is(name, tmp_path):
     bad = _same(got, _reduced(case, initial, values))
     assert not bad, (f'{len(bad)} of {case.extent} elements differ (index, '
                      f'got, want): {bad[:6]}')
+
+
+# -- the map's encoding and the copy's coordinates, without a GPU ----------- #
+
+#: A program that encodes the map of a 3-D box through `tensorMapTiled` and
+#: prints what the driver's encoder was handed, each with what it should be.
+#: The encoder comes from the runtime's lookup of the driver's entry points,
+#: which this program defines itself: linked against the shared runtime, its
+#: own definition is the one the header's call binds to, and it hands back
+#: the recorder below rather than the driver's `cuTensorMapEncodeTiled` -- so
+#: nothing here needs a driver or a GPU.
+_ENCODE_SOURCE = r'''
+#include <cstdio>
+#include <cstring>
+#include "tensorforge_device/cuda_tma.h"
+
+namespace {
+struct Seen {
+  int calls = 0;
+  CUtensorMapDataType type;
+  cuuint32_t rank = 0;
+  void *base = nullptr;
+  cuuint64_t dims[5] = {};
+  cuuint64_t strides[4] = {};
+  cuuint32_t box[5] = {};
+  cuuint32_t elements[5] = {};
+  CUtensorMapInterleave interleave;
+  CUtensorMapSwizzle swizzle;
+  CUtensorMapL2promotion promotion;
+  CUtensorMapFloatOOBfill fill;
+} seen;
+
+CUresult record(CUtensorMap *, CUtensorMapDataType type, cuuint32_t rank,
+                void *base, const cuuint64_t *dims, const cuuint64_t *strides,
+                const cuuint32_t *box, const cuuint32_t *elements,
+                CUtensorMapInterleave interleave, CUtensorMapSwizzle swizzle,
+                CUtensorMapL2promotion promotion,
+                CUtensorMapFloatOOBfill fill) {
+  ++seen.calls;
+  seen.type = type;
+  seen.rank = rank;
+  seen.base = base;
+  for (cuuint32_t d = 0; d < rank && d < 5; ++d) {
+    seen.dims[d] = dims[d];
+    seen.box[d] = box[d];
+    seen.elements[d] = elements[d];
+    if (d + 1 < rank) seen.strides[d] = strides[d];
+  }
+  seen.interleave = interleave;
+  seen.swizzle = swizzle;
+  seen.promotion = promotion;
+  seen.fill = fill;
+  return CUDA_SUCCESS;
+}
+
+void *lookup(const char *symbol, enum cudaDriverEntryPointQueryResult *found) {
+  const bool ours = std::strcmp(symbol, "cuTensorMapEncodeTiled") == 0;
+  if (found != nullptr)
+    *found = ours ? cudaDriverEntryPointSuccess
+                  : cudaDriverEntryPointSymbolNotFound;
+  return ours ? reinterpret_cast<void *>(&record) : nullptr;
+}
+} // namespace
+
+extern "C" {
+#if CUDART_VERSION >= 12050
+cudaError_t CUDARTAPI cudaGetDriverEntryPointByVersion(
+    const char *symbol, void **fn, unsigned int, unsigned long long,
+    enum cudaDriverEntryPointQueryResult *found) {
+  *fn = lookup(symbol, found);
+  return cudaSuccess;
+}
+#else
+cudaError_t CUDARTAPI cudaGetDriverEntryPoint(
+    const char *symbol, void **fn, unsigned long long,
+    enum cudaDriverEntryPointQueryResult *found) {
+  *fn = lookup(symbol, found);
+  return cudaSuccess;
+}
+#endif
+}
+
+int main() {
+  static float tensor[4];
+  // TensorForge's order: the outermost dimension first, strides in elements.
+  const unsigned long long dims[3] = {5, 7, 64};
+  const unsigned long long strides[2] = {504, 72};
+  const unsigned box[3] = {2, 3, 32};
+  tensorforge::tensorMapTiled<float, 3>(tensor, dims, strides, box, 128, true);
+  std::printf("calls %d 1\n", seen.calls);
+  std::printf("type %d %d\n", int(seen.type),
+              int(CU_TENSOR_MAP_DATA_TYPE_FLOAT32));
+  std::printf("rank %u 3\n", seen.rank);
+  std::printf("base %d 1\n", int(seen.base == tensor));
+  std::printf("dims %llu,%llu,%llu 64,7,5\n", seen.dims[0], seen.dims[1],
+              seen.dims[2]);
+  std::printf("strides %llu,%llu 288,2016\n", seen.strides[0],
+              seen.strides[1]);
+  std::printf("box %u,%u,%u 32,3,2\n", seen.box[0], seen.box[1], seen.box[2]);
+  std::printf("elements %u,%u,%u 1,1,1\n", seen.elements[0], seen.elements[1],
+              seen.elements[2]);
+  std::printf("interleave %d %d\n", int(seen.interleave),
+              int(CU_TENSOR_MAP_INTERLEAVE_NONE));
+  std::printf("swizzle %d %d\n", int(seen.swizzle),
+              int(CU_TENSOR_MAP_SWIZZLE_128B));
+  std::printf("fill %d %d\n", int(seen.fill),
+              int(CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA));
+  return 0;
+}
+'''
+
+
+def _runtime_libraries(nvcc):
+    """The toolkit's library directories, where the shared runtime is, for a
+    program linked against it to find at run time."""
+    root = Path(nvcc).resolve().parents[1]
+    found = [root / 'lib64', root / 'lib'] + sorted(root.glob('targets/*/lib'))
+    return [str(p) for p in found if p.is_dir()]
+
+
+def test_host_the_map_is_encoded_in_the_drivers_order(tmp_path):
+    """`tensorMapTiled` hands the driver's `cuTensorMapEncodeTiled` (CUDA
+    driver API, "Tensor Map Object Management") its arguments in the driver's
+    order: the extents innermost first, the strides in bytes without the
+    innermost dimension's, the box innermost first, an element stride of one,
+    no interleave, the 128-byte swizzle as `CU_TENSOR_MAP_SWIZZLE_128B` and
+    the NaN fill as `CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA` -- the
+    order TensorForge states them in, outermost first and strides in
+    elements, turned around.  Checked on the host, the encoder replaced by a
+    recorder (`_ENCODE_SOURCE`): what only the boxes on a GPU of sm_90 or
+    newer showed before, a box landing elsewhere."""
+    nvcc = _nvcc()
+    src = tmp_path / 'encode.cu'
+    src.write_text(_ENCODE_SOURCE)
+    exe = tmp_path / 'encode'
+    run = subprocess.run(
+        [nvcc, *toolchain.COMPILERS['cuda'].language_flags(), '-cudart',
+         'shared', '-I', str(INCLUDE), '-o', str(exe), str(src)],
+        capture_output=True, text=True, timeout=600)
+    assert run.returncode == 0, run.stderr[-4000:]
+    env = dict(os.environ)
+    env['LD_LIBRARY_PATH'] = os.pathsep.join(
+        _runtime_libraries(nvcc) + [env.get('LD_LIBRARY_PATH', '')])
+    run = subprocess.run([str(exe)], capture_output=True, text=True,
+                         timeout=120, env=env)
+    assert run.returncode == 0, (run.stdout, run.stderr[-2000:])
+    seen = {}
+    for line in run.stdout.splitlines():
+        name, got, want = line.split()
+        seen[name] = (got, want)
+    assert set(seen) == {'calls', 'type', 'rank', 'base', 'dims', 'strides',
+                         'box', 'elements', 'interleave', 'swizzle', 'fill'}
+    wrong = {name: pair for name, pair in seen.items() if pair[0] != pair[1]}
+    assert not wrong, wrong
+
+
+#: A kernel that copies a 3-D box through `tmaLoad` with its coordinates
+#: from three parameters of their own, which the PTX loads one by one.
+_COORDINATES_SOURCE = r'''
+#include "tensorforge_device/cuda_tma.h"
+
+extern "C" __global__ void __launch_bounds__(32)
+coordinates(const __grid_constant__ CUtensorMap map, int c0, int c1, int c2) {
+  __shared__ alignas(128) float box[256];
+  __shared__ alignas(8) uint64_t barrier;
+  tensorforge::BulkCursor cursor =
+      tensorforge::bulk_arm(&barrier, threadIdx.x == 0);
+  __syncthreads();
+  tensorforge::tmaLoad(cursor, box, &map, 1024, c0, c1, c2);
+}
+'''
+
+
+def test_compiled_the_coordinates_of_a_box_are_the_innermost_first(tmp_path):
+    """The 3-D `tmaLoad` passes its coordinates to `cp.async.bulk.tensor.3d`
+    as the PTX takes them (PTX ISA, "cp.async.bulk.tensor":
+    `tensorCoords`, the innermost dimension's first): `c0`, `c1`, `c2` in
+    turn.  Read off the PTX: each operand is the register the kernel loaded
+    from its own parameter -- the order a box on a GPU showed before, and
+    the compile alone needs none."""
+    nvcc = _nvcc_builds('sm_90')
+    src = tmp_path / 'coordinates.cu'
+    src.write_text(_COORDINATES_SOURCE)
+    out = tmp_path / 'coordinates.ptx'
+    run = subprocess.run(
+        [nvcc, '-ptx', *toolchain.COMPILERS['cuda'].language_flags(),
+         *toolchain.COMPILERS['cuda'].target_flags('sm_90'), '-I',
+         str(INCLUDE), '-o', str(out), str(src)],
+        capture_output=True, text=True, timeout=600)
+    assert run.returncode == 0, run.stderr[-4000:]
+    ptx = out.read_text()
+    # Each parameter's register, and what a move hands on to another.
+    source = {m.group(1): int(m.group(2)) for m in re.finditer(
+        r'ld\.param\.[us]32\s+(%r\d+),\s*\[coordinates_param_(\d)\];', ptx)}
+    for m in re.finditer(r'mov\.[ub]32\s+(%r\d+),\s*(%r\d+);', ptx):
+        if m.group(2) in source:
+            source[m.group(1)] = source[m.group(2)]
+    copies = re.findall(r'cp\.async\.bulk\.tensor\.3d\.shared::cluster\.global'
+                        r'\.tile\.mbarrier::complete_tx::bytes\s*\[[^\]]+\],\s*'
+                        r'\[[^,\]]+,\s*\{([^}]*)\}\]', ptx)
+    assert len(copies) == 1, copies
+    operands = [o.strip() for o in copies[0].split(',')]
+    assert [source.get(o) for o in operands] == [1, 2, 3], (operands, source)
