@@ -17,8 +17,7 @@ from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.common.operation import MaxOperator
 from tensorforge.generators.descriptions import (GemmDescr, GridBarrierDescr,
-                                                 GridFenceDescr,
-                                                 ReductionDescr)
+                                                 ReductionDescr, SiblingDescr)
 
 DTYPE = Datatype.F32
 
@@ -153,27 +152,27 @@ def test_a_single_chunk_is_not_a_run():
     assert find_repeats(face(0)) == []
 
 
-# --- fences take part -------------------------------------------------------
+# --- sibling cuts take part -------------------------------------------------
 
 
-def test_a_fence_inside_the_chunk_is_part_of_the_repetition():
-    descrs = flat([face(i) + [GridFenceDescr()] for i in range(4)])
+def test_a_sibling_cut_inside_the_chunk_is_part_of_the_repetition():
+    descrs = flat([face(i) + [SiblingDescr()] for i in range(4)])
     runs = find_repeats(descrs)
     assert len(runs) == 1
     assert (runs[0].period, runs[0].count) == (2, 4)
     assert runs[0].arity == 1
 
 
-def test_a_fence_in_a_different_place_breaks_the_run():
-    descrs = (face(0) + [GridFenceDescr()] + face(1) + [GridFenceDescr()] +
-              face(2) + face(3) + [GridFenceDescr()])
+def test_a_sibling_cut_in_a_different_place_breaks_the_run():
+    descrs = (face(0) + [SiblingDescr()] + face(1) + [SiblingDescr()] +
+              face(2) + face(3) + [SiblingDescr()])
     runs = find_repeats(descrs)
     assert all(r.count < 4 for r in runs)
 
 
-def test_a_fence_and_a_barrier_are_not_the_same_descriptor():
-    descrs = (face(0) + [GridFenceDescr()] + face(1) + [GridBarrierDescr()] +
-              face(2) + [GridFenceDescr()] + face(3) + [GridFenceDescr()])
+def test_a_sibling_cut_and_a_barrier_are_not_the_same_descriptor():
+    descrs = (face(0) + [SiblingDescr()] + face(1) + [GridBarrierDescr()] +
+              face(2) + [SiblingDescr()] + face(3) + [SiblingDescr()])
     runs = find_repeats(descrs)
     assert all(r.count < 4 for r in runs)
 

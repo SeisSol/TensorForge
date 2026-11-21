@@ -75,11 +75,11 @@ def test_the_arena_is_a_reserved_chunk_and_not_an_accessor():
 
 def test_a_kernel_of_several_sections_reserves_once():
     """`slm_init` may be called once per kernel, and every section binds its
-    own arena: were the arena reserved per section too, `fence_two_gemms`
+    own arena: were the arena reserved per section too, `siblings_two_gemms`
     would call it twice, which IGC refuses ("slm_init is called more than
     once").  The reservation is the kernel's, at the largest section's size;
     the binding stays the section's."""
-    src = _kernel('fence_two_gemms')
+    src = _kernel('siblings_two_gemms')
     assert src.count('slmReserve<') == 1, src
     assert src.count('SlmPtr<float> totalShrMem = ') == 2, src
 

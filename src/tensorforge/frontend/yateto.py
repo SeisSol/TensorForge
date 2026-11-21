@@ -11,7 +11,7 @@ from tensorforge.common.matrix.tensor import Tensor, SubTensor
 from tensorforge.common.matrix.spp import FullSPP, ListSPP
 from tensorforge.common.matrix.boundingbox import BoundingBox as BBox
 from tensorforge.generators.generator import Generator as TensorForgeGenerator
-from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, ReductionDescr, GridBarrierDescr, GridFenceDescr, RegionDescription, GuardLiteral
+from tensorforge.generators.descriptions import MultilinearDescr, ElementwiseDescr, ReductionDescr, GuardLiteral
 from tensorforge.generators.legalize import legalize
 from tensorforge.common.operation import Operation
 from tensorforge.common.operation import AddOperator, MulOperator, MinOperator, MaxOperator, AndOperator, OrOperator, XorOperator
@@ -45,19 +45,6 @@ class Reader:
     time is not finished when it is first asked for its result.
     """
     return self._descr_list, self._cache
-
-  # NOTE: regions and barriers have no place in the description yet -- yateto
-  #       has never called for one -- so these are unreachable. When they are
-  #       needed they belong in the operations list, as entries of their own.
-  def switch_region(self, barrier):
-    if barrier:
-      self._descr_list += [GridBarrierDescr()]
-    else:
-      self._descr_list += [GridFenceDescr()]
-
-  def set_region_name(self, name):
-    self._prefix = f"{name}."
-    self._descr_list += [RegionDescription(name)]
 
 
 class DescriptionReader(Reader):

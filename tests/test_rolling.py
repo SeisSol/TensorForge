@@ -18,7 +18,7 @@ from tensorforge.common.matrix.tensor import SubTensor, Tensor
 from tensorforge.generators.descriptions import (GemmDescr,
                                                  MultilinearDescr,
                                                  GridBarrierDescr,
-                                                 GridFenceDescr)
+                                                 SiblingDescr)
 from tensorforge.analysis.families import find_repeats
 from tensorforge.generators.rolling import ForDescr, _chunks, roll, unroll
 
@@ -412,15 +412,15 @@ def test_a_barrier_in_the_body_stops_the_roll():
     assert same_shape(out) == same_shape(descrs)
 
 
-def test_a_fence_in_the_body_stops_the_roll():
+def test_a_sibling_cut_in_the_body_stops_the_roll():
     descrs = [d for i in range(4)
-              for d in accumulation(4)[i:i + 1] + [GridFenceDescr()]]
+              for d in accumulation(4)[i:i + 1] + [SiblingDescr()]]
     assert not any(isinstance(d, ForDescr) for d in roll(descrs))
 
 
 def test_a_barrier_may_be_rolled_when_asked_for():
     descrs = [d for i in range(4)
-              for d in accumulation(4)[i:i + 1] + [GridFenceDescr()]]
+              for d in accumulation(4)[i:i + 1] + [SiblingDescr()]]
     out = roll(descrs, allow_barriers=True)
     assert isinstance(out[0], ForDescr)
     assert out[0].barrier()

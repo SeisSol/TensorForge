@@ -170,8 +170,8 @@ def test_temporary_assembled_from_slices_is_read_after_both_writes(backend,
 
 
 @pytest.mark.parametrize("case_stem", ["barrier/barrier_two_gemms",
-                                  "barrier/fence_two_gemms"],
-                         ids=["barrier", "fence"])
+                                  "barrier/siblings_two_gemms"],
+                         ids=["barrier", "siblings"])
 @pytest.mark.parametrize("backend,arch", ALL_TARGETS,
                          ids=[b for b, _ in ALL_TARGETS])
 def test_a_sections_stores_land_before_the_next_section(case_stem, backend,
@@ -191,9 +191,9 @@ def test_a_sections_stores_land_before_the_next_section(case_stem, backend,
     * ``barrier`` keeps a cross-section dependency -- section 1 reads back the
       tensor section 0 wrote -- so the order can be asserted on that one array,
       which is the sharpest form the invariant has.
-    * ``fence`` has none, and must not: a fence does not order its sections,
+    * ``siblings`` has none, and must not: sibling sections are not ordered,
       so a case that read section 0's output in section 1 would be racing by
-      construction (see ``cases/barrier/fence_two_gemms.py``).  What is left to
+      construction (see ``cases/barrier/siblings_two_gemms.py``).  What is left to
       assert there is the boundary itself -- section 0's destination is written
       before section 1's destination is first touched, rather than both being
       stored together at the end of the kernel.  That is the part of the

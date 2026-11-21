@@ -637,14 +637,26 @@ class BarrierDescription(OperationDescription):
   def matrix_list(self):
     return []
 
-class GridFenceDescr(BarrierDescription):
+class SiblingDescr(BarrierDescription):
+  """A cut between sibling sections: independent work in one launch, each
+  section over an element count and flags of its own, the next one started
+  rotated (`Generator._section_traversal`) so that consecutive siblings do
+  not take the same elements first.  Nothing orders them -- a section reads
+  nothing a sibling of it writes.  What the grid fence was, under a name that
+  promises no memory ordering: TensorForge's horizontal fusion of plan steps
+  without an edge between them."""
   def __str__(self):
-    return 'fence'
+    return 'siblings'
 
   def trueBarrier(self):
     return False
 
 class GridBarrierDescr(BarrierDescription):
+  """A barrier across the grid: what the sections ahead of it write, the
+  sections after it read.  The kernel is cut there into launches, issued one
+  after the other on the stream (`Generator._launch_groups`) -- or, under
+  `Options.cooperative_grid`, kept as one cooperative launch with a barrier
+  of the whole grid between the sections."""
   def __str__(self):
     return 'barrier'
 

@@ -402,8 +402,9 @@ def test_barriers_cases_construct_and_generate():
     The host-only assertion: after generation, ``gen._sections`` has
     length ≥ 2 — otherwise the barrier didn't actually split the descr
     list and the case isn't testing what it claims. For the
-    ``GridBarrierDescr`` variant we additionally require
-    ``persistent_threading`` to be on (cooperative launch).
+    ``GridBarrierDescr`` variant, which asks for ``cooperative_grid``, we
+    additionally require the cooperative launch; without the option the
+    same descr list is cut into two launches.
     """
     from pathlib import Path
     import importlib.util
@@ -422,7 +423,9 @@ def test_barriers_cases_construct_and_generate():
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
-        ctx = Context(arch="sm_86", backend="cuda", fp_type=mod.DTYPE)
+        from tensorforge.common.options import Options
+        ctx = Context(arch="sm_86", backend="cuda", fp_type=mod.DTYPE,
+                      options=Options(**getattr(mod, "OPTIONS", {})))
         gen = Generator(mod.descr_list(), ctx)
         gen.generate()
 
@@ -438,6 +441,14 @@ def test_barriers_cases_construct_and_generate():
                 f"{path.name}: GridBarrierDescr but no section.barrier set")
             assert "cudaLaunchCooperativeKernel" in gen.get_launcher(), (
                 f"{path.name}: cooperative launch not selected")
+            cut = Generator(mod.descr_list(),
+                            Context(arch="sm_86", backend="cuda",
+                                    fp_type=mod.DTYPE))
+            cut.generate()
+            assert any(s.launch_cut for s in cut._sections), (
+                f"{path.name}: GridBarrierDescr without cooperative_grid "
+                f"but no launch cut")
+            assert "cudaLaunchCooperativeKernel" not in cut.get_launcher()
 
 
 # ---------------------------------------------------------------------- #

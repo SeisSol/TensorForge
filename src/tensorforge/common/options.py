@@ -1920,6 +1920,24 @@ declare('programmatic_launch',
             'sm_90, a backend other than CUDA, and a kernel launched '
             'cooperatively (a grid barrier) are built as without it.')
 
+declare('cooperative_grid',
+        default=False,
+        parse=parse_bool,
+        env='TF_COOPERATIVE_GRID',
+        doc='Keep a grid barrier (`GridBarrierDescr`) inside one kernel: the '
+            'sections on either side run in one cooperative launch over a '
+            'grid that is resident at once, separated by a barrier of the '
+            'whole grid (`cooperative_groups::this_grid().sync()`).  Off, the '
+            'default, the kernel is cut there into launches, which its '
+            'launcher issues one after the other on the stream: the end of a '
+            'launch orders its writes before the next launch reads, no grid '
+            'has to be resident for that, and each launch takes the grid its '
+            'own element count asks for.  With `programmatic_launch` a launch '
+            'waits for the one before ahead of its first access to anything '
+            'that one may have written (`pir.griddep`); a captured graph '
+            'keeps them as its edges.  CUDA and HIP; SYCL has neither a '
+            'stream order the launcher could rely on nor a grid barrier.')
+
 declare('batch_parts',
         rule=lambda target: 2 if target.sycl else 1,
         parse=parse_int,

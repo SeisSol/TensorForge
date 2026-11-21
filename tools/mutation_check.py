@@ -2061,8 +2061,8 @@ GROUPS = {
         ('a merged run\'s members read through one element\'s pointers',
          sub(PTR, "        args.append(pointers[_e])", "        args.append(pointers[0])", 1)),
         ('the grid sized by the elements',
-         sub(GEN, "    stacks = stacking.count(0, self._stack)\n",
-             "    stacks = stacking.count(0, 1)\n", 1)),
+         sub(GEN, "    stacks = stacking.count(head, self._stack)\n",
+             "    stacks = stacking.count(head, 1)\n", 1)),
         ('the first stack clamped by the element count',
          sub(GEN, "    count = body.extern_value(stacking.count(index, self._stack), SIZE,",
              "    count = body.extern_value(stacking.count(index, 1), SIZE,", 1)),
@@ -4963,8 +4963,8 @@ GROUPS = {
          sub(GEN, '    if not self._programmatic():\n      return\n    from tensorforge.backend.pir import griddep\n',
              '    return\n    from tensorforge.backend.pir import griddep\n', 1)),
         ('the ordinary launch for a programmatic kernel',
-         sub(GEN, '      if self._programmatic():\n        call_site = lexic.get_programmatic_launch_code(\n',
-             '      if False:\n        call_site = lexic.get_programmatic_launch_code(\n', 1)),
+         sub(GEN, '        if self._programmatic():\n          return lexic.get_programmatic_launch_code(\n',
+             '        if False:\n          return lexic.get_programmatic_launch_code(\n', 1)),
         ('a programmatic launch below sm_90',
          sub(GEN, '    if nvidia.sm_of(self._context) < 90:\n      return False\n    return not self._launch.cooperative\n',
              '    return not self._launch.cooperative\n', 1)),
@@ -4990,6 +4990,38 @@ GROUPS = {
          sub(CUDA_H, '  return cudaLaunchKernelEx(&config, kernel, std::forward<Args>(args)...);\n',
              '  kernel<<<grid, block, shared, stream>>>(std::forward<Args>(args)...);\n'
              '  return cudaGetLastError();\n', 1)),
+    ]),
+    # A grid barrier as a launch boundary (`GridBarrierDescr` without
+    # `Options.cooperative_grid`): the cut, each launch's kernel, grid and
+    # wait, and the cooperative launch behind the option.
+    'launchcut': ('tests/test_launch_boundary.py '
+                  '--deselect tests/test_launch_boundary.py::test_gpu_two_launches_compute_what_the_cooperative_one_does '
+                  'tests/test_kernels.py::test_barriers_cases_construct_and_generate '
+                  'tests/test_launch_control.py::test_a_grid_barrier_is_a_launch_boundary_of_two_queues', [
+        ('a grid barrier kept in one cooperative launch',
+         sub(GEN, "    if getattr(self._context.get_user_options(), 'cooperative_grid', False):\n      return False\n    return self._context.target.backend in ('cuda', 'hip')\n",
+             '    return False\n', 1)),
+        ('the cooperative launch where it is not asked for',
+         sub(GEN, "    if getattr(self._context.get_user_options(), 'cooperative_grid', False):\n      return False\n",
+             '', 1)),
+        ('the launch after the cut started rotated',
+         sub(GEN, '      if ssection.barrier or ssection.block_barrier or ssection.launch_cut:\n',
+             '      if ssection.barrier or ssection.block_barrier:\n', 1)),
+        ('every launch sized by the first count',
+         sub(GEN, '    head = self._sections[self._launch_groups()[launch_index][0]].count_index\n',
+             '    head = 0\n', 1)),
+        ('the launch after the cut never issued',
+         sub(GEN, '      for launch in range(1, len(groups)):\n        suffix = self._launch_suffix(launch)\n',
+             '      for launch in range(1, 1):\n        suffix = self._launch_suffix(launch)\n', 1)),
+        ('one wait for all the launches',
+         sub(GEN, '        if placed:\n          section.body = body\n          break\n',
+             '        if placed:\n          section.body = body\n          return\n', 1)),
+        ('what another launch writes read as free',
+         sub(GEN, '    writes = griddep.written(section.body for section in self._sections)\n    for group in self._launch_groups():\n',
+             '    for group in self._launch_groups():\n      writes = griddep.written(self._sections[i].body for i in group)\n', 1)),
+        ('the sections after the cut in the first kernel',
+         sub(GEN, '      if section.launch_cut and i + 1 < len(self._sections):\n        groups.append([])\n',
+             '', 1)),
     ]),
 }
 

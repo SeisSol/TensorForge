@@ -280,7 +280,32 @@ def test_a_grid_barrier_is_refused():
     `GenerationError`, because a bare `assert not coop` in the launcher would
     fire with no message and read as an internal defect rather than as the
     answer to a question the caller asked.
+
+    The cooperative launch only where asked for (`cooperative_grid`); by
+    default the barrier cuts the kernel into two launches, each its own queue
+    (`test_a_grid_barrier_is_a_launch_boundary_of_two_queues`).
     """
+    dt = Datatype.F32
+
+    def square(alias):
+        return SubTensor(Tensor([16, 16], Addressing.STRIDED,
+                                BoundingBox([0, 0], [16, 16]),
+                                alias=alias, datatype=dt))
+
+    a, b, d, c, e = (square(x) for x in "ABDCE")
+    descrs = [GemmDescr(False, False, a=a, b=b, c=d, alpha=1.0, beta=0.0),
+              GridBarrierDescr(),
+              GemmDescr(False, False, a=d, b=c, c=e, alpha=1.0, beta=0.0)]
+    ctx = Context(arch=BLACKWELL, backend="cuda", fp_type=dt,
+                  options=Options(launch_control=True,
+                                  enable_wrap_loads=False,
+                                  cooperative_grid=True))
+    gen = Generator(descrs, ctx)
+    with pytest.raises(GenerationError, match="grid-wide barrier"):
+        gen.generate()
+
+
+def test_a_grid_barrier_is_a_launch_boundary_of_two_queues():
     dt = Datatype.F32
 
     def square(alias):
@@ -296,8 +321,12 @@ def test_a_grid_barrier_is_refused():
                   options=Options(launch_control=True,
                                   enable_wrap_loads=False))
     gen = Generator(descrs, ctx)
-    with pytest.raises(GenerationError, match="grid-wide barrier"):
-        gen.generate()
+    gen.generate()
+    kernel, launcher = gen.get_kernel(), gen.get_launcher()
+    assert kernel.count("__global__") == 2
+    assert "Cooperative" not in launcher
+    # Each launch sized by its own batch, the queue's ceiling stated for both.
+    assert launcher.count("// launch_control: at most") == 2
 
 
 # -- the loop as a construct ----------------------------------------------- #

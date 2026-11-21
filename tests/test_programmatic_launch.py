@@ -176,7 +176,8 @@ class TestTheOption:
     def test_a_cooperative_launch_stays_one(self):
         # A grid barrier needs every block resident at once, which the
         # cooperative launch is for, and nothing would gain by the other.
-        gen = _case('barrier_two_gemms', programmatic_launch=True)
+        gen = _case('barrier_two_gemms', programmatic_launch=True,
+                    cooperative_grid=True)
         assert 'cudaLaunchCooperativeKernel' in gen.get_launcher()
         assert LAUNCH not in gen.get_launcher()
         assert WAIT not in gen.get_kernel()
@@ -348,7 +349,8 @@ BENCH = Path(__file__).resolve().parents[1] / 'tools' / 'bench'
 
 #: Runs the sequence of `_sequence` `argv[2]` times over, on a stream of its
 #: own or captured into a graph and launched as one (`argv[3]`), then sums and
-#: dumps its outputs (`$TFB_DUMP`, `driver_bench`).
+#: dumps its outputs (`$TFB_DUMP`, `driver_bench`).  For another workload's
+#: entry points: `main_source`.
 MAIN = r"""
 #include <cstdio>
 #include <cstdlib>
@@ -393,6 +395,12 @@ int main(int argc, char** argv) {
   return 0;
 }
 """
+
+
+def main_source(tag: str) -> str:
+    """`MAIN` for the entry points of the bench workload `tag`
+    (`driver_bench.entry_points`)."""
+    return MAIN.replace('_pdl(', f'_{tag}(')
 
 
 def _nvcc():
@@ -481,7 +489,7 @@ class TestCompiled:
         if arch is None or int(arch[3:]) < 90:
             pytest.skip('no GPU of sm_90 or newer')
         nvcc = _nvcc()
-        (tmp_path / 'main.cu').write_text(MAIN)
+        (tmp_path / 'main.cu').write_text(main_source('pdl'))
         aux = INCLUDE / toolchain.COMPILERS['cuda'].aux
         outputs = {}
         for programmatic in (False, True):
