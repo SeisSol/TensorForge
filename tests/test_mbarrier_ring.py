@@ -39,7 +39,8 @@ from tensorforge.backend.pir.barriers import BLOCK, Arena, place_barriers
 from tensorforge.backend.pir.build import (IRBuilder, RingSlot, Role,
                                            barrier_stmt)
 from tensorforge.backend.pir.core import (BOOL, INDEX, IRError, MemSpace, Op,
-                                          Participants, Uniformity, walk)
+                                          Participants, ScalarType,
+                                          Uniformity, walk)
 from tensorforge.backend.pir.emit import Emitter
 from tensorforge.backend.pir.passes import verify
 from tensorforge.common.basic_types import Datatype
@@ -61,7 +62,7 @@ def _ctx(arch='sm_90a'):
 
 def _body(trips=5, slots=2, warp_sync=True, release=True, expect=True,
           tx=WIDTH * 4, producer_parity=True, exchange=True,
-          role_barrier=True, block_barrier=False):
+          role_barrier=True, block_barrier=False, cross=False):
     """Two consumer warps (`threadIdx.y` 0 and 1) and a producer warp (2)
     over a ring of `slots`, in roles of their own: each trip the producer
     waits for the slot's round on its empty side, copies the trip's `WIDTH`
@@ -94,6 +95,10 @@ def _body(trips=5, slots=2, warp_sync=True, release=True, expect=True,
                     Role('consumers', WIDTH, IDENT))
         with h.then():
             issue = b.op('eq', BOOL, x, 0, hint='issue')
+            if cross:
+                # The consumers' own buffer, written by the producer: no
+                # barrier of either role orders the two.
+                b.store(swap, b.const(0.0, ScalarType(F32)), x)
             free = (b.op('sub', INDEX, 1, parity, hint='free')
                     if producer_parity else parity)
             b.ring_wait(ring, 'empty', slot, free, writes=[slot_buf])
@@ -288,6 +293,15 @@ def test_the_roles_meet_on_the_ring_alone():
     found = _loop_barriers(_placed(built, report))
     assert Participants.BLOCK not in found and not report
     assert found.count(Participants.ROLE) == 2, found
+
+
+def test_an_access_across_the_roles_is_reported():
+    """The producer writes a buffer the consumers read, outside the ring:
+    neither role's barrier orders the other, and the placement says so."""
+    report = []
+    built, _, _ = _body(cross=True)
+    _placed(built, report)
+    assert report and 'meet an earlier one' in report[0]
 
 
 def test_a_role_hazard_is_met_on_the_roles_barrier():

@@ -1481,8 +1481,9 @@ def producer_refusal(section: GroupSection, context) -> Optional[str]:
 
     The producer copies an element's box of an input a column at a time,
     one bulk copy a column (`IRBuilder.copy_bulk` into a `RingSlot`), where
-    the copy takes it (`bulk_input`), and by its lanes' loads otherwise:
-    the target has the bulk copy (sm_90 on), every input is stored dense --
+    the copy takes it (`bulk_input`), and a cell an asynchronous copy of
+    its first warp otherwise: the target has the bulk copy (sm_90 on),
+    every input is stored dense --
     an element's operand stored sparse, SeisSol's `star` under its GPU
     memory layout, is read cell by cell through its places
     (`compute.multi_element._sparse_read`), which no copy of a box does --
@@ -1545,7 +1546,7 @@ def _bulk_source(buffer: Buffer) -> bool:
 
 def bulk_input(buffer: Buffer) -> bool:
     """Whether a producer copies an input's box by bulk copies, a column
-    each (`producer_refusal`), rather than by its lanes' loads: the operand
+    each (`producer_refusal`), rather than a cell a copy: the operand
     promises 16 bytes (`alignment`, as `Symbol.linear_align_bytes` reads
     it), a column's first row and the columns' stride in its storage -- the
     bounding box's rows -- are on four floats, the box's rows rounded to
@@ -1656,6 +1657,12 @@ def shared_bytes(section: GroupSection, elements: int) -> int:
         per_element += (section.ring - 1) * sum(b.per_element
                                                 for b in section.inputs)
         operators += 2 * section.ring * 8 // size
+    # tcgen05's D staged in shared memory for every element warp to write
+    # (`compute.multi_element._tcgen05`): the widest step's rows of the
+    # element, an odd number of floats apart.
+    per_element += max(((s.cols[1] - s.cols[0]) * ((s.rows[1] - s.rows[0]) | 1)
+                        for s in section.steps if s.lowering == 'tcgen05'),
+                       default=0)
     return (size * (operators + elements * per_element)
             + POINTER_BYTES * elements * len(section.pointer_tables))
 

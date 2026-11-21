@@ -59,12 +59,14 @@ def _kernel(arch='sm_90', shape='volume', order=6, **options):
 
 @pytest.mark.parametrize('arch,elements,slots,lowering', [
     ('sm_90', 16, 3, 'mma_sync'), ('sm_90a', 16, 2, 'wgmma'),
-    ('sm_100a', 14, 3, 'tcgen05')])
+    ('sm_100a', 14, 2, 'tcgen05')])
 def test_the_inputs_go_through_a_ring(arch, elements, slots, lowering):
     """o6's volume: the group as without the producer, a warp more, and the
     deepest ring the block has room for -- three slots on sm_90, 221.4 kB,
     mma_sync's B staged without its tiles of zeros; 202.5 kB at two on
-    sm_90a, wgmma's B whole; three on sm_100a's smaller group."""
+    sm_90a, wgmma's B whole; two on sm_100a's smaller group too, 219.3 kB,
+    as its D staged for every element warp's writes takes 27.7 kB
+    (`d_stage_stride`) and a third slot's 31.8 kB no longer fit."""
     group = _plan(arch)
     assert (group.elements, group.section.ring) == (elements, slots)
     assert group.producers == 1 and group.warps == elements + 1
@@ -170,6 +172,35 @@ def test_the_kernel():
     assert '__syncthreads' not in src[src.index('for (size_t'):]
 
 
+def test_the_producer_copies_what_no_bulk_copy_takes():
+    """The star matrices -- 9 x 9 an element, 324 bytes, which no bulk copy
+    takes -- by the producer's first warp, a cell a copy: lane `l` takes
+    element `l % 16` and, with the other lane of that element, every second
+    of its 81 cells -- 41 copies a star, 123 a trip, all in flight before one
+    wait, ahead of the warp's barrier and the first lane's arrival.  A lane
+    holds its own element's three pointers; no lane loads a star into a
+    register (p5d: a load and a store at a time, 243 a lane)."""
+    src = _kernel().get_kernel()
+    start = re.search(r'if \(\w+_producer\) \{', src).start()
+    producer = src[start:src.index('tensorforge::mbarrierExpect(', start)]
+    assert re.search(r'= threadIdx\.x % 16;', producer)
+    assert re.search(r'= threadIdx\.x / 16;', producer)
+    copies = re.findall(r'__pipeline_memcpy_async\(&\w+_rstar(\d)\[[^\]]+\], '
+                        r'&estar(\d)_\d+\[\w+\], 4\);', producer)
+    assert len(copies) == 3 * 41
+    assert all(window == star for window, star in copies)
+    assert {star: [w for w, _ in copies].count(star)
+            for star in '012'} == {'0': 41, '1': 41, '2': 41}
+    assert len(set(re.findall(r'const float \*const (estar\d_\d+) = ',
+                              producer))) == 3
+    assert src.count('__pipeline_memcpy_async') == 3 * 41
+    assert not re.search(r'= estar\d_\d+\[', producer)
+    last = producer.rindex('__pipeline_memcpy_async')
+    wait = producer.index('__pipeline_wait_prior(0);')
+    assert producer.count('__pipeline_wait_prior(0);') == 1
+    assert last < wait < producer.index('__syncwarp();', wait)
+
+
 @pytest.mark.parametrize('arch,elements,budgets', [
     ('sm_90a', 16, (96, 40, 112)), ('sm_100a', 12, (128, 40, 152))])
 def test_the_producers_registers_go_to_the_element_warps(arch, elements,
@@ -204,15 +235,28 @@ def test_the_kernel_moves_the_registers_once():
 
 # -- the host oracle -------------------------------------------------------------- #
 
-def _two_trips(shape, arch, monkeypatch, **options):
+def _two_trips(shape, arch, monkeypatch, count=7, poison=False, **options):
     """A group of four over seven elements -- two trips, the second with
     warps masked -- through a ring of three: every element against NumPy,
     no access a barrier or the ring does not order (`kernel_eval.Races`),
-    no wait for a phase that never completes."""
+    no wait for a phase that never completes.  `count` elements instead;
+    with `poison`, shared memory nothing wrote reads NaN rather than the
+    oracle's finite noise, as the hardware's may."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
-    group, count = 4, 7
+    group = 4
+    if poison:
+        read = kernel_eval.Slot.read
+
+        def poisoned(self, base, idx):
+            if base == kernel_eval.Races.SHARED and \
+                    (base, int(idx)) not in self.data:
+                if self.tracker is not None:
+                    self.tracker.read(int(idx))
+                return float('nan')
+            return read(self, base, idx)
+        monkeypatch.setattr(kernel_eval.Slot, 'read', poisoned)
     monkeypatch.setattr(eg, 'ELEMENTS', {key: group for key in eg.ELEMENTS})
     monkeypatch.setattr(eg, 'DEFAULT_ELEMENTS', group)
     gen = _kernel(arch, shape, 4, **options)
@@ -286,6 +330,27 @@ def _two_trips(shape, arch, monkeypatch, **options):
 def test_every_element_of_two_trips_on_the_oracle(shape, arch, options,
                                                   monkeypatch):
     _two_trips(shape, arch, monkeypatch, **options)
+
+
+def test_every_slot_handed_over_again_on_the_oracle(monkeypatch):
+    """Five trips of a group of four over nineteen elements, through a ring
+    of three: the fourth and fifth take their slots back from the element
+    warps, which every lane of a warp read before the warp's first lane gave
+    it back -- the producer's copies over it otherwise race with them.  And
+    shared memory nothing wrote reads NaN, as the hardware's may: the
+    intermediates' padding, which the matrix tiling's padded steps of K read
+    and nothing but the element warps' zeros writes, carries it into every
+    product where they were not."""
+    _two_trips('volume', 'sm_90', monkeypatch, count=19, poison=True)
+
+
+def test_a_slots_padding_is_zero_on_the_oracle(monkeypatch):
+    """The chain's first product reads I as its A, on wgmma's steps of eight:
+    a column's 10 rows padded to 16 the tiling reads, of which the bulk
+    copies write 12 -- rows 12 to 15 are the slot's own, zeroed once ahead
+    of the loop, and with shared memory nothing wrote reading NaN, every
+    element of a trip carries it where they were not."""
+    _two_trips('chain', 'sm_90a', monkeypatch, poison=True)
 
 
 # -- on the hardware ----------------------------------------------------------- #

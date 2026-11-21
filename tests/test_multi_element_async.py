@@ -278,20 +278,91 @@ def test_wgmma_pending_takes_what_a_thread_has_registers_for():
 
 
 def test_the_tcgen05_kernel():
-    """45 products, one commit and one wait a product of the step, the
-    tensor memory allocated and freed, A stored in it -- 30 stores, both
-    halves of each step of K -- and D loaded: 55 rows to the next eight,
+    """45 products in one round -- every product's A in columns of its
+    own, 512 of them, so one commit and one wait for the step -- the
+    tensor memory allocated and freed, A stored in it, 30 stores, both
+    halves of each step of K, and D loaded: 55 rows to the next eight,
     32 + 16 + 8; B fenced for the async proxy once."""
     src = _kernel('sm_100a').get_kernel()
     assert src.count('tcgen05.mma.cta_group::1.kind::tf32') == 45
-    assert src.count('tensorforge::tcgen05Commit(') == 3
-    assert src.count('tensorforge::tmemAlloc<') == 1
+    assert src.count('tensorforge::tcgen05Commit(') == 1
+    assert src.count('tensorforge::tmemAlloc<512>') == 1
     assert src.count('tensorforge::tmemDealloc<') == 1
     assert len(re.findall(r'tcgen05\.st\.sync\.aligned\.32x32b\.x8', src)) == 30
     loads = re.findall(r'tcgen05\.ld\.sync\.aligned\.32x32b\.x(\d+)', src)
     assert sorted(map(int, loads)) == [8, 16, 32]
     assert src.count('tensorforge::fenceProxyAsync()') == 1
     assert 'mma.sync' not in src
+
+
+def test_tcgen05s_a_is_stored_by_every_band_of_warps():
+    """o6's group of 14 holds three bands of four warps whole: a chunk of
+    eight columns of A each in turn, warp w the lanes 32 (w % 4) on --
+    and the band the chunk is not the band's skips it."""
+    src = _kernel('sm_100a').get_kernel()
+    bands = re.findall(r'\w+_mine = \w+_band == (\d+);', src)
+    assert sorted(set(bands)) == ['0', '1', '2']
+
+
+def test_tcgen05s_d_goes_out_through_every_element_warp():
+    """D staged in shared memory, a row a lane-holding thread, an odd
+    number of floats apart; every element warp's threads write a cell
+    each a hop."""
+    from tensorforge.backend.instructions.compute.multi_element import \
+        d_stage_stride
+    assert d_stage_stride(55) == 55 and d_stage_stride(56) == 57
+    src = _kernel('sm_100a').get_kernel()
+    assert 'dstage' in src
+    assert re.search(r'for \(int32_t \w+_c = \w+_tid; \w+_c < 6930; '
+                     r'\w+_c \+= 448\)', src)
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+@pytest.mark.parametrize('shape', ['volume', 'chain', 'reuse', 'assign',
+                                   'window'])
+def test_the_block_holds_what_the_plan_counted(shape, arch):
+    """The kernel's block takes the shared memory the fill rule counted
+    (`element_group.shared_bytes`), within the room it leaves the arena
+    (`SHARED_RESERVE`): tcgen05's D is staged once a trip for all of its
+    steps (`_d_stage`), the widest's rows.  A stage a step, the chain's two
+    steps took 27 kB past the plan -- with the producer's ring, more than a
+    GB200's block has."""
+    group = _group(shape, 6, 's', arch)
+    src = _kernel(arch, shape).get_kernel()
+    shared = int(re.search(r'(\d+) B shared', src).group(1))
+    assert group.shared_bytes <= shared <= (group.shared_bytes
+                                            + eg.SHARED_RESERVE)
+    assert src.count('_dstage = ') == (arch == 'sm_100a')
+
+
+def test_a_ring_keeps_a_product_a_round():
+    """With B streamed, a product's A shares D's end with the others':
+    a product a round, a chunk a commit."""
+    from tensorforge.backend.instructions.compute.multi_element import \
+        _tcgen05_columns
+    group = _group('volume', 8, 's', 'sm_100a')
+    step = _operator_step(group)
+    columns, at, apart = _tcgen05_columns(group.section, step)
+    assert len(set(at)) == 1 and columns <= 512 and not apart
+
+
+def test_a_ring_of_one_product_commits_a_chunk(monkeypatch):
+    """A step of one product has columns of its own either way, but with B
+    streamed its pieces are the ring's chunks: each its own round -- a
+    commit, the next chunk converted, a wait -- not one round of all of
+    them, which would leave the next chunks unconverted.  `assign`'s depth
+    of 35 is five chunks of eight."""
+    from tensorforge.backend.instructions.compute.multi_element import \
+        _tcgen05_columns
+    resident, group = _streaming(monkeypatch, 'sm_100a', 'assign')
+    step = _operator_step(group)
+    assert len(step.products) == 1
+    assert _tcgen05_columns(group.section, step)[2] is False
+    assert _tcgen05_columns(resident.section,
+                            _operator_step(resident))[2] is True
+    src = _kernel('sm_100a', 'assign').get_kernel()
+    assert src.count('tcgen05.mma.cta') == 15
+    assert src.count('tensorforge::tcgen05Commit(') == 5
 
 
 def test_the_tensor_memory_and_the_mbarrier_are_the_blocks():
@@ -484,7 +555,7 @@ def test_compiled_for_sm90a_each_product_is_one_hgmma(tmp_path):
 
 def test_compiled_for_sm100a_each_product_is_one_utchmma(tmp_path):
     sass = _sass('sm_100a', tmp_path)
-    assert _count(sass, 'UTCHMMA') == 45 and _count(sass, 'UTCBAR') == 3
+    assert _count(sass, 'UTCHMMA') == 45 and _count(sass, 'UTCBAR') == 1
     assert _count(sass, 'STTM') == 30 and _count(sass, 'LDTM') == 3
 
 
@@ -609,6 +680,23 @@ def test_the_ring_kernel(arch, instruction, monkeypatch):
         assert src.count('tensorforge::wgmmaWait<0>()') == 15
     else:
         assert src.count('tensorforge::tcgen05Commit(') == 15
+
+
+@pytest.mark.parametrize('arch,instruction', [('sm_90a', 'wgmma.mma_async'),
+                                              ('sm_100a', 'tcgen05.mma.cta')])
+def test_the_ring_reads_a_chunk_ahead(arch, instruction, monkeypatch):
+    """A chunk's operator is read into registers a chunk before it is put
+    into its slot: the loads of the first two stand ahead of the first
+    product, and each chunk's are read once -- fifteen chunks of the three
+    products.  Read where it is put, every chunk was a latency the block sat
+    out (p5d's ncu: 46 % of tcgen05's samples at o8)."""
+    _streaming(monkeypatch, arch)
+    src = _kernel(arch).get_kernel()
+    loads = r'float \w+_k = glb_m\d+\['
+    total = len(re.findall(loads, src))
+    ahead = len(re.findall(loads, src[:src.index(instruction)]))
+    assert total and total % 15 == 0
+    assert ahead == 2 * total // 15
 
 
 @pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])

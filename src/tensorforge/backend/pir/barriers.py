@@ -568,22 +568,36 @@ class _Pass:
             regions.append(replace(r, body=body))
             ends.append(end)
             unfenced |= missed
-        # What a role leaves outstanding, the other's barriers cannot
-        # settle: reported where it meets the other role's.
-        for i, end in enumerate(ends):
-            other = regions[1 - i].body
-            for inner in walk_stmts(other):
-                if inner.regions or settles(inner) is not None:
-                    continue
-                if self.conflict(inner, end)[0] and end is not state:
-                    fresh = _State({k: v for k, v in end.writes.items()
-                                    if k not in state.writes}, {},
-                                   {k: v for k, v in end.reads.items()
-                                    if k not in state.reads})
-                    if self.conflict(inner, fresh)[0]:
-                        unfenced |= {id(inner)}
+        unfenced |= self._across_roles(regions)
         merged = ends[0].merge(ends[1])
         return replace(s, regions=tuple(regions)), merged, unfenced
+
+    def _across_roles(self, regions) -> FrozenSet[int]:
+        """The accesses of one role that meet the other's: the roles run
+        side by side, and no barrier of either orders the other -- only a
+        ring's, which this pass leaves out (`completes_on_barrier`,
+        `handed_buffers`).  Every write of one role against every access of
+        the other, wherever in its region it stands."""
+        def touched(body):
+            reads, writes = [], []
+            for inner in walk_stmts(body):
+                if inner.regions or completes_on_barrier(inner):
+                    continue
+                r, w = self.accesses(inner)
+                reads += [(id(inner), key, ext) for key, ext, _ in r]
+                writes += [(id(inner), key, ext) for key, ext, _ in w]
+            return reads, writes
+
+        first, second = (touched(r.body) for r in regions)
+        found = set()
+        for (reads_a, writes_a), (reads_b, writes_b) in ((first, second),
+                                                         (second, first)):
+            for at, key, ext in writes_a:
+                for other, key_b, ext_b in reads_b + writes_b:
+                    if ((key == key_b or _OPAQUE in (key, key_b))
+                            and _overlap(ext, ext_b)):
+                        found |= {at, other}
+        return frozenset(found)
 
     def place_region(self, s: Stmt, state: _State, level: Uniformity
                      ) -> Tuple[Stmt, _State, FrozenSet[int]]:

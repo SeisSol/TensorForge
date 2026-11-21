@@ -2523,7 +2523,7 @@ declare('element_producer',
         doc='A producer warp fills the multi-element layout\'s inputs '
             '(`multi_element`, `generators.element_group`): through a ring '
             'of slots, its trips ahead of the element warps\', a bulk copy a '
-            'column where the copy takes the box and its lanes\' loads '
+            'column where the copy takes the box and a cell a copy '
             'otherwise, the slots handed over on mbarriers -- in place of '
             'each warp staging its own element.  CUDA from sm_90 on, F32; '
             'where the plan cannot take it (`element_group.'
