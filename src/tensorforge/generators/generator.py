@@ -422,6 +422,10 @@ class Section:
     # gets emitted.
     self.ir: List[AbstractInstruction] = []
     self.global_ir: List[AbstractInstruction] = []
+    #: What the builders author behind the batch loop: the multi-element
+    #: layout's release of what its prologue allocated for the block
+    #: (`MultiElementRelease`).  Empty everywhere else.
+    self.post_ir: List[AbstractInstruction] = []
     self.stream: List[AbstractInstruction] = []
     self.shr_mem_obj: Union[ShrMemObject, None] = None
     self.scopes: Scopes = Scopes()
@@ -1559,7 +1563,8 @@ class Generator:
                                if self._element_group.lanes
                                else Trip.ELEMENT_GROUP))
 
-        self._section.stream = list(self._section.global_ir) + [loop]
+        self._section.stream = (list(self._section.global_ir) + [loop]
+                                + list(self._section.post_ir))
 
         # Final sync for persistent threads: it guards the next iteration's
         # writes against the previous iteration's reads, which the barrier
@@ -4217,7 +4222,8 @@ class Generator:
     builder an operation."""
     import dataclasses
     from tensorforge.backend.instructions.compute.multi_element import (
-        MultiElementOperators, MultiElementSection)
+        MultiElementOperators, MultiElementRelease, MultiElementSection,
+        tmem_columns)
     # The section's own classification: the plan's was made of the
     # descriptions as the generator was handed them, and the section's
     # symbols are the ones its operations name.
@@ -4225,10 +4231,15 @@ class Generator:
     section, why = element_group.classify(flat)
     if section is not None:
       planned = self._element_group.section
+      # The engine the plan's tiling is on: mma_sync's where the fill rule
+      # held a tiling of the target's asynchronous engine to it.
+      engine = (None if element_group.asynchronous(planned)
+                else 'mma_sync')
       section = element_group.lower(
           section, self._context, matrix=element_group.tiled(planned),
           split=element_group.split(planned),
-          lanes=self._element_group.lanes is not None,
+          lanes=self._element_group.lanes is not None, engine=engine,
+          streamed=element_group.streamed(planned),
           double=planned.doubled > 0)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
@@ -4245,6 +4256,10 @@ class Generator:
       operators = MultiElementOperators(
           self._context, group, [symbols[id(t)] for t in section.operators])
       self._section.global_ir.append(operators)
+      if tmem_columns(section):
+        # The tensor memory the prologue allocated, freed behind the loop.
+        self._section.post_ir.append(MultiElementRelease(self._context,
+                                                         operators))
     self._section.ir.append(
         MultiElementSection(self._context, group, symbols, operators))
 

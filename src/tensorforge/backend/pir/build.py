@@ -1080,13 +1080,20 @@ class IRBuilder:
             raise IRError(why)
         return s
 
-    def tmem_alloc(self, columns: int, hint: str = 'tmem') -> Value:
+    def tmem_alloc(self, columns: int, hint: str = 'tmem',
+                   arena: Optional[str] = None) -> Value:
         """`columns` columns of tensor memory for the block, 128 lanes of
         them (`engines.tmem_alloc`): a buffer in `MemSpace.TMEM` held as its
         address, through a shared slot of this body's.  A barrier of the
-        block: every thread reaches it."""
+        block: every thread reaches it.
+
+        The slot is in `arena`, or in the multiplication's arena where it
+        names none.  The block's first warp writes it and every thread reads
+        it, so it is the block's one: where the block holds several
+        multiplications, each with its own window of their arena, `arena`
+        is the block's."""
         slot = self.alloc(Datatype.I32, (1,), MemSpace.SHARED,
-                          hint=f'{hint}Slot')
+                          hint=f'{hint}Slot', arena=arena)
         tmem = self.value(BufferType(Datatype.F32,
                                      (engines.TMEM_LANES, int(columns)),
                                      MemSpace.TMEM), hint=hint)
@@ -2122,7 +2129,8 @@ class IRBuilder:
 
     def bulk_channel(self, window: str, leader: str,
                      participants: Union[str, Participants] = Participants.MULT,
-                     threads: Optional[int] = None) -> Optional[Value]:
+                     threads: Optional[int] = None,
+                     arena: Optional[str] = None) -> Optional[Value]:
         """The mbarrier the bulk copies into the window `window` names
         complete on in this body (`copy_bulk`), set up the first time it is
         asked for -- or None in a body without an arena, which has nowhere to
@@ -2140,6 +2148,11 @@ class IRBuilder:
         (`tensorforge::BulkCursor`, which holds the phase bit as well), under
         the name `{window}_bulk`, and numbered in the objects' own space
         (`new_object`).
+
+        `arena` is where the barrier goes where it is not the
+        multiplication's: one every participant waits on, so for a channel
+        of the block's in a block of several multiplications, each with its
+        own window of their arena, the block's.
         """
         found = self._bulk_cursors.get(window)
         if found is not None:
@@ -2151,7 +2164,7 @@ class IRBuilder:
         slots = max(1, 8 // self._fptype.size())
         barrier = b.alloc(self._fptype, (slots,), MemSpace.SHARED,
                           hint=f'{window}Barrier', extern=f'{window}_barrier',
-                          place_align=slots, lifetime='body')
+                          place_align=slots, lifetime='body', arena=arena)
         who = _as_participants(participants)
         obj = self._bulk_cursors[window] = self.new_object(
             engines.mbarrier(who, self._wave(), threads),

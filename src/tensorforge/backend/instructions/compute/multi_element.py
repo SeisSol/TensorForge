@@ -179,6 +179,28 @@ def _sparse_read(builder, context, tables, source, tensor, index, fp,
     value = b.load(source, b.op('select', INDEX, stored, at, 0, hint='p'),
                    type_=fp, hint=hint, **kwargs)
     return b.op('select', fp, stored, value, b.const(0.0, fp), hint=hint)
+def tmem_columns(section) -> int:
+    """The columns of tensor memory the section's tcgen05 steps take, the
+    widest of them -- a power of two of at least 32 -- or 0 where none is
+    tcgen05's: D's columns, N rounded to 16, then both TF32 halves of A's
+    deepest product (`_tcgen05`)."""
+    from tensorforge.generators.element_group import matrix_shape
+    widest = 0
+    for step in section.steps:
+        if step.lowering != 'tcgen05':
+            continue
+        _, n_, _ = matrix_shape('tcgen05', 100)
+        n = -(-(step.rows[1] - step.rows[0]) // n_) * n_
+        depth = max(section.stage(p.first.tensor, (p.rows, p.depth)).depth
+                    for p in step.products)
+        widest = max(widest, n + 2 * depth)
+    if not widest:
+        return 0
+    columns = max(32, 1 << (widest - 1).bit_length())
+    if columns > 512:
+        raise InternalError(f'a tcgen05 step needs {widest} columns of tensor '
+                            f'memory, past its 512')
+    return columns
 
 
 def _module_table(instruction, prefix: str, numbers) -> str:
@@ -217,6 +239,11 @@ class MultiElementOperators(AbstractInstruction):
         #: The generated file's tables the packing copies from, by name
         #: (`module_tables`).
         self._module_tables: Dict[str, tuple] = {}
+        #: The block's tensor memory, where a step is tcgen05's
+        #: (`tmem_columns`): allocated here, ahead of the loop, once -- an
+        #: allocation gives up the block's permit to allocate again -- and
+        #: freed behind the loop (`MultiElementRelease`).
+        self.tmem = None
         self._is_ready = True
         for symbol in self.symbols:
             symbol.add_user(self)
@@ -248,6 +275,10 @@ class MultiElementOperators(AbstractInstruction):
         symbols = {id(t): s for t, s in zip(section.operators, self.symbols)}
         buffers = {}
         for stage in section.stages:
+            if stage.streamed:
+                # Its step streams it through a ring, a trip at a time
+                # (`_ring_copy`).
+                continue
             tensor = stage.tensor
             shared = builder.alloc(section.dtype, (stage.volume,),
                                    MemSpace.SHARED,
@@ -263,6 +294,9 @@ class MultiElementOperators(AbstractInstruction):
                     value = builder.load(source, loop.induction, type_=fp,
                                          hint='k')
                     builder.store(shared, value, loop.induction)
+            elif stage.order == 'canonical':
+                self._canonical(builder, stage, source, shared, fp, tid,
+                                threads)
             else:
                 self._fragments(builder, stage, source, shared, fp, tid,
                                 threads)
@@ -270,6 +304,19 @@ class MultiElementOperators(AbstractInstruction):
         tables = {id(step.terms): self._pack(builder, step, symbols, tid,
                                              threads)
                   for step in section.steps if step.terms is not None}
+        columns = tmem_columns(section)
+        # Its slot is the block's: the block's first warp writes the address
+        # there, and every warp -- an element each, with a window of its own
+        # of the multiplications' arena -- reads it.
+        self.tmem = builder.tmem_alloc(
+            columns, arena=GeneralLexicon.TOTAL_SHR_MEM) if columns else None
+        if any(stage.order == 'canonical' and not stage.streamed
+               for stage in section.stages):
+            # The asynchronous engines read B through the async proxy, and
+            # it was written through the generic one: each thread fences
+            # its stores ahead of the barrier.
+            from tensorforge.backend.pir.engines import FenceKind
+            builder.fence(FenceKind.PROXY)
         builder.barrier(Participants.BLOCK)
         self.buffers = buffers
         self.tables = tables
@@ -380,6 +427,54 @@ class MultiElementOperators(AbstractInstruction):
             else:
                 b.store(shared, value, slot)
 
+    @staticmethod
+    def _canonical(builder, stage, source, shared, fp, tid, threads):
+        """A matrix product's B in the canonical K-major layout an
+        asynchronous engine reads through a descriptor
+        (`element_group.Stage.canonical_offset`): `B(k, n)` the operator's
+        `(n0 + n, k0 + k)` inside the product's window, zero outside it --
+        past the window's contraction too, which the padded steps of K
+        multiply an input's padding by (`element_group.Stage`) -- each cell
+        written where its core matrix holds it, its two TF32 halves a layout
+        apart, the upper ones first.  Read at a clamped address, as
+        `_fragments` reads it."""
+        from tensorforge.backend.instructions.compute.primitives import \
+            nvidia
+        b = builder
+        (r0, r1), (d0, d1) = stage.window
+        cells = stage.depth * stage.width
+        with b.for_(tid, cells, threads, hint='i',
+                    uniform=Uniformity.LANE) as loop:
+            n = b.op('div', INDEX, loop.induction, stage.depth, hint='n')
+            k = b.op('rem', INDEX, loop.induction, stage.depth, hint='k')
+            row = _index(b, 'add', n, stage.n0, 'r')
+            col = _index(b, 'add', k, d0, 'c')
+            inside = b.op('and', BOOL, b.op(
+                'and', BOOL, b.op('ge', BOOL, row, r0, hint='in'),
+                b.op('lt', BOOL, row, r1, hint='in'), hint='in'),
+                b.op('lt', BOOL, col, d1, hint='in'), hint='in')
+            at = b.op('select', INDEX, inside,
+                      _address(b, stage.tensor, row, col), 0, hint='a')
+            value = b.op('select', fp, inside,
+                         b.load(source, at, type_=fp, hint='k'),
+                         b.const(0.0, fp), hint='k')
+            # `(n / 8) depth 8 + (k / 4) 32 + (n % 8) 4 + k % 4`
+            slot = b.op('add', INDEX, b.op('add', INDEX, b.op(
+                'mul', INDEX, b.op('div', INDEX, n, 8, hint='s'),
+                stage.depth * 8, hint='s'), b.op(
+                'mul', INDEX, b.op('div', INDEX, k, 4, hint='s'), 32,
+                hint='s'), hint='s'), b.op('add', INDEX, b.op(
+                'mul', INDEX, b.op('rem', INDEX, n, 8, hint='s'), 4,
+                hint='s'), b.op('rem', INDEX, k, 4, hint='s'), hint='s'),
+                hint='s')
+            if stage.split:
+                (upper, lower), = nvidia.tfconvert(b, [value])
+                b.store(shared, _as_float(b, upper), slot)
+                b.store(shared, _as_float(b, lower),
+                        b.op('add', INDEX, slot, cells, hint='s'))
+            else:
+                b.store(shared, value, slot)
+
     def __str__(self) -> str:
         return (f'multi-element operators '
                 f'{", ".join(s.name for s in self.symbols)}')
@@ -403,6 +498,9 @@ class _Trip:
         self.operators = operators
         #: A sparse step's tables, by its terms (`MultiElementOperators`).
         self.tables = tables or {}
+        #: The block's tensor memory, where a step is tcgen05's
+        #: (`MultiElementOperators.tmem`).
+        self.tmem = None
         self.buffers: Dict[int, object] = {}
         #: The block's pointer tables, by output (`publish`).
         self.pointers: Dict[int, object] = {}
@@ -1147,6 +1245,484 @@ def _matrix(trip, step) -> None:
                                  b.op('mul', INDEX, nts[s], n_, hint='n'))
 
 
+def _group_index(b, m, width, buffer, col_lo, row):
+    """The index in `buffer` of row `row` of the group's row `m`: element
+    `m / width`, the element's column `col_lo + m % width` (`_matrix`'s
+    rows)."""
+    e = b.op('div', INDEX, m, width, hint='e')
+    j = _index(b, 'add', b.op('rem', INDEX, m, width, hint='j'),
+               col_lo - buffer.cols[0], 'j')
+    base = b.op('mul', INDEX, e, buffer.per_element, hint='b')
+    return _index(b, 'add', base, _box_index(
+        b, row, j, (buffer.rows[0], 0), buffer.pitch), 'a')
+
+
+def _d_writer(trip, step):
+    """How the asynchronous lowerings hand a cell `(m, n)` of D to the
+    step's destination, as `_matrix` hands its own: into the
+    intermediate's buffer, added to it where the step accumulates; or to
+    the output through the pointer of the row's element (`_Trip.pointer`),
+    one reduction a cell where the step accumulates and a store where it
+    assigns, nothing where the element is masked -- and nothing for a row
+    past the group or a column past the step's rows.  `key` names a row
+    whose pointer is read once for all its cells."""
+    b = trip.builder
+    section = trip.section
+    fp = trip.fp
+    rows, cols = step.rows, step.cols
+    width = cols[1] - cols[0]
+    height = rows[1] - rows[0]
+    M = trip.group.elements * width
+    target = trip.buffers[id(step.dest)] if step.dest.is_tmp else None
+    dest = section.buffer(step.dest) if step.dest.is_tmp else None
+    pointers = {}
+
+    def write(m, n, value, key, padded: bool) -> None:
+        live = None
+        if not isinstance(n, int):
+            live = b.op('lt', BOOL, n, height, hint='in')
+        elif n >= height:
+            return
+        if padded:
+            inside = b.op('lt', BOOL, m, M, hint='in')
+            live = inside if live is None else b.op('and', BOOL, live,
+                                                    inside, hint='in')
+        if target is None:
+            if key not in pointers:
+                e = b.op('div', INDEX, m, width, hint='e')
+                if padded:
+                    e = b.op('select', INDEX, b.op('lt', BOOL, m, M,
+                                                   hint='in'), e, 0,
+                             hint='e')
+                col = _index(b, 'add', b.op('rem', INDEX, m, width,
+                                            hint='j'), cols[0], 'j')
+                pointers[key] = trip.pointer(step.dest, e) + (col,)
+            pointer, held, col = pointers[key]
+            keep = held if live is None else b.op('and', BOOL, live, held,
+                                                  hint='in')
+            b.store(pointer, value, _address(
+                b, step.dest, _index(b, 'add', n, rows[0], 'i'), col),
+                predicate=keep, atomic=not step.assigns)
+            return
+        at = _group_index(b, m, width, dest, cols[0],
+                          _index(b, 'add', n, rows[0], 'i'))
+        if live is not None:
+            at = b.op('select', INDEX, live, at, 0, hint='a')
+        if not step.assigns:
+            value = b.op('add', fp, b.load(target, at, type_=fp, hint='q'),
+                         value, hint='q')
+        b.store(target, value, at, predicate=live)
+    return write
+
+
+def _round_up(value: int, step: int) -> int:
+    return -(-value // step) * step
+
+
+def _terms(stage):
+    """The products of a step of K on an asynchronous engine, as `(A's
+    half, B's half)`: 3xTF32's three where B is split (`TF32_TERMS`); A's
+    two halves by B's one where it is not, as mma_sync's tiling takes a B
+    staged whole -- the operator then read in TF32, where its halves would
+    not leave the group room."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))
+
+
+def _ring(trip, step, stages):
+    """The step's ring in the block's shared memory (`element_group.
+    RING_SLOTS` slots of `RING_CHUNK` rows of K of B, both halves where
+    split), on 128 bytes, and the slot's size in elements."""
+    from tensorforge.generators.element_group import (RING_CHUNK,
+                                                      RING_SLOTS)
+    width = max(st.width for st in stages)
+    halves = 2 if stages[0].split else 1
+    slot = RING_CHUNK * width * halves
+    ring = trip.builder.alloc(trip.section.dtype, (RING_SLOTS * slot,),
+                              MemSpace.SHARED,
+                              arena=GeneralLexicon.TOTAL_SHR_MEM,
+                              hint=_hint('r', step.dest), place_align=32)
+    return ring, slot
+
+
+def _ring_copy(trip, stage, ring, at, k0, rows) -> None:
+    """Rows `k0` to `k0 + rows` of K of the stage's B into the ring from
+    element `at` on, in the canonical K-major order over `rows` -- core
+    matrices of eight rows of N by four of K, 128 bytes apart along K and
+    `rows` x 32 along N -- the upper halves, then the lower: every thread of
+    the block its cells of the operator as the kernel is handed it, read as
+    `MultiElementOperators._canonical` reads it, zeros outside the window --
+    past its contraction too (`element_group.Stage`).  The engine reads
+    them through the async proxy: the caller fences and meets."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    b = trip.builder
+    fp = trip.fp
+    (r0, r1), (d0, d1) = stage.window
+    cells = rows * stage.width
+    source = _bound(b, trip.symbols[id(stage.tensor)])
+    tid = b.op('add', INDEX, trip.lane, b.op('mul', INDEX, trip.slot, 32,
+                                             hint='tid'), hint='tid')
+    with b.for_(tid, cells, 32 * trip.group.elements, hint='i',
+                uniform=Uniformity.LANE) as loop:
+        n = b.op('div', INDEX, loop.induction, rows, hint='n')
+        k = b.op('rem', INDEX, loop.induction, rows, hint='k')
+        row = _index(b, 'add', n, stage.n0, 'r')
+        col = _index(b, 'add', k, d0 + k0, 'c')
+        inside = b.op('and', BOOL, b.op(
+            'and', BOOL, b.op('ge', BOOL, row, r0, hint='in'),
+            b.op('lt', BOOL, row, r1, hint='in'), hint='in'),
+            b.op('lt', BOOL, col, d1, hint='in'), hint='in')
+        address = b.op('select', INDEX, inside,
+                       _address(b, stage.tensor, row, col), 0, hint='a')
+        value = b.op('select', fp, inside,
+                     b.load(source, address, type_=fp, hint='k'),
+                     b.const(0.0, fp), hint='k')
+        place = b.op('add', INDEX, b.op('add', INDEX, b.op(
+            'mul', INDEX, b.op('div', INDEX, n, 8, hint='s'), rows * 8,
+            hint='s'), b.op('mul', INDEX, b.op('div', INDEX, k, 4,
+                                               hint='s'), 32, hint='s'),
+            hint='s'), b.op('add', INDEX, b.op(
+                'mul', INDEX, b.op('rem', INDEX, n, 8, hint='s'), 4,
+                hint='s'), b.op('rem', INDEX, k, 4, hint='s'), hint='s'),
+            hint='s')
+        place = _index(b, 'add', place, at, 's')
+        if stage.split:
+            (upper, lower), = nvidia.tfconvert(b, [value])
+            b.store(ring, _as_float(b, upper), place)
+            b.store(ring, _as_float(b, lower),
+                    b.op('add', INDEX, place, cells, hint='s'))
+        else:
+            b.store(ring, value, place)
+
+
+class _Piece:
+    """A piece of a step's B the engine multiplies through descriptors:
+    the rows `k0` to `k0 + rows` of K of a product's stage, in the
+    canonical K-major order over `rows` from element `at` of `buffer` --
+    the resident stage, whole (`rows` its depth), or a slot of the step's
+    ring (`_pieces`)."""
+
+    def __init__(self, product, stage, k0, rows, buffer, at):
+        self.product, self.stage = product, stage
+        self.k0, self.rows = k0, rows
+        self.buffer, self.at = buffer, at
+
+    def descriptors(self, b, kt, form):
+        """The descriptors of the step of K at `kt` of the piece: the upper
+        halves', and the lower halves' where the stage is split."""
+        from tensorforge.backend.pir.engines import MatrixDescType
+        desc = MatrixDescType(Datatype.TF32, lbo=self.stage.leading,
+                              sbo=self.rows * 32, form=form)
+        half = self.rows * self.stage.width
+        return [b.matrix_desc(self.buffer, self.at + h * half + kt * 8,
+                              desc=desc, hint='b')
+                for h in range(1 + self.stage.split)]
+
+
+def _pieces(trip, step):
+    """A step's B as the engine takes it (`_Piece`), and how the next piece
+    gets where it is read: the resident stages, a piece a product; or, where
+    they are streamed (`Stage.streamed`), the chunks of the step's ring
+    (`_ring`), each product's depth cut at `RING_CHUNK`, the slots in turn,
+    and a callable that copies piece `i` into its slot (`_ring_copy`) --
+    None for the resident ones."""
+    from tensorforge.generators.element_group import (RING_CHUNK,
+                                                      RING_SLOTS)
+    section = trip.section
+    stages = [section.stage(p.first.tensor, (p.rows, p.depth))
+              for p in step.products]
+    if not stages[0].streamed:
+        return [_Piece(p, st, 0, st.depth,
+                       trip.operators[(id(st.tensor), st.window)], 0)
+                for p, st in zip(step.products, stages)], None
+    ring, slot = _ring(trip, step, stages)
+    pieces = []
+    for product, stage in zip(step.products, stages):
+        for k0 in range(0, stage.depth, RING_CHUNK):
+            at = (len(pieces) % RING_SLOTS) * slot
+            pieces.append(_Piece(product, stage, k0,
+                                 min(RING_CHUNK, stage.depth - k0), ring,
+                                 at))
+
+    def copy(i):
+        piece = pieces[i]
+        _ring_copy(trip, piece.stage, ring, piece.at, piece.k0, piece.rows)
+    return pieces, copy
+
+
+#: Where the four 8x8 matrices of a warp's A start in its 16 rows of a step
+#: of K (`IRBuilder.matrix_load`'s `origins`): mma_sync's A of m16n8k8 over
+#: TF32, which a warp of a warpgroup holds as wgmma's A from registers
+#: (`nvidia.wgmma_a_fragment_bits`).
+A_ORIGINS = ((0, 0), (8, 0), (0, 4), (8, 4))
+
+
+def _wgmma(trip, step) -> None:
+    """The tiling of an F32 operator step on wgmma (sm_90a), 3xTF32: a
+    warpgroup takes tiles of 64 of the group's rows and the whole of N --
+    the step's rows rounded to 8, one instruction -- D in its registers
+    across the products (`wgmma_d_fragment_bits`), then handed to the
+    destination as `_matrix` hands its own (`_d_writer`).
+
+    A is wgmma's from registers, which a warp of the warpgroup holds as
+    mma_sync's A, its 16 rows (`wgmma_a_fragment_bits`): ldmatrix over the
+    pitched buffer, as `_matrix` loads it, then the two TF32 halves.  B is
+    the product's stage in the canonical K-major order, its halves through
+    two descriptors.  A step of K is the fence of the registers, the three
+    products (`TF32_TERMS`), the commit and the wait for the group: the
+    next step's A rewrites registers the products read.
+
+    Where B is streamed (`_pieces`), the first chunk is copied ahead; a
+    chunk's steps of K take their A into registers of their own, and one
+    commit closes them; while the engine multiplies, the block converts
+    the next chunk into the other slot -- last read by the chunk before,
+    which its wait retired -- then the wait, the fence of the async proxy
+    and the block's barrier.
+
+    The tile loop runs as often in every warpgroup -- the collective's
+    arrival is the block's, a multiplication being a warp -- so that a
+    warpgroup past the last tile multiplies the first rows again and
+    writes nothing."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import (WARPGROUP_WARPS,
+                                                      matrix_shape)
+    b = trip.builder
+    section = trip.section
+    fp = trip.fp
+    rows, cols = step.rows, step.cols
+    width = cols[1] - cols[0]
+    height = rows[1] - rows[0]
+    m_, n_, k_ = matrix_shape('wgmma', 90)
+    n = _round_up(height, n_)
+    M = trip.group.elements * width
+    groups = trip.group.elements // WARPGROUP_WARPS
+    tiles = -(-M // m_)
+    passes = -(-tiles // groups)
+    padded = passes * groups * m_ > M
+    lane = trip.lane
+    wg = b.op('div', INDEX, trip.slot, WARPGROUP_WARPS, hint='wg')
+    warp = b.op('rem', INDEX, trip.slot, WARPGROUP_WARPS, hint='w')
+    quad = b.op('div', INDEX, lane, 4, hint='q')
+    inquad = b.op('rem', INDEX, lane, 4, hint='q')
+    # ldmatrix.x4 (`IRBuilder.matrix_load`): lane `l` names row `l % 8 + 8
+    # ((l / 8) % 2)` of the warp's 16 at column `4 (l / 16)` (`_matrix`).
+    lrow = b.op('add', INDEX, b.op('rem', INDEX, lane, 8, hint='l'),
+                b.op('mul', INDEX, b.op('rem', INDEX, b.op(
+                    'div', INDEX, lane, 8, hint='l'), 2, hint='l'), 8,
+                    hint='l'), hint='l')
+    lcol = b.op('mul', INDEX, b.op('div', INDEX, lane, 16, hint='l'), 4,
+                hint='l')
+    layouts = (nvidia.wgmma_a_fragment_bits(), None,
+               nvidia.wgmma_d_fragment_bits(n))
+    write = _d_writer(trip, step)
+    with b.for_(0, passes, 1, hint='t', uniform=Uniformity.BLOCK) as loop:
+        tile = b.op('add', INDEX, wg, b.op('mul', INDEX, loop.induction,
+                                           groups, hint='t'), hint='t')
+        top = b.op('add', INDEX, b.op('mul', INDEX, tile, m_, hint='m'),
+                   b.op('mul', INDEX, warp, 16, hint='m'), hint='m')
+        lm = b.op('add', INDEX, top, lrow, hint='m')
+        if padded:
+            lm = b.op('select', INDEX, b.op('lt', BOOL, lm, M, hint='in'),
+                      lm, 0, hint='m')
+        accs = [b.declare(fp, hint='c', uniform=Uniformity.LANE)
+                for _ in range(n // 2)]
+        pieces, copy = _pieces(trip, step)
+        if copy is not None:
+            copy(0)
+            b.fence(FenceKind.PROXY)
+            b.barrier(Participants.BLOCK)
+        first = True
+        for i, piece in enumerate(pieces):
+            product, stage = piece.product, piece.stage
+            group = section.buffer(product.second.tensor)
+            source = trip.buffers[id(product.second.tensor)]
+            terms = _terms(stage)
+            k_lo = product.depth[0] + piece.k0
+            registers, reads = list(accs), []
+            for kt in range(0, piece.rows, k_):
+                at = _group_index(b, lm, width, group, cols[0],
+                                  _index(b, 'add', lcol, k_lo + kt, 'k'))
+                a = list(b.matrix_load(source, at, count=4, type_=fp,
+                                       origins=A_ORIGINS, hint='a'))
+                split = nvidia.tfconvert(b, a)
+                halves = ([u for u, _ in split], [lo for _, lo in split])
+                bs = piece.descriptors(b, kt, 'wgmma')
+                own = accs + halves[0] + halves[1]
+                b.fence(FenceKind.REGISTERS, engine='wgmma', registers=own)
+                for ia, ib in terms:
+                    b.wgmma(n, halves[ia], bs[ib], accs,
+                            scale_d=0 if first else 1, layouts=layouts)
+                    first = False
+                if copy is None:
+                    b.commit_group('wgmma')
+                    b.matrix_wait('wgmma', 0, registers=own, reads=bs)
+                    continue
+                registers += halves[0] + halves[1]
+                reads += bs
+            if copy is None:
+                continue
+            b.commit_group('wgmma')
+            if i + 1 < len(pieces):
+                copy(i + 1)
+            b.matrix_wait('wgmma', 0, registers=registers, reads=reads)
+            b.fence(FenceKind.PROXY)
+            b.barrier(Participants.BLOCK)
+        # D: register `i` of the lane is row `16 w + g + 8 ((i % 4) / 2)`,
+        # column `8 (i / 4) + 2 t + i % 2` (PTX's D of m64nN).
+        for i in range(n // 2):
+            r = 8 * ((i % 4) // 2)
+            m = b.op('add', INDEX, top, _index(b, 'add', quad, r, 'm'),
+                     hint='m')
+            col = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2,
+                                          hint='n'), 8 * (i // 4) + i % 2,
+                       hint='n')
+            write(m, col, accs[i], ('w', r), padded)
+
+
+#: Columns a warp loads of tensor memory at once in the epilogue: D's row
+#: a thread, a few of its columns live at a time.
+TMEM_CHUNK = 32
+
+
+def _tcgen05(trip, step) -> None:
+    """The tiling of an F32 operator step on tcgen05 (sm_100a), 3xTF32:
+    the group's rows -- at most 128 (`element_group.engine_elements`) -- are
+    the instruction's M, the lanes of tensor memory, which the block's
+    first four warps hold, a thread its row; N is the step's rows rounded
+    to 16, D's columns in tensor memory from 0.
+
+    A product at a time: those four warps store their rows of A into
+    tensor memory, both TF32 halves, behind D's columns (`tmem_st`); the
+    engine's fences around a block barrier show them to the thread that
+    issues; it issues the three products of each step of K (`TF32_TERMS`),
+    B the stage in the canonical K-major order through descriptors of
+    tcgen05's format, and commits them onto the block's mbarrier
+    (`bulk_channel`); every thread waits for the phase.  Where B is
+    streamed (`_pieces`), a product's chunks are committed one at a time:
+    the first copied ahead, and while the engine multiplies one, the block
+    converts the next into the other slot, the fence of the async proxy
+    and a barrier closing each.  Then the four warps load D's columns
+    (`tmem_ld`), a thread its row, and hand them to the destination as
+    `_matrix` hands its own (`_d_writer`).  The tensor memory is the
+    block's, allocated ahead of the batch loop and freed behind it
+    (`MultiElementOperators.tmem`): an allocation gives up the block's
+    permit to allocate again (`tmemAlloc`), so a trip may not allocate."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import (TCGEN05_ROWS,
+                                                      matrix_shape)
+    b = trip.builder
+    rows, cols = step.rows, step.cols
+    width = cols[1] - cols[0]
+    height = rows[1] - rows[0]
+    _, n_, k_ = matrix_shape('tcgen05', 100)
+    n = _round_up(height, n_)
+    M = trip.group.elements * width
+    if M > TCGEN05_ROWS:
+        raise InternalError(f'a tcgen05 step over {M} rows of the group, '
+                            f'past its {TCGEN05_ROWS} lanes')
+    padded = M < TCGEN05_ROWS
+    tmem = trip.tmem
+    if tmem is None:
+        raise InternalError('a tcgen05 step without the block\'s tensor '
+                            'memory (`MultiElementOperators.tmem`)')
+    # The block's one mbarrier, which every warp waits on: in the block's
+    # arena, not in a warp's window of the multiplications'.
+    cursor = b.bulk_channel('tcmma', 'threadIdx.x == 0 && threadIdx.y == 0',
+                            participants=Participants.BLOCK,
+                            arena=GeneralLexicon.TOTAL_SHR_MEM)
+    if cursor is None:
+        raise InternalError('a tcgen05 step in a body without an arena for '
+                            'its mbarrier')
+    issue = b.op('eq', BOOL, b.op('add', INDEX, trip.lane, b.op(
+        'mul', INDEX, trip.slot, 32, hint='tid'), hint='tid'), 0,
+        hint='issue')
+    holds = b.op('lt', BOOL, trip.slot, 4, hint='lanes')
+    m = b.op('add', INDEX, b.op('mul', INDEX, trip.slot, 32, hint='m'),
+             trip.lane, hint='m')
+    live = b.op('lt', BOOL, m, M, hint='in') if padded else None
+    row = b.op('select', INDEX, live, m, 0, hint='m') if padded else m
+    pieces, copy = _pieces(trip, step)
+    if copy is not None:
+        copy(0)
+        b.fence(FenceKind.PROXY)
+        b.barrier(Participants.BLOCK)
+    first = True
+    upper_at = n
+    for i, piece in enumerate(pieces):
+        product, stage = piece.product, piece.stage
+        lower_at = n + stage.depth
+        if piece.k0 == 0:
+            # A's rows into tensor memory, eight columns at a time.
+            _tcgen05_a(trip, product, stage, tmem, upper_at, holds, row,
+                       live)
+            b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
+            b.barrier(Participants.BLOCK)
+            b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+        reads = []
+        for kt in range(0, piece.rows, k_):
+            bs = piece.descriptors(b, kt, 'tcgen05')
+            for ia, ib in _terms(stage):
+                b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
+                          enable_input_d=0 if first else 1,
+                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)
+                first = False
+            reads += bs
+        b.commit_group('tcgen05', object=cursor, issue=issue)
+        if copy is not None and i + 1 < len(pieces):
+            copy(i + 1)
+        b.matrix_wait('tcgen05', object=cursor, reads=reads, tmem=[tmem])
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+        if copy is not None:
+            b.fence(FenceKind.PROXY)
+            b.barrier(Participants.BLOCK)
+    write = _d_writer(trip, step)
+    with b.if_(holds):
+        # The step's rows of D, to the next eight, in widths the load has:
+        # N's padding past them holds zeros nobody reads.
+        c0, end = 0, _round_up(height, 8)
+        while c0 < end:
+            count = 1 << (min(TMEM_CHUNK, end - c0).bit_length() - 1)
+            for j, value in enumerate(b.tmem_ld(tmem, c0, count)):
+                write(m, c0 + j, value, 'row', padded)
+            c0 += count
+    # The block's next use of the tensor memory, the next step's or the
+    # next trip's, is behind a barrier between the engine's fences.
+    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
+
+
+def _tcgen05_a(trip, product, stage, tmem, at, holds, row, live) -> None:
+    """The product's A into tensor memory, its upper halves from column
+    `at` on and its lower halves the depth behind, by the four warps that
+    hold the lanes, eight columns at a time (`_tcgen05`)."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    b = trip.builder
+    fp = trip.fp
+    section = trip.section
+    group = section.buffer(product.second.tensor)
+    source = trip.buffers[id(product.second.tensor)]
+    width = product.cols[1] - product.cols[0]
+    k_lo, k_hi = product.depth
+    with b.if_(holds):
+        for kt in range(0, stage.depth, 8):
+            values = []
+            for x in range(kt, kt + 8):
+                if k_lo + x >= k_hi:
+                    values.append(b.const(0.0, fp))
+                    continue
+                value = b.load(source, _group_index(
+                    b, row, width, group, product.cols[0], k_lo + x),
+                    type_=fp, hint='a')
+                if live is not None:
+                    value = b.op('select', fp, live, value, b.const(0.0, fp),
+                                 hint='a')
+                values.append(value)
+            split = nvidia.tfconvert(b, values)
+            b.tmem_st(tmem, at + kt, [_as_float(b, u) for u, _ in split])
+            b.tmem_st(tmem, at + stage.depth + kt,
+                      [_as_float(b, lo) for _, lo in split])
+
+
 class _LaneTrip:
     """What the lanes form's lowering of a trip shares (`element_group.
     Lanes`): the lane's element -- its own pointers and its mask, as the
@@ -1856,7 +2432,33 @@ def _chained(builder, context, group, symbols) -> list:
 #: Each step's lowering (`element_group.Step.lowering`).
 LOWERINGS = {'fma': _fma, 'rows': _per_output,
              'mix': lambda trip, step: _mix(trip, [step]),
-             'mma_sync': _matrix, 'dmma': _matrix, 'lane': _lane}
+             'mma_sync': _matrix, 'dmma': _matrix, 'lane': _lane,
+             'wgmma': _wgmma, 'tcgen05': _tcgen05}
+
+
+class MultiElementRelease(AbstractInstruction):
+    """Behind the batch loop: the block's tensor memory freed
+    (`MultiElementOperators.tmem`), as a block frees what it allocated
+    before it exits -- behind a block barrier between the engine's fences,
+    which the free brings (`engines.tmem_dealloc`)."""
+
+    def __init__(self, context: Context, operators):
+        super().__init__(context)
+        self._operators = operators
+        self._is_ready = True
+
+    def uses(self):
+        return ()
+
+    def barrier_scope(self) -> Uniformity:
+        return Uniformity.BLOCK
+
+    def gen_ir(self, builder) -> None:
+        if self._operators.tmem is not None:
+            builder.tmem_dealloc(self._operators.tmem)
+
+    def __str__(self) -> str:
+        return 'multi-element release of the tensor memory'
 
 
 class MultiElementSection(AbstractInstruction):
@@ -1937,6 +2539,7 @@ class MultiElementSection(AbstractInstruction):
                      self._operators.buffers, self._operators.tables)
         trip.table = lambda prefix, numbers: _module_table(self, prefix,
                                                            numbers)
+        trip.tmem = self._operators.tmem
         elements = self._group.elements
         for buffer in section.inputs + section.intermediates:
             trip.buffers[id(buffer.tensor)] = builder.alloc(

@@ -182,21 +182,28 @@ def test_what_the_bulk_copy_needs_is_there_for_a_reason(pattern, which, kind):
     """Taken out, each is the race it is there to prevent: the barrier behind
     the arming, a thread waiting on a barrier the leader has not armed; the
     one at the end of an element, the next copy over a window still read;
-    the wait, a read of the window in flight."""
+    the wait, a read of the window in flight -- and the wait behind it, for
+    a phase the barrier has gone past, would never return."""
     _, src, (lanes, _) = _build('aligned_operands', bulk_copies=True)
     races = []
-    kernel_eval.evaluate_wave(_without(src, pattern, which), lanes, seed=3,
-                              races=races, elements=3)
+    try:
+        kernel_eval.evaluate_wave(_without(src, pattern, which), lanes,
+                                  seed=3, races=races, elements=3)
+    except kernel_eval.Abort as e:
+        assert kind == 'FLIGHT' and 'never complete' in str(e), e
+    else:
+        assert kind != 'FLIGHT'
     assert kind in {r.kind for r in races}, races
 
 
 def test_the_oracle_copies_through_the_leader_alone():
     """Only the thread the cursor names issues; the others note the copy."""
     mem = kernel_eval.Slot(3)
-    for lane, expect in ((1, None), (0, 2.5)):
+    # The leader first: the others wait on the barrier it armed.
+    for lane, expect in ((0, 2.5), (1, None)):
         env = {'dst': kernel_eval.Ptr(mem, f'dst{lane}'),
                'src': kernel_eval.Ptr(mem, 'src'),
-               'bar': kernel_eval.Ptr(mem, f'bar{lane}'),
+               'bar': kernel_eval.Ptr(mem, 'bar'),
                'threadIdx': type('T', (), {'x': lane})()}
         it = kernel_eval.Interp(mem, env)
         it.widths['dst'] = 4

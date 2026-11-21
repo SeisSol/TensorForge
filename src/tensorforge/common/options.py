@@ -185,6 +185,18 @@ def parse_multi_element_values(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_engine` takes.
+MATRIX_ENGINE = ('auto', 'mma_sync')
+
+
+def parse_matrix_engine(text: str) -> str:
+  """`auto` or `mma_sync` (`Options.matrix_engine`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_ENGINE:
+    raise ValueError(f'expected one of {MATRIX_ENGINE}, got {text!r}')
+  return value
+
+
 #: What `Options.carry_element_index` takes.
 CARRY_ENTRY = ('auto', 'always', 'never')
 
@@ -2512,6 +2524,23 @@ declare('multi_element_values',
             'immediate and a uniform read is a message a number, but a '
             'broadcast from a lane is a register region of the `mad` (the PVC '
             'prototype\'s operands).')
+
+declare('matrix_engine',
+        default='mma_sync',
+        env='TF_MATRIX_ENGINE',
+        parse=parse_matrix_engine,
+        doc='The matrix engine the multi-element layout\'s tiling of an F32 '
+            'operator step runs on (`multi_element`, `generators.'
+            'element_group`).  `mma_sync`, the default: mma_sync everywhere, '
+            'as before the asynchronous engines.  `auto`: the target\'s '
+            'asynchronous one where it has one and the step and the group fit '
+            'it -- wgmma on sm_90a, a warpgroup\'s, D in registers; tcgen05 '
+            'on sm_100a, one thread\'s, D in tensor memory -- and mma_sync '
+            'elsewhere.  The default stays mma_sync until a measurement puts '
+            'them ahead: on a GH200 the o6 volume took 10.52 ns an element on '
+            'wgmma against 10.75 on mma_sync, on a GB200 11.06 on tcgen05 '
+            'against 9.68 -- and 62.79 against 38.53 at o8.  F64 is DMMA\'s '
+            'either way: neither engine has it.')
 
 declare('mma_prefetch',
         default=None,
