@@ -2641,6 +2641,58 @@ def _lower_mfma(s: Stmt, env: Spelling) -> Lowered:
                           f'{", ".join(args)})')
 
 
+#: The modifiers of gfx1250's and gfx1251's WMMA builtins, in the order they
+#: stand among the operands (`(a_neg, A, b_neg, B, c_mod, C, reuse_a,
+#: reuse_b)`, `amd.catalog.Call.WMMA_MODS`): A or B negated, C's modifier,
+#: and the hint that A or B is the previous product's, which saves its
+#: fetch.  Zero where a modifier is not stated.
+WMMA_MODIFIERS = ('a_neg', 'b_neg', 'c_mod', 'reuse_a', 'reuse_b')
+
+
+def _wmma_call(s: Stmt, env: Spelling, gfx1250: bool) -> Lowered:
+    """A WMMA as its builtin, D what it returns, the result's initializer:
+    `__builtin_amdgcn_<instruction>(A, B, C)` on RDNA 3 and 4, and on
+    gfx1250 and gfx1251 with the modifiers among the operands --
+    `(a_neg, A, b_neg, B, c_mod, C, reuse_a, reuse_b)`, the flags as
+    `bool`s and `c_mod` a number (`amd.catalog.Call`)."""
+    if not s.target or s.attr('instruction') is None:
+        raise IRError('a WMMA returns D and names its instruction: its matrix '
+                      'op has a result and an `instruction`')
+    if env.family and env.family not in AMD_FAMILIES:
+        raise IRError(f'a WMMA on {env.family}: AMD\'s, on HIP or SYCL '
+                      f'for AMD')
+    a, b, c = fragments(s)
+    if (len(a), len(b), len(c)) != (1, 1, 1):
+        raise IRError('a WMMA takes one register vector each of A, B and C')
+    a, b, c = (env.name(v[0]) for v in (a, b, c))
+    modifiers = dict(s.attr('modifiers', ()))
+    if not gfx1250:
+        if modifiers:
+            raise IRError(f'a WMMA of RDNA takes no modifiers, not '
+                          f'{sorted(modifiers)}')
+        args = [a, b, c]
+    else:
+        unknown = sorted(set(modifiers) - set(WMMA_MODIFIERS))
+        if unknown:
+            raise IRError(f'a WMMA of gfx1250 has no modifier {unknown}')
+
+        def flag(name):
+            return 'true' if modifiers.get(name, 0) else 'false'
+        args = [flag('a_neg'), a, flag('b_neg'), b,
+                str(int(modifiers.get('c_mod', 0))), c, flag('reuse_a'),
+                flag('reuse_b')]
+    return Lowered(result=f'__builtin_amdgcn_{s.attr("instruction")}('
+                          f'{", ".join(args)})')
+
+
+def _lower_wmma(s: Stmt, env: Spelling) -> Lowered:
+    return _wmma_call(s, env, gfx1250=False)
+
+
+def _lower_wmma_gfx1250(s: Stmt, env: Spelling) -> Lowered:
+    return _wmma_call(s, env, gfx1250=True)
+
+
 def _other(s: Stmt) -> str:
     return 'other'
 
@@ -3006,6 +3058,21 @@ MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
     # Intel's DPAS counts as other code, and as no work: the figures it was
     # counted under as a call and as raw text, kept as they were -- so a
     # build that issues it counts its arithmetic short.
+    # AMD's WMMA, issued by the wave together as an MFMA is, and counted as
+    # matrix work: RDNA 3's (`wmma-256b-insts`, A and B held twice over a
+    # wave of 32) and RDNA 4's (`wmma-128b-insts`) take A, B and C; gfx1250's
+    # and gfx1251's take their modifiers among them (`WMMA_MODIFIERS`).
+    # Priced as the matrix instruction of NVIDIA's is, not by its shape:
+    # `analysis.pipeline` measures CDNA's MFMAs alone.
+    MatrixEngine('wmma', Participants.WAVE, True, _matrix, _lower_wmma,
+                 "AMD's WMMA of RDNA 3 and 4, one builtin returning D "
+                 '(`amd.catalog`, `Call.WMMA`)'),
+    MatrixEngine('wmma_gfx1250', Participants.WAVE, True, _matrix,
+                 _lower_wmma_gfx1250,
+                 "AMD's WMMA of gfx1250 and gfx1251 -- F32 16x16x4, F64 "
+                 '16x16x4 on gfx1251, F16 and BF16 16x16x32 -- one builtin '
+                 'returning D, its modifiers among the operands '
+                 '(`Call.WMMA_MODS`)'),
     MatrixEngine('dpas_spmd', Participants.WAVE, False, _other,
                  _lower_dpas_spmd,
                  "Intel's DPAS from the SPMD lowering, TF32 into FP32 at an "
@@ -4055,7 +4122,7 @@ __all__ = [
     'TENSOR_FENCE', 'TensorDescType', 'tdm_refusal',
     'MATRIX_ENGINES', 'MatrixEngine', 'asm_text', 'fragments',
     'matrix_engine', 'mma_sync_name', 'pipe_of',
-    'MFMA_MODIFIERS', 'mfma_category', 'DPAS_SPMD',
+    'MFMA_MODIFIERS', 'mfma_category', 'DPAS_SPMD', 'WMMA_MODIFIERS',
     'Source', 'MatrixDescType', 'SWIZZLE_BYTES', 'DESC_FORMATS',
     'matrix_descriptor_bits', 'swizzle_alignment', 'swizzled',
     'descriptor_offset', 'sources_of', 'WGMMA_FEATURE', 'WGMMA_N',

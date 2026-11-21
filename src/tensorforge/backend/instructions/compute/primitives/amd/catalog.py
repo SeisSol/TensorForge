@@ -212,22 +212,51 @@ class MatrixOp:
         return threads == self.wave
 
     def mac(self, writer, type_, a, b, c, cbsz: int = 0, abid: int = 0,
-            blgp: int = 0):
-        """D = A * B + C as this instruction: the matrix op of engine `mfma`
+            blgp: int = 0, **wmma):
+        """D = A * B + C as this instruction: the matrix op of its engine
         (`IRBuilder.matrix_mac`), A, B and C one register vector each -- the
         builtin's operands, in its order -- and D a new value of `type_`,
         which it returns: a link of an accumulator chain, in a variable of
         its own, its layout one nobody wrote down (`codegen.matmul32`).
-        `cbsz`, `abid` and `blgp` are the broadcast and swizzle modifiers
-        (`broadcast`), all three stated; the layouts the vendor has for A, B
-        and D go along (`vendor_layouts`)."""
+
+        An MFMA is engine `mfma`, its broadcast and swizzle modifiers
+        `cbsz`, `abid` and `blgp` (`broadcast`) all three stated.  A WMMA is
+        engine `wmma` where it takes A, B and C alone (`Call.WMMA`, RDNA 3
+        and 4) and `wmma_gfx1250` where it takes its modifiers among them
+        (`Call.WMMA_MODS`), those of `wmma` stated by name
+        (`engines.WMMA_MODIFIERS`) and zero where not.  The layouts the
+        vendor has for A, B and D go along (`vendor_layouts`)."""
+        types = (self.a.dtype, self.b.dtype, self.d.dtype, self.d.dtype)
+        if self.call is Call.MFMA:
+            if wmma:
+                raise ValueError(f'{self.builtin} takes no modifiers '
+                                 f'{sorted(wmma)}')
+            return writer.matrix_mac(
+                'mfma', (self.m, self.n, self.k), types,
+                (a,), (b,), (c,), result=type_, hint='acc',
+                instruction=self.builtin,
+                modifiers=(('cbsz', cbsz), ('abid', abid), ('blgp', blgp)),
+                layouts=vendor_layouts(self))
+        if cbsz or abid or blgp:
+            raise ValueError(f'{self.builtin} broadcasts nothing: no cbsz, '
+                             f'abid or blgp')
+        from tensorforge.backend.pir.engines import WMMA_MODIFIERS
+        if self.call is Call.WMMA:
+            engine, modifiers = 'wmma', ()
+            if wmma:
+                raise ValueError(f'{self.builtin} takes no modifiers '
+                                 f'{sorted(wmma)}')
+        else:
+            unknown = sorted(set(wmma) - set(WMMA_MODIFIERS))
+            if unknown:
+                raise ValueError(f'{self.builtin} has no modifier {unknown}')
+            engine = 'wmma_gfx1250'
+            modifiers = tuple((name, int(wmma.get(name, 0)))
+                              for name in WMMA_MODIFIERS)
         return writer.matrix_mac(
-            'mfma', (self.m, self.n, self.k),
-            (self.a.dtype, self.b.dtype, self.d.dtype, self.d.dtype),
-            (a,), (b,), (c,), result=type_, hint='acc',
-            instruction=self.builtin,
-            modifiers=(('cbsz', cbsz), ('abid', abid), ('blgp', blgp)),
-            layouts=vendor_layouts(self))
+            engine, (self.m, self.n, self.k), types, (a,), (b,), (c,),
+            result=type_, hint='acc', instruction=self.builtin,
+            modifiers=modifiers, layouts=vendor_layouts(self))
 
     def cbsz(self, threads: int) -> int:
         """How many blocks share one A operand: the instruction's `cbsz`.

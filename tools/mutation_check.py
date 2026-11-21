@@ -4195,8 +4195,8 @@ GROUPS = {
              '    stated = (Provenance.MEASURED, Provenance.DOCUMENTED,\n'
              '              Provenance.DERIVED)\n', 1)),
         ('the emulated operands taken as D\'s type',
-         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '            (self.a.dtype, self.b.dtype, self.d.dtype, self.d.dtype),\n',
-             '            (self.d.dtype, self.d.dtype, self.d.dtype, self.d.dtype),\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '        types = (self.a.dtype, self.b.dtype, self.d.dtype, self.d.dtype)\n',
+             '        types = (self.d.dtype, self.d.dtype, self.d.dtype, self.d.dtype)\n', 1)),
         ('a kernel of MFMAs not waiting behind its blocks',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/dpp_block.py'), '            if (stmt.op == Op.MATRIX_MAC\n'
                   '                    and stmt.attr(\'engine\') == HAZARD.then):\n',
@@ -4945,6 +4945,7 @@ GROUPS = {
     'pircons': ('tests/test_matrix_transfers.py tests/test_copy_fill.py '
                 'tests/test_wrap_ahead.py tests/test_relayout.py '
                 'tests/test_transfer_engines.py tests/test_block2d.py '
+                'tests/test_wmma.py '
                 'tests/test_multi_element.py::test_ldmatrix_is_a_declared_read_of_its_buffer', [
         ('the rows of a matrix on the lane bits of its words',
          sub(ENGINES, '    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))\n',
@@ -5167,6 +5168,38 @@ GROUPS = {
         ('a 2D block read through the block messages',
          sub(BLOCKS, "        attrs=(('engine', 'block2d'), ('shape', (rows, cols)),\n",
              "        attrs=(('engine', 'block'), ('shape', (rows, cols)),\n", 1)),
+        # AMD's WMMA on the matrix op (`wmma`, `wmma_gfx1250`), issued from
+        # the catalog's rows (`MatrixOp.mac`).
+        ("a WMMA of RDNA through the MFMA's engine",
+         sub(PKG / 'catalog.py', "            engine, modifiers = 'wmma', ()\n",
+             "            engine, modifiers = 'mfma', ()\n", 1)),
+        ("gfx1250's WMMA through RDNA's engine",
+         sub(PKG / 'catalog.py', "            engine = 'wmma_gfx1250'\n",
+             "            engine = 'wmma'\n", 1)),
+        ("a WMMA's modifier stated as zero whatever was asked",
+         sub(PKG / 'catalog.py', "            modifiers = tuple((name, int(wmma.get(name, 0)))\n",
+             "            modifiers = tuple((name, 0)\n", 1)),
+        ('modifiers on a WMMA of RDNA let through',
+         sub(PKG / 'catalog.py', "            engine, modifiers = 'wmma', ()\n            if wmma:\n",
+             "            engine, modifiers = 'wmma', ()\n            if False:\n", 1)),
+        ("a modifier gfx1250's WMMA lacks let through",
+         sub(PKG / 'catalog.py', "            if unknown:\n                raise ValueError(f'{self.builtin} has no modifier",
+             "            if False:\n                raise ValueError(f'{self.builtin} has no modifier", 1)),
+        ("a WMMA's layouts left behind",
+         sub(PKG / 'catalog.py', "            modifiers=modifiers, layouts=vendor_layouts(self))\n",
+             "            modifiers=modifiers, layouts=None)\n", 1)),
+        ("gfx1250's modifiers out of their places among the operands",
+         sub(ENGINES, "        args = [flag('a_neg'), a, flag('b_neg'), b,\n",
+             "        args = [a, flag('a_neg'), flag('b_neg'), b,\n", 1)),
+        ("a WMMA's flags written as numbers",
+         sub(ENGINES, "            return 'true' if modifiers.get(name, 0) else 'false'\n",
+             "            return '1' if modifiers.get(name, 0) else '0'\n", 1)),
+        ('a WMMA lowered off HIP',
+         sub(ENGINES, "    if env.family not in ('hip', ''):\n        raise IRError(f'a WMMA on",
+             "    if False:\n        raise IRError(f'a WMMA on", 1)),
+        ("RDNA's WMMA spelled as gfx1250's",
+         sub(ENGINES, "def _lower_wmma(s: Stmt, env: Spelling) -> Lowered:\n    return _wmma_call(s, env, gfx1250=False)\n",
+             "def _lower_wmma(s: Stmt, env: Spelling) -> Lowered:\n    return _wmma_call(s, env, gfx1250=True)\n", 1)),
     ]),
     # An `if` whose first arm writes nothing: the writer leaves that arm out,
     # its head with it, and the second is written under the negated
