@@ -271,6 +271,15 @@ class SyclLexic(Lexic):
     # narrow enough (16 on PVC) for ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
 
+  def opaque_zero(self, value):
+    """Under SPMD, `value` less its broadcast from the sub-group's first
+    lane: zero, where every lane holds it alike, and a cross-lane read the
+    compiler does not see through.  None under the explicit vector."""
+    if self._explicit_simd:
+      return None
+    return (f'(sycl::group_broadcast(item.get_sub_group(), {value}, 0) - '
+            f'({value}))')
+
   def pin_fence(self):
     """The sub-group barrier, as `__syncwarp()` is on CUDA: no work in
     converged code -- a sub-group is one hardware thread, its lanes already

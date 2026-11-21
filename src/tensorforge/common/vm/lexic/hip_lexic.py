@@ -236,6 +236,13 @@ class HipLexic(CudaLexic):
     # with barriers around them -- 22 % faster.
     return '__builtin_amdgcn_sched_barrier(0);', False
 
+  def opaque_zero(self, value):
+    if self._underlying_hardware != 'amd':
+      return super().opaque_zero(value)
+    # An empty `asm volatile` that writes it (`hip.h`): a side effect, which
+    # nothing hoists, merges or folds.
+    return 'tensorforge::opaqueZero()'
+
   def loop_body_fence(self):
     if self._underlying_hardware != 'amd':
       return super().loop_body_fence()

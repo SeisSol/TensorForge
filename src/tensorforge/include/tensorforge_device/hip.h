@@ -518,6 +518,20 @@ template <typename T> __device__ __forceinline__ void pin(T &v) {
   asm volatile("" : "+v"(v));
 }
 
+/// Zero, as a value the compiler cannot see through: an empty `asm volatile`
+/// that writes it, in a scalar register.  No instruction; what it buys is an
+/// anchor.  Added into an address, it makes the address the loop iteration's
+/// that forms it -- an `asm volatile` is a side effect, which LICM neither
+/// hoists nor merges -- so that the compiler forms it there instead of taking
+/// it out of the loop and holding it across: the multi-element lanes form's
+/// reads of an element's rows and of an operator's numbers, the same in every
+/// column (`element_group.lane_anchors`).
+__device__ __forceinline__ int opaqueZero() {
+  int zero = 0;
+  asm volatile("" : "+s"(zero));
+  return zero;
+}
+
 /// The row share as an instruction of its own: every lane of a 16-lane row
 /// gets lane `Row`'s value.  Any trivially copyable value -- `dpp` moves it
 /// in 64-bit units where the target can, so a float pair or a `double` is one

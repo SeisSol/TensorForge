@@ -685,7 +685,7 @@ class Generator:
     self._merge_decided: bool = merge_within is not None
 
     options = context.get_user_options()
-    if options.reassociate_products:
+    if options.reassociate_products and not self._lanes_take(context):
       # Ahead of the merge, which groups the products into runs: the
       # rewritten pairs are what it should group (`reassociate`).
       from .reassociate import reassociate
@@ -1433,7 +1433,10 @@ class Generator:
                          flags=self._flags,
                          queue_depth=self._launch_control_depth,
                          group_size=group,
-                         narrow_group=self._num_threads
+                         # The element group is the block, whatever a warp
+                         # of it is of a wave.
+                         narrow_group=self._element_group is None
+                         and self._num_threads
                          < self._context.target.hw.vec_unit_length,
                          stack=self._stack,
                          wave_rows=self._group_wave_rows(group),
@@ -1559,6 +1562,12 @@ class Generator:
     hw = self._context.target.hw
     if getattr(opts, 'fission', 0) != 'auto':
       return
+    if opts.multi_element == 'force':
+      # The multi-element layout plans the kernel's one section whole
+      # (`element_group.plan`), and a piece would be a section of its own.
+      flat = [op for descr in self._descr_list for op in descr.operations()]
+      if element_group.plan(flat, self._context) is not None:
+        return
     if fission_pieces(1 << 40, hw) <= 1 or not fission_cuts(self._given):
       return
     if (not getattr(hw, 'icache_size', None)
@@ -1606,6 +1615,10 @@ class Generator:
     pieces = (self._fission_pieces if asked == 'auto' else int(asked))
     descrs = list(descrs)
     if not pieces or pieces <= 1 or any(d.barrier() for d in descrs):
+      return descrs
+    if self._element_group is not None:
+      # The multi-element layout's section is the kernel's whole list, which
+      # its plan was made for.
       return descrs
     from tensorforge.analysis.cost import list_cost
     from tensorforge.generators.descriptions import BlockBarrierDescr
@@ -2744,8 +2757,12 @@ class Generator:
     Where every multiplication is a whole number of waves, each wave holds
     one row, and the target can say so (`Target.reads_first_lane`).  Where
     several share a wave the row differs between them, and only their group
-    is alike across it.
+    is alike across it.  Not in the multi-element layout's lanes form,
+    whose lanes are each an element of their own: the row is the wave's,
+    but the pointers it binds are a lane's (`Trip.LANE_GROUP`).
     """
+    if self._element_group is not None and self._element_group.lanes:
+      return False
     return (layout.whole_waves
             and self._context.target.reads_first_lane()
             and self._context.get_user_options().wave_uniform_rows)
@@ -3367,6 +3384,20 @@ class Generator:
         f'{self._launch_config_proto(with_defaults=True)};\n'
         f'{self._generate_launcher_proto(with_defaults=True)};\n')
 
+  def _lanes_take(self, context) -> bool:
+    """Whether the multi-element layout's lanes form takes the description
+    as yateto writes it (`element_group.plan`): then it is not reassociated
+    (`Options.reassociate_products`).  The rewrite puts the operator product
+    first and mixes its intermediate after it, which a lane would hold
+    whole -- the order the lanes form refuses, and AMD's default."""
+    options = context.get_user_options()
+    if (options.multi_element != 'force'
+        or element_group.fma_form(context) != 'lanes'):
+      return False
+    flat = [op for descr in self._descr_list for op in descr.operations()]
+    group = element_group.plan(flat, context)
+    return group is not None and group.lanes is not None
+
   def _deduce_num_threads(self):
     """Adopt the section's lane geometry: the caller's, or the deduced one --
     or a warp a multiplication where the kernel takes the multi-element
@@ -3379,6 +3410,12 @@ class Generator:
       warp = self._element_group.threads
       self._num_threads = self._num_active_threads = warp
       self._lead_width = 1
+      # The layout stages its operators itself, in the form its steps read
+      # them (`MultiElementOperators`), or reads them where they are stored
+      # -- the lanes form -- and a copy into shared memory ahead of that
+      # (`preload_globals`, AMD's default) would be one more of them, or
+      # one nothing reads.
+      self._preload_globals = False
       return
     config = (self._lanes or lane_config.requested(flat, self._context)
               or lane_config.deduce(flat, self._context))
@@ -4811,10 +4848,15 @@ class Generator:
     if waves and self._context.target.waves_per_eu_bound():
       launch_bounds += (waves,)
 
+    grf = self._context.get_user_options().sycl_grf
+    if self._element_group is not None and self._element_group.lanes:
+      # The lanes form is sized for the large register file on Intel
+      # (`element_group.lane_grf`).
+      grf = element_group.lane_grf(self._context) or grf
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
                                          shr_total_size, global_symbols,
                                          lanes=self._num_threads,
-                                         grf=self._context.get_user_options().sycl_grf)
+                                         grf=grf)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()

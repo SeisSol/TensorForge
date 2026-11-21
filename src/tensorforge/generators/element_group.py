@@ -63,7 +63,17 @@ the one output -- its columns of a class, at its range of rows.  Nothing
 is staged: each lane reads its own element through its own pointers, a
 mixing step's entries are computed where a product reads them, an
 operator step's column is held in registers while a product reads it, and
-the operators' nonzeros are literals.  Every step's lowering is `lane`.
+only the operators' nonzeros are multiplied by -- literals of the code, or
+read from the operator's memory at addresses every lane shares
+(`lane_literals`).  Every step's lowering is `lane`.
+
+The layout is written for CUDA on NVIDIA, HIP on AMD and DPC++ under SPMD
+on Intel (`TARGETS`), and the forms say "warp" for what the target has:
+the warp form's warp is 32 lanes everywhere -- half a wave on CDNA, a
+sub-group of 32 on Intel, as the kernel states it -- and the lanes form's
+is the target's own, a wave or a sub-group of its vector unit's width
+(`lane_elements`).  Only the block's barriers reach across warps.  The
+matrix tiling is NVIDIA's (`lower`).
 
 `plan` decides whether and how a section takes the layout: every product
 classified or none, E for the section, and each step's lowering -- the
@@ -116,6 +126,14 @@ POINTER_BYTES = 8
 #: option is not set and this is on.  On: the layout exists for them, and is
 #: off by default itself (`Options.multi_element`).
 MATRIX = True
+
+#: The targets the layout is written for: a backend, and the vendor it runs
+#: on there.  SYCL is DPC++ under SPMD on Intel, whose kernels state their
+#: sub-group (`Target.pinned_sub_groups`): the lanes form's warp is one, and
+#: the fences in a range's code are sub-group barriers under a condition
+#: only whole sub-groups take.  The explicit vector, and AdaptiveCpp, whose
+#: device picks the sub-group, are not.
+TARGETS = (('cuda', 'nvidia'), ('hip', 'amd'), ('oneapi', 'intel'))
 
 
 class Role(enum.Enum):
@@ -438,8 +456,9 @@ class ElementGroup:
 
     @property
     def threads(self) -> int:
-        """Lanes of one multiplication: a warp."""
-        return 32
+        """A warp's lanes: 32, or in the lanes form the group's elements, a
+        lane each (`lane_elements`)."""
+        return self.elements if self.lanes is not None else 32
 
     @property
     def warps(self) -> int:
@@ -703,8 +722,9 @@ def _staged(section: GroupSection, sm: int,
     for step in section.steps:
         matrix = step.lowering in MATRIX_LOWERINGS
         if step.lowering == 'lane':
-            # The lanes form stages nothing: its operators are literals, and
-            # each lane reads its own element where it is stored.
+            # The lanes form stages nothing: its operators are literals or
+            # read where they are stored, and each lane reads its own
+            # element where it is stored.
             continue
         for p in step.products:
             t = p.first.tensor if p.kind is Kind.OPERATOR else None
@@ -829,9 +849,12 @@ def lower(section: GroupSection, context, matrix: bool = True,
     second stage where the options take them there (`second_stages`) and
     `double` does not decline it.  An `fma` step reads only its operators'
     nonzeros (`nonzero_terms`) where they carry their numbers and
-    `Options.skip_known_zeros` is on, as the per-element products do."""
+    `Options.skip_known_zeros` is on, as the per-element products do.  The
+    matrix tiling is NVIDIA's: elsewhere every step takes an FMA form, as
+    below sm_80."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
-    sm = nvidia.sm_of(context)
+    sm = (nvidia.sm_of(context)
+          if getattr(context.target.hw, 'vendor', None) == 'nvidia' else 0)
     sparse = context.get_user_options().skip_known_zeros
     steps = []
     for s in section.steps:
@@ -848,20 +871,29 @@ def lower(section: GroupSection, context, matrix: bool = True,
         if double and not lanes else 0))
 
 
+def async_staging(context) -> bool:
+    """Whether a trip stages its dense operands by asynchronous copies,
+    which `pir.wrap` can take a trip ahead: NVIDIA's `cp.async`
+    (`Target.async_copy_path`).  AMD's LDS-DMA writes a wave's lanes past
+    one base, which a box over its pitch is not to the emitter; there, as
+    where there is no such path, a trip stages by loads and stores."""
+    return (getattr(context.target.hw, 'vendor', None) == 'nvidia'
+            and context.target.async_copy_path())
+
+
 def second_stages(section: GroupSection, context) -> int:
     """How many of the section's inputs, in the order a trip stages them,
     `pir.wrap` may copy a trip ahead into a second stage, which the group
     then holds twice: the first `Options.move_distance` -- the transfers it
     moves -- where the options ask for the move and for its second stage
     (`enable_wrap_loads`, `enable_multibuffer`), the copies are the
-    hardware's (`Target.async_copy_path`), and the barrier placement runs
+    hardware's (`async_staging`), and the barrier placement runs
     (`enable_sync_block_opt`): an instruction's own barrier ahead of the
     staging stops the move.  At most that many: an input the pass leaves
     where it is keeps its room unused."""
     options = context.get_user_options()
     if not (options.enable_wrap_loads and options.enable_multibuffer
-            and options.enable_sync_block_opt
-            and context.target.async_copy_path()):
+            and options.enable_sync_block_opt and async_staging(context)):
         return 0
     return min(int(options.move_distance), len(section.inputs))
 
@@ -905,8 +937,99 @@ def table_elements(section: GroupSection) -> int:
 
 # -- the lanes form ---------------------------------------------------------- #
 
-#: The lanes form's group: a warp's lanes, an element each.
-LANE_ELEMENTS = 32
+def lane_elements(context) -> int:
+    """The lanes form's group on the context's target: a warp's lanes, an
+    element each -- the width of the target's vector unit, a CUDA warp of
+    32, a wave of 64 on CDNA and of 32 on RDNA, a sub-group of 16 on
+    Xe-HPC, which the kernel states as its multiplication's width
+    (`reqd_sub_group_size`).  Not wider: two of the block's warps on one
+    wave would be two shares of the output, whose ranges' guards diverge."""
+    return int(context.target.hw.vec_unit_length)
+
+
+def lane_grf(context) -> Optional[str]:
+    """The register file the lanes form's kernel asks IGC for on Intel, as
+    `Options.sycl_grf` spells it: the option's where it is set, and where it
+    is not the large file, 256 registers a thread -- the plan holds a
+    lane's column in registers and is sized for it, as the explicit vector
+    is (and the PVC prototype asked for it explicitly: IGC's own choice ran
+    its chained products twice as long).  None off Intel."""
+    if getattr(context.target.hw, 'vendor', None) != 'intel':
+        return None
+    grf = str(context.get_user_options().sycl_grf).strip()
+    return '256' if grf == 'default' else grf
+
+
+def lane_registers(context, elements: int) -> int:
+    """Registers, in 32-bit words, the lanes form's plan lets a lane hold
+    live on the context's target: `LANE_REGISTERS` of the 255 a CUDA thread
+    addresses, and the same share of what a lane addresses elsewhere -- 256
+    VGPRs on AMD, the ones an FMA takes as operands (CDNA's AGPRs, which
+    share the file from gfx90a on, are the matrix cores' and the spills');
+    on Intel the lane's share of its hardware thread's file, which the
+    sub-group's `elements` lanes split: 128 words a lane at SIMD16 in the
+    small file, 256 in the large one (`lane_grf`)."""
+    hw = context.target.hw
+    file = getattr(hw, 'max_reg_per_thread', None) or 1020
+    if getattr(hw, 'vendor', None) == 'amd':
+        file = min(file, 1024)
+    if getattr(hw, 'vendor', None) == 'intel':
+        # `max_reg_per_thread` is the small file, 128 registers of 64 bytes.
+        if lane_grf(context) in ('256', 'auto'):
+            file *= 2
+        file //= elements
+    return LANE_REGISTERS * (file // 4) // 255
+
+
+#: Where the lanes form takes its operators' nonzeros from by vendor, where
+#: `Options.multi_element_values` is `auto` (`lane_values`).  NVIDIA: literals
+#: of the code -- an FFMA takes its immediate and a DFMA reads its number from
+#: a constant bank as an operand, at no instruction (CUDA Binary Utilities,
+#: "Instruction Set Reference": FFMA32I, constant-bank operands).  Elsewhere a
+#: literal costs an instruction.  AMD: the operator's own memory at addresses
+#: every lane shares, a scalar load into SGPRs, which a VALU instruction takes
+#: as an operand -- gfx9 has no VOP3 literal, so a `v_fma_f64` cannot take its
+#: number from the code (AMD "CDNA3 ISA", VOP3 encoding, literal constants).
+#: Intel: an Xe `mad` takes no 32-bit immediate, and a uniform read is a
+#: message a number; a table of the numbers in the order they are multiplied
+#: by is read a sub-group's width at a time and each handed to the lanes from
+#: the lane that holds it, which IGC makes a register region of the `mad` --
+#: the PVC prototype's operands.
+LANE_VALUES = {'nvidia': 'literal', 'amd': 'memory', 'intel': 'table'}
+
+#: The vendors whose lanes form anchors what it reads to the column it reads
+#: it for (`lane_anchors`): an address that does not change from column to
+#: column -- an element's own rows the mixing product reads, an operator's
+#: number -- is otherwise taken out of the column loop by the compiler, and
+#: every one of them held across it.  On PVC the per-lane addresses of the
+#: element's rows of the o6 volume were 200 registers of 64 bytes, spilled;
+#: an anchor of the column -- a zero the compiler cannot see -- keeps them in
+#: the loop.  ptxas forms them where they are read.
+LANE_ANCHORS = ('amd', 'intel')
+
+
+def lane_values(context) -> str:
+    """Where the lanes form's operator nonzeros come from on the context's
+    target: `literal`, `memory` or `table` (`Options.multi_element_values`,
+    `LANE_VALUES`)."""
+    asked = context.get_user_options().multi_element_values
+    if asked != 'auto':
+        return asked
+    return LANE_VALUES.get(getattr(context.target.hw, 'vendor', None),
+                           'memory')
+
+
+def lane_literals(context) -> bool:
+    """Whether the lanes form's operator nonzeros are literals of the code
+    on the context's target (`lane_values`)."""
+    return lane_values(context) == 'literal'
+
+
+def lane_anchors(context) -> bool:
+    """Whether the lanes form anchors its reads to the column
+    (`LANE_ANCHORS`)."""
+    return getattr(context.target.hw, 'vendor', None) in LANE_ANCHORS
+
 
 #: The FMA form `Options.multi_element_fma` `auto` takes, by vendor: the
 #: warp form everywhere, until the measurements say otherwise.
@@ -927,18 +1050,21 @@ def fma_form(context) -> str:
 LANE_CLASSES = 3
 
 #: Registers, in 32-bit words, the lanes form's plan lets a lane hold live
-#: by its estimate (`Lanes.registers`): the output is cut into more row
-#: ranges until each fits.  Short of the 255 a CUDA thread addresses, for
-#: the addresses and the compiler's own temporaries.
+#: by its estimate (`Lanes.registers`) on CUDA: the output is cut into more
+#: row ranges until each fits.  Short of the 255 a CUDA thread addresses,
+#: for the addresses and the compiler's own temporaries; the same share of
+#: a lane's registers elsewhere (`lane_registers`).
 LANE_REGISTERS = 168
 
 #: The most row ranges the lanes form cuts an output into.
 LANE_RANGES = 8
 
 #: The most warps a block of the lanes form has: a block of more caps what
-#: a thread may hold below the 255 registers (`__launch_bounds__` sizes it
-#: by the block), and the cut into ranges is exactly what was to keep it
-#: there.  The column classes give way first: they add warps, no room.
+#: a thread may hold below the 255 registers on CUDA (`__launch_bounds__`
+#: sizes it by the block), and the cut into ranges is exactly what was to
+#: keep it there.  The column classes give way first: they add warps, no
+#: room.  Eight waves of 64 are two a SIMD on CDNA, and 256 VGPRs each;
+#: eight sub-groups are eight of an Xe core's 32 threads in the large file.
 LANE_WARPS = 8
 
 
@@ -955,9 +1081,10 @@ class Lanes:
     A mixing step's intermediate is not stored: where a product reads an
     entry of it, the entry is computed from the element's own operands.
     An operator step's intermediate is a column of registers, its needed
-    rows, for as long as the product that reads it runs.  The operators'
-    nonzeros are literals of the code, the description's numbers
-    (`operator_nonzeros`)."""
+    rows, for as long as the product that reads it runs.  Only the
+    operators' nonzeros are multiplied by (`operator_nonzeros`): literals
+    of the code, the description's numbers, or read from the operator's
+    memory at addresses every lane shares (`lane_literals`)."""
 
     classes: int
     ranges: Tuple[Range, ...]
@@ -1131,14 +1258,15 @@ def lanes_plan(section: GroupSection,
     It takes a section with one output, the last step's destination, which
     no other step reads; whose mixing products mix the element's own
     operands and not an intermediate -- which a lane would have to hold
-    whole, every column of it -- and whose operators carry numbers, at
-    most `Options.inline_constants` nonzeros each.  An intermediate
+    whole, every column of it -- and whose operators carry numbers, their
+    pattern, at most `Options.inline_constants` nonzeros each where those
+    are literals (`lane_literals`).  An intermediate
     written again is another value each time (`Cones`), and the steps
     into the output -- a merged run's, one a member -- add into one column
     of registers in turn.  The output is cut into as few row ranges as
-    keep the estimate of a lane's registers within `LANE_REGISTERS`, and
-    has as many column classes as `LANE_CLASSES` allows within `LANE_WARPS`
-    a block."""
+    keep the estimate of a lane's registers within the target's budget
+    (`lane_registers`), and has as many column classes as `LANE_CLASSES`
+    allows within `LANE_WARPS` a block."""
     if len(section.outputs) != 1:
         return None, (f'the lanes form writes one output, not '
                       f'{len(section.outputs)}')
@@ -1152,12 +1280,12 @@ def lanes_plan(section: GroupSection,
                 continue
             tensor = p.first.tensor
             if not tensor.has_values():
-                return None, (f'{tensor.alias} carries no numbers for the '
-                              f'lanes form\'s literals')
+                return None, (f'{tensor.alias} carries no numbers, whose '
+                              f'nonzeros the lanes form would walk')
     cones = Cones(section)
     for step in section.steps:
         for p in step.products:
-            if p.kind is Kind.MIXING:
+            if p.kind is Kind.MIXING or not lane_literals(context):
                 continue
             tensor = p.first.tensor
             count = sum(len(v) for v in cones.nonzeros[id(p)].values())
@@ -1171,16 +1299,17 @@ def lanes_plan(section: GroupSection,
     tile = max(1, 16 // section.dtype.size())
     lo, hi = cones.rows
     classes = max(1, min(LANE_CLASSES, cones.cols[1] - cones.cols[0]))
+    budget = lane_registers(context, lane_elements(context))
     live = None
     for count in range(1, min(LANE_RANGES, hi - lo) + 1):
         ranges = cones.ranges(count)
         live = max(cones.live(range(*r), tile) for r in ranges) * size
-        if live <= LANE_REGISTERS:
+        if live <= budget:
             return Lanes(max(1, min(classes, LANE_WARPS // count)), ranges,
                          live), ''
     return None, (f'a lane would hold {live} registers at {LANE_RANGES} row '
-                  f'ranges, more than the {LANE_REGISTERS} the lanes form '
-                  f'takes')
+                  f'ranges, more than the {budget} the lanes form takes '
+                  f'here')
 
 
 def fill(section: GroupSection,
@@ -1188,8 +1317,10 @@ def fill(section: GroupSection,
     """The fill rule: the group's size for `section` on the context's
     target, or None and why not.
 
-    The lanes form where it is asked for (`fma_form`) and the section
-    fits it (`lanes_plan`): a group of `LANE_ELEMENTS`, a lane each.
+    Only on the targets the layout is written for (`TARGETS`).  The lanes
+    form where it is asked for (`fma_form`) and the section fits it
+    (`lanes_plan`): a group of a warp's lanes (`lane_elements`), an element
+    each.
     Otherwise the size is the table's (`table_elements`) where the block
     holds it, halved while it does not -- in shared memory, in threads --
     and `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
@@ -1200,9 +1331,10 @@ def fill(section: GroupSection,
     lowered."""
     target = context.target
     hw = target.hw
-    if getattr(hw, 'vendor', None) != 'nvidia' or target.backend != 'cuda':
+    if (target.backend, getattr(hw, 'vendor', None)) not in TARGETS:
         return None, (f'the multi-element layout is written for CUDA on '
-                      f'NVIDIA, not {target.backend} on {hw.vendor}')
+                      f'NVIDIA, HIP on AMD and DPC++ under SPMD on Intel, '
+                      f'not {target.backend} on {hw.vendor}')
     options = context.get_user_options()
     # The batch loop's `Trip.ELEMENT_GROUP` takes neither.
     if options.launch_control:
@@ -1214,8 +1346,8 @@ def fill(section: GroupSection,
     if fma_form(context) == 'lanes':
         lanes, _ = lanes_plan(section, context)
         if lanes is not None:
-            return ElementGroup(LANE_ELEMENTS, lower(section, context,
-                                                     lanes=True), 0,
+            return ElementGroup(lane_elements(context),
+                                lower(section, context, lanes=True), 0,
                                 lanes), ''
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
     # The matrix tiling, with B in TF32 halves where that costs no group
@@ -1265,12 +1397,14 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
 
 
 __all__ = ['Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
-           'FMA_FORMS', 'GroupSection', 'Kind', 'LANE_CLASSES',
-           'LANE_ELEMENTS', 'LANE_RANGES', 'LANE_REGISTERS', 'LOWERING',
-           'Lanes', 'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS',
-           'POINTER_BYTES', 'Product', 'Role', 'SHARED_RESERVE',
-           'SMALL_EXTENT', 'Stage', 'Step', 'Terms', 'classify',
-           'fill', 'fma_form', 'lanes_plan', 'lower',
+           'FMA_FORMS', 'GroupSection', 'Kind', 'LANE_ANCHORS',
+           'LANE_CLASSES', 'LANE_RANGES', 'LANE_REGISTERS', 'LANE_VALUES',
+           'LANE_WARPS', 'LOWERING', 'Lanes', 'MATRIX', 'MATRIX_LOWERINGS',
+           'MIN_ELEMENTS', 'POINTER_BYTES', 'Product', 'Role',
+           'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step', 'TARGETS',
+           'Terms', 'async_staging', 'classify', 'fill', 'fma_form',
+           'lane_anchors', 'lane_elements', 'lane_grf', 'lane_literals',
+           'lane_registers', 'lane_values', 'lanes_plan', 'lower',
            'matrix_enabled', 'matrix_shape', 'nonzero_terms',
            'operator_nonzeros', 'plan', 'second_stages', 'shared_bytes',
            'split', 'table_elements', 'tiled']

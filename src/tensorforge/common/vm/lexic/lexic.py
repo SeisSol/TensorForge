@@ -254,6 +254,16 @@ class Lexic(ABC):
     warp to arrive -- or None where the backend has no such statement."""
     return None
 
+  def opaque_zero(self, value: str):
+    """A zero the compiler cannot see through, of `value` -- an index every
+    lane of the warp holds alike -- or None where the backend has none.
+
+    What anchors an address to the loop iteration that forms it: added in,
+    it makes the address the iteration's own, which the compiler cannot
+    take out of the loop and hold across it (the multi-element layout's
+    lanes form, `element_group.lane_anchors`)."""
+    return None
+
   def loop_body_fence(self) -> str:
     """A statement for the head of a loop body that loads cannot be hoisted
     across, or empty where the backend's compiler needs none.

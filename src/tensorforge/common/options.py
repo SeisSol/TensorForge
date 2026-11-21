@@ -172,6 +172,19 @@ def parse_multi_element_fma(text: str) -> str:
   return value
 
 
+#: What `Options.multi_element_values` takes.
+MULTI_ELEMENT_VALUES = ('auto', 'literal', 'memory', 'table')
+
+
+def parse_multi_element_values(text: str) -> str:
+  """`auto`, `literal`, `memory` or `table`
+  (`Options.multi_element_values`)."""
+  value = str(text).strip().lower()
+  if value not in MULTI_ELEMENT_VALUES:
+    raise ValueError(f'expected one of {MULTI_ELEMENT_VALUES}, got {text!r}')
+  return value
+
+
 #: What `Options.carry_element_index` takes.
 CARRY_ENTRY = ('auto', 'always', 'never')
 
@@ -2372,11 +2385,33 @@ declare('multi_element_fma',
             'element\'s operands staged in shared memory (`fma`, `rows`), '
             'where the matrix tiling does not take a step.  `lanes`: a lane '
             'an element, every lane reading its own element through its own '
-            'pointers and the operators\' nonzeros as literals, the outputs '
+            'pointers and the operators\' nonzeros alone '
+            '(`multi_element_values`), the outputs '
             'split over the warps the group\'s elements share (`lane`) -- '
             'ahead of the matrix tiling, wherever the section fits it, and '
             '`warp` where it does not.  `auto`: the target\'s rule, which is '
             '`warp` everywhere until the measurements say otherwise.')
+
+declare('multi_element_values',
+        default='auto',
+        env='TF_MULTI_ELEMENT_VALUES',
+        parse=parse_multi_element_values,
+        doc='Where the multi-element layout\'s lanes form (`multi_element_fma` '
+            '`lanes`) takes its operators\' nonzeros from.  `literal`: the '
+            'description\'s numbers, written into the code -- at most '
+            '`inline_constants` an operator.  `memory`: the operator\'s own '
+            'memory, the numbers the kernel is handed, read at addresses every '
+            'lane shares.  `table`: the description\'s numbers in the order the '
+            'kernel multiplies by them, a table of the generated file read a '
+            'warp\'s width at a time -- an element a lane -- and each handed to '
+            'every lane from the lane that holds it.  `auto`: literals on '
+            'NVIDIA, where an FFMA takes its immediate and a DFMA its '
+            'constant-bank operand at no instruction; memory on AMD, scalar '
+            'loads into SGPRs, where gfx9\'s `v_fma_f64` takes no literal; the '
+            'table on Intel, where a three-source `mad` takes no 32-bit '
+            'immediate and a uniform read is a message a number, but a '
+            'broadcast from a lane is a register region of the `mad` (the PVC '
+            'prototype\'s operands).')
 
 declare('mma_prefetch',
         default=None,

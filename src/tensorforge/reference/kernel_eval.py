@@ -1377,6 +1377,9 @@ def _py(expr: str) -> str:
     e = _fold_reads(e)
     # `pick<G>(m, a, b, ...)`: multiplication `m`'s value among `G`.
     e = re.sub(r'\btensorforge::pick\s*<\s*(\d+)\s*>\s*\(', r'PICK(\1, ', e)
+    # `opaqueZero()`, the zero an `asm volatile` hands over so that an
+    # address is formed where it is read (`hip.h`): zero.
+    e = re.sub(r'\btensorforge::opaqueZero\s*\(\s*\)', '0', e)
     # `bufferLoad<T, N>(r, i, keep)`: `N` elements of `T` through the
     # resource `r` (`Interp._buffer_load`), the element's size said here.
     e = re.sub(r'\btensorforge::bufferLoad\s*<\s*([\w:]+)\s*(?:,\s*(\d+)\s*)?'

@@ -590,10 +590,160 @@ def test_the_executed_flops_are_the_nonzeros(shape, order, precision):
         shape, order, precision, False)
 
 
-def test_the_layout_is_cudas_on_nvidia():
+@pytest.mark.parametrize('backend,arch,taken', [
+    ('cuda', 'sm_90', True), ('hip', 'gfx942', True), ('hip', 'gfx1150', True),
+    ('oneapi', 'pvc', True), ('esimd', 'pvc', False), ('acpp', 'pvc', False)])
+def test_the_layout_is_written_for_three_targets(backend, arch, taken):
+    """CUDA on NVIDIA, HIP on AMD and DPC++ under SPMD on Intel
+    (`TARGETS`); the explicit vector, and AdaptiveCpp, whose device picks the
+    sub-group, are refused and say so."""
     section = eg.classify(_volume())[0]
-    group, why = eg.fill(section, _context('gfx942', backend='hip'))
-    assert group is None and 'NVIDIA' in why
+    for options in ({}, LANES):
+        group, why = eg.fill(section, _context(arch, backend=backend,
+                                               **options))
+        assert (group is not None) is taken
+        if not taken:
+            assert 'DPC++ under SPMD on Intel' in why
+
+
+@pytest.mark.parametrize('backend,arch', [('hip', 'gfx942'),
+                                          ('oneapi', 'pvc')])
+def test_the_matrix_tiling_is_nvidias(backend, arch):
+    """Elsewhere every step takes its FMA form, the matrix engines asked
+    for or not."""
+    section = eg.classify(_volume())[0]
+    lowered = eg.lower(section, _context(arch, backend=backend,
+                                         tensor_cores=True))
+    assert not eg.tiled(lowered)
+    assert {s.lowering for s in lowered.steps} == {'fma', 'rows'}
+
+
+@pytest.mark.parametrize('backend,arch,options,elements,registers,grf', [
+    ('cuda', 'sm_90', {}, 32, 168, None),
+    ('hip', 'gfx942', {}, 64, 168, None),
+    ('hip', 'gfx1150', {}, 32, 168, None),
+    ('oneapi', 'pvc', {}, 16, 168, '256'),
+    ('oneapi', 'pvc', {'sycl_grf': 'auto'}, 16, 168, 'auto'),
+    ('oneapi', 'pvc', {'sycl_grf': '128'}, 16, 84, '128')],
+    ids=['sm_90', 'gfx942', 'gfx1150', 'pvc', 'pvc-auto', 'pvc-grf128'])
+def test_the_lanes_group_is_the_targets_warp(backend, arch, options,
+                                             elements, registers, grf):
+    """The lanes form's group is a warp's lanes on the target -- a CUDA
+    warp, a CDNA or RDNA wave, a sub-group of Xe-HPC's 16 lanes -- and a
+    lane holds as much of what it addresses as on CUDA: 168 of 256 VGPRs on
+    AMD, and on Intel its share of the thread's file, the large one unless
+    `sycl_grf` asks for another."""
+    context = _context(arch, backend=backend, **options)
+    assert eg.lane_elements(context) == elements
+    assert eg.lane_registers(context, elements) == registers
+    assert eg.lane_grf(context) == grf
+    for order in (4, 6):
+        section = eg.classify(_volume(order, 'd'))[0]
+        group = eg.fill(section, _context(arch, 'd', backend=backend,
+                                          **options, **LANES))[0]
+        if group.lanes is None:
+            # F64 in the small file: the warp form's.
+            assert registers == 84
+            why = eg.lanes_plan(section, _context(arch, 'd', backend=backend,
+                                                  **options))[1]
+            assert f'more than the {registers} the lanes form' in why
+            continue
+        assert group.elements == elements and group.threads == elements
+        assert group.warps <= eg.LANE_WARPS
+        assert group.lanes.registers <= registers
+
+
+@pytest.mark.parametrize('backend,arch,options,values', [
+    ('cuda', 'sm_90', {}, 'literal'), ('hip', 'gfx942', {}, 'memory'),
+    ('oneapi', 'pvc', {}, 'table'),
+    ('cuda', 'sm_90', {'multi_element_values': 'memory'}, 'memory'),
+    ('cuda', 'sm_90', {'multi_element_values': 'table'}, 'table'),
+    ('hip', 'gfx942', {'multi_element_values': 'literal'}, 'literal')],
+    ids=['sm_90', 'gfx942', 'pvc', 'sm_90-memory', 'sm_90-table',
+         'gfx942-literal'])
+def test_where_the_lanes_forms_numbers_come_from(backend, arch, options,
+                                                 values):
+    """Literals on NVIDIA, the operator's memory on AMD, a table of the
+    numbers in the order they are multiplied by on Intel
+    (`multi_element_values`): as literals the description's numbers are in
+    the kernel's text; read from memory the kernel reads the operators'
+    pointers; from the table it reads the table, a warp's width at a time,
+    and neither of the others.  Only literals count against
+    `inline_constants`."""
+    context = _context(arch, backend=backend, **options)
+    assert eg.lane_values(context) == values
+    assert eg.lane_literals(context) is (values == 'literal')
+    section = eg.classify(_volume(4, 's'))[0]
+    lanes, why = eg.lanes_plan(section, _context(
+        arch, backend=backend, inline_constants=8, **options))
+    assert (lanes is None) is (values == 'literal')
+    gen = _generate(_volume(4, 's'), _context(arch, backend=backend,
+                                              inline_constants=4096,
+                                              **options, **LANES))
+    kernel = gen.get_kernel()
+    names = re.findall(r'//   (m\d+) \S+ \S+ none', kernel)
+    assert len(names) == 3
+    # The code, without the tables the file defines ahead of it.
+    code = [line for line in kernel.splitlines()
+            if not line.strip().startswith(('//', '#', 'constexpr',
+                                            '__device__ const'))]
+    reads = [n for n in names
+             if any(re.search(rf'\bglb_{n}\[', line) for line in code)]
+    assert reads == (names if values == 'memory' else [])
+    operator = section.steps[-1].products[0].first.tensor
+    value = next(v for v in operator.storage_values() if abs(v) > 1.5)
+    assert (Datatype.F32.literal(value) in '\n'.join(code)) is (
+        values == 'literal')
+    tables = [d for d in gen.module_table_definitions() if 'tf_mel_' in d]
+    assert bool(tables) is (values == 'table')
+    if values == 'table':
+        name = re.search(r'(tf_mel_\w+)\[', tables[0]).group(1)
+        assert any(name in line for line in code)
+        assert Datatype.F32.literal(value) in tables[0]
+
+
+@pytest.mark.parametrize('fission', ['auto', 2])
+def test_a_kernel_the_layout_takes_is_not_cut(fission):
+    """Fission (`Options.fission`, `auto` on Intel under SPMD) cuts a list
+    into runs of the batch, each a section of its own: the layout plans
+    the kernel's one section whole, and is not cut."""
+    for options in (LANES, {'multi_element': 'force'}):
+        gen = _generate(_descrs('localFluxAll', 4, 'd'), _context(
+            'pvc', 'd', backend='oneapi', fission=fission, **options))
+        built = gen.built
+        assert built._element_group is not None
+        assert len(built._sections) == 1
+
+
+@pytest.mark.parametrize('backend,arch,spelled', [
+    ('cuda', 'sm_90', None), ('hip', 'gfx942', 'tensorforge::opaqueZero()'),
+    ('oneapi', 'pvc', 'sycl::group_broadcast(item.get_sub_group(), ')])
+def test_the_lanes_form_anchors_its_reads_to_the_column(backend, arch,
+                                                        spelled):
+    """Off NVIDIA the column's reads of what does not change from column
+    to column -- the element's rows its mixing products read -- carry an
+    anchor of the column, a zero the compiler cannot see through, so that
+    it forms their addresses in the column loop (`lane_anchors`)."""
+    assert eg.lane_anchors(_context(arch, backend=backend)) is (
+        spelled is not None)
+    kernel = _generate(_volume(4, 's'), _context(
+        arch, backend=backend, **LANES)).get_kernel()
+    lines = kernel.splitlines()
+    loop = next(i for i, line in enumerate(lines)
+                if re.search(r'for \(int32_t v\d+_c = 0;', line))
+    anchors = [i for i, line in enumerate(lines) if '_anc = ' in line]
+    if spelled is None:
+        assert not anchors
+        return
+    assert len(anchors) == 1 and anchors[0] > loop
+    assert spelled in lines[anchors[0]]
+    name = re.search(r'(v\d+_anc) = ', lines[anchors[0]]).group(1)
+    # Read at the anchor, or at an index formed of it.
+    anchored = {name} | set(re.findall(
+        rf'(v\d+_a) = [^;]*\b{name}\b', kernel))
+    reads = re.findall(r'glb_m0\[([^\]]+)\]', kernel)
+    assert reads and all(set(re.findall(r'v\d+_an?c?\b', at)) & anchored
+                         for at in reads)
 
 
 @pytest.mark.parametrize('options,why', [
@@ -746,7 +896,7 @@ def test_the_lanes_form_where_it_is_asked_for(options, lanes):
     group = eg.fill(section, _context('sm_90', **options))[0]
     assert (group.lanes is not None) is lanes
     if lanes:
-        assert group.elements == eg.LANE_ELEMENTS == 32
+        assert group.elements == eg.lane_elements(_context('sm_90')) == 32
         assert group.warps == 3 and group.shared_bytes == 0
         assert {s.lowering for s in group.section.steps} == {'lane'}
         assert group.section.stages == ()
@@ -770,6 +920,22 @@ def test_the_lane_group_loop():
         BatchLoop(context=_context(), section_index=0,
                   mode=LoopMode.LAUNCHCTRL, start='s', stride='t',
                   region=[], group_size=32, trip=Trip.LANE_GROUP)
+
+
+@pytest.mark.parametrize('options,sub_group,grf', [
+    (LANES, 16, '256'), ({**LANES, 'sycl_grf': '128'}, 16, '128'),
+    ({'multi_element': 'force'}, 32, None)],
+    ids=['lanes', 'lanes-grf128', 'warp'])
+def test_a_sycl_kernel_states_its_sub_group_and_file(options, sub_group,
+                                                     grf):
+    """Under DPC++ SPMD the lanes form's kernel states a sub-group of its
+    16 elements and the large register file, `sycl_grf` where it says
+    another; the warp form's states its warp of 32 and no file."""
+    kernel = _generate(_volume(4, 's'), _context(
+        'pvc', backend='oneapi', **options)).get_kernel()
+    assert f'[[intel::reqd_sub_group_size({sub_group})]]' in kernel
+    files = re.findall(r'grf_size<(\d+)>', kernel)
+    assert files == ([] if grf is None else [grf])
 
 
 # -- the kernel -------------------------------------------------------------- #
@@ -1270,7 +1436,16 @@ SEED = 29
     ('localFluxAll', 4, 's', LANES), ('columns', 4, 's', LANES),
     ('direction', 4, 'd', LANES),
     ('volume', 4, 's', {}), ('volume', 4, 'd', {}),
-    ('volume', 4, 's', TWO_STAGES), ('chain', 4, 's', TWO_STAGES)],
+    ('volume', 4, 's', TWO_STAGES), ('chain', 4, 's', TWO_STAGES),
+    ('volume', 4, 'd', {'tensor_cores': False, 'arch': 'gfx942'}),
+    ('localFlux', 4, 's', {'arch': 'gfx1150'}),
+    ('volume', 4, 'd', {**LANES, 'arch': 'gfx942'}),
+    ('localFluxAll', 4, 's', {**LANES, 'arch': 'gfx942'}),
+    ('localFlux', 4, 'd', {**LANES, 'arch': 'gfx1150'}),
+    ('volume', 4, 's', {**LANES, 'multi_element_values': 'memory'}),
+    ('volume', 4, 's', {**LANES, 'multi_element_values': 'table'}),
+    ('localFlux', 4, 'd', {**LANES, 'arch': 'gfx942',
+                           'multi_element_values': 'table'})],
     ids=['volume-o4d', 'volume-o4s-dense', 'reuse-o4s', 'localFlux-o4d',
          'neighboringFlux-o4s-own-barriers', 'localFluxAll-o4d',
          'direction-o4s', 'columns-o4d', 'lanes-volume-o4d',
@@ -1278,30 +1453,40 @@ SEED = 29
          'lanes-neighboringFlux-o4d', 'lanes-localFluxAll-o4s',
          'lanes-columns-o4s', 'lanes-direction-o4d', 'matrix-volume-o4s',
          'matrix-volume-o4d', 'matrix-volume-o4s-two-stages',
-         'matrix-chain-o4s-two-stages'])
+         'matrix-chain-o4s-two-stages', 'gfx942-volume-o4d',
+         'gfx1150-localFlux-o4s', 'gfx942-lanes-volume-o4d',
+         'gfx942-lanes-localFluxAll-o4s', 'gfx1150-lanes-localFlux-o4d',
+         'lanes-volume-o4s-memory', 'lanes-volume-o4s-table',
+         'gfx942-lanes-localFlux-o4d-table'])
 def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
                                                   options, monkeypatch):
     """A group over itself and seven more elements on the host oracle: two
     trips of the group, the second partial -- four warps over seven
-    elements, one warp masked, in the warp form; a warp's lanes over 39, 25
-    of them masked, in the lanes form -- every element's output against
+    elements, one warp masked, in the warp form; a warp's lanes over seven
+    more, the rest of the second trip masked, in the lanes form -- on CUDA
+    and on HIP, a CDNA wave of 64 lanes and RDNA's of 32, the operators'
+    nonzeros literals or read from memory -- every element's output against
     NumPy, from the oracle's own fill of memory, the operators their
     description's numbers; and no access to shared memory that no barrier
     orders (`kernel_eval.Races`)."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
+    options = dict(options)
+    arch = options.pop('arch', 'sm_90')
+    backend = 'cuda' if arch.startswith('sm_') else 'hip'
+    context = _context(arch, precision, backend=backend,
+                       **{'multi_element': 'force', **options})
     lanes = options.get('multi_element_fma') == 'lanes'
     if lanes:
-        group, count = eg.LANE_ELEMENTS, eg.LANE_ELEMENTS + 7
+        group = eg.lane_elements(context)
+        count = group + 7
     else:
         group, count = 4, 7
         monkeypatch.setattr(eg, 'ELEMENTS',
                             {key: group for key in eg.ELEMENTS})
         monkeypatch.setattr(eg, 'DEFAULT_ELEMENTS', group)
-    gen = _generate(_descrs(shape, order, precision),
-                    _context('sm_90', precision, **{'multi_element': 'force',
-                                                    **options}))
+    gen = _generate(_descrs(shape, order, precision), context)
     built = gen.built._element_group
     assert built.elements == group and (built.lanes is not None) is lanes
     tensors = {}
@@ -1478,12 +1663,16 @@ def test_the_section_computes_on_the_gpu(shape, order, precision, options,
     derives and, once, under the instructions' own.  The operators are zero
     where the description says (`_known_zeros`), as the sparse FMA form
     takes them to be."""
-    if target.backend != 'cuda':
-        pytest.skip('the multi-element layout is CUDA\'s')
     from harness.runner import run_case
-    # The layout's, and not the default build a refused plan leaves.
-    assert eg.plan(_descrs(shape, order, precision), _context(
-        target.arch, precision, multi_element='force', **options)) is not None
+    # The layout's, and not the default build a refused plan leaves -- on
+    # CUDA every case; elsewhere a group the block's shared memory holds.
+    context = _context(target.arch, precision, backend=target.backend,
+                       multi_element='force', **options)
+    if eg.plan(_descrs(shape, order, precision), context) is None:
+        section = eg.classify(_descrs(shape, order, precision))[0]
+        why = eg.fill(section, context)[1]
+        assert target.backend != 'cuda', why
+        pytest.skip(f'{target.backend} {target.arch}: {why}')
     suffix = ''.join(f'_{k}{int(v)}' for k, v in sorted(options.items()))
     case = types.SimpleNamespace(
         NAME=f'multi_element_{shape}_o{order}{precision}{suffix}',
@@ -1532,17 +1721,17 @@ LANE_CASES = [
 def test_the_lanes_form_computes_on_the_gpu(shape, order, precision, target,
                                             cache_root, tensorforge_include):
     """The lanes form built and run on the local GPU against NumPy, over a
-    batch whose last group of 32 is partial and which gives a block of the
+    batch whose last group is partial and which gives a block of the
     persistent grid several trips; the operators the description's
-    numbers, which its literals are.  F32 is held to a tolerance of the
+    numbers, which its literals are -- or which it reads where it reads
+    them (`multi_element_values`).  F32 is held to a tolerance of the
     outputs' size, about 1e3: a sum of a hundred terms of that size rounds
     to about 1e-3 in single precision, and an output near zero meets it
     absolutely."""
-    if target.backend != 'cuda':
-        pytest.skip('the multi-element layout is CUDA\'s')
     from harness.runner import run_case
     group = eg.plan(_descrs(shape, order, precision),
-                    _context(target.arch, precision, **LANES))
+                    _context(target.arch, precision, backend=target.backend,
+                             **LANES))
     assert group is not None and group.lanes is not None
     case = types.SimpleNamespace(
         NAME=f'multi_element_lanes_{shape}_o{order}{precision}',
