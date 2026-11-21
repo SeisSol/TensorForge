@@ -1635,8 +1635,8 @@ GROUPS = {
          sub(WRAP, '        tail_copy.given(l.k, l.next)',
              '        tail_copy.given(l.k, l.k)', 1)),
         ('the distance ignored',
-         sub(WRAP, '            if count.get(key, 0) < distance:',
-             '            if count.get(key, 0) < 1:', 1)),
+         sub(WRAP, '            if count.get(key, 0) < (distance if asked is None else asked[1]):',
+             '            if count.get(key, 0) < (1 if asked is None else asked[1]):', 1)),
         ('a buffer another statement writes moved all the same',
          sub(WRAP, "            if any(writes(a) and same(a.base, d) for a in x.accesses):\n"
                    "                raise Refusal('the buffer is written by more than this '",
@@ -4937,8 +4937,11 @@ GROUPS = {
     # (`copy_async`'s `valid`) and copies under a predicate of their own:
     # the engines that fill, the operand, the builder, the text and the
     # synchronous form, the oracle's model of both zero-fills, `pir.wrap`
-    # taking both, and the helper (on the local GPU, sm_80 or newer).
+    # taking both, and the helper (on the local GPU, sm_80 or newer).  A
+    # buffer's own request of the transfer into it (`alloc`'s `ahead`):
+    # what the builder takes, and which transfers wrap picks, at what stages.
     'pircons': ('tests/test_matrix_transfers.py tests/test_copy_fill.py '
+                'tests/test_wrap_ahead.py '
                 'tests/test_multi_element.py::test_ldmatrix_is_a_declared_read_of_its_buffer', [
         ('the rows of a matrix on the lane bits of its words',
          sub(ENGINES, '    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))\n',
@@ -5086,6 +5089,33 @@ GROUPS = {
         ('the helper of a copy that fills reading every byte',
          sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'),
              '                 "l"(from), "r"(srcBytes)\n', '                 "l"(from), "r"(16u)\n', 1)),
+        # A buffer's own request of the transfer into it (`alloc`'s `ahead`).
+        ('a ring of three stages asked for and taken',
+         sub(BUILD, '    if stages not in AHEAD_STAGES:\n', '    if False:\n', 1)),
+        ('a second stage asked for a register buffer and taken',
+         sub(BUILD, '    if stages > 1 and space != MemSpace.SHARED:\n', '    if False:\n', 1)),
+        ('a distance that is no count of transfers taken',
+         sub(BUILD, '    if not isinstance(distance, int) or isinstance(distance, bool) \\\n',
+             '    if False and not isinstance(distance, int) or isinstance(distance, bool) \\\n', 1)),
+        ("a buffer's request not said",
+         sub(BUILD, "            attrs = attrs + (('ahead', _ahead(ahead, space)),)\n",
+             "            _ahead(ahead, space)\n", 1)),
+        ("wrap counting every transfer at the pass's distance",
+         sub(WRAP, '            if count.get(key, 0) < (distance if asked is None else asked[1]):\n',
+             '            if count.get(key, 0) < distance:\n', 1)),
+        ('wrap counting the places of the transfers it takes alone',
+         sub(WRAP, '            if count.get(key, 0) < (distance if asked is None else asked[1]):\n'
+                   '                picked.append(t)\n'
+                   '            count[key] = count.get(key, 0) + 1\n',
+             '            if count.get(key, 0) < (distance if asked is None else asked[1]):\n'
+             '                picked.append(t)\n'
+             '                count[key] = count.get(key, 0) + 1\n', 1)),
+        ("wrap giving every buffer the pass's stages",
+         sub(WRAP, '        stages = self.stages if asked is None else asked[0]\n',
+             '        stages = self.stages\n', 1)),
+        ('the windows of a second stage asking again',
+         sub(WRAP, "                     if k not in ('identity', 'stages', 'extern', 'ahead')]\n",
+             "                     if k not in ('identity', 'stages', 'extern')]\n", 1)),
     ]),
 }
 

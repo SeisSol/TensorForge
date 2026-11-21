@@ -53,6 +53,36 @@ def access_of(symbol: Any, kind: Effect) -> Access:
     return Access(kind=kind, space=space, base=symbol)
 
 
+#: The stages a buffer may ask the transfer into it for (`IRBuilder.alloc`'s
+#: `ahead`): the ones `pir.wrap` builds -- one, or a second for a shared
+#: buffer.  A ring of more is not built.
+AHEAD_STAGES = (1, 2)
+
+
+def _ahead(ahead, space: MemSpace) -> Tuple[int, int]:
+    """A buffer's request of the transfer into it, checked: `(stages,
+    distance)`, the stages one or two -- a second for a buffer in shared
+    memory alone, whose copies the hardware carries out while the trip runs
+    -- and the distance a count of transfers, 0 or more."""
+    try:
+        stages, distance = ahead
+    except (TypeError, ValueError):
+        raise IRError(f'a request of {ahead!r} for the transfer into a '
+                      f'buffer: (stages, distance)')
+    if stages not in AHEAD_STAGES:
+        raise IRError(f'{stages!r} stages asked for a buffer; a transfer '
+                      f'is issued into one stage or two '
+                      f'({AHEAD_STAGES}): a ring of more is not built')
+    if stages > 1 and space != MemSpace.SHARED:
+        raise IRError(f'a second stage asked for a buffer in {space.name.lower()}'
+                      f'; it is for a shared buffer\'s copies')
+    if not isinstance(distance, int) or isinstance(distance, bool) \
+            or distance < 0:
+        raise IRError(f'a distance of {distance!r} asked for a buffer: a '
+                      f'count of transfers, 0 or more')
+    return int(stages), int(distance)
+
+
 def _unroll_pragma(unroll) -> str:
     """`#pragma unroll` for `True`, `#pragma unroll N` for a count, nothing else.
 
@@ -1423,7 +1453,8 @@ class IRBuilder:
               place_align: Optional[int] = None,
               lifetime: Optional[str] = None,
               permutable: Optional[int] = None,
-              own: bool = False) -> Value:
+              own: bool = False,
+              ahead: Optional[Tuple[int, int]] = None) -> Value:
         """Request a buffer *symbolically*.
 
         No offset and no address: for registers the compiler assigns those,
@@ -1448,6 +1479,14 @@ class IRBuilder:
         the body exists.  `own`: every lane reads only what it wrote itself
         there, which together with the `'body'` lifetime owes no barrier
         (`barriers.own_buffers`).
+
+        `ahead` is the buffer's own request of the transfer into it, `(stages,
+        distance)`, which `pir.wrap` honors in place of the pass's: the
+        transfer is issued a trip ahead where fewer than `distance` transfers
+        of its pipeline precede it in the body -- 0 keeps it in its trip --
+        into `stages` copies of the buffer, two putting it at the head of the
+        trip ahead (`wrap.wrap_loads`).  None leaves both to the pass's
+        settings (`move_distance`, `enable_multibuffer`).
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
@@ -1506,6 +1545,8 @@ class IRBuilder:
             attrs = attrs + (('identity', identity),)
         if permutable is not None:
             attrs = attrs + (('permutable', permutable),)
+        if ahead is not None:
+            attrs = attrs + (('ahead', _ahead(ahead, space)),)
         args = (stage,) if stage is not None and stages > 1 else ()
         self._emit_op(Op.ALLOC, (v,), args, pure=False, movable=False,
                       attrs=attrs)
