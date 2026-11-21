@@ -329,6 +329,91 @@ def fission_cuts(descrs) -> List[int]:
   return cuts
 
 
+#: The most cut sets `cuts_by_operators` weighs one against another; past it
+#: the flop-balanced choice stands.
+OPERATOR_CUT_SETS = 200_000
+
+
+def operators_read(descr) -> Dict[int, int]:
+  """The batch-constant operands `descr` reads (`Addressing.NONE`), a merged
+  run's members through its stand-in, by id: the elements each is stored
+  over."""
+  out: Dict[int, int] = {}
+  for op in descr.operations():
+    for view in list(op.reads()) + list(op.condition_reads()):
+      tensor = getattr(view, 'tensor', view)
+      for t in (tensor,) + tuple(getattr(tensor, 'variant_members', ())):
+        if (getattr(t, 'addressing', None) == Addressing.NONE
+            and not getattr(t, 'is_variant', False)):
+          out[id(t)] = int(t.storage_volume())
+  return out
+
+
+def cuts_by_operators(descrs, cuts, pieces: int,
+                      before: Dict[int, float]) -> Optional[List[int]]:
+  """`Options.fission_cut='operators'`: the `pieces - 1` of `cuts` at which
+  the largest set of batch-constant operands one piece reads, by the
+  elements they are stored over (`operators_read`), is smallest; among
+  those, the ones whose pieces read the fewest operands in all -- an operand
+  read by two pieces counts twice, so the pieces read sets of their own
+  where they can -- then the ones across which the least of the element's
+  own data passes (`crossing`: what a piece writes and a later one reads
+  back), and then the shares of the arithmetic nearest to equal (`before`,
+  the share ahead of each cut).  None where there are too many sets to
+  weigh."""
+  from itertools import combinations
+  from math import comb
+  if comb(len(cuts), pieces - 1) > OPERATOR_CUT_SETS:
+    return None
+  reads = [operators_read(d) for d in descrs]
+  bounds = sorted({0, len(descrs), *cuts})
+  # The footprint of every run between two points, grown one entry at a time.
+  footprint: Dict[Tuple[int, int], int] = {}
+  for a, start in enumerate(bounds):
+    seen: Dict[int, int] = {}
+    at = start
+    for end in bounds[a + 1:]:
+      for d in reads[at:end]:
+        seen.update(d)
+      at = end
+      footprint[(start, end)] = sum(seen.values())
+  crossing = {c: crossing_elements(descrs, c) for c in cuts}
+  best, key = None, None
+  for chosen in combinations(cuts, pieces - 1):
+    edges = (0, *chosen, len(descrs))
+    sizes = [footprint[(a, b)] for a, b in zip(edges, edges[1:])]
+    spread = sum(abs(before[c] - (k + 1) / pieces)
+                 for k, c in enumerate(chosen))
+    passed = sum(crossing[c] for c in chosen)
+    if key is None or (max(sizes), sum(sizes), passed, spread) < key:
+      best, key = list(chosen), (max(sizes), sum(sizes), passed, spread)
+  return best
+
+
+def crossing_elements(descrs, cut: int) -> int:
+  """The elements of the element's own operands (not `Addressing.NONE`,
+  not temporaries) that an operation ahead of `cut` writes and one from
+  `cut` on reads: what the piece before stores for the piece after to read
+  back."""
+  def views(descr, written):
+    for op in descr.operations():
+      if written:
+        dest = getattr(op, 'dest', None)
+        if dest is not None:
+          yield getattr(dest, 'tensor', dest)
+      else:
+        for view in list(op.reads()) + list(op.condition_reads()):
+          yield getattr(view, 'tensor', view)
+
+  def own(t):
+    return (getattr(t, 'addressing', None) not in (Addressing.NONE,
+                                                   Addressing.SCALAR)
+            and not getattr(t, 'is_tmp', False))
+  written = {id(t): t for d in descrs[:cut] for t in views(d, True) if own(t)}
+  read = {id(t) for d in descrs[cut:] for t in views(d, False) if own(t)}
+  return sum(int(t.storage_volume()) for i, t in written.items() if i in read)
+
+
 class Section:
   def __init__(self):
     # `global_ir` and `ir` are what the builders author: the section prologue
@@ -769,6 +854,10 @@ class Generator:
 
     self._persistent_threading = prefer_persistent
     self._preload_globals = prefer_preload
+    #: What a section starts from under `preload_by_section`: a section that
+    #: gave its staging up does not give it up for the next one, which
+    #: stages operands of its own.
+    self._preload_wanted = prefer_preload
     # `preload_partial`: the operands that fit rather than all or none.  How
     # many of those taken a retry has dropped again, which were staged, and
     # which were candidates and are read from global memory.
@@ -793,6 +882,13 @@ class Generator:
     self._group_unfit = False
     self._preloaded = set()
     self._preload_left = set()
+    #: The operands the section being built reads, by id, where
+    #: `preload_by_section` limits its staging to them; None otherwise.
+    self._section_reads: Optional[set] = None
+    #: The most multiplications a block may hold, where the sections of a
+    #: kernel staging what each reads planned different counts and are built
+    #: again (`_generate_bound`); None otherwise.
+    self._mults_cap: Optional[int] = None
     #: The launch every section runs under, once the sections are built.
     self._launch = None
 
@@ -1382,11 +1478,23 @@ class Generator:
     # which of them a section built before it read already, as they were
     # stored then (`Tensor.read_before`).
     reading = sections_reading(descrlist)
+    by_section = (len(descrlist) > 1 and
+                  self._context.get_user_options().preload_by_section)
+    # The operands' storage before any section stores them, for a build
+    # again under a cap on the multiplications a block holds.
+    stored = (self._operand_storage(self._given, self._descr_list)
+              if by_section and self._mults_cap is None else None)
     for position, (codesection, lastbarrier, lastblock) in enumerate(
         zip(descrlist, barrier, blocks)):
       for tensor, where in reading.values():
         tensor.read_elsewhere = bool(where - {position})
         tensor.read_before = any(w < position for w in where)
+      # What the section stages and streams of the batch-constant operands,
+      # under `preload_by_section`: what it reads (`_reads_here`).
+      self._section_reads = ({id(tensor) for tensor, where in reading.values()
+                              if position in where} if by_section else None)
+      if by_section:
+        self._preload_globals = self._preload_wanted
       self._preload_drop = 0
       self._pack_level = 0
       self._pack_floor = 0
@@ -1511,6 +1619,19 @@ class Generator:
       while scopecnt < self._scopes.get_num_scopes():
         self._scopes.remove_scope()
       self._sections += [self._section]
+
+    if by_section and self._mults_cap is None:
+      # One launch serves every section, and they have to agree on how many
+      # multiplications a block holds (`_make_launch_config`).  Staging what
+      # each reads, they plan by shared memory of their own, and may not: all
+      # of them are built again under the fewest any of them planned, from
+      # the operands' storage as it was before the first build.
+      mults = {s.shr_mem_obj.get_mults_per_block() for s in self._sections}
+      if len(mults) > 1:
+        self._mults_cap = min(mults)
+        self._sections = []
+        _store_as(stored)
+        return self._generate_bound()
 
     # Write the source before naming it: the name is the digest of what comes
     # out, so it cannot be known until it has.  Everything the three emitters
@@ -1681,14 +1802,24 @@ class Generator:
     flops = [list_cost([d]).flops for d in descrs]
     total = sum(flops) or 1
     before = {i: sum(flops[:i]) / total for i in cuts}
-    chosen = []
-    for piece in range(1, pieces):
-      want = piece / pieces
-      free = [i for i in cuts if i not in chosen
-              and (not chosen or i > chosen[-1])]
-      if not free:
-        break
-      chosen.append(min(free, key=lambda i: abs(before[i] - want)))
+    chosen = None
+    if self._context.get_user_options().fission_cut == 'operators':
+      # The arithmetic of a merged run is its iterations' (`list_cost` has
+      # no cost for the loop itself and counts it as nothing).
+      work = [list_cost(list(d.operations()) if isinstance(d, ForDescr)
+                        else [d]).flops for d in descrs]
+      whole = sum(work) or 1
+      chosen = cuts_by_operators(
+          descrs, cuts, pieces, {i: sum(work[:i]) / whole for i in cuts})
+    if chosen is None:
+      chosen = []
+      for piece in range(1, pieces):
+        want = piece / pieces
+        free = [i for i in cuts if i not in chosen
+                and (not chosen or i > chosen[-1])]
+        if not free:
+          break
+        chosen.append(min(free, key=lambda i: abs(before[i] - want)))
     out = []
     for i, d in enumerate(descrs):
       if i in chosen:
@@ -2651,24 +2782,34 @@ class Generator:
     `preload_shard_budget` says: where they do not, everything of them a
     block holds fits for the whole batch loop, and a room for the rest
     (`Options.stream_shards`) would hold nothing -- but cost the block its
-    size, one group of `stage_group` multiplications."""
-    total = sum(self._operand_extents().values()) * self._context.fp_type.size()
+    size, one group of `stage_group` multiplications.  Under
+    `preload_by_section`, the operands the section reads."""
+    total = (sum(self._operand_extents(here=True).values())
+             * self._context.fp_type.size())
     cap = self._context.target.hw.max_local_mem_size_per_block
     budget = self._context.get_user_options().preload_shard_budget
     if budget:
       cap = min(cap, budget)
     return total > cap
 
-  def _operand_extents(self) -> dict:
+  def _reads_here(self, symbol) -> bool:
+    """Whether the section being built reads `symbol`'s operand, a merged
+    run's member through its stand-in included -- always, where nothing
+    limits a section to what it reads (`preload_by_section`)."""
+    return self._section_reads is None or id(symbol.obj) in self._section_reads
+
+  def _operand_extents(self, here: bool = False) -> dict:
     """How many elements each batch-constant operand is stored over, by the
     name of its binding (`Tensor.storage_volume`): an order a multiplication
     chose for it reaches past its box, and the binding was typed from the
-    box before that."""
+    box before that.  With `here`, the operands the section reads
+    (`_reads_here`)."""
     out = {}
     for symbol in self._scopes.get_global_scope().values():
       obj = symbol.obj
       if (getattr(obj, 'addressing', None) == Addressing.NONE
-          and symbol.stype != SymbolType.Data):
+          and symbol.stype != SymbolType.Data
+          and (not here or self._reads_here(symbol))):
         out[f'{GeneralLexicon.GLOBAL_MEM_PREFIX}{symbol.name}'] = int(
             obj.storage_volume())
     return out
@@ -3863,8 +4004,11 @@ class Generator:
       # What is not staged at all is read where it is, as what
       # `preload_partial` leaves out is: an operand passed by value already
       # lives where kernel arguments do, and `preload_roles` may leave the
-      # operands read along the lead index in global memory.
-      candidates = [symbol for symbol in memory if self._preload_admits(symbol)]
+      # operands read along the lead index in global memory.  Under
+      # `preload_by_section`, nor are the operands the section does not read:
+      # bound to global memory, where nothing reads them.
+      candidates = [symbol for symbol in memory if self._preload_admits(symbol)
+                    and self._reads_here(symbol)]
       # Which packing, before the images are sized from it: the operands are
       # packed where the operations are settled, which is after this, so a
       # cap checked against the dense size would refuse to stage what the
@@ -4367,6 +4511,9 @@ class Generator:
     if stages:
       policy.set_stages()
     num_mults_per_block = policy.get_num_mults_per_block()
+    if self._mults_cap is not None:
+      # The fewest any section of the kernel planned (`_generate_bound`).
+      num_mults_per_block = min(num_mults_per_block, self._mults_cap)
     fits = num_mults_per_block >= 1
     if self._element_group is not None:
       # One group a block, whatever the policy would hold: the group's
