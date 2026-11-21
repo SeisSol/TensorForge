@@ -1010,7 +1010,11 @@ LANE_VALUES = {'nvidia': 'literal', 'amd': 'memory', 'intel': 'table'}
 #: every one of them held across it.  On PVC the per-lane addresses of the
 #: element's rows of the o6 volume were 200 registers of 64 bytes, spilled;
 #: an anchor of the column -- a zero the compiler cannot see -- keeps them in
-#: the loop.  ptxas forms them where they are read.
+#: the loop.  And an anchor of each walk over the rows: the four faces of
+#: `localFluxAll` read the same rows of the element, which LLVM read once
+#: for all four under one anchor and held -- 16 to 60 kB of spill a thread at
+#: o4 and o6 on PVC; none with an anchor a walk.  ptxas forms the addresses
+#: where they are read.
 LANE_ANCHORS = ('amd', 'intel')
 
 
@@ -1032,7 +1036,7 @@ def lane_literals(context) -> bool:
 
 
 def lane_anchors(context) -> bool:
-    """Whether the lanes form anchors its reads to the column
+    """Whether the lanes form anchors its reads to the column and the walk
     (`LANE_ANCHORS`)."""
     return getattr(context.target.hw, 'vendor', None) in LANE_ANCHORS
 
@@ -1159,6 +1163,10 @@ class Cones:
             for p in step.products:
                 self.sources[id(p)] = last.get(id(self.operand(p).tensor))
             last[id(step.dest)] = step
+        #: `need` of each output row alone, and the works of the ranges a
+        #: lane holds (`costs`), found once.
+        self._each: Optional[Dict[int, Dict[int, Set[int]]]] = None
+        self._costs: Dict[tuple, Dict[Range, int]] = {}
 
     @staticmethod
     def operand(product: Product):
@@ -1224,7 +1232,8 @@ class Cones:
                     total += len(here) * (p.depth[1] - p.depth[0])
         return total
 
-    def live(self, rows, tile: int = 1, columns: int = 1) -> int:
+    def live(self, rows, tile: int = 1, columns: int = 1,
+             need: Optional[Dict[int, Set[int]]] = None) -> int:
         """The values a lane holds live for `columns` columns of the
         output's `rows`, in elements: the rows it adds into, and at the
         costliest point either a column some product reads materialized --
@@ -1232,8 +1241,8 @@ class Cones:
         computed entries holds: each mixing product's column of its small
         operand and the rows of the operand it mixes one read brings in
         (`tile`), which the products and the columns share; and a few
-        temporaries."""
-        need = self.need(rows)
+        temporaries.  `need`: the rows' cone where it is found already."""
+        need = self.need(rows) if need is None else need
 
         def held(step, own):
             materialized, small, row = 0, 0, 0
@@ -1258,23 +1267,79 @@ class Cones:
 
         return max(held(step, len(rows)) for step in self.outputs) + 4
 
-    def ranges(self, count: int) -> Tuple[Range, ...]:
-        """The output's rows in `count` contiguous ranges: the costliest
-        range cut where its costlier part costs least (`work`), until there
-        are `count`."""
+    def costs(self, limit: Optional[int] = None, tile: int = 1,
+              columns: int = 1) -> Dict[Range, int]:
+        """The work (`work`) of every range of the output's rows a lane
+        holds within `limit` elements (`live`; every range where None):
+        each range grown from its first row a row at a time, its cone the
+        union of its rows' -- `need` maps row by row -- until a lane no
+        longer holds it, as no longer range does."""
+        key = (limit, tile, columns)
+        if key in self._costs:
+            return self._costs[key]
         lo, hi = self.rows
-        ranges = [(lo, hi)]
-        while len(ranges) < count:
-            costs = [self.work(range(*r)) for r in ranges]
-            a, b = ranges.pop(costs.index(max(costs)))
-            if b - a < 2:
-                ranges.append((a, b))
-                break
-            cut = min(range(a + 1, b), key=lambda c: (max(
-                self.work(range(a, c)), self.work(range(c, b))), c))
-            ranges += [(a, cut), (cut, b)]
-            ranges.sort()
-        return tuple(ranges)
+        if self._each is None:
+            self._each = {r: self.need((r,)) for r in range(lo, hi)}
+        # What a row of each value costs: `work`, row by row.
+        weights: Dict[int, Dict[int, int]] = {}
+        for step in self.section.steps:
+            weight = weights.setdefault(id(step), {})
+            for p in step.products:
+                for i in range(*p.rows):
+                    weight[i] = weight.get(i, 0) + (
+                        len(self.nonzeros[id(p)].get(i, ()))
+                        if p.kind is Kind.OPERATOR
+                        else p.depth[1] - p.depth[0])
+        costs: Dict[Range, int] = {}
+        for a in range(lo, hi):
+            need: Dict[int, Set[int]] = {}
+            work = 0
+            for b in range(a + 1, hi + 1):
+                for value, rows in self._each[b - 1].items():
+                    mine = need.setdefault(value, set())
+                    weight = weights.get(value, {})
+                    work += sum(weight.get(i, 0) for i in rows - mine)
+                    mine |= rows
+                if (limit is not None and self.live(
+                        range(a, b), tile, columns, need) > limit):
+                    break
+                costs[(a, b)] = work
+        self._costs[key] = costs
+        return costs
+
+    def ranges(self, count: int, limit: Optional[int] = None,
+               tile: int = 1, columns: int = 1
+               ) -> Optional[Tuple[Range, ...]]:
+        """The output's rows in `count` contiguous ranges a lane holds each
+        (`costs`), the ones whose work, all of it and the costliest range's
+        added, is least, then the earliest cuts: the block's warps compute
+        all of it -- rows of a value two ranges need, each computes, so a
+        cut costs least where the cones it parts share least -- and the
+        block is done when its costliest range is.  None where no `count`
+        ranges are held."""
+        costs = self.costs(limit, tile, columns)
+        lo, hi = self.rows
+        # The rows up to each row in as many ranges as cut so far: every
+        # (total, costliest, cuts) no other is below in both.
+        best: Dict[int, List[tuple]] = {lo: [(0, 0, ())]}
+        for _ in range(count):
+            reach: Dict[int, List[tuple]] = {}
+            for (a, b), work in costs.items():
+                for total, top, cuts in best.get(a, ()):
+                    reach.setdefault(b, []).append(
+                        (total + work, max(top, work), cuts + (b,)))
+            best = {}
+            for b, taken in reach.items():
+                front, least = [], None
+                for t in sorted(taken):
+                    if least is None or t[1] < least:
+                        front.append(t)
+                        least = t[1]
+                best[b] = front
+        if hi not in best:
+            return None
+        cuts = (lo,) + min(best[hi], key=lambda t: (t[0] + t[1], t[2]))[2]
+        return tuple(zip(cuts, cuts[1:]))
 
 
 def lanes_plan(section: GroupSection,
@@ -1291,7 +1356,8 @@ def lanes_plan(section: GroupSection,
     into the output -- a merged run's, one a member -- add into one column
     of registers in turn.  The output is cut into as few row ranges as
     keep the estimate of a lane's registers within the target's budget
-    (`lane_registers`), and has as many column classes as `LANE_CLASSES`
+    (`lane_registers`), where their work adds up to the least
+    (`Cones.ranges`), and has as many column classes as `LANE_CLASSES`
     allows within `LANE_WARPS` a block."""
     if len(section.outputs) != 1:
         return None, (f'the lanes form writes one output, not '
@@ -1327,7 +1393,6 @@ def lanes_plan(section: GroupSection,
     width = cones.cols[1] - cones.cols[0]
     classes = max(1, min(LANE_CLASSES, width))
     budget = lane_registers(context, lane_elements(context))
-    live = None
     # The most columns a pass takes first, each at as few row ranges as
     # hold it; a pass of several only where they divide the class's
     # columns and every class has as many.
@@ -1337,12 +1402,15 @@ def lanes_plan(section: GroupSection,
             trips = -(-width // kinds)
             if columns > 1 and (trips % columns or width % kinds):
                 continue
-            ranges = cones.ranges(count)
-            live = max(cones.live(range(*r), tile, columns)
-                       for r in ranges) * size
-            if live <= budget:
+            ranges = cones.ranges(count, budget // size, tile, columns)
+            if ranges is not None:
+                live = max(cones.live(range(*r), tile, columns)
+                           for r in ranges) * size
                 return Lanes(kinds, ranges, live, columns), ''
-    return None, (f'a lane would hold {live} registers at {LANE_RANGES} row '
+    count = min(LANE_RANGES, hi - lo)
+    live = max(cones.live(range(*r), tile) for r in cones.ranges(
+        count, None, tile)) * size
+    return None, (f'a lane would hold {live} registers at {count} row '
                   f'ranges, more than the {budget} the lanes form takes '
                   f'here')
 

@@ -782,32 +782,38 @@ def test_a_kernel_the_layout_takes_is_not_cut(fission):
 @pytest.mark.parametrize('backend,arch,spelled', [
     ('cuda', 'sm_90', None), ('hip', 'gfx942', 'tensorforge::opaqueZero()'),
     ('oneapi', 'pvc', 'sycl::group_broadcast(item.get_sub_group(), ')])
-def test_the_lanes_form_anchors_its_reads_to_the_column(backend, arch,
-                                                        spelled):
+def test_the_lanes_form_anchors_its_reads_to_the_walk(backend, arch,
+                                                      spelled):
     """Off NVIDIA the column's reads of what does not change from column
     to column -- the element's rows its mixing products read -- carry an
-    anchor of the column, a zero the compiler cannot see through, so that
-    it forms their addresses in the column loop (`lane_anchors`)."""
+    anchor, a zero the compiler cannot see through, so that it forms their
+    addresses in the column loop (`lane_anchors`); and a walk's anchor is
+    its own: the four faces of `localFluxAll` read the element's rows each
+    at anchors of its own, not the first face's reads held through the
+    other three."""
     assert eg.lane_anchors(_context(arch, backend=backend)) is (
         spelled is not None)
-    kernel = _generate(_volume(4, 's'), _context(
-        arch, backend=backend, **LANES)).get_kernel()
-    lines = kernel.splitlines()
-    loop = next(i for i, line in enumerate(lines)
-                if re.search(r'for \(int32_t v\d+_c = 0;', line))
-    anchors = [i for i, line in enumerate(lines) if '_anc = ' in line]
-    if spelled is None:
-        assert not anchors
-        return
-    assert len(anchors) == 1 and anchors[0] > loop
-    assert spelled in lines[anchors[0]]
-    name = re.search(r'(v\d+_anc) = ', lines[anchors[0]]).group(1)
-    # Read at the anchor, or at an index formed of it.
-    anchored = {name} | set(re.findall(
-        rf'(v\d+_a) = [^;]*\b{name}\b', kernel))
-    reads = re.findall(r'glb_m0\[([^\]]+)\]', kernel)
-    assert reads and all(set(re.findall(r'v\d+_an?c?\b', at)) & anchored
-                         for at in reads)
+    for descrs, walks in ((_volume(4, 's'), 1),
+                          (_descrs('localFluxAll', 4, 's'), 4)):
+        kernel = _generate(descrs, _context(
+            arch, backend=backend, **LANES)).get_kernel()
+        lines = kernel.splitlines()
+        loop = next(i for i, line in enumerate(lines)
+                    if re.search(r'for \(int32_t v\d+_c = 0;', line))
+        anchors = {re.search(r'(v\d+_anc) = ', line).group(1): i
+                   for i, line in enumerate(lines) if '_anc = ' in line}
+        if spelled is None:
+            assert not anchors
+            continue
+        assert all(i > loop and spelled in lines[i]
+                   for i in anchors.values())
+        # Read at an anchor, or at an index formed of one.
+        of = dict(re.findall(r'(v\d+_a) = [^;]*\b(v\d+_anc)\b', kernel))
+        at = [set(re.findall(r'v\d+_anc\b', read))
+              | {of[a] for a in re.findall(r'v\d+_a\b', read) if a in of}
+              for read in re.findall(r'glb_m0\[([^\]]+)\]', kernel)]
+        assert at and all(at)
+        assert len(set().union(*at)) >= walks
 
 
 @pytest.mark.parametrize('options,why', [
@@ -873,15 +879,16 @@ LANES = {'multi_element': 'force', 'multi_element_fma': 'lanes'}
 
 @pytest.mark.parametrize('shape,order,precision,classes,ranges', [
     ('volume', 4, 's', 3, ((1, 20),)), ('volume', 6, 's', 3, ((1, 56),)),
-    ('volume', 6, 'd', 2, ((1, 32), (32, 37), (37, 43), (43, 56))),
+    ('volume', 6, 'd', 3, ((1, 35), (35, 56))),
     ('localFlux', 6, 'd', 3, ((0, 35), (35, 56))),
     ('localFluxAll', 4, 'd', 3, ((0, 20),))])
 def test_the_lanes_form_cuts_the_output_until_a_lane_holds_it(
         shape, order, precision, classes, ranges):
     """As few row ranges as keep a lane's registers within the plan's
-    budget -- one in F32, more at o6 F64, each cut where the work of its
-    two parts is closest -- and three column classes where the block's
-    warps allow (`LANE_WARPS`)."""
+    budget -- one in F32, two at o6 F64, cut at the basis's degree five:
+    the rows below need the volume's intermediate up to degree three only,
+    the PVC prototype's two halves -- and three column classes where the
+    block's warps allow (`LANE_WARPS`)."""
     section = eg.classify(_descrs(shape, order, precision))[0]
     lanes, why = eg.lanes_plan(section, _context('sm_90', precision))
     assert lanes is not None, why
@@ -893,6 +900,57 @@ def test_the_lanes_form_cuts_the_output_until_a_lane_holds_it(
     cones = eg.Cones(section)
     one = cones.live(range(*cones.rows), tile) * size
     assert (one > eg.LANE_REGISTERS) is (len(ranges) > 1)
+
+
+@pytest.mark.parametrize('shape', ['volume', 'localFlux'])
+def test_a_cut_costs_the_least_work_a_lane_holds(shape):
+    """Of the cuts in two whose ranges a lane holds, the plan's has the
+    least work, all of it and its costlier range's added (`Cones.ranges`),
+    then the earliest: the o6 F64 volume's at row 35 -- the rows below
+    need its intermediate's first 20 rows, the rows above all 35 -- where
+    the cut of the closest two halves, at row 37, computes the 35 in both,
+    and the cut of the least work, at row 21, leaves the rows above three
+    times the rows below."""
+    section = eg.classify(_descrs(shape, 6, 'd'))[0]
+    cones = eg.Cones(section)
+    limit = eg.LANE_REGISTERS // 2
+    lo, hi = cones.rows
+    held = {c: (cones.work(range(lo, c)), cones.work(range(c, hi)))
+            for c in range(lo + 1, hi)
+            if max(cones.live(range(lo, c), 2),
+                   cones.live(range(c, hi), 2)) <= limit}
+    best = min(held, key=lambda c: (sum(held[c]) + max(held[c]), c))
+    assert cones.ranges(2, limit, 2) == ((lo, best), (best, hi))
+    assert cones.ranges(1, limit, 2) is None
+    if shape == 'volume':
+        assert best == 35 and 37 not in held
+        below, above = cones.need(range(lo, 35)), cones.need(range(35, hi))
+        for p in section.steps[-1].products:
+            source = id(cones.source(p))
+            assert max(below[source]) < 20 and len(above[source]) == 35
+        least = min(held, key=lambda c: sum(held[c]))
+        assert least == 21 and sum(held[least]) < sum(held[35])
+        assert held[21][1] > 3 * held[21][0]
+
+
+def test_a_range_costs_its_cone_and_ends_where_a_lane_no_longer_holds_it():
+    """The work of a range found a row at a time (`Cones.costs`) is its
+    cone's (`work`) -- a cone is the union of its rows' -- and a range
+    from a row is in the table up to the last a lane holds."""
+    section = eg.classify(_volume(6, 'd'))[0]
+    cones = eg.Cones(section)
+    lo, hi = cones.rows
+    every = cones.costs()
+    assert len(every) == (hi - lo) * (hi - lo + 1) // 2
+    for a, b in ((lo, hi), (lo, 21), (21, hi), (35, hi), (10, 20)):
+        assert every[(a, b)] == cones.work(range(a, b))
+    held = cones.costs(84, 2)
+    for a in range(lo, hi):
+        ends = [b for (start, b) in held if start == a]
+        last = max(ends)
+        assert ends == list(range(a + 1, last + 1))
+        assert cones.live(range(a, last), 2) <= 84
+        assert last == hi or cones.live(range(a, last + 1), 2) > 84
 
 
 def test_a_cone_reads_the_operands_rows_its_nonzeros_name():
@@ -1298,7 +1356,7 @@ def test_an_element_past_the_end_writes_nothing(shape, options):
         assert re.search(r'\b' + held + r'\b', lines[i - 1])
 
 
-@pytest.mark.parametrize('precision,warps', [('s', 3), ('d', 8)])
+@pytest.mark.parametrize('precision,warps', [('s', 3), ('d', 6)])
 def test_a_lanes_block_takes_a_group_on_its_lanes(precision, warps):
     """The lanes form's kernel: a block of the plan's warps over a group of
     32 elements, a lane each -- the group the block's, a trip apart by the

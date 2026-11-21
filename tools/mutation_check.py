@@ -4768,10 +4768,22 @@ GROUPS = {
         ('the column classes past the block\'s warps',
          sub(ME_GROUP, '            kinds = max(1, min(classes, LANE_WARPS // count))\n',
              '            kinds = classes\n', 1)),
-        ('a range cut in its middle',
-         sub(ME_GROUP, '            cut = min(range(a + 1, b), key=lambda c: (max(\n'
-                       '                self.work(range(a, c)), self.work(range(c, b))), c))\n',
-             '            cut = (a + b) // 2\n', 1)),
+        ('a range cut by its work alone',
+         sub(ME_GROUP, '        cuts = (lo,) + min(best[hi], key=lambda t: (t[0] + t[1], t[2]))[2]\n',
+             '        cuts = (lo,) + min(best[hi], key=lambda t: (t[0], t[2]))[2]\n', 1)),
+        ('a range cut where its two parts are closest',
+         sub(ME_GROUP, '        cuts = (lo,) + min(best[hi], key=lambda t: (t[0] + t[1], t[2]))[2]\n',
+             '        cuts = (lo,) + min(best[hi], key=lambda t: (t[1], t[2]))[2]\n', 1)),
+        ('a range a lane does not hold',
+         sub(ME_GROUP, '                        range(a, b), tile, columns, need) > limit):\n'
+                       '                    break\n',
+             '                        range(a, b), tile, columns, need) > limit):\n'
+                       '                    pass\n', 1)),
+        ('a range\'s work counting the cone its rows share again',
+         sub(ME_GROUP, '                    work += sum(weight.get(i, 0) for i in rows - mine)\n'
+                       '                    mine |= rows\n',
+             '                    work += sum(weight.get(i, 0) for i in rows)\n'
+                       '                    mine |= rows\n', 1)),
         ('a row of a tile read at its neighbour',
          sub(ME_SECTION, "        return b.extract(self.tiles[key], row - first, hint='e')\n",
              "        return b.extract(self.tiles[key], (row - first + 1) % self.width, hint='e')\n", 1)),
@@ -4991,6 +5003,10 @@ GROUPS = {
         ('an element\'s rows read without the column\'s anchor',
          sub(ME_SECTION, '                source, self.anchored(_address(b, tensor, first, col)),\n',
              '                source, _address(b, tensor, first, col),\n', 1)),
+        ('every walk at its pass\'s anchor',
+         sub(ME_SECTION, '        if self.anchor_seed is None:\n            return\n        b = self.builder\n',
+             '        if self.anchor_seed is None or self.anchor is not None:\n            return\n'
+             '        b = self.builder\n', 1)),
         ('AMD\'s anchor a plain zero',
          sub(HIP_LEXIC, "    return 'tensorforge::opaqueZero()'\n", "    return '0'\n", 1)),
         ('the operators preloaded for the layout\'s kernels',

@@ -929,10 +929,13 @@ class _LaneTrip:
         #: Where the operators' nonzeros come from: `literal`, `memory` or
         #: `table` (`element_group.lane_values`).
         self.values = element_group.lane_values(context)
-        #: The column's anchor (`element_group.lane_anchors`): a zero the
-        #: compiler cannot see through, added into the addresses the column
-        #: reads, or None.
+        #: The walk's anchor (`element_group.lane_anchors`): a zero the
+        #: compiler cannot see through, added into the addresses the walk
+        #: reads, or None; what a new one is made of (`reanchor`): the pass's
+        #: column, None where the target takes none, and a count.
         self.anchor = None
+        self.anchor_seed = None
+        self.anchor_count = 0
         #: The `table` form's numbers, in the order the column multiplies by
         #: them, by table: name -> numbers (`module_tables`); the table of
         #: the range being written and its block of a warp's width read last.
@@ -1040,10 +1043,29 @@ class _LaneTrip:
         return b.extract(self.tiles[key], row - first, hint='e')
 
     def anchored(self, index):
-        """`index` plus the column's anchor, where there is one."""
+        """`index` plus the walk's anchor, where there is one."""
         if self.anchor is None:
             return index
         return _index(self.builder, 'add', index, self.anchor, 'a')
+
+    def reanchor(self) -> None:
+        """A new anchor for what follows (`element_group.lane_anchors`): a
+        zero the compiler cannot see through, of the pass's column and of how
+        many anchors the pass has had, so that no two are one value.  At every
+        walk: two walks reading the same rows of the element -- the faces of
+        `localFluxAll` -- read them at addresses the compiler cannot tell are
+        the same, and reads them in each walk again rather than once for all
+        of them, held from the first to the last."""
+        if self.anchor_seed is None:
+            return
+        b = self.builder
+        spelled = self.context.target.lexic.opaque_zero('{0}')
+        seed = _index(b, 'add', self.anchor_seed, self.anchor_count, 'sd')
+        self.anchor_count += 1
+        self.anchor = b.rawexpr(
+            spelled, *(() if '{0}' not in spelled else (seed,)),
+            type_=INDEX, hint='anc', pure=False, movable=False,
+            crosslane='{0}' in spelled, uniform=Uniformity.MULT)
 
     def number(self, product, row, k, value):
         """The operator's nonzero `(row, k)` of `product` (`values`):
@@ -1207,6 +1229,7 @@ class _LaneTrip:
         # as well: a `__syncwarp()` under the warp's guard of its range has
         # ptxas write the code out twice.
         b.begin_operation(force=True)
+        self.reanchor()
 
         def add(row, v, x, product, j):
             if x is None:
@@ -1243,6 +1266,7 @@ class _LaneTrip:
                          lambda j, k=k, column=column: column.get((k, j)))
             del self.columns[id(source)]
             b.begin_operation(force=True)
+            self.reanchor()
         together: Dict[int, list] = {}
         for p in step.products:
             if any(p is h for h in held):
@@ -1391,10 +1415,11 @@ def _lanes(trip) -> None:
             cols = [_index(b, 'add', _index(b, 'add', first, kind, 'p'),
                            c0 + j * classes, 'p') for j in range(columns)]
             spelled = lexic.opaque_zero('{0}') if anchors else None
-            trip.anchor = (None if spelled is None else b.rawexpr(
-                spelled, *(() if '{0}' not in spelled else (loop.induction,)),
-                type_=INDEX, hint='anc', pure=False, movable=False,
-                crosslane='{0}' in spelled, uniform=Uniformity.MULT))
+            trip.anchor = None
+            trip.anchor_seed = (None if spelled is None
+                                else loop.induction)
+            trip.anchor_count = 0
+            trip.reanchor()
 
             def column():
                 trip.cols, trip.slot = cols, 0
@@ -1407,7 +1432,7 @@ def _lanes(trip) -> None:
                 with b.if_(b.op('lt', BOOL, cols[0], c1, hint='in'),
                            attrs=_lanes_active(width, classes * trips)):
                     column()
-        trip.anchor = None
+        trip.anchor, trip.anchor_seed = None, None
         trip.end_table()
 
     if len(plan.ranges) == 1:
