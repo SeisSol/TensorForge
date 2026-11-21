@@ -435,6 +435,19 @@ declare('enable_sync_block_opt',
         default=True,
         doc='Drop barriers a data-flow argument shows to be redundant.')
 
+declare('share_block_buffers',
+        default=False,
+        doc='Let the buffers of the block\'s shared arena share bytes where '
+            'no statement occupies two of them, as the buffers of a '
+            'multiplication\'s arena do (`pir.allocate`), instead of laying '
+            'them out back to back.  For a block that runs phases one after '
+            'another -- the multi-element layout\'s chained sections, an '
+            'order\'s buffer dead once the next order has read it.  Taken '
+            'only with `enable_sync_block_opt`: the barrier placement behind '
+            'the allocator fences a write over the bytes another buffer was '
+            'read from, which the builders\' own barriers, keyed on buffers, '
+            'do not.  Off: every kernel as before.')
+
 declare('enable_multibuffer',
         default=False,
         doc='Give a shared transfer `enable_wrap_loads` moves a second stage, '

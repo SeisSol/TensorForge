@@ -141,6 +141,8 @@ class PlaceBuffers(Pass):
     Behind everything that moves a statement, since where a buffer may go
     depends on when it is occupied, and ahead of the barriers, which ask what
     shares memory with what.  What it arrived at is kept in `layout`.
+    ``share_block`` lets the block's buffers share bytes by occupancy too
+    (`allocate`): for a pipeline whose barriers are placed behind this pass.
     """
 
     name = 'place'
@@ -149,18 +151,20 @@ class PlaceBuffers(Pass):
     is_transform = True
 
     def __init__(self, arenas, align: int = 1, block_align: int = 1,
-                 unit: int = 0):
+                 unit: int = 0, share_block: bool = False):
         self._arenas = dict(arenas)
         self._align = align
         self._block_align = block_align
         self._unit = unit
+        self._share_block = share_block
         self.layout = None
 
     def run(self, pc: BodyContext) -> None:
         pc.body, self.layout = allocate(pc.body, arenas=self._arenas,
                                         align=self._align,
                                         block_align=self._block_align,
-                                        unit=self._unit)
+                                        unit=self._unit,
+                                        share_block=self._share_block)
 
 
 class PlaceBarriers(Pass):

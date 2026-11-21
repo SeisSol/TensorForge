@@ -437,3 +437,173 @@ def test_the_epilogue_tile_goes_over_the_staging_tiles():
         assert co < ao + an and ao < co + cn, tiles
         return
     pytest.fail('no staging tiles: the matrix path was not taken')
+
+
+# --------------------------------------------------------------------------- #
+# The block's buffers, sharing bytes where the caller asks (`share_block`)
+# --------------------------------------------------------------------------- #
+
+def _block(b, hint, n, **kw):
+    return b.alloc(Datatype.F32, (n,), MemSpace.SHARED, hint=hint,
+                   arena='block', **kw)
+
+
+def _blocks(body, share_block=True):
+    return _layout(body, arenas={ARENA: MULT, 'block': BLOCK}, align=4,
+                   block_align=4, share_block=share_block)
+
+
+def test_the_block_s_buffers_share_bytes_where_asked():
+    """Two of the block's buffers never occupied together -- the first dead
+    before the second is written, as an order's buffer of a chained section
+    is once the next order has read it: on the same bytes where the caller
+    asks, back to back where it does not."""
+    def body():
+        b = _builder()
+        lane = b.thread_id('x')
+        first = _block(b, 'first', 10)
+        second = _block(b, 'second', 6)
+        _burst(b, first, lane)
+        _burst(b, second, lane)
+        return b.finish()
+
+    _, layout, offsets = _blocks(body(), share_block=False)
+    assert offsets == {'first': 0, 'second': 12} and layout.block == 18
+    _, layout, offsets = _blocks(body())
+    assert offsets == {'first': 0, 'second': 0} and layout.block == 10
+
+
+def test_the_block_s_buffers_occupied_together_keep_bytes_of_their_own():
+    b = _builder()
+    lane = b.thread_id('x')
+    first = _block(b, 'first', 10)
+    second = _block(b, 'second', 6)
+    for buf in (first, second):
+        b.store(buf, b.const(1.0), lane)
+    for buf in (first, second):
+        b.load(buf, lane, hint='d')
+    _, layout, offsets = _blocks(b.finish())
+    assert offsets == {'first': 0, 'second': 12} and layout.block == 18
+
+
+def test_an_operator_staged_ahead_of_the_trips_shares_with_nothing_in_them():
+    """What the block's arena held alone before -- an operator written once
+    ahead of the loop and read in every trip -- is occupied through the
+    loop, around its back edge; two buffers of a trip, the one dead before
+    the other is written, share bytes beside it."""
+    b = _builder()
+    lane = b.thread_id('x')
+    op = _block(b, 'op', 8)
+    x = _block(b, 'x', 8)
+    y = _block(b, 'y', 8)
+    b.mark('defines', op)
+    b.store(op, b.const(1.0), lane)
+    with b.for_(0, 4, 1, hint='t'):
+        b.load(op, lane, hint='k')
+        _burst(b, x, lane)
+        _burst(b, y, lane)
+    _, layout, offsets = _blocks(b.finish())
+    assert offsets == {'op': 0, 'x': 8, 'y': 8} and layout.block == 16
+
+
+def test_a_block_buffer_held_for_the_body_shares_with_nothing():
+    """A buffer that holds something for the whole body (`lifetime`) is
+    occupied with every other, in the block's arena too."""
+    b = _builder()
+    lane = b.thread_id('x')
+    held = _block(b, 'held', 4, lifetime='body')
+    other = _block(b, 'other', 4)
+    _burst(b, held, lane)
+    _burst(b, other, lane)
+    _, layout, offsets = _blocks(b.finish())
+    assert offsets['held'] != offsets['other'] and layout.block == 8
+
+
+def test_a_statement_that_says_nothing_keeps_the_block_s_buffers_apart():
+    """As in the multiplication's arena: what a statement touches unsaid is
+    taken to be every buffer, so nothing shares bytes across it."""
+    b = _builder()
+    lane = b.thread_id('x')
+    first = _block(b, 'first', 4)
+    second = _block(b, 'second', 4)
+    b.mark('defines', first)
+    b.store(first, b.const(0.0), lane)
+    b('opaque();')
+    _burst(b, second, lane)
+    _, layout, offsets = _blocks(b.finish())
+    assert offsets['first'] != offsets['second'] and layout.block == 8
+
+
+def test_the_two_arenas_are_placed_apart():
+    """The multiplication's buffer and the block's are in different memory:
+    occupied together, each starts at its arena's beginning, and neither
+    pushes the other off."""
+    b = _builder()
+    lane = b.thread_id('x')
+    mine = b.alloc(Datatype.F32, (12,), MemSpace.SHARED, hint='mine')
+    ours = _block(b, 'ours', 8)
+    for buf in (mine, ours):
+        b.store(buf, b.const(1.0), lane)
+    for buf in (mine, ours):
+        b.load(buf, lane, hint='d')
+    _, layout, offsets = _blocks(b.finish())
+    assert offsets == {'mine': 0, 'ours': 0}
+    assert (layout.per_mult, layout.block) == (12, 8)
+
+
+def test_a_block_buffer_nothing_touches_takes_no_room():
+    b = _builder()
+    lane = b.thread_id('x')
+    _block(b, 'idle', 32)
+    used = _block(b, 'used', 4)
+    _burst(b, used, lane)
+    _, layout, offsets = _blocks(b.finish())
+    assert offsets['used'] == 0 and layout.block == 4
+
+
+def test_the_barriers_behind_fence_a_write_over_bytes_another_buffer_was_read_from():
+    """The block's threads reach a statement at different times: where the
+    allocator lays the second buffer over the first, the barrier placement
+    behind it -- which the option is taken with -- puts a block barrier
+    between the last read of the first and the first write of the second.
+    On bytes of their own nothing is owed there.  The two differ in size, so
+    that only their overlap ties them, not equal extents."""
+    from tensorforge.backend.pir.barriers import Arena, place_barriers
+    from tensorforge.backend.pir.build import barrier_stmt
+    from tensorforge.backend.pir.core import Participants, Uniformity
+
+    def make(handoff, block):
+        if block:
+            return barrier_stmt(Participants.BLOCK, 32, handoff=handoff)
+        return barrier_stmt(Participants.MULT, 32, 16, handoff)
+
+    def fenced(share_block):
+        b = _builder()
+        lane = b.thread_id('x')
+        first = _block(b, 'first', 10)
+        second = _block(b, 'second', 6)
+        b.mark('defines', first)
+        b.store(first, b.const(1.0), lane)
+        b.barrier(Participants.BLOCK)
+        b.load(first, lane, hint='d')
+        b.mark('defines', second)
+        b.store(second, b.const(2.0), lane)
+        b.load(second, lane, hint='d')
+        body, _, offsets = _blocks(b.finish(), share_block=share_block)
+        assert (offsets['first'] == offsets['second']) is share_block
+        placed = place_barriers(
+            tuple(body), arena=Arena({ARENA: (MULT, 0), 'block': (BLOCK, 0)}),
+            make_barrier=make, arrival=Uniformity.MULT, handoff=frozenset())
+        flat = [s for s, _ in walk(placed)]
+
+        def touches(s, op, hint):
+            return s.op == op and any(getattr(a.base, 'hint', None) == hint
+                                      for a in s.accesses)
+        read = next(k for k, s in enumerate(flat)
+                    if touches(s, Op.LOAD, 'first'))
+        write = next(k for k, s in enumerate(flat)
+                     if touches(s, Op.STORE, 'second'))
+        return any(s.op == Op.BARRIER for s in flat[read:write])
+
+    assert fenced(share_block=True)
+    assert not fenced(share_block=False)
