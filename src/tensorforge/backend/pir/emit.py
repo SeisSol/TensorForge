@@ -2390,7 +2390,9 @@ class Emitter:
         converged = self._converged
         diverges = share is not None or getattr(
             s.cond, 'uniformity', Uniformity.LANE) < Uniformity.MULT
-        with w.If(_unwrap(self.operand(s.cond))):
+        cond = _unwrap(self.operand(s.cond))
+        then = w.If(cond)
+        with then:
             if share is not None:
                 self._lane_scale = outer * share
             self._converged = converged and not diverges
@@ -2400,7 +2402,13 @@ class Emitter:
                 self._lane_scale = outer
                 self._converged = converged
         if len(s.regions) > 1:
-            with w.Block('else'):
+            # An arm that writes nothing is left out by the writer, its head
+            # with it (`Writer.speculate`): behind such a first arm the
+            # second is no `else` of anything, and is written under the
+            # condition negated.
+            other = (w.If(f'!({cond})') if getattr(then, 'elided', False)
+                     else w.Block('else'))
+            with other:
                 if share is not None:
                     self._lane_scale = outer * max(0.0, 1.0 - share)
                 self._converged = converged and not diverges

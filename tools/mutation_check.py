@@ -5117,6 +5117,21 @@ GROUPS = {
          sub(WRAP, "                     if k not in ('identity', 'stages', 'extern', 'ahead')]\n",
              "                     if k not in ('identity', 'stages', 'extern')]\n", 1)),
     ]),
+    # An `if` whose first arm writes nothing: the writer leaves that arm out,
+    # its head with it, and the second is written under the negated
+    # condition rather than as an `else` of nothing (`Emitter._emit_if`).
+    'emitarms': ('tests/test_emit_empty_arm.py', [
+        ('the second arm an else of nothing',
+         sub(EMIT, "            other = (w.If(f'!({cond})') if getattr(then, 'elided', False)\n",
+             "            other = (w.If(f'!({cond})') if False\n", 1)),
+        ('the second arm under the condition itself',
+         sub(EMIT, "            other = (w.If(f'!({cond})') if getattr(then, 'elided', False)\n",
+             "            other = (w.If(cond) if getattr(then, 'elided', False)\n", 1)),
+        ('a block not saying it was left out',
+         sub(Path('src/tensorforge/backend/writer.py'),
+             "    self.elided = self.writer.speculateClear('}' + self.foot)\n",
+             "    self.writer.speculateClear('}' + self.foot)\n", 1)),
+    ]),
 }
 
 
