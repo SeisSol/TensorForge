@@ -346,18 +346,18 @@ def test_batch_scales_arithmetic_linearly():
 
 
 def test_a_barrier_costs_nothing_and_is_not_a_gap():
-    """`GridFenceDescr` computes nothing, which is different from being a
-    descriptor kind the model does not know.
+    """A cut between sections (`SiblingDescr`) computes nothing, which is
+    different from being a descriptor kind the model does not know.
 
     Both sides are priced at the same batch on purpose.  A case's ``BATCH`` is
-    a device-side knob -- the fence case runs at 96 so its batch loop takes
+    a device-side knob -- the siblings case runs at 96 so its batch loop takes
     more than one trip -- and reading it off each module would scale one side
-    of this comparison by a ratio that says nothing about what a fence costs.
+    of this comparison by a ratio that says nothing about what a cut costs.
     """
-    fence = _case("barrier/fence_two_gemms.py")
+    siblings = _case("barrier/siblings_two_gemms.py")
     one = _case("square_notrans.py")
     batch = getattr(one, "BATCH", 8)
-    cost = list_cost(fence.descr_list(), batch=batch, datatype=fence.DTYPE)
+    cost = list_cost(siblings.descr_list(), batch=batch, datatype=siblings.DTYPE)
     assert not cost.unmodeled
     assert cost.flops == 2 * list_cost(one.descr_list(), batch=batch,
                                        datatype=one.DTYPE).flops

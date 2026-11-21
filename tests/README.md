@@ -57,7 +57,7 @@ Cases live under `cases/`, grouped by feature:
 | Slicing               | `cases/slicing/`      | non-trivial `BoundingBox` inside larger `Tensor.shape`, temporaries written in parts    |
 | Reductions            | `cases/reduction/`    | `ReductionDescr` for sum/min/max/prod outside the multilinear lowering                  |
 | Mixed                 | `cases/mixed/`        | sequences of multilinear, elementwise and reduction descriptors sharing temporaries     |
-| Barriers              | `cases/barrier/`      | `GridFenceDescr` / `GridBarrierDescr` between descrs (multi-section, cooperative launch)|
+| Barriers              | `cases/barrier/`      | `SiblingDescr` / `GridBarrierDescr` between descrs (multi-section, cooperative launch)  |
 | Flags                 | `cases/flags/`        | the per-element mask: asked for, or attributes without it                               |
 
 Top-level `cases/*.py` also include the *single-feature* coverage
@@ -228,18 +228,21 @@ write temporaries in parts and read them back whole or sliced.
 
 ### Barriers
 
-`GridFenceDescr` and `GridBarrierDescr` split the descr list into
-multiple sections; the generator emits *one* kernel that contains all
-sections, with a section boundary inside it. Two cases under
-`cases/barrier/`:
+`SiblingDescr` and `GridBarrierDescr` split the descr list into
+multiple sections.  Sibling sections stay in *one* kernel; a grid barrier
+cuts the kernel into launches, one `__global__` function each, issued one
+after the other on the stream (`tests/test_launch_boundary.py`) -- or,
+under `Options.cooperative_grid`, keeps one cooperative kernel with a
+barrier of the whole grid inside it. Two cases under `cases/barrier/`:
 
-* `fence_two_gemms` — `GridFenceDescr.trueBarrier()` returns `False`;
+* `siblings_two_gemms` — `SiblingDescr.trueBarrier()` returns `False`;
   two sections inside one kernel, plain `<<<...>>>` launch.  The two
-  GEMMs are independent, because a fence does not order its sections;
+  GEMMs are independent, because sibling sections are not ordered;
   the case pins the per-section launcher parameters and the offset
   traversal that still covers every element.
 * `barrier_two_gemms` — `GridBarrierDescr.trueBarrier()` returns
-  `True`; switches the generator into persistent-threading mode and
+  `True`, and the case asks for `cooperative_grid`; switches the
+  generator into persistent-threading mode and
   emits `cudaLaunchCooperativeKernel`, which needs
   `tensorforge_aux.h::argsPtrs` (on the driver's include path via
   `toolchain.py`) and `cooperative_groups.h` (included by

@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-"""Two *independent* GEMMs separated by a :class:`GridFenceDescr`.
+"""Two *independent* GEMMs, sibling sections (:class:`SiblingDescr`).
 
-``D = A @ B`` in section 0; the fence cuts the descr list; then
+``D = A @ B`` in section 0; the sibling cut splits the descr list; then
 ``E = C @ F`` in section 1.  Nothing section 1 reads is written by
 section 0, and that is the point of the case rather than an omission.
+(The case was ``fence_two_gemms``, the cut ``GridFenceDescr``: the same
+mechanism, under a name that promises no ordering.)
 
-A fence is not an ordering.  ``GridFenceDescr.trueBarrier()`` returns
-``False``, so ``generator.py`` never sets ``section.barrier`` and never
-switches to a cooperative launch -- the two sections may be in flight
-across the grid at the same time.  ``Generator._section_traversal``
+Siblings are not ordered.  ``SiblingDescr.trueBarrier()`` returns
+``False``, so ``generator.py`` never sets ``section.barrier``, cuts no
+launch and never switches to a cooperative launch -- the two sections
+may be in flight across the grid at the same time.  ``Generator._section_traversal``
 says so outright and then acts on it: a section that
 follows another *without* a barrier starts at
 ``(blockId + numElements0) % stride`` rather than at ``blockId``,
@@ -22,7 +24,7 @@ where section 1's body needs the multiplications of a wave in step -- on
 gfx942 the 16-wide MFMA tile this case takes at 16 lanes: a rotated start
 is no group's, so that section starts at ``blockId``.)
 
-What the fence does provide, and what this case pins down:
+What sibling sections do provide, and what this case pins down:
 
 * the launcher signature gains *two* ``numElements`` and *two*
   ``flags`` parameters (one per section); the harness driver counts
@@ -53,9 +55,9 @@ import numpy as np
 from tensorforge.common.basic_types import Addressing, Datatype
 from tensorforge.common.matrix.boundingbox import BoundingBox
 from tensorforge.common.matrix.tensor import SubTensor, Tensor
-from tensorforge.generators.descriptions import GemmDescr, GridFenceDescr
+from tensorforge.generators.descriptions import GemmDescr, SiblingDescr
 
-NAME = "fence_two_gemms_16x16"
+NAME = "siblings_two_gemms_16x16"
 # Two tensors are written --- D in section 0 and E in section 1 ---
 # so the case has to name the one `reference()` returns.
 OUTPUT = "E"
@@ -82,7 +84,7 @@ def descr_list():
     e = _square("E")
     return [
         GemmDescr(False, False, a=a, b=b, c=d),
-        GridFenceDescr(),
+        SiblingDescr(),
         GemmDescr(False, False, a=c, b=f, c=e),
     ]
 

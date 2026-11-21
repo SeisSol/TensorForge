@@ -347,6 +347,11 @@ class Section:
     self.block_barrier = False
     #: The section whose element count and flags this one runs over.
     self.count_index = 0
+    #: Whether a launch boundary follows (`GridBarrierDescr` without
+    #: `Options.cooperative_grid`): the next section is the first of the next
+    #: launch, the kernel's next `__global__` function, issued after this one
+    #: on the stream (`Generator._launch_groups`).
+    self.launch_cut = False
     #: The operators preloaded into shared memory, with their waits and the
     #: barrier after them: a run of `global_ir` that is emitted as one body.
     self.preload: List[AbstractInstruction] = []
@@ -1496,7 +1501,10 @@ class Generator:
           self._preload_globals = False
 
       if lastbarrier:
-        self._section.barrier = True
+        if self._launch_cuts():
+          self._section.launch_cut = True
+        else:
+          self._section.barrier = True
       if lastblock and not lastbarrier:
         self._section.block_barrier = True
 
@@ -1516,12 +1524,70 @@ class Generator:
     self._settle_module_operands()
     self._launch = self._make_launch_config()
     self._attach_small()
+    self._place_grid_wait()
     self._generate_kernel()
     self._append_small_kernel()
     self._generate_launcher()
     self._generate_header()
 
     self._resolve_identity(pinned)
+
+  def _programmatic(self) -> bool:
+    """Whether the kernel is launched as the programmatic dependent of the
+    work ahead of it on the stream (`Options.programmatic_launch`): asked for,
+    on CUDA, sm_90 and newer, and not launched cooperatively -- a grid barrier
+    keeps the cooperative launch."""
+    if not getattr(self._context.get_user_options(), 'programmatic_launch',
+                   False):
+      return False
+    target = self._context.target
+    if (target.backend != 'cuda'
+        or getattr(target.hw, 'vendor', None) != 'nvidia'):
+      return False
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    if nvidia.sm_of(self._context) < 90:
+      return False
+    return not self._launch.cooperative
+
+  def _launch_cuts(self) -> bool:
+    """Whether a grid barrier (`GridBarrierDescr`) cuts the kernel into
+    launches: unless the caller asks for the cooperative launch
+    (`Options.cooperative_grid`), on CUDA and HIP, whose launches on one
+    stream run in its order.  Elsewhere the barrier stays one of the grid --
+    which SYCL has none of (`Target.grid_barrier`)."""
+    if getattr(self._context.get_user_options(), 'cooperative_grid', False):
+      return False
+    return self._context.target.backend in ('cuda', 'hip')
+
+  def _launch_groups(self) -> List[List[int]]:
+    """The sections of each launch, in order: one launch, all of them, but
+    where a launch boundary cuts the kernel (`Section.launch_cut`)."""
+    groups: List[List[int]] = [[]]
+    for i, section in enumerate(self._sections):
+      groups[-1].append(i)
+      if section.launch_cut and i + 1 < len(self._sections):
+        groups.append([])
+    return groups
+
+  def _place_grid_wait(self) -> None:
+    """Under a programmatic launch (`_programmatic`): the wait for the grid
+    launched ahead, in each launch's first section whose body touches
+    anything an earlier kernel may write, ahead of the statement that does
+    (`pir.griddep`).  Behind every pass, and the sections of a launch run one
+    after the other, so one wait covers the launch.  What another launch of
+    the kernel writes is not free in any of them: the launch before may have
+    written it, and the launch after, in the run before this one."""
+    if not self._programmatic():
+      return
+    from tensorforge.backend.pir import griddep
+    writes = griddep.written(section.body for section in self._sections)
+    for group in self._launch_groups():
+      for i in group:
+        section = self._sections[i]
+        body, placed = griddep.place_wait(section.body, writes)
+        if placed:
+          section.body = body
+          break
 
   def _verify_section(self, stream, index: int) -> None:
     """Structural check over one section, immediately before emitting it.
@@ -1662,7 +1728,7 @@ class Generator:
     offset = []
     idx = index - 1
     for ssection in reversed(self._sections[:index]):
-      if ssection.barrier or ssection.block_barrier:
+      if ssection.barrier or ssection.block_barrier or ssection.launch_cut:
         break
       offset += [f'{GeneralLexicon.NUM_ELEMENTS}{idx}']
       idx -= 1
@@ -2343,7 +2409,7 @@ class Generator:
       return tuple(out) if changed else stmts
     return spell(body)
 
-  def _barrier_prologue(self) -> Tuple['pir.Stmt', ...]:
+  def _barrier_prologue(self, sections=None) -> Tuple['pir.Stmt', ...]:
     """What the kernel opens with where a barrier of one multiplication
     needs its object set up ahead of its first use, as a body of its own:
     on gfx12.5, the setup of the barrier objects, one a multiplication of
@@ -2361,7 +2427,8 @@ class Generator:
             or not target.sync_mult(self._num_threads)):
       return ()
     from tensorforge.backend.pir import engines
-    if not any(obj.per_mult for section in self._sections
+    if not any(obj.per_mult for section in (self._sections if sections is None
+                                            else sections)
                for obj in engines.objects(section.body)):
       return ()
     init = self._mult_object_init(self._launch.mults_per_block)
@@ -2853,28 +2920,43 @@ class Generator:
       writer(definition)
     if definitions:
       writer.new_line()
-    with self._generate_kernel_proto(writer):
-      # Integer constants carry the suffixes of `base.h`, which live in
-      # `tensorforge::literals` rather than in the global namespace.
-      writer('using namespace tensorforge::literals;')
-      self._write_kernel_meta_data(writer)
-      prologue = self._barrier_prologue()
-      if prologue:
-        pir.emit(prologue, writer, self._context)
+    # One `__global__` function a launch: all the sections, or each run of
+    # them between two launch boundaries (`_launch_groups`), the first under
+    # the kernel's name and the next ones under it with `_launch<k>`.
+    groups = self._launch_groups()
+    for launch, group in enumerate(groups):
+      if launch:
+        writer.new_line()
+      with self._generate_kernel_proto(writer, launch=launch):
+        # Integer constants carry the suffixes of `base.h`, which live in
+        # `tensorforge::literals` rather than in the global namespace.
+        writer('using namespace tensorforge::literals;')
+        if launch == 0:
+          self._write_kernel_meta_data(writer)
+        else:
+          writer(f'// launch {launch} of {len(groups)}, after a grid barrier: '
+                 f'section{"s" if len(group) > 1 else ""} '
+                 f'{", ".join(map(str, group))} of the kernel above')
+          writer.new_line()
+        sections = [self._sections[i] for i in group]
+        prologue = self._barrier_prologue(sections)
+        if prologue:
+          pir.emit(prologue, writer, self._context)
 
-      # Every body of the kernel, for what a body's emitter asks of the kernel
-      # as a whole: whether it issues a matrix instruction anywhere, which a
-      # fused DPP block on CDNA waits behind itself for (`amd.dpp_block`) --
-      # the compiler may bring an MFMA of one section behind a block of another.
-      self._context.kernel_bodies = tuple(s.body for s in self._sections)
-      try:
-        for section in self._sections:
-          with writer.AnonymousScope():
-            AbstractInstruction._emit_shared_body(
-                self._context, writer, section.body, self._metrics,
-                self._num_threads)
-      finally:
-        self._context.kernel_bodies = None
+        # Every body of the kernel, for what a body's emitter asks of the
+        # kernel as a whole: whether it issues a matrix instruction anywhere,
+        # which a fused DPP block on CDNA waits behind itself for
+        # (`amd.dpp_block`) -- the compiler may bring an MFMA of one section
+        # behind a block of another.
+        self._context.kernel_bodies = tuple(s.body for s in sections)
+        try:
+          for section in sections:
+            with writer.AnonymousScope():
+              AbstractInstruction._emit_shared_body(
+                  self._context, writer, section.body, self._metrics,
+                  self._num_threads)
+        finally:
+          self._context.kernel_bodies = None
 
     self._kernel = self._name_module_operands(writer.get_src())
     self._warn_icache()
@@ -3202,10 +3284,12 @@ class Generator:
     """The launch this kernel runs under; `None` before `generate`."""
     return self._launch
 
-  def _launch_config_proto(self, with_defaults=True):
+  def _launch_config_proto(self, with_defaults=True, launch: int = 0):
     """`launch_config_<kernel>(numElements..., streamPtr)`, the function that
     decides the launch at run time -- declared in the header, defined next to
-    the launcher, which calls it."""
+    the launcher, which calls it.  A launch after a launch boundary has one
+    of its own beside it, `launch_config_<kernel>_launch<k>`, which only the
+    launcher calls (`_launch_groups`)."""
     params = [KernelParam.size(f'{GeneralLexicon.NUM_ELEMENTS}{i}')
               for i in self.count_heads()]
     params.append(KernelParam.opaque(
@@ -3214,11 +3298,15 @@ class Generator:
     str_params = ', '.join(self._declare(params, with_defaults=with_defaults,
                                          host=True))
     return (f'tensorforge::LaunchConfig '
-            f'launch_config_{self._base_kernel_name}({str_params})')
+            f'launch_config_{self._base_kernel_name}'
+            f'{self._launch_suffix(launch)}({str_params})')
 
-  def _generate_launch_config(self, writer, lexic, kernel_name, shmemsize):
+  def _generate_launch_config(self, writer, lexic, kernel_name, shmemsize,
+                              launch_index: int = 0):
     """The body of `launch_config_<kernel>`: the block and the shared memory
-    as generated, the grid as the device and the element count allow."""
+    as generated, the grid as the device and the element count allow -- the
+    count of the launch's first section, for a launch after a launch
+    boundary (`_launch_groups`)."""
     launch = self._launch
     mults_per_block = launch.mults_per_block
     if self._element_group is not None and self._element_group.lanes:
@@ -3229,10 +3317,12 @@ class Generator:
     block_x, block_y, block_z = launch.block
     # What a multiplication takes on is a stack of elements
     # (`Options.stack_elements`), so the grid is sized by the stacks.
-    stacks = stacking.count(0, self._stack)
+    head = self._sections[self._launch_groups()[launch_index][0]].count_index
+    stacks = stacking.count(head, self._stack)
     if self._stack > 1:
       stacks = f'static_cast<size_t>{stacks}'
-    with writer.Block(self._launch_config_proto(with_defaults=False)):
+    with writer.Block(self._launch_config_proto(with_defaults=False,
+                                                launch=launch_index)):
       if self._small is not None:
         counts = [f'{GeneralLexicon.NUM_ELEMENTS}{i}'
                   for i in self.count_heads()]
@@ -3328,7 +3418,12 @@ class Generator:
     writer(launch_types())
     if self._small is not None:
       self._generate_dispatch(writer, lexic)
+    groups = self._launch_groups()
     self._generate_launch_config(writer, lexic, kernel_name, shmemsize)
+    for launch in range(1, len(groups)):
+      self._generate_launch_config(
+          writer, lexic, kernel_name + self._launch_suffix(launch), shmemsize,
+          launch_index=launch)
     with writer.Block(self._generate_launcher_proto(with_defaults=False)):
       counts = [f'{GeneralLexicon.NUM_ELEMENTS}{i}'
                 for i in self.count_heads()]
@@ -3352,15 +3447,36 @@ class Generator:
 
       args = self._generate_kernel_base_args(writer)
       args = ', '.join(args)
-      call_site = lexic.get_launch_code(func_name=kernel_name,
-                                        grid='grid',
-                                        block='block',
-                                        stream='stream',
-                                        func_params=args,
-                                        shmem='config.sharedMemBytes',
-                                        coop=coop)
-      writer(f'{call_site};')
+
+      def call(name, grid, block, shmem):
+        if self._programmatic():
+          return lexic.get_programmatic_launch_code(
+              func_name=name, grid=grid, block=block, stream='stream',
+              func_params=args, shmem=shmem)
+        return lexic.get_launch_code(func_name=name, grid=grid, block=block,
+                                     stream='stream', func_params=args,
+                                     shmem=shmem, coop=coop)
+
+      writer(f'{call(kernel_name, "grid", "block", "config.sharedMemBytes")};')
       writer('CHECK_ERR;')
+      # The launches after a launch boundary, in order on the same stream,
+      # each with the grid its own element count asks for and the same
+      # arguments: the end of one orders its writes before the next reads.
+      # A scope each: what sets a kernel's shared memory keeps a static flag
+      # of its own name.
+      for launch in range(1, len(groups)):
+        suffix = self._launch_suffix(launch)
+        config = f'config{launch}'
+        with writer.AnonymousScope():
+          writer(f'const tensorforge::LaunchConfig {config} = '
+                 f'launch_config_{self._base_kernel_name}{suffix}'
+                 f'({", ".join(counts + [GeneralLexicon.STREAM_PTR_STR])});')
+          writer(f'{lexic.kernel_range_object(f"block{launch}", f"{config}.block[0], {config}.block[1], {config}.block[2]")};')
+          writer(f'{lexic.kernel_range_object(f"grid{launch}", f"{config}.grid[0], {config}.grid[1], {config}.grid[2]")};')
+          writer(lexic.set_shmem_size(kernel_name + suffix,
+                                      f'{config}.sharedMemBytes'))
+          writer(f'{call(kernel_name + suffix, f"grid{launch}", f"block{launch}", f"{config}.sharedMemBytes")};')
+          writer('CHECK_ERR;')
     self._launcher = writer.get_src()
     if self._small is not None:
       # After this one's: tests and `kernel_eval.launch_geometry` read the
@@ -3698,7 +3814,11 @@ class Generator:
     return chosen[:max(0, len(chosen) - self._preload_drop)]
 
   def _emit_global_ir(self):
-    nonfirst_block = len(self._sections) > 0
+    # A section after a launch boundary is the first of its kernel: no
+    # section ahead of it in the block, and nothing to wait for but what the
+    # end of the launch before ordered already.
+    nonfirst_block = (len(self._sections) > 0
+                      and not self._sections[-1].launch_cut)
     last_barrier = len(self._sections) > 0 and self._sections[-1].barrier
     self._preloaded = set()
     self._preload_left = set()
@@ -4554,6 +4674,11 @@ class Generator:
              f'({self._small_pick[0].label()})')
     if self._launch is not None:
       writer(f'// launch: {self._launch.describe()}')
+    groups = self._launch_groups()
+    if len(groups) > 1:
+      writer(f'// launches: {len(groups)}, cut at the grid barriers, one after '
+             f'the other on the stream: sections '
+             + ' | '.join(', '.join(map(str, g)) for g in groups))
     writer('// operands:')
     for matrix in self._scopes.get_global_scope().values():
       writer(f'//   {matrix.obj.gen_descr()}')
@@ -4645,6 +4770,11 @@ class Generator:
                           for s in self._scopes.get_global_scope().values()],
                 operations=operations,
                 loops=loops)
+    groups = self._launch_groups()
+    if len(groups) > 1:
+      # The sections of each launch (`_launch_groups`): only where a launch
+      # boundary cut the kernel, so that one launch's line reads as before.
+      info['launches'] = groups
     if self._small is not None:
       info['dispatch'] = dict(
           below=self._context.get_user_options().batch_dispatch,
@@ -4798,7 +4928,12 @@ class Generator:
           writer(bound)
     return [a for a in (p.argument(lexic) for p in params) if a is not None]
 
-  def _generate_kernel_proto(self, writer):
+  def _launch_suffix(self, launch: int) -> str:
+    """What a launch's kernel and its `launch_config_` carry after the
+    kernel's name: nothing for the first (`_launch_groups`)."""
+    return f'_launch{launch}' if launch else ''
+
+  def _generate_kernel_proto(self, writer, launch: int = 0):
     global_symbols = self._scopes.get_global_scope().values()
 
     str_params = ', '.join(self._declare(
@@ -4823,7 +4958,10 @@ class Generator:
     if waves and self._context.target.waves_per_eu_bound():
       launch_bounds += (waves,)
 
-    return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
+    return lexic.kernel_definition(writer, launch_bounds,
+                                   self._base_kernel_name
+                                   + self._launch_suffix(launch),
+                                   str_params, self._context.fp_as_str(),
                                          shr_total_size, global_symbols,
                                          lanes=self._num_threads,
                                          grf=self._context.get_user_options().sycl_grf)

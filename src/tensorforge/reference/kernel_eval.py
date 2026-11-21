@@ -3055,8 +3055,10 @@ class Interp:
             # The engines' orderings and hints (`pir.engines`): a priority, a
             # scheduling group, a memory fence, a counter wait, a gfx1250
             # object's setup and rendezvous, a cache hint for the next
-            # element's data (`pir.prefetch`) -- nothing a value changes by.
-            # The rendezvous themselves are the race tracker's.
+            # element's data (`pir.prefetch`), the wait for the grid
+            # launched ahead (`pir.griddep`; one grid runs here) -- nothing
+            # a value changes by.  The rendezvous themselves are the race
+            # tracker's.
             return
         if stmt.startswith('using namespace '):
             return
@@ -3092,6 +3094,7 @@ _NO_VALUE = re.compile(
     r'|s_wait_asynccnt|s_wait_tensorcnt)|__threadfence_block'
     r'|__atomic_signal_fence'
     r'|tensorforge::(?:sync|arrive|join)NamedBarrier(?:<[^>]*>)?'
+    r'|tensorforge::gridDependencyWait'
     r'|tensorforge::prefetch(?:Runs)?(?:L1|L2|Hinted)(?:<[^>]*>)?)\s*\(')
 
 

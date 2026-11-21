@@ -59,7 +59,7 @@ def test_every_engine_op_is_a_name_pir_knows():
         Op.BARRIER, Op.SYNC_INIT, Op.ARRIVE, Op.WAIT_PHASE, Op.FENCE,
         Op.WAIT_COUNTER, Op.SET_PRIORITY, Op.COMMIT_GROUP, Op.MATRIX_MAC,
         Op.TMEM_ALLOC, Op.TMEM_DEALLOC, Op.TMEM_LD, Op.TMEM_ST,
-        Op.MATRIX_LOAD, Op.MATRIX_STORE, Op.RELAYOUT}
+        Op.MATRIX_LOAD, Op.MATRIX_STORE, Op.RELAYOUT, Op.GRID_WAIT}
     for name, spec in engines.REGISTRY.items():
         assert name in Op.KNOWN and spec.name == name
         assert '*' in spec.lower
@@ -73,7 +73,8 @@ def _built():
             engines.wait_phase(obj), engines.fence_stmt(FenceKind.SCHEDULE),
             engines.fence_stmt('memory', scope=SyncScope.WARP),
             engines.fence_stmt(FenceKind.SCHEDULE, group=(8, 1, 0)),
-            engines.wait_counter('vmcnt', 0), engines.set_priority(2)]
+            engines.wait_counter('vmcnt', 0), engines.set_priority(2),
+            engines.grid_wait()]
 
 
 def test_a_statement_says_what_its_entry_says():

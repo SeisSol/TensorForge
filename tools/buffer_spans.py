@@ -10,7 +10,7 @@ they can share is text.
 
 What still needs a name is what outlives one body: the shared arena, and
 the tiles of the cases with several sections (`barrier_two_gemms`,
-`fence_two_gemms`).  This counts them over the corpus, so that moving more of
+`siblings_two_gemms`).  This counts them over the corpus, so that moving more of
 the kernel into the IR has a number to bring down.
 
     python3 tools/buffer_spans.py

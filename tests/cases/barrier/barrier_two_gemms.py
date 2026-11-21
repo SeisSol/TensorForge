@@ -4,9 +4,11 @@
 """Two GEMMs separated by a :class:`GridBarrierDescr` — cooperative launch.
 
 ``D = A @ B`` then ``E = D @ C``, and the section boundary between
-them is a true grid-wide barrier.
-``GridBarrierDescr.trueBarrier()`` returns ``True``, which in turn
-sets ``section.barrier`` and triggers ``persistent_threading``:
+them is a true grid-wide barrier: the cooperative launch, which the case
+asks for (``Options.cooperative_grid``) -- without it the kernel is cut
+at the barrier into two launches (``tests/test_launch_boundary.py``).
+``GridBarrierDescr.trueBarrier()`` returns ``True``, which under the
+option sets ``section.barrier`` and triggers ``persistent_threading``:
 
 * the launcher emits ``cudaLaunchCooperativeKernel`` instead of
   ``<<<...>>>``;
@@ -20,8 +22,8 @@ sets ``section.barrier`` and triggers ``persistent_threading``:
   ``cooperative_groups.h``, which ``tensorforge_device/cuda.h``
   includes.
 
-The fence case, ``fence_two_gemms.py``, runs two *independent* GEMMs
-instead, because a fence does not order its sections.  Ordering across
+The siblings case, ``siblings_two_gemms.py``, runs two *independent*
+GEMMs instead, because sibling sections are not ordered.  Ordering across
 a section boundary is this case's subject alone, which is why its batch
 has to exceed the grid.
 
@@ -62,6 +64,9 @@ DTYPE = Datatype.F32
 # element mapping is fixed by the block id.
 BATCH = 96
 TOL = (1e-4, 1e-4)
+#: The cooperative launch is opt-in: without the option the barrier is a
+#: launch boundary.
+OPTIONS = {"cooperative_grid": True}
 
 
 def descr_list():

@@ -44,7 +44,7 @@ def _generator(case_file: str, backend: str, arch: str, **options):
 @pytest.mark.parametrize("backend,arch", TARGETS)
 @pytest.mark.parametrize("case_file", ["chain_three.py",
                                        "barrier/barrier_two_gemms.py",
-                                       "barrier/fence_two_gemms.py"])
+                                       "barrier/siblings_two_gemms.py"])
 def test_a_section_is_emitted_as_one_body(case_file, backend, arch,
                                           monkeypatch):
     if case_file == "barrier/barrier_two_gemms.py" and arch == "pvc":

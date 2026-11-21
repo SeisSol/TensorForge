@@ -353,7 +353,7 @@ def launcher_call_expr(generator, ops: List[DriverOperand], *,
                     call_args.append(f"(size_t){op.slot}u")
     # The launcher signature has one ``numElements{i}`` parameter per
     # section. With a single descr or only fence-less chains the section
-    # count is 1 — the default. ``GridFenceDescr`` / ``GridBarrierDescr``
+    # count is 1 — the default. ``SiblingDescr`` / ``GridBarrierDescr``
     # between descrs split sections, raising the count.
     built = generator.built
     heads = getattr(built, "count_heads", None)
