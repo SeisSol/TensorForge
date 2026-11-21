@@ -5038,6 +5038,25 @@ GROUPS = {
              '            key = (id(product.second.tensor), row)\n', 1)),
         ('a pass\'s output written to its first column',
          sub(ME_SECTION, '        col = trip.cols[j]\n', '        col = trip.cols[0]\n', 1)),
+        # The sparse star: an element's small operand stored sparse, read
+        # through a table of its cells' places.
+        ('an operator stored sparse taken',
+         sub(ME_GROUP, '                    and not (kind is Kind.MIXING and sub is second)):\n',
+             '                    and False):\n', 1)),
+        ('a small operand stored sparse refused',
+         sub(ME_GROUP, '                    and not (kind is Kind.MIXING and sub is second)):\n',
+             '                    and True):\n', 1)),
+        ('a sparse operand staged as a box',
+         sub(ME_SECTION, '            if buffer.tensor.is_dense():\n', '            if True:\n', 1)),
+        ('a lane reading a sparse operand as a box',
+         sub(ME_SECTION, '        if not tensor.is_dense():\n            return _sparse_read(',
+             '        if False:\n            return _sparse_read(', 1)),
+        ('a cell a sparse operand does not store read as stored',
+         sub(ME_SECTION, "    return b.op('select', fp, stored, value, b.const(0.0, fp), hint=hint)\n",
+             '    return value\n', 1)),
+        ('a sparse operand\'s cells one place off',
+         sub(ME_SECTION, '            out.append(int(tensor.linear_index(cell))\n',
+             '            out.append(int(tensor.linear_index(cell)) + 1\n', 1)),
     ]),
 }
 

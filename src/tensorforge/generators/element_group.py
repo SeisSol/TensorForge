@@ -529,8 +529,6 @@ def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
             t = sub.tensor
             if len(sub.bbox.lower()) != 2:
                 return None, f'{t.alias} is no matrix'
-            if not t.is_dense():
-                return None, f'{t.alias} is stored sparse'
             if getattr(t, 'storage_order', None) is not None:
                 return None, f'{t.alias} is stored in an order of its own'
             if getattr(sub, 'sliced', False):
@@ -568,6 +566,14 @@ def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
                           f'and {second.tensor.alias}: neither an operator '
                           f'times a group operand nor a group operand times '
                           f'an element\'s small one')
+        # Stored sparse, only an element's small operand: its stored cells
+        # are read where they are, the rest are zeros (SeisSol's `star`
+        # under its GPU memory layout, 24 of 81).  An operator or a group
+        # operand stored so the layout does not read.
+        for sub in (first, second, op.dest):
+            if (not sub.tensor.is_dense()
+                    and not (kind is Kind.MIXING and sub is second)):
+                return None, f'{sub.tensor.alias} is stored sparse'
         if why:
             return None, why
         dest = op.dest.tensor

@@ -136,6 +136,50 @@ def _bound(builder, symbol):
     return bound if bound is not None else symbol
 
 
+def _positions(tensor) -> tuple:
+    """Where each cell of a tensor stored sparse sits among its stored
+    entries (`Tensor.linear_index`), column by column over its box -- the
+    order `_address` counts in -- and -1 where the cell is not stored."""
+    lower = [int(x) for x in tensor.bbox.lower()]
+    sizes = [int(x) for x in tensor.bbox.sizes()]
+    out = []
+    for c in range(sizes[1]):
+        for r in range(sizes[0]):
+            cell = (lower[0] + r, lower[1] + c)
+            out.append(int(tensor.linear_index(cell))
+                       if tensor.spp.is_nz(cell) else -1)
+    return tuple(out)
+
+
+def _sparse_read(builder, context, tables, source, tensor, index, fp,
+                 uniform=None, hint='s'):
+    """`tensor`'s cell at `index` -- its place in the box, column by column
+    (`_address`) -- read from its compressed memory: where the table of the
+    cells' places (`_positions`, a table of the generated file, which
+    `tables` takes by name) puts it, and zero where the cell is not stored.
+    An element's small operand stored sparse: SeisSol's `star` under its GPU
+    memory layout keeps 24 of its 81 cells."""
+    from tensorforge.backend.instructions.compute.multilinear import \
+        _module_table_name
+    b = builder
+    numbers = _positions(tensor)
+    kwargs = {} if uniform is None else {'uniform': uniform}
+    if isinstance(index, int):
+        at = numbers[index]
+        if at < 0:
+            return b.const(0.0, fp)
+        return b.load(source, at, type_=fp, hint=hint, **kwargs)
+    name = _module_table_name('mep', Datatype.I32, numbers)
+    tables[name] = (Datatype.I32, numbers)
+    context.module_tables[name] = numbers
+    at = b.rawexpr(f'{name}[{{0}}]', index, type_=INDEX, pure=True,
+                   movable=True, hint='p')
+    stored = b.op('ge', BOOL, at, 0, hint='in')
+    value = b.load(source, b.op('select', INDEX, stored, at, 0, hint='p'),
+                   type_=fp, hint=hint, **kwargs)
+    return b.op('select', fp, stored, value, b.const(0.0, fp), hint=hint)
+
+
 class MultiElementOperators(AbstractInstruction):
     """The section's operators, copied into the block's shared memory once,
     ahead of the batch loop, as the section stages them
@@ -893,6 +937,9 @@ class _LaneTrip:
         #: them, by table: name -> numbers (`module_tables`); the table of
         #: the range being written and its block of a warp's width read last.
         self.tables: Dict[str, tuple] = {}
+        #: The tables of a sparse operand's cells' places, by name:
+        #: (Datatype.I32, numbers) (`_sparse_read`).
+        self.int_tables: Dict[str, tuple] = {}
         self.table = None
         self.sequence: List[float] = []
         self.block = None
@@ -953,6 +1000,9 @@ class _LaneTrip:
         height = int(tensor.bbox.sizes()[0])
         if width < 2 or (row - lower) % width or row + width > lower + height:
             return None
+        if not tensor.is_dense():
+            # Its rows are not where a box would put them.
+            return None
         elem = self.section.dtype.size()
 
         def bound(nbytes):
@@ -968,6 +1018,11 @@ class _LaneTrip:
         where they are one aligned access (`claim`), an element where not."""
         b = self.builder
         source = _bound(b, self.symbols[id(tensor)])
+        if not tensor.is_dense():
+            return _sparse_read(b, self.context, self.int_tables, source,
+                                tensor, self.anchored(
+                                    _address(b, tensor, row, col)),
+                                self.fp, uniform=Uniformity.LANE, hint='e')
         lower = int(tensor.bbox.lower()[0])
         first = row - (row - lower) % self.width
         claim = self.claim(tensor, first)
@@ -1384,7 +1439,8 @@ class MultiElementSection(AbstractInstruction):
         self._group = group
         self._symbols = dict(symbols)
         self._operators = operators
-        #: The lanes form's tables of numbers, by name (`module_tables`).
+        #: The tables of numbers the section reads, by name: (dtype,
+        #: numbers) (`module_tables`).
         self._tables: Dict[str, tuple] = {}
         self._is_ready = True
         section = group.section
@@ -1406,12 +1462,11 @@ class MultiElementSection(AbstractInstruction):
         return self._inputs + self._outputs
 
     def module_tables(self):
-        """The numbers the lanes form's `table` reads by name at namespace
-        scope (`_LaneTrip.number`), as `MultiElementOperators.module_tables`
-        hands its own out."""
-        dtype = self._group.section.dtype
-        return {name: (dtype, numbers)
-                for name, numbers in self._tables.items()}
+        """The numbers the section reads by name at namespace scope -- the
+        lanes form's `table` (`_LaneTrip.number`), the places of a sparse
+        operand's cells (`_sparse_read`) -- as
+        `MultiElementOperators.module_tables` hands its own out."""
+        return dict(self._tables)
 
     def barrier_scope(self) -> Uniformity:
         return Uniformity.BLOCK
@@ -1424,8 +1479,12 @@ class MultiElementSection(AbstractInstruction):
             trip = _LaneTrip(builder, self._context, self._group,
                              self._symbols)
             _lanes(trip)
-            self._tables = dict(trip.tables)
+            dtype = section.dtype
+            self._tables = {name: (dtype, numbers)
+                            for name, numbers in trip.tables.items()}
+            self._tables.update(trip.int_tables)
             return
+        self._tables = {}
         trip = _Trip(builder, self._context, self._group, self._symbols,
                      self._operators.buffers, self._operators.tables)
         elements = self._group.elements
@@ -1484,19 +1543,21 @@ class MultiElementSection(AbstractInstruction):
         """The warp's element's box of an operand, from its own memory into
         the group's buffer; their tokens, where the copies are asynchronous.
 
-        Where the target's copies are (`element_group.async_staging`), by
-        asynchronous copies (`IRBuilder.copy_async`), a cell a lane a hop,
-        every hop issued before the trip waits for any, so that `pir.wrap`
-        can take them a trip ahead.  The last hop's lanes past the box stand
-        outside a guard block, as a loader's ragged tail does: a copy
-        predicated itself is one the pass does not take either.  Otherwise
-        by loads and stores."""
+        A dense operand where the target's copies are
+        (`element_group.async_staging`) goes by asynchronous copies
+        (`IRBuilder.copy_async`), a cell a lane a hop, every hop issued
+        before the trip waits for any, so that `pir.wrap` can take them a
+        trip ahead.  The last hop's lanes past the box stand outside a guard
+        block, as a loader's ragged tail does: a copy predicated itself is
+        one the pass does not take either.  Otherwise by loads and stores,
+        and a sparse operand's cells read through its table
+        (`_sparse_read`)."""
         from tensorforge.generators.element_group import async_staging
         b = trip.builder
         source = _bound(b, symbol)
         height = buffer.height
         width = buffer.cols[1] - buffer.cols[0]
-        if async_staging(self._context):
+        if buffer.tensor.is_dense() and async_staging(self._context):
             total = height * width
             lanes = trip.group.threads
             tokens = []
@@ -1524,8 +1585,14 @@ class MultiElementSection(AbstractInstruction):
             col = _index(b, 'add', b.op('div', INDEX, loop.induction,
                                         height, hint='c'),
                          buffer.cols[0], 'c')
-            value = b.load(source, _address(b, buffer.tensor, row, col),
-                           type_=trip.fp, hint='s')
+            if buffer.tensor.is_dense():
+                value = b.load(source, _address(b, buffer.tensor, row, col),
+                               type_=trip.fp, hint='s')
+            else:
+                value = _sparse_read(b, self._context, self._tables, source,
+                                     buffer.tensor,
+                                     _address(b, buffer.tensor, row, col),
+                                     trip.fp)
             b.store(trip.buffers[id(buffer.tensor)], value,
                     trip.at(buffer, row, col))
         return []

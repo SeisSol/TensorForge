@@ -161,8 +161,30 @@ def _window_description(order=6, precision='s'):
     return d
 
 
+#: The cells of an elastic star SeisSol's GPU memory layout stores
+#: (`config/gpu/tensorforge.xml`, `star` sparse) -- 24 of 81, in their
+#: storage order, the same for the three directions -- as a re-export of
+#: o6 under it lists them (`~/tf-probe/mfma/export`, 11-19).
+STAR_ENTRIES = [[6, 0], [7, 0], [8, 0], [6, 1], [7, 1], [8, 1], [6, 2],
+                [7, 2], [8, 2], [6, 3], [7, 3], [7, 4], [8, 4], [6, 5],
+                [8, 5], [0, 6], [3, 6], [5, 6], [1, 7], [3, 7], [4, 7],
+                [2, 8], [4, 8], [5, 8]]
+
+
+def _sparse_star_description(order=6, precision='s'):
+    """The volume with its stars stored as a SeisSol GPU build stores them:
+    `spp`, the cells of `STAR_ENTRIES` alone."""
+    d = json.loads(json.dumps(_volume_description(order, precision)))
+    for t in d['tensors']:
+        if t['name'].startswith('star('):
+            t['storage'] = {'shape': [9, 9], 'type': 'spp',
+                            'entries': STAR_ENTRIES}
+    return d
+
+
 DESCRIPTIONS = {
     'volume': _volume_description, 'chain': _chain_description,
+    'sparse-star': _sparse_star_description,
     'direction': _direction_description, 'columns': _columns_description,
     'reuse': lambda order, precision: _chain_description(order, precision,
                                                          reuse=True),
@@ -300,6 +322,48 @@ def _reads_its_output(descrs):
     from tensorforge.common.matrix.tensor import SubTensor
     descrs[2].ops = [SubTensor(descrs[1].dest.tensor, descrs[2].ops[0].bbox),
                      descrs[2].ops[1]]
+
+
+def _sparse_operator_description(order=4, precision='s'):
+    """The sparse-star volume with an operator stored sparse as well."""
+    d = _sparse_star_description(order, precision)
+    for t in d['tensors']:
+        if t['name'] == 'kDivM(0)':
+            box = t['storage']['shape']
+            t['storage'] = {'shape': box, 'type': 'spp',
+                            'entries': [[0, 0], [1, 0]]}
+    return d
+
+
+def test_an_elements_small_operand_may_be_stored_sparse():
+    """SeisSol's GPU memory layout stores `star` sparse, 24 of its 81
+    cells (`STAR_ENTRIES`): the layout takes the volume so, the stars an
+    element's small operands as before, and reads each stored cell where it
+    is stored -- through a table of the cells' places, zero where a cell is
+    not stored -- in either FMA form.  An operator stored sparse is still
+    the layout's refusal."""
+    from tensorforge.frontend.yateto import DescriptionReader
+    section, why = eg.classify(_descrs('sparse-star', 4, 's'))
+    assert section is not None, why
+    stars = [b for b in section.inputs if b.tensor.alias.startswith('star')]
+    assert len(stars) == 3 and all(b.role is eg.Role.SMALL for b in stars)
+    assert all(not b.tensor.is_dense() and b.per_element == 81
+               for b in stars)
+    descrs = DescriptionReader(None, {}).read(
+        _sparse_operator_description())[0]
+    assert eg.classify(descrs)[1] == 'kDivM(0) is stored sparse'
+    for options in ({'multi_element': 'force', 'tensor_cores': False},
+                    LANES):
+        gen = _generate(_descrs('sparse-star', 4, 's'),
+                        _context('sm_90', 's', **options))
+        kernel = gen.get_kernel()
+        assert gen.built._element_group is not None
+        tables = re.findall(r'(tf_mep_\w+)\[81\] = \{([^}]*)\}', kernel)
+        assert len(tables) == 1, tables
+        numbers = [int(x) for x in tables[0][1].split(',')]
+        assert sorted(x for x in numbers if x >= 0) == list(range(24))
+        assert numbers.count(-1) == 81 - 24
+        assert f'{tables[0][0]}[' in kernel.split(tables[0][1])[-1]
 
 
 @pytest.mark.parametrize('change,why', [
@@ -1495,7 +1559,11 @@ SEED = 29
     ('localFlux', 4, 'd', {**LANES, 'arch': 'gfx942',
                            'multi_element_values': 'table'}),
     ('volume', 4, 'd', {**LANES, 'columns': 3}),
-    ('localFluxAll', 4, 's', {**LANES, 'columns': 3, 'arch': 'gfx942'})],
+    ('localFluxAll', 4, 's', {**LANES, 'columns': 3, 'arch': 'gfx942'}),
+    ('sparse-star', 4, 'd', {'tensor_cores': False}),
+    ('sparse-star', 4, 's', {'arch': 'gfx942'}),
+    ('sparse-star', 4, 's', LANES),
+    ('sparse-star', 4, 'd', {**LANES, 'arch': 'gfx942'})],
     ids=['volume-o4d', 'volume-o4s-dense', 'reuse-o4s', 'localFlux-o4d',
          'neighboringFlux-o4s-own-barriers', 'localFluxAll-o4d',
          'direction-o4s', 'columns-o4d', 'lanes-volume-o4d',
@@ -1508,7 +1576,9 @@ SEED = 29
          'gfx942-lanes-localFluxAll-o4s', 'gfx1150-lanes-localFlux-o4d',
          'lanes-volume-o4s-memory', 'lanes-volume-o4s-table',
          'gfx942-lanes-localFlux-o4d-table', 'lanes-volume-o4d-columns',
-         'gfx942-lanes-localFluxAll-o4s-columns'])
+         'gfx942-lanes-localFluxAll-o4s-columns', 'sparse-star-o4d',
+         'gfx942-sparse-star-o4s', 'lanes-sparse-star-o4s',
+         'gfx942-lanes-sparse-star-o4d'])
 def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
                                                   options, monkeypatch):
     """A group over itself and seven more elements on the host oracle: two
@@ -1558,13 +1628,18 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
 
     def memory(t, read):
         """The tensor's box, element by element, as `read(element, slot)`
-        gives its storage slots (column by column over the box)."""
+        gives its storage slots (column by column over the box -- or, for a
+        tensor stored sparse, its stored cells' slots, zero elsewhere)."""
         (r0, r1), (c0, c1) = box(t)
         out = np.zeros((count, r1 - r0, c1 - c0))
         for e in range(count):
             for c in range(c1 - c0):
                 for r in range(r1 - r0):
-                    out[e, r, c] = read(e, r + c * (r1 - r0))
+                    if t.is_dense():
+                        out[e, r, c] = read(e, r + c * (r1 - r0))
+                    elif t.spp.is_nz((r0 + r, c0 + c)):
+                        out[e, r, c] = read(e, t.linear_index((r0 + r,
+                                                               c0 + c)))
         return out
 
     fill = kernel_eval.Slot(SEED)
@@ -1679,6 +1754,28 @@ def _known_zeros(descrs):
                             zip(t.bbox.lower(), t.bbox.upper()))
                 mask = np.asarray(t.get_values())[box] != 0
                 out[t.alias] = lambda a, mask=mask: a * mask
+    out.update(_stored_only(descrs))
+    return out
+
+
+def _stored_only(descrs):
+    """The harness's fill of each element's operand stored sparse, zero at
+    the cells it does not store: the harness hands the kernel the stored
+    cells alone (`DriverOperand.pack_index`) and the reference the box, which
+    has to be the same matrix."""
+    import numpy as np
+    out = {}
+    for descr in descrs:
+        for op in descr.operations():
+            for sub in op.ops:
+                t = getattr(sub, 'tensor', None)
+                if t is None or t.is_tmp or t.is_dense():
+                    continue
+                (r0, c0), (r1, c1) = ([int(x) for x in t.bbox.lower()],
+                                      [int(x) for x in t.bbox.upper()])
+                mask = np.array([[t.spp.is_nz((r, c)) for c in range(c0, c1)]
+                                 for r in range(r0, r1)])
+                out[t.alias] = lambda a, mask=mask: a * mask
     return out
 
 
@@ -1699,7 +1796,8 @@ GPU_CASES = [
     ('localFluxAll', 6, 's', {'tensor_cores': False}),
     ('direction', 6, 'd', {'tensor_cores': False}),
     ('columns', 6, 's', {'tensor_cores': False}),
-    ('volume', 4, 's', TWO_STAGES), ('chain', 6, 's', TWO_STAGES)]
+    ('volume', 4, 's', TWO_STAGES), ('chain', 6, 's', TWO_STAGES),
+    ('sparse-star', 6, 'd', {'tensor_cores': False})]
 
 
 @pytest.mark.parametrize('shape,order,precision,options', GPU_CASES, ids=[
@@ -1708,7 +1806,7 @@ GPU_CASES = [
     'chain-o6d', 'reuse-o6s', 'chain-o6d-fma', 'reuse-o6s-fma',
     'localFlux-o6d-fma', 'neighboringFlux-o4s-fma', 'localFluxAll-o6s-fma',
     'direction-o6d-fma', 'columns-o6s-fma', 'o4s-two-stages',
-    'chain-o6s-two-stages'])
+    'chain-o6s-two-stages', 'sparse-star-o6d-fma'])
 def test_the_section_computes_on_the_gpu(shape, order, precision, options,
                                          target, cache_root,
                                          tensorforge_include):
@@ -1762,6 +1860,7 @@ def _described(descrs):
                 values = np.asarray(t.get_values())[box]
                 out[t.alias] = lambda a, values=values: np.broadcast_to(
                     values, a.shape)
+    out.update(_stored_only(descrs))
     return out
 
 
@@ -1769,7 +1868,7 @@ LANE_CASES = [
     ('volume', 4, 's'), ('volume', 6, 's'), ('volume', 4, 'd'),
     ('volume', 6, 'd'), ('localFlux', 6, 'd'), ('neighboringFlux', 4, 's'),
     ('localFluxAll', 6, 's'), ('localFluxAll', 6, 'd'), ('direction', 6, 'd'),
-    ('columns', 6, 's')]
+    ('columns', 6, 's'), ('sparse-star', 6, 's')]
 
 
 @pytest.mark.parametrize('shape,order,precision', LANE_CASES,
